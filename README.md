@@ -9,11 +9,63 @@ signatures fit in one shared space.
 > every path resolves to exactly **one** canonical node — and diamond imports
 > collapse onto it.
 
-It takes the Zen syntax, type-checks it through one trie, and emits C.
+It takes Zen syntax, type-checks it through one trie, and emits C.
+
+## How it works
 
 ```
-examples/*.zen  ──parse──►  one trie  ──infer + fits──►  C  ──cc──►  ./vecdemo  ──►  12
+   build.zen  ──interpret──►  { name: vecdemo,  entry: main,  out: build/ }   (drives the build)
+
+   core/vec.zen   ops.zen   main.zen
+        │
+        ▼  tree-sitter  (grammar.js)
+   ┌──────────┐
+   │   AST    │   dataclasses + enums
+   └────┬─────┘
+        │  insert every decl at its path
+        ▼
+  ╔════════════ ONE TYPE SPACE — a trie ════════════╗
+  ║  root                                            ║
+  ║   ├─ core.vec.Vec         (struct)               ║     path = identity, so
+  ║   ├─ ops.len   ops.cap    (fns)                  ║     diamond imports
+  ║   └─ main.area   main.main  (fns)                ║     collapse to ONE node
+  ╚═════════════════════╤════════════════════════════╝
+                        │  resolve refs · infer() each body · fits() each call
+                        ▼
+              ┌─────────────────────┐
+     PASS ✓ ◄─┤  fits(given, want)? ├─► FAIL ✗   reported, excluded from codegen
+              └──────────┬──────────┘   null → nonnull ✗  ·  read → mut ✗
+                         ▼               (rules: nonnull ≤ Option,  MutPtr ≤ Ptr)
+              ┌─────────────────────┐
+              │     lower to C      │   Ptr → const* ,  Option → *   (types erase away)
+              └──────────┬──────────┘
+                         ▼  cc -Wall -Wextra
+                    build/vecdemo   ──►   12
 ```
+
+## Why treat everything as a type?
+
+A normal compiler runs three separate machines: a **name resolver / import linker**, a
+**type checker**, and a **null / ownership analyzer** — each its own pass, with its own
+bugs and its own ordering rules. Collapse all three into one question — *does this
+signature fit that one, in a single shared space?* — and they become **one** mechanism:
+
+- **Imports come for free.** A path *is* a type's identity, so importing is just a trie
+  lookup. Diamond imports (A and B both import C) land on the same node automatically — no
+  dedup, no conflict logic. The only way to clash is two files claiming one path, which the
+  filesystem already forbids.
+- **Pointer safety *is* type-checking.** Nullability (`Option<T>`) and direction
+  (`Ptr`/`MutPtr`) are axes of the type, so a null flowing into a non-null — or a read-only
+  pointer into a mutable slot — is caught by the *same* `fits()` that checks everything
+  else. No separate null pass, no borrow checker to write or keep in sync.
+- **Zero runtime cost.** The discipline is a compile-time fiction: `Ptr` erases to
+  `const*`, `Option` to a bare pointer. Once it checks, the emitted C carries no tags and
+  no guards — and `cc` re-verifies the const-correctness, a free second opinion.
+- **It stays tiny.** The whole checker is one trie + a ~20-line `fits()`. That smallness
+  *is* the result: three problems folded into one.
+
+The trade: it leans on **nominal** identity (a type *is* its path) and asks you to write
+every pointer's direction and nullability down. In return you delete two entire passes.
 
 ## The whole compiler, in four ideas
 
@@ -84,7 +136,7 @@ python3 -m holotype check examples     # type-check report + emit a C lib
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
 `build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
 
-Ill-typed functions are **excluded from codegen** — `zenc build` reports them and
+Ill-typed functions are **excluded from codegen** — `holotype build` reports them and
 builds only what type-checks:
 
 ```
