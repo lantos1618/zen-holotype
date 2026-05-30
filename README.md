@@ -76,9 +76,13 @@ build = (b: Builder) Result<BuildConfig, BuildError> {
 ## Run it
 
 ```sh
+pip install -r requirements.txt   # tree_sitter (front end)
 python3 zenc.py build examples    # read build.zen -> check -> emit C -> cc -> run
 python3 zenc.py check examples    # type-check report + emit a C lib
 ```
+
+The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
+`build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
 
 Ill-typed functions are **excluded from codegen** — `zenc build` reports them and
 builds only what type-checks:
@@ -97,14 +101,18 @@ vecdemo -> 12
 
 | file | role |
 |---|---|
+| `tree-sitter-zen/grammar.js` | the real grammar (a tree-sitter parser generator) |
+| `tsparse.py` | converts the tree-sitter parse tree → `nodes.py` dataclasses |
 | `nodes.py` | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
 | `space.py` | the trie + `fits()` pointer lattice + `infer()` |
 | `emit.py`  | transcribe to C (the type system erases here) |
-| `parse.py` | tiny recursive-descent parser for the Zen subset |
 | `zenc.py`  | driver + `build.zen` interpreter |
 
-Deliberately small — the point is to test the type idea, not the parser. Front end
-is a subset (no methods bodies, `::=`, pattern matching, or generics-with-params yet).
+The front end is a real **tree-sitter** grammar — a method call is just a `call`
+whose callee is a field access, so there's no special rule for it. It's still a
+subset of Zen (no `::=`, pattern matching, or generics-with-params yet). The point
+is to test the type idea, not to write a parser — which is exactly why the parser is
+someone else's grammar generator rather than hand-rolled.
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight
 into typed objects, hook-based) and the syntax of

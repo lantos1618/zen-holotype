@@ -9,10 +9,10 @@ Only well-typed functions are codegen'd.
 from __future__ import annotations
 import sys, pathlib, subprocess
 from nodes import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT,
-                   Str, StructLit, MethodCall)
+                   Str, StructLit, MethodCall, EnumCtor)
 from space import Space, fits, infer, TypeErr
 from emit import c_struct, c_proto, c_def, show, c_name
-from parse import parse
+from tsparse import parse
 
 BUILTIN = {"Option"}
 
@@ -123,24 +123,41 @@ def sval(e):
 
 
 def interpret_build(bf):
-    """Statically read the build() graph into a config dict (like reading build.zig)."""
+    """Statically read the build() graph into a config dict (like reading build.zig).
+
+    The CST chains the trailing `.Ok(...)` onto the last `b.add(...)`, so we walk
+    method-call receivers to find every `b.add(Component {...})`.
+    """
     cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": []}
     fn = next((d for d in bf.decls if isinstance(d, Fn) and d.name == "build"), None)
     if fn is None:
         raise SystemExit("build.zen: no build() function")
+
+    def handle_add(arg):
+        if not isinstance(arg, StructLit):
+            return
+        f = {n: v for n, v in arg.fields}
+        if arg.type == "Executable":
+            cfg["name"] = sval(f.get("name")) or cfg["name"]
+            cfg["main"] = sval(f.get("main")) or cfg["main"]
+            cfg["out_dir"] = sval(f.get("out_dir")) or cfg["out_dir"]
+        elif arg.type == "Test":
+            if (r := sval(f.get("root"))):
+                cfg["tests"].append(r)
+
+    def visit(node):
+        if isinstance(node, MethodCall):
+            if node.method == "add" and node.args:
+                handle_add(node.args[0])
+            visit(node.recv)
+            for a in node.args:
+                visit(a)
+        elif isinstance(node, EnumCtor):
+            for a in node.args:
+                visit(a)
+
     for stmt in fn.body:
-        if isinstance(stmt, MethodCall) and stmt.method == "add" and stmt.args:
-            arg = stmt.args[0]
-            if isinstance(arg, StructLit):
-                fields = {n: v for n, v in arg.fields}
-                if arg.type == "Executable":
-                    cfg["name"] = sval(fields.get("name")) or cfg["name"]
-                    cfg["main"] = sval(fields.get("main")) or cfg["main"]
-                    cfg["out_dir"] = sval(fields.get("out_dir")) or cfg["out_dir"]
-                elif arg.type == "Test":
-                    r = sval(fields.get("root"))
-                    if r:
-                        cfg["tests"].append(r)
+        visit(stmt)
     return cfg
 
 
