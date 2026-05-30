@@ -1,15 +1,41 @@
 # zen-holotype
 
 A tiny compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
-language, built to test one idea: **if everything is a type, then module imports,
-type-checking, and pointer safety are all the _same_ operation** — checking that
-signatures fit in one shared space.
+language, built to test one idea: **pin down what every value _is_ with type structure,
+and you lock out everything it isn't.** Do that for pointers, modules, and functions
+alike, and module imports, type-checking, and pointer safety all become the _same_
+operation — checking that a signature fits in one shared space.
 
 > In taxonomy a *holotype* is the single specimen that defines a name. Here,
 > every path resolves to exactly **one** canonical node — and diamond imports
 > collapse onto it.
 
-It takes Zen syntax, type-checks it through one trie, and emits C.
+## What we're actually doing: structure *is* the constraint
+
+We're not writing checks that hunt for bad programs — no null pass, no borrow pass, no
+separate linker. We do the opposite: **we describe exactly what each thing is, and that
+description locks out everything it isn't.** A type is a closed door; "checking" is just
+confirming the key fits the lock.
+
+Take one annotation. `Ptr<Vec>` is not "a pointer" — it's three locks at once:
+
+```
+   Ptr < Vec >
+    │     └──── points at THIS type only      (a different struct? rejected)
+    ├──────── read-only   →  mutation locked out      (write needs MutPtr)
+    └──────── non-null    →  absence locked out       (null needs Option<…>)
+```
+
+Every capability is **opt-in**. Didn't write `MutPtr`? You cannot mutate. Didn't write
+`Option`? There is no null. Whatever you didn't permit isn't "checked for and rejected" —
+it's *unrepresentable*. The same move scales: a **path** locks identity (`core.vec.Vec`
+is one node, so you can't mean a different `Vec`), and a **function signature** locks its
+call sites (only values whose locks match the parameter get in).
+
+So the three things a compiler usually does separately — resolve names, check types, prove
+pointer safety — are here the single act of **fitting a key to a lock**. That's why one
+`fits()` does all of it, and why the legal program is exactly the shape the structure
+allows, nothing more.
 
 ## How it works
 
@@ -43,12 +69,10 @@ It takes Zen syntax, type-checks it through one trie, and emits C.
                     build/vecdemo   ──►   12
 ```
 
-## Why treat everything as a type?
+## Why it pays off
 
-A normal compiler runs three separate machines: a **name resolver / import linker**, a
-**type checker**, and a **null / ownership analyzer** — each its own pass, with its own
-bugs and its own ordering rules. Collapse all three into one question — *does this
-signature fit that one, in a single shared space?* — and they become **one** mechanism:
+Folding name-resolution, type-checking, and pointer-safety into one `fits()` isn't just
+tidy — it buys real things:
 
 - **Imports come for free.** A path *is* a type's identity, so importing is just a trie
   lookup. Diamond imports (A and B both import C) land on the same node automatically — no
