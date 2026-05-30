@@ -6,8 +6,8 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from nodes import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                   Lit, Var, Field, Bin, Call, StructLit)
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
+                  Lit, Var, Field, Bin, Call, StructLit)
 
 
 class Conflict(Exception):   ...

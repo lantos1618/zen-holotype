@@ -1,18 +1,18 @@
-"""zenc driver.
+"""holotype driver.
 
-    python3 zenc.py build [dir]   # read build.zen, compile + link + run the exe
-    python3 zenc.py check [dir]   # type-check report only, emit a C lib
+    python3 -m holotype build [dir]   # read build.zen, compile + link + run the exe
+    python3 -m holotype check [dir]   # type-check report only, emit a C lib
 
 Pipeline: parse -> insert into trie -> resolve refs -> infer/fits -> to_c.
 Only well-typed functions are codegen'd.
 """
 from __future__ import annotations
 import sys, pathlib, subprocess
-from nodes import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT,
-                   Str, StructLit, MethodCall, EnumCtor)
-from space import Space, fits, infer, TypeErr
-from emit import c_struct, c_proto, c_def, show, c_name
-from tsparse import parse
+from .ast import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT,
+                  Str, StructLit, MethodCall, EnumCtor)
+from .types import Space, fits, infer, TypeErr
+from .lower import c_struct, c_proto, c_def, show, c_name
+from .parser import parse
 
 BUILTIN = {"Option"}
 
@@ -208,7 +208,12 @@ def cmd_build(root):
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
 
 
-if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "build"
-    arg = sys.argv[2] if len(sys.argv) > 2 else "examples"
+def cli(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    cmd = argv[0] if argv else "build"
+    arg = argv[1] if len(argv) > 1 else "examples"
     (cmd_build if cmd == "build" else cmd_check)(arg)
+
+
+if __name__ == "__main__":
+    cli()

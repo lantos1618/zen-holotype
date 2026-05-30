@@ -1,17 +1,16 @@
 """Front end: parse Zen with the tree-sitter grammar, convert the CST into
-holotype's nodes.py dataclasses. Drop-in replacement for the old hand-rolled
-parse.py — same `parse(src, ns) -> File` entry point.
+holotype's ast.py dataclasses. Exposes `parse(src, ns) -> File`.
 
 The grammar lives in tree-sitter-zen/; its C parser is compiled to build/zen.so.
 """
 from __future__ import annotations
 import warnings, pathlib
 from tree_sitter import Language, Parser
-from nodes import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
-                   EnumDecl, Param, Fn, Import, File,
-                   Lit, Var, Field, Bin, Call, Str, StructLit, MethodCall, EnumCtor)
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
+                  EnumDecl, Param, Fn, Import, File,
+                  Lit, Var, Field, Bin, Call, Str, StructLit, MethodCall, EnumCtor)
 
-_ROOT = pathlib.Path(__file__).parent
+_ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
 _GRAMMAR = _ROOT / "tree-sitter-zen"
 

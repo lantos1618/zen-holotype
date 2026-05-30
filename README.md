@@ -76,9 +76,9 @@ build = (b: Builder) Result<BuildConfig, BuildError> {
 ## Run it
 
 ```sh
-pip install -r requirements.txt   # tree_sitter (front end)
-python3 zenc.py build examples    # read build.zen -> check -> emit C -> cc -> run
-python3 zenc.py check examples    # type-check report + emit a C lib
+pip install -r requirements.txt        # tree_sitter (front end)
+python3 -m holotype build examples     # read build.zen -> check -> emit C -> cc -> run
+python3 -m holotype check examples     # type-check report + emit a C lib
 ```
 
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
@@ -102,11 +102,14 @@ vecdemo -> 12
 | file | role |
 |---|---|
 | `tree-sitter-zen/grammar.js` | the real grammar (a tree-sitter parser generator) |
-| `tsparse.py` | converts the tree-sitter parse tree → `nodes.py` dataclasses |
-| `nodes.py` | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
-| `space.py` | the trie + `fits()` pointer lattice + `infer()` |
-| `emit.py`  | transcribe to C (the type system erases here) |
-| `zenc.py`  | driver + `build.zen` interpreter |
+| `holotype/parser.py` | converts the tree-sitter parse tree → AST |
+| `holotype/ast.py`    | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
+| `holotype/types.py`  | the trie + `fits()` pointer lattice + `infer()` (the one type space) |
+| `holotype/lower.py`  | transcribe to C (the type system erases here) |
+| `holotype/main.py`   | driver + `build.zen` interpreter |
+
+(`ast.py` and `types.py` are safe as classic names because they live in a package —
+stdlib `import ast` / `import types` still resolve to the real ones.)
 
 The front end is a real **tree-sitter** grammar — a method call is just a `call`
 whose callee is a field access, so there's no special rule for it. It's still a

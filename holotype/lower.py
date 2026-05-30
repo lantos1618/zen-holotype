@@ -2,9 +2,9 @@
 direction -> const, Option -> a plain pointer (nullability already enforced upstream).
 """
 from __future__ import annotations
-from nodes import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                   Lit, Var, Field, Bin, Call, StructLit)
-from space import infer
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
+                  Lit, Var, Field, Bin, Call, StructLit)
+from .types import infer
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
 
