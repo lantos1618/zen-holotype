@@ -1,15 +1,15 @@
-# holotype
+# zen-holotype
 
-A tiny compiler built to test one idea: **if everything is a type, then module
-imports, type-checking, and pointer safety are all the _same_ operation** —
-checking that signatures fit in one shared space.
+A tiny compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
+language, built to test one idea: **if everything is a type, then module imports,
+type-checking, and pointer safety are all the _same_ operation** — checking that
+signatures fit in one shared space.
 
 > In taxonomy a *holotype* is the single specimen that defines a name. Here,
 > every path resolves to exactly **one** canonical node — and diamond imports
 > collapse onto it.
 
-It takes a small [Zen](https://github.com/lantos1618/zenlang)-flavoured syntax,
-type-checks it through one trie, and emits C.
+It takes the Zen syntax, type-checks it through one trie, and emits C.
 
 ```
 examples/*.zen  ──parse──►  one trie  ──infer + fits──►  C  ──cc──►  ./vecdemo  ──►  12
