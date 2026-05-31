@@ -23,6 +23,7 @@ class Prim(Enum):
     U8   = "u8"       # a byte — the substrate for buffers and strings
     BOOL = "bool"
     VOID = "void"
+    STR  = "str"      # a comptime string (names/ops in the reified AST); C `const char*`
 
 
 # ───────────────────────── types (the structural space) ─────────────────────

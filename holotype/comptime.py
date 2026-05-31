@@ -133,12 +133,10 @@ def _binop(op, l, r):
             "||": lambda a, b: a or b}[op](l, r)
 
 
-# ───────────────────────── reified-AST builtins (the prelude surface) ────────
-# Host-provided functions a comptime generator calls to *read structure* and
-# *build declarations*. These are the seam P4 opens: today the Ast type and
-# these builtins live in the host; a later slice moves them into Zen itself
-# (VISION step 4: "define the AST in Zen"). A reflected type is just its decl
-# node (Struct/EnumDecl); a built declaration is a real Fn node.
+# ───────────────────────── the host reflection kernel ───────────────────────
+# All the host gives a derive is the ability to *read* a type's structure. The
+# Ast it *builds* is defined in Zen (prelude/derive.zen); the host only reifies
+# that value back into a real declaration (see reify_decl below). (VISION 4.)
 def _bi_reflect(e, env, space, scope, fuel):
     arg = e.args[0]                              # reflect(Point) — the arg names a type
     if not isinstance(arg, Var):
@@ -165,19 +163,6 @@ def _bi_field_count(e, env, space, scope, fuel):
     raise ComptimeErr("field_count: argument is not a type")
 
 
-def _bi_concat(e, env, space, scope, fuel):
-    return str(_eval(e.args[0], env, space, scope, fuel)) + \
-           str(_eval(e.args[1], env, space, scope, fuel))
-
-
-def _bi_fn_const(e, env, space, scope, fuel):
-    """fn_const(name, n) -> the declaration  `name = () i32 { n }`."""
-    name = _eval(e.args[0], env, space, scope, fuel)
-    n = _eval(e.args[1], env, space, scope, fuel)
-    return Fn(name, [], PrimT(Prim.I32), body=[Lit(n)])
-
-
-# field iteration + struct construction — enough to write a real `derive`.
 def _bi_field_name_at(e, env, space, scope, fuel):
     t = _eval(e.args[0], env, space, scope, fuel)
     i = _eval(e.args[1], env, space, scope, fuel)
@@ -186,68 +171,70 @@ def _bi_field_name_at(e, env, space, scope, fuel):
     return t.fields[i].name
 
 
-def _bi_ast_int(e, env, space, scope, fuel):
-    return Lit(_eval(e.args[0], env, space, scope, fuel))
-
-
-# general expression constructors — one per AST node, the shape a Zen-defined
-# `Ast` enum will take. Bespoke per-derive helpers (ast_eq, ast_and, …) collapse
-# into ast_bin; this is what keeps the surface from sprawling as derives grow.
-def _bi_ast_bool(e, env, space, scope, fuel):
-    return Bool(_eval(e.args[0], env, space, scope, fuel))
-
-
-def _bi_ast_var(e, env, space, scope, fuel):
-    return Var(_eval(e.args[0], env, space, scope, fuel))
-
-
-def _bi_ast_field(e, env, space, scope, fuel):
-    obj = _eval(e.args[0], env, space, scope, fuel)
-    return Field(obj, _eval(e.args[1], env, space, scope, fuel))
-
-
-def _bi_ast_bin(e, env, space, scope, fuel):
-    op = _eval(e.args[0], env, space, scope, fuel)
-    return Bin(op, _eval(e.args[1], env, space, scope, fuel),
-               _eval(e.args[2], env, space, scope, fuel))
-
-
-def _bi_fn_eq(e, env, space, scope, fuel):
-    """fn_eq(name, TypeName, body) -> `name = (a: Ptr<T>, b: Ptr<T>) bool { body }`."""
-    name = _eval(e.args[0], env, space, scope, fuel)
-    tn = _eval(e.args[1], env, space, scope, fuel)
-    body = _eval(e.args[2], env, space, scope, fuel)
-    p = lambda nm: Param(nm, PtrT(Dir.READ, NameT(tn, ())))
-    return Fn(name, [p("a"), p("b")], PrimT(Prim.BOOL), body=[body])
-
-
-def _bi_struct_start(e, env, space, scope, fuel):
-    """struct_start(TypeName) -> an empty struct literal to fill field by field."""
-    return StructLit(_eval(e.args[0], env, space, scope, fuel), ())
-
-
-def _bi_with_field(e, env, space, scope, fuel):
-    """with_field(sl, name, value) -> sl with one more field initializer."""
-    sl = _eval(e.args[0], env, space, scope, fuel)
-    name = _eval(e.args[1], env, space, scope, fuel)
-    val = _eval(e.args[2], env, space, scope, fuel)
-    return replace(sl, fields=sl.fields + ((name, val),))
-
-
-def _bi_fn_of(e, env, space, scope, fuel):
-    """fn_of(name, structLit) -> the declaration  `name = () T { structLit }`."""
-    name = _eval(e.args[0], env, space, scope, fuel)
-    sl = _eval(e.args[1], env, space, scope, fuel)
-    return Fn(name, [], NameT(sl.type, ()), body=[sl])
+def _bi_concat(e, env, space, scope, fuel):
+    return str(_eval(e.args[0], env, space, scope, fuel)) + \
+           str(_eval(e.args[1], env, space, scope, fuel))
 
 
 _BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
-             "field_count": _bi_field_count, "concat": _bi_concat,
-             "fn_const": _bi_fn_const, "field_name_at": _bi_field_name_at,
-             "ast_int": _bi_ast_int, "ast_bool": _bi_ast_bool, "ast_var": _bi_ast_var,
-             "ast_field": _bi_ast_field, "ast_bin": _bi_ast_bin,
-             "struct_start": _bi_struct_start, "with_field": _bi_with_field,
-             "fn_of": _bi_fn_of, "fn_eq": _bi_fn_eq}
+             "field_count": _bi_field_count, "field_name_at": _bi_field_name_at,
+             "concat": _bi_concat}
+
+
+# ───────────────────────── reify: Zen Ast value → host AST node ──────────────
+# A derive returns a comptime value shaped by prelude/derive.zen: an enum is
+# ("@enum", Variant, payload); a struct is a dict. reify_decl walks it back into
+# a real ast.py declaration, which then flows through check + lower unchanged.
+_PRIMS = {p.value: p for p in Prim}
+
+
+def _enum(v):
+    if not (isinstance(v, tuple) and len(v) == 3 and v[0] == "@enum"):
+        raise ComptimeErr(f"reify: expected an Ast value, got {v!r}")
+    return v[1], v[2]                            # (variant, payload)
+
+
+def _flist(v, head_key):
+    """Walk a prelude cons-list (?Nil / ?Cons(cell)) into the cells' dicts."""
+    out = []
+    while True:
+        tag, payload = _enum(v)
+        if tag.endswith("Nil"):
+            return out
+        out.append(payload)                      # the cell dict
+        v = payload[head_key]                    # its tail
+
+
+def _reify_type(name):
+    return PrimT(_PRIMS[name]) if name in _PRIMS else NameT(name, ())
+
+
+def reify_expr(v):
+    tag, p = _enum(v)
+    if tag == "Int":
+        return Lit(p)
+    if tag == "Boolean":
+        return Bool(p)
+    if tag == "Var":
+        return Var(p)
+    if tag == "Field":
+        return Field(reify_expr(p["obj"]), p["fld"])
+    if tag == "Bin":
+        return Bin(p["op"], reify_expr(p["lhs"]), reify_expr(p["rhs"]))
+    if tag == "Struct":
+        inits = tuple((c["key"], reify_expr(c["val"])) for c in _flist(p["inits"], "tail"))
+        return StructLit(p["ty"], inits)
+    raise ComptimeErr(f"reify: unknown Ast node '{tag}'")
+
+
+def reify_decl(v):
+    tag, p = _enum(v)
+    if tag != "Func":
+        raise ComptimeErr(f"reify: a derive must return a Decl, got '{tag}'")
+    params = [Param(c["pnm"], PtrT(Dir.READ, _reify_type(c["pty"])) if c["ptr"]
+                    else _reify_type(c["pty"]))
+              for c in _flist(p["ps"], "tail")]
+    return Fn(p["nm"], params, _reify_type(p["ret"]), body=[reify_expr(p["body"])])
 
 
 def _call(e, env, space, scope, fuel):

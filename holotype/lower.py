@@ -8,7 +8,7 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
-         Prim.BOOL: "bool", Prim.VOID: "void"}
+         Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
 
 
 def c_name(path: str) -> str:

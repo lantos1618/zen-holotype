@@ -1,0 +1,62 @@
+// The reified AST — defined in Zen, not the compiler.
+// A derive is an ordinary Zen function run at comptime: it reads a type's
+// structure (reflect/name_of/field_count/field_name_at — the host reflection
+// kernel) and builds an `Ast`/`Decl` value. The host's only other job is to
+// reify that value back into a real declaration and splice it. (VISION step 4.)
+
+// ── the expression AST ──────────────────────────────────────────────────────
+Ast: Int(i32), Boolean(bool), Var(str), Field(FieldData), Bin(BinData), Struct(StructData)
+
+FieldData:  { obj: Ast, fld: str }              // obj.fld
+BinData:    { op: str, lhs: Ast, rhs: Ast }     // lhs op rhs
+StructData: { ty: str, inits: FList }           // Ty { k0: v0, k1: v1, ... }
+
+FList: FNil, FCons(FCell)                        // a list of field initializers
+FCell: { key: str, val: Ast, tail: FList }
+
+// ── declarations ────────────────────────────────────────────────────────────
+Decl: Func(FuncData)
+FuncData: { nm: str, ps: PList, ret: str, body: Ast }   // nm = (ps) ret { body }
+
+PList: PNil, PCons(PCell)                        // a list of parameters
+PCell: { pnm: str, pty: str, ptr: bool, tail: PList }   // pnm: (Ptr<pty> if ptr else pty)
+
+// ── derive: a zero-constructor  ()-> T { T { f0: 0, f1: 0, ... } } ───────────
+zero_inits = (T: Ast, i: i32) FList {
+    match (field_count(T) - i) {
+        0 => .FNil(),
+        _ => .FCons(FCell { key: field_name_at(T, i), val: .Int(0), tail: zero_inits(T, i + 1) })
+    }
+}
+derive_zero = (T: Ast) Decl {
+    .Func(FuncData {
+        nm: concat(name_of(T), "_zero"),
+        ps: .PNil(),
+        ret: name_of(T),
+        body: .Struct(StructData { ty: name_of(T), inits: zero_inits(T, 0) })
+    })
+}
+
+// ── derive: structural equality  (a, b: Ptr<T>) bool ─────────────────────────
+field_eq = (T: Ast, i: i32) Ast {
+    .Bin(BinData {
+        op: "==",
+        lhs: .Field(FieldData { obj: .Var("a"), fld: field_name_at(T, i) }),
+        rhs: .Field(FieldData { obj: .Var("b"), fld: field_name_at(T, i) })
+    })
+}
+eq_body = (T: Ast, acc: Ast, i: i32) Ast {
+    match (field_count(T) - i) {
+        0 => acc,
+        _ => eq_body(T, .Bin(BinData { op: "&&", lhs: acc, rhs: field_eq(T, i) }), i + 1)
+    }
+}
+derive_eq = (T: Ast) Decl {
+    .Func(FuncData {
+        nm: concat(name_of(T), "_eq"),
+        ps: .PCons(PCell { pnm: "a", pty: name_of(T), ptr: true,
+             tail: .PCons(PCell { pnm: "b", pty: name_of(T), ptr: true, tail: .PNil() }) }),
+        ret: "bool",
+        body: eq_body(T, .Boolean(true), 0)
+    })
+}

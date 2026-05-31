@@ -16,18 +16,28 @@ from .types import (Namespace, fits, infer, infer_block, subst, solve_call, matc
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle)
 from .parser import parse
-from .comptime import fold_comptime, evaluate, ComptimeErr
+from .comptime import fold_comptime, evaluate, reify_decl
 
-BUILTIN = {"Option", "Ast"}     # Ast: the reified-AST type a comptime generator works over
+BUILTIN = {"Option"}
 _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
          "printf", "write", "read", "memcpy", "memset", "memmove", "strlen",
          "abort", "exit"}     # declared by the stdlib headers — don't re-proto
 
 
 # ───────────────────────── front end ────────────────────────────────────────
+_PRELUDE_DIR = pathlib.Path(__file__).parent / "prelude"
+
+
+def load_prelude():
+    """The compiler's bundled Zen prelude (the self-hosted Ast model + derives),
+    always available under the `prelude.*` namespace, importable from any file."""
+    return {f"prelude.{p.stem}": parse(p.read_text(), f"prelude.{p.stem}")
+            for p in sorted(_PRELUDE_DIR.glob("*.zen"))}
+
+
 def load(root, skip=()):
     skip = set(skip) | {"build.zen"}        # build.zen is a build script, never a module
-    files = {}
+    files = dict(load_prelude())
     for path in sorted(pathlib.Path(root).rglob("*.zen")):
         if path.name in skip:
             continue
@@ -125,21 +135,17 @@ def _resolve_fn(d, scope, space):
     d.scope = trait_methods_scope(d, scope, space) if d.bounds else scope   # for ret inference
 
 
-def _is_ast(t):
-    return isinstance(t, NameT) and t.path == "Ast"
-
-
-def is_prelude(d):
-    """A function over `Ast` is a comptime generator (prelude). The kernel never
-    checks or lowers it — it runs only inside the emit/comptime pass."""
-    return (isinstance(d, Fn) and d.body is not None and
-            (_is_ast(d.ret) or any(_is_ast(p.type) for p in d.params)))
+def is_prelude_ns(ns):
+    """Prelude files (the self-hosted Ast model + derives) are loaded, resolved,
+    and available at comptime, but the kernel never checks or lowers them."""
+    return ns == "prelude" or ns.startswith("prelude.")
 
 
 def run_emits(files, space):
-    """The splice pass: evaluate each `emit` generator at comptime and graft the
-    declaration(s) it returns into the module — so check + lower meet them as
-    ordinary code. Runs after resolve, before check (VISION: prelude `Ast→Ast`)."""
+    """The splice pass: evaluate each `emit` generator at comptime, reify the
+    Zen `Ast` value it returns into a real declaration, and graft it into the
+    module — so check + lower meet it as ordinary code. Runs after resolve,
+    before check (VISION step 4: prelude `Ast → Ast`)."""
     for f in files.values():
         grafted = []
         for d in f.decls:
@@ -147,8 +153,7 @@ def run_emits(files, space):
                 continue
             out = evaluate(d.value, space, f.scope)
             for g in (out if isinstance(out, list) else [out]):
-                if not isinstance(g, Fn):
-                    raise ComptimeErr(f"emit produced {type(g).__name__}, not a declaration")
+                g = reify_decl(g)                        # Zen Ast value -> host Fn
                 f.scope[g.name] = f"{f.ns}.{g.name}"     # same dict the siblings see
                 space.insert(f"{f.ns}.{g.name}", g)
                 _resolve_fn(g, f.scope, space)
@@ -178,8 +183,10 @@ def _check_fn(qual, ns, d, space, results, passing):
 def check(files, space):
     results, passing = [], set()
     for f in files.values():
+        if is_prelude_ns(f.ns):                            # the prelude runs at comptime; never checked
+            continue
         for d in f.decls:
-            if isinstance(d, Fn) and not is_prelude(d):    # prelude (Ast) fns run, never type-check
+            if isinstance(d, Fn):
                 _check_fn(f"{f.ns}.{d.name}", f.ns, d, space, results, passing)
             elif isinstance(d, Impl):
                 _check_impl(d, f, space, results, passing)
@@ -357,6 +364,8 @@ def emit_c(files, passing, space, extra=""):
     # Integrity: codegen lowers struct/enum/fn directly and trait impls on demand.
     # A trait declaration emits nothing; anything else fails loudly.
     for f in files.values():
+        if is_prelude_ns(f.ns):                          # prelude types/fns are comptime-only
+            continue
         for d in f.decls:
             if not isinstance(d, (Struct, EnumDecl, Fn, TraitDecl, Impl)):
                 raise NotImplementedError(
@@ -378,6 +387,8 @@ def emit_c(files, passing, space, extra=""):
                   "#include <string.h>", "#include <unistd.h>"]
     lines.append("")
     for f in files.values():                             # types (generic templates emit nothing)
+        if is_prelude_ns(f.ns):                          # prelude Ast model is never lowered
+            continue
         for d in f.decls:
             if isinstance(d, Struct) and not d.tparams:
                 lines.append(c_struct(f"{f.ns}.{d.name}", d))
