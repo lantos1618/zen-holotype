@@ -67,7 +67,7 @@ module.exports = grammar({
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
     _type: $ => choice($.primitive, $.pointer, $.named_type),
-    primitive: $ => choice('i32', 'i64', 'u8', 'bool', 'void'),
+    primitive: $ => choice('i32', 'i64', 'u8', 'bool', 'void', 'str'),
     pointer: $ => seq(field('dir', choice('Ptr', 'MutPtr', 'RawPtr')),
                       '<', field('pointee', $._type), '>'),
     named_type: $ => seq(field('name', $.identifier),

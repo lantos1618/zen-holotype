@@ -85,7 +85,8 @@ class _UnknownDecl:           # a decl kind codegen has never heard of
 def test_unlowerable_decl_raises(checked):
     files, space, _, passing = checked
     # codegen lowers struct/enum/fn; anything else must refuse loudly, not vanish
-    some_file = next(iter(files.values()))
+    # (skip the bundled prelude — it's comptime-only and never lowered)
+    some_file = next(f for ns, f in files.items() if not ns.startswith("prelude"))
     some_file.decls.append(_UnknownDecl("mystery"))
     with pytest.raises(NotImplementedError) as ei:
         emit_c(files, passing, space)

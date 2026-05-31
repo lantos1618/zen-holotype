@@ -251,7 +251,30 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 1. **Pluggable backends** — split the front end (kernel) from `gen.c`; add a second backend
    (`gen.json`: the checked structure, externalized) to *prove* one-AST-many-emitters. *(on v1)*
 2. **v2 record grammar** — the one declaration form, beside v1.
-3. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)*
+3. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)* ✅
 4. **reified AST + self-host** — define the AST in Zen; rewrite `impl`/`derive`/traits as prelude
-   `(Ast) Ast` functions, and **delete them from the compiler**.
+   `(Ast) Ast` functions, and **delete them from the compiler**. ✅ *(in progress: the `Ast`/`Decl`
+   model + `derive_zero`/`derive_eq` live in `prelude/derive.zen`; the host keeps only a reflection
+   kernel + reifier. Remaining: a payload-bearing derive, traits/impl, and type-checking the
+   generators against the Zen `Ast`.)*
 5. **more backends** — `gen.js`, `gen.llvm` — each just another walk over the same CheckedAst.
+
+### How a derive works today (the self-hosted loop)
+
+```
+  user.zen:   { derive_eq } = prelude.derive
+              emit derive_eq(reflect(Point))           // a top-level directive
+
+  kernel  :   resolve ─► run_emits ─► check ─► lower
+                          │
+                          ├─ evaluate derive_eq(reflect(Point)) at comptime
+                          │     derive_eq is ORDINARY ZEN (prelude/derive.zen):
+                          │     it reads structure (field_count/field_name_at — the
+                          │     host reflection kernel) and builds an `Ast` value.
+                          └─ reify_decl: Zen `Ast` value → real ast.Fn → splice
+                                         (then checked + lowered like hand-written code)
+```
+
+The kernel's only AST-construction knowledge is `reify_decl` (≈40 lines). The shape of every
+node — `Int`, `Bin`, `Struct`, `Func`, the field/param lists — is **defined in Zen**, and the
+derives are **Zen functions**. New derive = new prelude function, not compiler code.
