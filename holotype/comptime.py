@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import replace
 from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
                   MethodCall, Let, Assign, While, Arm, Str, Fn, Param, Impl, Struct, EnumDecl,
-                  Prim, PrimT, NameT, PtrT, Dir)
+                  TraitDecl, Prim, PrimT, NameT, PtrT, Dir)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
 _RUNTIME = {"addr", "load", "store", "offset", "comptime"}
@@ -137,17 +137,35 @@ def _binop(op, l, r):
 # All the host gives a derive is the ability to *read* a type's structure. The
 # Ast it *builds* is defined in Zen (prelude/derive.zen); the host only reifies
 # that value back into a real declaration (see reify_decl below). (VISION 4.)
-def _bi_reflect(e, env, space, scope, fuel):
-    arg = e.args[0]                              # reflect(Point) — the arg names a type
+def _resolve_named(arg, scope, space, what):
+    """A bare-name argument (reflect(Point) / reflect_trait(Show)) -> its decl."""
     if not isinstance(arg, Var):
-        raise ComptimeErr("reflect expects a bare type name, e.g. reflect(Point)")
+        raise ComptimeErr(f"{what} expects a bare name, e.g. {what}(Foo)")
     try:
-        node = space.walk(scope.get(arg.name, arg.name)).value
+        return space.walk(scope.get(arg.name, arg.name)).value
     except Exception:
-        raise ComptimeErr(f"reflect: no such type '{arg.name}'")
+        raise ComptimeErr(f"{what}: no such name '{arg.name}'")
+
+
+def _bi_reflect(e, env, space, scope, fuel):
+    node = _resolve_named(e.args[0], scope, space, "reflect")
     if not isinstance(node, (Struct, EnumDecl)):
-        raise ComptimeErr(f"reflect: '{arg.name}' is not a type")
+        raise ComptimeErr(f"reflect: '{e.args[0].name}' is not a type")
     return node
+
+
+def _bi_reflect_trait(e, env, space, scope, fuel):
+    node = _resolve_named(e.args[0], scope, space, "reflect_trait")
+    if not isinstance(node, TraitDecl):
+        raise ComptimeErr(f"reflect_trait: '{e.args[0].name}' is not a trait")
+    return node
+
+
+def _bi_trait_method_name(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    if not isinstance(t, TraitDecl):
+        raise ComptimeErr("trait_method_name: argument is not a trait")
+    return t.methods[0].name                     # single-method traits, for now
 
 
 def _bi_name_of(e, env, space, scope, fuel):
@@ -199,7 +217,8 @@ def _bi_concat(e, env, space, scope, fuel):
            str(_eval(e.args[1], env, space, scope, fuel))
 
 
-_BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
+_BUILTINS = {"reflect": _bi_reflect, "reflect_trait": _bi_reflect_trait,
+             "name_of": _bi_name_of, "trait_method_name": _bi_trait_method_name,
              "field_count": _bi_field_count, "field_name_at": _bi_field_name_at,
              "variant_count": _bi_variant_count, "variant_name_at": _bi_variant_name_at,
              "variant_has_payload": _bi_variant_has_payload, "concat": _bi_concat}

@@ -121,25 +121,30 @@ pub main = () i32 {
 
 
 def test_derive_generates_a_trait_impl(tmp_path):
-    # a derive can emit a trait IMPL (not just a free fn). It registers in the
-    # impls table, conformance-checks, and dispatches through a bound `<T: Tagged>`.
+    # a derive can emit a trait IMPL (not just a free fn), and the trait + its
+    # method name are REFLECTED — so the SAME derive implements two differently
+    # named traits. Each registers, conformance-checks, and dispatches via a bound.
     files, space, results, passing = frontend(tmp_path, """
-{ derive_tagged } = prelude.derive
-trait Tagged { tag2: (Self) i32 }
+{ derive_tag_impl } = prelude.derive
+trait Ranked  { rank: (Self) i32 }
+trait Ordinal { ord:  (Self) i32 }
 Color: Red, Green, Blue
-emit derive_tagged(reflect(Color))
-use<T: Tagged> = (x: T) i32 { tag2(x) }
+emit derive_tag_impl(reflect_trait(Ranked),  reflect(Color))
+emit derive_tag_impl(reflect_trait(Ordinal), reflect(Color))
+byRank<T: Ranked>  = (x: T) i32 { rank(x) }
+byOrd<T: Ordinal>  = (x: T) i32 { ord(x) }
 green = () Color { .Green() }
-blue  = () Color { .Blue() }
-pub main = () i32 { use(green()) + use(blue()) * 10 }
+pub main = () i32 { byRank(green()) + byOrd(green()) * 10 }
 """)
-    assert ("Tagged for Color::tag2", True, "ok") in results   # the generated impl conforms
+    assert ("Ranked for Color::rank", True, "ok") in results    # both generated impls conform
+    assert ("Ordinal for Color::ord", True, "ok") in results
     c = emit_c(files, passing, space)
-    assert "impl_m_Tagged_m_Color_tag2(m_Color e)" in c
+    assert "impl_m_Ranked_m_Color_rank(m_Color e)" in c
+    assert "impl_m_Ordinal_m_Color_ord(m_Color e)" in c
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
     subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)
-    assert subprocess.run([str(tmp_path / "o")]).returncode == 21   # 1 + 2*10
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 11   # 1 + 1*10
 
 
 def test_reify_decl_turns_a_zen_ast_value_into_a_fn():
