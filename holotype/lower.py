@@ -4,7 +4,7 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
                   Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor, Match)
-from .types import infer, subst, solve_call
+from .types import infer, subst, solve_call, match_type, TraitMethod
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
 
@@ -32,6 +32,11 @@ def mangle(t) -> str:
 def inst_name(qual, targs) -> str:
     """The mangled C name of a generic instance: <fn>_<arg1>_<arg2>…"""
     return c_name(qual) + "_" + "_".join(mangle(t) for t in targs)
+
+
+def impl_cname(trait_path, type_path, method) -> str:
+    """The mangled C name of a trait method's concrete impl: impl_<Trait>_<Type>_<m>."""
+    return f"impl_{c_name(trait_path)}_{c_name(type_path)}_{method}"
 
 
 def c_type(t) -> str:
@@ -97,7 +102,17 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
     if isinstance(e, Call):
         if e.callee == "addr":
             return f"&({c_expr(e.args[0], locals_, space, scope)})"
-        callee = space.walk(scope[e.callee]).value
+        target = scope.get(e.callee)
+        if isinstance(target, TraitMethod):             # resolve to the concrete impl fn
+            s = {}
+            for p, a in zip(target.sig.params, e.args):
+                match_type(p, infer(a, locals_, space, scope), s)
+            cn = impl_cname(target.trait, s["Self"].path, e.callee)
+            ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
+            args = ", ".join(c_expr(a, locals_, space, scope, pt)
+                             for a, pt in zip(e.args, ptypes))
+            return f"{cn}({args})"
+        callee = space.walk(target).value
         if callee.tparams:                              # generic: name the monomorphized instance
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
             targs = tuple(s[n] for n in callee.tparams)

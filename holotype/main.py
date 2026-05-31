@@ -9,9 +9,12 @@ Only well-typed functions are codegen'd.
 from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
-                  Str, StructLit, Bin, Field, Let, Call, MethodCall, EnumCtor, Match)
-from .types import Space, fits, infer, infer_block, subst, solve_call, TypeErr
-from .lower import c_struct, c_enum, c_proto, c_def, show, c_name, inst_name
+                  Str, StructLit, Bin, Field, Let, Call, MethodCall, EnumCtor, Match,
+                  TraitDecl, Impl)
+from .types import (Space, fits, infer, infer_block, subst, solve_call, match_type,
+                    TraitMethod, TypeErr)
+from .lower import (c_struct, c_enum, c_proto, c_def, show, c_name, inst_name,
+                    impl_cname)
 from .parser import parse
 
 BUILTIN = {"Option"}
@@ -31,8 +34,11 @@ def load(root, skip=()):
 
 def build_space(files):
     space = Space()
+    space.impls = {}                      # (trait_path, type_path) -> {method: (Fn, scope)}
     for f in files.values():
         for d in f.decls:
+            if isinstance(d, Impl):       # impls have no name — registered in resolve()
+                continue
             space.insert(f"{f.ns}.{d.name}", d)
     return space
 
@@ -44,8 +50,20 @@ def build_scopes(files):
             for n in imp.names:
                 sc[n] = f"{imp.module}.{n}"
         for d in f.decls:
-            sc[d.name] = f"{f.ns}.{d.name}"
+            if not isinstance(d, Impl):
+                sc[d.name] = f"{f.ns}.{d.name}"
         f.scope = sc
+
+
+def trait_methods_scope(fn, base, space):
+    """`base` scope plus, for every bound `T: Trait`, the trait's methods bound
+    as TraitMethod entries — so a bounded body can call them by name."""
+    sc = dict(base)
+    for tp, trait_path in fn.bounds.items():
+        trait = space.walk(trait_path).value
+        for sig in trait.methods:
+            sc[sig.name] = TraitMethod(tp, sig, trait_path)
+    return sc
 
 
 def resolve_type(t, scope, space, tparams=()):
@@ -78,51 +96,97 @@ def resolve(files, space):
                     if v.payload is not None:
                         v.payload = resolve_type(v.payload, f.scope, space, tp)
             elif isinstance(d, Fn):
-                tp = set(d.tparams)
-                for p in d.params:
-                    p.type = resolve_type(p.type, f.scope, space, tp)
-                d.ret = resolve_type(d.ret, f.scope, space, tp)
+                _resolve_fn(d, f.scope, space)
+            elif isinstance(d, TraitDecl):
+                for sig in d.methods:                       # Self is the implementor's type var
+                    sig.params = tuple(resolve_type(p, f.scope, space, {"Self"}) for p in sig.params)
+                    sig.ret = resolve_type(sig.ret, f.scope, space, {"Self"})
+            elif isinstance(d, Impl):
+                trait_path = f.scope.get(d.trait, d.trait)
+                type_path = f.scope.get(d.type, d.type)
+                space.walk(trait_path); space.walk(type_path)   # both must exist
+                for m in d.methods:
+                    _resolve_fn(m, f.scope, space)
+                space.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
+
+
+def _resolve_fn(d, scope, space):
+    tp = set(d.tparams)
+    for p in d.params:
+        p.type = resolve_type(p.type, scope, space, tp)
+    d.ret = resolve_type(d.ret, scope, space, tp)
+    d.bounds = {k: (scope.get(v, v)) for k, v in d.bounds.items()}
+    for trait_path in d.bounds.values():
+        space.walk(trait_path)                              # the bound trait must exist
+
+
+def _check_fn(qual, ns, d, scope, space, results, passing):
+    if not d.body:
+        return
+    locals_ = {p.name: p.type for p in d.params}
+    try:
+        bt = infer_block(d.body, locals_, space, scope, d.ret)
+        if not fits(bt, d.ret):
+            raise TypeErr("return type", bt, d.ret)
+        results.append((qual, True, "ok")); passing.add(qual)
+    except TypeErr as ex:
+        core = (f"{show(ex.given)}  ⊀  {show(ex.want)}"
+                if ex.given is not None else str(ex))
+        loc = f"{ns}:{ex.pos[0] + 1}:{ex.pos[1] + 1}: " if ex.pos else ""
+        results.append((qual, False, loc + core))
 
 
 def check(files, space):
     results, passing = [], set()
     for f in files.values():
         for d in f.decls:
-            if not isinstance(d, Fn):
-                continue
-            qual = f"{f.ns}.{d.name}"
-            if not d.body:
-                continue
-            locals_ = {p.name: p.type for p in d.params}
-            try:
-                bt = infer_block(d.body, locals_, space, f.scope, d.ret)
-                if not fits(bt, d.ret):
-                    raise TypeErr("return type", bt, d.ret)
-                results.append((qual, True, "ok")); passing.add(qual)
-            except TypeErr as ex:
-                core = (f"{show(ex.given)}  ⊀  {show(ex.want)}"
-                        if ex.given is not None else str(ex))
-                loc = f"{f.ns}:{ex.pos[0] + 1}:{ex.pos[1] + 1}: " if ex.pos else ""
-                results.append((qual, False, loc + core))
+            if isinstance(d, Fn):
+                scope = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
+                _check_fn(f"{f.ns}.{d.name}", f.ns, d, scope, space, results, passing)
+            elif isinstance(d, Impl):
+                _check_impl(d, f, space, results, passing)
     return results, passing
 
 
+def _check_impl(d, f, space, results, passing):
+    trait_path = f.scope.get(d.trait, d.trait)
+    type_path = f.scope.get(d.type, d.type)
+    trait = space.walk(trait_path).value
+    sigs = {s.name: s for s in trait.methods}
+    self_sub = {"Self": NameT(type_path, ())}
+    for m in d.methods:
+        tag = f"{d.trait} for {d.type}::{m.name}"
+        # conformance: the method must match the trait signature with Self = the type
+        sig = sigs.get(m.name)
+        if sig is None:
+            results.append((tag, False, f"{d.trait} has no method '{m.name}'")); continue
+        want_params = [subst(p, self_sub) for p in sig.params]
+        got_params = [p.type for p in m.params]
+        if got_params != want_params or m.ret != subst(sig.ret, self_sub):
+            results.append((tag, False, "signature does not match the trait")); continue
+        _check_fn(tag, f.ns, m, f.scope, space, results, passing)
+    missing = [name for name in sigs if name not in {m.name for m in d.methods}]
+    if missing:
+        results.append((f"{d.trait} for {d.type}", False,
+                        f"missing method(s): {', '.join(missing)}"))
+
+
 # ───────────────────────── monomorphization ─────────────────────────────────
-def _scan_expr(e, locals_, space, scope, add):
-    """Walk an expression; record every generic-call instance (callee, type-args)."""
+def _scan_expr(e, locals_, space, scope, add, add_impl):
+    """Walk an expression; record every generic-call instance and trait-impl use."""
     if isinstance(e, Bin):
-        _scan_expr(e.l, locals_, space, scope, add)
-        _scan_expr(e.r, locals_, space, scope, add)
+        _scan_expr(e.l, locals_, space, scope, add, add_impl)
+        _scan_expr(e.r, locals_, space, scope, add, add_impl)
     elif isinstance(e, Field):
-        _scan_expr(e.obj, locals_, space, scope, add)
+        _scan_expr(e.obj, locals_, space, scope, add, add_impl)
     elif isinstance(e, StructLit):
         for _, v in e.fields:
-            _scan_expr(v, locals_, space, scope, add)
+            _scan_expr(v, locals_, space, scope, add, add_impl)
     elif isinstance(e, EnumCtor):
         for a in e.args:
-            _scan_expr(a, locals_, space, scope, add)
+            _scan_expr(a, locals_, space, scope, add, add_impl)
     elif isinstance(e, Match):
-        _scan_expr(e.subject, locals_, space, scope, add)
+        _scan_expr(e.subject, locals_, space, scope, add, add_impl)
         st = infer(e.subject, locals_, space, scope)
         decl = space.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
@@ -131,68 +195,91 @@ def _scan_expr(e, locals_, space, scope, add):
             al = locals_
             if arm.variant is not None and arm.binding is not None:
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
-            _scan_expr(arm.body, al, space, scope, add)
+            _scan_expr(arm.body, al, space, scope, add, add_impl)
     elif isinstance(e, Call):
         for a in e.args:
-            _scan_expr(a, locals_, space, scope, add)
+            _scan_expr(a, locals_, space, scope, add, add_impl)
         if e.callee == "addr":
             return
-        callee = space.walk(scope[e.callee]).value
+        target = scope.get(e.callee)
+        if isinstance(target, TraitMethod):              # resolve concrete Self -> impl used
+            s = {}
+            for p, a in zip(target.sig.params, e.args):
+                match_type(p, infer(a, locals_, space, scope), s)
+            if isinstance(s.get("Self"), NameT):
+                add_impl(target.trait, s["Self"].path)
+            return
+        callee = space.walk(target).value
         if isinstance(callee, Fn) and callee.tparams:
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
-            add(scope[e.callee], tuple(s[n] for n in callee.tparams))
+            add(target, tuple(s[n] for n in callee.tparams))
 
 
-def _scan_block(stmts, locals_, space, scope, add):
+def _scan_block(stmts, locals_, space, scope, add, add_impl):
     locals_ = dict(locals_)
     for s in stmts:
         if isinstance(s, Let):
-            _scan_expr(s.value, locals_, space, scope, add)
+            _scan_expr(s.value, locals_, space, scope, add, add_impl)
             locals_[s.name] = infer(s.value, locals_, space, scope)
         else:
-            _scan_expr(s, locals_, space, scope, add)
+            _scan_expr(s, locals_, space, scope, add, add_impl)
 
 
 def specialize(fn, s):
-    """A concrete copy of a generic fn with its type-args substituted in."""
+    """A concrete copy of a generic fn with its type-args substituted in (bounds
+    kept so its body's trait-method calls still resolve)."""
     return Fn(fn.name, [Param(p.name, subst(p.type, s)) for p in fn.params],
-              subst(fn.ret, s), fn.body, fn.pub, ())
+              subst(fn.ret, s), fn.body, fn.pub, (), fn.bounds)
 
 
 def collect_instances(files, passing, space):
-    """Every concrete (qual, type-args) of a generic fn reachable from the
-    non-generic passing functions, transitively. -> {(qual, targs): (spec, scope)}"""
-    decl_scope = {f"{f.ns}.{d.name}": f.scope for f in files.values() for d in f.decls}
-    insts, work = {}, []
+    """Reachable from the non-generic passing functions, transitively: every
+    concrete generic-fn instance and every trait impl actually used.
+    -> ({(qual, targs): (spec, scope)}, {(trait_path, type_path)})"""
+    decl_scope = {f"{f.ns}.{d.name}": f.scope
+                  for f in files.values() for d in f.decls if not isinstance(d, Impl)}
+    insts, impls_used, work = {}, set(), []
 
     def add(qual, targs):
         if (qual, targs) in insts:
             return
         fn = space.walk(qual).value
+        sc = trait_methods_scope(fn, decl_scope[qual], space)
         spec = specialize(fn, dict(zip(fn.tparams, targs)))
-        insts[(qual, targs)] = (spec, decl_scope[qual])
-        work.append((spec, decl_scope[qual]))
+        insts[(qual, targs)] = (spec, sc)
+        work.append((spec, sc))
+
+    def add_impl(trait_path, type_path):
+        if (trait_path, type_path) in impls_used:
+            return
+        impls_used.add((trait_path, type_path))
+        for mfn, msc in space.impls[(trait_path, type_path)].values():
+            work.append((mfn, msc))
 
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
-                _scan_block(d.body, {p.name: p.type for p in d.params}, space, f.scope, add)
+                sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
+                _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, add, add_impl)
     while work:
-        spec, sc = work.pop()
-        _scan_block(spec.body, {p.name: p.type for p in spec.params}, space, sc, add)
-    return insts
+        fn, sc = work.pop()
+        _scan_block(fn.body, {p.name: p.type for p in fn.params}, space, sc, add, add_impl)
+    return insts, impls_used
 
 
 def emit_c(files, passing, space, extra=""):
-    # Integrity: codegen lowers Struct, EnumDecl, Fn. Anything else fails loudly
-    # rather than silently dropping it from the output.
+    # Integrity: codegen lowers struct/enum/fn directly and trait impls on demand.
+    # A trait declaration emits nothing; anything else fails loudly.
     for f in files.values():
         for d in f.decls:
-            if not isinstance(d, (Struct, EnumDecl, Fn)):
+            if not isinstance(d, (Struct, EnumDecl, Fn, TraitDecl, Impl)):
                 raise NotImplementedError(
-                    f"cannot lower {type(d).__name__} '{f.ns}.{d.name}' to C yet "
-                    f"(codegen supports struct + enum + fn)")
-    insts = collect_instances(files, passing, space)
+                    f"cannot lower {type(d).__name__} '{getattr(d, 'name', '?')}' to C yet "
+                    f"(codegen supports struct + enum + fn + trait/impl)")
+    insts, impls_used = collect_instances(files, passing, space)
+    impl_fns = [(impl_cname(tp, ty, m), mfn, msc)         # the trait methods actually used
+                for (tp, ty) in impls_used
+                for m, (mfn, msc) in space.impls[(tp, ty)].items()]
 
     lines = ["#include <stdint.h>", "#include <stdbool.h>", ""]
     for f in files.values():                             # types (generic templates emit nothing)
@@ -206,8 +293,10 @@ def emit_c(files, passing, space, extra=""):
         for d in f.decls:
             if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
                 lines.append(c_proto(f"{f.ns}.{d.name}", d))
-    for (qual, targs), (spec, _) in insts.items():       # …and each monomorphized instance
+    for (qual, targs), (spec, _) in insts.items():       # …monomorphized instances…
         lines.append(c_proto(qual, spec, inst_name(qual, targs)))
+    for cn, mfn, _ in impl_fns:                          # …and trait-impl methods
+        lines.append(c_proto(cn, mfn, cn))
     lines.append("")
     for f in files.values():                             # definitions
         for d in f.decls:
@@ -215,6 +304,8 @@ def emit_c(files, passing, space, extra=""):
                 lines.append(c_def(f"{f.ns}.{d.name}", d, space, f.scope))
     for (qual, targs), (spec, sc) in insts.items():
         lines.append(c_def(qual, spec, space, sc, inst_name(qual, targs)))
+    for cn, mfn, msc in impl_fns:
+        lines.append(c_def(cn, mfn, space, msc, cn))
     return "\n".join(lines) + "\n" + extra
 
 

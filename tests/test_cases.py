@@ -51,7 +51,8 @@ def _check_fixture(path):
     build_scopes(files)
     resolve(files, space)
     results, _ = check(files, space)
-    verdicts = {qual.split(".", 1)[1]: (ok, why) for qual, ok, why in results}
+    verdicts = {(qual.split(".", 1)[1] if "." in qual else qual): (ok, why)
+                for qual, ok, why in results}
     return verdicts, annotations(src)
 
 

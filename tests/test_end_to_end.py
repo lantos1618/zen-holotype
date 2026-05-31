@@ -167,6 +167,35 @@ def test_match_lowers_and_runs(tmp_path):
     assert run.stdout.strip() == "7"
 
 
+# ── Traits: a bounded generic dispatches to the impl, compiles, and runs ────
+def test_trait_dispatch_runs(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Vec: { len: i32, cap: i32 }\n"
+        "trait Area { area: (Ptr<Self>) i32 }\n"
+        "impl Area for Vec { area = (v: Ptr<Vec>) i32 { v.len * v.cap } }\n"
+        "pub total<T: Area> = (x: Ptr<T>) i32 { area(x) }\n"
+        "pub main = () i32 { total(addr(Vec { len: 5, cap: 4 })) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    # the bounded generic and the impl both monomorphize, and total calls the impl
+    assert "main_total_main_Vec" in c
+    assert "impl_main_Area_main_Vec_area" in c
+    assert "return impl_main_Area_main_Vec_area(x)" in c
+    harness = ("\n#include <stdio.h>\nint main(void){ "
+               "printf(\"%d\\n\", main_main()); return 0; }\n")
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + harness)
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "20"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

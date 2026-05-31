@@ -13,7 +13,7 @@ module.exports = grammar({
 
   rules: {
     source_file: $ => repeat($._item),
-    _item: $ => choice($.import, $.struct, $.enum, $.function),
+    _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl),
 
     comment: $ => token(seq('//', /[^\n]*/)),
 
@@ -21,8 +21,21 @@ module.exports = grammar({
     import: $ => seq('{', comma1($.identifier), '}', '=', $.module_path),
     module_path: $ => sep1($.identifier, '.'),
 
-    // a declaration's own type parameters:  Box<T>,  map<T, U>
-    type_params: $ => seq('<', comma1($.identifier), '>'),
+    // a declaration's own type parameters, each optionally bounded by a trait:
+    //   Box<T>,  map<T, U>,  total<T: Area>
+    type_params: $ => seq('<', comma1($.tparam), '>'),
+    tparam: $ => seq(field('name', $.identifier),
+                     optional(seq(':', field('bound', $.identifier)))),
+
+    // trait Area { area: (Ptr<Self>) i32 }   — a named set of method signatures
+    trait: $ => seq(optional('pub'), 'trait', field('name', $.identifier),
+                    '{', comma1($.method_sig), optional(','), '}'),
+    method_sig: $ => seq(field('name', $.identifier), ':',
+                         '(', optional(comma1($._type)), ')', field('ret', $._type)),
+
+    // impl Area for Vec { area = (v: Ptr<Vec>) i32 { ... } }
+    impl: $ => seq('impl', field('trait', $.identifier), 'for', field('type', $.identifier),
+                   '{', repeat($.function), '}'),
 
     // pub Vec: { len: i32, cap: i32 }   /   pub Box<T>: { val: T }
     struct: $ => seq(optional('pub'), field('name', $.identifier),

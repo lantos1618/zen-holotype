@@ -7,7 +7,7 @@ from __future__ import annotations
 import warnings, pathlib
 from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
-                  EnumDecl, Param, Fn, Import, File,
+                  EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
                   Lit, Bool, Var, Field, Bin, Call, Str, StructLit, MethodCall,
                   EnumCtor, Let, Arm, Match)
 
@@ -122,8 +122,29 @@ def _stmt(n):
 
 
 def _tparams(n):
+    """(names, bounds) — bounds maps a param name to its trait bound, e.g. T: Area."""
     tp = _field(n, "tparams")
-    return tuple(_t(c) for c in tp.named_children) if tp else ()
+    if not tp:
+        return (), {}
+    names, bounds = [], {}
+    for c in tp.named_children:
+        if c.type != "tparam":
+            continue
+        nm = _t(_field(c, "name"))
+        names.append(nm)
+        b = _field(c, "bound")
+        if b is not None:
+            bounds[nm] = _t(b)
+    return tuple(names), bounds
+
+
+def _fn(n):
+    pub = any(c.type == "pub" for c in n.children)
+    params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
+              for p in _named(n) if p.type == "param"]
+    body = [_stmt(s) for s in _named(_field(n, "body"))]
+    names, bounds = _tparams(n)
+    return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub, names, bounds)
 
 
 def _decl(n):
@@ -131,17 +152,26 @@ def _decl(n):
     if n.type == "struct":
         fields = [Field_(_t(_field(f, "name")), _type(_field(f, "type")))
                   for f in _named(n) if f.type == "field"]
-        return Struct(_t(_field(n, "name")), fields, pub, _tparams(n))
+        return Struct(_t(_field(n, "name")), fields, pub, _tparams(n)[0])
     if n.type == "enum":
         variants = [Variant(_t(_field(v, "name")),
                             _type(_field(v, "payload")) if _field(v, "payload") else None)
                     for v in _named(n) if v.type == "variant"]
-        return EnumDecl(_t(_field(n, "name")), variants, pub, _tparams(n))
+        return EnumDecl(_t(_field(n, "name")), variants, pub, _tparams(n)[0])
     if n.type == "function":
-        params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
-                  for p in _named(n) if p.type == "param"]
-        body = [_stmt(s) for s in _named(_field(n, "body"))]
-        return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub, _tparams(n))
+        return _fn(n)
+    if n.type == "trait":
+        sigs = []
+        for m in _named(n):
+            if m.type != "method_sig":
+                continue
+            tks = [c for c in _named(m) if c.type in _TYPES]   # param types … then ret (last)
+            sigs.append(MethodSig(_t(_field(m, "name")),
+                                  tuple(_type(t) for t in tks[:-1]), _type(tks[-1])))
+        return TraitDecl(_t(_field(n, "name")), sigs, pub)
+    if n.type == "impl":
+        methods = [_fn(f) for f in _named(n) if f.type == "function"]
+        return Impl(_t(_field(n, "trait")), _t(_field(n, "type")), methods)
     raise ValueError(f"unhandled decl: {n.type}")
 
 

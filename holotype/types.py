@@ -14,6 +14,14 @@ class Conflict(Exception):   ...
 class Unresolved(Exception): ...
 
 
+@dataclass
+class TraitMethod:
+    """A scope entry for a trait method reachable via a bound `T: Trait`."""
+    tparam: str               # the bound type-parameter (the method's Self)
+    sig: object               # MethodSig
+    trait: str                # fully-qualified trait path
+
+
 class TypeErr(Exception):
     def __init__(self, msg, given=None, want=None):
         super().__init__(msg)
@@ -203,7 +211,12 @@ def _infer(e, locals_, space, scope, expect=None):
     if isinstance(e, Call):
         if e.callee == "addr":                            # addr(x): take a mutable pointer
             return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
-        callee = space.walk(scope[e.callee]).value
+        target = scope.get(e.callee)
+        if isinstance(target, TraitMethod):               # a bound's method, e.g. area(x)
+            return infer_trait_call(e, target, locals_, space, scope)
+        if target is None:
+            raise TypeErr(f"unbound function '{e.callee}'")
+        callee = space.walk(target).value
         if not isinstance(callee, Fn):
             raise TypeErr(f"'{e.callee}' is not callable")
         if len(e.args) != len(callee.params):
@@ -218,6 +231,11 @@ def _infer(e, locals_, space, scope, expect=None):
                 want = subst(p.type, s)
                 if not fits(given, want):
                     raise TypeErr("pointer/null mismatch", given, want)
+            for tp, trait_path in callee.bounds.items():  # the type-arg must satisfy its bound
+                got = s.get(tp)
+                if isinstance(got, NameT) and (trait_path, got.path) not in getattr(space, "impls", {}):
+                    raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement "
+                                  f"{trait_path.rsplit('.', 1)[-1]}")
             return subst(callee.ret, s)
         for a, p in zip(e.args, callee.params):
             given = infer(a, locals_, space, scope, p.type)
@@ -225,6 +243,19 @@ def _infer(e, locals_, space, scope, expect=None):
                 raise TypeErr("pointer/null mismatch", given, p.type)
         return callee.ret
     raise TypeErr(f"unknown expr {e!r}")
+
+
+def infer_trait_call(e, tm, locals_, space, scope):
+    """Type a call to a bound's trait method: check args against the signature
+    with Self left abstract (the type var of the bound this method came from)."""
+    params = [subst(p, {"Self": TVar(tm.tparam)}) for p in tm.sig.params]
+    if len(e.args) != len(params):
+        raise TypeErr(f"'{e.callee}' wants {len(params)} args, got {len(e.args)}")
+    for a, pt in zip(e.args, params):
+        given = infer(a, locals_, space, scope)
+        if not fits(given, pt):
+            raise TypeErr("trait-method argument", given, pt)
+    return subst(tm.sig.ret, {"Self": TVar(tm.tparam)})
 
 
 def infer_enum_ctor(e, expect, locals_, space, scope):

@@ -188,6 +188,28 @@ class Fn:
     body: object = None       # Expr | None
     pub: bool = False
     tparams: tuple = ()        # type-parameter names
+    bounds: dict = field(default_factory=dict)   # tparam name -> trait path (the <T: Area>)
+
+
+@dataclass
+class MethodSig:
+    name: str
+    params: tuple             # tuple[Type] (types only; Self is the implementor)
+    ret: object               # Type
+
+
+@dataclass
+class TraitDecl:
+    name: str
+    methods: list             # list[MethodSig]
+    pub: bool = False
+
+
+@dataclass
+class Impl:
+    trait: str                # trait name (resolved to a path later)
+    type: str                 # implementing type name (resolved later)
+    methods: list             # list[Fn]
 
 
 @dataclass
