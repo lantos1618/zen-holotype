@@ -295,6 +295,21 @@ def test_match_subject_evaluated_once(tmp_path):
     assert pick.count("main_kind") == 1, pick      # not re-evaluated per arm
 
 
+# ── A void-returning main gets a harness without printf("%d", …) ────────────
+def test_void_main_harness(tmp_path):
+    (tmp_path / "build.zen").write_text(
+        '{ Builder, BuildConfig, BuildError, Executable } = @builtin.build\n'
+        'build = (b: Builder) Result<BuildConfig, BuildError> {\n'
+        '    b.add(Executable { name: "v", main: "main.zen", out_dir: "build" })\n'
+        '    .Ok(b.config())\n}\n')
+    (tmp_path / "main.zen").write_text("pub main = () void { y := 5 }\n")
+    out = subprocess.run([sys.executable, "-m", "holotype", "build", str(tmp_path)],
+                         capture_output=True, text=True, cwd=str(EXAMPLES.parent))
+    assert out.returncode == 0, out.stderr           # would fail at cc if it printf'd %d on void
+    c = (tmp_path / "build" / "v.c").read_text()
+    assert "main_main();" in c and "printf" not in c.split("int main(void)")[1]
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

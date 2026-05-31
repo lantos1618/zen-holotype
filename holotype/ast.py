@@ -42,7 +42,7 @@ class NameT:
 class PtrT:
     """A pointer IS a type. Direction is locked in an enum, not a comment."""
     dir: Dir
-    pointee: object           # Type
+    pointee: Type
 
 
 @dataclass(frozen=True)
@@ -78,7 +78,7 @@ class Var:
 
 @dataclass(frozen=True)
 class Field:
-    obj: object               # Expr
+    obj: Expr
     name: str
     pos: object = _pos()
 
@@ -86,14 +86,14 @@ class Field:
 @dataclass(frozen=True)
 class Bin:
     op: str                   # + - * == < > <= >= && ||
-    l: object                 # Expr
-    r: object                 # Expr
+    l: Expr
+    r: Expr
     pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Not:
-    operand: object           # Expr  (logical !)
+    operand: Expr             # logical !
     pos: object = _pos()
 
 
@@ -133,7 +133,7 @@ class EnumCtor:
 @dataclass(frozen=True)
 class Let:
     name: str                 # x := value   (a local binding; type inferred)
-    value: object             # Expr
+    value: Expr
     pos: object = _pos()
 
 
@@ -141,13 +141,13 @@ class Let:
 class Arm:
     variant: str | None       # ctor variant name (None for a literal/wildcard arm)
     binding: str | None       # payload binding, e.g. the `v` of .Some(v)
-    body: object              # Expr
+    body: Expr
     lit: object = None        # literal pattern value (Lit/Bool); None for ctor/wildcard
 
 
 @dataclass(frozen=True)
 class Match:
-    subject: object           # Expr
+    subject: Expr
     arms: tuple = ()          # tuple[Arm, ...]
     pos: object = _pos()
 
@@ -156,7 +156,7 @@ class Match:
 @dataclass
 class Field_:                  # struct field (distinct from the Field expr)
     name: str
-    type: object              # Type
+    type: Type
 
 
 @dataclass
@@ -170,7 +170,7 @@ class Struct:
 @dataclass
 class Variant:
     name: str
-    payload: object = None    # Type | None
+    payload: "Type | None" = None
 
 
 @dataclass
@@ -184,15 +184,15 @@ class EnumDecl:
 @dataclass
 class Param:
     name: str
-    type: object              # Type
+    type: Type
 
 
 @dataclass
 class Fn:
     name: str
     params: list              # list[Param]
-    ret: object               # Type
-    body: object = None       # Expr | None
+    ret: "Type | None"        # None until inferred from the body
+    body: object = None       # list[Expr] | None
     pub: bool = False
     tparams: tuple = ()        # type-parameter names
     bounds: dict = field(default_factory=dict)   # tparam name -> trait path (the <T: Area>)
@@ -202,7 +202,7 @@ class Fn:
 class MethodSig:
     name: str
     params: tuple             # tuple[Type] (types only; Self is the implementor)
-    ret: object               # Type
+    ret: Type
 
 
 @dataclass
@@ -231,3 +231,11 @@ class File:
     imports: list
     decls: list
     scope: dict = field(default_factory=dict)   # local name -> fully-qualified path
+
+
+# ───────────────────────── the closed unions ────────────────────────────────
+# The structural type space and the expression grammar, named so the checker's
+# annotations document exactly which nodes are legal (and mypy can check them).
+Type = PrimT | NameT | PtrT | TVar
+Expr = (Lit | Bool | Var | Field | Bin | Not | Call | Str | StructLit
+        | MethodCall | EnumCtor | Let | Match)

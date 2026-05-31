@@ -33,8 +33,7 @@ def load(root, skip=()):
 
 
 def build_space(files):
-    space = Space()
-    space.impls = {}                      # (trait_path, type_path) -> {method: (Fn, scope)}
+    space = Space()                       # space.impls / fn_scope / impl_pass init'd in Space
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Impl):       # impls have no name — registered in resolve()
@@ -462,9 +461,14 @@ def cmd_build(root):
     if entry not in passing:
         raise SystemExit(f"\nentry '{entry}' did not type-check — nothing to run")
 
-    harness = (f'\n#include <stdio.h>\nint main(void) {{\n'
-               f'    printf("{cfg["name"]} -> %d\\n", {c_name(entry)}());\n'
-               f'    return 0;\n}}\n')
+    entry_ret = space.walk(entry).value.ret
+    if isinstance(entry_ret, PrimT) and entry_ret.prim is Prim.VOID:   # main returns nothing
+        harness = (f'\nint main(void) {{\n    {c_name(entry)}();\n'
+                   f'    return 0;\n}}\n')
+    else:
+        harness = (f'\n#include <stdio.h>\nint main(void) {{\n'
+                   f'    printf("{cfg["name"]} -> %d\\n", {c_name(entry)}());\n'
+                   f'    return 0;\n}}\n')
     out_dir = pathlib.Path(root) / cfg["out_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{cfg['name']}.c", out_dir / cfg["name"]

@@ -40,6 +40,10 @@ class Node:
 class Space:
     def __init__(self):
         self.root = Node()
+        self.impls = {}              # (trait_path, type_path) -> {method: (Fn, scope)}
+        self.impl_pass = set()       # (trait_path, type_path, method) that type-checked
+        self.fn_scope = {}           # qual -> defining scope (for return-type inference)
+        self._inferring = set()      # guard against recursive return-type inference
 
     def insert(self, path: str, decl) -> None:
         n = self.root
@@ -254,7 +258,7 @@ def _infer(e, locals_, space, scope, expect=None):
                     raise TypeErr("pointer/null mismatch", given, want)
             for tp, trait_path in callee.bounds.items():  # the type-arg must satisfy its bound
                 got = s.get(tp)
-                if isinstance(got, NameT) and (trait_path, got.path) not in getattr(space, "impls", {}):
+                if isinstance(got, NameT) and (trait_path, got.path) not in space.impls:
                     raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement "
                                   f"{trait_path.rsplit('.', 1)[-1]}")
             return subst(ret_type(target, space), s)
