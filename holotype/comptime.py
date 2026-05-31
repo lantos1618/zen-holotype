@@ -10,7 +10,8 @@ Values: int, bool, dict (a struct), or ("@enum", variant, payload).
 from __future__ import annotations
 from dataclasses import replace
 from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
-                  MethodCall, Let, Assign, While, Fn, Impl)
+                  MethodCall, Let, Assign, While, Str, Fn, Impl, Struct, EnumDecl,
+                  Prim, PrimT)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
 _RUNTIME = {"addr", "load", "store", "offset", "comptime"}
@@ -97,6 +98,8 @@ def _eval(e, env, space, scope, fuel):
         return e.n
     if isinstance(e, Bool):
         return e.b
+    if isinstance(e, Str):
+        return e.s
     if isinstance(e, Var):
         if e.name not in env:
             raise ComptimeErr(f"comptime: unbound '{e.name}'")
@@ -130,7 +133,58 @@ def _binop(op, l, r):
             "||": lambda a, b: a or b}[op](l, r)
 
 
+# ───────────────────────── reified-AST builtins (the prelude surface) ────────
+# Host-provided functions a comptime generator calls to *read structure* and
+# *build declarations*. These are the seam P4 opens: today the Ast type and
+# these builtins live in the host; a later slice moves them into Zen itself
+# (VISION step 4: "define the AST in Zen"). A reflected type is just its decl
+# node (Struct/EnumDecl); a built declaration is a real Fn node.
+def _bi_reflect(e, env, space, scope, fuel):
+    arg = e.args[0]                              # reflect(Point) — the arg names a type
+    if not isinstance(arg, Var):
+        raise ComptimeErr("reflect expects a bare type name, e.g. reflect(Point)")
+    try:
+        node = space.walk(scope.get(arg.name, arg.name)).value
+    except Exception:
+        raise ComptimeErr(f"reflect: no such type '{arg.name}'")
+    if not isinstance(node, (Struct, EnumDecl)):
+        raise ComptimeErr(f"reflect: '{arg.name}' is not a type")
+    return node
+
+
+def _bi_name_of(e, env, space, scope, fuel):
+    return _eval(e.args[0], env, space, scope, fuel).name
+
+
+def _bi_field_count(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    if isinstance(t, Struct):
+        return len(t.fields)
+    if isinstance(t, EnumDecl):
+        return len(t.variants)
+    raise ComptimeErr("field_count: argument is not a type")
+
+
+def _bi_concat(e, env, space, scope, fuel):
+    return str(_eval(e.args[0], env, space, scope, fuel)) + \
+           str(_eval(e.args[1], env, space, scope, fuel))
+
+
+def _bi_fn_const(e, env, space, scope, fuel):
+    """fn_const(name, n) -> the declaration  `name = () i32 { n }`."""
+    name = _eval(e.args[0], env, space, scope, fuel)
+    n = _eval(e.args[1], env, space, scope, fuel)
+    return Fn(name, [], PrimT(Prim.I32), body=[Lit(n)])
+
+
+_BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
+             "field_count": _bi_field_count, "concat": _bi_concat,
+             "fn_const": _bi_fn_const}
+
+
 def _call(e, env, space, scope, fuel):
+    if e.callee in _BUILTINS:                     # reified-AST surface, before everything else
+        return _BUILTINS[e.callee](e, env, space, scope, fuel)
     if e.callee in _RUNTIME:
         raise ComptimeErr(f"comptime: '{e.callee}' is a runtime op, not evaluatable")
     target = scope.get(e.callee)
