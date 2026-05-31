@@ -222,6 +222,13 @@ higher-kinded types, or full Hindley-Milner — which is unsound under subtyping
 anyway) — the point is to test the type idea, which is exactly why the parser is
 someone else's grammar generator rather than hand-rolled.
 
+Since then the language has grown well past that subset: `while` loops and
+mutation, `extern` C bindings + raw memory intrinsics (a heap-allocating
+`String`), and a **comptime metaprogramming layer** whose headline is that the
+**AST is defined in Zen** — `impl`/`derive` are ordinary Zen functions
+(`prelude/derive.zen`) that the compiler runs at comptime and splices back in.
+See **[FEATURES.md](FEATURES.md)** for the full current inventory.
+
 `build.zen` can declare a `Test { root: "test.zen" }`; `holotype build` then
 compiles that root with the project and runs each no-arg `bool` test, printing
 PASS/FAIL (SKIP if it doesn't type-check).
