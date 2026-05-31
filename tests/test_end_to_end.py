@@ -152,8 +152,8 @@ def test_match_lowers_and_runs(tmp_path):
     resolve(files, space)
     _, passing = check(files, space)
     c = emit_c(files, passing, space)
-    assert "(s).tag == main_Status_Idle" in c          # tag test
-    assert "int32_t n = (s).u.Busy" in c               # payload binding
+    assert ".tag == main_Status_Idle" in c             # tag test (subject bound to a temp)
+    assert "int32_t n = " in c and ".u.Busy" in c      # payload binding
     harness = ("\n#include <stdio.h>\nint main(void){ "
                "printf(\"%d\\n\", main_main()); return 0; }\n")
     cfile = tmp_path / "o.c"
@@ -240,8 +240,9 @@ def test_recursion_computes(tmp_path):
     resolve(files, space)
     _, passing = check(files, space)
     c = emit_c(files, passing, space)
-    assert "(n) == 0 ?" in c                            # literal-pattern branch
+    assert "== 0 ?" in c                                # literal-pattern branch
     assert "main_fact((n - 1))" in c                    # the recursive call
+    assert c.count("main_fact((n - 1))") == 1           # subject/arms evaluated once
     harness = ("\n#include <stdio.h>\nint main(void){ "
                "printf(\"%d\\n\", main_main()); return 0; }\n")
     cfile = tmp_path / "o.c"
@@ -276,6 +277,22 @@ def test_generic_struct_monomorphizes(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "42"
+
+
+# ── A match subject with side effects is evaluated exactly once ─────────────
+def test_match_subject_evaluated_once(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Vec: { len: i32, cap: i32 }\n"
+        "pub kind = (v: Ptr<Vec>) i32 { v.len }\n"
+        "pub pick = (v: Ptr<Vec>) i32 { match (kind(v)) { 0 => 10, 1 => 20, _ => 30 } }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    pick = [ln for ln in emit_c(files, passing, space).splitlines()
+            if "main_pick" in ln and "return" in ln][0]
+    assert pick.count("main_kind") == 1, pick      # not re-evaluated per arm
 
 
 # ── T11: the build really runs ──────────────────────────────────────────────

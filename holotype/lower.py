@@ -137,20 +137,22 @@ def c_match(e, locals_, space, scope, expect) -> str:
     """Lower a match to a tag-tested ternary chain. A variant with a payload
     binding uses a statement-expression `({ T b = subj.u.V; body; })` so the
     binding is a real typed local (this narrows the payload inside the arm)."""
-    # `subj` is inlined into each arm test; the language is pure, so re-evaluating
-    # it is at worst redundant work, never a behavioural change. A catch-all is
-    # guaranteed last (the checker rejects unreachable arms), so the default = else.
+    # The subject is bound to a temp ONCE, then the arm tests reference the temp —
+    # so a subject with side effects (e.g. a call) is evaluated exactly once, not
+    # per arm. A catch-all is guaranteed last (the checker rejects unreachable
+    # arms), so the final arm is the ternary's else.
     subj = c_expr(e.subject, locals_, space, scope)
     st = infer(e.subject, locals_, space, scope)
+    t = f"_subj{id(e)}"                                  # unique per match node (nesting-safe)
 
-    if isinstance(st, PrimT):                           # literal match: subj == lit ? … : …
+    if isinstance(st, PrimT):                           # literal match: t == lit ? … : …
         body = lambda arm: f"({c_expr(arm.body, locals_, space, scope, expect)})"
         default = next((a for a in e.arms if a.lit is None), None) or e.arms[-1]
         chain = body(default)
         for arm in reversed([a for a in e.arms if a is not default]):
             litc = c_expr(arm.lit, locals_, space, scope)
-            chain = f"(({subj}) == {litc} ? {body(arm)} : {chain})"
-        return chain
+            chain = f"({t} == {litc} ? {body(arm)} : {chain})"
+        return f"({{ {c_type(st)} {t} = {subj}; {chain}; }})"
 
     decl = space.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
@@ -161,16 +163,15 @@ def c_match(e, locals_, space, scope, expect) -> str:
         if arm.variant is not None and arm.binding is not None:
             pt = c_type(subst(variants[arm.variant].payload, sub))
             al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
-            return (f"({{ {pt} {arm.binding} = ({subj}).u.{arm.variant}; "
+            return (f"({{ {pt} {arm.binding} = {t}.u.{arm.variant}; "
                     f"{c_expr(arm.body, al, space, scope, expect)}; }})")
         return f"({c_expr(arm.body, locals_, space, scope, expect)})"
 
-    # the wildcard arm (or, for an exhaustive match, the last arm) is the else
     default = next((a for a in e.arms if a.variant is None), None) or e.arms[-1]
     chain = clause(default)
     for arm in reversed([a for a in e.arms if a is not default]):
-        chain = f"(({subj}).tag == {cn}_{arm.variant} ? {clause(arm)} : {chain})"
-    return chain
+        chain = f"({t}.tag == {cn}_{arm.variant} ? {clause(arm)} : {chain})"
+    return f"({{ {c_type(st)} {t} = {subj}; {chain}; }})"
 
 
 # ───────────────────────── declaration codegen ─────────────────────────────
