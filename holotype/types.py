@@ -6,7 +6,7 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, EnumDecl,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, EnumDecl, MethodSig,
                   Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 
 
@@ -18,7 +18,7 @@ class Unresolved(Exception): ...
 class TraitMethod:
     """A scope entry for a trait method reachable via a bound `T: Trait`."""
     tparam: str               # the bound type-parameter (the method's Self)
-    sig: object               # MethodSig
+    sig: "MethodSig"
     trait: str                # fully-qualified trait path
 
 
@@ -37,9 +37,13 @@ class Node:
     value: object = None
 
 
-class Space:
+class Namespace:
+    """Immutable-after-resolve data: the namespace trie + the trait-impl registry.
+    Nothing is written to it during the checking phase — checking state lives on
+    the AST (memoized `fn.ret`) and in the per-run `passing` set."""
     def __init__(self):
         self.root = Node()
+        self.impls = {}              # (trait_path, type_path) -> {method: (Fn, scope)}; built in resolve
 
     def insert(self, path: str, decl) -> None:
         n = self.root
@@ -163,124 +167,137 @@ def _infer(e, locals_, space, scope, expect=None):
     `expect` is the type the surrounding context wants (return slot, parameter,
     field). It's how a leading-dot enum ctor like `.Some(x)` learns which enum
     it builds — the variant name alone is ambiguous across enums."""
-    if isinstance(e, Lit):
-        return PrimT(Prim.I32)
-    if isinstance(e, Bool):
-        return PrimT(Prim.BOOL)
-    if isinstance(e, EnumCtor):
-        return infer_enum_ctor(e, expect, locals_, space, scope)
-    if isinstance(e, Match):
-        return infer_match(e, expect, locals_, space, scope)
-    if isinstance(e, Var):
-        if e.name not in locals_:
-            raise TypeErr(f"unbound '{e.name}'")
-        return locals_[e.name]
-    if isinstance(e, Not):
-        if infer(e.operand, locals_, space, scope) != PrimT(Prim.BOOL):
-            raise TypeErr("'!' needs a bool operand")
-        return PrimT(Prim.BOOL)
-    if isinstance(e, Bin):
-        lt = infer(e.l, locals_, space, scope)
-        rt = infer(e.r, locals_, space, scope)
-        if e.op in ("&&", "||"):                         # logical: bool, bool -> bool
-            if lt != PrimT(Prim.BOOL) or rt != PrimT(Prim.BOOL):
-                raise TypeErr(f"'{e.op}' needs bool operands")
+    match e:
+        case Lit():
+            return PrimT(Prim.I32)
+        case Bool():
             return PrimT(Prim.BOOL)
-        if e.op == "==":
-            if not (fits(lt, rt) or fits(rt, lt)):       # operands must be comparable
-                raise TypeErr("'==' operands differ")
+        case EnumCtor():
+            return infer_enum_ctor(e, expect, locals_, space, scope)
+        case Match():
+            return infer_match(e, expect, locals_, space, scope)
+        case Var(name):
+            if name not in locals_:
+                raise TypeErr(f"unbound '{name}'")
+            return locals_[name]
+        case Not(operand):
+            if infer(operand, locals_, space, scope) != PrimT(Prim.BOOL):
+                raise TypeErr("'!' needs a bool operand")
             return PrimT(Prim.BOOL)
-        if e.op in ("<", ">", "<=", ">="):               # ordering: numeric -> bool
-            if not (_numeric(lt) and _numeric(rt)):
-                raise TypeErr(f"'{e.op}' needs numeric operands")
-            return PrimT(Prim.BOOL)
-        if not (_numeric(lt) and _numeric(rt)):          # + - * are numeric-only
-            raise TypeErr(f"'{e.op}' needs numeric operands")
-        wide = Prim.I64 if Prim.I64 in (lt.prim, rt.prim) else Prim.I32
-        return PrimT(wide)                               # widen: i32 op i64 -> i64
-    if isinstance(e, Field):
-        ot = infer(e.obj, locals_, space, scope)
-        st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer
-        if not isinstance(st, NameT):
-            raise TypeErr("field access on non-struct")
-        decl = space.walk(st.path).value
-        for f in decl.fields:
-            if f.name == e.name:
-                # a field of a generic struct carries the instantiation's args
-                return subst(f.type, dict(zip(decl.tparams, st.args))) if decl.tparams else f.type
-        raise TypeErr(f"no field '{e.name}' on {st.path}")
-    if isinstance(e, StructLit):
-        qual = scope.get(e.type, e.type)
-        decl = space.walk(qual).value
-        ftypes = {f.name: f.type for f in decl.fields}
-        givens, s = {}, {}
-        for fname, fexpr in e.fields:            # pass 1: infer values, solve type-args
-            if fname not in ftypes:
-                raise TypeErr(f"no field '{fname}' on {qual}")
-            givens[fname] = infer(fexpr, locals_, space, scope)
-            if decl.tparams:
-                match_type(ftypes[fname], givens[fname], s)
-        missing = [t for t in decl.tparams if t not in s]
+        case Bin(op, l, r):
+            lt = infer(l, locals_, space, scope)
+            rt = infer(r, locals_, space, scope)
+            if op in ("&&", "||"):                       # logical: bool, bool -> bool
+                if lt != PrimT(Prim.BOOL) or rt != PrimT(Prim.BOOL):
+                    raise TypeErr(f"'{op}' needs bool operands")
+                return PrimT(Prim.BOOL)
+            if op == "==":
+                if not (fits(lt, rt) or fits(rt, lt)):   # operands must be comparable
+                    raise TypeErr("'==' operands differ")
+                return PrimT(Prim.BOOL)
+            if op in ("<", ">", "<=", ">="):             # ordering: numeric -> bool
+                if not (_numeric(lt) and _numeric(rt)):
+                    raise TypeErr(f"'{op}' needs numeric operands")
+                return PrimT(Prim.BOOL)
+            if not (_numeric(lt) and _numeric(rt)):      # + - * are numeric-only
+                raise TypeErr(f"'{op}' needs numeric operands")
+            return PrimT(Prim.I64 if Prim.I64 in (lt.prim, rt.prim) else Prim.I32)  # widen
+        case Field(obj, name):
+            ot = infer(obj, locals_, space, scope)
+            st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer
+            if not isinstance(st, NameT):
+                raise TypeErr("field access on non-struct")
+            decl = space.walk(st.path).value
+            for f in decl.fields:
+                if f.name == name:
+                    # a field of a generic struct carries the instantiation's args
+                    return subst(f.type, dict(zip(decl.tparams, st.args))) if decl.tparams else f.type
+            raise TypeErr(f"no field '{name}' on {st.path}")
+        case StructLit():
+            return _infer_struct_lit(e, locals_, space, scope)
+        case Call():
+            return _infer_call(e, expect, locals_, space, scope)
+        case _:
+            raise TypeErr(f"unknown expr {e!r}")
+
+
+def _infer_struct_lit(e, locals_, space, scope):
+    qual = scope.get(e.type, e.type)
+    decl = space.walk(qual).value
+    ftypes = {f.name: f.type for f in decl.fields}
+    givens, s = {}, {}
+    for fname, fexpr in e.fields:                # pass 1: infer values, solve type-args
+        if fname not in ftypes:
+            raise TypeErr(f"no field '{fname}' on {qual}")
+        givens[fname] = infer(fexpr, locals_, space, scope)
+        if decl.tparams:
+            match_type(ftypes[fname], givens[fname], s)
+    missing = [t for t in decl.tparams if t not in s]
+    if missing:
+        raise TypeErr(f"cannot infer type {', '.join(missing)} for {qual.rsplit('.', 1)[-1]}")
+    for fname, given in givens.items():          # pass 2: check against substituted field types
+        want = subst(ftypes[fname], s)
+        if not fits(given, want):
+            raise TypeErr("field type", given, want)
+    return NameT(qual, tuple(s[t] for t in decl.tparams))
+
+
+def _infer_call(e, expect, locals_, space, scope):
+    if e.callee == "addr":                                # addr(x): take a mutable pointer
+        return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
+    target = scope.get(e.callee)
+    if isinstance(target, TraitMethod):                   # a bound's method, e.g. area(x)
+        return infer_trait_call(e, target, locals_, space, scope)
+    if target is None:
+        raise TypeErr(f"unbound function '{e.callee}'")
+    callee = space.walk(target).value
+    if not isinstance(callee, Fn):
+        raise TypeErr(f"'{e.callee}' is not callable")
+    if len(e.args) != len(callee.params):
+        raise TypeErr(f"'{e.callee}' wants {len(callee.params)} args, got {len(e.args)}")
+    if callee.tparams:                                    # generic: infer type-args, then check
+        arg_types = [infer(a, locals_, space, scope) for a in e.args]
+        s = solve_call(callee, arg_types)
+        missing = [n for n in callee.tparams if n not in s]
         if missing:
-            raise TypeErr(f"cannot infer type {', '.join(missing)} for "
-                          f"{qual.rsplit('.', 1)[-1]}")
-        for fname, given in givens.items():     # pass 2: check against substituted field types
-            want = subst(ftypes[fname], s)
+            raise TypeErr(f"cannot infer type {', '.join(missing)} for '{e.callee}'")
+        for given, p in zip(arg_types, callee.params):
+            want = subst(p.type, s)
             if not fits(given, want):
-                raise TypeErr("field type", given, want)
-        return NameT(qual, tuple(s[t] for t in decl.tparams))
-    if isinstance(e, Call):
-        if e.callee == "addr":                            # addr(x): take a mutable pointer
-            return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
-        target = scope.get(e.callee)
-        if isinstance(target, TraitMethod):               # a bound's method, e.g. area(x)
-            return infer_trait_call(e, target, locals_, space, scope)
-        if target is None:
-            raise TypeErr(f"unbound function '{e.callee}'")
-        callee = space.walk(target).value
-        if not isinstance(callee, Fn):
-            raise TypeErr(f"'{e.callee}' is not callable")
-        if len(e.args) != len(callee.params):
-            raise TypeErr(f"'{e.callee}' wants {len(callee.params)} args, got {len(e.args)}")
-        if callee.tparams:                               # generic: infer type-args, then check
-            arg_types = [infer(a, locals_, space, scope) for a in e.args]
-            s = solve_call(callee, arg_types)
-            missing = [n for n in callee.tparams if n not in s]
-            if missing:
-                raise TypeErr(f"cannot infer type {', '.join(missing)} for '{e.callee}'")
-            for given, p in zip(arg_types, callee.params):
-                want = subst(p.type, s)
-                if not fits(given, want):
-                    raise TypeErr("pointer/null mismatch", given, want)
-            for tp, trait_path in callee.bounds.items():  # the type-arg must satisfy its bound
-                got = s.get(tp)
-                if isinstance(got, NameT) and (trait_path, got.path) not in getattr(space, "impls", {}):
-                    raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement "
-                                  f"{trait_path.rsplit('.', 1)[-1]}")
-            return subst(ret_type(target, space), s)
-        for a, p in zip(e.args, callee.params):
-            given = infer(a, locals_, space, scope, p.type)
-            if not fits(given, p.type):
-                raise TypeErr("pointer/null mismatch", given, p.type)
-        return ret_type(target, space)
-    raise TypeErr(f"unknown expr {e!r}")
+                raise TypeErr("pointer/null mismatch", given, want)
+        for tp, trait_path in callee.bounds.items():      # the type-arg must satisfy its bound
+            got = s.get(tp)
+            if isinstance(got, NameT) and (trait_path, got.path) not in space.impls:
+                raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement "
+                              f"{trait_path.rsplit('.', 1)[-1]}")
+        return subst(ret_type(target, space), s)
+    for a, p in zip(e.args, callee.params):
+        given = infer(a, locals_, space, scope, p.type)
+        if not fits(given, p.type):
+            raise TypeErr("pointer/null mismatch", given, p.type)
+    return ret_type(target, space)
+
+
+_INFERRING = object()      # sentinel parked in fn.ret while its body is being inferred
 
 
 def ret_type(qual, space):
     """The return type of a function: its annotation, or — when omitted — inferred
-    from the body and memoized. Recursion through an un-annotated return is an
-    error (you must write the type), like every ML-family checker."""
+    from the body and memoized onto `fn.ret`. The sentinel doubles as the
+    recursion guard, so no checking state lives on `Namespace`. Recursion through an
+    un-annotated return is an error (annotate it), like every ML-family checker."""
     fn = space.walk(qual).value
+    if fn.ret is _INFERRING:
+        raise TypeErr(f"recursive function '{qual.rsplit('.', 1)[-1]}' needs a return-type annotation")
     if fn.ret is not None:
         return fn.ret
-    if qual in space._inferring:
-        raise TypeErr(f"recursive function '{qual.rsplit('.', 1)[-1]}' needs a return-type annotation")
-    space._inferring.add(qual)
+    fn.ret = _INFERRING
     try:
         fn.ret = infer_block(fn.body, {p.name: p.type for p in fn.params},
-                             space, space.fn_scope[qual], None)
-    finally:
-        space._inferring.discard(qual)
+                             space, fn.scope, None)
+    except BaseException:
+        fn.ret = None      # roll back so a later check of this fn re-infers cleanly
+        raise
     return fn.ret
 
 
