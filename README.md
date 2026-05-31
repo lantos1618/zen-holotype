@@ -200,12 +200,14 @@ stdlib `import ast` / `import types` still resolve to the real ones.)
 The front end is a real **tree-sitter** grammar — a method call is just a `call`
 whose callee is a field access, so there's no special rule for it. The language
 now covers structs, **user enums** (lowered to C tagged unions, ctor `.Variant(x)`
-type-checked against the expected type), `Ptr/MutPtr/RawPtr` and `Option`,
-`i32`/`i64`/`bool` with `i32→i64` widening, `==`, `x := v` let-bindings and
-multi-statement bodies. Still a subset of Zen (no `::=`, pattern matching, or
-generics-with-params yet) — the point is to test the type idea, not to write a
-parser, which is exactly why the parser is someone else's grammar generator
-rather than hand-rolled.
+type-checked against the expected type), **generic functions** (`id<T>` — type-args
+inferred by unification at the call site, then **monomorphized** to specialized C),
+**`match`** with payload-binding and exhaustiveness checking (the arm `.Some(v)`
+narrows the payload), `Ptr/MutPtr/RawPtr` and `Option`, `i32`/`i64`/`bool` with
+`i32→i64` widening, `==`, and `x := v` let-bindings. Still a subset of Zen (no
+`::=`, traits, or generic *data types* with literal type-args yet) — the point is
+to test the type idea, which is exactly why the parser is someone else's grammar
+generator rather than hand-rolled.
 
 `build.zen` can declare a `Test { root: "test.zen" }`; `holotype build` then
 compiles that root with the project and runs each no-arg `bool` test, printing
