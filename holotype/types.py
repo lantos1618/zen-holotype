@@ -7,7 +7,7 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                  Lit, Var, Field, Bin, Call, StructLit)
+                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let)
 
 
 class Conflict(Exception):   ...
@@ -85,6 +85,10 @@ def fits(given, want) -> bool:
         if want.dir is Dir.READ:
             return fits(given.pointee, want.pointee)
         return given.pointee == want.pointee
+    if isinstance(given, PrimT) and isinstance(want, PrimT):
+        if given.prim is want.prim:
+            return True
+        return given.prim is Prim.I32 and want.prim is Prim.I64   # widening only
     return given == want                             # nominal/structural eq (paths canonical)
 
 
@@ -93,6 +97,8 @@ def infer(e, locals_, space, scope):
     """Return the type of expression `e`; raise TypeErr on any call mismatch."""
     if isinstance(e, Lit):
         return PrimT(Prim.I32)
+    if isinstance(e, Bool):
+        return PrimT(Prim.BOOL)
     if isinstance(e, Var):
         if e.name not in locals_:
             raise TypeErr(f"unbound '{e.name}'")
@@ -136,3 +142,16 @@ def infer(e, locals_, space, scope):
                 raise TypeErr("pointer/null mismatch", given, p.type)
         return callee.ret
     raise TypeErr(f"unknown expr {e!r}")
+
+
+def infer_block(stmts, locals_, space, scope):
+    """Type a function body: `x := v` bindings extend locals in order; the value
+    of the block is the type of its final expression statement (void if none)."""
+    locals_ = dict(locals_)
+    last = PrimT(Prim.VOID)
+    for s in stmts:
+        if isinstance(s, Let):
+            locals_[s.name] = infer(s.value, locals_, space, scope)
+        else:
+            last = infer(s, locals_, space, scope)
+    return last

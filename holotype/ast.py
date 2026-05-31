@@ -52,6 +52,11 @@ class Lit:
 
 
 @dataclass(frozen=True)
+class Bool:
+    b: bool
+
+
+@dataclass(frozen=True)
 class Var:
     name: str
 
@@ -97,6 +102,12 @@ class MethodCall:
 class EnumCtor:
     name: str                 # leading-dot ctor, e.g. .Ok(x)
     args: tuple = ()
+
+
+@dataclass(frozen=True)
+class Let:
+    name: str                 # x := value   (a local binding; type inferred)
+    value: object             # Expr
 
 
 # ───────────────────────── declarations (each = one trie node) ──────────────

@@ -46,14 +46,16 @@ module.exports = grammar({
                          optional(seq('<', comma1($._type), '>'))),
 
     block: $ => seq('{', repeat($._statement), '}'),
-    _statement: $ => choice($.enum_ctor, $._expression),
+    _statement: $ => choice($.let_binding, $.enum_ctor, $._expression),
+    // x := expr  — a local binding (type inferred from the value)
+    let_binding: $ => seq(field('name', $.identifier), ':=', field('value', $._expression)),
     enum_ctor: $ => seq('.', field('name', $.identifier), $.arguments),
 
     // a postfix chain: primary, then any number of (args) calls and .name accesses.
     // A "method call" is simply a call whose `fn` is a field_access — no special rule.
     _expression: $ => choice($.binary, $._unary),
     _unary: $ => choice($._primary, $.call, $.field_access),
-    _primary: $ => choice($.parenthesized, $.struct_literal, $.integer, $.string, $.identifier),
+    _primary: $ => choice($.parenthesized, $.struct_literal, $.integer, $.boolean, $.string, $.identifier),
 
     call:         $ => prec.left(4, seq(field('fn', $._unary), $.arguments)),
     field_access: $ => prec.left(4, seq(field('obj', $._unary), '.', field('name', $.identifier))),
@@ -70,6 +72,7 @@ module.exports = grammar({
     arguments: $ => seq('(', optional(comma1($._expression)), ')'),
 
     integer: $ => /\d+/,
+    boolean: $ => choice('true', 'false'),
     string: $ => token(seq('"', /[^"]*/, '"')),
     identifier: $ => /@?[A-Za-z_]\w*/,
   }

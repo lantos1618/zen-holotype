@@ -3,7 +3,7 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 """
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                  Lit, Var, Field, Bin, Call, StructLit)
+                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let)
 from .types import infer
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
@@ -44,6 +44,8 @@ def show(t) -> str:
 def c_expr(e, locals_, space, scope) -> str:
     if isinstance(e, Lit):
         return str(e.n)
+    if isinstance(e, Bool):
+        return "true" if e.b else "false"
     if isinstance(e, Var):
         return e.name
     if isinstance(e, Bin):
@@ -79,8 +81,22 @@ def c_proto(qual, d: Fn) -> str:
     return f"{c_type(d.ret)} {c_name(qual)}({_params(d)});"
 
 
+def c_block(stmts, locals_, space, scope) -> str:
+    """Lower a statement list: each `x := v` becomes a typed C local; the final
+    expression statement becomes the `return`."""
+    locals_ = dict(locals_)
+    lines, ret = [], "0"
+    for s in stmts:
+        if isinstance(s, Let):
+            t = infer(s.value, locals_, space, scope)
+            locals_[s.name] = t
+            lines.append(f"{c_type(t)} {s.name} = {c_expr(s.value, locals_, space, scope)};")
+        else:
+            ret = c_expr(s, locals_, space, scope)
+    return " ".join(lines + [f"return {ret};"])
+
+
 def c_def(qual, d: Fn, space, scope) -> str:
     locals_ = {p.name: p.type for p in d.params}
-    expr = d.body[-1] if d.body else None              # final statement = return value
-    body = c_expr(expr, locals_, space, scope) if expr is not None else "0"
-    return f"{c_type(d.ret)} {c_name(qual)}({_params(d)}) {{ return {body}; }}"
+    body = c_block(d.body, locals_, space, scope) if d.body else "return 0;"
+    return f"{c_type(d.ret)} {c_name(qual)}({_params(d)}) {{ {body} }}"

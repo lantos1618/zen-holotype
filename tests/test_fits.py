@@ -77,8 +77,13 @@ def test_direction_and_pointee_both_checked():
 
 def test_primitive_equality():
     assert fits(I32, PrimT(Prim.I32))
-    assert not fits(I32, PrimT(Prim.I64))
     assert not fits(PrimT(Prim.BOOL), I32)
+    assert not fits(PrimT(Prim.I64), I32)        # narrowing rejected
+
+
+def test_i32_widens_to_i64():
+    assert fits(I32, PrimT(Prim.I64))            # widening is value-preserving
+    assert not fits(PrimT(Prim.I64), I32)        # but not the other way
 
 
 def test_nominal_identity_by_path():

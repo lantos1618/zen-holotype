@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT,
                   Str, StructLit, MethodCall, EnumCtor)
-from .types import Space, fits, infer, TypeErr
+from .types import Space, fits, infer, infer_block, TypeErr
 from .lower import c_struct, c_proto, c_def, show, c_name
 from .parser import parse
 
@@ -82,12 +82,11 @@ def check(files, space):
             if not isinstance(d, Fn):
                 continue
             qual = f"{f.ns}.{d.name}"
-            expr = d.body[-1] if d.body else None
-            if expr is None:
+            if not d.body:
                 continue
             locals_ = {p.name: p.type for p in d.params}
             try:
-                bt = infer(expr, locals_, space, f.scope)
+                bt = infer_block(d.body, locals_, space, f.scope)
                 if not fits(bt, d.ret):
                     raise TypeErr("return type", bt, d.ret)
                 results.append((qual, True, "ok")); passing.add(qual)

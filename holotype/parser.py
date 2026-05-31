@@ -8,7 +8,8 @@ import warnings, pathlib
 from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File,
-                  Lit, Var, Field, Bin, Call, Str, StructLit, MethodCall, EnumCtor)
+                  Lit, Bool, Var, Field, Bin, Call, Str, StructLit, MethodCall,
+                  EnumCtor, Let)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -63,6 +64,8 @@ def _expr(n):
     t = n.type
     if t == "integer":
         return Lit(int(_t(n)))
+    if t == "boolean":
+        return Bool(_t(n) == "true")
     if t == "string":
         return Str(_t(n)[1:-1])
     if t == "identifier":
@@ -94,6 +97,12 @@ def _args(n):
     return [_expr(c) for c in _named(arg)] if arg else []
 
 
+def _stmt(n):
+    if n.type == "let_binding":                     # x := value
+        return Let(_t(_field(n, "name")), _expr(_field(n, "value")))
+    return _expr(n)
+
+
 def _decl(n):
     pub = any(c.type == "pub" for c in n.children)
     if n.type == "struct":
@@ -108,7 +117,7 @@ def _decl(n):
     if n.type == "function":
         params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
                   for p in _named(n) if p.type == "param"]
-        body = [_expr(s) for s in _named(_field(n, "body"))]
+        body = [_stmt(s) for s in _named(_field(n, "body"))]
         return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub)
     raise ValueError(f"unhandled decl: {n.type}")
 
