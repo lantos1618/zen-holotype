@@ -12,8 +12,8 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
                   Str, StructLit, Bin, Not, Field, Let, Call, MethodCall, EnumCtor, Match,
                   TraitDecl, Impl)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
-                    ret_type, TraitMethod, TypeErr)
-from .lower import (c_struct, c_enum, c_proto, c_def, show, c_name, inst_name,
+                    ret_type, show, TraitMethod, TypeErr)
+from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle)
 from .parser import parse
 

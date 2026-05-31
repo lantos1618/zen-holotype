@@ -58,20 +58,6 @@ def c_type(t) -> str:
     return "void"
 
 
-def show(t) -> str:
-    """Source-level (pre-erasure) rendering — for diagnostics, not codegen."""
-    if isinstance(t, TVar):
-        return t.name
-    if isinstance(t, PrimT):
-        return t.prim.value
-    if isinstance(t, PtrT):
-        return f"{t.dir.value}<{show(t.pointee)}>"
-    if isinstance(t, NameT):
-        seg = t.path.rsplit(".", 1)[-1]
-        return f"{seg}<{', '.join(show(a) for a in t.args)}>" if t.args else seg
-    return "?"
-
-
 # ───────────────────────── expression codegen ──────────────────────────────
 def c_expr(e, locals_, space, scope, expect=None) -> str:
     match e:

@@ -67,6 +67,20 @@ class Namespace:
         return n
 
 
+def show(t) -> str:
+    """Source-level (pre-erasure) rendering of a type — for diagnostics."""
+    if isinstance(t, TVar):
+        return t.name
+    if isinstance(t, PrimT):
+        return t.prim.value
+    if isinstance(t, PtrT):
+        return f"{t.dir.value}<{show(t.pointee)}>"
+    if isinstance(t, NameT):
+        seg = t.path.rsplit(".", 1)[-1]
+        return f"{seg}<{', '.join(show(a) for a in t.args)}>" if t.args else seg
+    return "?"
+
+
 # ───────────────────────── the pointer lattice ──────────────────────────────
 def is_option(t) -> bool:
     return isinstance(t, NameT) and t.path == "Option"
@@ -227,6 +241,8 @@ def _infer(e, locals_, space, scope, expect=None):
 def _infer_struct_lit(e, locals_, space, scope):
     qual = scope.get(e.type, e.type)
     decl = space.walk(qual).value
+    if not isinstance(decl, Struct):                 # `EnumName { … }` / `fn { … }` is not a struct
+        raise TypeErr(f"'{qual.rsplit('.', 1)[-1]}' is not a struct")
     ftypes = {f.name: f.type for f in decl.fields}
     givens, s = {}, {}
     for fname, fexpr in e.fields:                # pass 1: infer values, solve type-args
@@ -347,7 +363,7 @@ def infer_match(e, expect, locals_, space, scope):
     if isinstance(st, PrimT):
         return _infer_match_lit(e, st, expect, locals_, space, scope)
     if not isinstance(st, NameT) or not isinstance(space.walk(st.path).value, EnumDecl):
-        raise TypeErr(f"match on a non-enum value ({st.path if isinstance(st, NameT) else st})")
+        raise TypeErr(f"match on a non-enum value ({show(st)})")
     decl = space.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
     variants = {v.name: v for v in decl.variants}
