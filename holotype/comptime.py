@@ -10,8 +10,8 @@ Values: int, bool, dict (a struct), or ("@enum", variant, payload).
 from __future__ import annotations
 from dataclasses import replace
 from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
-                  MethodCall, Let, Assign, While, Str, Fn, Impl, Struct, EnumDecl,
-                  Prim, PrimT, NameT)
+                  MethodCall, Let, Assign, While, Str, Fn, Param, Impl, Struct, EnumDecl,
+                  Prim, PrimT, NameT, PtrT, Dir)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
 _RUNTIME = {"addr", "load", "store", "offset", "comptime"}
@@ -190,6 +190,37 @@ def _bi_ast_int(e, env, space, scope, fuel):
     return Lit(_eval(e.args[0], env, space, scope, fuel))
 
 
+# general expression constructors — one per AST node, the shape a Zen-defined
+# `Ast` enum will take. Bespoke per-derive helpers (ast_eq, ast_and, …) collapse
+# into ast_bin; this is what keeps the surface from sprawling as derives grow.
+def _bi_ast_bool(e, env, space, scope, fuel):
+    return Bool(_eval(e.args[0], env, space, scope, fuel))
+
+
+def _bi_ast_var(e, env, space, scope, fuel):
+    return Var(_eval(e.args[0], env, space, scope, fuel))
+
+
+def _bi_ast_field(e, env, space, scope, fuel):
+    obj = _eval(e.args[0], env, space, scope, fuel)
+    return Field(obj, _eval(e.args[1], env, space, scope, fuel))
+
+
+def _bi_ast_bin(e, env, space, scope, fuel):
+    op = _eval(e.args[0], env, space, scope, fuel)
+    return Bin(op, _eval(e.args[1], env, space, scope, fuel),
+               _eval(e.args[2], env, space, scope, fuel))
+
+
+def _bi_fn_eq(e, env, space, scope, fuel):
+    """fn_eq(name, TypeName, body) -> `name = (a: Ptr<T>, b: Ptr<T>) bool { body }`."""
+    name = _eval(e.args[0], env, space, scope, fuel)
+    tn = _eval(e.args[1], env, space, scope, fuel)
+    body = _eval(e.args[2], env, space, scope, fuel)
+    p = lambda nm: Param(nm, PtrT(Dir.READ, NameT(tn, ())))
+    return Fn(name, [p("a"), p("b")], PrimT(Prim.BOOL), body=[body])
+
+
 def _bi_struct_start(e, env, space, scope, fuel):
     """struct_start(TypeName) -> an empty struct literal to fill field by field."""
     return StructLit(_eval(e.args[0], env, space, scope, fuel), ())
@@ -213,8 +244,10 @@ def _bi_fn_of(e, env, space, scope, fuel):
 _BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
              "field_count": _bi_field_count, "concat": _bi_concat,
              "fn_const": _bi_fn_const, "field_name_at": _bi_field_name_at,
-             "ast_int": _bi_ast_int, "struct_start": _bi_struct_start,
-             "with_field": _bi_with_field, "fn_of": _bi_fn_of}
+             "ast_int": _bi_ast_int, "ast_bool": _bi_ast_bool, "ast_var": _bi_ast_var,
+             "ast_field": _bi_ast_field, "ast_bin": _bi_ast_bin,
+             "struct_start": _bi_struct_start, "with_field": _bi_with_field,
+             "fn_of": _bi_fn_of, "fn_eq": _bi_fn_eq}
 
 
 def _call(e, env, space, scope, fuel):
