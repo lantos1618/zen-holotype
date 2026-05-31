@@ -9,8 +9,8 @@ Only well-typed functions are codegen'd.
 from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
-                  Str, StructLit, Bin, Not, Field, Let, Call, MethodCall, EnumCtor, Match,
-                  TraitDecl, Impl)
+                  Str, StructLit, Bin, Not, Field, Let, Assign, While, Call, MethodCall,
+                  EnumCtor, Match, TraitDecl, Impl)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
@@ -131,7 +131,8 @@ def _check_fn(qual, ns, d, space, results, passing):
     try:
         want = d.ret if d.ret is not None else ret_type(qual, space)   # declared or inferred
         bt = infer_block(d.body, locals_, space, d.scope, want)
-        if want is not None and not fits(bt, want):
+        void = isinstance(want, PrimT) and want.prim is Prim.VOID
+        if want is not None and not void and not fits(bt, want):        # void discards the body value
             raise TypeErr("return type", bt, want)
         results.append((qual, True, "ok")); passing.add(qual)
     except TypeErr as ex:
@@ -265,6 +266,12 @@ def _scan_block(stmts, locals_, space, scope, sink, expect=None):
         if isinstance(s, Let):
             _scan_expr(s.value, locals_, space, scope, sink)
             locals_[s.name] = infer(s.value, locals_, space, scope)
+        elif isinstance(s, Assign):
+            _scan_expr(s.target, locals_, space, scope, sink)
+            _scan_expr(s.value, locals_, space, scope, sink)
+        elif isinstance(s, While):
+            _scan_expr(s.cond, locals_, space, scope, sink)
+            _scan_block(s.body, locals_, space, scope, sink)
         else:
             _scan_expr(s, locals_, space, scope, sink, expect if i == last else None)
 

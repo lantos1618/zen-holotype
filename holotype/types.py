@@ -7,7 +7,8 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, Struct, EnumDecl, MethodSig,
-                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
+                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, Assign, While,
+                  EnumCtor, Match)
 
 
 class Conflict(Exception):   ...
@@ -469,6 +470,25 @@ def infer_block(stmts, locals_, space, scope, expect=None):
         exp = expect if i == len(stmts) - 1 else None
         if isinstance(s, Let):
             locals_[s.name] = infer(s.value, locals_, space, scope)
+        elif isinstance(s, Assign):
+            _check_assign(s, locals_, space, scope)
+            last = PrimT(Prim.VOID)
+        elif isinstance(s, While):
+            if infer(s.cond, locals_, space, scope) != PrimT(Prim.BOOL):
+                raise TypeErr("while condition must be a bool")
+            infer_block(s.body, locals_, space, scope)   # body in the loop's scope
+            last = PrimT(Prim.VOID)
         else:
             last = infer(s, locals_, space, scope, exp)
     return last
+
+
+def _check_assign(s, locals_, space, scope):
+    target = infer(s.target, locals_, space, scope)      # the lvalue's type (also validates it)
+    if isinstance(s.target, Field):                      # set a field through a pointer? must be writable
+        ot = infer(s.target.obj, locals_, space, scope)
+        if isinstance(ot, PtrT) and ot.dir is Dir.READ:
+            raise TypeErr("cannot assign through a read-only Ptr (use MutPtr)")
+    val = infer(s.value, locals_, space, scope, target)
+    if not fits(val, target):
+        raise TypeErr("assignment", val, target)

@@ -70,9 +70,14 @@ module.exports = grammar({
                          optional(seq('<', comma1($._type), '>'))),
 
     block: $ => seq('{', repeat($._statement), '}'),
-    _statement: $ => choice($.let_binding, $._expression),
+    _statement: $ => choice($.let_binding, $.assign, $.while_, $._expression),
     // x := expr  — a local binding (type inferred from the value)
     let_binding: $ => seq(field('name', $.identifier), ':=', field('value', $._expression)),
+    // lvalue = expr  — reassign a local, or set a struct field (s.f = v)
+    assign: $ => prec(1, seq(field('target', choice($.identifier, $.field_access)),
+                             '=', field('value', $._expression))),
+    // while cond { … }  — a loop (a statement, no value)
+    while_: $ => seq('while', field('cond', $._expression), field('body', $.block)),
     // a leading-dot constructor `.Ok(x)` — an expression, so it works as a call
     // argument and match arm body too, not just a bare statement.
     enum_ctor: $ => seq('.', field('name', $.identifier), $.arguments),
