@@ -209,3 +209,49 @@ migration is a front-end rewrite (the one record grammar above) plus folding
 struct/enum/trait/impl/visibility into the trie — but the back end (monomorphize → C) and the
 `fits()` lattice **carry straight over**: a record is still a product, a sum is still a tagged
 union, a method is still a trie node. **v1 stays green the whole way; v2 grows beside it.**
+
+## The architecture: kernel + backends + self-hosted prelude
+
+The compiler does exactly **two** things — *check that structure fits*, and *hand off a checked
+AST*. Everything else plugs in.
+
+```
+                         ┌──────────────────────────────────┐
+   text ──parse──► AST ──►  trie · fits() · comptime          ──► CHECKED AST
+                         └────────────────┬─────────────────┘
+                                          │  one structure, many emitters
+              ┌──────────┬────────────────┼────────────────┬──────────┐
+              ▼          ▼                ▼                ▼          ▼
+           gen.c     gen.llvm          gen.js           gen.json   gen.???
+```
+
+The three layers and the contract between them:
+
+```
+kernel   :  text       → CheckedAst      // parse + trie + fits + comptime
+backend  :  CheckedAst → target          // gen.c / gen.llvm / gen.js / gen.json
+prelude  :  Ast        → Ast   (in Zen)  // impl / derive / macros, run at comptime
+```
+
+- The **kernel** never knows about C, JS, or LLVM. It produces a *checked, resolved* AST —
+  structure that has been proven to fit. It only ever answers "does this fit?".
+- A **backend** is a walk over that AST emitting a target. `gen.c` exists (v1's `lower.py`);
+  `gen.llvm` / `gen.js` / `gen.json` are *more of the same* — each keeps its own variable/type
+  tables, but never re-checks, because the kernel already did. **New target = new backend.**
+- The **prelude is Zen.** `impl`, `derive`, traits are `(n: Ast) Ast` functions run at comptime;
+  the AST they build flows back through the same kernel and out the same backends.
+  **New feature = new prelude function**, not compiler code.
+
+So the kernel stays tiny *forever*: it checks structure and emits; targets and features both live
+outside it. **Structure is king** — data is shape, behavior is functions over shape, and code is
+shape too (the AST), so one checker + a row of emitters is the entire compiler.
+
+### Roadmap
+
+1. **Pluggable backends** — split the front end (kernel) from `gen.c`; add a second backend
+   (`gen.json`: the checked structure, externalized) to *prove* one-AST-many-emitters. *(on v1)*
+2. **v2 record grammar** — the one declaration form, beside v1.
+3. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)*
+4. **reified AST + self-host** — define the AST in Zen; rewrite `impl`/`derive`/traits as prelude
+   `(Ast) Ast` functions, and **delete them from the compiler**.
+5. **more backends** — `gen.js`, `gen.llvm` — each just another walk over the same CheckedAst.
