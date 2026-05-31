@@ -108,15 +108,19 @@ derive_payload = (E: Ast) Decl {
     })
 }
 
-// ── derive (trait impl): implement a user trait `Tagged { tag2: (Self) i32 }` ─
-//   generates  impl Tagged for E { tag2 = (e: E) i32 { match e { .V => idx } } }
-//   — reachable through a bound `<T: Tagged>`, the way the compiler dispatches trait methods.
-derive_tagged = (E: Ast) Decl {
+// ── derive (trait impl): implement ANY single-method `(Self) i32` trait ───────
+//   the trait + its method name are REFLECTED, not hardcoded, so this works for
+//   any such trait you name:
+//       trait Ranked { rank: (Self) i32 }
+//       emit derive_tag_impl(reflect_trait(Ranked), reflect(Color))
+//       // -> impl Ranked for Color { rank = (e: Color) i32 { match e { .V => idx } } }
+//   reachable through a bound `<T: Ranked>`, the way the compiler dispatches trait methods.
+derive_tag_impl = (Tr: Ast, E: Ast) Decl {
     .Impl(ImplData {
-        trait: "Tagged",
+        trait: name_of(Tr),
         ty: name_of(E),
         method: FuncData {
-            nm: "tag2",
+            nm: trait_method_name(Tr),
             ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
             ret: "i32",
             body: .Match(MatchData { subj: .Var("e"), arms: tag_arms(E, 0) })

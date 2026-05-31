@@ -42,8 +42,9 @@ where it's headed, [VISION](VISION.md).)
   (free fn or trait impl) into your program, which is then checked and lowered like
   hand-written code.
 - **The reified AST lives in Zen** (`prelude/derive.zen`). The compiler keeps only:
-  - a **reflection kernel** (`reflect`, `name_of`, `field_count`, `field_name_at`,
-    `variant_count`, `variant_name_at`, `variant_has_payload`, `concat`), and
+  - a **reflection kernel** — over types (`reflect`, `name_of`, `field_count`,
+    `field_name_at`, `variant_count`, `variant_name_at`, `variant_has_payload`) and over
+    traits (`reflect_trait`, `trait_method_name`), plus `concat` — and
   - a ~40-line **reifier** (Zen `Ast` value → real `ast.Fn`/`Impl`).
 - **Five self-hosted derives, all ordinary Zen functions:**
 
@@ -53,7 +54,7 @@ where it's headed, [VISION](VISION.md).)
   | `derive_eq` | structural equality `(a, b: Ptr<T>) bool` |
   | `derive_tag` | the variant index `(e: E) i32 { match … }` |
   | `derive_payload` | extract the bound payload (or 0) |
-  | `derive_tagged` | a trait **impl**, dispatched through a bound |
+  | `derive_tag_impl` | a trait **impl** for *any* single-method `(Self) i32` trait (trait + method name reflected), dispatched through a bound |
 
   ```zen
   { derive_eq } = prelude.derive
@@ -68,7 +69,8 @@ excluded from codegen; the rest builds and runs.
 ## Not yet (the honest gaps)
 - No `for`/iterators, closures, modules beyond files, or first-class **runtime** strings.
 - Generators aren't **type-checked against the Zen `Ast`** — they run comptime-dynamically.
-- `derive_tagged` hardcodes its target trait (no **trait reflection** yet).
+- Trait reflection is single-method only, and assumes a `(Self) i32` shape (no full
+  method-signature reflection yet).
 - One backend (C). The kernel/backend split is designed for `gen.llvm`/`gen.js`; they don't
   exist.
 - The one-structure grammar from VISION is the *direction*, not the current syntax.
