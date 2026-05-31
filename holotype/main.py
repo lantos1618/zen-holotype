@@ -141,11 +141,22 @@ def is_prelude_ns(ns):
     return ns == "prelude" or ns.startswith("prelude.")
 
 
+def _graft_impl(d, f, space):
+    """Register a generated trait impl exactly like resolve() does for a written
+    one: resolve its methods and record it in the impls registry."""
+    trait_path = f.scope.get(d.trait, d.trait)
+    type_path = f.scope.get(d.type, d.type)
+    space.walk(trait_path); space.walk(type_path)        # both must exist
+    for m in d.methods:
+        _resolve_fn(m, f.scope, space)
+    space.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
+
+
 def run_emits(files, space):
     """The splice pass: evaluate each `emit` generator at comptime, reify the
-    Zen `Ast` value it returns into a real declaration, and graft it into the
-    module — so check + lower meet it as ordinary code. Runs after resolve,
-    before check (VISION step 4: prelude `Ast → Ast`)."""
+    Zen `Ast` value it returns into a real declaration (a free fn or a trait
+    impl), and graft it into the module — so check + lower meet it as ordinary
+    code. Runs after resolve, before check (VISION step 4: prelude `Ast → Ast`)."""
     for f in files.values():
         grafted = []
         for d in f.decls:
@@ -153,10 +164,13 @@ def run_emits(files, space):
                 continue
             out = evaluate(d.value, space, f.scope)
             for g in (out if isinstance(out, list) else [out]):
-                g = reify_decl(g)                        # Zen Ast value -> host Fn
-                f.scope[g.name] = f"{f.ns}.{g.name}"     # same dict the siblings see
-                space.insert(f"{f.ns}.{g.name}", g)
-                _resolve_fn(g, f.scope, space)
+                g = reify_decl(g)                        # Zen Ast value -> host Fn / Impl
+                if isinstance(g, Impl):
+                    _graft_impl(g, f, space)
+                else:
+                    f.scope[g.name] = f"{f.ns}.{g.name}"     # same dict the siblings see
+                    space.insert(f"{f.ns}.{g.name}", g)
+                    _resolve_fn(g, f.scope, space)
                 grafted.append(g)
         if grafted:
             f.decls = [d for d in f.decls if not isinstance(d, Emit)] + grafted

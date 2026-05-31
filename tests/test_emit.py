@@ -120,6 +120,28 @@ pub main = () i32 {
     assert subprocess.run([str(tmp_path / "o")]).returncode == 10   # 7 + 3 + 0
 
 
+def test_derive_generates_a_trait_impl(tmp_path):
+    # a derive can emit a trait IMPL (not just a free fn). It registers in the
+    # impls table, conformance-checks, and dispatches through a bound `<T: Tagged>`.
+    files, space, results, passing = frontend(tmp_path, """
+{ derive_tagged } = prelude.derive
+trait Tagged { tag2: (Self) i32 }
+Color: Red, Green, Blue
+emit derive_tagged(reflect(Color))
+use<T: Tagged> = (x: T) i32 { tag2(x) }
+green = () Color { .Green() }
+blue  = () Color { .Blue() }
+pub main = () i32 { use(green()) + use(blue()) * 10 }
+""")
+    assert ("Tagged for Color::tag2", True, "ok") in results   # the generated impl conforms
+    c = emit_c(files, passing, space)
+    assert "impl_m_Tagged_m_Color_tag2(m_Color e)" in c
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
+    subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 21   # 1 + 2*10
+
+
 def test_reify_decl_turns_a_zen_ast_value_into_a_fn():
     # a hand-built Zen `Decl` value (as comptime produces) reifies to a host Fn
     zero_for_two = ("@enum", "Func", {

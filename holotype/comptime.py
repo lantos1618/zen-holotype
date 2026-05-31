@@ -257,14 +257,20 @@ def reify_expr(v):
     raise ComptimeErr(f"reify: unknown Ast node '{tag}'")
 
 
-def reify_decl(v):
-    tag, p = _enum(v)
-    if tag != "Func":
-        raise ComptimeErr(f"reify: a derive must return a Decl, got '{tag}'")
+def _reify_func(p):
     params = [Param(c["pnm"], PtrT(Dir.READ, _reify_type(c["pty"])) if c["ptr"]
                     else _reify_type(c["pty"]))
               for c in _flist(p["ps"], "tail")]
     return Fn(p["nm"], params, _reify_type(p["ret"]), body=[reify_expr(p["body"])])
+
+
+def reify_decl(v):
+    tag, p = _enum(v)
+    if tag == "Func":                            # a free function
+        return _reify_func(p)
+    if tag == "Impl":                            # impl Trait for Ty { method }
+        return Impl(p["trait"], p["ty"], [_reify_func(p["method"])])
+    raise ComptimeErr(f"reify: a derive must return a Decl, got '{tag}'")
 
 
 def _call(e, env, space, scope, fuel):
