@@ -81,6 +81,25 @@ pub main = () i32 {
     assert subprocess.run([str(tmp_path / "o")]).returncode == 10   # equal -> 10, unequal -> +0
 
 
+def test_derive_tag_reflects_a_sum_type(tmp_path):
+    # sums, not just products: derive_tag reflects an enum's variants and
+    # generates a `match` returning each variant's index.
+    files, space, results, passing = frontend(tmp_path, """
+{ derive_tag } = prelude.derive
+Color: Red, Green, Blue
+emit derive_tag(reflect(Color))
+pub main = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
+""")
+    assert ("m.Color_tag", True, "ok") in results
+    c = emit_c(files, passing, space)
+    assert "int32_t m_Color_tag(m_Color e)" in c
+    assert "m_Color_Red" in c and "m_Color_Green" in c and "m_Color_Blue" in c
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
+    subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 21   # 1 + 2*10
+
+
 def test_reify_decl_turns_a_zen_ast_value_into_a_fn():
     # a hand-built Zen `Decl` value (as comptime produces) reifies to a host Fn
     zero_for_two = ("@enum", "Func", {
