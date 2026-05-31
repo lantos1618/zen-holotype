@@ -10,6 +10,8 @@ import sys
 
 import pytest
 
+from dataclasses import dataclass
+
 from holotype.ast import Dir, Prim, PrimT, NameT, PtrT, Fn, Param, EnumDecl
 from holotype.main import (load, build_space, build_scopes, resolve, check,
                            emit_c)
@@ -67,14 +69,43 @@ def test_codegen_excludes_failing_functions(checked):
 
 
 # ── F1: integrity — un-lowerable decls raise instead of silently dropping ───
+@dataclass
+class _UnknownDecl:           # a decl kind codegen has never heard of
+    name: str
+
+
 def test_unlowerable_decl_raises(checked):
     files, space, _, passing = checked
-    # inject a declared enum into one file; codegen must refuse, not drop it
+    # codegen lowers struct/enum/fn; anything else must refuse loudly, not vanish
     some_file = next(iter(files.values()))
-    some_file.decls.append(EnumDecl("Color", [], pub=True))
+    some_file.decls.append(_UnknownDecl("mystery"))
     with pytest.raises(NotImplementedError) as ei:
         emit_c(files, passing, space)
-    assert "EnumDecl" in str(ei.value) and "Color" in str(ei.value)
+    assert "_UnknownDecl" in str(ei.value) and "mystery" in str(ei.value)
+
+
+# ── F3: user enums lower to a tagged union that cc accepts ──────────────────
+def test_enum_lowers_to_tagged_union(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Status: Idle, Busy(i32)\n"
+        "pub idle = () Status { .Idle() }\n"
+        "pub busy = (n: i32) Status { .Busy(n) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "int32_t tag;" in c and "union { int32_t Busy; } u;" in c
+    assert "enum { main_Status_Idle, main_Status_Busy };" in c
+    assert ".tag = main_Status_Busy, .u.Busy = n" in c
+    # the emitted C must actually compile
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c)
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-c", str(cfile),
+                        "-o", str(tmp_path / "o.o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
 
 
 # ── T11: the build really runs ──────────────────────────────────────────────

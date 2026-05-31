@@ -6,8 +6,8 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let)
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn, EnumDecl,
+                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor)
 
 
 class Conflict(Exception):   ...
@@ -93,12 +93,18 @@ def fits(given, want) -> bool:
 
 
 # ───────────────────────── expression inference ─────────────────────────────
-def infer(e, locals_, space, scope):
-    """Return the type of expression `e`; raise TypeErr on any call mismatch."""
+def infer(e, locals_, space, scope, expect=None):
+    """Return the type of expression `e`; raise TypeErr on any call mismatch.
+
+    `expect` is the type the surrounding context wants (return slot, parameter,
+    field). It's how a leading-dot enum ctor like `.Some(x)` learns which enum
+    it builds — the variant name alone is ambiguous across enums."""
     if isinstance(e, Lit):
         return PrimT(Prim.I32)
     if isinstance(e, Bool):
         return PrimT(Prim.BOOL)
+    if isinstance(e, EnumCtor):
+        return infer_enum_ctor(e, expect, locals_, space, scope)
     if isinstance(e, Var):
         if e.name not in locals_:
             raise TypeErr(f"unbound '{e.name}'")
@@ -124,7 +130,7 @@ def infer(e, locals_, space, scope):
         for fname, fexpr in e.fields:
             if fname not in ftypes:
                 raise TypeErr(f"no field '{fname}' on {qual}")
-            given = infer(fexpr, locals_, space, scope)
+            given = infer(fexpr, locals_, space, scope, ftypes[fname])
             if not fits(given, ftypes[fname]):
                 raise TypeErr("field type", given, ftypes[fname])
         return NameT(qual, ())
@@ -137,21 +143,46 @@ def infer(e, locals_, space, scope):
         if len(e.args) != len(callee.params):
             raise TypeErr(f"'{e.callee}' wants {len(callee.params)} args, got {len(e.args)}")
         for a, p in zip(e.args, callee.params):
-            given = infer(a, locals_, space, scope)
+            given = infer(a, locals_, space, scope, p.type)
             if not fits(given, p.type):
                 raise TypeErr("pointer/null mismatch", given, p.type)
         return callee.ret
     raise TypeErr(f"unknown expr {e!r}")
 
 
-def infer_block(stmts, locals_, space, scope):
+def infer_enum_ctor(e, expect, locals_, space, scope):
+    """`.Variant(payload)` — the expected type names which enum, then the
+    variant's declared payload type is checked like any other slot."""
+    if not isinstance(expect, NameT):
+        raise TypeErr(f"cannot tell which enum '.{e.name}' builds (no expected type here)")
+    decl = space.walk(expect.path).value
+    if not isinstance(decl, EnumDecl):
+        raise TypeErr(f"'.{e.name}' used where {expect.path} (not an enum) is wanted")
+    var = next((v for v in decl.variants if v.name == e.name), None)
+    if var is None:
+        raise TypeErr(f"enum {expect.path} has no variant '.{e.name}'")
+    if var.payload is None:
+        if e.args:
+            raise TypeErr(f"variant '.{e.name}' takes no payload")
+    else:
+        if len(e.args) != 1:
+            raise TypeErr(f"variant '.{e.name}' takes one payload value")
+        given = infer(e.args[0], locals_, space, scope, var.payload)
+        if not fits(given, var.payload):
+            raise TypeErr("enum payload", given, var.payload)
+    return NameT(expect.path, ())
+
+
+def infer_block(stmts, locals_, space, scope, expect=None):
     """Type a function body: `x := v` bindings extend locals in order; the value
-    of the block is the type of its final expression statement (void if none)."""
+    of the block is the type of its final expression statement (void if none).
+    `expect` (the function's return type) reaches the final statement."""
     locals_ = dict(locals_)
     last = PrimT(Prim.VOID)
-    for s in stmts:
+    for i, s in enumerate(stmts):
+        exp = expect if i == len(stmts) - 1 else None
         if isinstance(s, Let):
             locals_[s.name] = infer(s.value, locals_, space, scope)
         else:
-            last = infer(s, locals_, space, scope)
+            last = infer(s, locals_, space, scope, exp)
     return last

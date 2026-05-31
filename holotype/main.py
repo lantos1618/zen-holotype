@@ -11,7 +11,7 @@ import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT,
                   Str, StructLit, MethodCall, EnumCtor)
 from .types import Space, fits, infer, infer_block, TypeErr
-from .lower import c_struct, c_proto, c_def, show, c_name
+from .lower import c_struct, c_enum, c_proto, c_def, show, c_name
 from .parser import parse
 
 BUILTIN = {"Option"}
@@ -69,6 +69,10 @@ def resolve(files, space):
             if isinstance(d, Struct):
                 for fld in d.fields:
                     fld.type = resolve_type(fld.type, f.scope, space)
+            elif isinstance(d, EnumDecl):
+                for v in d.variants:
+                    if v.payload is not None:
+                        v.payload = resolve_type(v.payload, f.scope, space)
             elif isinstance(d, Fn):
                 for p in d.params:
                     p.type = resolve_type(p.type, f.scope, space)
@@ -86,7 +90,7 @@ def check(files, space):
                 continue
             locals_ = {p.name: p.type for p in d.params}
             try:
-                bt = infer_block(d.body, locals_, space, f.scope)
+                bt = infer_block(d.body, locals_, space, f.scope, d.ret)
                 if not fits(bt, d.ret):
                     raise TypeErr("return type", bt, d.ret)
                 results.append((qual, True, "ok")); passing.add(qual)
@@ -98,19 +102,21 @@ def check(files, space):
 
 
 def emit_c(files, passing, space, extra=""):
-    # Integrity: codegen lowers Struct + Fn. Anything else (e.g. EnumDecl) is NOT
-    # yet lowerable — fail loudly rather than silently dropping it from the output.
+    # Integrity: codegen lowers Struct, EnumDecl, Fn. Anything else fails loudly
+    # rather than silently dropping it from the output.
     for f in files.values():
         for d in f.decls:
-            if not isinstance(d, (Struct, Fn)):
+            if not isinstance(d, (Struct, EnumDecl, Fn)):
                 raise NotImplementedError(
                     f"cannot lower {type(d).__name__} '{f.ns}.{d.name}' to C yet "
-                    f"(codegen supports struct + fn)")
+                    f"(codegen supports struct + enum + fn)")
     lines = ["#include <stdint.h>", "#include <stdbool.h>", ""]
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Struct):
                 lines.append(c_struct(f"{f.ns}.{d.name}", d))
+            elif isinstance(d, EnumDecl):
+                lines.append(c_enum(f"{f.ns}.{d.name}", d))
     lines.append("")
     for f in files.values():
         for d in f.decls:
