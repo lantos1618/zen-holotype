@@ -31,7 +31,7 @@ def run(tmp_path, c, entry):
 
 def test_count_loop_folds_to_a_for(tmp_path):
     results, passing, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     s := 0
     loop(11, (h, i) { s = s + i })
     s
@@ -46,7 +46,7 @@ pub main = () i32 {
 def test_iterless_loop_with_break(tmp_path):
     # loop((h){…}) is the while-replacement — handle-driven, breaks via h.break()
     results, passing, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     r := 0
     loop((h) {
         r = r + 1
@@ -63,7 +63,7 @@ pub main = () i32 {
 
 def test_at_while_primitive(tmp_path):
     results, passing, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     n := 0
     @while(n < 5) { n = n + 1 }
     n
@@ -75,14 +75,14 @@ pub main = () i32 {
 
 
 def test_at_while_condition_must_be_bool(tmp_path):
-    results, _, _ = build(tmp_path, "pub main = () i32 { @while(5) { }  0 }")
+    results, _, _ = build(tmp_path, "main* = () i32 { @while(5) { }  0 }")
     assert any(q == "m.main" and not ok and "bool" in why for q, ok, why in results)
 
 
 def test_while_keyword_is_gone(tmp_path):
     # `while` is no longer a construct — it parses as a bare call/identifier and fails
     with pytest.raises(SyntaxError):
-        parse("pub main = () i32 { while (1) { }  0 }", "m")
+        parse("main* = () i32 { while (1) { }  0 }", "m")
 
 
 def test_continue_runs_the_step(tmp_path):
@@ -91,7 +91,7 @@ def test_continue_runs_the_step(tmp_path):
     # `i < 3` would never advance and the loop would hang. Terminating with n == 3
     # proves the step runs on continue.
     results, passing, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     n := 0
     loop(3, (h, i) {
         n = n + 1

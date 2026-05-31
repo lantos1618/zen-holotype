@@ -164,7 +164,7 @@ def _tparams(n):
 
 
 def _fn(n):
-    pub = any(c.type == "pub" for c in n.children)
+    pub = _field(n, "vis") is not None          # a glued `*` after the name = public
     params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
               for p in _named(n) if p.type == "param"]
     body = [_stmt(s) for s in _named(_field(n, "body"))]
@@ -175,7 +175,7 @@ def _fn(n):
 
 
 def _decl(n):
-    pub = any(c.type == "pub" for c in n.children)
+    pub = _field(n, "vis") is not None          # a glued `*` after the name = public
     if n.type == "struct":
         fields = [Field_(_t(_field(f, "name")), _type(_field(f, "type")))
                   for f in _named(n) if f.type == "field"]

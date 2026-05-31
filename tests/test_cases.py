@@ -35,7 +35,8 @@ def annotations(src):
         rest = rest[0] if rest else ""
         if head in ("PASS", "FAIL"):
             verdict, reason = head, rest                 # implicit: name from this decl line
-            name = line.split("//~")[0].split("=")[0].strip().split()[-1]
+            # ...stripping the glued `*` public marker (verdict keys are bare names).
+            name = line.split("//~")[0].split("=")[0].strip().split()[-1].rstrip("*")
         else:
             name = head                                  # explicit: //~ name PASS/FAIL
             verdict, _, reason = rest.partition(" ")

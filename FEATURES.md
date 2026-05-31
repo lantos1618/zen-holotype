@@ -35,6 +35,8 @@ where it's headed, [VISION](VISION.md).)
 - **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
+- **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `trait Area* { … }` —
+  not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = local.
 
 ## Systems / FFI
 - **`extern`** C bindings (binds libc by bare name; libc headers auto-included).

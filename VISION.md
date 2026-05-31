@@ -204,8 +204,9 @@ a method is a node, visibility is "does it have a node." No separate symbol tabl
 
 ## Today → the direction
 
-The compiler today is a working, tested one for a keyword-ful surface (`pub`, `trait`, `impl`,
-`Name: { }`). Getting to the one-structure form above is a front-end change — fold
+The compiler today is a working, tested one for a keyword-ful surface (`trait`, `impl`,
+`Name: { }`) — though visibility is already the VISION's glued `*` (`Vec*`, `area*`), not a `pub`
+keyword. Getting to the one-structure form above is a front-end change — fold
 struct/enum/trait/impl/visibility into the trie under the single `decl` shape — while the back
 end (monomorphize → C) and the `fits()` lattice **carry straight over**: a record is still a
 product, a sum is still a tagged union, a method is still a trie node. The grammar evolves in
