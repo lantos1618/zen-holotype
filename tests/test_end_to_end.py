@@ -338,15 +338,16 @@ def test_generic_enum_monomorphizes(tmp_path):
 
 # ── M1: extern FFI binds libc; side-effecting statements are preserved ──────
 def test_extern_ffi_runs(tmp_path):
-    (tmp_path / "main.zen").write_text(
-        "extern putchar = (c: i32) i32\n"
-        "extern malloc  = (n: i64) RawPtr<u8>\n"
-        "extern free    = (p: RawPtr<u8>) void\n"
-        "pub main = () i32 {\n"
-        "    putchar(90) putchar(101) putchar(110) putchar(10)\n"   # 'Z' 'e' 'n' '\n'
-        "    free(malloc(64))\n"
-        "    0\n"
-        "}\n")
+    (tmp_path / "main.zen").write_text("""
+extern putchar = (c: i32) i32
+extern malloc  = (n: i64) RawPtr<u8>
+extern free    = (p: RawPtr<u8>) void
+pub main = () i32 {
+    putchar(90) putchar(101) putchar(110) putchar(10)   // Z e n \\n
+    free(malloc(64))
+    0
+}
+""")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -367,20 +368,21 @@ def test_extern_ffi_runs(tmp_path):
 
 # ── M2: alloc a buffer, store/load/offset through it, run ───────────────────
 def test_raw_memory_runs(tmp_path):
-    (tmp_path / "main.zen").write_text(
-        "extern putchar = (c: i32) i32\n"
-        "extern malloc  = (n: i64) RawPtr<u8>\n"
-        "extern free    = (p: RawPtr<u8>) void\n"
-        "pub main = () i32 {\n"
-        "    buf := malloc(8)\n"
-        "    store(offset(buf, 0), 72)\n"               # 'H'
-        "    store(offset(buf, 1), 105)\n"              # 'i'
-        "    putchar(load(offset(buf, 0)))\n"
-        "    putchar(load(offset(buf, 1)))\n"
-        "    putchar(10)\n"
-        "    free(buf)\n"
-        "    0\n"
-        "}\n")
+    (tmp_path / "main.zen").write_text("""
+extern putchar = (c: i32) i32
+extern malloc  = (n: i64) RawPtr<u8>
+extern free    = (p: RawPtr<u8>) void
+pub main = () i32 {
+    buf := malloc(8)
+    store(offset(buf, 0), 72)            // 'H'
+    store(offset(buf, 1), 105)           // 'i'
+    putchar(load(offset(buf, 0)))
+    putchar(load(offset(buf, 1)))
+    putchar(10)
+    free(buf)
+    0
+}
+""")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -399,29 +401,36 @@ def test_raw_memory_runs(tmp_path):
 
 # ── M3: a String that TAKES AN ALLOCATOR, built on the memory primitives ────
 def test_string_takes_an_allocator(tmp_path):
-    (tmp_path / "main.zen").write_text(
-        "extern malloc  = (n: i64) RawPtr<u8>\n"
-        "extern free    = (p: RawPtr<u8>) void\n"
-        "extern putchar = (c: i32) i32\n"
-        "Allocator: { id: i32 }\n"
-        "String: { ptr: RawPtr<u8>, len: i64 }\n"
-        "alloc = (a: Ptr<Allocator>, n: i64) RawPtr<u8> { malloc(n) }\n"   # String takes an allocator
-        "build_hi = (a: Ptr<Allocator>) String {\n"
-        "    p := alloc(a, 2)\n"
-        "    store(offset(p, 0), 72) store(offset(p, 1), 105)\n"
-        "    String { ptr: p, len: 2 }\n"
-        "}\n"
-        "step = (s: Ptr<String>, i: i64) i32 { putchar(load(offset(s.ptr, i))) print_from(s, i+1) }\n"
-        "print_from = (s: Ptr<String>, i: i64) i32 {\n"
-        "    match (i < s.len) { false => putchar(10), true => step(s, i) }\n"
-        "}\n"
-        "pub main = () i32 {\n"
-        "    a := Allocator { id: 0 }\n"
-        "    s := build_hi(addr(a))\n"
-        "    print_from(addr(s), 0)\n"
-        "    free(s.ptr)\n"
-        "    0\n"
-        "}\n")
+    (tmp_path / "main.zen").write_text("""
+extern malloc  = (n: i64) RawPtr<u8>
+extern free    = (p: RawPtr<u8>) void
+extern putchar = (c: i32) i32
+
+Allocator: { id: i32 }
+String: { ptr: RawPtr<u8>, len: i64 }
+
+alloc = (a: Ptr<Allocator>, n: i64) RawPtr<u8> { malloc(n) }   // a String takes an allocator
+
+build_hi = (a: Ptr<Allocator>) String {
+    p := alloc(a, 2)
+    store(offset(p, 0), 72) store(offset(p, 1), 105)
+    String { ptr: p, len: 2 }
+}
+
+// print by recursing over the bytes (no loops in v1)
+step = (s: Ptr<String>, i: i64) i32 { putchar(load(offset(s.ptr, i))) print_from(s, i+1) }
+print_from = (s: Ptr<String>, i: i64) i32 {
+    match (i < s.len) { false => putchar(10), true => step(s, i) }
+}
+
+pub main = () i32 {
+    a := Allocator { id: 0 }
+    s := build_hi(addr(a))
+    print_from(addr(s), 0)
+    free(s.ptr)
+    0
+}
+""")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
