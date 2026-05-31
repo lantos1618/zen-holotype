@@ -293,8 +293,6 @@ def _infer_call(e, expect, locals_, space, scope):
         return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
     if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
         return _infer_mem(e, locals_, space, scope)
-    if e.callee == "comptime":                            # comptime(x) has the type of x
-        return infer(e.args[0], locals_, space, scope, expect)
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                   # a bound's method, e.g. area(x)
         return infer_trait_call(e, target, locals_, space, scope)
