@@ -6,7 +6,7 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, EnumDecl, MethodSig,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, Struct, EnumDecl, MethodSig,
                   Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 
 
@@ -206,8 +206,11 @@ def _infer(e, locals_, space, scope, expect=None):
             ot = infer(obj, locals_, space, scope)
             st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer
             if not isinstance(st, NameT):
-                raise TypeErr("field access on non-struct")
+                raise TypeErr("field access on a non-struct value")
             decl = space.walk(st.path).value
+            if not isinstance(decl, Struct):                    # an enum payload is reachable
+                short = st.path.rsplit(".", 1)[-1]              # ONLY through match, never `.field`
+                raise TypeErr(f"cannot read fields of enum {short} — use match")
             for f in decl.fields:
                 if f.name == name:
                     # a field of a generic struct carries the instantiation's args
