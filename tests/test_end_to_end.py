@@ -336,6 +336,35 @@ def test_generic_enum_monomorphizes(tmp_path):
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "42"
 
 
+# ── M1: extern FFI binds libc; side-effecting statements are preserved ──────
+def test_extern_ffi_runs(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "extern putchar = (c: i32) i32\n"
+        "extern malloc  = (n: i64) RawPtr<u8>\n"
+        "extern free    = (p: RawPtr<u8>) void\n"
+        "pub main = () i32 {\n"
+        "    putchar(90) putchar(101) putchar(110) putchar(10)\n"   # 'Z' 'e' 'n' '\n'
+        "    free(malloc(64))\n"
+        "    0\n"
+        "}\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    # intermediate side effects are emitted (not collapsed to the last expr)
+    assert c.count("putchar(") == 4
+    assert "extern" not in c.split("int32_t main_main")[0] or "#include <stdlib.h>" in c
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr                  # warning-free (libc via headers)
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Zen\n"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

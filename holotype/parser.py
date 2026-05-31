@@ -179,6 +179,11 @@ def _decl(n):
     if n.type == "impl":
         methods = [_fn(f) for f in _named(n) if f.type == "function"]
         return Impl(_t(_field(n, "trait")), _t(_field(n, "type")), methods)
+    if n.type == "extern":
+        params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
+                  for p in _named(n) if p.type == "param"]
+        return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")),
+                  body=None, extern=True)
     raise ValueError(f"unhandled decl: {n.type}")
 
 

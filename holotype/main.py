@@ -18,6 +18,9 @@ from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
 from .parser import parse
 
 BUILTIN = {"Option"}
+_LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
+         "printf", "write", "read", "memcpy", "memset", "memmove", "strlen",
+         "abort", "exit"}     # declared by the stdlib headers — don't re-proto
 
 
 # ───────────────────────── front end ────────────────────────────────────────
@@ -327,7 +330,12 @@ def emit_c(files, passing, space, extra=""):
                     f"trait impl {ty.rsplit('.', 1)[-1]}::{m} is used but did not type-check")
             impl_fns.append((impl_cname(tp, ty, m), mfn, msc))
 
-    lines = ["#include <stdint.h>", "#include <stdbool.h>", ""]
+    lines = ["#include <stdint.h>", "#include <stdbool.h>"]
+    externs = [d for f in files.values() for d in f.decls if isinstance(d, Fn) and d.extern]
+    if externs:                                          # libc headers declare the common ones
+        lines += ["#include <stdlib.h>", "#include <stdio.h>",
+                  "#include <string.h>", "#include <unistd.h>"]
+    lines.append("")
     for f in files.values():                             # types (generic templates emit nothing)
         for d in f.decls:
             if isinstance(d, Struct) and not d.tparams:
@@ -339,9 +347,12 @@ def emit_c(files, passing, space, extra=""):
         lower = c_struct if isinstance(decl, Struct) else c_enum
         lines.append(lower(qual, decl, sub, mangle(NameT(qual, targs))))
     lines.append("")
+    for d in externs:                                    # protos only for non-libc externs
+        if d.name not in _LIBC:                           # (the headers above declare libc)
+            lines.append("extern " + c_proto(d.name, d, d.name))
     for f in files.values():                             # prototypes: concrete fns…
         for d in f.decls:
-            if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
+            if isinstance(d, Fn) and not d.tparams and not d.extern and f"{f.ns}.{d.name}" in passing:
                 lines.append(c_proto(f"{f.ns}.{d.name}", d))
     for (qual, targs), (spec, _) in insts.items():       # …monomorphized instances…
         lines.append(c_proto(qual, spec, inst_name(qual, targs)))
