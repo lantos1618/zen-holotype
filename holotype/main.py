@@ -8,13 +8,13 @@ Only well-typed functions are codegen'd.
 """
 from __future__ import annotations
 import sys, pathlib, subprocess, dataclasses
-from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, SliceT,
+from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, SliceT, FnT,
                   Str, StructLit, SliceLit, Index, Bin, Not, Field, Let, Assign, While, Loop,
-                  Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var)
+                  Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var, Closure)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
-                    impl_cname, mangle, slice_typedefs, _slice_reg)
+                    impl_cname, mangle, slice_typedefs, _slice_reg, is_template, _CENV)
 from .parser import parse
 from .comptime import fold_comptime, evaluate, reify_decl
 
@@ -84,6 +84,9 @@ def resolve_type(t, scope, space, tparams=()):
         return t
     if isinstance(t, SliceT):
         return SliceT(resolve_type(t.elem, scope, space, tparams))
+    if isinstance(t, FnT):                        # (A, T) Ret — resolve params + ret
+        return FnT(tuple(resolve_type(p, scope, space, tparams) for p in t.params),
+                   resolve_type(t.ret, scope, space, tparams))
     if isinstance(t, PtrT):
         return PtrT(t.dir, resolve_type(t.pointee, scope, space, tparams))
     if isinstance(t, NameT):
@@ -302,29 +305,30 @@ class _Sink:
         self.fn, self.impl, self.data = fn, impl, data
 
 
-def _scan_expr(e, locals_, space, scope, sink, expect=None):
-    """Walk an expression, feeding every monomorphization site to `sink`."""
+def _scan_expr(e, locals_, space, scope, sink, expect=None, cenv=None):
+    """Walk an expression, feeding every monomorphization site to `sink`. `cenv`
+    carries the active closure params while scanning an inlined template body."""
     if isinstance(e, Bin):
-        _scan_expr(e.l, locals_, space, scope, sink)
-        _scan_expr(e.r, locals_, space, scope, sink)
+        _scan_expr(e.l, locals_, space, scope, sink, None, cenv)
+        _scan_expr(e.r, locals_, space, scope, sink, None, cenv)
     elif isinstance(e, Not):
-        _scan_expr(e.operand, locals_, space, scope, sink)
+        _scan_expr(e.operand, locals_, space, scope, sink, None, cenv)
     elif isinstance(e, Field):
-        _scan_expr(e.obj, locals_, space, scope, sink)
+        _scan_expr(e.obj, locals_, space, scope, sink, None, cenv)
     elif isinstance(e, SliceLit):
         et = infer(e, locals_, space, scope).elem if e.elems else None
         for x in e.elems:
-            _scan_expr(x, locals_, space, scope, sink, et)
+            _scan_expr(x, locals_, space, scope, sink, et, cenv)
     elif isinstance(e, Index):
-        _scan_expr(e.seq, locals_, space, scope, sink)
-        _scan_expr(e.idx, locals_, space, scope, sink)
+        _scan_expr(e.seq, locals_, space, scope, sink, None, cenv)
+        _scan_expr(e.idx, locals_, space, scope, sink, None, cenv)
     elif isinstance(e, StructLit):
         st = infer(e, locals_, space, scope)
         decl = space.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args))
         ftypes = {fl.name: subst(fl.type, sub) for fl in decl.fields}
         for n, v in e.fields:                            # children first (inner-first emit order)
-            _scan_expr(v, locals_, space, scope, sink, ftypes[n])
+            _scan_expr(v, locals_, space, scope, sink, ftypes[n], cenv)
         if decl.tparams:
             sink.data(st.path, st.args)
     elif isinstance(e, EnumCtor):
@@ -332,15 +336,15 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
         sub = dict(zip(decl.tparams, expect.args))
         var = next(v for v in decl.variants if v.name == e.name)
         for a in e.args:
-            _scan_expr(a, locals_, space, scope, sink, subst(var.payload, sub))
+            _scan_expr(a, locals_, space, scope, sink, subst(var.payload, sub), cenv)
         if decl.tparams:
             sink.data(expect.path, expect.args)
     elif isinstance(e, Match):
-        _scan_expr(e.subject, locals_, space, scope, sink)
+        _scan_expr(e.subject, locals_, space, scope, sink, None, cenv)
         st = infer(e.subject, locals_, space, scope)
         if isinstance(st, PrimT):                         # literal match: arms bind nothing
             for arm in e.arms:
-                _scan_expr(arm.body, locals_, space, scope, sink, expect)
+                _scan_expr(arm.body, locals_, space, scope, sink, expect, cenv)
             return
         decl = space.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
@@ -349,11 +353,20 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
             al = locals_
             if arm.variant is not None and arm.binding is not None:
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
-            _scan_expr(arm.body, al, space, scope, sink, expect)
+            _scan_expr(arm.body, al, space, scope, sink, expect, cenv)
+    elif isinstance(e, Closure):                          # a closure literal that wasn't a call arg
+        pass                                              # (only reachable via a template call, handled there)
     elif isinstance(e, Call):
         if e.callee in ("addr", "load", "store", "offset"):   # intrinsics: just scan args
             for a in e.args:
-                _scan_expr(a, locals_, space, scope, sink)
+                _scan_expr(a, locals_, space, scope, sink, None, cenv)
+            return
+        if cenv and e.callee in cenv:                     # calling a closure param: scan its inlined body
+            clos, fnt, csite_locals, csite_scope = cenv[e.callee]
+            for a, pt in zip(e.args, fnt.params):
+                _scan_expr(a, locals_, space, scope, sink, pt, cenv)
+            cl = {**csite_locals, **dict(zip(clos.params, fnt.params))}
+            _scan_block(clos.body, cl, space, csite_scope, sink, fnt.ret)
             return
         target = scope.get(e.callee)
         if isinstance(target, TraitMethod):              # resolve concrete Self -> impl used
@@ -362,11 +375,14 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
                 match_type(p, infer(a, locals_, space, scope), s)
             ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
             for a, pt in zip(e.args, ptypes):
-                _scan_expr(a, locals_, space, scope, sink, pt)
+                _scan_expr(a, locals_, space, scope, sink, pt, cenv)
             if isinstance(s.get("Self"), NameT):
                 sink.impl(target.trait, s["Self"].path)
             return
         callee = space.walk(target).value
+        if is_template(callee):                           # a closure-taking fn: scan the inlined body
+            _scan_template_call(e, callee, locals_, space, scope, sink, cenv)
+            return
         if isinstance(callee, Fn) and callee.tparams:
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
             ptypes = [subst(p.type, s) for p in callee.params]
@@ -374,26 +390,48 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
         else:
             ptypes = [p.type for p in callee.params]
         for a, pt in zip(e.args, ptypes):
-            _scan_expr(a, locals_, space, scope, sink, pt)
+            _scan_expr(a, locals_, space, scope, sink, pt, cenv)
 
 
-def _scan_block(stmts, locals_, space, scope, sink, expect=None):
+def _scan_template_call(e, tmpl, locals_, space, scope, sink, cenv):
+    """A template is inlined, not instanced — so don't sink.fn it. Mirror the
+    inlining: solve type-args from the value args, scan them, then scan the body
+    with the closure params bound (so any monomorph sites inside are collected)."""
+    s: dict = {}
+    for a, p in zip(e.args, tmpl.params):
+        if not isinstance(p.type, FnT):
+            match_type(p.type, infer(a, locals_, space, scope), s)
+    blocals, frame = dict(locals_), {}
+    for a, p in zip(e.args, tmpl.params):
+        if isinstance(p.type, FnT):
+            fnt = subst(p.type, s)
+            frame[p.name] = (a, fnt, locals_, scope)
+            blocals[p.name] = fnt
+        else:
+            pt = subst(p.type, s)
+            _scan_expr(a, locals_, space, scope, sink, pt, cenv)
+            blocals[p.name] = pt
+    _scan_block(tmpl.body, blocals, space, tmpl.scope or scope, sink, subst(tmpl.ret, s),
+                {**(cenv or {}), **frame})
+
+
+def _scan_block(stmts, locals_, space, scope, sink, expect=None, cenv=None):
     locals_ = dict(locals_)
     last = len(stmts) - 1
     for i, s in enumerate(stmts):
         if isinstance(s, Let):
-            _scan_expr(s.value, locals_, space, scope, sink)
+            _scan_expr(s.value, locals_, space, scope, sink, None, cenv)
             locals_[s.name] = infer(s.value, locals_, space, scope)
         elif isinstance(s, Assign):
-            _scan_expr(s.target, locals_, space, scope, sink)
-            _scan_expr(s.value, locals_, space, scope, sink)
+            _scan_expr(s.target, locals_, space, scope, sink, None, cenv)
+            _scan_expr(s.value, locals_, space, scope, sink, None, cenv)
         elif isinstance(s, While):
-            _scan_expr(s.cond, locals_, space, scope, sink)
-            _scan_block(s.body, locals_, space, scope, sink)
+            _scan_expr(s.cond, locals_, space, scope, sink, None, cenv)
+            _scan_block(s.body, locals_, space, scope, sink, None, cenv)
             if s.step is not None:
-                _scan_block((s.step,), locals_, space, scope, sink)
+                _scan_block((s.step,), locals_, space, scope, sink, None, cenv)
         else:
-            _scan_expr(s, locals_, space, scope, sink, expect if i == last else None)
+            _scan_expr(s, locals_, space, scope, sink, expect if i == last else None, cenv)
 
 
 def specialize(fn, s):
@@ -433,7 +471,8 @@ def collect_instances(files, passing, space):
     sink = _Sink(add, add_impl, add_data)
     for f in files.values():
         for d in f.decls:
-            if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
+            if (isinstance(d, Fn) and not d.tparams and not is_template(d)
+                    and f"{f.ns}.{d.name}" in passing):
                 sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
                 _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink, d.ret)
     while work:
@@ -463,6 +502,7 @@ def emit_c(files, passing, space, extra=""):
             impl_fns.append((impl_cname(tp, ty, m), mfn, msc))
 
     _slice_reg.clear()                                   # slice typedefs collected during lowering
+    _CENV.clear()                                        # closure-inlining env (always empties itself)
     lines = ["#include <stdint.h>", "#include <stdbool.h>"]
     externs = [d for f in files.values() for d in f.decls if isinstance(d, Fn) and d.extern]
     if externs:                                          # libc headers declare the common ones
@@ -488,7 +528,8 @@ def emit_c(files, passing, space, extra=""):
             lines.append("extern " + c_proto(d.name, d, d.name))
     for f in files.values():                             # prototypes: concrete fns…
         for d in f.decls:
-            if isinstance(d, Fn) and not d.tparams and not d.extern and f"{f.ns}.{d.name}" in passing:
+            if (isinstance(d, Fn) and not d.tparams and not d.extern and not is_template(d)
+                    and f"{f.ns}.{d.name}" in passing):
                 lines.append(c_proto(f"{f.ns}.{d.name}", d))
     for (qual, targs), (spec, _) in insts.items():       # …monomorphized instances…
         lines.append(c_proto(qual, spec, inst_name(qual, targs)))
@@ -497,7 +538,8 @@ def emit_c(files, passing, space, extra=""):
     lines.append("")
     for f in files.values():                             # definitions
         for d in f.decls:
-            if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
+            if (isinstance(d, Fn) and not d.tparams and not is_template(d)
+                    and f"{f.ns}.{d.name}" in passing):
                 lines.append(c_def(f"{f.ns}.{d.name}", d, space, f.scope))
     for (qual, targs), (spec, sc) in insts.items():
         lines.append(c_def(qual, spec, space, sc, inst_name(qual, targs)))

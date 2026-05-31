@@ -6,9 +6,9 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, Struct, EnumDecl, MethodSig,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, FnT, Fn, Struct, EnumDecl, MethodSig,
                   Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
-                  SliceT, Let, Assign, While, EnumCtor, Match)
+                  SliceT, Let, Assign, While, EnumCtor, Match, Closure)
 
 
 class Conflict(Exception):   ...
@@ -76,6 +76,10 @@ def show(t) -> str:
         return t.prim.value
     if isinstance(t, PtrT):
         return f"{t.dir.value}<{show(t.pointee)}>"
+    if isinstance(t, SliceT):
+        return f"[{show(t.elem)}]"
+    if isinstance(t, FnT):
+        return f"({', '.join(show(p) for p in t.params)}) {show(t.ret)}"
     if isinstance(t, NameT):
         seg = t.path.rsplit(".", 1)[-1]
         return f"{seg}<{', '.join(show(a) for a in t.args)}>" if t.args else seg
@@ -113,6 +117,10 @@ def fits(given, want) -> bool:
         if want.dir is Dir.READ:
             return fits(given.pointee, want.pointee)
         return given.pointee == want.pointee
+    if isinstance(given, FnT) and isinstance(want, FnT):     # closures: inlined, so invariant params
+        return (len(given.params) == len(want.params)
+                and all(p == q for p, q in zip(given.params, want.params))
+                and fits(given.ret, want.ret))
     if isinstance(given, PrimT) and isinstance(want, PrimT):
         if given.prim is want.prim:
             return True
@@ -132,6 +140,8 @@ def subst(t, s):
         return PtrT(t.dir, subst(t.pointee, s))
     if isinstance(t, SliceT):
         return SliceT(subst(t.elem, s))
+    if isinstance(t, FnT):
+        return FnT(tuple(subst(p, s) for p in t.params), subst(t.ret, s))
     if isinstance(t, NameT):
         return NameT(t.path, tuple(subst(a, s) for a in t.args))
     return t
@@ -151,6 +161,10 @@ def match_type(param, arg, s) -> None:
         match_type(param.pointee, arg.pointee, s)
     elif isinstance(param, SliceT) and isinstance(arg, SliceT):
         match_type(param.elem, arg.elem, s)
+    elif isinstance(param, FnT) and isinstance(arg, FnT) and len(param.params) == len(arg.params):
+        for p, a in zip(param.params, arg.params):
+            match_type(p, a, s)
+        match_type(param.ret, arg.ret, s)
     elif is_option(param) and not is_option(arg):     # Option<X> vs a nonnull -> peek
         match_type(param.args[0], arg, s)
     elif (isinstance(param, NameT) and isinstance(arg, NameT)
@@ -270,6 +284,17 @@ def _infer(e, locals_, space, scope, expect=None):
             if not _numeric(infer(idx, locals_, space, scope)):
                 raise TypeErr("a slice index must be numeric")
             return st.elem
+        case Closure(params, body):
+            if not isinstance(expect, FnT):
+                raise TypeErr("a closure needs a known function type here (pass it to a closure parameter)")
+            if len(params) != len(expect.params):
+                raise TypeErr(f"closure has {len(params)} param(s), expected {len(expect.params)}")
+            cl = {**locals_, **dict(zip(params, expect.params))}   # captures + the bound params
+            rt = infer_block(body, cl, space, scope, expect.ret)
+            void = isinstance(expect.ret, PrimT) and expect.ret.prim is Prim.VOID
+            if expect.ret is not None and not void and not fits(rt, expect.ret):
+                raise TypeErr("closure result", rt, expect.ret)
+            return FnT(tuple(expect.params), expect.ret)
         case Call():
             return _infer_call(e, expect, locals_, space, scope)
         case MethodCall(recv, method, args):                    # the loop handle: h.break()/h.continue()
@@ -331,6 +356,15 @@ def _infer_call(e, expect, locals_, space, scope):
         return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
     if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
         return _infer_mem(e, locals_, space, scope)
+    if isinstance(locals_.get(e.callee), FnT):            # calling a closure parameter: f(acc, x)
+        fnt = locals_[e.callee]
+        if len(e.args) != len(fnt.params):
+            raise TypeErr(f"closure '{e.callee}' wants {len(fnt.params)} args, got {len(e.args)}")
+        for a, pt in zip(e.args, fnt.params):
+            given = infer(a, locals_, space, scope, pt)
+            if not fits(given, pt):
+                raise TypeErr("closure argument", given, pt)
+        return fnt.ret
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                   # a bound's method, e.g. area(x)
         return infer_trait_call(e, target, locals_, space, scope)
@@ -342,8 +376,20 @@ def _infer_call(e, expect, locals_, space, scope):
     if len(e.args) != len(callee.params):
         raise TypeErr(f"'{e.callee}' wants {len(callee.params)} args, got {len(e.args)}")
     if callee.tparams:                                    # generic: infer type-args, then check
-        arg_types = [infer(a, locals_, space, scope) for a in e.args]
-        s = solve_call(callee, arg_types)
+        # Two passes so a closure argument can be checked AFTER the type-args it
+        # depends on are solved from the ordinary args (a closure has no standalone
+        # type — its param types come from the now-known FnT parameter).
+        s, arg_types = {}, [None] * len(e.args)
+        for i, (a, p) in enumerate(zip(e.args, callee.params)):
+            if isinstance(a, Closure):
+                continue
+            arg_types[i] = infer(a, locals_, space, scope)
+            match_type(p.type, arg_types[i], s)
+        for i, (a, p) in enumerate(zip(e.args, callee.params)):
+            if not isinstance(a, Closure):
+                continue
+            arg_types[i] = infer(a, locals_, space, scope, subst(p.type, s))
+            match_type(p.type, arg_types[i], s)
         missing = [n for n in callee.tparams if n not in s]
         if missing:
             raise TypeErr(f"cannot infer type {', '.join(missing)} for '{e.callee}'")
