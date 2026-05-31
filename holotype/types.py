@@ -275,7 +275,7 @@ def _infer_struct_lit(e, locals_, space, scope):
     for fname, fexpr in e.fields:                # pass 1: infer values, solve type-args
         if fname not in ftypes:
             raise TypeErr(f"no field '{fname}' on {qual}")
-        givens[fname] = infer(fexpr, locals_, space, scope)
+        givens[fname] = infer(fexpr, locals_, space, scope, ftypes[fname])  # int lits adapt to the field
         if decl.tparams:
             match_type(ftypes[fname], givens[fname], s)
     missing = [t for t in decl.tparams if t not in s]

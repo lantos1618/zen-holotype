@@ -60,6 +60,50 @@ pub main = () i32 { Rgb_n() }
     assert subprocess.run([str(tmp_path / "o")]).returncode == 4   # Rgb has 4 fields
 
 
+_DERIVE_ZERO = """
+zero_build = (T: Ast, sl: Ast, i: i32) Ast {
+    match (field_count(T) - i) {
+        0 => sl,
+        _ => zero_build(T, with_field(sl, field_name_at(T, i), ast_int(0)), i + 1)
+    }
+}
+derive_zero = (T: Ast) Ast {
+    fn_of(concat(name_of(T), "_zero"), zero_build(T, struct_start(name_of(T)), 0))
+}
+"""
+
+
+def test_derive_zero_iterates_every_field(tmp_path):
+    # a real derive: comptime tail-recursion walks ALL fields and builds a
+    # constructor that zeroes each one.
+    files, space, results, passing = frontend(tmp_path, """
+Point: { x: i32, y: i32, z: i32 }
+""" + _DERIVE_ZERO + """
+emit derive_zero(reflect(Point))
+pub main = () i32 { p := Point_zero()  p.x + p.y + p.z }
+""")
+    assert ("m.Point_zero", True, "ok") in results
+    c = emit_c(files, passing, space)
+    assert ".x = 0, .y = 0, .z = 0" in c                  # every field, in order
+    assert "m_Point m_Point_zero(void)" in c
+
+
+def test_derived_constructor_runs_over_mixed_widths(tmp_path):
+    files, space, _, passing = frontend(tmp_path, """
+Mixed: { a: i32, b: u8, c: i64 }
+""" + _DERIVE_ZERO + """
+emit derive_zero(reflect(Mixed))
+pub main = () i32 { m := Mixed_zero()  m.a }
+""")
+    c = emit_c(files, passing, space)
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", str(cfile), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr                    # int literal adapts to u8/i64 field
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 0
+
+
 def test_is_prelude_flags_ast_functions(tmp_path):
     files, space, _, _ = frontend(tmp_path, """
 gen   = (T: Ast) Ast { fn_const("k", field_count(T)) }

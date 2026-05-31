@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import replace
 from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
                   MethodCall, Let, Assign, While, Str, Fn, Impl, Struct, EnumDecl,
-                  Prim, PrimT)
+                  Prim, PrimT, NameT)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
 _RUNTIME = {"addr", "load", "store", "offset", "comptime"}
@@ -177,9 +177,44 @@ def _bi_fn_const(e, env, space, scope, fuel):
     return Fn(name, [], PrimT(Prim.I32), body=[Lit(n)])
 
 
+# field iteration + struct construction — enough to write a real `derive`.
+def _bi_field_name_at(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    i = _eval(e.args[1], env, space, scope, fuel)
+    if not isinstance(t, Struct):
+        raise ComptimeErr("field_name_at: argument is not a struct")
+    return t.fields[i].name
+
+
+def _bi_ast_int(e, env, space, scope, fuel):
+    return Lit(_eval(e.args[0], env, space, scope, fuel))
+
+
+def _bi_struct_start(e, env, space, scope, fuel):
+    """struct_start(TypeName) -> an empty struct literal to fill field by field."""
+    return StructLit(_eval(e.args[0], env, space, scope, fuel), ())
+
+
+def _bi_with_field(e, env, space, scope, fuel):
+    """with_field(sl, name, value) -> sl with one more field initializer."""
+    sl = _eval(e.args[0], env, space, scope, fuel)
+    name = _eval(e.args[1], env, space, scope, fuel)
+    val = _eval(e.args[2], env, space, scope, fuel)
+    return replace(sl, fields=sl.fields + ((name, val),))
+
+
+def _bi_fn_of(e, env, space, scope, fuel):
+    """fn_of(name, structLit) -> the declaration  `name = () T { structLit }`."""
+    name = _eval(e.args[0], env, space, scope, fuel)
+    sl = _eval(e.args[1], env, space, scope, fuel)
+    return Fn(name, [], NameT(sl.type, ()), body=[sl])
+
+
 _BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
              "field_count": _bi_field_count, "concat": _bi_concat,
-             "fn_const": _bi_fn_const}
+             "fn_const": _bi_fn_const, "field_name_at": _bi_field_name_at,
+             "ast_int": _bi_ast_int, "struct_start": _bi_struct_start,
+             "with_field": _bi_with_field, "fn_of": _bi_fn_of}
 
 
 def _call(e, env, space, scope, fuel):
