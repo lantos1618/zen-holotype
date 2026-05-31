@@ -50,12 +50,12 @@ allows, nothing more.
    └────┬─────┘
         │  insert every decl at its path
         ▼
-  ╔════════════ ONE TYPE SPACE — a trie ════════════╗
-  ║  root                                            ║
-  ║   ├─ core.vec.Vec         (struct)               ║     path = identity, so
-  ║   ├─ ops.len   ops.cap    (fns)                  ║     diamond imports
-  ║   └─ main.area   main.main  (fns)                ║     collapse to ONE node
-  ╚═════════════════════╤════════════════════════════╝
+  ╔═══════════ Namespace — ONE trie (path = identity) ═══════╗
+  ║  root                                                    ║
+  ║   ├─ core.vec.Vec         (struct)                       ║   diamond imports
+  ║   ├─ ops.len   ops.cap    (fns)                          ║   collapse to ONE
+  ║   └─ main.area   main.main  (fns)                        ║   node, for free
+  ╚═════════════════════╤════════════════════════════════════╝
                         │  resolve refs · infer() each body · fits() each call
                         ▼
               ┌─────────────────────┐
@@ -160,10 +160,13 @@ python3 -m holotype check examples     # type-check report + emit a C lib
 Tests (the lattice is the whole safety argument, so it's the most-covered part):
 
 ```sh
-pip install -r requirements-dev.txt    # adds pytest
-python3 -m pytest                       # fits() lattice + laws, infer(), trie, parser,
-                                        # Zen //~ PASS/FAIL fixtures, end-to-end build
+pip install -r requirements-dev.txt    # adds pytest + mypy
+python3 -m pytest                       # fits() lattice + laws, infer(), Namespace, parser,
+                                        # Zen //~ PASS/FAIL fixtures, end-to-end build, mypy
 ```
+
+The AST carries `Type`/`Expr` unions and `python3 -m mypy holotype` is clean (a test
+runs it), so the node types can't silently drift.
 
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
 `build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
@@ -188,10 +191,14 @@ vecdemo -> 12
 | `tree-sitter-zen/grammar.js` | the real grammar (a tree-sitter parser generator) |
 | `holotype/parser.py` | converts the tree-sitter parse tree → AST |
 | `holotype/ast.py`    | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
-| `holotype/types.py`  | the trie + `fits()` pointer lattice + `infer()` (the one type space) |
+| `holotype/types.py`  | `Namespace` (the trie + impl registry) + `fits()` lattice + `infer()` |
 | `holotype/lower.py`  | transcribe to C (the type system erases here) |
 | `holotype/main.py`   | driver + `build.zen` interpreter |
-| `tests/`             | pytest suite — `fits()` lattice + laws, `infer()`, trie, parser, end-to-end build |
+| `tests/`             | pytest suite — `fits()` lattice + laws, `infer()`, Namespace, parser, mypy, end-to-end |
+
+`Namespace` is built during *resolve* and is strictly read-only during *checking* —
+the only state the checker writes is the typed AST itself (a memoized `fn.ret`), so
+data and checking context stay cleanly separated.
 | `tests/cases/*.zen`  | type-checker tests written **in Zen** — inline `//~ PASS`/`//~ FAIL` verdicts |
 
 (`ast.py` and `types.py` are safe as classic names because they live in a package —
