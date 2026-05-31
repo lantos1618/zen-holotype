@@ -50,11 +50,12 @@ module.exports = grammar({
     variant: $ => seq(field('name', $.identifier),
                       optional(seq('(', field('payload', $._type), ')'))),
 
-    // pub area = (v: Ptr<Vec>) i32 { len(v) * cap(v) }   /   pub id<T> = (x: Ptr<T>) Ptr<T> { x }
+    // pub area = (v: Ptr<Vec>) i32 { … }   — the return type may be omitted and inferred:
+    // pub area = (v: Ptr<Vec>) { len(v) * cap(v) }
     function: $ => seq(optional('pub'), field('name', $.identifier),
                        optional(field('tparams', $.type_params)), '=',
                        '(', optional(comma1($.param)), ')',
-                       field('ret', $._type), field('body', $.block)),
+                       optional(field('ret', $._type)), field('body', $.block)),
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
     _type: $ => choice($.primitive, $.pointer, $.named_type),

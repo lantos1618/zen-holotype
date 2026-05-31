@@ -12,7 +12,7 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
                   Str, StructLit, Bin, Not, Field, Let, Call, MethodCall, EnumCtor, Match,
                   TraitDecl, Impl)
 from .types import (Space, fits, infer, infer_block, subst, solve_call, match_type,
-                    TraitMethod, TypeErr)
+                    ret_type, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, show, c_name, inst_name,
                     impl_cname)
 from .parser import parse
@@ -114,7 +114,8 @@ def _resolve_fn(d, scope, space):
     tp = set(d.tparams)
     for p in d.params:
         p.type = resolve_type(p.type, scope, space, tp)
-    d.ret = resolve_type(d.ret, scope, space, tp)
+    if d.ret is not None:                                   # None -> inferred from the body later
+        d.ret = resolve_type(d.ret, scope, space, tp)
     d.bounds = {k: (scope.get(v, v)) for k, v in d.bounds.items()}
     for trait_path in d.bounds.values():
         space.walk(trait_path)                              # the bound trait must exist
@@ -125,9 +126,10 @@ def _check_fn(qual, ns, d, scope, space, results, passing):
         return
     locals_ = {p.name: p.type for p in d.params}
     try:
-        bt = infer_block(d.body, locals_, space, scope, d.ret)
-        if not fits(bt, d.ret):
-            raise TypeErr("return type", bt, d.ret)
+        want = ret_type(qual, space) if qual in space.fn_scope else d.ret  # inferred or declared
+        bt = infer_block(d.body, locals_, space, scope, want)
+        if want is not None and not fits(bt, want):
+            raise TypeErr("return type", bt, want)
         results.append((qual, True, "ok")); passing.add(qual)
     except TypeErr as ex:
         core = (f"{show(ex.given)}  ⊀  {show(ex.want)}"
@@ -137,6 +139,12 @@ def _check_fn(qual, ns, d, scope, space, results, passing):
 
 
 def check(files, space):
+    # maps for on-demand return-type inference: each top-level fn's defining
+    # scope (trait-augmented if bounded), plus a guard against recursive inference.
+    space.fn_scope = {f"{f.ns}.{d.name}": (trait_methods_scope(d, f.scope, space) if d.bounds else f.scope)
+                      for f in files.values() for d in f.decls if isinstance(d, Fn)}
+    space._inferring = set()
+
     results, passing = [], set()
     for f in files.values():
         for d in f.decls:

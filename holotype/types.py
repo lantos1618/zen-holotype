@@ -248,13 +248,31 @@ def _infer(e, locals_, space, scope, expect=None):
                 if isinstance(got, NameT) and (trait_path, got.path) not in getattr(space, "impls", {}):
                     raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement "
                                   f"{trait_path.rsplit('.', 1)[-1]}")
-            return subst(callee.ret, s)
+            return subst(ret_type(target, space), s)
         for a, p in zip(e.args, callee.params):
             given = infer(a, locals_, space, scope, p.type)
             if not fits(given, p.type):
                 raise TypeErr("pointer/null mismatch", given, p.type)
-        return callee.ret
+        return ret_type(target, space)
     raise TypeErr(f"unknown expr {e!r}")
+
+
+def ret_type(qual, space):
+    """The return type of a function: its annotation, or — when omitted — inferred
+    from the body and memoized. Recursion through an un-annotated return is an
+    error (you must write the type), like every ML-family checker."""
+    fn = space.walk(qual).value
+    if fn.ret is not None:
+        return fn.ret
+    if qual in space._inferring:
+        raise TypeErr(f"recursive function '{qual.rsplit('.', 1)[-1]}' needs a return-type annotation")
+    space._inferring.add(qual)
+    try:
+        fn.ret = infer_block(fn.body, {p.name: p.type for p in fn.params},
+                             space, space.fn_scope[qual], None)
+    finally:
+        space._inferring.discard(qual)
+    return fn.ret
 
 
 def infer_trait_call(e, tm, locals_, space, scope):

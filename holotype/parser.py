@@ -149,7 +149,9 @@ def _fn(n):
               for p in _named(n) if p.type == "param"]
     body = [_stmt(s) for s in _named(_field(n, "body"))]
     names, bounds = _tparams(n)
-    return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub, names, bounds)
+    rn = _field(n, "ret")
+    ret = _type(rn) if rn is not None else None          # None -> infer from the body
+    return Fn(_t(_field(n, "name")), params, ret, body, pub, names, bounds)
 
 
 def _decl(n):
