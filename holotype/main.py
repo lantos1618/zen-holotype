@@ -10,15 +10,15 @@ from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
                   Str, StructLit, Bin, Not, Field, Let, Assign, While, Call, MethodCall,
-                  EnumCtor, Match, TraitDecl, Impl)
+                  EnumCtor, Match, TraitDecl, Impl, Emit)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle)
 from .parser import parse
-from .comptime import fold_comptime
+from .comptime import fold_comptime, evaluate, ComptimeErr
 
-BUILTIN = {"Option"}
+BUILTIN = {"Option", "Ast"}     # Ast: the reified-AST type a comptime generator works over
 _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
          "printf", "write", "read", "memcpy", "memset", "memmove", "strlen",
          "abort", "exit"}     # declared by the stdlib headers — don't re-proto
@@ -40,7 +40,7 @@ def build_space(files):
     space = Namespace()                       # trie + impls registry; impls filled in resolve()
     for f in files.values():
         for d in f.decls:
-            if isinstance(d, Impl):       # impls have no name — registered in resolve()
+            if isinstance(d, (Impl, Emit)):   # no name: impls registered in resolve, emits splice later
                 continue
             space.insert(f"{f.ns}.{d.name}", d)
     return space
@@ -53,7 +53,7 @@ def build_scopes(files):
             for n in imp.names:
                 sc[n] = f"{imp.module}.{n}"
         for d in f.decls:
-            if not isinstance(d, Impl):
+            if not isinstance(d, (Impl, Emit)):
                 sc[d.name] = f"{f.ns}.{d.name}"
         f.scope = sc
 
@@ -125,6 +125,38 @@ def _resolve_fn(d, scope, space):
     d.scope = trait_methods_scope(d, scope, space) if d.bounds else scope   # for ret inference
 
 
+def _is_ast(t):
+    return isinstance(t, NameT) and t.path == "Ast"
+
+
+def is_prelude(d):
+    """A function over `Ast` is a comptime generator (prelude). The kernel never
+    checks or lowers it — it runs only inside the emit/comptime pass."""
+    return (isinstance(d, Fn) and d.body is not None and
+            (_is_ast(d.ret) or any(_is_ast(p.type) for p in d.params)))
+
+
+def run_emits(files, space):
+    """The splice pass: evaluate each `emit` generator at comptime and graft the
+    declaration(s) it returns into the module — so check + lower meet them as
+    ordinary code. Runs after resolve, before check (VISION: prelude `Ast→Ast`)."""
+    for f in files.values():
+        grafted = []
+        for d in f.decls:
+            if not isinstance(d, Emit):
+                continue
+            out = evaluate(d.value, space, f.scope)
+            for g in (out if isinstance(out, list) else [out]):
+                if not isinstance(g, Fn):
+                    raise ComptimeErr(f"emit produced {type(g).__name__}, not a declaration")
+                f.scope[g.name] = f"{f.ns}.{g.name}"     # same dict the siblings see
+                space.insert(f"{f.ns}.{g.name}", g)
+                _resolve_fn(g, f.scope, space)
+                grafted.append(g)
+        if grafted:
+            f.decls = [d for d in f.decls if not isinstance(d, Emit)] + grafted
+
+
 def _check_fn(qual, ns, d, space, results, passing):
     if not d.body:
         return
@@ -147,7 +179,7 @@ def check(files, space):
     results, passing = [], set()
     for f in files.values():
         for d in f.decls:
-            if isinstance(d, Fn):
+            if isinstance(d, Fn) and not is_prelude(d):    # prelude (Ast) fns run, never type-check
                 _check_fn(f"{f.ns}.{d.name}", f.ns, d, space, results, passing)
             elif isinstance(d, Impl):
                 _check_impl(d, f, space, results, passing)
@@ -435,7 +467,7 @@ def run_test_root(root, test_rel):
     test_ns = pathlib.Path(test_rel).with_suffix("").as_posix().replace("/", ".")
     files = load(root)                       # includes the test root (skips only build.zen)
     space = build_space(files)
-    build_scopes(files); resolve(files, space); fold_comptime(files, space)
+    build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
     _, passing = check(files, space)
 
     tf = files.get(test_ns)
@@ -464,7 +496,7 @@ def run_test_root(root, test_rel):
 def cmd_check(root):
     files = load(root)
     space = build_space(files)
-    build_scopes(files); resolve(files, space); fold_comptime(files, space)
+    build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
     results, passing = check(files, space)
     print(f"── check {root} ──")
     for qual, ok, why in results:
@@ -482,7 +514,7 @@ def cmd_build(root):
 
     files = load(root, skip={"build.zen"} | set(cfg["tests"]))
     space = build_space(files)
-    build_scopes(files); resolve(files, space); fold_comptime(files, space)
+    build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
     results, passing = check(files, space)
     print("\n── type checks ──")
     for qual, ok, why in results:

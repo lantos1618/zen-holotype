@@ -13,11 +13,15 @@ module.exports = grammar({
 
   rules: {
     source_file: $ => repeat($._item),
-    _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl, $.extern),
+    _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl, $.extern, $.emit),
 
     // extern malloc = (n: i64) RawPtr<u8>   — bind a C symbol; no body
     extern: $ => seq('extern', field('name', $.identifier), '=',
                      '(', optional(comma1($.param)), ')', field('ret', $._type)),
+
+    // emit arity_of(reflect(Point))   — run a comptime (Ast)->Ast generator and
+    // splice the declaration it returns into this module, then check + lower it.
+    emit: $ => seq('emit', field('value', $._expression)),
 
     comment: $ => token(seq('//', /[^\n]*/)),
 

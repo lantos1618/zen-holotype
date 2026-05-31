@@ -8,8 +8,8 @@ import warnings, pathlib
 from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
-                  Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, MethodCall,
-                  EnumCtor, Let, Assign, While, Arm, Match)
+                  Emit, Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit,
+                  MethodCall, EnumCtor, Let, Assign, While, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -189,6 +189,8 @@ def _decl(n):
                   for p in _named(n) if p.type == "param"]
         return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")),
                   body=None, extern=True)
+    if n.type == "emit":
+        return Emit(_expr(_field(n, "value")))
     raise ValueError(f"unhandled decl: {n.type}")
 
 

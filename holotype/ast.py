@@ -237,6 +237,12 @@ class Impl:
 
 
 @dataclass
+class Emit:
+    value: object             # Expr — a comptime (Ast)->Ast call; its result is spliced in
+    pos: object = None
+
+
+@dataclass
 class Import:
     names: list               # list[str]
     module: str               # dotted path, e.g. "core.vec"
