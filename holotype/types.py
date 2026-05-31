@@ -7,8 +7,8 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, Struct, EnumDecl, MethodSig,
-                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, Let, Assign, While,
-                  EnumCtor, Match)
+                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
+                  SliceT, Let, Assign, While, EnumCtor, Match)
 
 
 class Conflict(Exception):   ...
@@ -130,6 +130,8 @@ def subst(t, s):
         return s.get(t.name, t)
     if isinstance(t, PtrT):
         return PtrT(t.dir, subst(t.pointee, s))
+    if isinstance(t, SliceT):
+        return SliceT(subst(t.elem, s))
     if isinstance(t, NameT):
         return NameT(t.path, tuple(subst(a, s) for a in t.args))
     return t
@@ -147,6 +149,8 @@ def match_type(param, arg, s) -> None:
         return
     if isinstance(param, PtrT) and isinstance(arg, PtrT):
         match_type(param.pointee, arg.pointee, s)
+    elif isinstance(param, SliceT) and isinstance(arg, SliceT):
+        match_type(param.elem, arg.elem, s)
     elif is_option(param) and not is_option(arg):     # Option<X> vs a nonnull -> peek
         match_type(param.args[0], arg, s)
     elif (isinstance(param, NameT) and isinstance(arg, NameT)
@@ -225,6 +229,12 @@ def _infer(e, locals_, space, scope, expect=None):
         case Field(obj, name):
             ot = infer(obj, locals_, space, scope)
             st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer
+            if isinstance(st, SliceT):                          # a slice exposes .ptr and .len
+                if name == "len":
+                    return PrimT(Prim.I64)
+                if name == "ptr":
+                    return PtrT(Dir.RAW, st.elem)
+                raise TypeErr(f"a slice has no field '{name}' (only .ptr / .len)")
             if not isinstance(st, NameT):
                 raise TypeErr("field access on a non-struct value")
             decl = space.walk(st.path).value
@@ -238,6 +248,28 @@ def _infer(e, locals_, space, scope, expect=None):
             raise TypeErr(f"no field '{name}' on {st.path}")
         case StructLit():
             return _infer_struct_lit(e, locals_, space, scope)
+        case SliceLit(elems):                                  # [a, b, c] : [T]
+            et = expect.elem if isinstance(expect, SliceT) else None
+            if et is None:
+                if not elems:
+                    raise TypeErr("cannot infer the type of an empty slice literal")
+                et = infer(elems[0], locals_, space, scope)
+            for x in elems:                                    # every element must fit the elem type
+                xt = infer(x, locals_, space, scope, et)
+                if fits(xt, et):
+                    continue
+                if et is not None and fits(et, xt):            # widen toward the larger int
+                    et = xt
+                else:
+                    raise TypeErr("slice element", xt, et)
+            return SliceT(et)
+        case Index(seq, idx):                                  # xs[i] : T
+            st = infer(seq, locals_, space, scope)
+            if not isinstance(st, SliceT):
+                raise TypeErr("indexing a non-slice value")
+            if not _numeric(infer(idx, locals_, space, scope)):
+                raise TypeErr("a slice index must be numeric")
+            return st.elem
         case Call():
             return _infer_call(e, expect, locals_, space, scope)
         case MethodCall(recv, method, args):                    # the loop handle: h.break()/h.continue()

@@ -70,15 +70,16 @@ module.exports = grammar({
                        optional(field('ret', $._type)), field('body', $.block)),
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
-    _type: $ => choice($.primitive, $.pointer, $.named_type),
+    _type: $ => choice($.primitive, $.pointer, $.slice_type, $.named_type),
     primitive: $ => choice('i32', 'i64', 'u8', 'bool', 'void', 'str'),
     pointer: $ => seq(field('dir', choice('Ptr', 'MutPtr', 'RawPtr')),
                       '<', field('pointee', $._type), '>'),
+    slice_type: $ => seq('[', field('elem', $._type), ']'),   // [T] — a (ptr, len) view
     named_type: $ => seq(field('name', $.identifier),
                          optional(seq('<', comma1($._type), '>'))),
 
     block: $ => seq('{', repeat($._statement), '}'),
-    _statement: $ => choice($.let_binding, $.assign, $.while_prim, $.loop_, $._expression),
+    _statement: $ => choice($.let_binding, $.assign, $.while_prim, $.loop_, $.loop_method, $._expression),
     // x := expr  — a local binding (type inferred from the value)
     let_binding: $ => seq(field('name', $.identifier), ':=', field('value', $._expression)),
     // lvalue = expr  — reassign a local, or set a struct field (s.f = v)
@@ -98,6 +99,10 @@ module.exports = grammar({
                     optional(seq(field('count', $._expression), ',')),
                     '(', field('params', seq($.identifier, repeat(seq(',', $.identifier)))), ')',
                     field('body', $.block), ')'),
+    // postfix: xs.loop((h, i, x) { … }) — same as loop(xs, (h, i, x) { … }).
+    loop_method: $ => prec(8, seq(field('recv', $._unary), '.', 'loop', '(',
+                    '(', field('params', seq($.identifier, repeat(seq(',', $.identifier)))), ')',
+                    field('body', $.block), ')')),
     // a leading-dot constructor `.Ok(x)` — an expression, so it works as a call
     // argument and match arm body too, not just a bare statement.
     enum_ctor: $ => seq('.', field('name', $.identifier), $.arguments),
@@ -105,9 +110,13 @@ module.exports = grammar({
     // a postfix chain: primary, then any number of (args) calls and .name accesses.
     // A "method call" is simply a call whose `fn` is a field_access — no special rule.
     _expression: $ => choice($.binary, $._unary),
-    _unary: $ => choice($._primary, $.call, $.field_access, $.unary_op),
+    _unary: $ => choice($._primary, $.call, $.field_access, $.index, $.unary_op),
     unary_op: $ => prec(7, seq(field('op', '!'), $._unary)),   // logical not
-    _primary: $ => choice($.parenthesized, $.match, $.enum_ctor, $.struct_literal, $.integer, $.boolean, $.string, $.identifier),
+    // xs[i] — the `[` must be glued (token.immediate), so a statement-leading
+    // `[a,b,c]` slice literal is never absorbed as an index of the previous line.
+    index: $ => prec.left(4, seq(field('seq', $._unary), token.immediate('['), field('idx', $._expression), ']')),
+    _primary: $ => choice($.parenthesized, $.match, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.boolean, $.string, $.identifier),
+    slice_literal: $ => seq('[', optional(seq(comma1($._expression), optional(','))), ']'),  // [a, b, c]
 
     // match subject { .Variant(x) => expr, .Other => expr, _ => expr }
     // The subject is a restricted expression so the `{` can't be mistaken for a

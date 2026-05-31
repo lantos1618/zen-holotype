@@ -7,14 +7,14 @@ Pipeline: parse -> insert into trie -> resolve refs -> infer/fits -> to_c.
 Only well-typed functions are codegen'd.
 """
 from __future__ import annotations
-import sys, pathlib, subprocess
-from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
-                  Str, StructLit, Bin, Not, Field, Let, Assign, While, Loop, Call, MethodCall,
-                  EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var)
+import sys, pathlib, subprocess, dataclasses
+from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, SliceT,
+                  Str, StructLit, SliceLit, Index, Bin, Not, Field, Let, Assign, While, Loop,
+                  Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
-                    impl_cname, mangle)
+                    impl_cname, mangle, slice_typedefs, _slice_reg)
 from .parser import parse
 from .comptime import fold_comptime, evaluate, reify_decl
 
@@ -82,6 +82,8 @@ def trait_methods_scope(fn, base, space):
 def resolve_type(t, scope, space, tparams=()):
     if isinstance(t, (PrimT, TVar)):
         return t
+    if isinstance(t, SliceT):
+        return SliceT(resolve_type(t.elem, scope, space, tparams))
     if isinstance(t, PtrT):
         return PtrT(t.dir, resolve_type(t.pointee, scope, space, tparams))
     if isinstance(t, NameT):
@@ -146,12 +148,32 @@ def _desugar_block(stmts):
     return out
 
 
+def _mentions(node, name) -> bool:
+    """Does `name` appear as a Var anywhere in this AST node? (Used so the element
+    binding `x := xs[i]` is only emitted when the body actually reads it — an
+    unused one would trip -Werror=unused-variable.)"""
+    if isinstance(node, Var):
+        return node.name == name
+    if dataclasses.is_dataclass(node):
+        return any(_mentions(getattr(node, f.name), name) for f in dataclasses.fields(node))
+    if isinstance(node, (tuple, list)):
+        return any(_mentions(x, name) for x in node)
+    return False
+
+
 def _desugar_stmt(s):
     if isinstance(s, Loop):
         body = tuple(_desugar_block(s.body))
         if s.count is None:                          # loop((h){B}) -> @while(true){B}
             return [While(Bool(True), body, None)]
-        idx = s.params[1] if len(s.params) > 1 else "_i"   # loop(n,(h,i){B})
+        if len(s.params) >= 3:                        # element form: loop(xs, (h, i, x) { B })
+            seq, idx, elem = f"_seq{id(s)}", s.params[1], s.params[2]
+            cond = Bin("<", Var(idx), Field(Var(seq), "len"))      # i < xs.len
+            step = Assign(Var(idx), Bin("+", Var(idx), Lit(1)))
+            pre = (Let(elem, Index(Var(seq), Var(idx))),) if _mentions(body, elem) else ()  # x := xs[i]
+            return [Let(seq, s.count), Let(idx, Lit(0)),
+                    While(cond, pre + body, step)]
+        idx = s.params[1] if len(s.params) > 1 else "_i"   # count form: loop(n,(h,i){B})
         cond = Bin("<", Var(idx), s.count)
         step = Assign(Var(idx), Bin("+", Var(idx), Lit(1)))
         return [Let(idx, Lit(0)), While(cond, body, step)]   #  i:=0; @while(i<n){B; step i++}
@@ -289,6 +311,13 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
         _scan_expr(e.operand, locals_, space, scope, sink)
     elif isinstance(e, Field):
         _scan_expr(e.obj, locals_, space, scope, sink)
+    elif isinstance(e, SliceLit):
+        et = infer(e, locals_, space, scope).elem if e.elems else None
+        for x in e.elems:
+            _scan_expr(x, locals_, space, scope, sink, et)
+    elif isinstance(e, Index):
+        _scan_expr(e.seq, locals_, space, scope, sink)
+        _scan_expr(e.idx, locals_, space, scope, sink)
     elif isinstance(e, StructLit):
         st = infer(e, locals_, space, scope)
         decl = space.walk(st.path).value
@@ -433,12 +462,14 @@ def emit_c(files, passing, space, extra=""):
                     f"trait impl {ty.rsplit('.', 1)[-1]}::{m} is used but did not type-check")
             impl_fns.append((impl_cname(tp, ty, m), mfn, msc))
 
+    _slice_reg.clear()                                   # slice typedefs collected during lowering
     lines = ["#include <stdint.h>", "#include <stdbool.h>"]
     externs = [d for f in files.values() for d in f.decls if isinstance(d, Fn) and d.extern]
     if externs:                                          # libc headers declare the common ones
         lines += ["#include <stdlib.h>", "#include <stdio.h>",
                   "#include <string.h>", "#include <unistd.h>"]
     lines.append("")
+    slice_at = len(lines)                                # splice slice typedefs here (before structs)
     for f in files.values():                             # types (generic templates emit nothing)
         if is_prelude_ns(f.ns):                          # prelude Ast model is never lowered
             continue
@@ -472,6 +503,7 @@ def emit_c(files, passing, space, extra=""):
         lines.append(c_def(qual, spec, space, sc, inst_name(qual, targs)))
     for cn, mfn, msc in impl_fns:
         lines.append(c_def(cn, mfn, space, msc, cn))
+    lines[slice_at:slice_at] = slice_typedefs()          # now _slice_reg is fully populated
     return "\n".join(lines) + "\n" + extra
 
 
