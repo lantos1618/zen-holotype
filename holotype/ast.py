@@ -139,9 +139,10 @@ class Let:
 
 @dataclass(frozen=True)
 class Arm:
-    variant: str | None       # variant name, or None for the wildcard `_`
+    variant: str | None       # ctor variant name (None for a literal/wildcard arm)
     binding: str | None       # payload binding, e.g. the `v` of .Some(v)
     body: object              # Expr
+    lit: object = None        # literal pattern value (Lit/Bool); None for ctor/wildcard
 
 
 @dataclass(frozen=True)

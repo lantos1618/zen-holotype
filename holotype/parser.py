@@ -105,10 +105,12 @@ def _expr_inner(n):
 
 
 def _arm(n):
-    pat = _named(_field(n, "pat"))[0]               # ctor_pattern | wildcard
+    pat = _named(_field(n, "pat"))[0]               # ctor_pattern | literal_pattern | wildcard
     body = _expr(_field(n, "body"))
     if pat.type == "wildcard":
         return Arm(None, None, body)
+    if pat.type == "literal_pattern":
+        return Arm(None, None, body, _expr(_named(pat)[0]))
     binding = _field(pat, "binding")
     return Arm(_t(_field(pat, "name")), _t(binding) if binding else None, body)
 

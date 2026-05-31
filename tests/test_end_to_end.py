@@ -196,6 +196,31 @@ def test_trait_dispatch_runs(tmp_path):
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "20"
 
 
+# ── Turing-complete: integer branching + recursion compiles and computes ────
+def test_recursion_computes(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub fact = (n: i32) i32 { match n { 0 => 1, _ => n * fact(n - 1) } }\n"
+        "pub fib = (n: i32) i32 { match n { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
+        "pub main = () i32 { fact(5) + fib(10) }\n")   # 120 + 55 = 175
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "(n) == 0 ?" in c                            # literal-pattern branch
+    assert "main_fact((n - 1))" in c                    # the recursive call
+    harness = ("\n#include <stdio.h>\nint main(void){ "
+               "printf(\"%d\\n\", main_main()); return 0; }\n")
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + harness)
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "175"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

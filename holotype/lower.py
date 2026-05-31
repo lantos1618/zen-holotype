@@ -135,6 +135,16 @@ def c_match(e, locals_, space, scope, expect) -> str:
     binding is a real typed local (this narrows the payload inside the arm)."""
     subj = c_expr(e.subject, locals_, space, scope)
     st = infer(e.subject, locals_, space, scope)
+
+    if isinstance(st, PrimT):                           # literal match: subj == lit ? … : …
+        body = lambda arm: f"({c_expr(arm.body, locals_, space, scope, expect)})"
+        default = next((a for a in e.arms if a.lit is None), None) or e.arms[-1]
+        chain = body(default)
+        for arm in reversed([a for a in e.arms if a is not default]):
+            litc = c_expr(arm.lit, locals_, space, scope)
+            chain = f"(({subj}) == {litc} ? {body(arm)} : {chain})"
+        return chain
+
     decl = space.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
     cn = c_name(st.path)

@@ -87,9 +87,10 @@ module.exports = grammar({
     match: $ => seq('match', field('subject', choice($.identifier, $.parenthesized)),
                     '{', comma1($.match_arm), optional(','), '}'),
     match_arm: $ => seq(field('pat', $.pattern), '=>', field('body', $._expression)),
-    pattern: $ => choice($.ctor_pattern, $.wildcard),
+    pattern: $ => choice($.ctor_pattern, $.literal_pattern, $.wildcard),
     ctor_pattern: $ => seq('.', field('name', $.identifier),
                            optional(seq('(', field('binding', $.identifier), ')'))),
+    literal_pattern: $ => choice($.integer, $.boolean),   // match n { 0 => …, _ => … }
     wildcard: $ => '_',
 
     call:         $ => prec.left(4, seq(field('fn', $._unary), $.arguments)),

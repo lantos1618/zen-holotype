@@ -190,6 +190,10 @@ def _scan_expr(e, locals_, space, scope, add, add_impl):
     elif isinstance(e, Match):
         _scan_expr(e.subject, locals_, space, scope, add, add_impl)
         st = infer(e.subject, locals_, space, scope)
+        if isinstance(st, PrimT):                        # literal match: arms bind nothing
+            for arm in e.arms:
+                _scan_expr(arm.body, locals_, space, scope, add, add_impl)
+            return
         decl = space.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
         variants = {v.name: v for v in decl.variants}

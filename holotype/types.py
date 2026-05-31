@@ -297,6 +297,8 @@ def infer_match(e, expect, locals_, space, scope):
     """A match types each arm against the expected result, binds a variant's
     payload inside its arm (narrowing), and demands exhaustive coverage."""
     st = infer(e.subject, locals_, space, scope)
+    if isinstance(st, PrimT):
+        return _infer_match_lit(e, st, expect, locals_, space, scope)
     if not isinstance(st, NameT) or not isinstance(space.walk(st.path).value, EnumDecl):
         raise TypeErr(f"match on a non-enum value ({st.path if isinstance(st, NameT) else st})")
     decl = space.walk(st.path).value
@@ -326,6 +328,31 @@ def infer_match(e, expect, locals_, space, scope):
     missing = [v for v in variants if v not in covered]
     if not wildcard and missing:
         raise TypeErr(f"non-exhaustive match: missing {', '.join('.' + m for m in missing)}")
+    return result
+
+
+def _infer_match_lit(e, st, expect, locals_, space, scope):
+    """Match on an i32/bool subject: literal patterns and a wildcard. Integers
+    can't be enumerated, so a `_` is required (bool may instead cover true+false)."""
+    wildcard, result, bools = False, expect, set()
+    for arm in e.arms:
+        if arm.variant is not None:
+            raise TypeErr("variant pattern on a non-enum value")
+        if arm.lit is None:
+            wildcard = True
+        else:
+            lt = infer(arm.lit, locals_, space, scope)
+            if not fits(lt, st):
+                raise TypeErr("pattern type", lt, st)
+            if isinstance(arm.lit, Bool):
+                bools.add(arm.lit.b)
+        bt = infer(arm.body, locals_, space, scope, result)
+        if result is None:
+            result = bt
+        elif not fits(bt, result):
+            raise TypeErr("match arms differ", bt, result)
+    if not wildcard and not (st == PrimT(Prim.BOOL) and bools == {True, False}):
+        raise TypeErr("non-exhaustive match: add a '_' arm")
     return result
 
 
