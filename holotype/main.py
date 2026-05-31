@@ -100,9 +100,10 @@ def check(files, space):
                     raise TypeErr("return type", bt, d.ret)
                 results.append((qual, True, "ok")); passing.add(qual)
             except TypeErr as ex:
-                why = (f"{show(ex.given)}  ⊀  {show(ex.want)}"
-                       if ex.given is not None else str(ex))
-                results.append((qual, False, why))
+                core = (f"{show(ex.given)}  ⊀  {show(ex.want)}"
+                        if ex.given is not None else str(ex))
+                loc = f"{f.ns}:{ex.pos[0] + 1}:{ex.pos[1] + 1}: " if ex.pos else ""
+                results.append((qual, False, loc + core))
     return results, passing
 
 

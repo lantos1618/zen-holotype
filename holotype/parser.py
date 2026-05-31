@@ -61,6 +61,12 @@ def _type(n):
 
 
 def _expr(n):
+    e = _expr_inner(n)
+    object.__setattr__(e, "pos", n.start_point)     # (row, col) for diagnostics
+    return e
+
+
+def _expr_inner(n):
     t = n.type
     if t == "integer":
         return Lit(int(_t(n)))

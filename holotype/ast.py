@@ -53,25 +53,34 @@ class TVar:
 
 
 # ───────────────────────── expressions ──────────────────────────────────────
+# `pos` is the (row, col) of the node in source, set by the parser. It's excluded
+# from equality/repr so it never affects type comparisons — purely for diagnostics.
+_pos = lambda: field(default=None, compare=False, repr=False)
+
+
 @dataclass(frozen=True)
 class Lit:
     n: int
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Bool:
     b: bool
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Var:
     name: str
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Field:
     obj: object               # Expr
     name: str
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
@@ -79,12 +88,14 @@ class Bin:
     op: str                   # + - *
     l: object                 # Expr
     r: object                 # Expr
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Call:
     callee: str
     args: tuple = ()          # tuple[Expr, ...]
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
@@ -96,6 +107,7 @@ class Str:
 class StructLit:
     type: str                 # type name (resolved later)
     fields: tuple = ()        # tuple[(name, Expr), ...]
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
@@ -109,12 +121,14 @@ class MethodCall:
 class EnumCtor:
     name: str                 # leading-dot ctor, e.g. .Ok(x)
     args: tuple = ()
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Let:
     name: str                 # x := value   (a local binding; type inferred)
     value: object             # Expr
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
@@ -128,6 +142,7 @@ class Arm:
 class Match:
     subject: object           # Expr
     arms: tuple = ()          # tuple[Arm, ...]
+    pos: object = _pos()
 
 
 # ───────────────────────── declarations (each = one trie node) ──────────────

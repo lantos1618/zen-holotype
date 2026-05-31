@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+import re
 from dataclasses import dataclass
 
 from holotype.ast import Dir, Prim, PrimT, NameT, PtrT, Fn, Param, EnumDecl
@@ -49,6 +50,14 @@ def test_failure_reasons_name_the_lattice_violation(checked):
     why = {qual: reason for qual, ok, reason in results if not ok}
     assert "Option<Ptr<Vec>>" in why["main.bad"] and "⊀" in why["main.bad"]
     assert "MutPtr<Vec>" in why["main.dirbad"]
+
+
+def test_type_errors_carry_a_source_location(checked):
+    _, _, results, _ = checked
+    why = {qual: reason for qual, ok, reason in results if not ok}
+    # main.bad / main.dirbad fail in main.zen — message is prefixed main:line:col
+    assert re.match(r"main:\d+:\d+: ", why["main.bad"]), why["main.bad"]
+    assert re.match(r"main:\d+:\d+: ", why["main.dirbad"]), why["main.dirbad"]
 
 
 # ── T10: codegen golden properties ──────────────────────────────────────────

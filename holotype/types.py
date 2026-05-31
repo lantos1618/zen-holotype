@@ -18,6 +18,7 @@ class TypeErr(Exception):
     def __init__(self, msg, given=None, want=None):
         super().__init__(msg)
         self.given, self.want = given, want
+        self.pos = None              # (row, col) of the offending expr, filled in by infer()
 
 
 # ───────────────────────── the namespace trie ───────────────────────────────
@@ -133,7 +134,22 @@ def solve_call(callee, arg_types):
 
 
 # ───────────────────────── expression inference ─────────────────────────────
+def _numeric(t) -> bool:
+    return isinstance(t, PrimT) and t.prim in (Prim.I32, Prim.I64)
+
+
 def infer(e, locals_, space, scope, expect=None):
+    """Type `e`, tagging any TypeErr with the innermost offending expr's position
+    (the deepest frame catches first, so the most specific location wins)."""
+    try:
+        return _infer(e, locals_, space, scope, expect)
+    except TypeErr as ex:
+        if ex.pos is None:
+            ex.pos = getattr(e, "pos", None)
+        raise
+
+
+def _infer(e, locals_, space, scope, expect=None):
     """Return the type of expression `e`; raise TypeErr on any call mismatch.
 
     `expect` is the type the surrounding context wants (return slot, parameter,
@@ -158,7 +174,10 @@ def infer(e, locals_, space, scope, expect=None):
             if not (fits(lt, rt) or fits(rt, lt)):       # operands must be comparable
                 raise TypeErr("'==' operands differ")
             return PrimT(Prim.BOOL)
-        return PrimT(Prim.I32)                            # integer arithmetic
+        if not (_numeric(lt) and _numeric(rt)):          # + - * are numeric-only
+            raise TypeErr(f"'{e.op}' needs numeric operands")
+        wide = Prim.I64 if Prim.I64 in (lt.prim, rt.prim) else Prim.I32
+        return PrimT(wide)                               # widen: i32 op i64 -> i64
     if isinstance(e, Field):
         ot = infer(e.obj, locals_, space, scope)
         st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer
