@@ -74,63 +74,64 @@ def show(t) -> str:
 
 # ───────────────────────── expression codegen ──────────────────────────────
 def c_expr(e, locals_, space, scope, expect=None) -> str:
-    if isinstance(e, Lit):
-        return str(e.n)
-    if isinstance(e, Bool):
-        return "true" if e.b else "false"
-    if isinstance(e, Var):
-        return e.name
-    if isinstance(e, Bin):
-        return f"({c_expr(e.l, locals_, space, scope)} {e.op} {c_expr(e.r, locals_, space, scope)})"
-    if isinstance(e, Not):
-        return f"(!{c_expr(e.operand, locals_, space, scope)})"
-    if isinstance(e, Field):
-        ot = infer(e.obj, locals_, space, scope)
-        sep = "->" if isinstance(ot, PtrT) else "."     # pointer access lowers to ->
-        return f"{c_expr(e.obj, locals_, space, scope)}{sep}{e.name}"
-    if isinstance(e, StructLit):
-        st = infer(e, locals_, space, scope)                    # NameT(qual, targs)
-        decl = space.walk(st.path).value
-        sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
-        ftypes = {fl.name: subst(fl.type, sub) for fl in decl.fields}
-        inits = ", ".join(f".{n} = {c_expr(v, locals_, space, scope, ftypes[n])}"
-                          for n, v in e.fields)
-        return f"({c_type(st)}){{ {inits} }}"                   # C99 compound literal
-    if isinstance(e, EnumCtor):
-        cn = c_name(expect.path)                        # expect names the enum
-        var = next(v for v in space.walk(expect.path).value.variants if v.name == e.name)
-        if var.payload is None:
-            return f"({cn}){{ .tag = {cn}_{e.name} }}"
-        inner = c_expr(e.args[0], locals_, space, scope, var.payload)
-        return f"({cn}){{ .tag = {cn}_{e.name}, .u.{e.name} = {inner} }}"
-    if isinstance(e, Match):
-        return c_match(e, locals_, space, scope, expect)
-    if isinstance(e, Call):
-        if e.callee == "addr":
-            return f"&({c_expr(e.args[0], locals_, space, scope)})"
-        target = scope.get(e.callee)
-        if isinstance(target, TraitMethod):             # resolve to the concrete impl fn
-            s = {}
-            for p, a in zip(target.sig.params, e.args):
-                match_type(p, infer(a, locals_, space, scope), s)
-            cn = impl_cname(target.trait, s["Self"].path, e.callee)
-            ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
-            args = ", ".join(c_expr(a, locals_, space, scope, pt)
-                             for a, pt in zip(e.args, ptypes))
-            return f"{cn}({args})"
+    match e:
+        case Lit(n):
+            return str(n)
+        case Bool(b):
+            return "true" if b else "false"
+        case Var(name):
+            return name
+        case Bin(op, l, r):
+            return f"({c_expr(l, locals_, space, scope)} {op} {c_expr(r, locals_, space, scope)})"
+        case Not(operand):
+            return f"(!{c_expr(operand, locals_, space, scope)})"
+        case Field(obj, name):
+            sep = "->" if isinstance(infer(obj, locals_, space, scope), PtrT) else "."
+            return f"{c_expr(obj, locals_, space, scope)}{sep}{name}"   # pointer access -> ->
+        case StructLit():
+            st = infer(e, locals_, space, scope)                # NameT(qual, targs)
+            decl = space.walk(st.path).value
+            sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
+            ftypes = {fl.name: subst(fl.type, sub) for fl in decl.fields}
+            inits = ", ".join(f".{n} = {c_expr(v, locals_, space, scope, ftypes[n])}"
+                              for n, v in e.fields)
+            return f"({c_type(st)}){{ {inits} }}"               # C99 compound literal
+        case EnumCtor():
+            cn = c_name(expect.path)                            # expect names the enum
+            var = next(v for v in space.walk(expect.path).value.variants if v.name == e.name)
+            if var.payload is None:
+                return f"({cn}){{ .tag = {cn}_{e.name} }}"
+            inner = c_expr(e.args[0], locals_, space, scope, var.payload)
+            return f"({cn}){{ .tag = {cn}_{e.name}, .u.{e.name} = {inner} }}"
+        case Match():
+            return c_match(e, locals_, space, scope, expect)
+        case Call():
+            return _c_call(e, locals_, space, scope)
+        case _:
+            return "0"
+
+
+def _c_call(e, locals_, space, scope) -> str:
+    if e.callee == "addr":
+        return f"&({c_expr(e.args[0], locals_, space, scope)})"
+    target = scope.get(e.callee)
+    if isinstance(target, TraitMethod):                 # resolve to the concrete impl fn
+        s = {}
+        for p, a in zip(target.sig.params, e.args):
+            match_type(p, infer(a, locals_, space, scope), s)
+        cn = impl_cname(target.trait, s["Self"].path, e.callee)
+        ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
+    else:
         callee = space.walk(target).value
         if callee.tparams:                              # generic: name the monomorphized instance
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
-            targs = tuple(s[n] for n in callee.tparams)
-            cn = inst_name(scope[e.callee], targs)
+            cn = inst_name(target, tuple(s[n] for n in callee.tparams))
             ptypes = [subst(p.type, s) for p in callee.params]
         else:
-            cn = c_name(scope[e.callee])
+            cn = c_name(target)
             ptypes = [p.type for p in callee.params]
-        args = ", ".join(c_expr(a, locals_, space, scope, pt)
-                         for a, pt in zip(e.args, ptypes))
-        return f"{cn}({args})"
-    return "0"
+    args = ", ".join(c_expr(a, locals_, space, scope, pt) for a, pt in zip(e.args, ptypes))
+    return f"{cn}({args})"
 
 
 def c_match(e, locals_, space, scope, expect) -> str:
