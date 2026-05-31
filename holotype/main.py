@@ -16,6 +16,7 @@ from .types import (Namespace, fits, infer, infer_block, subst, solve_call, matc
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle)
 from .parser import parse
+from .comptime import fold_comptime
 
 BUILTIN = {"Option"}
 _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
@@ -231,8 +232,6 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
             _scan_expr(arm.body, al, space, scope, sink, expect)
     elif isinstance(e, Call):
-        if e.callee == "comptime":                            # evaluated away — nothing to emit
-            return
         if e.callee in ("addr", "load", "store", "offset"):   # intrinsics: just scan args
             for a in e.args:
                 _scan_expr(a, locals_, space, scope, sink)
@@ -436,7 +435,7 @@ def run_test_root(root, test_rel):
     test_ns = pathlib.Path(test_rel).with_suffix("").as_posix().replace("/", ".")
     files = load(root)                       # includes the test root (skips only build.zen)
     space = build_space(files)
-    build_scopes(files); resolve(files, space)
+    build_scopes(files); resolve(files, space); fold_comptime(files, space)
     _, passing = check(files, space)
 
     tf = files.get(test_ns)
@@ -465,7 +464,7 @@ def run_test_root(root, test_rel):
 def cmd_check(root):
     files = load(root)
     space = build_space(files)
-    build_scopes(files); resolve(files, space)
+    build_scopes(files); resolve(files, space); fold_comptime(files, space)
     results, passing = check(files, space)
     print(f"── check {root} ──")
     for qual, ok, why in results:
@@ -483,7 +482,7 @@ def cmd_build(root):
 
     files = load(root, skip={"build.zen"} | set(cfg["tests"]))
     space = build_space(files)
-    build_scopes(files); resolve(files, space)
+    build_scopes(files); resolve(files, space); fold_comptime(files, space)
     results, passing = check(files, space)
     print("\n── type checks ──")
     for qual, ok, why in results:

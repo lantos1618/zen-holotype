@@ -8,7 +8,9 @@ runtime call survives. This is the engine; the reified-AST self-hosting
 Values: int, bool, dict (a struct), or ("@enum", variant, payload).
 """
 from __future__ import annotations
-from .ast import Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor, Let, Fn
+from dataclasses import replace
+from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
+                  MethodCall, Let, Assign, While, Fn, Impl)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
 _RUNTIME = {"addr", "load", "store", "offset", "comptime"}
@@ -18,8 +20,69 @@ class ComptimeErr(Exception):
     ...
 
 
+# ───────────────────────── the dedicated comptime pass ──────────────────────
+# A first-class run, after resolve and before check: walk every function body
+# and rewrite each `comptime(e)` node into the constant it evaluates to. The
+# checker and the lowerer therefore never see a comptime node — they only ever
+# meet plain literals. This is the hinge P4 builds on: once comptime is a pass
+# that *rewrites the AST*, it can grow to evaluate functions that return AST
+# (derive/impl as `(Ast) Ast`), and the new nodes flow into check unchanged.
+def fold_comptime(files, space):
+    """Rewrite every comptime(...) in every body to its constant, in place."""
+    for f in files.values():
+        for d in f.decls:
+            if isinstance(d, Fn) and d.body is not None and not d.extern:
+                d.body = [_fold(s, space, d.scope) for s in d.body]
+            elif isinstance(d, Impl):
+                for m in d.methods:
+                    if m.body is not None:
+                        m.body = [_fold(s, space, m.scope) for s in m.body]
+
+
+def _to_node(v, pos):
+    """Turn a comptime value back into a literal expression node."""
+    if isinstance(v, bool):
+        return Bool(v, pos)
+    if isinstance(v, int):
+        return Lit(v, pos)
+    raise ComptimeErr(f"comptime value {v!r} cannot be folded into a literal yet")
+
+
+def _fold(e, space, scope):
+    """Recurse an expr/stmt, replacing comptime(x) with its folded constant."""
+    if isinstance(e, Call) and e.callee == "comptime":
+        return _to_node(evaluate(e.args[0], space, scope), e.pos)
+    if isinstance(e, Call):
+        return replace(e, args=tuple(_fold(a, space, scope) for a in e.args))
+    if isinstance(e, Bin):
+        return replace(e, l=_fold(e.l, space, scope), r=_fold(e.r, space, scope))
+    if isinstance(e, Not):
+        return replace(e, operand=_fold(e.operand, space, scope))
+    if isinstance(e, Field):
+        return replace(e, obj=_fold(e.obj, space, scope))
+    if isinstance(e, StructLit):
+        return replace(e, fields=tuple((n, _fold(v, space, scope)) for n, v in e.fields))
+    if isinstance(e, EnumCtor):
+        return replace(e, args=tuple(_fold(a, space, scope) for a in e.args))
+    if isinstance(e, MethodCall):
+        return replace(e, recv=_fold(e.recv, space, scope),
+                       args=tuple(_fold(a, space, scope) for a in e.args))
+    if isinstance(e, Match):
+        arms = tuple(replace(a, body=_fold(a.body, space, scope)) for a in e.arms)
+        return replace(e, subject=_fold(e.subject, space, scope), arms=arms)
+    if isinstance(e, Let):
+        return replace(e, value=_fold(e.value, space, scope))
+    if isinstance(e, Assign):
+        return replace(e, target=_fold(e.target, space, scope),
+                       value=_fold(e.value, space, scope))
+    if isinstance(e, While):
+        return replace(e, cond=_fold(e.cond, space, scope),
+                       body=tuple(_fold(s, space, scope) for s in e.body))
+    return e                                  # Lit / Bool / Var / Str — nothing to fold
+
+
 def evaluate(e, space, scope):
-    """Evaluate `e` to a compile-time value. Used by codegen for comptime(...)."""
+    """Evaluate `e` to a compile-time value (int/bool/struct/enum)."""
     try:
         return _eval(e, {}, space, scope, [_FUEL])
     except RecursionError:                   # deep comptime recursion → a clean error, not a crash

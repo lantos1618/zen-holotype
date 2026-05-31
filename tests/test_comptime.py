@@ -4,15 +4,17 @@ import sys
 import pytest
 
 from holotype.main import load, build_space, build_scopes, resolve, check, emit_c
-from holotype.comptime import ComptimeErr
+from holotype.comptime import ComptimeErr, fold_comptime
 
 
-def frontend(tmp_path, src):
+def frontend(tmp_path, src, fold=True):
     (tmp_path / "m.zen").write_text(src)
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
     resolve(files, space)
+    if fold:                                 # the dedicated comptime pass: runs before check
+        fold_comptime(files, space)
     _, passing = check(files, space)
     return files, space, passing
 
@@ -51,19 +53,38 @@ pub main = () i32 { comptime(fib(10)) }
     assert subprocess.run([str(tmp_path / "o")]).returncode == 55
 
 
-def test_comptime_rejects_runtime_op(tmp_path):
+def test_fold_pass_rewrites_nested_comptime(tmp_path):
+    # comptime appears deep inside arithmetic, a let, and a loop body — the
+    # dedicated pass must reach all of them and leave no comptime node behind.
     files, space, passing = frontend(tmp_path, """
+pub k = () i32 { 7 }
+pub mix = (n: i32) i32 {
+    acc := n + comptime(2 * 3)
+    i := 0
+    while (i < comptime(k())) { acc = acc + comptime(10 - 8)  i = i + 1 }
+    acc
+}
+""")
+    # no comptime call survives anywhere in the AST handed to check/lower
+    fn = next(d for d in files["m"].decls if d.name == "mix")
+    src = repr(fn.body)
+    assert "comptime" not in src
+    assert "Lit(n=6" in src and "Lit(n=7" in src and "Lit(n=2" in src   # the folded constants
+    c = emit_c(files, passing, space)
+    assert "(n + 6)" in c and "(i < 7)" in c and "(acc + 2)" in c
+
+
+def test_comptime_rejects_runtime_op(tmp_path):
+    with pytest.raises(ComptimeErr):           # load is a runtime op — the fold pass rejects it
+        frontend(tmp_path, """
 extern malloc = (n: i64) RawPtr<u8>
 pub bad = () u8 { comptime(load(malloc(1))) }
 """)
-    with pytest.raises(ComptimeErr):           # load is a runtime op — can't comptime it
-        emit_c(files, passing, space)
 
 
 def test_comptime_infinite_loop_is_fueled(tmp_path):
-    files, space, passing = frontend(tmp_path, """
+    with pytest.raises(ComptimeErr):           # runs out of fuel instead of hanging
+        frontend(tmp_path, """
 pub spin = (n: i32) i32 { spin(n) }
 pub bad  = () i32 { comptime(spin(1)) }
 """)
-    with pytest.raises(ComptimeErr):           # runs out of fuel instead of hanging
-        emit_c(files, passing, space)

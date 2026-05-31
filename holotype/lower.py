@@ -6,7 +6,6 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
                   Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, Assign, While,
                   EnumCtor, Match)
 from .types import infer, subst, solve_call, match_type, TraitMethod
-from .comptime import evaluate
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void"}
@@ -112,13 +111,6 @@ def _c_call(e, locals_, space, scope) -> str:
         if e.callee == "store":
             return f"(*({a[0]}) = {a[1]})"
         return f"(({a[0]}) + ({a[1]}))"                    # offset
-    if e.callee == "comptime":                            # evaluate now, emit the constant
-        v = evaluate(e.args[0], space, scope)
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, int):
-            return str(v)
-        raise NotImplementedError(f"comptime value {v!r} is not yet lowerable")
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                 # resolve to the concrete impl fn
         s: dict = {}
