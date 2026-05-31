@@ -32,6 +32,12 @@ where it's headed, [VISION](VISION.md).)
   `loop((h) { … })` is iterless and handle-driven; the handle does `h.break()` / `h.continue()`.
   It desugars onto the **`@while(cond) { … }`** structured primitive, which lowers to a C `for`
   (kept structured so it stays auto-vectorizable — never gotos).
+- **Closures-as-values** — a function with a closure-typed parameter `f: (A, B) C` is an
+  *inline template*: it is never emitted as a standalone C function. Each call splices the
+  body as a GNU statement-expression with the closure argument `(a, x) { … }` inlined where the
+  parameter is called. **Zero-cost** (no function pointers), captures resolve in the caller's
+  scope so they read *and* mutate as written, and the C stays clean under `-Wall -Wextra -Werror`.
+  So `fold`/`each` are ordinary Zen on top of `loop` — `fold(xs, 0, (a, x) { a + x })`.
 - **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
@@ -75,10 +81,9 @@ driven by a `build.zen` written in the language itself. Ill-typed functions are 
 excluded from codegen; the rest builds and runs.
 
 ## Not yet (the honest gaps)
-- No `map`/`fold`/`filter` yet — they need **closures-as-values** (zero-cost: monomorphized +
-  inlined), then they're ordinary Zen on top of `loop`. No `Loopable` trait yet either (only
-  slices have `.loop`, not user structs). No modules beyond files, or first-class **runtime**
-  strings.
+- `fold`/`each` work (closures-as-values landed); `map`/`filter` still need allocation (they
+  produce a new collection). No `Loopable` trait yet either (only slices have `.loop`, not user
+  structs). No modules beyond files, or first-class **runtime** strings.
 - Generators aren't **type-checked against the Zen `Ast`** — they run comptime-dynamically.
 - Trait reflection is single-method only, and assumes a `(Self) i32` shape (no full
   method-signature reflection yet).

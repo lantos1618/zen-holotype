@@ -2,9 +2,9 @@
 direction -> const, Option -> a plain pointer (nullability already enforced upstream).
 """
 from __future__ import annotations
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, Struct, EnumDecl, Fn,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, FnT, Struct, EnumDecl, Fn,
                   Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
-                  Let, Assign, While, EnumCtor, Match)
+                  Let, Assign, While, EnumCtor, Match, Closure)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
@@ -52,7 +52,15 @@ def impl_cname(trait_path, type_path, method) -> str:
     return f"impl_{c_name(trait_path)}_{c_name(type_path)}_{method}"
 
 
+def is_template(d) -> bool:
+    """A function with a closure (FnT) parameter — never a standalone C function;
+    inlined at each call site (see _c_inline_template)."""
+    return isinstance(d, Fn) and any(isinstance(p.type, FnT) for p in d.params)
+
+
 def c_type(t) -> str:
+    if isinstance(t, FnT):
+        raise TypeError("a closure type has no C representation — it is always inlined")
     if isinstance(t, TVar):
         raise TypeError(f"un-monomorphized type variable {t.name} reached codegen")
     if isinstance(t, PrimT):
@@ -124,8 +132,93 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
             if method in ("break", "continue"):
                 return method                                # `h.break();` -> `break;`
             return "0"
+        case Closure():
+            raise TypeError("a closure may only be passed to a closure parameter (it is inlined there)")
         case _:
             return "0"
+
+
+# ── closures: an inline template + a per-site closure environment ────────────
+# A template (fn with FnT params) is never a C function. Each call lowers to a GNU
+# statement-expression `({ … })` splicing the body: value params bound to the arg
+# exprs, calls to a closure param inlined as nested `({ … })`. Every binding goes
+# through a fresh temp first (`T _v = (arg); T name = _v;`) so an arg that mentions
+# `name` reads the OUTER value, never the half-initialised inner one (C self-init).
+# Captures stay bare Vars and resolve in the caller scope, where the whole thing
+# sits — so they read AND mutate exactly as written. _CENV is the active closure
+# params; non-reentrant (v1 forbids a template calling a template).
+_CENV: dict = {}
+_MISSING = object()
+
+
+def _tmp(e, i) -> str:
+    return f"_v{abs(id(e))}_{i}"
+
+
+def _c_inline_body(stmts, locals_, space, scope, ret) -> str:
+    """Lower a body as the inside of a statement-expression: the final expression
+    is the produced VALUE (a bare `expr;`, not a `return`)."""
+    locals_ = dict(locals_)
+    is_void = isinstance(ret, PrimT) and ret.prim is Prim.VOID
+    out, last = [], len(stmts) - 1
+    for i, s in enumerate(stmts):
+        if isinstance(s, (Let, Assign, While)):
+            out.append(c_stmt(s, locals_, space, scope))
+        elif isinstance(s, Match) and not (i == last and not is_void):
+            out.append(c_match_stmt(s, locals_, space, scope))
+        elif i == last and not is_void:
+            out.append(f"{c_expr(s, locals_, space, scope, ret)};")
+        else:
+            out.append(f"{c_expr(s, locals_, space, scope)};")
+    return " ".join(out)
+
+
+def _bindings(e, names_types_args, locals_, space, scope) -> str:
+    """`T _v0 = (arg0); T name0 = _v0; …` — temp-first so a self-named arg is safe."""
+    pre, binds = [], []
+    for i, (name, pt, arg) in enumerate(names_types_args):
+        ct, u = c_type(pt), _tmp(e, i)
+        pre.append(f"{ct} {u} = ({c_expr(arg, locals_, space, scope, pt)});")
+        binds.append(f"{ct} {name} = {u};")
+    return " ".join(pre + binds)
+
+
+def _c_inline_template(e, tmpl, locals_, space, scope) -> str:
+    s: dict = {}
+    for a, p in zip(e.args, tmpl.params):                 # solve type-args from the value args
+        if not isinstance(p.type, FnT):
+            match_type(p.type, infer(a, locals_, space, scope), s)
+    binds, blocals, frame = [], dict(locals_), {}
+    for a, p in zip(e.args, tmpl.params):
+        if isinstance(p.type, FnT):                       # closure arg: record for its calls
+            fnt = subst(p.type, s)
+            frame[p.name] = (a, fnt, locals_, scope)
+            blocals[p.name] = fnt                         # so infer() can type `f(…)` in the body
+        else:
+            pt = subst(p.type, s)
+            binds.append((p.name, pt, a))
+            blocals[p.name] = pt
+    head = _bindings(e, binds, locals_, space, scope)
+    saved = {k: _CENV.get(k, _MISSING) for k in frame}
+    _CENV.update(frame)
+    try:
+        body = _c_inline_body(tmpl.body, blocals, space, tmpl.scope or scope, subst(tmpl.ret, s))
+    finally:
+        for k, v in saved.items():
+            _CENV.pop(k, None) if v is _MISSING else _CENV.__setitem__(k, v)
+    return f"({{ {head} {body} }})"
+
+
+def _c_inline_closure(e, locals_, space, scope) -> str:
+    clos, fnt, csite_locals, csite_scope = _CENV[e.callee]
+    cl = dict(csite_locals)                               # the closure body sees its capture site…
+    binds = []
+    for a, pname, pt in zip(e.args, clos.params, fnt.params):
+        binds.append((pname, pt, a))                      # …args lowered in the CURRENT (template) scope
+        cl[pname] = pt
+    head = _bindings(e, [(n, t, a) for n, t, a in binds], locals_, space, scope)
+    body = _c_inline_body(clos.body, cl, space, csite_scope, fnt.ret)
+    return f"({{ {head} {body} }})"
 
 
 def _c_call(e, locals_, space, scope) -> str:
@@ -138,6 +231,8 @@ def _c_call(e, locals_, space, scope) -> str:
         if e.callee == "store":
             return f"(*({a[0]}) = {a[1]})"
         return f"(({a[0]}) + ({a[1]}))"                    # offset
+    if e.callee in _CENV:                                  # calling a closure param -> inline it
+        return _c_inline_closure(e, locals_, space, scope)
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                 # resolve to the concrete impl fn
         s: dict = {}
@@ -148,6 +243,8 @@ def _c_call(e, locals_, space, scope) -> str:
     else:
         callee = space.walk(target).value
         assert isinstance(callee, Fn)                   # a callee path always names a function
+        if is_template(callee):                         # a closure-taking fn -> inline it here
+            return _c_inline_template(e, callee, locals_, space, scope)
         if callee.tparams:                              # generic: name the monomorphized instance
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
             cn = inst_name(target, tuple(s[n] for n in callee.tparams))

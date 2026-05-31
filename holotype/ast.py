@@ -60,6 +60,16 @@ class SliceT:
     elem: Type
 
 
+@dataclass(frozen=True)
+class FnT:
+    """A closure/function type — `(A, T) A`. Only ever a parameter type: a function
+    that takes one is an *inline template* (monomorphized + inlined per call site,
+    never a C function pointer). So `FnT` has no runtime C type — it reaches lower.py
+    only to be recognised, never emitted."""
+    params: tuple = ()        # tuple[Type, ...]
+    ret: "Type | None" = None  # always set in practice (a function type has a result)
+
+
 # ───────────────────────── expressions ──────────────────────────────────────
 # `pos` is the (row, col) of the node in source, set by the parser. It's excluded
 # from equality/repr so it never affects type comparisons — purely for diagnostics.
@@ -187,6 +197,17 @@ class Loop:
 
 
 @dataclass(frozen=True)
+class Closure:
+    # an anonymous function value `(a, x) { a + x }` — only ever a call argument to
+    # a template's FnT param. Params get their types from the expected FnT (no
+    # annotations); free variables are captured from the enclosing scope. It is
+    # inlined at the call site, so captures (read AND mutate) just resolve there.
+    params: tuple = ()        # tuple[str] — parameter names
+    body: tuple = ()          # tuple[stmt]
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
 class Arm:
     variant: str | None       # ctor variant name (None for a literal/wildcard arm)
     binding: str | None       # payload binding, e.g. the `v` of .Some(v)
@@ -293,6 +314,6 @@ class File:
 # ───────────────────────── the closed unions ────────────────────────────────
 # The structural type space and the expression grammar, named so the checker's
 # annotations document exactly which nodes are legal (and mypy can check them).
-Type = PrimT | NameT | PtrT | TVar
+Type = PrimT | NameT | PtrT | TVar | SliceT | FnT
 Expr = (Lit | Bool | Var | Field | Bin | Not | Call | Str | StructLit
-        | MethodCall | EnumCtor | Let | Match)
+        | MethodCall | EnumCtor | Let | Match | Closure)

@@ -6,10 +6,10 @@ The grammar lives in tree-sitter-zen/; its C parser is compiled to build/zen.so.
 from __future__ import annotations
 import warnings, pathlib
 from tree_sitter import Language, Parser
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, SliceT, Field_, Struct, Variant,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, SliceT, FnT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
                   Emit, Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, SliceLit,
-                  Index, MethodCall, EnumCtor, Let, Assign, While, Loop, Arm, Match)
+                  Index, MethodCall, EnumCtor, Let, Assign, While, Loop, Arm, Match, Closure)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -17,7 +17,7 @@ _GRAMMAR = _ROOT / "tree-sitter-zen"
 
 _PRIM = {p.value: p for p in Prim}
 _DIR  = {d.value: d for d in Dir}
-_TYPES = {"primitive", "pointer", "slice_type", "named_type"}
+_TYPES = {"primitive", "pointer", "slice_type", "fn_type", "named_type"}
 
 
 def _language():
@@ -56,6 +56,10 @@ def _type(n):
         return PtrT(_DIR[_t(_field(n, "dir"))], _type(_field(n, "pointee")))
     if n.type == "slice_type":
         return SliceT(_type(_field(n, "elem")))
+    if n.type == "fn_type":                              # (A, T) Ret — a closure type
+        ret = _field(n, "ret")
+        params = tuple(_type(c) for c in _named(n) if c.type in _TYPES and c != ret)
+        return FnT(params, _type(ret))
     if n.type == "named_type":
         args = tuple(_type(c) for c in _named(n) if c.type in _TYPES)
         return NameT(_t(_field(n, "name")), args)
@@ -107,6 +111,10 @@ def _expr_inner(n):
     if t == "match":
         return Match(_expr(_field(n, "subject")), tuple(_arm(a) for a in _named(n)
                                                         if a.type == "match_arm"))
+    if t == "closure":                          # (a, x) { a + x } — an inlined function value
+        params = tuple(_t(p) for p in n.children_by_field_name("params") if p.type == "identifier")
+        body = tuple(_stmt(s) for s in _named(_field(n, "body")))
+        return Closure(params, body)
     raise ValueError(f"unhandled expr node: {t}")
 
 

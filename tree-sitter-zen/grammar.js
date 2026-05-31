@@ -13,7 +13,7 @@ module.exports = grammar({
 
   // loop(EXPR, (h,i){…}) vs loop((h){…}): after `loop(`, a `(` could begin the
   // count expression or the param group — GLR forks and the valid parse wins.
-  conflicts: $ => [[$.loop_, $._primary]],
+  conflicts: $ => [[$.loop_, $._primary, $.closure], [$._primary, $.closure]],
 
   rules: {
     source_file: $ => repeat($._item),
@@ -71,7 +71,10 @@ module.exports = grammar({
                        optional(field('ret', $._type)), field('body', $.block)),
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
-    _type: $ => choice($.primitive, $.pointer, $.slice_type, $.named_type),
+    _type: $ => choice($.primitive, $.pointer, $.slice_type, $.fn_type, $.named_type),
+    // (A, T) A — a closure/function type. Only meaningful as a parameter: the fn
+    // taking it is an inline template (monomorphized + inlined, no fn pointers).
+    fn_type: $ => seq('(', optional(comma1($._type)), ')', field('ret', $._type)),
     primitive: $ => choice('i32', 'i64', 'u8', 'bool', 'void', 'str'),
     pointer: $ => seq(field('dir', choice('Ptr', 'MutPtr', 'RawPtr')),
                       '<', field('pointee', $._type), '>'),
@@ -116,8 +119,12 @@ module.exports = grammar({
     // xs[i] — the `[` must be glued (token.immediate), so a statement-leading
     // `[a,b,c]` slice literal is never absorbed as an index of the previous line.
     index: $ => prec.left(4, seq(field('seq', $._unary), token.immediate('['), field('idx', $._expression), ']')),
-    _primary: $ => choice($.parenthesized, $.match, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.boolean, $.string, $.identifier),
+    _primary: $ => choice($.parenthesized, $.closure, $.match, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.boolean, $.string, $.identifier),
     slice_literal: $ => seq('[', optional(seq(comma1($._expression), optional(','))), ']'),  // [a, b, c]
+    // (a, x) { a + x } — a closure value; the trailing block is what tells it apart
+    // from a parenthesized expression (GLR forks, the one with a `{` body wins).
+    closure: $ => seq('(', optional(field('params', seq($.identifier, repeat(seq(',', $.identifier))))), ')',
+                      field('body', $.block)),
 
     // match subject { .Variant(x) => expr, .Other => expr, _ => expr }
     // The subject is a restricted expression so the `{` can't be mistaken for a
