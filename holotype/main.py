@@ -177,14 +177,15 @@ def _check_impl(d, f, space, results, passing):
 # ───────────────────────── monomorphization ─────────────────────────────────
 class _Sink:
     """Three collectors the scanner feeds: generic-fn instances, trait-impl uses,
-    and generic-struct instances."""
-    __slots__ = ("fn", "impl", "struct")
+    and generic data-type instances (structs + enums). `expect` threads through
+    exactly like in c_expr, so an enum ctor knows which enum instance it builds."""
+    __slots__ = ("fn", "impl", "data")
 
-    def __init__(self, fn, impl, struct):
-        self.fn, self.impl, self.struct = fn, impl, struct
+    def __init__(self, fn, impl, data):
+        self.fn, self.impl, self.data = fn, impl, data
 
 
-def _scan_expr(e, locals_, space, scope, sink):
+def _scan_expr(e, locals_, space, scope, sink, expect=None):
     """Walk an expression, feeding every monomorphization site to `sink`."""
     if isinstance(e, Bin):
         _scan_expr(e.l, locals_, space, scope, sink)
@@ -194,20 +195,28 @@ def _scan_expr(e, locals_, space, scope, sink):
     elif isinstance(e, Field):
         _scan_expr(e.obj, locals_, space, scope, sink)
     elif isinstance(e, StructLit):
-        for _, v in e.fields:
-            _scan_expr(v, locals_, space, scope, sink)
-        st = infer(e, locals_, space, scope)             # record AFTER children (inner-first)
-        if space.walk(st.path).value.tparams:
-            sink.struct(st.path, st.args)
+        st = infer(e, locals_, space, scope)
+        decl = space.walk(st.path).value
+        sub = dict(zip(decl.tparams, st.args))
+        ftypes = {fl.name: subst(fl.type, sub) for fl in decl.fields}
+        for n, v in e.fields:                            # children first (inner-first emit order)
+            _scan_expr(v, locals_, space, scope, sink, ftypes[n])
+        if decl.tparams:
+            sink.data(st.path, st.args)
     elif isinstance(e, EnumCtor):
+        decl = space.walk(expect.path).value             # expect names the enum (generic or not)
+        sub = dict(zip(decl.tparams, expect.args))
+        var = next(v for v in decl.variants if v.name == e.name)
         for a in e.args:
-            _scan_expr(a, locals_, space, scope, sink)
+            _scan_expr(a, locals_, space, scope, sink, subst(var.payload, sub))
+        if decl.tparams:
+            sink.data(expect.path, expect.args)
     elif isinstance(e, Match):
         _scan_expr(e.subject, locals_, space, scope, sink)
         st = infer(e.subject, locals_, space, scope)
         if isinstance(st, PrimT):                         # literal match: arms bind nothing
             for arm in e.arms:
-                _scan_expr(arm.body, locals_, space, scope, sink)
+                _scan_expr(arm.body, locals_, space, scope, sink, expect)
             return
         decl = space.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
@@ -216,34 +225,42 @@ def _scan_expr(e, locals_, space, scope, sink):
             al = locals_
             if arm.variant is not None and arm.binding is not None:
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
-            _scan_expr(arm.body, al, space, scope, sink)
+            _scan_expr(arm.body, al, space, scope, sink, expect)
     elif isinstance(e, Call):
-        for a in e.args:
-            _scan_expr(a, locals_, space, scope, sink)
         if e.callee == "addr":
+            _scan_expr(e.args[0], locals_, space, scope, sink)
             return
         target = scope.get(e.callee)
         if isinstance(target, TraitMethod):              # resolve concrete Self -> impl used
             s = {}
             for p, a in zip(target.sig.params, e.args):
                 match_type(p, infer(a, locals_, space, scope), s)
+            ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
+            for a, pt in zip(e.args, ptypes):
+                _scan_expr(a, locals_, space, scope, sink, pt)
             if isinstance(s.get("Self"), NameT):
                 sink.impl(target.trait, s["Self"].path)
             return
         callee = space.walk(target).value
         if isinstance(callee, Fn) and callee.tparams:
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
+            ptypes = [subst(p.type, s) for p in callee.params]
             sink.fn(target, tuple(s[n] for n in callee.tparams))
+        else:
+            ptypes = [p.type for p in callee.params]
+        for a, pt in zip(e.args, ptypes):
+            _scan_expr(a, locals_, space, scope, sink, pt)
 
 
-def _scan_block(stmts, locals_, space, scope, sink):
+def _scan_block(stmts, locals_, space, scope, sink, expect=None):
     locals_ = dict(locals_)
-    for s in stmts:
+    last = len(stmts) - 1
+    for i, s in enumerate(stmts):
         if isinstance(s, Let):
             _scan_expr(s.value, locals_, space, scope, sink)
             locals_[s.name] = infer(s.value, locals_, space, scope)
         else:
-            _scan_expr(s, locals_, space, scope, sink)
+            _scan_expr(s, locals_, space, scope, sink, expect if i == last else None)
 
 
 def specialize(fn, s):
@@ -255,11 +272,11 @@ def specialize(fn, s):
 
 def collect_instances(files, passing, space):
     """Reachable from the non-generic passing functions, transitively: every
-    concrete generic-fn instance, trait impl, and generic-struct instance used.
-    -> (fn_insts, impls_used, struct_insts)"""
+    concrete generic-fn instance, trait impl, and generic data-type instance
+    (struct or enum) used. -> (fn_insts, impls_used, data_insts)"""
     decl_scope = {f"{f.ns}.{d.name}": f.scope
                   for f in files.values() for d in f.decls if not isinstance(d, Impl)}
-    insts, impls_used, struct_insts, work = {}, set(), {}, []
+    insts, impls_used, data_insts, work = {}, set(), {}, []
 
     def add(qual, targs):
         if (qual, targs) in insts:
@@ -277,19 +294,19 @@ def collect_instances(files, passing, space):
         for mfn, msc in space.impls[(trait_path, type_path)].values():
             work.append((mfn, msc))
 
-    def add_struct(qual, targs):              # inner-first insertion → emit order is valid
-        struct_insts.setdefault((qual, targs), dict(zip(space.walk(qual).value.tparams, targs)))
+    def add_data(qual, targs):                # struct OR enum; inner-first insertion = emit order
+        data_insts.setdefault((qual, targs), dict(zip(space.walk(qual).value.tparams, targs)))
 
-    sink = _Sink(add, add_impl, add_struct)
+    sink = _Sink(add, add_impl, add_data)
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
                 sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
-                _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink)
+                _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink, d.ret)
     while work:
         fn, sc = work.pop()
-        _scan_block(fn.body, {p.name: p.type for p in fn.params}, space, sc, sink)
-    return insts, impls_used, struct_insts
+        _scan_block(fn.body, {p.name: p.type for p in fn.params}, space, sc, sink, fn.ret)
+    return insts, impls_used, data_insts
 
 
 def emit_c(files, passing, space, extra=""):
@@ -301,7 +318,7 @@ def emit_c(files, passing, space, extra=""):
                 raise NotImplementedError(
                     f"cannot lower {type(d).__name__} '{getattr(d, 'name', '?')}' to C yet "
                     f"(codegen supports struct + enum + fn + trait/impl)")
-    insts, impls_used, struct_insts = collect_instances(files, passing, space)
+    insts, impls_used, data_insts = collect_instances(files, passing, space)
     impl_fns = []                                         # the trait methods actually used
     for (tp, ty) in impls_used:
         for m, (mfn, msc) in space.impls[(tp, ty)].items():
@@ -317,8 +334,10 @@ def emit_c(files, passing, space, extra=""):
                 lines.append(c_struct(f"{f.ns}.{d.name}", d))
             elif isinstance(d, EnumDecl) and not d.tparams:
                 lines.append(c_enum(f"{f.ns}.{d.name}", d))
-    for (qual, targs), sub in struct_insts.items():      # monomorphized generic structs
-        lines.append(c_struct(qual, space.walk(qual).value, sub, mangle(NameT(qual, targs))))
+    for (qual, targs), sub in data_insts.items():        # monomorphized generic structs + enums
+        decl = space.walk(qual).value
+        lower = c_struct if isinstance(decl, Struct) else c_enum
+        lines.append(lower(qual, decl, sub, mangle(NameT(qual, targs))))
     lines.append("")
     for f in files.values():                             # prototypes: concrete fns…
         for d in f.decls:

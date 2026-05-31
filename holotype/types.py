@@ -344,16 +344,18 @@ def infer_enum_ctor(e, expect, locals_, space, scope):
     var = next((v for v in decl.variants if v.name == e.name), None)
     if var is None:
         raise TypeErr(f"enum {expect.path} has no variant '.{e.name}'")
+    sub = dict(zip(decl.tparams, expect.args))       # generic enum: T -> the instantiation's arg
     if var.payload is None:
         if e.args:
             raise TypeErr(f"variant '.{e.name}' takes no payload")
     else:
         if len(e.args) != 1:
             raise TypeErr(f"variant '.{e.name}' takes one payload value")
-        given = infer(e.args[0], locals_, space, scope, var.payload)
-        if not fits(given, var.payload):
-            raise TypeErr("enum payload", given, var.payload)
-    return NameT(expect.path, ())
+        want = subst(var.payload, sub)
+        given = infer(e.args[0], locals_, space, scope, want)
+        if not fits(given, want):
+            raise TypeErr("enum payload", given, want)
+    return NameT(expect.path, expect.args)           # preserve the type-args (Opt<i32>, not Opt<>)
 
 
 def infer_match(e, expect, locals_, space, scope):

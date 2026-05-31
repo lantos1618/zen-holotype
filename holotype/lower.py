@@ -83,11 +83,13 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
                               for n, v in e.fields)
             return f"({c_type(st)}){{ {inits} }}"               # C99 compound literal
         case EnumCtor():
-            cn = c_name(expect.path)                            # expect names the enum
-            var = next(v for v in space.walk(expect.path).value.variants if v.name == e.name)
+            decl = space.walk(expect.path).value                # expect names the enum (+ its args)
+            cn = c_type(expect)                                 # mangled instance name if generic
+            sub = dict(zip(decl.tparams, expect.args))
+            var = next(v for v in decl.variants if v.name == e.name)
             if var.payload is None:
                 return f"({cn}){{ .tag = {cn}_{e.name} }}"
-            inner = c_expr(e.args[0], locals_, space, scope, var.payload)
+            inner = c_expr(e.args[0], locals_, space, scope, subst(var.payload, sub))
             return f"({cn}){{ .tag = {cn}_{e.name}, .u.{e.name} = {inner} }}"
         case Match():
             return c_match(e, locals_, space, scope, expect)
@@ -144,7 +146,7 @@ def c_match(e, locals_, space, scope, expect) -> str:
 
     decl = space.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
-    cn = c_name(st.path)
+    cn = c_type(st)                                     # mangled instance name if a generic enum
     variants = {v.name: v for v in decl.variants}
 
     def clause(arm):
@@ -173,11 +175,13 @@ def c_struct(qual, d: Struct, sub=None, cname=None) -> str:
     return f"typedef struct {{ {body} }} {cname or c_name(qual)};"
 
 
-def c_enum(qual, d: EnumDecl) -> str:
+def c_enum(qual, d: EnumDecl, sub=None, cname=None) -> str:
     """A tagged union: an int tag plus a union of the payload-carrying variants.
-    Tag constants <Enum>_<Variant> take their declaration order (0, 1, 2, …)."""
-    cn = c_name(qual)
-    members = " ".join(f"{c_type(v.payload)} {v.name};"
+    Tag constants <Enum>_<Variant> take their declaration order (0, 1, 2, …).
+    `sub`/`cname` monomorphize a generic enum instance (Opt<i32> -> Opt_i32)."""
+    sub = sub or {}
+    cn = cname or c_name(qual)
+    members = " ".join(f"{c_type(subst(v.payload, sub))} {v.name};"
                        for v in d.variants if v.payload is not None)
     union = f" union {{ {members} }} u;" if members else ""
     tags = ", ".join(f"{cn}_{v.name}" for v in d.variants)

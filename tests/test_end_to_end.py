@@ -310,6 +310,32 @@ def test_void_main_harness(tmp_path):
     assert "main_main();" in c and "printf" not in c.split("int main(void)")[1]
 
 
+# ── Generic enums monomorphize and run ──────────────────────────────────────
+def test_generic_enum_monomorphizes(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Opt<T>: None, Some(T)\n"
+        "pub some_i = (n: i32) Opt<i32> { .Some(n) }\n"
+        "pub get = (o: Opt<i32>) i32 { match o { .None => 0, .Some(v) => v } }\n"
+        "pub main = () i32 { get(some_i(42)) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "union { int32_t Some; } u; } main_Opt_i32;" in c          # the instance struct
+    assert "main_Opt_i32){ .tag = main_Opt_i32_Some" in c             # ctor uses the instance name
+    harness = ("\n#include <stdio.h>\nint main(void){ "
+               "printf(\"%d\\n\", main_main()); return 0; }\n")
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + harness)
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "42"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(
