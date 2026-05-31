@@ -161,7 +161,8 @@ Tests (the lattice is the whole safety argument, so it's the most-covered part):
 
 ```sh
 pip install -r requirements-dev.txt    # adds pytest
-python3 -m pytest                       # 49 cases: fits() lattice, infer(), trie, parser, build
+python3 -m pytest                       # fits() lattice + laws, infer(), trie, parser,
+                                        # Zen //~ PASS/FAIL fixtures, end-to-end build
 ```
 
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
@@ -190,16 +191,25 @@ vecdemo -> 12
 | `holotype/types.py`  | the trie + `fits()` pointer lattice + `infer()` (the one type space) |
 | `holotype/lower.py`  | transcribe to C (the type system erases here) |
 | `holotype/main.py`   | driver + `build.zen` interpreter |
-| `tests/`             | pytest suite — `fits()` lattice, `infer()`, trie, parser, end-to-end build |
+| `tests/`             | pytest suite — `fits()` lattice + laws, `infer()`, trie, parser, end-to-end build |
+| `tests/cases/*.zen`  | type-checker tests written **in Zen** — inline `//~ PASS`/`//~ FAIL` verdicts |
 
 (`ast.py` and `types.py` are safe as classic names because they live in a package —
 stdlib `import ast` / `import types` still resolve to the real ones.)
 
 The front end is a real **tree-sitter** grammar — a method call is just a `call`
-whose callee is a field access, so there's no special rule for it. It's still a
-subset of Zen (no `::=`, pattern matching, or generics-with-params yet). The point
-is to test the type idea, not to write a parser — which is exactly why the parser is
-someone else's grammar generator rather than hand-rolled.
+whose callee is a field access, so there's no special rule for it. The language
+now covers structs, **user enums** (lowered to C tagged unions, ctor `.Variant(x)`
+type-checked against the expected type), `Ptr/MutPtr/RawPtr` and `Option`,
+`i32`/`i64`/`bool` with `i32→i64` widening, `==`, `x := v` let-bindings and
+multi-statement bodies. Still a subset of Zen (no `::=`, pattern matching, or
+generics-with-params yet) — the point is to test the type idea, not to write a
+parser, which is exactly why the parser is someone else's grammar generator
+rather than hand-rolled.
+
+`build.zen` can declare a `Test { root: "test.zen" }`; `holotype build` then
+compiles that root with the project and runs each no-arg `bool` test, printing
+PASS/FAIL (SKIP if it doesn't type-check).
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight
 into typed objects, hook-based) and the syntax of
