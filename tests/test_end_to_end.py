@@ -166,6 +166,39 @@ def test_match_lowers_and_runs(tmp_path):
     assert run.stdout.strip() == "7"
 
 
+# ── A used but ill-typed trait impl is refused loudly (not silently emitted) ─
+def test_used_illtyped_impl_refused(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Box<T>: { val: T }\n"
+        "trait Score { score: (Ptr<Self>) i32 }\n"
+        "impl Score for Box { score = (b: Ptr<Box>) i32 { b.val } }\n"   # b.val : T ⊀ i32
+        "pub total<T: Score> = (x: Ptr<T>) i32 { score(x) }\n"
+        "pub main = () i32 { total(addr(Box { val: 9 })) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    with pytest.raises(NotImplementedError) as ei:
+        emit_c(files, passing, space)
+    assert "did not type-check" in str(ei.value) and "score" in str(ei.value)
+
+
+def test_unused_illtyped_impl_still_builds(tmp_path):
+    # the same bad impl, but never used — the rest of the program still compiles
+    (tmp_path / "main.zen").write_text(
+        "pub Box<T>: { val: T }\n"
+        "trait Score { score: (Ptr<Self>) i32 }\n"
+        "impl Score for Box { score = (b: Ptr<Box>) i32 { b.val } }\n"
+        "pub main = () i32 { 42 }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    assert "main_main(void) { return 42; }" in emit_c(files, passing, space)
+
+
 # ── Traits: a bounded generic dispatches to the impl, compiles, and runs ────
 def test_trait_dispatch_runs(tmp_path):
     (tmp_path / "main.zen").write_text(

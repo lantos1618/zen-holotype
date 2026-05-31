@@ -144,6 +144,7 @@ def check(files, space):
     space.fn_scope = {f"{f.ns}.{d.name}": (trait_methods_scope(d, f.scope, space) if d.bounds else f.scope)
                       for f in files.values() for d in f.decls if isinstance(d, Fn)}
     space._inferring = set()
+    space.impl_pass = set()          # (trait_path, type_path, method) that type-checked
 
     results, passing = [], set()
     for f in files.values():
@@ -173,6 +174,8 @@ def _check_impl(d, f, space, results, passing):
         if got_params != want_params or m.ret != subst(sig.ret, self_sub):
             results.append((tag, False, "signature does not match the trait")); continue
         _check_fn(tag, f.ns, m, f.scope, space, results, passing)
+        if tag in passing:
+            space.impl_pass.add((trait_path, type_path, m.name))
     missing = [name for name in sigs if name not in {m.name for m in d.methods}]
     if missing:
         results.append((f"{d.trait} for {d.type}", False,
@@ -307,9 +310,13 @@ def emit_c(files, passing, space, extra=""):
                     f"cannot lower {type(d).__name__} '{getattr(d, 'name', '?')}' to C yet "
                     f"(codegen supports struct + enum + fn + trait/impl)")
     insts, impls_used, struct_insts = collect_instances(files, passing, space)
-    impl_fns = [(impl_cname(tp, ty, m), mfn, msc)         # the trait methods actually used
-                for (tp, ty) in impls_used
-                for m, (mfn, msc) in space.impls[(tp, ty)].items()]
+    impl_fns = []                                         # the trait methods actually used
+    for (tp, ty) in impls_used:
+        for m, (mfn, msc) in space.impls[(tp, ty)].items():
+            if (tp, ty, m) not in space.impl_pass:        # used but ill-typed -> refuse loudly
+                raise NotImplementedError(
+                    f"trait impl {ty.rsplit('.', 1)[-1]}::{m} is used but did not type-check")
+            impl_fns.append((impl_cname(tp, ty, m), mfn, msc))
 
     lines = ["#include <stdint.h>", "#include <stdbool.h>", ""]
     for f in files.values():                             # types (generic templates emit nothing)
