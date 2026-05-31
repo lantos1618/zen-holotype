@@ -11,7 +11,7 @@ def only(decls, kind):
 
 
 def test_parse_struct():
-    f = parse("pub Vec: { len: i32, cap: i32 }", "core.vec")
+    f = parse("Vec*: { len: i32, cap: i32 }", "core.vec")
     s = only(f.decls, Struct)
     assert s.name == "Vec" and s.pub
     assert [(fl.name, fl.type) for fl in s.fields] == \
@@ -19,7 +19,7 @@ def test_parse_struct():
 
 
 def test_parse_pointer_directions():
-    f = parse("pub g = (a: Ptr<Vec>, b: MutPtr<Vec>, c: RawPtr<Vec>) i32 { 0 }", "m")
+    f = parse("g* = (a: Ptr<Vec>, b: MutPtr<Vec>, c: RawPtr<Vec>) i32 { 0 }", "m")
     fn = only(f.decls, Fn)
     dirs = [p.type.dir for p in fn.params]
     assert dirs == [Dir.READ, Dir.MUT, Dir.RAW]
@@ -27,7 +27,7 @@ def test_parse_pointer_directions():
 
 
 def test_parse_option_named_type():
-    f = parse("pub g = (a: Option<Ptr<Vec>>) i32 { 0 }", "m")
+    f = parse("g* = (a: Option<Ptr<Vec>>) i32 { 0 }", "m")
     t = only(f.decls, Fn).params[0].type
     assert isinstance(t, NameT) and t.path == "Option"
     assert isinstance(t.args[0], PtrT)
@@ -41,7 +41,7 @@ def test_parse_import():
 
 
 def test_parse_call_and_field_and_binary():
-    f = parse("pub area = (v: Ptr<Vec>) i32 { len(v) * v.cap }", "m")
+    f = parse("area* = (v: Ptr<Vec>) i32 { len(v) * v.cap }", "m")
     body = only(f.decls, Fn).body[-1]
     assert isinstance(body, Bin) and body.op == "*"
     assert isinstance(body.l, Call) and body.l.callee == "len"
@@ -49,7 +49,7 @@ def test_parse_call_and_field_and_binary():
 
 
 def test_parse_struct_literal_and_addr():
-    f = parse("pub m = () i32 { area(addr(Vec { len: 3, cap: 4 })) }", "m")
+    f = parse("m* = () i32 { area(addr(Vec { len: 3, cap: 4 })) }", "m")
     call = only(f.decls, Fn).body[-1]
     assert isinstance(call, Call) and call.callee == "area"
     addr = call.args[0]
@@ -59,7 +59,7 @@ def test_parse_struct_literal_and_addr():
 
 def test_method_call_is_just_a_call_on_a_field_access():
     # a method call has no special grammar rule — it's call-of-field-access.
-    f = parse('pub build = (b: Ptr<Vec>) i32 { b.add(Vec { len: 1, cap: 2 }) }', "m")
+    f = parse('build* = (b: Ptr<Vec>) i32 { b.add(Vec { len: 1, cap: 2 }) }', "m")
     body = only(f.decls, Fn).body[-1]
     assert isinstance(body, MethodCall)
     assert body.method == "add" and isinstance(body.recv, Var)
@@ -68,14 +68,14 @@ def test_method_call_is_just_a_call_on_a_field_access():
 # ── F2: parse errors carry ns:line:col ──────────────────────────────────────
 def test_parse_error_is_located():
     with pytest.raises(SyntaxError) as ei:
-        parse("pub Vec: { len: i32, cap: }", "core.vec")   # missing field type
+        parse("Vec*: { len: i32, cap: }", "core.vec")   # missing field type
     msg = str(ei.value)
     assert msg.startswith("core.vec:")
     assert "parse error" in msg
 
 
 def test_parse_error_reports_line_number():
-    src = "pub a = () i32 { 0 }\npub Vec: { x: }"           # error on line 2
+    src = "a* = () i32 { 0 }\nVec*: { x: }"              # error on line 2 (field with no type)
     with pytest.raises(SyntaxError) as ei:
         parse(src, "m")
     assert str(ei.value).startswith("m:2:")

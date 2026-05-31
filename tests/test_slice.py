@@ -29,8 +29,8 @@ def run(tmp_path, c, entry="main"):
 
 def test_slice_literal_index_and_param(tmp_path):
     results, _, c = build(tmp_path, """
-pub at0 = (xs: [i32]) i32 { xs[0] }
-pub main = () i32 {
+at0* = (xs: [i32]) i32 { xs[0] }
+main* = () i32 {
     ys := [10, 20, 30]
     ys[0] + ys[2] + at0(ys)
 }
@@ -44,7 +44,7 @@ pub main = () i32 {
 
 def test_element_loop_prefix(tmp_path):
     results, _, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     sum := 0
     loop([10, 20, 30], (h, i, x) { sum = sum + x })
     sum
@@ -59,7 +59,7 @@ pub main = () i32 {
 def test_element_loop_postfix(tmp_path):
     # [1,2,3].loop(...) is identical to loop([1,2,3], ...)
     results, _, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     sum := 0
     [10, 20, 30].loop((h, i, x) { sum = sum + x })
     sum
@@ -71,7 +71,7 @@ pub main = () i32 {
 
 def test_index_with_the_loop_index(tmp_path):
     results, _, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     xs := [3, 5, 7, 9]
     acc := 0
     loop(xs, (h, i, x) { acc = acc + xs[i] })     // index back into the slice
@@ -84,7 +84,7 @@ pub main = () i32 {
 def test_element_type_is_checked(tmp_path):
     # the element x has the slice's element type — using it as the wrong type fails
     results, _, _ = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     flags := [true, false, true]
     n := 0
     loop(flags, (h, i, x) { n = n + x })          // x : bool, n : i32  -> mismatch
@@ -97,7 +97,7 @@ pub main = () i32 {
 def test_slice_of_u8_widens_index(tmp_path):
     # element type drives the literals; an i32 literal index reads a u8 slice fine
     results, _, c = build(tmp_path, """
-pub main = () i32 {
+main* = () i32 {
     bs := [1, 2, 3]
     bs[1]
 }
@@ -107,6 +107,6 @@ pub main = () i32 {
 
 def test_heterogeneous_slice_is_rejected(tmp_path):
     results, _, _ = build(tmp_path, """
-pub main = () i32 { xs := [1, true, 3]  0 }
+main* = () i32 { xs := [1, true, 3]  0 }
 """)
     assert any(q == "m.main" and not ok for q, ok, why in results)

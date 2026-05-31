@@ -96,9 +96,9 @@ def test_unlowerable_decl_raises(checked):
 # ── F3: user enums lower to a tagged union that cc accepts ──────────────────
 def test_enum_lowers_to_tagged_union(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Status: Idle, Busy(i32)\n"
-        "pub idle = () Status { .Idle() }\n"
-        "pub busy = (n: i32) Status { .Busy(n) }\n")
+        "Status*: Idle, Busy(i32)\n"
+        "idle* = () Status { .Idle() }\n"
+        "busy* = (n: i32) Status { .Busy(n) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -120,10 +120,10 @@ def test_enum_lowers_to_tagged_union(tmp_path):
 # ── Phase A: generics monomorphize to concrete C that compiles and runs ─────
 def test_generic_fn_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Vec: { len: i32, cap: i32 }\n"
-        "pub id<T> = (x: Ptr<T>) Ptr<T> { x }\n"
-        "pub area = (v: Ptr<Vec>) i32 { id(v).len * id(v).cap }\n"
-        "pub main = () i32 { area(addr(Vec { len: 5, cap: 4 })) }\n")
+        "Vec*: { len: i32, cap: i32 }\n"
+        "id*<T> = (x: Ptr<T>) Ptr<T> { x }\n"
+        "area* = (v: Ptr<Vec>) i32 { id(v).len * id(v).cap }\n"
+        "main* = () i32 { area(addr(Vec { len: 5, cap: 4 })) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -144,9 +144,9 @@ def test_generic_fn_monomorphizes(tmp_path):
 # ── Phase B: match compiles to a tag-switch and runs ────────────────────────
 def test_match_lowers_and_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Status: Idle, Busy(i32)\n"
-        "pub code = (s: Status) i32 { match s { .Idle => 0, .Busy(n) => n } }\n"
-        "pub main = () i32 { code(.Busy(7)) }\n")
+        "Status*: Idle, Busy(i32)\n"
+        "code* = (s: Status) i32 { match s { .Idle => 0, .Busy(n) => n } }\n"
+        "main* = () i32 { code(.Busy(7)) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -170,11 +170,11 @@ def test_match_lowers_and_runs(tmp_path):
 # ── A used but ill-typed trait impl is refused loudly (not silently emitted) ─
 def test_used_illtyped_impl_refused(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Box<T>: { val: T }\n"
+        "Box*<T>: { val: T }\n"
         "trait Score { score: (Ptr<Self>) i32 }\n"
         "impl Score for Box { score = (b: Ptr<Box>) i32 { b.val } }\n"   # b.val : T ⊀ i32
-        "pub total<T: Score> = (x: Ptr<T>) i32 { score(x) }\n"
-        "pub main = () i32 { total(addr(Box { val: 9 })) }\n")
+        "total*<T: Score> = (x: Ptr<T>) i32 { score(x) }\n"
+        "main* = () i32 { total(addr(Box { val: 9 })) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -188,10 +188,10 @@ def test_used_illtyped_impl_refused(tmp_path):
 def test_unused_illtyped_impl_still_builds(tmp_path):
     # the same bad impl, but never used — the rest of the program still compiles
     (tmp_path / "main.zen").write_text(
-        "pub Box<T>: { val: T }\n"
+        "Box*<T>: { val: T }\n"
         "trait Score { score: (Ptr<Self>) i32 }\n"
         "impl Score for Box { score = (b: Ptr<Box>) i32 { b.val } }\n"
-        "pub main = () i32 { 42 }\n")
+        "main* = () i32 { 42 }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -203,11 +203,11 @@ def test_unused_illtyped_impl_still_builds(tmp_path):
 # ── Traits: a bounded generic dispatches to the impl, compiles, and runs ────
 def test_trait_dispatch_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Vec: { len: i32, cap: i32 }\n"
+        "Vec*: { len: i32, cap: i32 }\n"
         "trait Area { area: (Ptr<Self>) i32 }\n"
         "impl Area for Vec { area = (v: Ptr<Vec>) i32 { v.len * v.cap } }\n"
-        "pub total<T: Area> = (x: Ptr<T>) i32 { area(x) }\n"
-        "pub main = () i32 { total(addr(Vec { len: 5, cap: 4 })) }\n")
+        "total*<T: Area> = (x: Ptr<T>) i32 { area(x) }\n"
+        "main* = () i32 { total(addr(Vec { len: 5, cap: 4 })) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -232,9 +232,9 @@ def test_trait_dispatch_runs(tmp_path):
 # ── Turing-complete: integer branching + recursion compiles and computes ────
 def test_recursion_computes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub fact = (n: i32) i32 { match n { 0 => 1, _ => n * fact(n - 1) } }\n"
-        "pub fib = (n: i32) i32 { match n { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
-        "pub main = () i32 { fact(5) + fib(10) }\n")   # 120 + 55 = 175
+        "fact* = (n: i32) i32 { match n { 0 => 1, _ => n * fact(n - 1) } }\n"
+        "fib* = (n: i32) i32 { match n { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
+        "main* = () i32 { fact(5) + fib(10) }\n")   # 120 + 55 = 175
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -258,9 +258,9 @@ def test_recursion_computes(tmp_path):
 # ── Generic data types: a generic struct monomorphizes and runs ─────────────
 def test_generic_struct_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Box<T>: { val: T }\n"
-        "pub unwrap<T> = (b: Ptr<Box<T>>) T { b.val }\n"
-        "pub main = () i32 { unwrap(addr(Box { val: 42 })) }\n")
+        "Box*<T>: { val: T }\n"
+        "unwrap*<T> = (b: Ptr<Box<T>>) T { b.val }\n"
+        "main* = () i32 { unwrap(addr(Box { val: 42 })) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -283,9 +283,9 @@ def test_generic_struct_monomorphizes(tmp_path):
 # ── A match subject with side effects is evaluated exactly once ─────────────
 def test_match_subject_evaluated_once(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Vec: { len: i32, cap: i32 }\n"
-        "pub kind = (v: Ptr<Vec>) i32 { v.len }\n"
-        "pub pick = (v: Ptr<Vec>) i32 { match (kind(v)) { 0 => 10, 1 => 20, _ => 30 } }\n")
+        "Vec*: { len: i32, cap: i32 }\n"
+        "kind* = (v: Ptr<Vec>) i32 { v.len }\n"
+        "pick* = (v: Ptr<Vec>) i32 { match (kind(v)) { 0 => 10, 1 => 20, _ => 30 } }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -303,7 +303,7 @@ def test_void_main_harness(tmp_path):
         'build = (b: Builder) Result<BuildConfig, BuildError> {\n'
         '    b.add(Executable { name: "v", main: "main.zen", out_dir: "build" })\n'
         '    .Ok(b.config())\n}\n')
-    (tmp_path / "main.zen").write_text("pub main = () void { y := 5 }\n")
+    (tmp_path / "main.zen").write_text("main* = () void { y := 5 }\n")
     out = subprocess.run([sys.executable, "-m", "holotype", "build", str(tmp_path)],
                          capture_output=True, text=True, cwd=str(EXAMPLES.parent))
     assert out.returncode == 0, out.stderr           # would fail at cc if it printf'd %d on void
@@ -314,10 +314,10 @@ def test_void_main_harness(tmp_path):
 # ── Generic enums monomorphize and run ──────────────────────────────────────
 def test_generic_enum_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "pub Opt<T>: None, Some(T)\n"
-        "pub some_i = (n: i32) Opt<i32> { .Some(n) }\n"
-        "pub get = (o: Opt<i32>) i32 { match o { .None => 0, .Some(v) => v } }\n"
-        "pub main = () i32 { get(some_i(42)) }\n")
+        "Opt*<T>: None, Some(T)\n"
+        "some_i* = (n: i32) Opt<i32> { .Some(n) }\n"
+        "get* = (o: Opt<i32>) i32 { match o { .None => 0, .Some(v) => v } }\n"
+        "main* = () i32 { get(some_i(42)) }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -343,7 +343,7 @@ def test_extern_ffi_runs(tmp_path):
 extern putchar = (c: i32) i32
 extern malloc  = (n: i64) RawPtr<u8>
 extern free    = (p: RawPtr<u8>) void
-pub main = () i32 {
+main* = () i32 {
     putchar(90) putchar(101) putchar(110) putchar(10)   // Z e n \\n
     free(malloc(64))
     0
@@ -373,7 +373,7 @@ def test_raw_memory_runs(tmp_path):
 extern putchar = (c: i32) i32
 extern malloc  = (n: i64) RawPtr<u8>
 extern free    = (p: RawPtr<u8>) void
-pub main = () i32 {
+main* = () i32 {
     buf := malloc(8)
     store(offset(buf, 0), 72)            // 'H'
     store(offset(buf, 1), 105)           // 'i'
@@ -424,7 +424,7 @@ print_from = (s: Ptr<String>, i: i64) i32 {
     match (i < s.len) { false => putchar(10), true => step(s, i) }
 }
 
-pub main = () i32 {
+main* = () i32 {
     a := Allocator { id: 0 }
     s := build_hi(addr(a))
     print_from(addr(s), 0)
@@ -465,7 +465,7 @@ print_str = (s: Ptr<String>) void {
     loop(s.len, (h, i) { putchar(load(offset(s.ptr, i))) })
     putchar(10)
 }
-pub main = () i32 {
+main* = () i32 {
     s := new_str(16)
     push(addr(s), 72) push(addr(s), 105) push(addr(s), 33)   // H i !
     print_str(addr(s))
@@ -490,7 +490,7 @@ pub main = () i32 {
 
 def test_loop_sums(tmp_path):
     (tmp_path / "main.zen").write_text("""
-pub main = () i32 {
+main* = () i32 {
     sum := 0
     loop(11, (h, i) { sum = sum + i })
     sum
@@ -522,12 +522,12 @@ def test_full_build_runs_and_prints_12():
 
 # ── F5: the test runner reports pass / fail / skip ──────────────────────────
 def test_test_runner_reports_pass_fail_skip(tmp_path, capsys):
-    (tmp_path / "lib.zen").write_text("pub three = () i32 { 3 }\n")
+    (tmp_path / "lib.zen").write_text("three* = () i32 { 3 }\n")
     (tmp_path / "t.zen").write_text(
         "{ three } = lib\n"
-        "pub t_pass = () bool { three() == 3 }\n"   # true  -> PASS
-        "pub t_fail = () bool { three() == 9 }\n"   # false -> FAIL
-        "pub t_bad  = () bool { three() == true }\n")  # type error -> SKIP
+        "t_pass* = () bool { three() == 3 }\n"   # true  -> PASS
+        "t_fail* = () bool { three() == 9 }\n"   # false -> FAIL
+        "t_bad*  = () bool { three() == true }\n")  # type error -> SKIP
     run_test_root(tmp_path, "t.zen")
     out = capsys.readouterr().out
     assert "PASS ✓  t.t_pass" in out

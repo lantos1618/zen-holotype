@@ -33,7 +33,7 @@ def test_prelude_is_loaded_but_never_lowered(tmp_path):
 { derive_zero } = prelude.derive
 Point: { x: i32, y: i32 }
 emit derive_zero(reflect(Point))
-pub main = () i32 { p := Point_zero()  p.x }
+main* = () i32 { p := Point_zero()  p.x }
 """)
     # the Ast model lives in Zen, under the prelude namespace
     assert "prelude.derive" in files
@@ -50,7 +50,7 @@ def test_derive_zero_self_hosted(tmp_path):
 { derive_zero } = prelude.derive
 Point: { x: i32, y: i32, z: i32 }
 emit derive_zero(reflect(Point))
-pub main = () i32 { p := Point_zero()  p.x + p.y + p.z }
+main* = () i32 { p := Point_zero()  p.x + p.y + p.z }
 """)
     assert ("m.Point_zero", True, "ok") in results
     c = emit_c(files, passing, space)
@@ -62,7 +62,7 @@ def test_derive_eq_self_hosted_and_runs(tmp_path):
 { derive_eq } = prelude.derive
 Point: { x: i32, y: i32 }
 emit derive_eq(reflect(Point))
-pub main = () i32 {
+main* = () i32 {
     a := Point { x: 1, y: 2 }
     b := Point { x: 1, y: 2 }
     c := Point { x: 9, y: 2 }
@@ -88,7 +88,7 @@ def test_derive_tag_reflects_a_sum_type(tmp_path):
 { derive_tag } = prelude.derive
 Color: Red, Green, Blue
 emit derive_tag(reflect(Color))
-pub main = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
+main* = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
 """)
     assert ("m.Color_tag", True, "ok") in results
     c = emit_c(files, passing, space)
@@ -107,7 +107,7 @@ def test_derive_payload_binds_variant_payloads(tmp_path):
 { derive_payload } = prelude.derive
 Shape: Circle(i32), Square(i32), Dot
 emit derive_payload(reflect(Shape))
-pub main = () i32 {
+main* = () i32 {
     Shape_payload(.Circle(7)) + Shape_payload(.Square(3)) + Shape_payload(.Dot())
 }
 """)
@@ -134,7 +134,7 @@ emit derive_tag_impl(reflect_trait(Ordinal), reflect(Color))
 byRank<T: Ranked>  = (x: T) i32 { rank(x) }
 byOrd<T: Ordinal>  = (x: T) i32 { ord(x) }
 green = () Color { .Green() }
-pub main = () i32 { byRank(green()) + byOrd(green()) * 10 }
+main* = () i32 { byRank(green()) + byOrd(green()) * 10 }
 """)
     assert ("Ranked for Color::rank", True, "ok") in results    # both generated impls conform
     assert ("Ordinal for Color::ord", True, "ok") in results
@@ -163,7 +163,7 @@ def test_emitted_decls_are_reachable_in_the_trie(tmp_path):
 { derive_zero } = prelude.derive
 Rgb: { r: u8, g: u8, b: u8, a: u8 }
 emit derive_zero(reflect(Rgb))
-pub main = () i32 { c := Rgb_zero()  0 }
+main* = () i32 { c := Rgb_zero()  0 }
 """)
     assert isinstance(space.walk("m.Rgb_zero").value, Fn)
     c = emit_c(files, passing, space)

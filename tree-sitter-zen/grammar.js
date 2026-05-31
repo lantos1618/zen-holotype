@@ -40,7 +40,8 @@ module.exports = grammar({
                      optional(seq(':', field('bound', $.identifier)))),
 
     // trait Area { area: (Ptr<Self>) i32 }   — a named set of method signatures
-    trait: $ => seq(optional('pub'), 'trait', field('name', $.identifier),
+    // a glued `*` after the name marks it public: `trait Area* { … }`.
+    trait: $ => seq('trait', field('name', $.identifier), optional(field('vis', token.immediate('*'))),
                     '{', comma1($.method_sig), optional(','), '}'),
     method_sig: $ => seq(field('name', $.identifier), ':',
                          '(', optional(comma1($._type)), ')', field('ret', $._type)),
@@ -49,22 +50,22 @@ module.exports = grammar({
     impl: $ => seq('impl', field('trait', $.identifier), 'for', field('type', $.identifier),
                    '{', repeat($.function), '}'),
 
-    // pub Vec: { len: i32, cap: i32 }   /   pub Box<T>: { val: T }
-    struct: $ => seq(optional('pub'), field('name', $.identifier),
+    // Vec*: { len: i32, cap: i32 }   /   Box*<T>: { val: T }   (the glued `*` = public)
+    struct: $ => seq(field('name', $.identifier), optional(field('vis', token.immediate('*'))),
                      optional(field('tparams', $.type_params)), ':',
                      '{', comma1($.field), optional(','), '}'),
     field: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
-    // pub Opt<T>: None, Some(T)
-    enum: $ => seq(optional('pub'), field('name', $.identifier),
+    // Opt*<T>: None, Some(T)   (the glued `*` = public)
+    enum: $ => seq(field('name', $.identifier), optional(field('vis', token.immediate('*'))),
                    optional(field('tparams', $.type_params)), ':',
                    comma1($.variant)),
     variant: $ => seq(field('name', $.identifier),
                       optional(seq('(', field('payload', $._type), ')'))),
 
-    // pub area = (v: Ptr<Vec>) i32 { … }   — the return type may be omitted and inferred:
-    // pub area = (v: Ptr<Vec>) { len(v) * cap(v) }
-    function: $ => seq(optional('pub'), field('name', $.identifier),
+    // area* = (v: Ptr<Vec>) i32 { … }   — the glued `*` = public; the return type may be
+    // omitted and inferred:  area* = (v: Ptr<Vec>) { len(v) * cap(v) }
+    function: $ => seq(field('name', $.identifier), optional(field('vis', token.immediate('*'))),
                        optional(field('tparams', $.type_params)), '=',
                        '(', optional(comma1($.param)), ')',
                        optional(field('ret', $._type)), field('body', $.block)),
