@@ -230,6 +230,8 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
             _scan_expr(arm.body, al, space, scope, sink, expect)
     elif isinstance(e, Call):
+        if e.callee == "comptime":                            # evaluated away — nothing to emit
+            return
         if e.callee in ("addr", "load", "store", "offset"):   # intrinsics: just scan args
             for a in e.args:
                 _scan_expr(a, locals_, space, scope, sink)
