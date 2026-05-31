@@ -76,7 +76,15 @@ def fits(given, want) -> bool:
     if is_option(given) and not is_option(want):     # nullable into nonnull: REJECT
         return False
     if isinstance(given, PtrT) and isinstance(want, PtrT):
-        return dir_fits(given.dir, want.dir) and fits(given.pointee, want.pointee)
+        if not dir_fits(given.dir, want.dir):
+            return False
+        # Variance: a read-only target may be covariant in its pointee (you can only
+        # observe through it). A writable/raw target must be INVARIANT — otherwise a
+        # callee could store, say, a null through a MutPtr<Option<T>> into a slot the
+        # caller guaranteed non-null (the classic array-covariance hole).
+        if want.dir is Dir.READ:
+            return fits(given.pointee, want.pointee)
+        return given.pointee == want.pointee
     return given == want                             # nominal/structural eq (paths canonical)
 
 

@@ -85,3 +85,57 @@ def test_nominal_identity_by_path():
     # same path == same type; different path == different type (holotype principle).
     assert fits(NameT("a.b.C", ()), NameT("a.b.C", ()))
     assert not fits(NameT("a.b.C", ()), NameT("a.b.D", ()))
+
+
+# ── variance: writable pointers are INVARIANT in their pointee ───────────────
+def test_mutptr_pointee_is_invariant():
+    # MutPtr<Vec> must NOT fit MutPtr<Option<Vec>>: the callee could write null
+    # through it into a slot the caller guaranteed non-null (array-covariance hole).
+    assert not fits(ptr(VEC, Dir.MUT), ptr(option(VEC), Dir.MUT))
+    assert not fits(ptr(option(VEC), Dir.MUT), ptr(VEC, Dir.MUT))
+    assert fits(ptr(VEC, Dir.MUT), ptr(VEC, Dir.MUT))        # equal pointee still fits
+
+
+def test_readonly_pointee_stays_covariant():
+    # downgrading to read-only is safe, so Ptr pointee may be covariant.
+    assert fits(ptr(VEC, Dir.READ), ptr(option(VEC), Dir.READ))
+
+
+def test_mutptr_downgraded_to_readonly_is_covariant():
+    # MutPtr<Vec> -> Ptr<Option<Vec>>: target is read-only, so covariance is fine.
+    assert fits(ptr(VEC, Dir.MUT), ptr(option(VEC), Dir.READ))
+
+
+# ── algebraic laws of the subtyping relation (property tests) ───────────────
+def _type_zoo():
+    """A spread of types to check lattice laws over."""
+    base = [I32, PrimT(Prim.I64), PrimT(Prim.BOOL), VEC, NameT("a.b.Other", ())]
+    out = list(base)
+    for t in base:
+        out += [ptr(t, Dir.READ), ptr(t, Dir.MUT), ptr(t, Dir.RAW), option(t)]
+    out += [option(ptr(VEC, Dir.MUT)), ptr(option(VEC), Dir.READ)]
+    return out
+
+
+def test_fits_is_reflexive():
+    for t in _type_zoo():
+        assert fits(t, t), f"reflexivity failed for {t}"
+
+
+def test_fits_is_transitive():
+    zoo = _type_zoo()
+    for a in zoo:
+        for b in zoo:
+            if not fits(a, b):
+                continue
+            for c in zoo:
+                if fits(b, c):
+                    assert fits(a, c), f"transitivity: {a} ≤ {b} ≤ {c} but not {a} ≤ {c}"
+
+
+def test_fits_is_antisymmetric():
+    zoo = _type_zoo()
+    for a in zoo:
+        for b in zoo:
+            if fits(a, b) and fits(b, a):
+                assert a == b, f"antisymmetry: {a} ≤ {b} ≤ {a} but {a} != {b}"
