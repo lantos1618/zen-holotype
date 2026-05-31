@@ -3,7 +3,7 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 """
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
-                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, Assign, While,
+                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, Let, Assign, While,
                   EnumCtor, Match)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
@@ -97,6 +97,10 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
             return c_match(e, locals_, space, scope, expect)
         case Call():
             return _c_call(e, locals_, space, scope)
+        case MethodCall(recv, method, args):                 # loop handle control
+            if method in ("break", "continue"):
+                return method                                # `h.break();` -> `break;`
+            return "0"
         case _:
             return "0"
 
@@ -173,6 +177,48 @@ def c_match(e, locals_, space, scope, expect) -> str:
     return f"({{ {c_type(st)} {t} = {subj}; {chain}; }})"
 
 
+def c_match_stmt(e, locals_, space, scope) -> str:
+    """Lower a match used as a STATEMENT (for effect, not value) to an if/else
+    chain, so arm bodies may be statements — `h.break()`, `h.continue()`, an
+    assignment — which a ternary can't hold."""
+    subj = c_expr(e.subject, locals_, space, scope)
+    st = infer(e.subject, locals_, space, scope)
+    t = f"_subj{id(e)}"
+    arm_stmt = lambda a, al: (c_match_stmt(a.body, al, space, scope) if isinstance(a.body, Match)
+                              else f"{c_expr(a.body, al, space, scope)};")
+
+    if isinstance(st, PrimT):                            # literal match
+        default = next((a for a in e.arms if a.lit is None), None)
+        clauses = [f"if ({t} == {c_expr(a.lit, locals_, space, scope)}) {{ {arm_stmt(a, locals_)} }}"
+                   for a in e.arms if a is not default]
+        chain = " else ".join(clauses)
+        if default is not None:
+            chain += (f" else {{ {arm_stmt(default, locals_)} }}" if clauses
+                      else f"{{ {arm_stmt(default, locals_)} }}")
+        return f"{{ {c_type(st)} {t} = {subj}; {chain} }}"
+
+    decl = space.walk(st.path).value
+    sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
+    cn = c_type(st)
+    variants = {v.name: v for v in decl.variants}
+    default = next((a for a in e.arms if a.variant is None), None)
+    clauses = []
+    for a in e.arms:
+        if a is default:
+            continue
+        al, bind = locals_, ""
+        if a.binding is not None:
+            pt = c_type(subst(variants[a.variant].payload, sub))
+            al = {**locals_, a.binding: subst(variants[a.variant].payload, sub)}
+            bind = f"{pt} {a.binding} = {t}.u.{a.variant}; "
+        clauses.append(f"if ({t}.tag == {cn}_{a.variant}) {{ {bind}{arm_stmt(a, al)} }}")
+    chain = " else ".join(clauses)
+    if default is not None:
+        chain += (f" else {{ {arm_stmt(default, locals_)} }}" if clauses
+                  else f"{{ {arm_stmt(default, locals_)} }}")
+    return f"{{ {c_type(st)} {t} = {subj}; {chain} }}"
+
+
 # ───────────────────────── declaration codegen ─────────────────────────────
 def _params(d: Fn) -> str:
     return ", ".join(f"{c_type(p.type)} {p.name}" for p in d.params) or "void"
@@ -212,6 +258,8 @@ def c_block(stmts, locals_, space, scope, expect=None) -> str:
             lines.append(c_stmt(s, locals_, space, scope))
         elif i == last and not is_void:
             lines.append(f"return {c_expr(s, locals_, space, scope, expect)};")
+        elif isinstance(s, Match):                       # match for effect -> if/else statement
+            lines.append(c_match_stmt(s, locals_, space, scope))
         else:                                            # statement — keep its effect, discard value
             lines.append(f"{c_expr(s, locals_, space, scope)};")
     if not is_void and (not stmts or isinstance(stmts[-1], (Let, Assign, While))):
@@ -227,11 +275,17 @@ def c_stmt(s, locals_, space, scope) -> str:
         return f"{c_type(t)} {s.name} = {c_expr(s.value, locals_, space, scope)};"
     if isinstance(s, Assign):
         return f"{c_expr(s.target, locals_, space, scope)} = {c_expr(s.value, locals_, space, scope)};"
+    if isinstance(s, Match):                             # a match used as a statement
+        return c_match_stmt(s, locals_, space, scope)
     if isinstance(s, While):
         bl = dict(locals_)                               # loop body has its own scope
-        body = " ".join(c_stmt(x, bl, space, scope) if isinstance(x, (Let, Assign, While))
+        body = " ".join(c_stmt(x, bl, space, scope) if isinstance(x, (Let, Assign, While, Match))
                         else f"{c_expr(x, bl, space, scope)};" for x in s.body)
-        return f"while ({c_expr(s.cond, locals_, space, scope)}) {{ {body} }}"
+        cond = c_expr(s.cond, locals_, space, scope)
+        # the structured loop primitive → a C `for` (the step slot makes `continue`
+        # correct and keeps it a counted loop the C compiler can auto-vectorize).
+        step = c_stmt(s.step, locals_, space, scope).rstrip(";") if s.step is not None else ""
+        return f"for (; {cond}; {step}) {{ {body} }}"
     return f"{c_expr(s, locals_, space, scope)};"
 
 

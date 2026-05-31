@@ -462,8 +462,7 @@ push = (s: MutPtr<String>, b: u8) void {
     s.len = s.len + 1                      // mutate the field through the pointer
 }
 print_str = (s: Ptr<String>) void {
-    i := 0
-    while (i < s.len) { putchar(load(offset(s.ptr, i)))  i = i + 1 }
+    loop(s.len, (h, i) { putchar(load(offset(s.ptr, i))) })
     putchar(10)
 }
 pub main = () i32 {
@@ -480,7 +479,7 @@ pub main = () i32 {
     resolve(files, space)
     _, passing = check(files, space)
     c = emit_c(files, passing, space)
-    assert "->len = (" in c and "while (" in c              # field mutation + a loop
+    assert "->len = (" in c and "for (" in c                # field mutation + a loop (folds to for)
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
     bexe = tmp_path / "o"
@@ -489,11 +488,11 @@ pub main = () i32 {
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Hi!\n"
 
 
-def test_while_loop_sums(tmp_path):
+def test_loop_sums(tmp_path):
     (tmp_path / "main.zen").write_text("""
 pub main = () i32 {
-    sum := 0  i := 1
-    while (i <= 10) { sum = sum + i  i = i + 1 }
+    sum := 0
+    loop(11, (h, i) { sum = sum + i })
     sum
 }
 """)

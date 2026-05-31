@@ -222,9 +222,10 @@ higher-kinded types, or full Hindley-Milner — which is unsound under subtyping
 anyway) — the point is to test the type idea, which is exactly why the parser is
 someone else's grammar generator rather than hand-rolled.
 
-Since then the language has grown well past that subset: `while` loops and
-mutation, `extern` C bindings + raw memory intrinsics (a heap-allocating
-`String`), and a **comptime metaprogramming layer** whose headline is that the
+Since then the language has grown well past that subset: a single `loop`
+construct (desugared onto a structured `@while` primitive that folds to a C
+`for`) and mutation, `extern` C bindings + raw memory intrinsics (a
+heap-allocating `String`), and a **comptime metaprogramming layer** whose headline is that the
 **AST is defined in Zen** — `impl`/`derive` are ordinary Zen functions
 (`prelude/derive.zen`) that the compiler runs at comptime and splices back in.
 See **[FEATURES.md](FEATURES.md)** for the full current inventory.

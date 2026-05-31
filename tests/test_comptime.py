@@ -60,8 +60,7 @@ def test_fold_pass_rewrites_nested_comptime(tmp_path):
 pub k = () i32 { 7 }
 pub mix = (n: i32) i32 {
     acc := n + comptime(2 * 3)
-    i := 0
-    while (i < comptime(k())) { acc = acc + comptime(10 - 8)  i = i + 1 }
+    loop(comptime(k()), (h, i) { acc = acc + comptime(10 - 8) })
     acc
 }
 """)

@@ -9,7 +9,7 @@ from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
                   Emit, Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit,
-                  MethodCall, EnumCtor, Let, Assign, While, Arm, Match)
+                  MethodCall, EnumCtor, Let, Assign, While, Loop, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -125,9 +125,14 @@ def _stmt(n):
         return Let(_t(_field(n, "name")), _expr(_field(n, "value")))
     if n.type == "assign":                          # lvalue = value
         return Assign(_expr(_field(n, "target")), _expr(_field(n, "value")))
-    if n.type == "while_":                          # while cond { body }
+    if n.type == "while_prim":                      # @while(cond) { body } — the primitive
         body = tuple(_stmt(s) for s in _named(_field(n, "body")))
         return While(_expr(_field(n, "cond")), body)
+    if n.type == "loop_":                           # loop(n, (h, i) { body }) / loop((h) { body })
+        cnt = _field(n, "count")
+        params = tuple(_t(p) for p in n.children_by_field_name("params") if p.type == "identifier")
+        body = tuple(_stmt(s) for s in _named(_field(n, "body")))
+        return Loop(_expr(cnt) if cnt is not None else None, params, body)
     return _expr(n)
 
 

@@ -78,7 +78,8 @@ def _fold(e, space, scope):
                        value=_fold(e.value, space, scope))
     if isinstance(e, While):
         return replace(e, cond=_fold(e.cond, space, scope),
-                       body=tuple(_fold(s, space, scope) for s in e.body))
+                       body=tuple(_fold(s, space, scope) for s in e.body),
+                       step=_fold(e.step, space, scope) if e.step is not None else None)
     return e                                  # Lit / Bool / Var / Str — nothing to fold
 
 
