@@ -115,7 +115,10 @@ def fits(given, want) -> bool:
     if isinstance(given, PrimT) and isinstance(want, PrimT):
         if given.prim is want.prim:
             return True
-        return given.prim is Prim.I32 and want.prim is Prim.I64   # widening only
+        rank = {Prim.U8: 0, Prim.I32: 1, Prim.I64: 2}             # widening: u8 ≤ i32 ≤ i64
+        if given.prim in rank and want.prim in rank:
+            return rank[given.prim] <= rank[want.prim]
+        return False
     return given == want                             # nominal/structural eq (paths canonical)
 
 
@@ -161,7 +164,7 @@ def solve_call(callee, arg_types):
 
 # ───────────────────────── expression inference ─────────────────────────────
 def _numeric(t) -> bool:
-    return isinstance(t, PrimT) and t.prim in (Prim.I32, Prim.I64)
+    return isinstance(t, PrimT) and t.prim in (Prim.U8, Prim.I32, Prim.I64)
 
 
 def infer(e, locals_, space, scope, expect=None):
@@ -182,7 +185,9 @@ def _infer(e, locals_, space, scope, expect=None):
     field). It's how a leading-dot enum ctor like `.Some(x)` learns which enum
     it builds — the variant name alone is ambiguous across enums."""
     match e:
-        case Lit():
+        case Lit():                                      # an integer literal adapts to the wanted int type
+            if isinstance(expect, PrimT) and expect.prim in (Prim.U8, Prim.I32, Prim.I64):
+                return expect
             return PrimT(Prim.I32)
         case Bool():
             return PrimT(Prim.BOOL)
@@ -238,6 +243,27 @@ def _infer(e, locals_, space, scope, expect=None):
             raise TypeErr(f"unknown expr {e!r}")
 
 
+def _infer_mem(e, locals_, space, scope):
+    """load(p)->T · store(p, v: T)->void · offset(p, i64)->same ptr. T comes from p."""
+    pt = infer(e.args[0], locals_, space, scope)
+    if not isinstance(pt, PtrT):
+        raise TypeErr(f"'{e.callee}' needs a pointer as its first argument")
+    if e.callee == "load":
+        return pt.pointee
+    if e.callee == "offset":
+        idx = infer(e.args[1], locals_, space, scope)
+        if not _numeric(idx):
+            raise TypeErr("offset index must be numeric")
+        return pt                                        # offset stays the same pointer type
+    # store
+    if pt.dir is Dir.READ:
+        raise TypeErr("cannot store through a read-only Ptr (use MutPtr/RawPtr)")
+    val = infer(e.args[1], locals_, space, scope, pt.pointee)
+    if not fits(val, pt.pointee):
+        raise TypeErr("store value", val, pt.pointee)
+    return PrimT(Prim.VOID)
+
+
 def _infer_struct_lit(e, locals_, space, scope):
     qual = scope.get(e.type, e.type)
     decl = space.walk(qual).value
@@ -264,6 +290,8 @@ def _infer_struct_lit(e, locals_, space, scope):
 def _infer_call(e, expect, locals_, space, scope):
     if e.callee == "addr":                                # addr(x): take a mutable pointer
         return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
+    if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
+        return _infer_mem(e, locals_, space, scope)
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                   # a bound's method, e.g. area(x)
         return infer_trait_call(e, target, locals_, space, scope)

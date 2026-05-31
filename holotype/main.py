@@ -230,8 +230,9 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None):
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
             _scan_expr(arm.body, al, space, scope, sink, expect)
     elif isinstance(e, Call):
-        if e.callee == "addr":
-            _scan_expr(e.args[0], locals_, space, scope, sink)
+        if e.callee in ("addr", "load", "store", "offset"):   # intrinsics: just scan args
+            for a in e.args:
+                _scan_expr(a, locals_, space, scope, sink)
             return
         target = scope.get(e.callee)
         if isinstance(target, TraitMethod):              # resolve concrete Self -> impl used

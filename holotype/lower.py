@@ -103,6 +103,13 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
 def _c_call(e, locals_, space, scope) -> str:
     if e.callee == "addr":
         return f"&({c_expr(e.args[0], locals_, space, scope)})"
+    if e.callee in ("load", "store", "offset"):           # raw memory ops erase to C
+        a = [c_expr(x, locals_, space, scope) for x in e.args]
+        if e.callee == "load":
+            return f"(*({a[0]}))"
+        if e.callee == "store":
+            return f"(*({a[0]}) = {a[1]})"
+        return f"(({a[0]}) + ({a[1]}))"                    # offset
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                 # resolve to the concrete impl fn
         s: dict = {}

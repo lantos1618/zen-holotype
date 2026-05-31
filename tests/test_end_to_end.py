@@ -365,6 +365,38 @@ def test_extern_ffi_runs(tmp_path):
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Zen\n"
 
 
+# ── M2: alloc a buffer, store/load/offset through it, run ───────────────────
+def test_raw_memory_runs(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "extern putchar = (c: i32) i32\n"
+        "extern malloc  = (n: i64) RawPtr<u8>\n"
+        "extern free    = (p: RawPtr<u8>) void\n"
+        "pub main = () i32 {\n"
+        "    buf := malloc(8)\n"
+        "    store(offset(buf, 0), 72)\n"               # 'H'
+        "    store(offset(buf, 1), 105)\n"              # 'i'
+        "    putchar(load(offset(buf, 0)))\n"
+        "    putchar(load(offset(buf, 1)))\n"
+        "    putchar(10)\n"
+        "    free(buf)\n"
+        "    0\n"
+        "}\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "((buf) + (0))" in c and "= 72)" in c        # store(offset(..)) erases to *(p+i)=v
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Hi\n"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(
