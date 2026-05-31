@@ -199,18 +199,21 @@ stdlib `import ast` / `import types` still resolve to the real ones.)
 
 The front end is a real **tree-sitter** grammar — a method call is just a `call`
 whose callee is a field access, so there's no special rule for it. The language
-now covers structs, **user enums** (lowered to C tagged unions, ctor `.Variant(x)`
-type-checked against the expected type), **generic functions** (`id<T>` — type-args
-inferred by unification at the call site, then **monomorphized** to specialized C),
-**traits / constrained generics** (`trait`, `impl … for …`, `<T: Trait>` — bound
-methods dispatch to the concrete impl at monomorphization; an unsatisfied bound is
-a type error), **`match`** with payload-binding and exhaustiveness checking (the
-arm `.Some(v)` narrows the payload), `Ptr/MutPtr/RawPtr` and `Option`,
-`i32`/`i64`/`bool` with `i32→i64` widening, numeric-only `+ - *`, `==`, and
-`x := v` let-bindings. Type errors carry `ns:line:col`. Still a subset of Zen (no
-`::=`, higher-kinded types, or generic *data types* with literal type-args yet) —
-the point is to test the type idea, which is exactly why the parser is someone
-else's grammar generator rather than hand-rolled.
+now covers structs and **generic data types** (`Box<T>` — the type-arg inferred
+from the field values, monomorphized to concrete C), **user enums** (C tagged
+unions), **generic functions** (`id<T>` — type-args inferred by unification,
+**monomorphized**), **traits / constrained generics** (`trait`, `impl … for …`,
+`<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound
+is a type error), **`match`** with payload-binding, exhaustiveness, and **literal
+patterns** on `i32`/`bool` (so with **recursion** the language is Turing-complete —
+`fact`/`fib` compile and run), **return-type inference** (omit the return type and
+it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` and `Option`,
+`i32`/`i64`/`bool` with `i32→i64` widening, the full operator set
+(`+ - *  ==  < > <= >=  && ||  !`, each operand-checked), and `x := v` let-bindings.
+Type errors carry `ns:line:col`. Still a subset of Zen (no strings/heap/stdlib,
+higher-kinded types, or full Hindley-Milner — which is unsound under subtyping
+anyway) — the point is to test the type idea, which is exactly why the parser is
+someone else's grammar generator rather than hand-rolled.
 
 `build.zen` can declare a `Test { root: "test.zen" }`; `holotype build` then
 compiles that root with the project and runs each no-arg `bool` test, printing
