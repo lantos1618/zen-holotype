@@ -9,6 +9,8 @@ where it's headed, [VISION](VISION.md).)
 - **Products** — structs: `Point: { x: i32, y: i32 }`.
 - **Sums** — enums with optional payloads: `Shape: Circle(i32), Square(i32), Dot`
   (lowered to C tagged unions).
+- **Slices** — `[T]`, a `(ptr, len)` view (lowers to `struct { T* ptr; int64_t len; }`).
+  `[a, b, c]` literals, `xs[i]` indexing, `xs.len`. Iterated with the element-form `loop`.
 - **Pointers, three kinds, with a real subtyping lattice:** `Ptr<T>` (read-only),
   `MutPtr<T>` (writable), `RawPtr<T>` (untyped, for FFI). `fits()` enforces direction
   (`MutPtr ≤ Ptr`), nullability (`T ≤ Option<T>`, no bare null), invariant writable
@@ -26,6 +28,7 @@ where it's headed, [VISION](VISION.md).)
 - `match` with **literal patterns** (`i32`/`bool`), **payload binding** (`.Circle(v) => v`),
   exhaustiveness, and wildcards — usable as an expression *or* a statement (`?:` or `if/else`).
 - **`loop`** — the *one* iteration construct (no `while`/`for`). `loop(n, (h, i) { … })` counts;
+  `loop(xs, (h, i, x) { … })` / `xs.loop((h, i, x) { … })` iterates a slice's elements;
   `loop((h) { … })` is iterless and handle-driven; the handle does `h.break()` / `h.continue()`.
   It desugars onto the **`@while(cond) { … }`** structured primitive, which lowers to a C `for`
   (kept structured so it stays auto-vectorizable — never gotos).
@@ -70,9 +73,10 @@ driven by a `build.zen` written in the language itself. Ill-typed functions are 
 excluded from codegen; the rest builds and runs.
 
 ## Not yet (the honest gaps)
-- No iterators / `map`/`fold` yet (the plan: a `Loopable` trait + a slice type, with `map`/`fold`
-  as ordinary Zen on top of `loop`). No closures-as-values, modules beyond files, or first-class
-  **runtime** strings.
+- No `map`/`fold`/`filter` yet — they need **closures-as-values** (zero-cost: monomorphized +
+  inlined), then they're ordinary Zen on top of `loop`. No `Loopable` trait yet either (only
+  slices have `.loop`, not user structs). No modules beyond files, or first-class **runtime**
+  strings.
 - Generators aren't **type-checked against the Zen `Ast`** — they run comptime-dynamically.
 - Trait reflection is single-method only, and assumes a `(Self) i32` shape (no full
   method-signature reflection yet).

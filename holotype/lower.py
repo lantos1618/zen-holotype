@@ -2,13 +2,22 @@
 direction -> const, Option -> a plain pointer (nullability already enforced upstream).
 """
 from __future__ import annotations
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
-                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, Let, Assign, While,
-                  EnumCtor, Match)
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, Struct, EnumDecl, Fn,
+                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
+                  Let, Assign, While, EnumCtor, Match)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
+
+_slice_reg: dict = {}             # mangle(elem) -> elem type, for emitting slice typedefs
+
+
+def slice_typedefs() -> list:
+    """`typedef struct { T* ptr; int64_t len; } slice_<T>;` for each slice used.
+    Nested elem types register first (c_type recurses), so this is dependency-ordered."""
+    return [f"typedef struct {{ {c_type(elem)} * ptr; int64_t len; }} slice_{nm};"
+            for nm, elem in list(_slice_reg.items())]
 
 
 def c_name(path: str) -> str:
@@ -28,6 +37,8 @@ def mangle(t) -> str:
         return c_name(t.path) + tail
     if isinstance(t, PtrT):
         return _DIRTAG[t.dir] + "_" + mangle(t.pointee)
+    if isinstance(t, SliceT):
+        return "slice_" + mangle(t.elem)
     return "x"
 
 
@@ -46,6 +57,10 @@ def c_type(t) -> str:
         raise TypeError(f"un-monomorphized type variable {t.name} reached codegen")
     if isinstance(t, PrimT):
         return _CMAP[t.prim]
+    if isinstance(t, SliceT):
+        c_type(t.elem)                          # recurse first: registers nested slices
+        _slice_reg[mangle(t.elem)] = t.elem     # key = mangle(elem); typedef = slice_<key>
+        return "slice_" + mangle(t.elem)
     if isinstance(t, PtrT):
         return c_type(t.pointee) + (" const *" if t.dir is Dir.READ else " *")
     if isinstance(t, NameT):
@@ -95,6 +110,14 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
             return f"({cn}){{ .tag = {cn}_{e.name}, .u.{e.name} = {inner} }}"
         case Match():
             return c_match(e, locals_, space, scope, expect)
+        case SliceLit(elems):                                # [a,b,c] : a (ptr,len) view
+            st = infer(e, locals_, space, scope, expect)     # SliceT(elem)
+            et = c_type(st.elem)
+            arr = (f"({et}[]){{ {', '.join(c_expr(x, locals_, space, scope, st.elem) for x in elems)} }}"
+                   if elems else f"({et}*)0")
+            return f"({c_type(st)}){{ .ptr = {arr}, .len = {len(elems)} }}"
+        case Index(seq, idx):                                # xs[i] -> xs.ptr[i]
+            return f"{c_expr(seq, locals_, space, scope)}.ptr[{c_expr(idx, locals_, space, scope)}]"
         case Call():
             return _c_call(e, locals_, space, scope)
         case MethodCall(recv, method, args):                 # loop handle control

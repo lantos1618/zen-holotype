@@ -54,6 +54,12 @@ class TVar:
     name: str
 
 
+@dataclass(frozen=True)
+class SliceT:
+    """A slice `[T]` — a (ptr, len) view. Lowers to `struct { T* ptr; int64_t len; }`."""
+    elem: Type
+
+
 # ───────────────────────── expressions ──────────────────────────────────────
 # `pos` is the (row, col) of the node in source, set by the parser. It's excluded
 # from equality/repr so it never affects type comparisons — purely for diagnostics.
@@ -82,6 +88,19 @@ class Var:
 class Field:
     obj: Expr
     name: str
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class SliceLit:
+    elems: tuple = ()         # tuple[Expr] — [a, b, c]
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Index:
+    seq: Expr                 # a slice
+    idx: Expr                 # numeric
     pos: object = _pos()
 
 

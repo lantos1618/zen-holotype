@@ -6,10 +6,10 @@ The grammar lives in tree-sitter-zen/; its C parser is compiled to build/zen.so.
 from __future__ import annotations
 import warnings, pathlib
 from tree_sitter import Language, Parser
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, SliceT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
-                  Emit, Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit,
-                  MethodCall, EnumCtor, Let, Assign, While, Loop, Arm, Match)
+                  Emit, Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, SliceLit,
+                  Index, MethodCall, EnumCtor, Let, Assign, While, Loop, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -17,7 +17,7 @@ _GRAMMAR = _ROOT / "tree-sitter-zen"
 
 _PRIM = {p.value: p for p in Prim}
 _DIR  = {d.value: d for d in Dir}
-_TYPES = {"primitive", "pointer", "named_type"}
+_TYPES = {"primitive", "pointer", "slice_type", "named_type"}
 
 
 def _language():
@@ -54,6 +54,8 @@ def _type(n):
         return PrimT(_PRIM[_t(n)])
     if n.type == "pointer":
         return PtrT(_DIR[_t(_field(n, "dir"))], _type(_field(n, "pointee")))
+    if n.type == "slice_type":
+        return SliceT(_type(_field(n, "elem")))
     if n.type == "named_type":
         args = tuple(_type(c) for c in _named(n) if c.type in _TYPES)
         return NameT(_t(_field(n, "name")), args)
@@ -92,6 +94,10 @@ def _expr_inner(n):
         return Call(_t(fn), tuple(_args(n)))    # len(v) / addr(x)
     if t == "field_access":
         return Field(_expr(_field(n, "obj")), _t(_field(n, "name")))
+    if t == "index":                            # xs[i]
+        return Index(_expr(_field(n, "seq")), _expr(_field(n, "idx")))
+    if t == "slice_literal":                    # [a, b, c]
+        return SliceLit(tuple(_expr(c) for c in _named(n)))
     if t == "struct_literal":
         fields = tuple((_t(_field(fi, "name")), _expr(_field(fi, "value")))
                        for fi in _named(n) if fi.type == "field_init")
@@ -133,6 +139,10 @@ def _stmt(n):
         params = tuple(_t(p) for p in n.children_by_field_name("params") if p.type == "identifier")
         body = tuple(_stmt(s) for s in _named(_field(n, "body")))
         return Loop(_expr(cnt) if cnt is not None else None, params, body)
+    if n.type == "loop_method":                     # xs.loop((h, i, x) { body }) == loop(xs, …)
+        params = tuple(_t(p) for p in n.children_by_field_name("params") if p.type == "identifier")
+        body = tuple(_stmt(s) for s in _named(_field(n, "body")))
+        return Loop(_expr(_field(n, "recv")), params, body)
     return _expr(n)
 
 

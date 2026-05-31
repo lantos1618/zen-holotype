@@ -10,8 +10,8 @@ Values: int, bool, dict (a struct), or ("@enum", variant, payload).
 from __future__ import annotations
 from dataclasses import replace
 from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
-                  MethodCall, Let, Assign, While, Arm, Str, Fn, Param, Impl, Struct, EnumDecl,
-                  TraitDecl, Prim, PrimT, NameT, PtrT, Dir)
+                  MethodCall, SliceLit, Index, Let, Assign, While, Arm, Str, Fn, Param, Impl,
+                  Struct, EnumDecl, TraitDecl, Prim, PrimT, NameT, PtrT, Dir)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
 _RUNTIME = {"addr", "load", "store", "offset", "comptime"}
@@ -61,6 +61,10 @@ def _fold(e, space, scope):
         return replace(e, operand=_fold(e.operand, space, scope))
     if isinstance(e, Field):
         return replace(e, obj=_fold(e.obj, space, scope))
+    if isinstance(e, SliceLit):
+        return replace(e, elems=tuple(_fold(x, space, scope) for x in e.elems))
+    if isinstance(e, Index):
+        return replace(e, seq=_fold(e.seq, space, scope), idx=_fold(e.idx, space, scope))
     if isinstance(e, StructLit):
         return replace(e, fields=tuple((n, _fold(v, space, scope)) for n, v in e.fields))
     if isinstance(e, EnumCtor):
