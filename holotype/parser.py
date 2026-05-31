@@ -74,7 +74,7 @@ def _expr(n):
         return _expr(_named(n)[0])
     if t == "binary":
         kids = _named(n)
-        op = next(c.type for c in n.children if c.type in ("+", "-", "*"))
+        op = next(c.type for c in n.children if c.type in ("+", "-", "*", "=="))
         return Bin(op, _expr(kids[0]), _expr(kids[1]))
     if t == "call":
         fn = _field(n, "fn")

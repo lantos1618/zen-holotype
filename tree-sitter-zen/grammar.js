@@ -61,6 +61,7 @@ module.exports = grammar({
     field_access: $ => prec.left(4, seq(field('obj', $._unary), '.', field('name', $.identifier))),
 
     binary: $ => choice(
+      prec.left(1, seq($._expression, '==', $._expression)),   // equality -> bool
       prec.left(2, seq($._expression, choice('+', '-'), $._expression)),
       prec.left(3, seq($._expression, '*', $._expression)),
     ),

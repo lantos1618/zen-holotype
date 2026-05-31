@@ -110,9 +110,13 @@ def infer(e, locals_, space, scope, expect=None):
             raise TypeErr(f"unbound '{e.name}'")
         return locals_[e.name]
     if isinstance(e, Bin):
-        infer(e.l, locals_, space, scope)
-        infer(e.r, locals_, space, scope)
-        return PrimT(Prim.I32)               # integer arithmetic
+        lt = infer(e.l, locals_, space, scope)
+        rt = infer(e.r, locals_, space, scope)
+        if e.op == "==":
+            if not (fits(lt, rt) or fits(rt, lt)):       # operands must be comparable
+                raise TypeErr("'==' operands differ")
+            return PrimT(Prim.BOOL)
+        return PrimT(Prim.I32)                            # integer arithmetic
     if isinstance(e, Field):
         ot = infer(e.obj, locals_, space, scope)
         st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer

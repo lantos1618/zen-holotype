@@ -8,7 +8,7 @@ Only well-typed functions are codegen'd.
 """
 from __future__ import annotations
 import sys, pathlib, subprocess
-from .ast import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT,
+from .ast import (Struct, EnumDecl, Fn, Prim, PrimT, NameT, PtrT,
                   Str, StructLit, MethodCall, EnumCtor)
 from .types import Space, fits, infer, infer_block, TypeErr
 from .lower import c_struct, c_enum, c_proto, c_def, show, c_name
@@ -174,6 +174,43 @@ def interpret_build(bf):
     return cfg
 
 
+def is_test_fn(d) -> bool:
+    """A test is a no-arg function returning bool — true means the test passed."""
+    return (isinstance(d, Fn) and not d.params
+            and isinstance(d.ret, PrimT) and d.ret.prim is Prim.BOOL)
+
+
+def run_test_root(root, test_rel):
+    """Compile the test root together with the project modules and run each
+    bool-returning no-arg test, reporting PASS/FAIL from its return value."""
+    test_ns = pathlib.Path(test_rel).with_suffix("").as_posix().replace("/", ".")
+    files = load(root)                       # includes the test root (skips only build.zen)
+    space = build_space(files)
+    build_scopes(files); resolve(files, space)
+    _, passing = check(files, space)
+
+    tf = files.get(test_ns)
+    tests = [d for d in (tf.decls if tf else []) if is_test_fn(d)]
+    runnable = [d for d in tests if f"{test_ns}.{d.name}" in passing]
+
+    calls = "\n".join(
+        f'    printf("   %s  {test_ns}.{d.name}\\n", '
+        f'{c_name(f"{test_ns}.{d.name}")}() ? "PASS \\u2713" : "FAIL \\u2717");'
+        for d in runnable)
+    harness = f'\n#include <stdio.h>\nint main(void) {{\n{calls}\n    return 0;\n}}\n'
+
+    out_dir = pathlib.Path(root) / "build"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cpath, bpath = out_dir / f"{test_ns}_test.c", out_dir / f"{test_ns}_test"
+    cpath.write_text(emit_c(files, passing, space, harness))
+    subprocess.run(["cc", "-Wall", "-Wextra", str(cpath), "-o", str(bpath)], check=True)
+    print(f"\n── tests: {test_rel} ──")
+    skipped = [d.name for d in tests if d not in runnable]
+    print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
+    for name in skipped:
+        print(f"   SKIP    {test_ns}.{name}  (did not type-check)")
+
+
 # ───────────────────────── commands ─────────────────────────────────────────
 def cmd_check(root):
     files = load(root)
@@ -219,6 +256,9 @@ def cmd_build(root):
     subprocess.run(["cc", "-Wall", "-Wextra", str(cpath), "-o", str(bpath)], check=True)
     print(f"── running {bpath} ──")
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
+
+    for t in cfg["tests"]:
+        run_test_root(root, t)
 
 
 def cli(argv=None):

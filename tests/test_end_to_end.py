@@ -14,13 +14,13 @@ from dataclasses import dataclass
 
 from holotype.ast import Dir, Prim, PrimT, NameT, PtrT, Fn, Param, EnumDecl
 from holotype.main import (load, build_space, build_scopes, resolve, check,
-                           emit_c)
+                           emit_c, run_test_root)
 from conftest import EXAMPLES
 
 
 @pytest.fixture
 def checked():
-    files = load(EXAMPLES)
+    files = load(EXAMPLES, skip={"test.zen"})    # library modules only (as the exe build does)
     space = build_space(files)
     build_scopes(files)
     resolve(files, space)
@@ -115,3 +115,21 @@ def test_full_build_runs_and_prints_12():
         capture_output=True, text=True, cwd=str(EXAMPLES.parent))
     assert out.returncode == 0, out.stderr
     assert "vecdemo -> 12" in out.stdout
+    # the declared Test root is compiled and run, reporting per-test verdicts
+    assert "tests: test.zen" in out.stdout
+    assert "PASS ✓  test.test_len" in out.stdout
+
+
+# ── F5: the test runner reports pass / fail / skip ──────────────────────────
+def test_test_runner_reports_pass_fail_skip(tmp_path, capsys):
+    (tmp_path / "lib.zen").write_text("pub three = () i32 { 3 }\n")
+    (tmp_path / "t.zen").write_text(
+        "{ three } = lib\n"
+        "pub t_pass = () bool { three() == 3 }\n"   # true  -> PASS
+        "pub t_fail = () bool { three() == 9 }\n"   # false -> FAIL
+        "pub t_bad  = () bool { three() == true }\n")  # type error -> SKIP
+    run_test_root(tmp_path, "t.zen")
+    out = capsys.readouterr().out
+    assert "PASS ✓  t.t_pass" in out
+    assert "FAIL ✗  t.t_fail" in out
+    assert "SKIP    t.t_bad" in out
