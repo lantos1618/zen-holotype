@@ -12,9 +12,10 @@ Inside any `{ }`:
 | you write | it means |
 |---|---|
 | `name : Type` | a **requirement** — a field, or a method signature. The *shape*. |
-| `name = value` | a **provision** — a field value, a method body, a nested record. The *fill*. |
+| `name = value` | a **provision** (const) — a field value, a method body, a nested record. |
+| `name := value` | a **provision** (mutable). |
 
-That's the whole grammar of declarations. From it, everything:
+(`*` after the name = public; full table under **Declarations** below.) From this, everything:
 
 ```
 all `:`        → a trait / interface   (pure shape, nothing provided)
@@ -28,13 +29,28 @@ has an `=`. **That is impl:** filling a record's requirements.
 
 ## Products and sums
 
-- **Product** — a record: `{ }`.
-- **Sum** — a comma-list. A variant may carry a payload.
+The separator *is* the distinction — `,` inside `{ }` is **AND** (product); `|` is **OR** (sum):
+
+- **Product** — a record: `{ a: T, b: T }`.
+- **Sum** — a `|`-list of variants. A variant carries its payload with `:` (a payload is a type).
 
 ```zen
-Vec   = { len: i32, cap: i32 }              // product
-Shape = Circle = { r: i32 }, Square = { s: i32 }   // sum, payloads are records
-Bool  = True, False                          // the smallest sum — this is why `if` doesn't exist
+Vec   = { len: i32, cap: i32 }              // product: has len AND cap
+Bool  = True | False                         // sum: the smallest one (why `if` doesn't exist)
+Shape = Circle : { r: i32 } | Rect : { w: i32, h: i32 } | Point
+Opt<T> = None | Some : T                     // generic sum
+```
+
+Matching tears a sum back down — the same record syntax both ways:
+
+```zen
+area = (s: Shape) i32 {
+    s.match {
+        Circle(c) => c.r * c.r * 3,
+        Rect(r)   => r.w * r.h,
+        Point     => 0,
+    }
+}
 ```
 
 ## Traits & impl are just completion — no keywords
@@ -59,14 +75,41 @@ No `trait`, no `impl`, no `for`. You extend a record and fill what's missing.
 - Names are **paths into the one trie**. A file `core/vec.zen` is the record `vec`; you reach
   it as `vec.Vec` from anywhere — inside or out. *What you type is the path.*
 
-## Visibility = structure (no `pub`, no `*`, no `@export`)
+## Declarations — the one grammar
 
-Attach a name to a scope and it **has a path** → it's public. Leave it bare and it has no node
-→ it's private. Privacy is *where you put it*, checked by the same trie that resolves it.
+Every declaration — field, const, var, fn, type, method, requirement — is one line:
+
+```
+name  [*]   [ : Type ]   ( =  |  := )   value
+  │    │         │           │
+ name pub      label   = const · := mutable     (omit operator+value → a requirement)
+```
+
+Four independent slots, nothing special-cased:
+
+| | private | public (`*`) |
+|---|---|---|
+| **requirement** (no value) | `Foo : i32` | `Foo* : i32` |
+| **const**, inferred | `Foo = 0` | `Foo* = 0` |
+| **const**, typed | `Foo : i32 = 0` | `Foo* : i32 = 0` |
+| **mutable**, inferred | `Foo := 0` | `Foo* := 0` |
+| **mutable**, typed | `Foo : i32 := 0` | `Foo* : i32 := 0` |
+
+- **`=` const · `:=` mutable** — the operator is the whole mutability story (no `let`/`var`/`mut`).
+- **no operator** (just `: T`) → a *requirement* — the abstract `:` of a record (a field / method sig).
+- **`*` = public surface.** `name* = …` attaches the name to the enclosing record (gives it a path);
+  bare `name = …` keeps it local (no path). So `*` *is* the structural visibility, made explicit —
+  not capitalization (case is already taken: `Vec` is a type, `area` a value).
+
+It's the same for everything:
 
 ```zen
-multiplier = 2                  // bare → private to this file
-vec.Tau    = 6                  // on the module → public, path = vec.Tau
+Vec*  = { len: i32, cap: i32 }          // public type
+tau*  : i32 = 6                          // public const
+count*       := 0                        // public var
+area* = (v: Ptr<@Self>) i32 { … }        // public fn
+scale =       (n: i32) i32 { … }         // private fn
+area  : (Ptr<@Self>) i32                 // a requirement (the trait part)
 ```
 
 ## Control flow is postfix methods — no statements
@@ -116,8 +159,9 @@ run = (v: Ptr<vec.Vec>) i32 {
 
 ## What's gone
 
-`pub` · `*` · `@export` · `trait` · `impl` · `for` · `if` · `else` · `switch` · `for`-loops ·
-`while` · `struct` · `enum` · `fn`/`proc`. **One construct, read four ways.**
+`pub` · `@export` · `trait` · `impl` · `for` (the keyword) · `if` · `else` · `switch` ·
+`while` · `for`-loops · `let`/`var`/`const`/`mut` · `struct` · `enum` · `fn`/`proc`.
+**One construct, read four ways.** (`*` stays — it's the one mark, for public surface.)
 
 ## Open forks (not yet locked)
 
@@ -130,9 +174,38 @@ run = (v: Ptr<vec.Vec>) i32 {
    to be specified.
 5. **Result/`Ok`** — is everything a `Result` (so bodies wrap in `Ok`), or only when annotated?
 
+## Grammar sketch (v2)
+
+The whole front end is small because there's one declaration shape. (EBNF-ish; the real
+tree-sitter grammar comes when we build v2 — v1's `grammar.js` stays the working one until then.)
+
+```
+file        = decl*                                  // a file is the outermost record body
+decl        = name "*"? (":" type)? ( ("=" | ":=") value )?   // the one grammar (see table)
+name        = ident
+type        = record | sum | path | "Ptr<" type ">" | prim | "@Self"
+record      = "{" decl* "}"                           // product
+sum         = variant ("," variant)*                  // sum;  a variant may carry a payload
+variant     = ident ("=" record)?                     //   FooBar = { a: i64 }
+value       = record | sum | fn | expr
+fn          = "(" param,* ")" type? block             // params + optional ret + body
+param       = name ":" type
+block       = "{" stmt* "}"
+expr        = literal | path | call | postfix | binop
+postfix     = expr "." name args?                     // field access / method call (x.area())
+            | expr "." "match" "{" arm,* "}"           // match is a postfix method
+arm         = pattern "=>" expr
+pattern     = variant_pat | literal | "_"
+path        = name ("." name)*                        // vec.Vec, @self.foo, @Self
+```
+
+Everything above resolves into the **same trie**: a `record` is a subtree, a `path` is a walk,
+a method is a node, visibility is "does it have a node." No separate symbol table, no IR.
+
 ## v1 → v2
 
-v1 is a working, tested compiler for a keyword-ful subset. v2 is this. The migration is a
-front-end rewrite (one record grammar) plus folding struct/enum/trait/impl/visibility into the
-trie — but the back end (monomorphize → C) and `fits()` lattice **carry straight over**: a
-record is still a product, a sum is still a tagged union, a method is still a trie node.
+v1 is a working, tested compiler for a keyword-ful subset (145 tests green). v2 is this. The
+migration is a front-end rewrite (the one record grammar above) plus folding
+struct/enum/trait/impl/visibility into the trie — but the back end (monomorphize → C) and the
+`fits()` lattice **carry straight over**: a record is still a product, a sum is still a tagged
+union, a method is still a trie node. **v1 stays green the whole way; v2 grows beside it.**
