@@ -117,6 +117,19 @@ class Let:
     value: object             # Expr
 
 
+@dataclass(frozen=True)
+class Arm:
+    variant: str | None       # variant name, or None for the wildcard `_`
+    binding: str | None       # payload binding, e.g. the `v` of .Some(v)
+    body: object              # Expr
+
+
+@dataclass(frozen=True)
+class Match:
+    subject: object           # Expr
+    arms: tuple = ()          # tuple[Arm, ...]
+
+
 # ───────────────────────── declarations (each = one trie node) ──────────────
 @dataclass
 class Field_:                  # struct field (distinct from the Field expr)

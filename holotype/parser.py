@@ -9,7 +9,7 @@ from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File,
                   Lit, Bool, Var, Field, Bin, Call, Str, StructLit, MethodCall,
-                  EnumCtor, Let)
+                  EnumCtor, Let, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -89,7 +89,19 @@ def _expr(n):
         return StructLit(_t(_field(n, "type")), fields)
     if t == "enum_ctor":
         return EnumCtor(_t(_field(n, "name")), tuple(_args(n)))
+    if t == "match":
+        return Match(_expr(_field(n, "subject")), tuple(_arm(a) for a in _named(n)
+                                                        if a.type == "match_arm"))
     raise ValueError(f"unhandled expr node: {t}")
+
+
+def _arm(n):
+    pat = _named(_field(n, "pat"))[0]               # ctor_pattern | wildcard
+    body = _expr(_field(n, "body"))
+    if pat.type == "wildcard":
+        return Arm(None, None, body)
+    binding = _field(pat, "binding")
+    return Arm(_t(_field(pat, "name")), _t(binding) if binding else None, body)
 
 
 def _args(n):

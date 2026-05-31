@@ -52,16 +52,31 @@ module.exports = grammar({
                          optional(seq('<', comma1($._type), '>'))),
 
     block: $ => seq('{', repeat($._statement), '}'),
-    _statement: $ => choice($.let_binding, $.enum_ctor, $._expression),
+    _statement: $ => choice($.let_binding, $._expression),
     // x := expr  — a local binding (type inferred from the value)
     let_binding: $ => seq(field('name', $.identifier), ':=', field('value', $._expression)),
+    // a leading-dot constructor `.Ok(x)` — an expression, so it works as a call
+    // argument and match arm body too, not just a bare statement.
     enum_ctor: $ => seq('.', field('name', $.identifier), $.arguments),
 
     // a postfix chain: primary, then any number of (args) calls and .name accesses.
     // A "method call" is simply a call whose `fn` is a field_access — no special rule.
     _expression: $ => choice($.binary, $._unary),
     _unary: $ => choice($._primary, $.call, $.field_access),
-    _primary: $ => choice($.parenthesized, $.struct_literal, $.integer, $.boolean, $.string, $.identifier),
+    _primary: $ => choice($.parenthesized, $.match, $.enum_ctor, $.struct_literal, $.integer, $.boolean, $.string, $.identifier),
+
+    // match subject { .Variant(x) => expr, .Other => expr, _ => expr }
+    // The subject is a restricted expression so the `{` can't be mistaken for a
+    // struct literal — wrap a struct-literal subject in parens if ever needed.
+    // subject is an identifier or a parenthesized expression — keeps the `{`
+    // unambiguous and sidesteps the struct-literal / left-recursion conflicts.
+    match: $ => seq('match', field('subject', choice($.identifier, $.parenthesized)),
+                    '{', comma1($.match_arm), optional(','), '}'),
+    match_arm: $ => seq(field('pat', $.pattern), '=>', field('body', $._expression)),
+    pattern: $ => choice($.ctor_pattern, $.wildcard),
+    ctor_pattern: $ => seq('.', field('name', $.identifier),
+                           optional(seq('(', field('binding', $.identifier), ')'))),
+    wildcard: $ => '_',
 
     call:         $ => prec.left(4, seq(field('fn', $._unary), $.arguments)),
     field_access: $ => prec.left(4, seq(field('obj', $._unary), '.', field('name', $.identifier))),

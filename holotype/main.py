@@ -9,7 +9,7 @@ Only well-typed functions are codegen'd.
 from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
-                  Str, StructLit, Bin, Field, Let, Call, MethodCall, EnumCtor)
+                  Str, StructLit, Bin, Field, Let, Call, MethodCall, EnumCtor, Match)
 from .types import Space, fits, infer, infer_block, subst, solve_call, TypeErr
 from .lower import c_struct, c_enum, c_proto, c_def, show, c_name, inst_name
 from .parser import parse
@@ -120,6 +120,17 @@ def _scan_expr(e, locals_, space, scope, add):
     elif isinstance(e, EnumCtor):
         for a in e.args:
             _scan_expr(a, locals_, space, scope, add)
+    elif isinstance(e, Match):
+        _scan_expr(e.subject, locals_, space, scope, add)
+        st = infer(e.subject, locals_, space, scope)
+        decl = space.walk(st.path).value
+        sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
+        variants = {v.name: v for v in decl.variants}
+        for arm in e.arms:
+            al = locals_
+            if arm.variant is not None and arm.binding is not None:
+                al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
+            _scan_expr(arm.body, al, space, scope, add)
     elif isinstance(e, Call):
         for a in e.args:
             _scan_expr(a, locals_, space, scope, add)

@@ -3,7 +3,7 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 """
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
-                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor)
+                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor, Match)
 from .types import infer, subst, solve_call
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
@@ -92,6 +92,8 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
             return f"({cn}){{ .tag = {cn}_{e.name} }}"
         inner = c_expr(e.args[0], locals_, space, scope, var.payload)
         return f"({cn}){{ .tag = {cn}_{e.name}, .u.{e.name} = {inner} }}"
+    if isinstance(e, Match):
+        return c_match(e, locals_, space, scope, expect)
     if isinstance(e, Call):
         if e.callee == "addr":
             return f"&({c_expr(e.args[0], locals_, space, scope)})"
@@ -108,6 +110,33 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
                          for a, pt in zip(e.args, ptypes))
         return f"{cn}({args})"
     return "0"
+
+
+def c_match(e, locals_, space, scope, expect) -> str:
+    """Lower a match to a tag-tested ternary chain. A variant with a payload
+    binding uses a statement-expression `({ T b = subj.u.V; body; })` so the
+    binding is a real typed local (this narrows the payload inside the arm)."""
+    subj = c_expr(e.subject, locals_, space, scope)
+    st = infer(e.subject, locals_, space, scope)
+    decl = space.walk(st.path).value
+    sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
+    cn = c_name(st.path)
+    variants = {v.name: v for v in decl.variants}
+
+    def clause(arm):
+        if arm.variant is not None and arm.binding is not None:
+            pt = c_type(subst(variants[arm.variant].payload, sub))
+            al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
+            return (f"({{ {pt} {arm.binding} = ({subj}).u.{arm.variant}; "
+                    f"{c_expr(arm.body, al, space, scope, expect)}; }})")
+        return f"({c_expr(arm.body, locals_, space, scope, expect)})"
+
+    # the wildcard arm (or, for an exhaustive match, the last arm) is the else
+    default = next((a for a in e.arms if a.variant is None), None) or e.arms[-1]
+    chain = clause(default)
+    for arm in reversed([a for a in e.arms if a is not default]):
+        chain = f"(({subj}).tag == {cn}_{arm.variant} ? {clause(arm)} : {chain})"
+    return chain
 
 
 # ───────────────────────── declaration codegen ─────────────────────────────

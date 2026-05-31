@@ -132,6 +132,32 @@ def test_generic_fn_monomorphizes(tmp_path):
     assert r.returncode == 0, r.stderr
 
 
+# ── Phase B: match compiles to a tag-switch and runs ────────────────────────
+def test_match_lowers_and_runs(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Status: Idle, Busy(i32)\n"
+        "pub code = (s: Status) i32 { match s { .Idle => 0, .Busy(n) => n } }\n"
+        "pub main = () i32 { code(.Busy(7)) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "(s).tag == main_Status_Idle" in c          # tag test
+    assert "int32_t n = (s).u.Busy" in c               # payload binding
+    harness = ("\n#include <stdio.h>\nint main(void){ "
+               "printf(\"%d\\n\", main_main()); return 0; }\n")
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + harness)
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    run = subprocess.run([str(bexe)], capture_output=True, text=True)
+    assert run.stdout.strip() == "7"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

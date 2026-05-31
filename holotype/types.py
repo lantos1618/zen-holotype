@@ -7,7 +7,7 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, Fn, EnumDecl,
-                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor)
+                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor, Match)
 
 
 class Conflict(Exception):   ...
@@ -145,6 +145,8 @@ def infer(e, locals_, space, scope, expect=None):
         return PrimT(Prim.BOOL)
     if isinstance(e, EnumCtor):
         return infer_enum_ctor(e, expect, locals_, space, scope)
+    if isinstance(e, Match):
+        return infer_match(e, expect, locals_, space, scope)
     if isinstance(e, Var):
         if e.name not in locals_:
             raise TypeErr(f"unbound '{e.name}'")
@@ -227,6 +229,42 @@ def infer_enum_ctor(e, expect, locals_, space, scope):
         if not fits(given, var.payload):
             raise TypeErr("enum payload", given, var.payload)
     return NameT(expect.path, ())
+
+
+def infer_match(e, expect, locals_, space, scope):
+    """A match types each arm against the expected result, binds a variant's
+    payload inside its arm (narrowing), and demands exhaustive coverage."""
+    st = infer(e.subject, locals_, space, scope)
+    if not isinstance(st, NameT) or not isinstance(space.walk(st.path).value, EnumDecl):
+        raise TypeErr(f"match on a non-enum value ({st.path if isinstance(st, NameT) else st})")
+    decl = space.walk(st.path).value
+    sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
+    variants = {v.name: v for v in decl.variants}
+
+    covered, wildcard, result = set(), False, expect
+    for arm in e.arms:
+        arm_locals = locals_
+        if arm.variant is None:
+            wildcard = True
+        else:
+            if arm.variant not in variants:
+                raise TypeErr(f"enum {st.path} has no variant '.{arm.variant}'")
+            covered.add(arm.variant)
+            var = variants[arm.variant]
+            if arm.binding is not None:
+                if var.payload is None:
+                    raise TypeErr(f"variant '.{arm.variant}' has no payload to bind")
+                arm_locals = {**locals_, arm.binding: subst(var.payload, sub)}
+        bt = infer(arm.body, arm_locals, space, scope, result)
+        if result is None:
+            result = bt
+        elif not fits(bt, result):
+            raise TypeErr("match arms differ", bt, result)
+
+    missing = [v for v in variants if v not in covered]
+    if not wildcard and missing:
+        raise TypeErr(f"non-exhaustive match: missing {', '.join('.' + m for m in missing)}")
+    return result
 
 
 def infer_block(stmts, locals_, space, scope, expect=None):
