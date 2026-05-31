@@ -119,10 +119,24 @@ def _import(n):
     return Import(names, ".".join(_t(g) for g in mp.named_children))
 
 
+def _first_error(n):
+    """Depth-first hunt for the first ERROR / MISSING node, for a located message."""
+    if n.type == "ERROR" or n.is_missing:
+        return n
+    for c in n.children:
+        hit = _first_error(c)
+        if hit is not None:
+            return hit
+    return None
+
+
 def parse(src: str, ns: str) -> File:
     root = _PARSER.parse(bytes(src, "utf8")).root_node
     if root.has_error:
-        raise SyntaxError(f"parse error in {ns}")
+        bad = _first_error(root) or root
+        r, c = bad.start_point                 # 0-based row, col from tree-sitter
+        what = "missing" if bad.is_missing else f"unexpected {_t(bad)!r}"
+        raise SyntaxError(f"{ns}:{r + 1}:{c + 1}: parse error ({what})")
     imports, decls = [], []
     for n in _named(root):
         if n.type == "import":

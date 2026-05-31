@@ -1,0 +1,86 @@
+"""T9-T11 + F1: the whole pipeline on the real `examples/` tree.
+
+T9  expected PASS/FAIL set from the checker
+T10 codegen is const-correct and excludes ill-typed fns
+T11 `holotype build` actually compiles, links, and runs -> "vecdemo -> 12"
+F1  un-lowerable declarations fail loudly instead of vanishing
+"""
+import subprocess
+import sys
+
+import pytest
+
+from holotype.ast import Dir, Prim, PrimT, NameT, PtrT, Fn, Param, EnumDecl
+from holotype.main import (load, build_space, build_scopes, resolve, check,
+                           emit_c)
+from conftest import EXAMPLES
+
+
+@pytest.fixture
+def checked():
+    files = load(EXAMPLES)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    results, passing = check(files, space)
+    return files, space, results, passing
+
+
+# ── T9: the checker verdict on the example tree ─────────────────────────────
+def test_expected_pass_fail_set(checked):
+    _, _, results, passing = checked
+    verdict = {qual: ok for qual, ok, _ in results}
+    assert verdict == {
+        "main.area": True,
+        "main.main": True,
+        "main.bad": False,      # nullable into nonnull
+        "main.dirbad": False,   # read-only into mut-required
+        "ops.len": True,
+        "ops.cap": True,
+        "ops.bump": True,
+    }
+    assert "main.bad" not in passing and "main.dirbad" not in passing
+
+
+def test_failure_reasons_name_the_lattice_violation(checked):
+    _, _, results, _ = checked
+    why = {qual: reason for qual, ok, reason in results if not ok}
+    assert "Option<Ptr<Vec>>" in why["main.bad"] and "⊀" in why["main.bad"]
+    assert "MutPtr<Vec>" in why["main.dirbad"]
+
+
+# ── T10: codegen golden properties ──────────────────────────────────────────
+def test_codegen_is_const_correct(checked):
+    files, space, _, passing = checked
+    c = emit_c(files, passing, space)
+    # Ptr<Vec> -> const *, MutPtr<Vec> -> plain *
+    assert "ops_len(core_vec_Vec const * v)" in c
+    assert "ops_bump(core_vec_Vec * v)" in c
+    assert "typedef struct { int32_t len; int32_t cap; } core_vec_Vec;" in c
+
+
+def test_codegen_excludes_failing_functions(checked):
+    files, space, _, passing = checked
+    c = emit_c(files, passing, space)
+    assert "main_area" in c and "main_main" in c
+    assert "main_bad" not in c and "main_dirbad" not in c
+
+
+# ── F1: integrity — un-lowerable decls raise instead of silently dropping ───
+def test_unlowerable_decl_raises(checked):
+    files, space, _, passing = checked
+    # inject a declared enum into one file; codegen must refuse, not drop it
+    some_file = next(iter(files.values()))
+    some_file.decls.append(EnumDecl("Color", [], pub=True))
+    with pytest.raises(NotImplementedError) as ei:
+        emit_c(files, passing, space)
+    assert "EnumDecl" in str(ei.value) and "Color" in str(ei.value)
+
+
+# ── T11: the build really runs ──────────────────────────────────────────────
+def test_full_build_runs_and_prints_12():
+    out = subprocess.run(
+        [sys.executable, "-m", "holotype", "build", str(EXAMPLES)],
+        capture_output=True, text=True, cwd=str(EXAMPLES.parent))
+    assert out.returncode == 0, out.stderr
+    assert "vecdemo -> 12" in out.stdout

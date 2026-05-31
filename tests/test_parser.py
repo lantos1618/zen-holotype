@@ -1,0 +1,82 @@
+"""T8 + F2: front-end — tree-sitter CST -> AST, and located parse errors."""
+import pytest
+
+from holotype.ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
+                          Import, Lit, Var, Bin, Field, Call, StructLit,
+                          MethodCall, EnumCtor)
+from holotype.parser import parse
+
+
+def only(decls, kind):
+    return next(d for d in decls if isinstance(d, kind))
+
+
+def test_parse_struct():
+    f = parse("pub Vec: { len: i32, cap: i32 }", "core.vec")
+    s = only(f.decls, Struct)
+    assert s.name == "Vec" and s.pub
+    assert [(fl.name, fl.type) for fl in s.fields] == \
+           [("len", PrimT(Prim.I32)), ("cap", PrimT(Prim.I32))]
+
+
+def test_parse_pointer_directions():
+    f = parse("pub g = (a: Ptr<Vec>, b: MutPtr<Vec>, c: RawPtr<Vec>) i32 { 0 }", "m")
+    fn = only(f.decls, Fn)
+    dirs = [p.type.dir for p in fn.params]
+    assert dirs == [Dir.READ, Dir.MUT, Dir.RAW]
+    assert all(isinstance(p.type, PtrT) for p in fn.params)
+
+
+def test_parse_option_named_type():
+    f = parse("pub g = (a: Option<Ptr<Vec>>) i32 { 0 }", "m")
+    t = only(f.decls, Fn).params[0].type
+    assert isinstance(t, NameT) and t.path == "Option"
+    assert isinstance(t.args[0], PtrT)
+
+
+def test_parse_import():
+    f = parse("{ Vec } = core.vec\n", "m")
+    imp = f.imports[0]
+    assert isinstance(imp, Import)
+    assert imp.names == ["Vec"] and imp.module == "core.vec"
+
+
+def test_parse_call_and_field_and_binary():
+    f = parse("pub area = (v: Ptr<Vec>) i32 { len(v) * v.cap }", "m")
+    body = only(f.decls, Fn).body[-1]
+    assert isinstance(body, Bin) and body.op == "*"
+    assert isinstance(body.l, Call) and body.l.callee == "len"
+    assert isinstance(body.r, Field) and body.r.name == "cap"
+
+
+def test_parse_struct_literal_and_addr():
+    f = parse("pub m = () i32 { area(addr(Vec { len: 3, cap: 4 })) }", "m")
+    call = only(f.decls, Fn).body[-1]
+    assert isinstance(call, Call) and call.callee == "area"
+    addr = call.args[0]
+    assert isinstance(addr, Call) and addr.callee == "addr"
+    assert isinstance(addr.args[0], StructLit)
+
+
+def test_method_call_is_just_a_call_on_a_field_access():
+    # a method call has no special grammar rule — it's call-of-field-access.
+    f = parse('pub build = (b: Ptr<Vec>) i32 { b.add(Vec { len: 1, cap: 2 }) }', "m")
+    body = only(f.decls, Fn).body[-1]
+    assert isinstance(body, MethodCall)
+    assert body.method == "add" and isinstance(body.recv, Var)
+
+
+# ── F2: parse errors carry ns:line:col ──────────────────────────────────────
+def test_parse_error_is_located():
+    with pytest.raises(SyntaxError) as ei:
+        parse("pub Vec: { len: i32, cap: }", "core.vec")   # missing field type
+    msg = str(ei.value)
+    assert msg.startswith("core.vec:")
+    assert "parse error" in msg
+
+
+def test_parse_error_reports_line_number():
+    src = "pub a = () i32 { 0 }\npub Vec: { x: }"           # error on line 2
+    with pytest.raises(SyntaxError) as ei:
+        parse(src, "m")
+    assert str(ei.value).startswith("m:2:")

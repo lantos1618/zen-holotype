@@ -157,6 +157,13 @@ python3 -m holotype build examples     # read build.zen -> check -> emit C -> cc
 python3 -m holotype check examples     # type-check report + emit a C lib
 ```
 
+Tests (the lattice is the whole safety argument, so it's the most-covered part):
+
+```sh
+pip install -r requirements-dev.txt    # adds pytest
+python3 -m pytest                       # 49 cases: fits() lattice, infer(), trie, parser, build
+```
+
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
 `build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
 
@@ -183,6 +190,7 @@ vecdemo -> 12
 | `holotype/types.py`  | the trie + `fits()` pointer lattice + `infer()` (the one type space) |
 | `holotype/lower.py`  | transcribe to C (the type system erases here) |
 | `holotype/main.py`   | driver + `build.zen` interpreter |
+| `tests/`             | pytest suite — `fits()` lattice, `infer()`, trie, parser, end-to-end build |
 
 (`ast.py` and `types.py` are safe as classic names because they live in a package —
 stdlib `import ast` / `import types` still resolve to the real ones.)

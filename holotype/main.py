@@ -99,6 +99,14 @@ def check(files, space):
 
 
 def emit_c(files, passing, space, extra=""):
+    # Integrity: codegen lowers Struct + Fn. Anything else (e.g. EnumDecl) is NOT
+    # yet lowerable — fail loudly rather than silently dropping it from the output.
+    for f in files.values():
+        for d in f.decls:
+            if not isinstance(d, (Struct, Fn)):
+                raise NotImplementedError(
+                    f"cannot lower {type(d).__name__} '{f.ns}.{d.name}' to C yet "
+                    f"(codegen supports struct + fn)")
     lines = ["#include <stdint.h>", "#include <stdbool.h>", ""]
     for f in files.values():
         for d in f.decls:
