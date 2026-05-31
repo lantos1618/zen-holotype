@@ -397,6 +397,46 @@ def test_raw_memory_runs(tmp_path):
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Hi\n"
 
 
+# ── M3: a String that TAKES AN ALLOCATOR, built on the memory primitives ────
+def test_string_takes_an_allocator(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "extern malloc  = (n: i64) RawPtr<u8>\n"
+        "extern free    = (p: RawPtr<u8>) void\n"
+        "extern putchar = (c: i32) i32\n"
+        "Allocator: { id: i32 }\n"
+        "String: { ptr: RawPtr<u8>, len: i64 }\n"
+        "alloc = (a: Ptr<Allocator>, n: i64) RawPtr<u8> { malloc(n) }\n"   # String takes an allocator
+        "build_hi = (a: Ptr<Allocator>) String {\n"
+        "    p := alloc(a, 2)\n"
+        "    store(offset(p, 0), 72) store(offset(p, 1), 105)\n"
+        "    String { ptr: p, len: 2 }\n"
+        "}\n"
+        "step = (s: Ptr<String>, i: i64) i32 { putchar(load(offset(s.ptr, i))) print_from(s, i+1) }\n"
+        "print_from = (s: Ptr<String>, i: i64) i32 {\n"
+        "    match (i < s.len) { false => putchar(10), true => step(s, i) }\n"
+        "}\n"
+        "pub main = () i32 {\n"
+        "    a := Allocator { id: 0 }\n"
+        "    s := build_hi(addr(a))\n"
+        "    print_from(addr(s), 0)\n"
+        "    free(s.ptr)\n"
+        "    0\n"
+        "}\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "typedef struct { uint8_t * ptr; int64_t len; } main_String;" in c   # heap string
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", str(cfile), "-o", str(bexe)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Hi\n"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(
