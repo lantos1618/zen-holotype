@@ -100,6 +100,26 @@ pub main = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
     assert subprocess.run([str(tmp_path / "o")]).returncode == 21   # 1 + 2*10
 
 
+def test_derive_payload_binds_variant_payloads(tmp_path):
+    # match arms can now BIND a variant's payload: derive_payload returns the
+    # i32 inside each variant (0 for a nullary one).
+    files, space, results, passing = frontend(tmp_path, """
+{ derive_payload } = prelude.derive
+Shape: Circle(i32), Square(i32), Dot
+emit derive_payload(reflect(Shape))
+pub main = () i32 {
+    Shape_payload(.Circle(7)) + Shape_payload(.Square(3)) + Shape_payload(.Dot())
+}
+""")
+    assert ("m.Shape_payload", True, "ok") in results
+    c = emit_c(files, passing, space)
+    assert "int32_t v = " in c and ".u.Circle" in c          # the bound payload
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
+    subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 10   # 7 + 3 + 0
+
+
 def test_reify_decl_turns_a_zen_ast_value_into_a_fn():
     # a hand-built Zen `Decl` value (as comptime produces) reifies to a host Fn
     zero_for_two = ("@enum", "Func", {

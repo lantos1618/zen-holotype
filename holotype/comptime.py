@@ -186,6 +186,14 @@ def _bi_variant_name_at(e, env, space, scope, fuel):
     return t.variants[i].name
 
 
+def _bi_variant_has_payload(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    i = _eval(e.args[1], env, space, scope, fuel)
+    if not isinstance(t, EnumDecl):
+        raise ComptimeErr("variant_has_payload: argument is not an enum")
+    return t.variants[i].payload is not None
+
+
 def _bi_concat(e, env, space, scope, fuel):
     return str(_eval(e.args[0], env, space, scope, fuel)) + \
            str(_eval(e.args[1], env, space, scope, fuel))
@@ -194,7 +202,7 @@ def _bi_concat(e, env, space, scope, fuel):
 _BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
              "field_count": _bi_field_count, "field_name_at": _bi_field_name_at,
              "variant_count": _bi_variant_count, "variant_name_at": _bi_variant_name_at,
-             "concat": _bi_concat}
+             "variant_has_payload": _bi_variant_has_payload, "concat": _bi_concat}
 
 
 # ───────────────────────── reify: Zen Ast value → host AST node ──────────────
@@ -241,7 +249,9 @@ def reify_expr(v):
         inits = tuple((c["key"], reify_expr(c["val"])) for c in _flist(p["inits"], "tail"))
         return StructLit(p["ty"], inits)
     if tag == "Match":
-        arms = tuple(Arm(None if c["tag"] == "_" else c["tag"], None, reify_expr(c["body"]), None)
+        arms = tuple(Arm(None if c["tag"] == "_" else c["tag"],   # variant (None = wildcard)
+                         c.get("bind") or None,                    # payload binding ("" = none)
+                         reify_expr(c["body"]), None)
                      for c in _flist(p["arms"], "tail"))
         return Match(reify_expr(p["subj"]), arms)
     raise ComptimeErr(f"reify: unknown Ast node '{tag}'")

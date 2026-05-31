@@ -17,7 +17,7 @@ FList: FNil, FCons(FCell)                        // a list of field initializers
 FCell: { key: str, val: Ast, tail: FList }
 
 AList: ANil, ACons(ACell)                        // a list of match arms (ctor-pattern)
-ACell: { tag: str, body: Ast, tail: AList }      // tag = variant name, or "_" for wildcard
+ACell: { tag: str, bind: str, body: Ast, tail: AList }   // .tag(bind) => body; bind "" = none
 
 // ── declarations ────────────────────────────────────────────────────────────
 Decl: Func(FuncData)
@@ -70,7 +70,8 @@ derive_eq = (T: Ast) Decl {
 tag_arms = (E: Ast, i: i32) AList {
     match (variant_count(E) - i) {
         0 => .ANil(),
-        _ => .ACons(ACell { tag: variant_name_at(E, i), body: .Int(i), tail: tag_arms(E, i + 1) })
+        _ => .ACons(ACell { tag: variant_name_at(E, i), bind: "",
+                            body: .Int(i), tail: tag_arms(E, i + 1) })
     }
 }
 derive_tag = (E: Ast) Decl {
@@ -79,5 +80,29 @@ derive_tag = (E: Ast) Decl {
         ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
         ret: "i32",
         body: .Match(MatchData { subj: .Var("e"), arms: tag_arms(E, 0) })
+    })
+}
+
+// ── derive (sum payload): bind each i32 payload, or 0 for a nullary variant ───
+//   Shape: Circle(i32), Square(i32), Dot
+//   -> Shape_payload = (e) i32 { match e { .Circle(v)=>v, .Square(v)=>v, .Dot=>0 } }
+pay_arm = (E: Ast, i: i32, rest: AList) ACell {
+    match (variant_has_payload(E, i)) {
+        true  => ACell { tag: variant_name_at(E, i), bind: "v", body: .Var("v"), tail: rest },
+        false => ACell { tag: variant_name_at(E, i), bind: "",  body: .Int(0),  tail: rest }
+    }
+}
+pay_arms = (E: Ast, i: i32) AList {
+    match (variant_count(E) - i) {
+        0 => .ANil(),
+        _ => .ACons(pay_arm(E, i, pay_arms(E, i + 1)))
+    }
+}
+derive_payload = (E: Ast) Decl {
+    .Func(FuncData {
+        nm: concat(name_of(E), "_payload"),
+        ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
+        ret: "i32",
+        body: .Match(MatchData { subj: .Var("e"), arms: pay_arms(E, 0) })
     })
 }
