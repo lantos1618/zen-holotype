@@ -5,14 +5,19 @@
 // reify that value back into a real declaration and splice it. (VISION step 4.)
 
 // ── the expression AST ──────────────────────────────────────────────────────
-Ast: Int(i32), Boolean(bool), Var(str), Field(FieldData), Bin(BinData), Struct(StructData)
+Ast: Int(i32), Boolean(bool), Var(str), Field(FieldData), Bin(BinData),
+     Struct(StructData), Match(MatchData)
 
 FieldData:  { obj: Ast, fld: str }              // obj.fld
 BinData:    { op: str, lhs: Ast, rhs: Ast }     // lhs op rhs
 StructData: { ty: str, inits: FList }           // Ty { k0: v0, k1: v1, ... }
+MatchData:  { subj: Ast, arms: AList }          // match subj { .Tag => body, ... }
 
 FList: FNil, FCons(FCell)                        // a list of field initializers
 FCell: { key: str, val: Ast, tail: FList }
+
+AList: ANil, ACons(ACell)                        // a list of match arms (ctor-pattern)
+ACell: { tag: str, body: Ast, tail: AList }      // tag = variant name, or "_" for wildcard
 
 // ── declarations ────────────────────────────────────────────────────────────
 Decl: Func(FuncData)
@@ -58,5 +63,21 @@ derive_eq = (T: Ast) Decl {
              tail: .PCons(PCell { pnm: "b", pty: name_of(T), ptr: true, tail: .PNil() }) }),
         ret: "bool",
         body: eq_body(T, .Boolean(true), 0)
+    })
+}
+
+// ── derive (sum type): the variant tag  (e: E) i32 { match e { .V => idx } } ──
+tag_arms = (E: Ast, i: i32) AList {
+    match (variant_count(E) - i) {
+        0 => .ANil(),
+        _ => .ACons(ACell { tag: variant_name_at(E, i), body: .Int(i), tail: tag_arms(E, i + 1) })
+    }
+}
+derive_tag = (E: Ast) Decl {
+    .Func(FuncData {
+        nm: concat(name_of(E), "_tag"),
+        ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
+        ret: "i32",
+        body: .Match(MatchData { subj: .Var("e"), arms: tag_arms(E, 0) })
     })
 }

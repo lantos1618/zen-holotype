@@ -10,7 +10,7 @@ Values: int, bool, dict (a struct), or ("@enum", variant, payload).
 from __future__ import annotations
 from dataclasses import replace
 from .ast import (Lit, Bool, Var, Not, Bin, Field, Call, Match, StructLit, EnumCtor,
-                  MethodCall, Let, Assign, While, Str, Fn, Param, Impl, Struct, EnumDecl,
+                  MethodCall, Let, Assign, While, Arm, Str, Fn, Param, Impl, Struct, EnumDecl,
                   Prim, PrimT, NameT, PtrT, Dir)
 
 _FUEL = 200_000               # recursion/step budget — turns a comptime ∞-loop into an error
@@ -171,6 +171,21 @@ def _bi_field_name_at(e, env, space, scope, fuel):
     return t.fields[i].name
 
 
+def _bi_variant_count(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    if not isinstance(t, EnumDecl):
+        raise ComptimeErr("variant_count: argument is not an enum")
+    return len(t.variants)
+
+
+def _bi_variant_name_at(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    i = _eval(e.args[1], env, space, scope, fuel)
+    if not isinstance(t, EnumDecl):
+        raise ComptimeErr("variant_name_at: argument is not an enum")
+    return t.variants[i].name
+
+
 def _bi_concat(e, env, space, scope, fuel):
     return str(_eval(e.args[0], env, space, scope, fuel)) + \
            str(_eval(e.args[1], env, space, scope, fuel))
@@ -178,6 +193,7 @@ def _bi_concat(e, env, space, scope, fuel):
 
 _BUILTINS = {"reflect": _bi_reflect, "name_of": _bi_name_of,
              "field_count": _bi_field_count, "field_name_at": _bi_field_name_at,
+             "variant_count": _bi_variant_count, "variant_name_at": _bi_variant_name_at,
              "concat": _bi_concat}
 
 
@@ -224,6 +240,10 @@ def reify_expr(v):
     if tag == "Struct":
         inits = tuple((c["key"], reify_expr(c["val"])) for c in _flist(p["inits"], "tail"))
         return StructLit(p["ty"], inits)
+    if tag == "Match":
+        arms = tuple(Arm(None if c["tag"] == "_" else c["tag"], None, reify_expr(c["body"]), None)
+                     for c in _flist(p["arms"], "tail"))
+        return Match(reify_expr(p["subj"]), arms)
     raise ComptimeErr(f"reify: unknown Ast node '{tag}'")
 
 
