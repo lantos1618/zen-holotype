@@ -75,7 +75,8 @@ module.exports = grammar({
     // a postfix chain: primary, then any number of (args) calls and .name accesses.
     // A "method call" is simply a call whose `fn` is a field_access — no special rule.
     _expression: $ => choice($.binary, $._unary),
-    _unary: $ => choice($._primary, $.call, $.field_access),
+    _unary: $ => choice($._primary, $.call, $.field_access, $.unary_op),
+    unary_op: $ => prec(7, seq(field('op', '!'), $._unary)),   // logical not
     _primary: $ => choice($.parenthesized, $.match, $.enum_ctor, $.struct_literal, $.integer, $.boolean, $.string, $.identifier),
 
     // match subject { .Variant(x) => expr, .Other => expr, _ => expr }
@@ -95,9 +96,11 @@ module.exports = grammar({
     field_access: $ => prec.left(4, seq(field('obj', $._unary), '.', field('name', $.identifier))),
 
     binary: $ => choice(
-      prec.left(1, seq($._expression, '==', $._expression)),   // equality -> bool
-      prec.left(2, seq($._expression, choice('+', '-'), $._expression)),
-      prec.left(3, seq($._expression, '*', $._expression)),
+      prec.left(1, seq($._expression, '||', $._expression)),                       // bool -> bool
+      prec.left(2, seq($._expression, '&&', $._expression)),
+      prec.left(3, seq($._expression, choice('==', '<', '>', '<=', '>='), $._expression)),  // -> bool
+      prec.left(4, seq($._expression, choice('+', '-'), $._expression)),           // numeric
+      prec.left(5, seq($._expression, '*', $._expression)),
     ),
 
     struct_literal: $ => prec(5, seq(field('type', $.identifier),

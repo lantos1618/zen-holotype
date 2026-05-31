@@ -3,7 +3,7 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 """
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
-                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor, Match)
+                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
@@ -80,6 +80,8 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
         return e.name
     if isinstance(e, Bin):
         return f"({c_expr(e.l, locals_, space, scope)} {e.op} {c_expr(e.r, locals_, space, scope)})"
+    if isinstance(e, Not):
+        return f"(!{c_expr(e.operand, locals_, space, scope)})"
     if isinstance(e, Field):
         ot = infer(e.obj, locals_, space, scope)
         sep = "->" if isinstance(ot, PtrT) else "."     # pointer access lowers to ->

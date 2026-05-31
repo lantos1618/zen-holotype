@@ -85,9 +85,15 @@ class Field:
 
 @dataclass(frozen=True)
 class Bin:
-    op: str                   # + - *
+    op: str                   # + - * == < > <= >= && ||
     l: object                 # Expr
     r: object                 # Expr
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Not:
+    operand: object           # Expr  (logical !)
     pos: object = _pos()
 
 

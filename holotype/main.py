@@ -9,7 +9,7 @@ Only well-typed functions are codegen'd.
 from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
-                  Str, StructLit, Bin, Field, Let, Call, MethodCall, EnumCtor, Match,
+                  Str, StructLit, Bin, Not, Field, Let, Call, MethodCall, EnumCtor, Match,
                   TraitDecl, Impl)
 from .types import (Space, fits, infer, infer_block, subst, solve_call, match_type,
                     TraitMethod, TypeErr)
@@ -177,6 +177,8 @@ def _scan_expr(e, locals_, space, scope, add, add_impl):
     if isinstance(e, Bin):
         _scan_expr(e.l, locals_, space, scope, add, add_impl)
         _scan_expr(e.r, locals_, space, scope, add, add_impl)
+    elif isinstance(e, Not):
+        _scan_expr(e.operand, locals_, space, scope, add, add_impl)
     elif isinstance(e, Field):
         _scan_expr(e.obj, locals_, space, scope, add, add_impl)
     elif isinstance(e, StructLit):

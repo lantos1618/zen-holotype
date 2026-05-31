@@ -7,7 +7,7 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, Fn, EnumDecl,
-                  Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor, Match)
+                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 
 
 class Conflict(Exception):   ...
@@ -175,12 +175,24 @@ def _infer(e, locals_, space, scope, expect=None):
         if e.name not in locals_:
             raise TypeErr(f"unbound '{e.name}'")
         return locals_[e.name]
+    if isinstance(e, Not):
+        if infer(e.operand, locals_, space, scope) != PrimT(Prim.BOOL):
+            raise TypeErr("'!' needs a bool operand")
+        return PrimT(Prim.BOOL)
     if isinstance(e, Bin):
         lt = infer(e.l, locals_, space, scope)
         rt = infer(e.r, locals_, space, scope)
+        if e.op in ("&&", "||"):                         # logical: bool, bool -> bool
+            if lt != PrimT(Prim.BOOL) or rt != PrimT(Prim.BOOL):
+                raise TypeErr(f"'{e.op}' needs bool operands")
+            return PrimT(Prim.BOOL)
         if e.op == "==":
             if not (fits(lt, rt) or fits(rt, lt)):       # operands must be comparable
                 raise TypeErr("'==' operands differ")
+            return PrimT(Prim.BOOL)
+        if e.op in ("<", ">", "<=", ">="):               # ordering: numeric -> bool
+            if not (_numeric(lt) and _numeric(rt)):
+                raise TypeErr(f"'{e.op}' needs numeric operands")
             return PrimT(Prim.BOOL)
         if not (_numeric(lt) and _numeric(rt)):          # + - * are numeric-only
             raise TypeErr(f"'{e.op}' needs numeric operands")

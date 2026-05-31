@@ -8,7 +8,7 @@ import warnings, pathlib
 from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
-                  Lit, Bool, Var, Field, Bin, Call, Str, StructLit, MethodCall,
+                  Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, MethodCall,
                   EnumCtor, Let, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
@@ -80,8 +80,11 @@ def _expr_inner(n):
         return _expr(_named(n)[0])
     if t == "binary":
         kids = _named(n)
-        op = next(c.type for c in n.children if c.type in ("+", "-", "*", "=="))
+        op = next(c.type for c in n.children
+                  if c.type in ("+", "-", "*", "==", "<", ">", "<=", ">=", "&&", "||"))
         return Bin(op, _expr(kids[0]), _expr(kids[1]))
+    if t == "unary_op":
+        return Not(_expr(_named(n)[0]))
     if t == "call":
         fn = _field(n, "fn")
         if fn.type == "field_access":          # b.add(x)  ->  a method call
