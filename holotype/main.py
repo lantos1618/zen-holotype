@@ -8,10 +8,10 @@ Only well-typed functions are codegen'd.
 """
 from __future__ import annotations
 import sys, pathlib, subprocess
-from .ast import (Struct, EnumDecl, Fn, Prim, PrimT, NameT, PtrT,
-                  Str, StructLit, MethodCall, EnumCtor)
-from .types import Space, fits, infer, infer_block, TypeErr
-from .lower import c_struct, c_enum, c_proto, c_def, show, c_name
+from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
+                  Str, StructLit, Bin, Field, Let, Call, MethodCall, EnumCtor)
+from .types import Space, fits, infer, infer_block, subst, solve_call, TypeErr
+from .lower import c_struct, c_enum, c_proto, c_def, show, c_name, inst_name
 from .parser import parse
 
 BUILTIN = {"Option"}
@@ -48,13 +48,15 @@ def build_scopes(files):
         f.scope = sc
 
 
-def resolve_type(t, scope, space):
-    if isinstance(t, PrimT):
+def resolve_type(t, scope, space, tparams=()):
+    if isinstance(t, (PrimT, TVar)):
         return t
     if isinstance(t, PtrT):
-        return PtrT(t.dir, resolve_type(t.pointee, scope, space))
+        return PtrT(t.dir, resolve_type(t.pointee, scope, space, tparams))
     if isinstance(t, NameT):
-        args = tuple(resolve_type(a, scope, space) for a in t.args)
+        if t.path in tparams:                    # a bare name in scope as a type param
+            return TVar(t.path)
+        args = tuple(resolve_type(a, scope, space, tparams) for a in t.args)
         if t.path in BUILTIN:
             return NameT(t.path, args)
         qual = scope.get(t.path, t.path)
@@ -67,16 +69,19 @@ def resolve(files, space):
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Struct):
+                tp = set(d.tparams)
                 for fld in d.fields:
-                    fld.type = resolve_type(fld.type, f.scope, space)
+                    fld.type = resolve_type(fld.type, f.scope, space, tp)
             elif isinstance(d, EnumDecl):
+                tp = set(d.tparams)
                 for v in d.variants:
                     if v.payload is not None:
-                        v.payload = resolve_type(v.payload, f.scope, space)
+                        v.payload = resolve_type(v.payload, f.scope, space, tp)
             elif isinstance(d, Fn):
+                tp = set(d.tparams)
                 for p in d.params:
-                    p.type = resolve_type(p.type, f.scope, space)
-                d.ret = resolve_type(d.ret, f.scope, space)
+                    p.type = resolve_type(p.type, f.scope, space, tp)
+                d.ret = resolve_type(d.ret, f.scope, space, tp)
 
 
 def check(files, space):
@@ -101,6 +106,71 @@ def check(files, space):
     return results, passing
 
 
+# ───────────────────────── monomorphization ─────────────────────────────────
+def _scan_expr(e, locals_, space, scope, add):
+    """Walk an expression; record every generic-call instance (callee, type-args)."""
+    if isinstance(e, Bin):
+        _scan_expr(e.l, locals_, space, scope, add)
+        _scan_expr(e.r, locals_, space, scope, add)
+    elif isinstance(e, Field):
+        _scan_expr(e.obj, locals_, space, scope, add)
+    elif isinstance(e, StructLit):
+        for _, v in e.fields:
+            _scan_expr(v, locals_, space, scope, add)
+    elif isinstance(e, EnumCtor):
+        for a in e.args:
+            _scan_expr(a, locals_, space, scope, add)
+    elif isinstance(e, Call):
+        for a in e.args:
+            _scan_expr(a, locals_, space, scope, add)
+        if e.callee == "addr":
+            return
+        callee = space.walk(scope[e.callee]).value
+        if isinstance(callee, Fn) and callee.tparams:
+            s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
+            add(scope[e.callee], tuple(s[n] for n in callee.tparams))
+
+
+def _scan_block(stmts, locals_, space, scope, add):
+    locals_ = dict(locals_)
+    for s in stmts:
+        if isinstance(s, Let):
+            _scan_expr(s.value, locals_, space, scope, add)
+            locals_[s.name] = infer(s.value, locals_, space, scope)
+        else:
+            _scan_expr(s, locals_, space, scope, add)
+
+
+def specialize(fn, s):
+    """A concrete copy of a generic fn with its type-args substituted in."""
+    return Fn(fn.name, [Param(p.name, subst(p.type, s)) for p in fn.params],
+              subst(fn.ret, s), fn.body, fn.pub, ())
+
+
+def collect_instances(files, passing, space):
+    """Every concrete (qual, type-args) of a generic fn reachable from the
+    non-generic passing functions, transitively. -> {(qual, targs): (spec, scope)}"""
+    decl_scope = {f"{f.ns}.{d.name}": f.scope for f in files.values() for d in f.decls}
+    insts, work = {}, []
+
+    def add(qual, targs):
+        if (qual, targs) in insts:
+            return
+        fn = space.walk(qual).value
+        spec = specialize(fn, dict(zip(fn.tparams, targs)))
+        insts[(qual, targs)] = (spec, decl_scope[qual])
+        work.append((spec, decl_scope[qual]))
+
+    for f in files.values():
+        for d in f.decls:
+            if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
+                _scan_block(d.body, {p.name: p.type for p in d.params}, space, f.scope, add)
+    while work:
+        spec, sc = work.pop()
+        _scan_block(spec.body, {p.name: p.type for p in spec.params}, space, sc, add)
+    return insts
+
+
 def emit_c(files, passing, space, extra=""):
     # Integrity: codegen lowers Struct, EnumDecl, Fn. Anything else fails loudly
     # rather than silently dropping it from the output.
@@ -110,23 +180,29 @@ def emit_c(files, passing, space, extra=""):
                 raise NotImplementedError(
                     f"cannot lower {type(d).__name__} '{f.ns}.{d.name}' to C yet "
                     f"(codegen supports struct + enum + fn)")
+    insts = collect_instances(files, passing, space)
+
     lines = ["#include <stdint.h>", "#include <stdbool.h>", ""]
-    for f in files.values():
+    for f in files.values():                             # types (generic templates emit nothing)
         for d in f.decls:
-            if isinstance(d, Struct):
+            if isinstance(d, Struct) and not d.tparams:
                 lines.append(c_struct(f"{f.ns}.{d.name}", d))
-            elif isinstance(d, EnumDecl):
+            elif isinstance(d, EnumDecl) and not d.tparams:
                 lines.append(c_enum(f"{f.ns}.{d.name}", d))
     lines.append("")
-    for f in files.values():
+    for f in files.values():                             # prototypes: concrete fns…
         for d in f.decls:
-            if isinstance(d, Fn) and f"{f.ns}.{d.name}" in passing:
+            if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
                 lines.append(c_proto(f"{f.ns}.{d.name}", d))
+    for (qual, targs), (spec, _) in insts.items():       # …and each monomorphized instance
+        lines.append(c_proto(qual, spec, inst_name(qual, targs)))
     lines.append("")
-    for f in files.values():
+    for f in files.values():                             # definitions
         for d in f.decls:
-            if isinstance(d, Fn) and f"{f.ns}.{d.name}" in passing:
+            if isinstance(d, Fn) and not d.tparams and f"{f.ns}.{d.name}" in passing:
                 lines.append(c_def(f"{f.ns}.{d.name}", d, space, f.scope))
+    for (qual, targs), (spec, sc) in insts.items():
+        lines.append(c_def(qual, spec, space, sc, inst_name(qual, targs)))
     return "\n".join(lines) + "\n" + extra
 
 

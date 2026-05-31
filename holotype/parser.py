@@ -103,22 +103,27 @@ def _stmt(n):
     return _expr(n)
 
 
+def _tparams(n):
+    tp = _field(n, "tparams")
+    return tuple(_t(c) for c in tp.named_children) if tp else ()
+
+
 def _decl(n):
     pub = any(c.type == "pub" for c in n.children)
     if n.type == "struct":
         fields = [Field_(_t(_field(f, "name")), _type(_field(f, "type")))
                   for f in _named(n) if f.type == "field"]
-        return Struct(_t(_field(n, "name")), fields, pub)
+        return Struct(_t(_field(n, "name")), fields, pub, _tparams(n))
     if n.type == "enum":
         variants = [Variant(_t(_field(v, "name")),
                             _type(_field(v, "payload")) if _field(v, "payload") else None)
                     for v in _named(n) if v.type == "variant"]
-        return EnumDecl(_t(_field(n, "name")), variants, pub)
+        return EnumDecl(_t(_field(n, "name")), variants, pub, _tparams(n))
     if n.type == "function":
         params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
                   for p in _named(n) if p.type == "param"]
         body = [_stmt(s) for s in _named(_field(n, "body"))]
-        return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub)
+        return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub, _tparams(n))
     raise ValueError(f"unhandled decl: {n.type}")
 
 

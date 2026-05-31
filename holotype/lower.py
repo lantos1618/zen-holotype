@@ -2,9 +2,9 @@
 direction -> const, Option -> a plain pointer (nullability already enforced upstream).
 """
 from __future__ import annotations
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, EnumDecl, Fn,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
                   Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor)
-from .types import infer
+from .types import infer, subst, solve_call
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
 
@@ -13,7 +13,30 @@ def c_name(path: str) -> str:
     return path.replace(".", "_")
 
 
+_DIRTAG = {Dir.READ: "p", Dir.MUT: "mp", Dir.RAW: "rp"}
+
+
+def mangle(t) -> str:
+    """A C-identifier fragment for a concrete type — used to name monomorphized
+    instances so two type-args never collide (id<Vec> -> ..._core_vec_Vec)."""
+    if isinstance(t, PrimT):
+        return t.prim.value
+    if isinstance(t, NameT):
+        tail = ("_" + "_".join(mangle(a) for a in t.args)) if t.args else ""
+        return c_name(t.path) + tail
+    if isinstance(t, PtrT):
+        return _DIRTAG[t.dir] + "_" + mangle(t.pointee)
+    return "x"
+
+
+def inst_name(qual, targs) -> str:
+    """The mangled C name of a generic instance: <fn>_<arg1>_<arg2>…"""
+    return c_name(qual) + "_" + "_".join(mangle(t) for t in targs)
+
+
 def c_type(t) -> str:
+    if isinstance(t, TVar):
+        raise TypeError(f"un-monomorphized type variable {t.name} reached codegen")
     if isinstance(t, PrimT):
         return _CMAP[t.prim]
     if isinstance(t, PtrT):
@@ -30,6 +53,8 @@ def c_type(t) -> str:
 
 def show(t) -> str:
     """Source-level (pre-erasure) rendering — for diagnostics, not codegen."""
+    if isinstance(t, TVar):
+        return t.name
     if isinstance(t, PrimT):
         return t.prim.value
     if isinstance(t, PtrT):
@@ -70,8 +95,15 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
     if isinstance(e, Call):
         if e.callee == "addr":
             return f"&({c_expr(e.args[0], locals_, space, scope)})"
-        cn = c_name(scope[e.callee])
-        ptypes = [p.type for p in space.walk(scope[e.callee]).value.params]
+        callee = space.walk(scope[e.callee]).value
+        if callee.tparams:                              # generic: name the monomorphized instance
+            s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
+            targs = tuple(s[n] for n in callee.tparams)
+            cn = inst_name(scope[e.callee], targs)
+            ptypes = [subst(p.type, s) for p in callee.params]
+        else:
+            cn = c_name(scope[e.callee])
+            ptypes = [p.type for p in callee.params]
         args = ", ".join(c_expr(a, locals_, space, scope, pt)
                          for a, pt in zip(e.args, ptypes))
         return f"{cn}({args})"
@@ -99,8 +131,8 @@ def c_enum(qual, d: EnumDecl) -> str:
     return f"typedef struct {{ int32_t tag;{union} }} {cn};\nenum {{ {tags} }};"
 
 
-def c_proto(qual, d: Fn) -> str:
-    return f"{c_type(d.ret)} {c_name(qual)}({_params(d)});"
+def c_proto(qual, d: Fn, cname=None) -> str:
+    return f"{c_type(d.ret)} {cname or c_name(qual)}({_params(d)});"
 
 
 def c_block(stmts, locals_, space, scope, expect=None) -> str:
@@ -119,7 +151,7 @@ def c_block(stmts, locals_, space, scope, expect=None) -> str:
     return " ".join(lines + [f"return {ret};"])
 
 
-def c_def(qual, d: Fn, space, scope) -> str:
+def c_def(qual, d: Fn, space, scope, cname=None) -> str:
     locals_ = {p.name: p.type for p in d.params}
     body = c_block(d.body, locals_, space, scope, d.ret) if d.body else "return 0;"
-    return f"{c_type(d.ret)} {c_name(qual)}({_params(d)}) {{ {body} }}"
+    return f"{c_type(d.ret)} {cname or c_name(qual)}({_params(d)}) {{ {body} }}"

@@ -108,6 +108,30 @@ def test_enum_lowers_to_tagged_union(tmp_path):
     assert r.returncode == 0, r.stderr
 
 
+# ── Phase A: generics monomorphize to concrete C that compiles and runs ─────
+def test_generic_fn_monomorphizes(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Vec: { len: i32, cap: i32 }\n"
+        "pub id<T> = (x: Ptr<T>) Ptr<T> { x }\n"
+        "pub area = (v: Ptr<Vec>) i32 { id(v).len * id(v).cap }\n"
+        "pub main = () i32 { area(addr(Vec { len: 5, cap: 4 })) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    # one specialized instance named for its type-arg; the template itself is gone
+    assert "main_Vec const * main_id_main_Vec(main_Vec const * x)" in c
+    assert "main_id_main_Vec(v)" in c
+    assert "_T(" not in c                     # no un-monomorphized template emitted
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c)
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-c", str(cfile),
+                        "-o", str(tmp_path / "o.o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

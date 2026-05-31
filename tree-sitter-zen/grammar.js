@@ -21,19 +21,25 @@ module.exports = grammar({
     import: $ => seq('{', comma1($.identifier), '}', '=', $.module_path),
     module_path: $ => sep1($.identifier, '.'),
 
-    // pub Vec: { len: i32, cap: i32 }
-    struct: $ => seq(optional('pub'), field('name', $.identifier), ':',
+    // a declaration's own type parameters:  Box<T>,  map<T, U>
+    type_params: $ => seq('<', comma1($.identifier), '>'),
+
+    // pub Vec: { len: i32, cap: i32 }   /   pub Box<T>: { val: T }
+    struct: $ => seq(optional('pub'), field('name', $.identifier),
+                     optional(field('tparams', $.type_params)), ':',
                      '{', comma1($.field), optional(','), '}'),
     field: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
-    // pub Opt: None, Some(T)
-    enum: $ => seq(optional('pub'), field('name', $.identifier), ':',
+    // pub Opt<T>: None, Some(T)
+    enum: $ => seq(optional('pub'), field('name', $.identifier),
+                   optional(field('tparams', $.type_params)), ':',
                    comma1($.variant)),
     variant: $ => seq(field('name', $.identifier),
                       optional(seq('(', field('payload', $._type), ')'))),
 
-    // pub area = (v: Ptr<Vec>) i32 { len(v) * cap(v) }
-    function: $ => seq(optional('pub'), field('name', $.identifier), '=',
+    // pub area = (v: Ptr<Vec>) i32 { len(v) * cap(v) }   /   pub id<T> = (x: Ptr<T>) Ptr<T> { x }
+    function: $ => seq(optional('pub'), field('name', $.identifier),
+                       optional(field('tparams', $.type_params)), '=',
                        '(', optional(comma1($.param)), ')',
                        field('ret', $._type), field('body', $.block)),
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),

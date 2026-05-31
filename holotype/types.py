@@ -6,7 +6,7 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn, EnumDecl,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, Fn, EnumDecl,
                   Lit, Bool, Var, Field, Bin, Call, StructLit, Let, EnumCtor)
 
 
@@ -92,6 +92,46 @@ def fits(given, want) -> bool:
     return given == want                             # nominal/structural eq (paths canonical)
 
 
+# ───────────────────────── generics: substitution + unification ─────────────
+def subst(t, s):
+    """Replace each type variable in `t` with its binding from `s` (name -> Type)."""
+    if isinstance(t, TVar):
+        return s.get(t.name, t)
+    if isinstance(t, PtrT):
+        return PtrT(t.dir, subst(t.pointee, s))
+    if isinstance(t, NameT):
+        return NameT(t.path, tuple(subst(a, s) for a in t.args))
+    return t
+
+
+def match_type(param, arg, s) -> None:
+    """One-directional unification: bind the type vars in `param` to the matching
+    subterms of the concrete `arg`. Shape-only — lattice fitness (direction,
+    nullability) is enforced afterwards by fits() on the substituted types.
+    Occurs-check is moot: `arg` is already concrete (var-free)."""
+    if isinstance(param, TVar):
+        prev = s.get(param.name)
+        if prev is None or prev == arg:
+            s[param.name] = arg
+        return
+    if isinstance(param, PtrT) and isinstance(arg, PtrT):
+        match_type(param.pointee, arg.pointee, s)
+    elif is_option(param) and not is_option(arg):     # Option<X> vs a nonnull -> peek
+        match_type(param.args[0], arg, s)
+    elif (isinstance(param, NameT) and isinstance(arg, NameT)
+          and param.path == arg.path and len(param.args) == len(arg.args)):
+        for p, a in zip(param.args, arg.args):
+            match_type(p, a, s)
+
+
+def solve_call(callee, arg_types):
+    """Infer a generic function's type arguments from its call's argument types."""
+    s = {}
+    for p, at in zip(callee.params, arg_types):
+        match_type(p.type, at, s)
+    return s
+
+
 # ───────────────────────── expression inference ─────────────────────────────
 def infer(e, locals_, space, scope, expect=None):
     """Return the type of expression `e`; raise TypeErr on any call mismatch.
@@ -125,7 +165,8 @@ def infer(e, locals_, space, scope, expect=None):
         decl = space.walk(st.path).value
         for f in decl.fields:
             if f.name == e.name:
-                return f.type
+                # a field of a generic struct carries the instantiation's args
+                return subst(f.type, dict(zip(decl.tparams, st.args))) if decl.tparams else f.type
         raise TypeErr(f"no field '{e.name}' on {st.path}")
     if isinstance(e, StructLit):
         qual = scope.get(e.type, e.type)
@@ -146,6 +187,17 @@ def infer(e, locals_, space, scope, expect=None):
             raise TypeErr(f"'{e.callee}' is not callable")
         if len(e.args) != len(callee.params):
             raise TypeErr(f"'{e.callee}' wants {len(callee.params)} args, got {len(e.args)}")
+        if callee.tparams:                               # generic: infer type-args, then check
+            arg_types = [infer(a, locals_, space, scope) for a in e.args]
+            s = solve_call(callee, arg_types)
+            missing = [n for n in callee.tparams if n not in s]
+            if missing:
+                raise TypeErr(f"cannot infer type {', '.join(missing)} for '{e.callee}'")
+            for given, p in zip(arg_types, callee.params):
+                want = subst(p.type, s)
+                if not fits(given, want):
+                    raise TypeErr("pointer/null mismatch", given, want)
+            return subst(callee.ret, s)
         for a, p in zip(e.args, callee.params):
             given = infer(a, locals_, space, scope, p.type)
             if not fits(given, p.type):

@@ -45,6 +45,13 @@ class PtrT:
     pointee: object           # Type
 
 
+@dataclass(frozen=True)
+class TVar:
+    """A type parameter standing in for an unknown type, e.g. the `T` of Box<T>.
+    Resolved away by substitution once a concrete type-arg is known."""
+    name: str
+
+
 # ───────────────────────── expressions ──────────────────────────────────────
 @dataclass(frozen=True)
 class Lit:
@@ -122,6 +129,7 @@ class Struct:
     name: str
     fields: list              # list[Field_]
     pub: bool = False
+    tparams: tuple = ()        # type-parameter names, e.g. ("T",)
 
 
 @dataclass
@@ -135,6 +143,7 @@ class EnumDecl:
     name: str
     variants: list            # list[Variant]
     pub: bool = False
+    tparams: tuple = ()        # type-parameter names
 
 
 @dataclass
@@ -150,6 +159,7 @@ class Fn:
     ret: object               # Type
     body: object = None       # Expr | None
     pub: bool = False
+    tparams: tuple = ()        # type-parameter names
 
 
 @dataclass
