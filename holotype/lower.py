@@ -3,7 +3,8 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 """
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
-                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
+                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, Assign, While,
+                  EnumCtor, Match)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 from .comptime import evaluate
 
@@ -212,19 +213,34 @@ def c_block(stmts, locals_, space, scope, expect=None) -> str:
     """Lower a statement list: each `x := v` becomes a typed C local; the final
     expression statement becomes the `return` (and gets the expected type)."""
     locals_ = dict(locals_)
+    is_void = isinstance(expect, PrimT) and expect.prim is Prim.VOID
     lines, last = [], len(stmts) - 1
     for i, s in enumerate(stmts):
-        if isinstance(s, Let):
-            t = infer(s.value, locals_, space, scope)
-            locals_[s.name] = t
-            lines.append(f"{c_type(t)} {s.name} = {c_expr(s.value, locals_, space, scope)};")
-        elif i == last:
+        if isinstance(s, (Let, Assign, While)):
+            lines.append(c_stmt(s, locals_, space, scope))
+        elif i == last and not is_void:
             lines.append(f"return {c_expr(s, locals_, space, scope, expect)};")
-        else:                                            # an intermediate statement — KEEP its effect
+        else:                                            # statement — keep its effect, discard value
             lines.append(f"{c_expr(s, locals_, space, scope)};")
-    if not stmts or isinstance(stmts[-1], Let):          # body ends without a value expr
-        lines.append("return 0;")
+    if not is_void and (not stmts or isinstance(stmts[-1], (Let, Assign, While))):
+        lines.append("return 0;")                        # non-void body ending without a value expr
     return " ".join(lines)
+
+
+def c_stmt(s, locals_, space, scope) -> str:
+    """One statement (mutates `locals_` for a let)."""
+    if isinstance(s, Let):
+        t = infer(s.value, locals_, space, scope)
+        locals_[s.name] = t
+        return f"{c_type(t)} {s.name} = {c_expr(s.value, locals_, space, scope)};"
+    if isinstance(s, Assign):
+        return f"{c_expr(s.target, locals_, space, scope)} = {c_expr(s.value, locals_, space, scope)};"
+    if isinstance(s, While):
+        bl = dict(locals_)                               # loop body has its own scope
+        body = " ".join(c_stmt(x, bl, space, scope) if isinstance(x, (Let, Assign, While))
+                        else f"{c_expr(x, bl, space, scope)};" for x in s.body)
+        return f"while ({c_expr(s.cond, locals_, space, scope)}) {{ {body} }}"
+    return f"{c_expr(s, locals_, space, scope)};"
 
 
 def c_def(qual, d: Fn, space, scope, cname=None) -> str:

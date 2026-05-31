@@ -446,6 +446,68 @@ pub main = () i32 {
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Hi\n"
 
 
+# ── B1+B2: mutation + loops — a growable String that pushes and prints ──────
+def test_growable_string_push_loop(tmp_path):
+    (tmp_path / "main.zen").write_text("""
+extern malloc  = (n: i64) RawPtr<u8>
+extern free    = (p: RawPtr<u8>) void
+extern putchar = (c: i32) i32
+
+String: { ptr: RawPtr<u8>, len: i64, cap: i64 }
+new_str = (cap: i64) String { String { ptr: malloc(cap), len: 0, cap: cap } }
+
+push = (s: MutPtr<String>, b: u8) void {
+    store(offset(s.ptr, s.len), b)
+    s.len = s.len + 1                      // mutate the field through the pointer
+}
+print_str = (s: Ptr<String>) void {
+    i := 0
+    while (i < s.len) { putchar(load(offset(s.ptr, i)))  i = i + 1 }
+    putchar(10)
+}
+pub main = () i32 {
+    s := new_str(16)
+    push(addr(s), 72) push(addr(s), 105) push(addr(s), 33)   // H i !
+    print_str(addr(s))
+    free(s.ptr)
+    0
+}
+""")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "->len = (" in c and "while (" in c              # field mutation + a loop
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", str(cfile), "-o", str(bexe)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout == "Hi!\n"
+
+
+def test_while_loop_sums(tmp_path):
+    (tmp_path / "main.zen").write_text("""
+pub main = () i32 {
+    sum := 0  i := 1
+    while (i <= 10) { sum = sum + i  i = i + 1 }
+    sum
+}
+""")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
+    subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 55
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

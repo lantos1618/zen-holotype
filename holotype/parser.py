@@ -9,7 +9,7 @@ from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
                   EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
                   Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, MethodCall,
-                  EnumCtor, Let, Arm, Match)
+                  EnumCtor, Let, Assign, While, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -123,6 +123,11 @@ def _args(n):
 def _stmt(n):
     if n.type == "let_binding":                     # x := value
         return Let(_t(_field(n, "name")), _expr(_field(n, "value")))
+    if n.type == "assign":                          # lvalue = value
+        return Assign(_expr(_field(n, "target")), _expr(_field(n, "value")))
+    if n.type == "while_":                          # while cond { body }
+        body = tuple(_stmt(s) for s in _named(_field(n, "body")))
+        return While(_expr(_field(n, "cond")), body)
     return _expr(n)
 
 

@@ -139,6 +139,20 @@ class Let:
 
 
 @dataclass(frozen=True)
+class Assign:
+    target: object            # an lvalue: Var (reassign local) or Field (set a struct field)
+    value: object             # Expr
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class While:
+    cond: object              # Expr (bool)
+    body: tuple = ()          # tuple[stmt]
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
 class Arm:
     variant: str | None       # ctor variant name (None for a literal/wildcard arm)
     binding: str | None       # payload binding, e.g. the `v` of .Some(v)
