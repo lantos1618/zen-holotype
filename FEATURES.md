@@ -24,9 +24,12 @@ where it's headed, [VISION](VISION.md).)
 ## Expressions & control flow
 - Full operator set: `+ - *  ==  < > <= >=  && ||  !`, each operand-checked.
 - `match` with **literal patterns** (`i32`/`bool`), **payload binding** (`.Circle(v) => v`),
-  exhaustiveness, and wildcards.
-- **`while` loops** and **mutation** — `x = 5` (reassign a local), `s.f = v` (set a field
-  through a `MutPtr`).
+  exhaustiveness, and wildcards — usable as an expression *or* a statement (`?:` or `if/else`).
+- **`loop`** — the *one* iteration construct (no `while`/`for`). `loop(n, (h, i) { … })` counts;
+  `loop((h) { … })` is iterless and handle-driven; the handle does `h.break()` / `h.continue()`.
+  It desugars onto the **`@while(cond) { … }`** structured primitive, which lowers to a C `for`
+  (kept structured so it stays auto-vectorizable — never gotos).
+- **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
 
@@ -67,7 +70,9 @@ driven by a `build.zen` written in the language itself. Ill-typed functions are 
 excluded from codegen; the rest builds and runs.
 
 ## Not yet (the honest gaps)
-- No `for`/iterators, closures, modules beyond files, or first-class **runtime** strings.
+- No iterators / `map`/`fold` yet (the plan: a `Loopable` trait + a slice type, with `map`/`fold`
+  as ordinary Zen on top of `loop`). No closures-as-values, modules beyond files, or first-class
+  **runtime** strings.
 - Generators aren't **type-checked against the Zen `Ast`** — they run comptime-dynamically.
 - Trait reflection is single-method only, and assumes a `(Self) i32` shape (no full
   method-signature reflection yet).

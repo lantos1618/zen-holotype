@@ -7,7 +7,7 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, Struct, EnumDecl, MethodSig,
-                  Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, Assign, While,
+                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, Let, Assign, While,
                   EnumCtor, Match)
 
 
@@ -240,6 +240,12 @@ def _infer(e, locals_, space, scope, expect=None):
             return _infer_struct_lit(e, locals_, space, scope)
         case Call():
             return _infer_call(e, expect, locals_, space, scope)
+        case MethodCall(recv, method, args):                    # the loop handle: h.break()/h.continue()
+            if method in ("break", "continue"):
+                if args:
+                    raise TypeErr(f"'{method}' takes no arguments")
+                return PrimT(Prim.VOID)
+            raise TypeErr(f"unknown method '.{method}'")
         case _:
             raise TypeErr(f"unknown expr {e!r}")
 
@@ -471,10 +477,12 @@ def infer_block(stmts, locals_, space, scope, expect=None):
         elif isinstance(s, Assign):
             _check_assign(s, locals_, space, scope)
             last = PrimT(Prim.VOID)
-        elif isinstance(s, While):
+        elif isinstance(s, While):                       # @while / desugared loop
             if infer(s.cond, locals_, space, scope) != PrimT(Prim.BOOL):
-                raise TypeErr("while condition must be a bool")
-            infer_block(s.body, locals_, space, scope)   # body in the loop's scope
+                raise TypeErr("loop/@while condition must be a bool")
+            infer_block(s.body, dict(locals_), space, scope)   # body in its own scope
+            if s.step is not None:                       # the count loop's i = i + 1
+                infer_block((s.step,), locals_, space, scope)
             last = PrimT(Prim.VOID)
         else:
             last = infer(s, locals_, space, scope, exp)

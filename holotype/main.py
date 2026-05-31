@@ -9,8 +9,8 @@ Only well-typed functions are codegen'd.
 from __future__ import annotations
 import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
-                  Str, StructLit, Bin, Not, Field, Let, Assign, While, Call, MethodCall,
-                  EnumCtor, Match, TraitDecl, Impl, Emit)
+                  Str, StructLit, Bin, Not, Field, Let, Assign, While, Loop, Call, MethodCall,
+                  EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
@@ -121,6 +121,43 @@ def resolve(files, space):
                 for m in d.methods:
                     _resolve_fn(m, f.scope, space)
                 space.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
+    desugar_loops(files)                                # loop → @while, before check + lower
+
+
+# ───────────────────────── desugar: loop → @while ───────────────────────────
+# The everyday `loop` sugar collapses onto the one structured primitive (While)
+# BEFORE checking, so check + lower only ever meet @while. Nothing is unravelled
+# to gotos — While stays structured (→ a C `for`) so it can auto-vectorize.
+def desugar_loops(files):
+    for f in files.values():
+        for d in f.decls:
+            if isinstance(d, Fn) and d.body is not None and not d.extern:
+                d.body = _desugar_block(d.body)
+            elif isinstance(d, Impl):
+                for m in d.methods:
+                    if m.body is not None:
+                        m.body = _desugar_block(m.body)
+
+
+def _desugar_block(stmts):
+    out = []
+    for s in stmts:
+        out.extend(_desugar_stmt(s))
+    return out
+
+
+def _desugar_stmt(s):
+    if isinstance(s, Loop):
+        body = tuple(_desugar_block(s.body))
+        if s.count is None:                          # loop((h){B}) -> @while(true){B}
+            return [While(Bool(True), body, None)]
+        idx = s.params[1] if len(s.params) > 1 else "_i"   # loop(n,(h,i){B})
+        cond = Bin("<", Var(idx), s.count)
+        step = Assign(Var(idx), Bin("+", Var(idx), Lit(1)))
+        return [Let(idx, Lit(0)), While(cond, body, step)]   #  i:=0; @while(i<n){B; step i++}
+    if isinstance(s, While):                         # @while primitive — desugar its nested body
+        return [While(s.cond, tuple(_desugar_block(s.body)), s.step)]
+    return [s]
 
 
 def _resolve_fn(d, scope, space):
@@ -324,6 +361,8 @@ def _scan_block(stmts, locals_, space, scope, sink, expect=None):
         elif isinstance(s, While):
             _scan_expr(s.cond, locals_, space, scope, sink)
             _scan_block(s.body, locals_, space, scope, sink)
+            if s.step is not None:
+                _scan_block((s.step,), locals_, space, scope, sink)
         else:
             _scan_expr(s, locals_, space, scope, sink, expect if i == last else None)
 

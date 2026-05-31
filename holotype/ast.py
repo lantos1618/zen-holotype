@@ -148,7 +148,21 @@ class Assign:
 
 @dataclass(frozen=True)
 class While:
+    # the structured loop PRIMITIVE — lowers to C `for(; cond; step)`. `step` runs
+    # each iteration (incl. on continue) and keeps it a clean counted loop the C
+    # compiler can auto-vectorize. Surface: @while(cond){body} (step is None);
+    # the `loop` sugar desugars onto it (with a step for the count form).
     cond: object              # Expr (bool)
+    body: tuple = ()          # tuple[stmt]
+    step: object = None       # optional stmt run each iteration (the for-loop's 3rd slot)
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Loop:
+    # the everyday surface — desugared onto While before check (see desugar_loops).
+    count: object             # Expr (numeric count) — None for an iterless loop((h){…})
+    params: tuple = ()        # (handle,) or (handle, index) — binding names
     body: tuple = ()          # tuple[stmt]
     pos: object = _pos()
 

@@ -11,6 +11,10 @@ module.exports = grammar({
   extras: $ => [/\s/, $.comment],     // whitespace (incl. newlines) is insignificant here
   word: $ => $.identifier,
 
+  // loop(EXPR, (h,i){…}) vs loop((h){…}): after `loop(`, a `(` could begin the
+  // count expression or the param group — GLR forks and the valid parse wins.
+  conflicts: $ => [[$.loop_, $._primary]],
+
   rules: {
     source_file: $ => repeat($._item),
     _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl, $.extern, $.emit),
@@ -74,14 +78,26 @@ module.exports = grammar({
                          optional(seq('<', comma1($._type), '>'))),
 
     block: $ => seq('{', repeat($._statement), '}'),
-    _statement: $ => choice($.let_binding, $.assign, $.while_, $._expression),
+    _statement: $ => choice($.let_binding, $.assign, $.while_prim, $.loop_, $._expression),
     // x := expr  — a local binding (type inferred from the value)
     let_binding: $ => seq(field('name', $.identifier), ':=', field('value', $._expression)),
     // lvalue = expr  — reassign a local, or set a struct field (s.f = v)
     assign: $ => prec(1, seq(field('target', choice($.identifier, $.field_access)),
                              '=', field('value', $._expression))),
-    // while cond { … }  — a loop (a statement, no value)
-    while_: $ => seq('while', field('cond', $._expression), field('body', $.block)),
+    // @while(cond) { … } — the structured loop PRIMITIVE (plumbing; prefer `loop`).
+    // It carries a backend-visible structure (lowers to a C `for`), so the C
+    // compiler can still auto-vectorize it — never unravelled to gotos.
+    while_prim: $ => seq('@while', '(', field('cond', $._expression), ')', field('body', $.block)),
+
+    // the one iteration construct (no `while`/`for`):
+    //   loop((h) { … })          iterless — the handle drives it (h.break/h.continue)
+    //   loop(n, (h, i) { … })    count    — i runs 0..n-1
+    // the closure is sugar (inlined), so the body reads/mutates enclosing locals;
+    // it all folds to a C `for`.
+    loop_: $ => seq('loop', '(',
+                    optional(seq(field('count', $._expression), ',')),
+                    '(', field('params', seq($.identifier, repeat(seq(',', $.identifier)))), ')',
+                    field('body', $.block), ')'),
     // a leading-dot constructor `.Ok(x)` — an expression, so it works as a call
     // argument and match arm body too, not just a bare statement.
     enum_ctor: $ => seq('.', field('name', $.identifier), $.arguments),
