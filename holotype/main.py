@@ -11,7 +11,7 @@ import sys, pathlib, subprocess
 from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar,
                   Str, StructLit, Bin, Not, Field, Let, Call, MethodCall, EnumCtor, Match,
                   TraitDecl, Impl)
-from .types import (Space, fits, infer, infer_block, subst, solve_call, match_type,
+from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, show, c_name, inst_name,
                     impl_cname, mangle)
@@ -33,7 +33,7 @@ def load(root, skip=()):
 
 
 def build_space(files):
-    space = Space()                       # space.impls / fn_scope / impl_pass init'd in Space
+    space = Namespace()                       # trie + impls registry; impls filled in resolve()
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Impl):       # impls have no name — registered in resolve()
@@ -118,15 +118,16 @@ def _resolve_fn(d, scope, space):
     d.bounds = {k: (scope.get(v, v)) for k, v in d.bounds.items()}
     for trait_path in d.bounds.values():
         space.walk(trait_path)                              # the bound trait must exist
+    d.scope = trait_methods_scope(d, scope, space) if d.bounds else scope   # for ret inference
 
 
-def _check_fn(qual, ns, d, scope, space, results, passing):
+def _check_fn(qual, ns, d, space, results, passing):
     if not d.body:
         return
     locals_ = {p.name: p.type for p in d.params}
     try:
-        want = ret_type(qual, space) if qual in space.fn_scope else d.ret  # inferred or declared
-        bt = infer_block(d.body, locals_, space, scope, want)
+        want = d.ret if d.ret is not None else ret_type(qual, space)   # declared or inferred
+        bt = infer_block(d.body, locals_, space, d.scope, want)
         if want is not None and not fits(bt, want):
             raise TypeErr("return type", bt, want)
         results.append((qual, True, "ok")); passing.add(qual)
@@ -138,19 +139,11 @@ def _check_fn(qual, ns, d, scope, space, results, passing):
 
 
 def check(files, space):
-    # maps for on-demand return-type inference: each top-level fn's defining
-    # scope (trait-augmented if bounded), plus a guard against recursive inference.
-    space.fn_scope = {f"{f.ns}.{d.name}": (trait_methods_scope(d, f.scope, space) if d.bounds else f.scope)
-                      for f in files.values() for d in f.decls if isinstance(d, Fn)}
-    space._inferring = set()
-    space.impl_pass = set()          # (trait_path, type_path, method) that type-checked
-
     results, passing = [], set()
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Fn):
-                scope = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
-                _check_fn(f"{f.ns}.{d.name}", f.ns, d, scope, space, results, passing)
+                _check_fn(f"{f.ns}.{d.name}", f.ns, d, space, results, passing)
             elif isinstance(d, Impl):
                 _check_impl(d, f, space, results, passing)
     return results, passing
@@ -172,9 +165,9 @@ def _check_impl(d, f, space, results, passing):
         got_params = [p.type for p in m.params]
         if got_params != want_params or m.ret != subst(sig.ret, self_sub):
             results.append((tag, False, "signature does not match the trait")); continue
-        _check_fn(tag, f.ns, m, f.scope, space, results, passing)
-        if tag in passing:
-            space.impl_pass.add((trait_path, type_path, m.name))
+        _check_fn(tag, f.ns, m, space, results, passing)
+        if tag in passing:                          # record the codegen key in `passing` too
+            passing.add((trait_path, type_path, m.name))
     missing = [name for name in sigs if name not in {m.name for m in d.methods}]
     if missing:
         results.append((f"{d.trait} for {d.type}", False,
@@ -312,7 +305,7 @@ def emit_c(files, passing, space, extra=""):
     impl_fns = []                                         # the trait methods actually used
     for (tp, ty) in impls_used:
         for m, (mfn, msc) in space.impls[(tp, ty)].items():
-            if (tp, ty, m) not in space.impl_pass:        # used but ill-typed -> refuse loudly
+            if (tp, ty, m) not in passing:                # used but ill-typed -> refuse loudly
                 raise NotImplementedError(
                     f"trait impl {ty.rsplit('.', 1)[-1]}::{m} is used but did not type-check")
             impl_fns.append((impl_cname(tp, ty, m), mfn, msc))
@@ -461,14 +454,18 @@ def cmd_build(root):
     if entry not in passing:
         raise SystemExit(f"\nentry '{entry}' did not type-check — nothing to run")
 
+    # The entry must return i32 (printed) or void (run for effect) — anything else
+    # has no sensible harness, so reject it rather than misformat (e.g. %d on a ptr).
     entry_ret = space.walk(entry).value.ret
-    if isinstance(entry_ret, PrimT) and entry_ret.prim is Prim.VOID:   # main returns nothing
+    if entry_ret == PrimT(Prim.VOID):
         harness = (f'\nint main(void) {{\n    {c_name(entry)}();\n'
                    f'    return 0;\n}}\n')
-    else:
+    elif entry_ret == PrimT(Prim.I32):
         harness = (f'\n#include <stdio.h>\nint main(void) {{\n'
                    f'    printf("{cfg["name"]} -> %d\\n", {c_name(entry)}());\n'
                    f'    return 0;\n}}\n')
+    else:
+        raise SystemExit(f"\nentry '{entry}' must return i32 or void, not {show(entry_ret)}")
     out_dir = pathlib.Path(root) / cfg["out_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{cfg['name']}.c", out_dir / cfg["name"]

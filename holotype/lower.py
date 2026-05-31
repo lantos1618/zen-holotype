@@ -116,13 +116,14 @@ def _c_call(e, locals_, space, scope) -> str:
         return f"&({c_expr(e.args[0], locals_, space, scope)})"
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                 # resolve to the concrete impl fn
-        s = {}
+        s: dict = {}
         for p, a in zip(target.sig.params, e.args):
             match_type(p, infer(a, locals_, space, scope), s)
         cn = impl_cname(target.trait, s["Self"].path, e.callee)
         ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
     else:
         callee = space.walk(target).value
+        assert isinstance(callee, Fn)                   # a callee path always names a function
         if callee.tparams:                              # generic: name the monomorphized instance
             s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
             cn = inst_name(target, tuple(s[n] for n in callee.tparams))

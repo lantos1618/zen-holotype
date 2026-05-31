@@ -6,7 +6,7 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, EnumDecl,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, EnumDecl, MethodSig,
                   Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 
 
@@ -18,7 +18,7 @@ class Unresolved(Exception): ...
 class TraitMethod:
     """A scope entry for a trait method reachable via a bound `T: Trait`."""
     tparam: str               # the bound type-parameter (the method's Self)
-    sig: object               # MethodSig
+    sig: "MethodSig"
     trait: str                # fully-qualified trait path
 
 
@@ -37,13 +37,13 @@ class Node:
     value: object = None
 
 
-class Space:
+class Namespace:
+    """Immutable-after-resolve data: the namespace trie + the trait-impl registry.
+    Nothing is written to it during the checking phase — checking state lives on
+    the AST (memoized `fn.ret`) and in the per-run `passing` set."""
     def __init__(self):
         self.root = Node()
-        self.impls = {}              # (trait_path, type_path) -> {method: (Fn, scope)}
-        self.impl_pass = set()       # (trait_path, type_path, method) that type-checked
-        self.fn_scope = {}           # qual -> defining scope (for return-type inference)
-        self._inferring = set()      # guard against recursive return-type inference
+        self.impls = {}              # (trait_path, type_path) -> {method: (Fn, scope)}; built in resolve
 
     def insert(self, path: str, decl) -> None:
         n = self.root
@@ -278,21 +278,26 @@ def _infer_call(e, expect, locals_, space, scope):
     return ret_type(target, space)
 
 
+_INFERRING = object()      # sentinel parked in fn.ret while its body is being inferred
+
+
 def ret_type(qual, space):
     """The return type of a function: its annotation, or — when omitted — inferred
-    from the body and memoized. Recursion through an un-annotated return is an
-    error (you must write the type), like every ML-family checker."""
+    from the body and memoized onto `fn.ret`. The sentinel doubles as the
+    recursion guard, so no checking state lives on `Namespace`. Recursion through an
+    un-annotated return is an error (annotate it), like every ML-family checker."""
     fn = space.walk(qual).value
+    if fn.ret is _INFERRING:
+        raise TypeErr(f"recursive function '{qual.rsplit('.', 1)[-1]}' needs a return-type annotation")
     if fn.ret is not None:
         return fn.ret
-    if qual in space._inferring:
-        raise TypeErr(f"recursive function '{qual.rsplit('.', 1)[-1]}' needs a return-type annotation")
-    space._inferring.add(qual)
+    fn.ret = _INFERRING
     try:
         fn.ret = infer_block(fn.body, {p.name: p.type for p in fn.params},
-                             space, space.fn_scope[qual], None)
-    finally:
-        space._inferring.discard(qual)
+                             space, fn.scope, None)
+    except BaseException:
+        fn.ret = None      # roll back so a later check of this fn re-infers cleanly
+        raise
     return fn.ret
 
 

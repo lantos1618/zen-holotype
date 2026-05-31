@@ -196,6 +196,7 @@ class Fn:
     pub: bool = False
     tparams: tuple = ()        # type-parameter names
     bounds: dict = field(default_factory=dict)   # tparam name -> trait path (the <T: Area>)
+    scope: dict | None = None  # defining scope (set in resolve; for return-type inference)
 
 
 @dataclass
