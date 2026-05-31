@@ -6,7 +6,7 @@ infer() type-checks a body and triggers fits() at every call site.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, Fn, EnumDecl,
+from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Fn, EnumDecl,
                   Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 
 
@@ -334,12 +334,16 @@ def infer_match(e, expect, locals_, space, scope):
 
     covered, wildcard, result = set(), False, expect
     for arm in e.arms:
+        if wildcard:                                      # a catch-all already matched everything
+            raise TypeErr("unreachable match arm after '_'")
         arm_locals = locals_
         if arm.variant is None:
             wildcard = True
         else:
             if arm.variant not in variants:
                 raise TypeErr(f"enum {st.path} has no variant '.{arm.variant}'")
+            if arm.variant in covered:
+                raise TypeErr(f"duplicate match arm '.{arm.variant}'")
             covered.add(arm.variant)
             var = variants[arm.variant]
             if arm.binding is not None:
@@ -361,8 +365,10 @@ def infer_match(e, expect, locals_, space, scope):
 def _infer_match_lit(e, st, expect, locals_, space, scope):
     """Match on an i32/bool subject: literal patterns and a wildcard. Integers
     can't be enumerated, so a `_` is required (bool may instead cover true+false)."""
-    wildcard, result, bools = False, expect, set()
+    wildcard, result, seen = False, expect, set()
     for arm in e.arms:
+        if wildcard:
+            raise TypeErr("unreachable match arm after '_'")
         if arm.variant is not None:
             raise TypeErr("variant pattern on a non-enum value")
         if arm.lit is None:
@@ -371,14 +377,16 @@ def _infer_match_lit(e, st, expect, locals_, space, scope):
             lt = infer(arm.lit, locals_, space, scope)
             if not fits(lt, st):
                 raise TypeErr("pattern type", lt, st)
-            if isinstance(arm.lit, Bool):
-                bools.add(arm.lit.b)
+            val = arm.lit.b if isinstance(arm.lit, Bool) else arm.lit.n
+            if val in seen:
+                raise TypeErr(f"duplicate match arm '{val}'")
+            seen.add(val)
         bt = infer(arm.body, locals_, space, scope, result)
         if result is None:
             result = bt
         elif not fits(bt, result):
             raise TypeErr("match arms differ", bt, result)
-    if not wildcard and not (st == PrimT(Prim.BOOL) and bools == {True, False}):
+    if not wildcard and not (st == PrimT(Prim.BOOL) and seen == {True, False}):
         raise TypeErr("non-exhaustive match: add a '_' arm")
     return result
 

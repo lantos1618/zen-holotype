@@ -137,6 +137,9 @@ def c_match(e, locals_, space, scope, expect) -> str:
     """Lower a match to a tag-tested ternary chain. A variant with a payload
     binding uses a statement-expression `({ T b = subj.u.V; body; })` so the
     binding is a real typed local (this narrows the payload inside the arm)."""
+    # `subj` is inlined into each arm test; the language is pure, so re-evaluating
+    # it is at worst redundant work, never a behavioural change. A catch-all is
+    # guaranteed last (the checker rejects unreachable arms), so the default = else.
     subj = c_expr(e.subject, locals_, space, scope)
     st = infer(e.subject, locals_, space, scope)
 

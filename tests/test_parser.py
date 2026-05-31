@@ -2,8 +2,7 @@
 import pytest
 
 from holotype.ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                          Import, Lit, Var, Bin, Field, Call, StructLit,
-                          MethodCall, EnumCtor)
+                          Import, Var, Bin, Field, Call, StructLit, MethodCall)
 from holotype.parser import parse
 
 

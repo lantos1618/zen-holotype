@@ -13,7 +13,6 @@ import pytest
 import re
 from dataclasses import dataclass
 
-from holotype.ast import Dir, Prim, PrimT, NameT, PtrT, Fn, Param, EnumDecl
 from holotype.main import (load, build_space, build_scopes, resolve, check,
                            emit_c, run_test_root)
 from conftest import EXAMPLES
