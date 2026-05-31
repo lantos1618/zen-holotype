@@ -13,7 +13,11 @@ module.exports = grammar({
 
   rules: {
     source_file: $ => repeat($._item),
-    _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl),
+    _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl, $.extern),
+
+    // extern malloc = (n: i64) RawPtr<u8>   — bind a C symbol; no body
+    extern: $ => seq('extern', field('name', $.identifier), '=',
+                     '(', optional(comma1($.param)), ')', field('ret', $._type)),
 
     comment: $ => token(seq('//', /[^\n]*/)),
 
@@ -59,7 +63,7 @@ module.exports = grammar({
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
     _type: $ => choice($.primitive, $.pointer, $.named_type),
-    primitive: $ => choice('i32', 'i64', 'bool', 'void'),
+    primitive: $ => choice('i32', 'i64', 'u8', 'bool', 'void'),
     pointer: $ => seq(field('dir', choice('Ptr', 'MutPtr', 'RawPtr')),
                       '<', field('pointee', $._type), '>'),
     named_type: $ => seq(field('name', $.identifier),

@@ -20,6 +20,7 @@ class Dir(Enum):
 class Prim(Enum):
     I32  = "i32"
     I64  = "i64"
+    U8   = "u8"       # a byte — the substrate for buffers and strings
     BOOL = "bool"
     VOID = "void"
 
@@ -197,6 +198,7 @@ class Fn:
     tparams: tuple = ()        # type-parameter names
     bounds: dict = field(default_factory=dict)   # tparam name -> trait path (the <T: Area>)
     scope: dict | None = None  # defining scope (set in resolve; for return-type inference)
+    extern: bool = False       # an `extern` C binding: no body, C symbol = the bare name
 
 
 @dataclass

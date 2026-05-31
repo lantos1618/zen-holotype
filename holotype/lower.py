@@ -6,7 +6,8 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, Struct, EnumDecl, Fn,
                   Lit, Bool, Var, Field, Bin, Not, Call, StructLit, Let, EnumCtor, Match)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
-_CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.BOOL: "bool", Prim.VOID: "void"}
+_CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
+         Prim.BOOL: "bool", Prim.VOID: "void"}
 
 
 def c_name(path: str) -> str:
@@ -102,6 +103,13 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
 def _c_call(e, locals_, space, scope) -> str:
     if e.callee == "addr":
         return f"&({c_expr(e.args[0], locals_, space, scope)})"
+    if e.callee in ("load", "store", "offset"):           # raw memory ops erase to C
+        a = [c_expr(x, locals_, space, scope) for x in e.args]
+        if e.callee == "load":
+            return f"(*({a[0]}))"
+        if e.callee == "store":
+            return f"(*({a[0]}) = {a[1]})"
+        return f"(({a[0]}) + ({a[1]}))"                    # offset
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                 # resolve to the concrete impl fn
         s: dict = {}
@@ -117,7 +125,7 @@ def _c_call(e, locals_, space, scope) -> str:
             cn = inst_name(target, tuple(s[n] for n in callee.tparams))
             ptypes = [subst(p.type, s) for p in callee.params]
         else:
-            cn = c_name(target)
+            cn = callee.name if callee.extern else c_name(target)   # extern → bare C symbol
             ptypes = [p.type for p in callee.params]
     args = ", ".join(c_expr(a, locals_, space, scope, pt) for a, pt in zip(e.args, ptypes))
     return f"{cn}({args})"
@@ -196,16 +204,19 @@ def c_block(stmts, locals_, space, scope, expect=None) -> str:
     """Lower a statement list: each `x := v` becomes a typed C local; the final
     expression statement becomes the `return` (and gets the expected type)."""
     locals_ = dict(locals_)
-    lines, ret = [], "0"
+    lines, last = [], len(stmts) - 1
     for i, s in enumerate(stmts):
-        exp = expect if i == len(stmts) - 1 else None
         if isinstance(s, Let):
             t = infer(s.value, locals_, space, scope)
             locals_[s.name] = t
             lines.append(f"{c_type(t)} {s.name} = {c_expr(s.value, locals_, space, scope)};")
-        else:
-            ret = c_expr(s, locals_, space, scope, exp)
-    return " ".join(lines + [f"return {ret};"])
+        elif i == last:
+            lines.append(f"return {c_expr(s, locals_, space, scope, expect)};")
+        else:                                            # an intermediate statement — KEEP its effect
+            lines.append(f"{c_expr(s, locals_, space, scope)};")
+    if not stmts or isinstance(stmts[-1], Let):          # body ends without a value expr
+        lines.append("return 0;")
+    return " ".join(lines)
 
 
 def c_def(qual, d: Fn, space, scope, cname=None) -> str:
