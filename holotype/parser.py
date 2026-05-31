@@ -7,8 +7,9 @@ from __future__ import annotations
 import warnings, pathlib
 from tree_sitter import Language, Parser
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct, Variant,
-                  EnumDecl, Param, Fn, Import, File,
-                  Lit, Var, Field, Bin, Call, Str, StructLit, MethodCall, EnumCtor)
+                  EnumDecl, Param, Fn, Import, File, MethodSig, TraitDecl, Impl,
+                  Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, MethodCall,
+                  EnumCtor, Let, Arm, Match)
 
 _ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
 _SO   = _ROOT / "build" / "zen.so"
@@ -60,9 +61,17 @@ def _type(n):
 
 
 def _expr(n):
+    e = _expr_inner(n)
+    object.__setattr__(e, "pos", n.start_point)     # (row, col) for diagnostics
+    return e
+
+
+def _expr_inner(n):
     t = n.type
     if t == "integer":
         return Lit(int(_t(n)))
+    if t == "boolean":
+        return Bool(_t(n) == "true")
     if t == "string":
         return Str(_t(n)[1:-1])
     if t == "identifier":
@@ -71,8 +80,11 @@ def _expr(n):
         return _expr(_named(n)[0])
     if t == "binary":
         kids = _named(n)
-        op = next(c.type for c in n.children if c.type in ("+", "-", "*"))
+        op = next(c.type for c in n.children
+                  if c.type in ("+", "-", "*", "==", "<", ">", "<=", ">=", "&&", "||"))
         return Bin(op, _expr(kids[0]), _expr(kids[1]))
+    if t == "unary_op":
+        return Not(_expr(_named(n)[0]))
     if t == "call":
         fn = _field(n, "fn")
         if fn.type == "field_access":          # b.add(x)  ->  a method call
@@ -86,7 +98,21 @@ def _expr(n):
         return StructLit(_t(_field(n, "type")), fields)
     if t == "enum_ctor":
         return EnumCtor(_t(_field(n, "name")), tuple(_args(n)))
+    if t == "match":
+        return Match(_expr(_field(n, "subject")), tuple(_arm(a) for a in _named(n)
+                                                        if a.type == "match_arm"))
     raise ValueError(f"unhandled expr node: {t}")
+
+
+def _arm(n):
+    pat = _named(_field(n, "pat"))[0]               # ctor_pattern | literal_pattern | wildcard
+    body = _expr(_field(n, "body"))
+    if pat.type == "wildcard":
+        return Arm(None, None, body)
+    if pat.type == "literal_pattern":
+        return Arm(None, None, body, _expr(_named(pat)[0]))
+    binding = _field(pat, "binding")
+    return Arm(_t(_field(pat, "name")), _t(binding) if binding else None, body)
 
 
 def _args(n):
@@ -94,22 +120,65 @@ def _args(n):
     return [_expr(c) for c in _named(arg)] if arg else []
 
 
+def _stmt(n):
+    if n.type == "let_binding":                     # x := value
+        return Let(_t(_field(n, "name")), _expr(_field(n, "value")))
+    return _expr(n)
+
+
+def _tparams(n):
+    """(names, bounds) — bounds maps a param name to its trait bound, e.g. T: Area."""
+    tp = _field(n, "tparams")
+    if not tp:
+        return (), {}
+    names, bounds = [], {}
+    for c in tp.named_children:
+        if c.type != "tparam":
+            continue
+        nm = _t(_field(c, "name"))
+        names.append(nm)
+        b = _field(c, "bound")
+        if b is not None:
+            bounds[nm] = _t(b)
+    return tuple(names), bounds
+
+
+def _fn(n):
+    pub = any(c.type == "pub" for c in n.children)
+    params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
+              for p in _named(n) if p.type == "param"]
+    body = [_stmt(s) for s in _named(_field(n, "body"))]
+    names, bounds = _tparams(n)
+    rn = _field(n, "ret")
+    ret = _type(rn) if rn is not None else None          # None -> infer from the body
+    return Fn(_t(_field(n, "name")), params, ret, body, pub, names, bounds)
+
+
 def _decl(n):
     pub = any(c.type == "pub" for c in n.children)
     if n.type == "struct":
         fields = [Field_(_t(_field(f, "name")), _type(_field(f, "type")))
                   for f in _named(n) if f.type == "field"]
-        return Struct(_t(_field(n, "name")), fields, pub)
+        return Struct(_t(_field(n, "name")), fields, pub, _tparams(n)[0])
     if n.type == "enum":
         variants = [Variant(_t(_field(v, "name")),
                             _type(_field(v, "payload")) if _field(v, "payload") else None)
                     for v in _named(n) if v.type == "variant"]
-        return EnumDecl(_t(_field(n, "name")), variants, pub)
+        return EnumDecl(_t(_field(n, "name")), variants, pub, _tparams(n)[0])
     if n.type == "function":
-        params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
-                  for p in _named(n) if p.type == "param"]
-        body = [_expr(s) for s in _named(_field(n, "body"))]
-        return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")), body, pub)
+        return _fn(n)
+    if n.type == "trait":
+        sigs = []
+        for m in _named(n):
+            if m.type != "method_sig":
+                continue
+            tks = [c for c in _named(m) if c.type in _TYPES]   # param types … then ret (last)
+            sigs.append(MethodSig(_t(_field(m, "name")),
+                                  tuple(_type(t) for t in tks[:-1]), _type(tks[-1])))
+        return TraitDecl(_t(_field(n, "name")), sigs, pub)
+    if n.type == "impl":
+        methods = [_fn(f) for f in _named(n) if f.type == "function"]
+        return Impl(_t(_field(n, "trait")), _t(_field(n, "type")), methods)
     raise ValueError(f"unhandled decl: {n.type}")
 
 
@@ -119,10 +188,24 @@ def _import(n):
     return Import(names, ".".join(_t(g) for g in mp.named_children))
 
 
+def _first_error(n):
+    """Depth-first hunt for the first ERROR / MISSING node, for a located message."""
+    if n.type == "ERROR" or n.is_missing:
+        return n
+    for c in n.children:
+        hit = _first_error(c)
+        if hit is not None:
+            return hit
+    return None
+
+
 def parse(src: str, ns: str) -> File:
     root = _PARSER.parse(bytes(src, "utf8")).root_node
     if root.has_error:
-        raise SyntaxError(f"parse error in {ns}")
+        bad = _first_error(root) or root
+        r, c = bad.start_point                 # 0-based row, col from tree-sitter
+        what = "missing" if bad.is_missing else f"unexpected {_t(bad)!r}"
+        raise SyntaxError(f"{ns}:{r + 1}:{c + 1}: parse error ({what})")
     imports, decls = [], []
     for n in _named(root):
         if n.type == "import":

@@ -45,34 +45,63 @@ class PtrT:
     pointee: object           # Type
 
 
+@dataclass(frozen=True)
+class TVar:
+    """A type parameter standing in for an unknown type, e.g. the `T` of Box<T>.
+    Resolved away by substitution once a concrete type-arg is known."""
+    name: str
+
+
 # ───────────────────────── expressions ──────────────────────────────────────
+# `pos` is the (row, col) of the node in source, set by the parser. It's excluded
+# from equality/repr so it never affects type comparisons — purely for diagnostics.
+_pos = lambda: field(default=None, compare=False, repr=False)
+
+
 @dataclass(frozen=True)
 class Lit:
     n: int
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Bool:
+    b: bool
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Var:
     name: str
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Field:
     obj: object               # Expr
     name: str
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Bin:
-    op: str                   # + - *
+    op: str                   # + - * == < > <= >= && ||
     l: object                 # Expr
     r: object                 # Expr
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Not:
+    operand: object           # Expr  (logical !)
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
 class Call:
     callee: str
     args: tuple = ()          # tuple[Expr, ...]
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
@@ -84,6 +113,7 @@ class Str:
 class StructLit:
     type: str                 # type name (resolved later)
     fields: tuple = ()        # tuple[(name, Expr), ...]
+    pos: object = _pos()
 
 
 @dataclass(frozen=True)
@@ -97,6 +127,29 @@ class MethodCall:
 class EnumCtor:
     name: str                 # leading-dot ctor, e.g. .Ok(x)
     args: tuple = ()
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Let:
+    name: str                 # x := value   (a local binding; type inferred)
+    value: object             # Expr
+    pos: object = _pos()
+
+
+@dataclass(frozen=True)
+class Arm:
+    variant: str | None       # ctor variant name (None for a literal/wildcard arm)
+    binding: str | None       # payload binding, e.g. the `v` of .Some(v)
+    body: object              # Expr
+    lit: object = None        # literal pattern value (Lit/Bool); None for ctor/wildcard
+
+
+@dataclass(frozen=True)
+class Match:
+    subject: object           # Expr
+    arms: tuple = ()          # tuple[Arm, ...]
+    pos: object = _pos()
 
 
 # ───────────────────────── declarations (each = one trie node) ──────────────
@@ -111,6 +164,7 @@ class Struct:
     name: str
     fields: list              # list[Field_]
     pub: bool = False
+    tparams: tuple = ()        # type-parameter names, e.g. ("T",)
 
 
 @dataclass
@@ -124,6 +178,7 @@ class EnumDecl:
     name: str
     variants: list            # list[Variant]
     pub: bool = False
+    tparams: tuple = ()        # type-parameter names
 
 
 @dataclass
@@ -139,6 +194,29 @@ class Fn:
     ret: object               # Type
     body: object = None       # Expr | None
     pub: bool = False
+    tparams: tuple = ()        # type-parameter names
+    bounds: dict = field(default_factory=dict)   # tparam name -> trait path (the <T: Area>)
+
+
+@dataclass
+class MethodSig:
+    name: str
+    params: tuple             # tuple[Type] (types only; Self is the implementor)
+    ret: object               # Type
+
+
+@dataclass
+class TraitDecl:
+    name: str
+    methods: list             # list[MethodSig]
+    pub: bool = False
+
+
+@dataclass
+class Impl:
+    trait: str                # trait name (resolved to a path later)
+    type: str                 # implementing type name (resolved later)
+    methods: list             # list[Fn]
 
 
 @dataclass

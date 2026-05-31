@@ -157,6 +157,14 @@ python3 -m holotype build examples     # read build.zen -> check -> emit C -> cc
 python3 -m holotype check examples     # type-check report + emit a C lib
 ```
 
+Tests (the lattice is the whole safety argument, so it's the most-covered part):
+
+```sh
+pip install -r requirements-dev.txt    # adds pytest
+python3 -m pytest                       # fits() lattice + laws, infer(), trie, parser,
+                                        # Zen //~ PASS/FAIL fixtures, end-to-end build
+```
+
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
 `build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
 
@@ -183,15 +191,33 @@ vecdemo -> 12
 | `holotype/types.py`  | the trie + `fits()` pointer lattice + `infer()` (the one type space) |
 | `holotype/lower.py`  | transcribe to C (the type system erases here) |
 | `holotype/main.py`   | driver + `build.zen` interpreter |
+| `tests/`             | pytest suite — `fits()` lattice + laws, `infer()`, trie, parser, end-to-end build |
+| `tests/cases/*.zen`  | type-checker tests written **in Zen** — inline `//~ PASS`/`//~ FAIL` verdicts |
 
 (`ast.py` and `types.py` are safe as classic names because they live in a package —
 stdlib `import ast` / `import types` still resolve to the real ones.)
 
 The front end is a real **tree-sitter** grammar — a method call is just a `call`
-whose callee is a field access, so there's no special rule for it. It's still a
-subset of Zen (no `::=`, pattern matching, or generics-with-params yet). The point
-is to test the type idea, not to write a parser — which is exactly why the parser is
+whose callee is a field access, so there's no special rule for it. The language
+now covers structs and **generic data types** (`Box<T>` — the type-arg inferred
+from the field values, monomorphized to concrete C), **user enums** (C tagged
+unions), **generic functions** (`id<T>` — type-args inferred by unification,
+**monomorphized**), **traits / constrained generics** (`trait`, `impl … for …`,
+`<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound
+is a type error), **`match`** with payload-binding, exhaustiveness, and **literal
+patterns** on `i32`/`bool` (so with **recursion** the language is Turing-complete —
+`fact`/`fib` compile and run), **return-type inference** (omit the return type and
+it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` and `Option`,
+`i32`/`i64`/`bool` with `i32→i64` widening, the full operator set
+(`+ - *  ==  < > <= >=  && ||  !`, each operand-checked), and `x := v` let-bindings.
+Type errors carry `ns:line:col`. Still a subset of Zen (no strings/heap/stdlib,
+higher-kinded types, or full Hindley-Milner — which is unsound under subtyping
+anyway) — the point is to test the type idea, which is exactly why the parser is
 someone else's grammar generator rather than hand-rolled.
+
+`build.zen` can declare a `Test { root: "test.zen" }`; `holotype build` then
+compiles that root with the project and runs each no-arg `bool` test, printing
+PASS/FAIL (SKIP if it doesn't type-check).
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight
 into typed objects, hook-based) and the syntax of
