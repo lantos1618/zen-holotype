@@ -213,13 +213,22 @@ def _infer(e, locals_, space, scope, expect=None):
         qual = scope.get(e.type, e.type)
         decl = space.walk(qual).value
         ftypes = {f.name: f.type for f in decl.fields}
-        for fname, fexpr in e.fields:
+        givens, s = {}, {}
+        for fname, fexpr in e.fields:            # pass 1: infer values, solve type-args
             if fname not in ftypes:
                 raise TypeErr(f"no field '{fname}' on {qual}")
-            given = infer(fexpr, locals_, space, scope, ftypes[fname])
-            if not fits(given, ftypes[fname]):
-                raise TypeErr("field type", given, ftypes[fname])
-        return NameT(qual, ())
+            givens[fname] = infer(fexpr, locals_, space, scope)
+            if decl.tparams:
+                match_type(ftypes[fname], givens[fname], s)
+        missing = [t for t in decl.tparams if t not in s]
+        if missing:
+            raise TypeErr(f"cannot infer type {', '.join(missing)} for "
+                          f"{qual.rsplit('.', 1)[-1]}")
+        for fname, given in givens.items():     # pass 2: check against substituted field types
+            want = subst(ftypes[fname], s)
+            if not fits(given, want):
+                raise TypeErr("field type", given, want)
+        return NameT(qual, tuple(s[t] for t in decl.tparams))
     if isinstance(e, Call):
         if e.callee == "addr":                            # addr(x): take a mutable pointer
             return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))

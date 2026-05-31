@@ -221,6 +221,31 @@ def test_recursion_computes(tmp_path):
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "175"
 
 
+# ── Generic data types: a generic struct monomorphizes and runs ─────────────
+def test_generic_struct_monomorphizes(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "pub Box<T>: { val: T }\n"
+        "pub unwrap<T> = (b: Ptr<Box<T>>) T { b.val }\n"
+        "pub main = () i32 { unwrap(addr(Box { val: 42 })) }\n")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    _, passing = check(files, space)
+    c = emit_c(files, passing, space)
+    assert "typedef struct { int32_t val; } main_Box_i32;" in c   # the instance struct
+    assert "_T " not in c                                          # template not emitted raw
+    harness = ("\n#include <stdio.h>\nint main(void){ "
+               "printf(\"%d\\n\", main_main()); return 0; }\n")
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + harness)
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "42"
+
+
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(

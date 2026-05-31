@@ -52,6 +52,8 @@ def c_type(t) -> str:
             if isinstance(inner, PtrT) or (isinstance(inner, NameT) and inner.path == "Option"):
                 return c_type(inner)        # niche: nullable pointer IS the pointer (NULL = none)
             return c_type(inner) + " *"
+        if t.args:                          # a generic struct/enum instance -> monomorphized name
+            return mangle(t)
         return c_name(t.path)
     return "void"
 
@@ -87,11 +89,13 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
         sep = "->" if isinstance(ot, PtrT) else "."     # pointer access lowers to ->
         return f"{c_expr(e.obj, locals_, space, scope)}{sep}{e.name}"
     if isinstance(e, StructLit):
-        qual = scope.get(e.type, e.type)
-        ftypes = {fl.name: fl.type for fl in space.walk(qual).value.fields}
+        st = infer(e, locals_, space, scope)                    # NameT(qual, targs)
+        decl = space.walk(st.path).value
+        sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
+        ftypes = {fl.name: subst(fl.type, sub) for fl in decl.fields}
         inits = ", ".join(f".{n} = {c_expr(v, locals_, space, scope, ftypes[n])}"
                           for n, v in e.fields)
-        return f"({c_name(qual)}){{ {inits} }}"                 # C99 compound literal
+        return f"({c_type(st)}){{ {inits} }}"                   # C99 compound literal
     if isinstance(e, EnumCtor):
         cn = c_name(expect.path)                        # expect names the enum
         var = next(v for v in space.walk(expect.path).value.variants if v.name == e.name)
@@ -171,9 +175,10 @@ def _params(d: Fn) -> str:
     return ", ".join(f"{c_type(p.type)} {p.name}" for p in d.params) or "void"
 
 
-def c_struct(qual, d: Struct) -> str:
-    body = " ".join(f"{c_type(f.type)} {f.name};" for f in d.fields)
-    return f"typedef struct {{ {body} }} {c_name(qual)};"
+def c_struct(qual, d: Struct, sub=None, cname=None) -> str:
+    sub = sub or {}
+    body = " ".join(f"{c_type(subst(f.type, sub))} {f.name};" for f in d.fields)
+    return f"typedef struct {{ {body} }} {cname or c_name(qual)};"
 
 
 def c_enum(qual, d: EnumDecl) -> str:
