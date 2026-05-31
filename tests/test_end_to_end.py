@@ -418,7 +418,7 @@ build_hi = (a: Ptr<Allocator>) String {
     String { ptr: p, len: 2 }
 }
 
-// print by recursing over the bytes (no loops in v1)
+// print by recursing over the bytes
 step = (s: Ptr<String>, i: i64) i32 { putchar(load(offset(s.ptr, i))) print_from(s, i+1) }
 print_from = (s: Ptr<String>, i: i64) i32 {
     match (i < s.len) { false => putchar(10), true => step(s, i) }

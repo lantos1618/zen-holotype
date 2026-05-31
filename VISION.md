@@ -1,9 +1,9 @@
 # Zen — the vision: **one structure**
 
-> The current compiler (structs, enums, traits, generics, `fits()`) is **v1** — it proved
-> *"structure is the constraint."* This is **v2**: take that to the end. There are no
-> keywords, because there is only **one** kind of thing. A `{ }`. Everything else is how you
-> read it.
+> The compiler today (structs, enums, traits, generics, `fits()`, comptime, a self-hosted
+> derive prelude) proves *"structure is the constraint."* This document is where it's
+> headed: take that to the end, until there are no keywords — because there is only **one**
+> kind of thing. A `{ }`. Everything else is how you read it.
 
 ## The one rule
 
@@ -174,10 +174,10 @@ run = (v: Ptr<vec.Vec>) i32 {
    to be specified.
 5. **Result/`Ok`** — is everything a `Result` (so bodies wrap in `Ok`), or only when annotated?
 
-## Grammar sketch (v2)
+## Grammar sketch (the one-structure direction)
 
-The whole front end is small because there's one declaration shape. (EBNF-ish; the real
-tree-sitter grammar comes when we build v2 — v1's `grammar.js` stays the working one until then.)
+The whole front end gets small because there's one declaration shape. (EBNF-ish; the working
+`grammar.js` is the keyword-ful form today — this is the shape it collapses toward.)
 
 ```
 file        = decl*                                  // a file is the outermost record body
@@ -202,13 +202,14 @@ path        = name ("." name)*                        // vec.Vec, @self.foo, @Se
 Everything above resolves into the **same trie**: a `record` is a subtree, a `path` is a walk,
 a method is a node, visibility is "does it have a node." No separate symbol table, no IR.
 
-## v1 → v2
+## Today → the direction
 
-v1 is a working, tested compiler for a keyword-ful subset (145 tests green). v2 is this. The
-migration is a front-end rewrite (the one record grammar above) plus folding
-struct/enum/trait/impl/visibility into the trie — but the back end (monomorphize → C) and the
-`fits()` lattice **carry straight over**: a record is still a product, a sum is still a tagged
-union, a method is still a trie node. **v1 stays green the whole way; v2 grows beside it.**
+The compiler today is a working, tested one for a keyword-ful surface (`pub`, `trait`, `impl`,
+`Name: { }`). Getting to the one-structure form above is a front-end change — fold
+struct/enum/trait/impl/visibility into the trie under the single `decl` shape — while the back
+end (monomorphize → C) and the `fits()` lattice **carry straight over**: a record is still a
+product, a sum is still a tagged union, a method is still a trie node. The grammar evolves in
+place; there is **one** language, growing toward its own end state — not two.
 
 ## The architecture: kernel + backends + self-hosted prelude
 
@@ -235,7 +236,7 @@ prelude  :  Ast        → Ast   (in Zen)  // impl / derive / macros, run at com
 
 - The **kernel** never knows about C, JS, or LLVM. It produces a *checked, resolved* AST —
   structure that has been proven to fit. It only ever answers "does this fit?".
-- A **backend** is a walk over that AST emitting a target. `gen.c` exists (v1's `lower.py`);
+- A **backend** is a walk over that AST emitting a target. `gen.c` exists (`lower.py`);
   `gen.llvm` / `gen.js` / `gen.json` are *more of the same* — each keeps its own variable/type
   tables, but never re-checks, because the kernel already did. **New target = new backend.**
 - The **prelude is Zen.** `impl`, `derive`, traits are `(n: Ast) Ast` functions run at comptime;
@@ -248,16 +249,16 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 
 ### Roadmap
 
-1. **Pluggable backends** — split the front end (kernel) from `gen.c`; add a second backend
-   (`gen.json`: the checked structure, externalized) to *prove* one-AST-many-emitters. *(on v1)*
-2. **v2 record grammar** — the one declaration form, beside v1.
-3. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)* ✅
-4. **reified AST + self-host** — define the AST in Zen; rewrite `impl`/`derive`/traits as prelude
-   `(Ast) Ast` functions, and **delete them from the compiler**. ✅ *(in progress: the `Ast`/`Decl`
-   model + `derive_zero`/`derive_eq` live in `prelude/derive.zen`; the host keeps only a reflection
-   kernel + reifier. Remaining: a payload-bearing derive, traits/impl, and type-checking the
-   generators against the Zen `Ast`.)*
-5. **more backends** — `gen.js`, `gen.llvm` — each just another walk over the same CheckedAst.
+1. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)* ✅
+2. **reified AST + self-host** — define the AST in Zen; rewrite `impl`/`derive`/traits as prelude
+   `(Ast) Ast` functions. ✅ The `Ast`/`Decl` model and the derives (`derive_zero`, `derive_eq`,
+   `derive_tag`, `derive_payload`, `derive_tagged`) live in `prelude/derive.zen`, covering products,
+   sums, payload binding, and trait impls; the host keeps only a reflection kernel + reifier.
+   *Remaining: type-check the generators against the Zen `Ast`, and trait reflection so a derive
+   can implement any trait.*
+3. **the one-structure grammar** — collapse the keyword-ful surface into the single `decl` shape
+   (fold struct/enum/trait/impl/visibility into the trie). Same back end, same `fits()`.
+4. **more backends** — `gen.llvm`, `gen.js` — each just another walk over the same CheckedAst.
 
 ### How a derive works today (the self-hosted loop)
 
