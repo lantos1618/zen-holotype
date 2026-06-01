@@ -29,7 +29,7 @@ Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(param
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
 Field*: { name: str, ty: Ty }
 StructDecl*: { name: str, fields: [Field] }             // typedef struct { fields } name;
-Decl*: DFunc(Func), DStruct(StructDecl)
+Decl*: DFunc(Func), DStruct(StructDecl), DRaw(str)      // DRaw = verbatim C (the escape hatch)
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -49,6 +49,8 @@ field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
 sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
+draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
+                                                        // pragma, intrinsic decl, anything
 
 // ── int -> decimal digits (no cast: digit bytes come from a str view) ────────
 digit = (d: i32) u8 { view("0123456789")[d] }
@@ -129,7 +131,8 @@ gen_struct* = (s: String, sd: StructDecl) String {
 gen_decl* = (s: String, d: Decl) String {
     d.match {
         .DFunc(f) => gen_func(s, f),
-        .DStruct(sd) => gen_struct(s, sd)
+        .DStruct(sd) => gen_struct(s, sd),
+        .DRaw(c) => append(s, c)                        // verbatim — SIMD attrs/pragmas/intrinsics
     }
 }
 
