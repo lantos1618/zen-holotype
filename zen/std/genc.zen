@@ -20,7 +20,8 @@ VarData*: { name: str }
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
 CallData*: { fn: str, arg: Ptr<Expr> }                  // fn(arg) — a one-arg call
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
-Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData)
+MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field
+Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -29,7 +30,7 @@ IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } els
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData)
 // types + typed parameters
-Ty*: I32 | I64 | U8 | Bool                                 // a C scalar type
+Ty*: I32 | I64 | U8 | Bool | Named(str)                    // a C scalar type, or a named struct
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
@@ -45,6 +46,7 @@ vref* = (nm: str) Expr { .Var(VarData { name: nm }) }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: l, rhs: r }) }
 call* = (fn: str, a: Ptr<Expr>) Expr { .Call(CallData { fn: fn, arg: a }) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData { c: c, t: t, e: e }) }
+member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData { obj: o, field: f }) }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sassign* = (nm: str, v: Ptr<Expr>) Stmt { .Assign(AssignData { name: nm, value: v }) }
@@ -54,6 +56,7 @@ ti32* = () Ty { .I32() }
 ti64* = () Ty { .I64() }
 tu8* = () Ty { .U8() }
 tbool* = () Ty { .Bool() }
+tnamed* = (n: str) Ty { .Named(n) }
 param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
 field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
 sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
@@ -73,7 +76,7 @@ gen_int = (s: String, n: i32) String {
 
 // a Ty -> its C type name
 cty = (t: Ty) str {
-    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool" }
+    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool", .Named(n) => n }
 }
 
 // ── emit an expression (recursive) ──────────────────────────────────────────
@@ -83,7 +86,8 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Var(v)  => s.append(v.name),
         .Bin(b)  => s.gen_bin(b),
         .Call(c) => s.append(c.fn).append("(").gen_expr(c.arg).append(")"),
-        .Cond(d) => s.gen_cond(d)
+        .Cond(d) => s.gen_cond(d),
+        .Member(m) => s.gen_expr(m.obj).append(".").append(m.field)
     }
 }
 
