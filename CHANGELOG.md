@@ -11,9 +11,10 @@ Toward **self-hosting** — the compiler's backend, written in zen, run at runti
 - **`std.string`** — a growable, owned heap `String` assembled at runtime (the
   keystone: source can now be built as a value while a program runs).
 - **`std.genc`** — a C backend *written in zen*, run at runtime. It walks a
-  recursive expression AST and emits C source: `genC(f: Func) -> String`. The loop
-  closes — a running zen program emits `int32_t f(int32_t x) { return ((x + 5) * x); }`,
-  which compiles and runs (`f(10) == 150`).
+  recursive expression AST and emits **whole function bodies** (`Func` body is a
+  `[Stmt]` of `Let` / `Return`): `genC(f: Func) -> String`. The loop closes — a
+  running zen program emits `int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }`,
+  which compiles and runs (`f(10) == 225`).
 - Language work enabling the above: division `/` and remainder `%`; `match`
   auto-derefs a `Ptr<Enum>` (recursive heap structures); type definitions are
   toposorted (recursive types in any declaration order); UFCS (`x.f(a)` == `f(x, a)`).

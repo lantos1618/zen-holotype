@@ -101,11 +101,12 @@ where it's headed, [VISION](VISION.md).)
   **runtime code generation** — a backend can emit source as a value the running program builds.
 - **`std.genc` — a C backend written in Zen, run at RUNTIME.** It walks a **recursive** AST
   (ordinary lowered structs + enums — runtime values; a `Bin` holds `Ptr<Expr>` children) and
-  emits C source into a `String`: `genC(f: Func) → String`. A running zen program builds an
-  expression tree and gets C source as a value — and that emitted C compiles and computes (the
-  test closes the loop: zen emits `int32_t f(int32_t x) { return ((x + 5) * x); }`, which is then
-  compiled and run → `f(10) == 150`). The self-hosting seed: codegen is the language's own
-  ordinary code, not the host's. (A subset today; the path is to grow it toward lowering zen in zen.)
+  emits C source into a `String`: `genC(f: Func) → String`. A function body is a `[Stmt]` (`Let`
+  / `Return`), so it emits **whole function bodies**. A running zen program builds an AST and gets
+  C source as a value — and that emitted C compiles and computes (the test closes the loop: zen
+  emits `int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }`, which is then compiled
+  and run → `f(10) == 225`). The self-hosting seed: codegen is the language's own ordinary code,
+  not the host's. (A subset today; the path is to grow it toward lowering zen in zen.)
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 
