@@ -173,7 +173,7 @@ module.exports = grammar({
 
     integer: $ => /\d+/,
     boolean: $ => choice('true', 'false'),
-    string: $ => token(seq('"', /[^"]*/, '"')),
+    string: $ => token(seq('"', repeat(choice(/[^"\\]/, /\\./)), '"')),  // escapes: \" \\ \n \t …
     identifier: $ => /@?[A-Za-z_]\w*/,
   }
 });
