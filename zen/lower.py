@@ -3,7 +3,7 @@ direction -> const, Option -> a plain pointer (nullability already enforced upst
 """
 from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, FnT, Struct, EnumDecl, Fn,
-                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
+                  Lit, Bool, Str, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
                   Let, Assign, While, EnumCtor, Match, Closure)
 from .types import infer, subst, solve_call, match_type, TraitMethod
 
@@ -100,6 +100,8 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
             return str(n)
         case Bool(b):
             return "true" if b else "false"
+        case Str(s):                                     # a `str` literal -> a C string literal
+            return f'"{s}"'
         case Var(name):
             return name
         case Bin(op, l, r):

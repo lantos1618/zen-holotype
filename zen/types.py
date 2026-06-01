@@ -7,7 +7,7 @@ infer() type-checks a body and triggers fits() at every call site.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, FnT, Fn, Struct, EnumDecl, MethodSig,
-                  Lit, Bool, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
+                  Lit, Bool, Str, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
                   SliceT, Let, Assign, While, EnumCtor, Match, Closure)
 
 
@@ -221,6 +221,8 @@ def _infer(e, locals_, space, scope, expect=None):
             return PrimT(Prim.I32)
         case Bool():
             return PrimT(Prim.BOOL)
+        case Str():                                      # a string literal "…" is a `str`
+            return PrimT(Prim.STR)
         case EnumCtor():
             return infer_enum_ctor(e, expect, locals_, space, scope)
         case Match():
