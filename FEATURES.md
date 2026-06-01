@@ -61,8 +61,11 @@ where it's headed, [VISION](VISION.md).)
 - **Binding modules via the build object** — `c = b.use("libc")` in `build.zen` installs a
   bundled Zen binding module (bodyless fns) under the namespace `c`; code then `{ malloc, free } = c`.
   A foreign binding is just a Zen module of decls — the kernel only loads-a-module-as-a-namespace,
-  no C-specific logic in the compiler. (A future generating adapter — translate-c / wasm / python
-  → `[Decl]` — would run through the same `b.use` seam.)
+  no C-specific logic in the compiler.
+- **Generating adapters** — a binding module can `@emit` its bindings instead of listing them: the
+  reified `Ast` has an `Extern` `Decl` variant, so a generator produces `[Decl]` of bodyless C
+  bindings, spliced + installed by `b.use` exactly like a static one. A translate-c adapter is this
+  shape — parse a header, `@emit` one `Extern` per declaration (`bindings/gen_demo.zen` shows it).
 - **Raw memory intrinsics:** `addr(x)`, `load(p)`, `store(p, v)`, `offset(p, i)`.
 - Enough to build a **heap-allocating, growable `String`** on an allocator.
 

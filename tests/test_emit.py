@@ -211,3 +211,26 @@ def test_malformed_generator_is_caught_at_check(tmp_path):
 bad* = (v: i32) Decl { .Func(FuncData { nm: v, ps: .PNil(), ret: "i32", body: .Int(v) }) }
 """)
     assert any(q == "m.bad" and not ok and "str" in why for q, ok, why in results)
+
+
+def test_generator_can_emit_an_extern_binding(tmp_path):
+    # the reified Decl model has an `Extern` variant, so a generator can emit a
+    # bodyless C binding (goal #19's building block) — not just bodied functions
+    files, namespace, results, passing = frontend(tmp_path, """
+{ Decl, ExternData, PCell } = prelude.derive
+bind = (nm: str) Decl {
+    .Extern(ExternData { nm: nm, ps: .PCons(PCell { pnm: "c", pty: "i32", ptr: false, tail: .PNil() }), ret: "i32" })
+}
+@emit(bind("putchar"))
+main* = () i32 { putchar(65)  0 }
+""")
+    putchar = namespace.walk("m.putchar").value
+    assert putchar.extern is True and putchar.body is None    # a real bodyless binding
+    c = emit_c(files, passing, namespace)
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = subprocess.run([str(tmp_path / "o")], capture_output=True, text=True)
+    assert out.stdout == "A"
