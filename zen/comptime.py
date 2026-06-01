@@ -298,11 +298,15 @@ def reify_expr(v):
     raise ComptimeErr(f"reify: unknown Ast node '{tag}'")
 
 
+def _reify_params(ps):
+    return [Param(c["pnm"], PtrT(Dir.READ, _reify_type(c["pty"])) if c["ptr"]
+                 else _reify_type(c["pty"]))
+            for c in _flist(ps, "tail")]
+
+
 def _reify_func(p):
-    params = [Param(c["pnm"], PtrT(Dir.READ, _reify_type(c["pty"])) if c["ptr"]
-                    else _reify_type(c["pty"]))
-              for c in _flist(p["ps"], "tail")]
-    return Fn(p["nm"], params, _reify_type(p["ret"]), body=[reify_expr(p["body"])])
+    return Fn(p["nm"], _reify_params(p["ps"]), _reify_type(p["ret"]),
+              body=[reify_expr(p["body"])])
 
 
 def reify_decl(v):
@@ -311,6 +315,9 @@ def reify_decl(v):
         return _reify_func(p)
     if tag == "Impl":                            # impl Trait for Ty { method }
         return Impl(p["trait"], p["ty"], [_reify_func(p["method"])])
+    if tag == "Extern":                          # a bodyless C binding (the C symbol = the name)
+        return Fn(p["nm"], _reify_params(p["ps"]), _reify_type(p["ret"]),
+                  body=None, extern=True)
     raise ComptimeErr(f"reify: a derive must return a Decl, got '{tag}'")
 
 

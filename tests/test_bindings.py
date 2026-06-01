@@ -80,3 +80,31 @@ def test_unknown_binding_module_is_rejected(tmp_path):
         assert False, "expected SystemExit for an unknown binding module"
     except SystemExit as e:
         assert "no binding module" in str(e)
+
+
+# ── generating adapters (goal #19): b.use a module that GENERATES its bindings ─
+_GEN_BUILD = """
+{ Builder, Executable } = @builtin.build
+build = (b: Builder) i32 {
+    c = b.use("gen_demo")          // a *generating* adapter (emits .Extern via @emit)
+    b.add(Executable { name: "demo", main: "main.zen", out_dir: "build" })
+    0
+}
+"""
+
+
+def test_generating_adapter_installs_emitted_bindings(tmp_path):
+    cfg, files, namespace, passing = build(tmp_path, _GEN_BUILD, """
+{ putchar } = c
+main* = () i32 { putchar(90)  putchar(10)  0 }    // "Z\\n" via a GENERATED binding
+""")
+    assert namespace.walk("c.putchar").value.extern is True   # generated, bodyless C binding
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace)
+    cpath = tmp_path / "o.c"
+    cpath.write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cpath), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = subprocess.run([str(tmp_path / "o")], capture_output=True, text=True)
+    assert out.stdout == "Z\n"
