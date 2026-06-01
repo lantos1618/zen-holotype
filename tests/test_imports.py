@@ -5,7 +5,7 @@ across multiple modules."""
 import pytest
 
 from zen.parser import parse
-from zen.main import build_space, build_scopes, resolve, check
+from zen.main import build_namespace, build_scopes, resolve, check
 from zen.types import Conflict, Unresolved, Private
 
 
@@ -22,20 +22,20 @@ def test_diamond_import_resolves_to_one_node():
         "a": "{ Vec } = core.vec\nfa* = (v: Ptr<Vec>) i32 { v.len }",
         "b": "{ Vec } = core.vec\nfb* = (v: Ptr<Vec>) i32 { v.cap }",
     })
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
+    resolve(files, namespace)
     assert files["a"].scope["Vec"] == "core.vec.Vec"
     assert files["b"].scope["Vec"] == "core.vec.Vec"          # same qualified path
-    assert space.walk("core.vec.Vec").value is space.walk("core.vec.Vec").value
-    results = check(files, space)[0]
+    assert namespace.walk("core.vec.Vec").value is namespace.walk("core.vec.Vec").value
+    results = check(files, namespace)[0]
     assert {q: ok for q, ok, _ in results} == {"a.fa": True, "b.fb": True}
 
 
 def test_two_decls_at_the_same_path_conflict():
     # the only possible name conflict: two declarations claiming one path
     with pytest.raises(Conflict, match="m.Vec"):
-        build_space(files_from({"m": "Vec*: { x: i32 }\nVec*: { y: i32 }"}))
+        build_namespace(files_from({"m": "Vec*: { x: i32 }\nVec*: { y: i32 }"}))
 
 
 def test_same_name_different_modules_is_fine():
@@ -44,8 +44,8 @@ def test_same_name_different_modules_is_fine():
         "core.vec": "Vec*: { len: i32, cap: i32 }",
         "other": "Vec*: { x: i32 }",
     })
-    space = build_space(files)                                # no Conflict raised
-    assert space.walk("core.vec.Vec").value is not space.walk("other.Vec").value
+    namespace = build_namespace(files)                                # no Conflict raised
+    assert namespace.walk("core.vec.Vec").value is not namespace.walk("other.Vec").value
 
 
 def test_importing_a_private_name_is_rejected():
@@ -54,10 +54,10 @@ def test_importing_a_private_name_is_rejected():
         "core.vec": "secret = (n: i32) i32 { n + 1 }",      # no `*` → private
         "m": "{ secret } = core.vec\nf* = (x: i32) i32 { secret(x) }",
     })
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
     with pytest.raises(Private, match="private to core.vec"):
-        resolve(files, space)
+        resolve(files, namespace)
 
 
 def test_importing_a_public_name_is_allowed():
@@ -65,10 +65,10 @@ def test_importing_a_public_name_is_allowed():
         "core.vec": "shared* = (n: i32) i32 { n + 1 }",      # `*` → public
         "m": "{ shared } = core.vec\nf* = (x: i32) i32 { shared(x) }",
     })
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)                                    # no Private raised
-    assert {q: ok for q, ok, _ in check(files, space)[0] if q.startswith("m.")} == {"m.f": True}
+    resolve(files, namespace)                                    # no Private raised
+    assert {q: ok for q, ok, _ in check(files, namespace)[0] if q.startswith("m.")} == {"m.f": True}
 
 
 def test_deeply_nested_modules_resolve():
@@ -78,11 +78,11 @@ def test_deeply_nested_modules_resolve():
         "a.b.c": "Thing*: { v: i32 }\nmk* = (n: i32) Thing { Thing { v: n } }",
         "main": "{ Thing, mk } = a.b.c\nuse* = (t: Ptr<Thing>) i32 { t.v }",
     })
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
+    resolve(files, namespace)
     assert files["main"].scope["Thing"] == "a.b.c.Thing"      # the deep path resolves
-    assert ("main.use", True, "ok") in check(files, space)[0]
+    assert ("main.use", True, "ok") in check(files, namespace)[0]
 
 
 def test_fully_qualified_type_needs_no_import():
@@ -91,19 +91,19 @@ def test_fully_qualified_type_needs_no_import():
         "core.vec": "Vec*: { len: i32 }",
         "main": "use* = (v: Ptr<core.vec.Vec>) i32 { v.len }",
     })
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    assert ("main.use", True, "ok") in check(files, space)[0]
+    resolve(files, namespace)
+    assert ("main.use", True, "ok") in check(files, namespace)[0]
 
 
 def test_same_module_can_use_its_own_private_names():
     # privacy is about IMPORTS across modules; a file freely uses its own bare names
     files = files_from({"m": "helper = (n: i32) i32 { n + 1 }\nf* = (x: i32) i32 { helper(x) }"})
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    assert ("m.f", True, "ok") in check(files, space)[0]
+    resolve(files, namespace)
+    assert ("m.f", True, "ok") in check(files, namespace)[0]
 
 
 def test_importing_a_missing_name_is_unresolved():
@@ -112,7 +112,7 @@ def test_importing_a_missing_name_is_unresolved():
         "core.vec": "Vec*: { x: i32 }",
         "m": "{ Nope } = core.vec\nf* = (x: Ptr<Nope>) i32 { 0 }",
     })
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
     with pytest.raises(Unresolved, match="core.vec.Nope"):
-        resolve(files, space)
+        resolve(files, namespace)

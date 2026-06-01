@@ -10,7 +10,7 @@ Zen. A real *generating* adapter (translate-c / wasm / python) would run through
 the same `b.use` seam, producing `[Decl]` instead of being a static module."""
 import subprocess
 
-from zen.main import (parse, interpret_build, load, load_uses, build_space,
+from zen.main import (parse, interpret_build, load, load_uses, build_namespace,
                            build_scopes, resolve, fold_comptime, run_emits, check, emit_c)
 
 
@@ -20,11 +20,11 @@ def build(root, build_src, main_src):
     cfg = interpret_build(parse(build_src, "build"))
     files = load(root, skip={"build.zen"})
     load_uses(cfg, files)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space)
-    fold_comptime(files, space); run_emits(files, space)
-    _, passing = check(files, space)
-    return cfg, files, space, passing
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    return cfg, files, namespace, passing
 
 
 _BUILD = """
@@ -43,17 +43,17 @@ def test_use_is_read_from_build():
 
 
 def test_binding_module_installs_an_importable_namespace(tmp_path):
-    _, files, space, passing = build(tmp_path, _BUILD, """
+    _, files, namespace, passing = build(tmp_path, _BUILD, """
 { malloc, free } = c
 main* = () i32 { free(malloc(64))  0 }
 """)
     assert "c" in files                                  # the namespace was installed
-    assert space.walk("c.malloc").value.extern is True   # bundled binding, bodyless
+    assert namespace.walk("c.malloc").value.extern is True   # bundled binding, bodyless
     assert "main.main" in passing
 
 
 def test_program_using_a_binding_compiles_and_runs(tmp_path):
-    _, files, space, passing = build(tmp_path, _BUILD, """
+    _, files, namespace, passing = build(tmp_path, _BUILD, """
 { malloc, free, putchar } = c
 main* = () i32 {
     p := malloc(64)
@@ -62,7 +62,7 @@ main* = () i32 {
     0
 }
 """)
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     cpath = tmp_path / "o.c"
     cpath.write_text(c + "\nint main(void){ return main_main(); }\n")
     r = subprocess.run(["cc", "-Wall", "-Wextra", str(cpath), "-o", str(tmp_path / "o")],

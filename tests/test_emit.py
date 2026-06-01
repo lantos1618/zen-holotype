@@ -10,7 +10,7 @@ hand-written code.
 import subprocess
 import pytest
 
-from zen.main import (load, build_space, build_scopes, resolve, fold_comptime,
+from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptime,
                            run_emits, check, emit_c, is_prelude_ns)
 from zen.comptime import ComptimeErr, reify_decl
 from zen.ast import Fn
@@ -19,17 +19,17 @@ from zen.ast import Fn
 def frontend(tmp_path, src):
     (tmp_path / "m.zen").write_text(src)
     files = load(tmp_path)                    # load() also pulls in the bundled prelude
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    fold_comptime(files, space)
-    run_emits(files, space)                   # evaluate the derive + reify + splice
-    results, passing = check(files, space)
-    return files, space, results, passing
+    resolve(files, namespace)
+    fold_comptime(files, namespace)
+    run_emits(files, namespace)                   # evaluate the derive + reify + splice
+    results, passing = check(files, namespace)
+    return files, namespace, results, passing
 
 
 def test_prelude_is_loaded_but_never_lowered(tmp_path):
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { derive_zero } = prelude.derive
 Point: { x: i32, y: i32 }
 @emit(derive_zero(reflect(Point)))
@@ -40,25 +40,25 @@ main* = () i32 { p := Point_zero()  p.x }
     assert any(d.name == "Ast" for d in files["prelude.derive"].decls)
     # ...but the prelude is comptime-only: nothing from it is checked or lowered
     assert not any(q.startswith("prelude") for q, _, _ in results)
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "m_Ast" not in c and "m_FList" not in c       # the model never reaches C
     assert is_prelude_ns("prelude.derive") and not is_prelude_ns("m")
 
 
 def test_derive_zero_self_hosted(tmp_path):
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { derive_zero } = prelude.derive
 Point: { x: i32, y: i32, z: i32 }
 @emit(derive_zero(reflect(Point)))
 main* = () i32 { p := Point_zero()  p.x + p.y + p.z }
 """)
     assert ("m.Point_zero", True, "ok") in results
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "m_Point m_Point_zero(void) { return (m_Point){ .x = 0, .y = 0, .z = 0 }; }" in c
 
 
 def test_derive_eq_self_hosted_and_runs(tmp_path):
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { derive_eq } = prelude.derive
 Point: { x: i32, y: i32 }
 @emit(derive_eq(reflect(Point)))
@@ -72,7 +72,7 @@ main* = () i32 {
 }
 """)
     assert ("m.Point_eq", True, "ok") in results
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "bool m_Point_eq(m_Point const * a, m_Point const * b)" in c
     assert "((true && (a->x == b->x)) && (a->y == b->y))" in c
     cfile = tmp_path / "o.c"
@@ -84,14 +84,14 @@ main* = () i32 {
 def test_derive_tag_reflects_a_sum_type(tmp_path):
     # sums, not just products: derive_tag reflects an enum's variants and
     # generates a `match` returning each variant's index.
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { derive_tag } = prelude.derive
 Color: Red, Green, Blue
 @emit(derive_tag(reflect(Color)))
 main* = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
 """)
     assert ("m.Color_tag", True, "ok") in results
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "int32_t m_Color_tag(m_Color e)" in c
     assert "m_Color_Red" in c and "m_Color_Green" in c and "m_Color_Blue" in c
     cfile = tmp_path / "o.c"
@@ -103,7 +103,7 @@ main* = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
 def test_derive_payload_binds_variant_payloads(tmp_path):
     # match arms can now BIND a variant's payload: derive_payload returns the
     # i32 inside each variant (0 for a nullary one).
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { derive_payload } = prelude.derive
 Shape: Circle(i32), Square(i32), Dot
 @emit(derive_payload(reflect(Shape)))
@@ -112,7 +112,7 @@ main* = () i32 {
 }
 """)
     assert ("m.Shape_payload", True, "ok") in results
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "int32_t v = " in c and ".u.Circle" in c          # the bound payload
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
@@ -124,7 +124,7 @@ def test_derive_generates_a_trait_impl(tmp_path):
     # a derive can emit a trait IMPL (not just a free fn), and the trait + its
     # method name are REFLECTED — so the SAME derive implements two differently
     # named traits. Each registers, conformance-checks, and dispatches via a bound.
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { derive_tag_impl } = prelude.derive
 Ranked:  { rank: (Self) i32 }
 Ordinal: { ord:  (Self) i32 }
@@ -138,7 +138,7 @@ main* = () i32 { byRank(green()) + byOrd(green()) * 10 }
 """)
     assert ("Ranked for Color::rank", True, "ok") in results    # both generated impls conform
     assert ("Ordinal for Color::ord", True, "ok") in results
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "impl_m_Ranked_m_Color_rank(m_Color e)" in c
     assert "impl_m_Ordinal_m_Color_ord(m_Color e)" in c
     cfile = tmp_path / "o.c"
@@ -159,14 +159,14 @@ def test_reify_decl_turns_a_zen_ast_value_into_a_fn():
 
 
 def test_emitted_decls_are_reachable_in_the_trie(tmp_path):
-    files, space, _, passing = frontend(tmp_path, """
+    files, namespace, _, passing = frontend(tmp_path, """
 { derive_zero } = prelude.derive
 Rgb: { r: u8, g: u8, b: u8, a: u8 }
 @emit(derive_zero(reflect(Rgb)))
 main* = () i32 { c := Rgb_zero()  0 }
 """)
-    assert isinstance(space.walk("m.Rgb_zero").value, Fn)
-    c = emit_c(files, passing, space)
+    assert isinstance(namespace.walk("m.Rgb_zero").value, Fn)
+    c = emit_c(files, passing, namespace)
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
     r = subprocess.run(["cc", "-Wall", str(cfile), "-o", str(tmp_path / "o")],
@@ -186,7 +186,7 @@ def test_reflect_requires_a_type(tmp_path):
 def test_user_generator_is_emitted_and_typechecked(tmp_path):
     # a generator is ordinary Zen returning a Decl — the Ast model is public now,
     # so users (not just the prelude) can write one. It's checked, @emit'd, and run.
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { Decl, FuncData } = prelude.derive
 gen = (nm: str, v: i32) Decl {
     .Func(FuncData { nm: nm, ps: .PNil(), ret: "i32", body: .Int(v) })
@@ -194,7 +194,7 @@ gen = (nm: str, v: i32) Decl {
 @emit(gen("answer", 42))
 main* = () i32 { answer() }
 """)
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert "m_gen" not in c                          # a generator is comptime-only — never lowered
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
@@ -206,7 +206,7 @@ main* = () i32 { answer() }
 
 def test_malformed_generator_is_caught_at_check(tmp_path):
     # the generator's Ast construction is type-checked: a str field given an i32 fails
-    files, space, results, passing = frontend(tmp_path, """
+    files, namespace, results, passing = frontend(tmp_path, """
 { Decl, FuncData } = prelude.derive
 bad* = (v: i32) Decl { .Func(FuncData { nm: v, ps: .PNil(), ret: "i32", body: .Int(v) }) }
 """)

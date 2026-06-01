@@ -18,7 +18,7 @@ import re
 import pytest
 
 from zen.parser import parse
-from zen.main import build_space, build_scopes, resolve, check
+from zen.main import build_namespace, build_scopes, resolve, check
 
 CASES_DIR = pathlib.Path(__file__).parent / "cases"
 _ANNOT = re.compile(r"//~\s*(.+?)\s*$")
@@ -48,10 +48,10 @@ def annotations(src):
 def _check_fixture(path):
     src = path.read_text()
     files = {"t": parse(src, "t")}
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    results, _ = check(files, space)
+    resolve(files, namespace)
+    results, _ = check(files, namespace)
     verdicts = {(qual.split(".", 1)[1] if "." in qual else qual): (ok, why)
                 for qual, ok, why in results}
     return verdicts, annotations(src)

@@ -27,8 +27,8 @@ def option(inner):
 
 
 @pytest.fixture
-def space():
-    """A resolved space: struct core.vec.Vec + fns ops.len (Ptr) / ops.bump (MutPtr)."""
+def namespace():
+    """A resolved namespace: struct core.vec.Vec + fns ops.len (Ptr) / ops.bump (MutPtr)."""
     sp = Namespace()
     sp.insert("core.vec.Vec", Struct("Vec",
               [Field_("len", I32), Field_("cap", I32)], pub=True))
@@ -39,7 +39,7 @@ def space():
 
 @pytest.fixture
 def scope():
-    """Local-name -> fully-qualified-path map matching the `space` fixture."""
+    """Local-name -> fully-qualified-path map matching the `namespace` fixture."""
     return {"Vec": "core.vec.Vec", "len": "ops.len", "bump": "ops.bump"}
 
 

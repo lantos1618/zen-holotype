@@ -4,18 +4,18 @@ user code; but its helpers are templates, so importing std costs nothing unless 
 program uses them (they inline at the call site, never emitted standalone)."""
 import subprocess
 
-from zen.main import (load, build_space, build_scopes, resolve, fold_comptime,
+from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptime,
                       run_emits, check, emit_c)
 
 
 def build(tmp_path, src):
     (tmp_path / "main.zen").write_text(src)
     files = load(tmp_path)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space)
-    fold_comptime(files, space); run_emits(files, space)
-    _, passing = check(files, space)
-    return files, space, passing
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    return files, namespace, passing
 
 
 def run(tmp_path, c, entry="main"):
@@ -29,17 +29,17 @@ def run(tmp_path, c, entry="main"):
 
 
 def test_std_iter_is_loaded_and_importable(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { fold } = std.iter
 main* = () i32 { fold([1, 2, 3], 0, (a, x) { a + x }) }
 """)
     assert "std.iter" in files                       # bundled, always loaded
-    assert space.walk("std.iter.fold").value.tparams == ("T",)
+    assert namespace.walk("std.iter.fold").value.tparams == ("T",)
     assert "main.main" in passing
 
 
 def test_fold_and_each_run(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { fold, each } = std.iter
 main* = () i32 {
     s := fold([10, 20, 30], 0, (a, x) { a + x })   // 60
@@ -48,29 +48,29 @@ main* = () i32 {
     s + r
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 66
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 66
 
 
 def test_fold_is_generic_over_element_type(tmp_path):
     # the same template folds an i64 slice — T solved from the arguments
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { fold } = std.iter
 main* = () i64 { fold([100, 200, 300], 0, (a, x) { a + x }) }
 """)
-    c = emit_c(files, passing, space)
+    c = emit_c(files, passing, namespace)
     assert run(tmp_path, c, entry="main") == (600 & 0xFF)   # exit code is 8-bit
 
 
 def test_unused_std_emits_nothing(tmp_path):
     # importing nothing from std → std contributes no C at all (zero-cost ambient)
-    files, space, passing = build(tmp_path, "main* = () i32 { 0 }")
-    c = emit_c(files, passing, space)
+    files, namespace, passing = build(tmp_path, "main* = () i32 { 0 }")
+    c = emit_c(files, passing, namespace)
     assert "std_iter" not in c and "fold" not in c
 
 
 # ── std.mem — the library's allocator over libc ────────────────────────────
 def test_mem_round_trips_the_heap(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { alloc, release } = std.mem
 main* = () i32 {
     p := alloc(8)
@@ -81,11 +81,11 @@ main* = () i32 {
 }
 """)
     assert "main.main" in passing
-    assert run(tmp_path, emit_c(files, passing, space)) == 42
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 42
 
 
 def test_mem_zeroed_and_copy(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { zeroed, copy, release } = std.mem
 main* = () i32 {
     src := zeroed(4)
@@ -97,12 +97,12 @@ main* = () i32 {
     r
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 7
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 7
 
 
 # ── std.iter map_into / filter_into — caller-owned output, no allocation ────
 def test_map_into(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { map_into } = std.iter
 main* = () i32 {
     xs  := [1, 2, 3, 4]
@@ -111,11 +111,11 @@ main* = () i32 {
     out[0] + out[1] + out[2] + out[3]
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 100   # (1+2+3+4)*10
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 100   # (1+2+3+4)*10
 
 
 def test_filter_into_packs_and_counts(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { filter_into } = std.iter
 main* = () i32 {
     xs   := [1, 2, 3, 4, 5]
@@ -124,12 +124,12 @@ main* = () i32 {
     (n == 3).match { true => kept[0] + kept[1] + kept[2], false => 0 }   // 12 iff count right
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 12   # 3 + 4 + 5, and n == 3
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 12   # 3 + 4 + 5, and n == 3
 
 
 # ── std.str — read-only string ops over libc (first-class string literals) ──
 def test_str_len_and_eq(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { len, eq, ne, is_empty } = std.str
 main* = () i32 {
     a := (len("hello") == 5).match  { true => 1,  false => 0 }
@@ -141,35 +141,35 @@ main* = () i32 {
 }
 """)
     assert "main.main" in passing
-    assert run(tmp_path, emit_c(files, passing, space)) == 27   # 1 + 2 + 0 + 8 + 16
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 27   # 1 + 2 + 0 + 8 + 16
 
 
 # ── allocating map/filter (return a fresh heap slice) via the slice intrinsic ─
 def test_allocating_map_returns_fresh_slice(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { map } = std.iter
 main* = () i32 {
     ys := map([1, 2, 3, 4], (x) { x * 10 })     // fresh [10, 20, 30, 40]
     ys[0] + ys[1] + ys[2] + ys[3]
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 100
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 100
 
 
 def test_allocating_filter_packs_kept(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { filter } = std.iter
 main* = () i32 {
     zs := filter([1, 2, 3, 4, 5, 6], (x) { x > 3 })   // fresh [4, 5, 6]
     zs[0] + zs[1] + zs[2]
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 15   # 4 + 5 + 6
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 15   # 4 + 5 + 6
 
 
 def test_slice_intrinsic_views_raw_memory(tmp_path):
     # slice(ptr, len) reinterprets raw bytes as a typed [i32] view (from_raw_parts)
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { alloc, release } = std.mem
 view* = (p: RawPtr<u8>, n: i64) [i32] { slice(p, n) }
 main* = () i32 {
@@ -179,7 +179,7 @@ main* = () i32 {
     xs[0] + xs[1]
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 42
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 42
 
 
 def test_slice_needs_a_known_element_type(tmp_path):
@@ -189,15 +189,15 @@ def test_slice_needs_a_known_element_type(tmp_path):
 bad* = () i32 { v := slice(alloc(8), 2)  0 }
 """)
     files = load(tmp_path)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space)
-    results = check(files, space)[0]
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    results = check(files, namespace)[0]
     assert any(q == "main.bad" and not ok and "slice" in why for q, ok, why in results)
 
 
 # ── std.str view/dup — borrowed and owned bytes (#6 owned String) ──────────
 def test_str_view_borrows_bytes(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { view } = std.str
 main* = () i32 {
     b := view("ABC")            // [65, 66, 67], borrowed
@@ -205,11 +205,11 @@ main* = () i32 {
     (b.len == 3).match { true => r, false => 0 }   // 198
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 198 & 0xFF   # 198
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 198 & 0xFF   # 198
 
 
 def test_str_dup_is_an_owned_independent_copy(tmp_path):
-    files, space, passing = build(tmp_path, """
+    files, namespace, passing = build(tmp_path, """
 { dup } = std.str
 { release } = std.mem
 main* = () i32 {
@@ -219,4 +219,4 @@ main* = () i32 {
     r
 }
 """)
-    assert run(tmp_path, emit_c(files, passing, space)) == 131
+    assert run(tmp_path, emit_c(files, passing, namespace)) == 131

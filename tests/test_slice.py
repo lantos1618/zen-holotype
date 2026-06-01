@@ -5,17 +5,17 @@ element each iteration and folds — like every loop — to a C `for`."""
 import subprocess
 import pytest
 
-from zen.main import load, build_space, build_scopes, resolve, check, emit_c
+from zen.main import load, build_namespace, build_scopes, resolve, check, emit_c
 
 
 def build(tmp_path, src):
     (tmp_path / "m.zen").write_text(src)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    results, passing = check(files, space)
-    return results, passing, emit_c(files, passing, space)
+    resolve(files, namespace)
+    results, passing = check(files, namespace)
+    return results, passing, emit_c(files, passing, namespace)
 
 
 def run(tmp_path, c, entry="main"):

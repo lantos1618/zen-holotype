@@ -8,18 +8,18 @@ mutate exactly as written. The emitted C stays warning-clean under
 import subprocess
 import pytest
 
-from zen.main import (load, build_space, build_scopes, resolve, check, emit_c)
+from zen.main import (load, build_namespace, build_scopes, resolve, check, emit_c)
 from zen.parser import parse
 
 
 def build(tmp_path, src):
     (tmp_path / "m.zen").write_text(src)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    results, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    results, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     return results, passing, c
 
 
