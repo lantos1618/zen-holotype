@@ -253,7 +253,7 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 1. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)* ✅
 2. **reified AST + self-host** — define the AST in Zen; rewrite `impl`/`derive`/traits as prelude
    `(Ast) Ast` functions. ✅ The `Ast`/`Decl` model and the derives (`derive_zero`, `derive_eq`,
-   `derive_tag`, `derive_payload`, `derive_tagged`) live in `prelude/derive.zen`, covering products,
+   `derive_tag`, `derive_payload`, `derive_tag_impl`) live in `prelude/derive.zen`, covering products,
    sums, payload binding, and trait impls; the host keeps only a reflection kernel + reifier.
    *Remaining: type-check the generators against the Zen `Ast`, and trait reflection so a derive
    can implement any trait.*

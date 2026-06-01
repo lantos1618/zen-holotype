@@ -1,6 +1,6 @@
 # Features
 
-What the language has and does today. ~2,140 LOC of compiler, 178 tests, compiles to C
+What the language has and does today. ~2,890 LOC of compiler, 285 tests, compiles to C
 via `cc`. (For the *why* — "structure is the constraint" — see [README](README.md); for
 where it's headed, [VISION](VISION.md).)
 
@@ -131,12 +131,11 @@ driven by a `build.zen` written in the language itself. Ill-typed functions are 
 excluded from codegen; the rest builds and runs.
 
 ## Not yet (the honest gaps)
-- `fold`/`each` work (closures-as-values landed); `map`/`filter` still need allocation (they
-  produce a new collection). No `Loopable` trait yet either (only slices have `.loop`, not user
-  structs). No modules beyond files, or first-class **runtime** strings.
-- Generators aren't **type-checked against the Zen `Ast`** — they run comptime-dynamically.
-- Trait reflection is single-method only, and assumes a `(Self) i32` shape (no full
-  method-signature reflection yet).
+- No `Loopable` trait yet — only slices have `.loop`, not user structs. No modules beyond files.
+- The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
+  (the `map_into`/`filter_into` forms are already generic).
+- Trait reflection exposes method *names* (any arity), but not method *signatures* (param/return
+  types) — so `derive_tag_impl` still assumes a `(Self) i32` shape.
 - One backend (C). The kernel/backend split is designed for `gen.llvm`/`gen.js`; they don't
-  exist.
+  exist (the `build.zen` `target` field is the slot, `native` the only value).
 - The one-structure grammar from VISION is the *direction*, not the current syntax.
