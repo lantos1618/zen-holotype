@@ -281,6 +281,29 @@ def test_generic_struct_monomorphizes(tmp_path):
     assert subprocess.run([str(bexe)], capture_output=True, text=True).stdout.strip() == "42"
 
 
+def test_generic_struct_with_slice_field_infers_from_literal(tmp_path):
+    # Vec<T> with a `[T]` field, built from a slice literal: T is solved from the
+    # element values. Regression: an expected element type that's an unsolved type
+    # param used to fail with "i32 ⊀ T" — a slice literal can't fit against a TVar,
+    # so the TVar must be inferred-then-unified, not treated as a constraint.
+    (tmp_path / "main.zen").write_text(
+        "Vec*<T>: { data: [T], n: i32 }\n"
+        "first*<T> = (v: Vec<T>) i32 { v.n }\n"
+        "main* = () i32 { v := Vec { data: [5, 10, 15], n: 3 }\n v.data[0] + v.data[2] + first(v) }\n")
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace)
+    harness = '\n#include <stdio.h>\nint main(void){ printf("%d\\n", main_main()); return 0; }\n'
+    (tmp_path / "o.c").write_text(c + harness)
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout.strip() == "23"
+
+
 # ── A match subject with side effects is evaluated exactly once ─────────────
 def test_match_subject_evaluated_once(tmp_path):
     (tmp_path / "main.zen").write_text(

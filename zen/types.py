@@ -214,6 +214,8 @@ def scope_with_bounds(scope, bounds):
 def infer(e, locals_, namespace, scope, expect=None):
     """Type `e`, tagging any TypeErr with the innermost offending expr's position
     (the deepest frame catches first, so the most specific location wins)."""
+    if isinstance(expect, TVar):                 # an unsolved type param never constrains a value —
+        expect = None                            # it gets solved by match_type, so infer naturally here
     try:
         return _infer(e, locals_, namespace, scope, expect)
     except TypeErr as ex:
@@ -291,6 +293,8 @@ def _infer(e, locals_, namespace, scope, expect=None):
             return _infer_struct_lit(e, locals_, namespace, scope)
         case SliceLit(elems):                                  # [a, b, c] : [T]
             et = expect.elem if isinstance(expect, SliceT) else None
+            if isinstance(et, TVar):                            # unsolved type param ([T] of a generic
+                et = None                                       # struct): infer naturally, solve later
             if et is None:
                 if not elems:
                     raise TypeErr("cannot infer the type of an empty slice literal")
