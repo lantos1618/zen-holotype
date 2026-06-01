@@ -112,7 +112,7 @@ module.exports = grammar({
                     '(', field('params', seq($.identifier, repeat(seq(',', $.identifier)))), ')',
                     field('body', $.block), ')'),
     // postfix: xs.loop((h, i, x) { … }) — same as loop(xs, (h, i, x) { … }).
-    loop_method: $ => prec(8, seq(field('recv', $._unary), '.', 'loop', '(',
+    loop_method: $ => prec(8, seq(field('recv', $._unary), token.immediate('.'), 'loop', '(',
                     '(', field('params', seq($.identifier, repeat(seq(',', $.identifier)))), ')',
                     field('body', $.block), ')')),
     // a leading-dot constructor `.Ok(x)` — an expression, so it works as a call
@@ -139,7 +139,7 @@ module.exports = grammar({
     // subject is any postfix expression (`result.match {…}`, `xs.head().match {…}`);
     // wrap a binary subject in parens: `(n < 0).match {…}`. `match` stays a reserved
     // word, so `.match {` is unambiguous against a `.name` field access.
-    match: $ => prec.left(8, seq(field('subject', $._unary), '.', 'match',
+    match: $ => prec.left(8, seq(field('subject', $._unary), token.immediate('.'), 'match',
                     '{', comma1($.match_arm), optional(','), '}')),
     match_arm: $ => seq(field('pat', $.pattern), '=>', field('body', $._expression)),
     pattern: $ => choice($.ctor_pattern, $.literal_pattern, $.wildcard),
@@ -149,7 +149,10 @@ module.exports = grammar({
     wildcard: $ => '_',
 
     call:         $ => prec.left(4, seq(field('fn', $._unary), $.arguments)),
-    field_access: $ => prec.left(4, seq(field('obj', $._unary), '.', field('name', $.identifier))),
+    // the postfix `.` is glued (token.immediate) — like the call `(` and index `[` —
+    // so a statement-leading `.Ok(…)` on the next line is a fresh enum_ctor, not a
+    // method call absorbed onto the previous statement.
+    field_access: $ => prec.left(4, seq(field('obj', $._unary), token.immediate('.'), field('name', $.identifier))),
 
     binary: $ => choice(
       prec.left(1, seq($._expression, '||', $._expression)),                       // bool -> bool
