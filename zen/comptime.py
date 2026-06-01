@@ -313,7 +313,7 @@ def reify_decl(v):
     tag, p = _enum(v)
     if tag == "Func":                            # a free function
         return _reify_func(p)
-    if tag == "Impl":                            # impl Trait for Ty { method }
+    if tag == "Impl":                            # ty.impl(trait) { method }
         return Impl(p["trait"], p["ty"], [_reify_func(p["method"])])
     if tag == "Extern":                          # a bodyless C binding (the C symbol = the name)
         return Fn(p["nm"], _reify_params(p["ps"]), _reify_type(p["ret"]),
