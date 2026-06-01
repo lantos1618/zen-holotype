@@ -171,8 +171,8 @@ def test_match_lowers_and_runs(tmp_path):
 def test_used_illtyped_impl_refused(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Box*<T>: { val: T }\n"
-        "trait Score { score: (Ptr<Self>) i32 }\n"
-        "impl Score for Box { score = (b: Ptr<Box>) i32 { b.val } }\n"   # b.val : T ⊀ i32
+        "Score: { score: (Ptr<Self>) i32 }\n"
+        "Box.impl(Score) { score = (b: Ptr<Box>) i32 { b.val } }\n"   # b.val : T ⊀ i32
         "total*<T: Score> = (x: Ptr<T>) i32 { score(x) }\n"
         "main* = () i32 { total(addr(Box { val: 9 })) }\n")
     files = load(tmp_path)
@@ -189,8 +189,8 @@ def test_unused_illtyped_impl_still_builds(tmp_path):
     # the same bad impl, but never used — the rest of the program still compiles
     (tmp_path / "main.zen").write_text(
         "Box*<T>: { val: T }\n"
-        "trait Score { score: (Ptr<Self>) i32 }\n"
-        "impl Score for Box { score = (b: Ptr<Box>) i32 { b.val } }\n"
+        "Score: { score: (Ptr<Self>) i32 }\n"
+        "Box.impl(Score) { score = (b: Ptr<Box>) i32 { b.val } }\n"
         "main* = () i32 { 42 }\n")
     files = load(tmp_path)
     space = build_space(files)
@@ -204,8 +204,8 @@ def test_unused_illtyped_impl_still_builds(tmp_path):
 def test_trait_dispatch_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Vec*: { len: i32, cap: i32 }\n"
-        "trait Area { area: (Ptr<Self>) i32 }\n"
-        "impl Area for Vec { area = (v: Ptr<Vec>) i32 { v.len * v.cap } }\n"
+        "Area: { area: (Ptr<Self>) i32 }\n"
+        "Vec.impl(Area) { area = (v: Ptr<Vec>) i32 { v.len * v.cap } }\n"
         "total*<T: Area> = (x: Ptr<T>) i32 { area(x) }\n"
         "main* = () i32 { total(addr(Vec { len: 5, cap: 4 })) }\n")
     files = load(tmp_path)

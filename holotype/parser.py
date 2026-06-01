@@ -187,6 +187,11 @@ def _decl(n):
     if n.type == "struct":
         fields = [Field_(_t(_field(f, "name")), _type(_field(f, "type")))
                   for f in _named(n) if f.type == "field"]
+        # A record whose every member is a function type IS a trait (no keyword):
+        #   Area*: { area: (Ptr<Self>) i32 }  →  each field is a method signature.
+        if fields and all(isinstance(f.type, FnT) for f in fields):
+            sigs = [MethodSig(f.name, f.type.params, f.type.ret) for f in fields]
+            return TraitDecl(_t(_field(n, "name")), sigs, pub)
         return Struct(_t(_field(n, "name")), fields, pub, _tparams(n)[0])
     if n.type == "enum":
         variants = [Variant(_t(_field(v, "name")),
@@ -195,15 +200,6 @@ def _decl(n):
         return EnumDecl(_t(_field(n, "name")), variants, pub, _tparams(n)[0])
     if n.type == "function":
         return _fn(n)
-    if n.type == "trait":
-        sigs = []
-        for m in _named(n):
-            if m.type != "method_sig":
-                continue
-            tks = [c for c in _named(m) if c.type in _TYPES]   # param types … then ret (last)
-            sigs.append(MethodSig(_t(_field(m, "name")),
-                                  tuple(_type(t) for t in tks[:-1]), _type(tks[-1])))
-        return TraitDecl(_t(_field(n, "name")), sigs, pub)
     if n.type == "impl":
         methods = [_fn(f) for f in _named(n) if f.type == "function"]
         return Impl(_t(_field(n, "trait")), _t(_field(n, "type")), methods)
