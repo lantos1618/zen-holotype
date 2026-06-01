@@ -5,6 +5,10 @@
 // is the language's own ordinary code, lowered to C and called while the program
 // runs — the self-hosting direction made real on a subset. `genC(f) -> String` is
 // the seed of zen lowering itself.
+//
+// The emitters are written in fluent UFCS style: `s.append(a).append(b)` is just
+// `append(append(s, a), b)`, and `s.gen_expr(e)` is `gen_expr(s, e)` — String flows
+// left-to-right through the chain.
 
 { String, new, append, push } = std.string
 { view } = std.str
@@ -56,42 +60,8 @@ draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an a
 digit = (d: i32) u8 { view("0123456789")[d] }
 gen_int = (s: String, n: i32) String {
     (n < 10).match {
-        true  => push(s, digit(n)),
-        false => push(gen_int(s, n / 10), digit(n % 10))
-    }
-}
-
-// ── emit an expression (recursive) and a whole function ─────────────────────
-gen_expr* = (s: String, e: Ptr<Expr>) String {
-    e.match {                                       // match auto-derefs the Ptr<Expr>
-        .Int(n) => gen_int(s, n),
-        .Var(v) => append(s, v.name),
-        .Bin(b) => gen_bin(s, b),
-        .Call(c) => append(gen_expr(append(append(s, c.fn), "("), c.arg), ")"),  // fn(arg)
-        .Cond(cd) => gen_cond(s, cd)                                             // (c ? t : e)
-    }
-}
-
-gen_cond = (s: String, cd: CondData) String {
-    c := gen_expr(append(s, "("), cd.c)
-    t := gen_expr(append(c, " ? "), cd.t)
-    e := gen_expr(append(t, " : "), cd.e)
-    append(e, ")")
-}
-
-gen_bin = (s: String, b: BinData) String {
-    open := append(s, "(")
-    left := gen_expr(open, b.lhs)
-    mid := append(append(left, " "), b.op)
-    right := gen_expr(append(mid, " "), b.rhs)
-    append(right, ")")
-}
-
-// emit one statement, terminated by `;`
-gen_stmt = (s: String, st: Stmt) String {
-    st.match {
-        .Let(l)    => append(gen_expr(append(append(append(s, "int32_t "), l.name), " = "), l.value), ";"),
-        .Return(e) => append(gen_expr(append(s, "return "), e), ";")
+        true  => s.push(digit(n)),
+        false => s.gen_int(n / 10).push(digit(n % 10))
     }
 }
 
@@ -100,48 +70,71 @@ cty = (t: Ty) str {
     t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool" }
 }
 
-// emit the parameter list, comma-separated: `int32_t a, int32_t b`
+// ── emit an expression (recursive) ──────────────────────────────────────────
+gen_expr* = (s: String, e: Ptr<Expr>) String {
+    e.match {                                       // match auto-derefs the Ptr<Expr>
+        .Int(n)  => s.gen_int(n),
+        .Var(v)  => s.append(v.name),
+        .Bin(b)  => s.gen_bin(b),
+        .Call(c) => s.append(c.fn).append("(").gen_expr(c.arg).append(")"),
+        .Cond(d) => s.gen_cond(d)
+    }
+}
+
+gen_bin = (s: String, b: BinData) String {
+    s.append("(").gen_expr(b.lhs).append(" ").append(b.op).append(" ").gen_expr(b.rhs).append(")")
+}
+
+gen_cond = (s: String, d: CondData) String {
+    s.append("(").gen_expr(d.c).append(" ? ").gen_expr(d.t).append(" : ").gen_expr(d.e).append(")")
+}
+
+// ── emit a statement, a parameter list, a function, a struct, a decl ────────
+gen_stmt = (s: String, st: Stmt) String {
+    st.match {
+        .Let(l)    => s.append("int32_t ").append(l.name).append(" = ").gen_expr(l.value).append(";"),
+        .Return(e) => s.append("return ").gen_expr(e).append(";")
+    }
+}
+
 gen_params = (s: String, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
-        out = (i == 0).match { true => out, false => append(out, ", ") }   // comma between, not before
-        out = append(append(append(out, cty(p.ty)), " "), p.name)
+        out = (i == 0).match { true => out, false => out.append(", ") }   // comma between, not before
+        out = out.append(cty(p.ty)).append(" ").append(p.name)
     })
     out
 }
 
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 gen_func* = (s: String, f: Func) String {
-    sig := append(append(append(s, cty(f.ret)), " "), f.name)
-    open := append(gen_params(append(sig, "("), f.params), ") { ")
-    f.body.loop((hd, i, st) { open = append(gen_stmt(open, st), " ") })   // accumulate each statement
-    append(open, "}")
+    open := s.append(cty(f.ret)).append(" ").append(f.name).append("(").gen_params(f.params).append(") { ")
+    f.body.loop((h, i, st) { open = open.gen_stmt(st).append(" ") })   // accumulate each statement
+    open.append("}")
 }
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 gen_struct* = (s: String, sd: StructDecl) String {
-    open := append(s, "typedef struct { ")
-    sd.fields.loop((h, i, fld) {
-        open = append(append(append(append(open, cty(fld.ty)), " "), fld.name), "; ")
-    })
-    append(append(append(open, "} "), sd.name), ";")
+    open := s.append("typedef struct { ")
+    sd.fields.loop((h, i, fld) { open = open.append(cty(fld.ty)).append(" ").append(fld.name).append("; ") })
+    open.append("} ").append(sd.name).append(";")
 }
 
-// emit a top-level declaration (a function or a struct)
+// emit a top-level declaration (a function, a struct, or verbatim C)
 gen_decl* = (s: String, d: Decl) String {
     d.match {
-        .DFunc(f) => gen_func(s, f),
-        .DStruct(sd) => gen_struct(s, sd),
-        .DRaw(c) => append(s, c)                        // verbatim — SIMD attrs/pragmas/intrinsics
+        .DFunc(f)    => s.gen_func(f),
+        .DStruct(sd) => s.gen_struct(sd),
+        .DRaw(c)     => s.append(c)                     // verbatim — SIMD attrs/pragmas/intrinsics
     }
 }
 
 // genC: an AST in, C source out — at runtime.
-genC* = (f: Func) String { gen_func(new(), f) }
+genC* = (f: Func) String { new().gen_func(f) }
 
 // genModule: a whole translation unit — a list of decls (structs + functions).
 genModule* = (decls: [Decl]) String {
     s := new()
-    decls.loop((h, i, d) { s = append(gen_decl(s, d), " ") })
+    decls.loop((h, i, d) { s = s.gen_decl(d).append(" ") })
     s
 }
