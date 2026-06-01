@@ -1,6 +1,6 @@
 // std.genc — a C backend written IN Zen, run at RUNTIME.
 //
-// It walks a small AST (ordinary lowered structs + enums — runtime values, not the
+// It walks an AST (ordinary lowered structs + enums — runtime values, not the
 // comptime prelude model) and emits C source into a heap String. The point: codegen
 // is the language's own ordinary code, lowered to C and called while the program
 // runs — the self-hosting direction made real on a subset. `genC(f) -> String` is
@@ -9,11 +9,18 @@
 { String, new, append, push } = std.string
 { view } = std.str
 
-// ── the AST (runtime values) ────────────────────────────────────────────────
+// ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
+// Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
+// which needs only a forward decl, so the recursion closes.
 VarData*: { name: str }
-Term*: Int(i32), Var(VarData)                 // a leaf: a constant or a variable
-Expr*: { op: str, lhs: Term, rhs: Term }      // lhs <op> rhs
-Func*: { name: str, param: str, body: Expr }  // int32_t name(int32_t param) { return body; }
+BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
+Expr*: Int(i32), Var(VarData), Bin(BinData)
+Func*: { name: str, param: str, body: Ptr<Expr> }       // int32_t name(int32_t param){ return body; }
+
+// constructors — return an Expr by value; the caller addr()s it to make a child
+lit* = (n: i32) Expr { .Int(n) }
+vref* = (nm: str) Expr { .Var(VarData { name: nm }) }
+bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: l, rhs: r }) }
 
 // ── int -> decimal digits (no cast: digit bytes come from a str view) ────────
 digit = (d: i32) u8 { view("0123456789")[d] }
@@ -24,18 +31,21 @@ gen_int = (s: String, n: i32) String {
     }
 }
 
-// ── emit a term, an expression, a whole function ────────────────────────────
-gen_term* = (s: String, t: Term) String {
-    t.match {
+// ── emit an expression (recursive) and a whole function ─────────────────────
+gen_expr* = (s: String, e: Ptr<Expr>) String {
+    e.match {                                       // match auto-derefs the Ptr<Expr>
         .Int(n) => gen_int(s, n),
-        .Var(v) => append(s, v.name)
+        .Var(v) => append(s, v.name),
+        .Bin(b) => gen_bin(s, b)
     }
 }
 
-gen_expr* = (s: String, e: Expr) String {
-    a := gen_term(s, e.lhs)
-    b := append(append(a, " "), e.op)
-    gen_term(append(b, " "), e.rhs)
+gen_bin = (s: String, b: BinData) String {
+    open := append(s, "(")
+    left := gen_expr(open, b.lhs)
+    mid := append(append(left, " "), b.op)
+    right := gen_expr(append(mid, " "), b.rhs)
+    append(right, ")")
 }
 
 // genC: an AST in, C source out — at runtime.
