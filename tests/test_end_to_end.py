@@ -304,6 +304,28 @@ def test_generic_struct_with_slice_field_infers_from_literal(tmp_path):
     assert subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout.strip() == "23"
 
 
+# ── type definitions are toposorted by by-value containment (any decl order) ──
+def test_types_emitted_in_dependency_order(tmp_path):
+    # `Outer` embeds `Inner` BY VALUE but is declared FIRST. The C definition of Inner
+    # must still precede Outer's. Regression: emit used decl order -> incomplete type.
+    (tmp_path / "main.zen").write_text(
+        "Outer*: { inner: Inner, k: i32 }\n"
+        "Inner*: { v: i32 }\n"
+        "main* = () i32 { o := Outer { inner: Inner { v: 42 }, k: 1 }\n o.inner.v + o.k }\n")
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace)
+    assert c.index("struct main_Inner {") < c.index("struct main_Outer {")   # inner first
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 43
+
+
 # ── match auto-derefs a Ptr<Enum>, so recursive heap structures walk cleanly ──
 def test_match_auto_derefs_pointer_to_enum(tmp_path):
     # A binary tree built on the heap (stack-addressed here): `sum` recurses through
