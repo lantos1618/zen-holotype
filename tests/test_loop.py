@@ -15,8 +15,8 @@ def build(tmp_path, src, entry="main"):
     build_scopes(files)
     resolve(files, namespace)
     results, passing = check(files, namespace)
-    c = emit_c(files, passing, namespace)
-    return results, passing, c
+    c = emit_c(files, passing, namespace, roots={f"m.{entry}"})   # DCE from the entry: emit only
+    return results, passing, c                                    # reachable code (not all of std)
 
 
 def run(tmp_path, c, entry):
