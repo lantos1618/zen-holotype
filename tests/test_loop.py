@@ -50,7 +50,7 @@ main* = () i32 {
     r := 0
     loop((h) {
         r = r + 1
-        match (r < 5) { true => h.continue(), false => h.break() }
+        (r < 5).match { true => h.continue(), false => h.break() }
     })
     r
 }
@@ -95,7 +95,7 @@ main* = () i32 {
     n := 0
     loop(3, (h, i) {
         n = n + 1
-        match (i < 100) { true => h.continue(), false => h.break() }
+        (i < 100).match { true => h.continue(), false => h.break() }
     })
     n
 }

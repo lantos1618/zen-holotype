@@ -16,7 +16,10 @@ module.exports = grammar({
   conflicts: $ => [[$.loop_, $._primary, $.closure], [$._primary, $.closure],
                    // a bodyless fn (foreign binding) vs one whose `{…}` body follows the
                    // return type: after `name = (p) Ret`, a `{` lookahead forks — GLR wins.
-                   [$.function]],
+                   [$.function],
+                   // prefix `!` vs a postfix `.match`/`.name` on the same operand
+                   // (`!x.match {…}`): GLR forks; a `.match {` is unambiguously a match.
+                   [$.unary_op, $.match, $.field_access]],
 
   rules: {
     source_file: $ => repeat($._item),
@@ -116,30 +119,30 @@ module.exports = grammar({
     // a postfix chain: primary, then any number of (args) calls and .name accesses.
     // A "method call" is simply a call whose `fn` is a field_access — no special rule.
     _expression: $ => choice($.binary, $._unary),
-    _unary: $ => choice($._primary, $.call, $.field_access, $.index, $.unary_op),
+    _unary: $ => choice($._primary, $.call, $.field_access, $.index, $.unary_op, $.match),
     unary_op: $ => prec(7, seq(field('op', '!'), $._unary)),   // logical not
     // xs[i] — the `[` must be glued (token.immediate), so a statement-leading
     // `[a,b,c]` slice literal is never absorbed as an index of the previous line.
     index: $ => prec.left(4, seq(field('seq', $._unary), token.immediate('['), field('idx', $._expression), ']')),
-    _primary: $ => choice($.parenthesized, $.closure, $.match, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.boolean, $.string, $.identifier),
+    _primary: $ => choice($.parenthesized, $.closure, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.boolean, $.string, $.identifier),
     slice_literal: $ => seq('[', optional(seq(comma1($._expression), optional(','))), ']'),  // [a, b, c]
     // (a, x) { a + x } — a closure value; the trailing block is what tells it apart
     // from a parenthesized expression (GLR forks, the one with a `{` body wins).
     closure: $ => seq('(', optional(field('params', seq($.identifier, repeat(seq(',', $.identifier))))), ')',
                       field('body', $.block)),
 
-    // match subject { .Variant(x) => expr, .Other => expr, _ => expr }
-    // The subject is a restricted expression so the `{` can't be mistaken for a
-    // struct literal — wrap a struct-literal subject in parens if ever needed.
-    // subject is an identifier or a parenthesized expression — keeps the `{`
-    // unambiguous and sidesteps the struct-literal / left-recursion conflicts.
-    match: $ => seq('match', field('subject', choice($.identifier, $.parenthesized)),
-                    '{', comma1($.match_arm), optional(','), '}'),
+    // subject.match { .Variant(x) => expr, .Other => expr, _ => expr }
+    // Postfix, like .loop / .impl — subject-first, no `match` prefix keyword. The
+    // subject is any postfix expression (`result.match {…}`, `xs.head().match {…}`);
+    // wrap a binary subject in parens: `(n < 0).match {…}`. `match` stays a reserved
+    // word, so `.match {` is unambiguous against a `.name` field access.
+    match: $ => prec.left(8, seq(field('subject', $._unary), '.', 'match',
+                    '{', comma1($.match_arm), optional(','), '}')),
     match_arm: $ => seq(field('pat', $.pattern), '=>', field('body', $._expression)),
     pattern: $ => choice($.ctor_pattern, $.literal_pattern, $.wildcard),
     ctor_pattern: $ => seq('.', field('name', $.identifier),
                            optional(seq('(', field('binding', $.identifier), ')'))),
-    literal_pattern: $ => choice($.integer, $.boolean),   // match n { 0 => …, _ => … }
+    literal_pattern: $ => choice($.integer, $.boolean),   // n.match { 0 => …, _ => … }
     wildcard: $ => '_',
 
     call:         $ => prec.left(4, seq(field('fn', $._unary), $.arguments)),
@@ -157,7 +160,9 @@ module.exports = grammar({
                           '{', optional(seq(comma1($.field_init), optional(','))), '}')),
     field_init: $ => seq(field('name', $.identifier), ':', field('value', $._expression)),
     parenthesized: $ => seq('(', $._expression, ')'),
-    arguments: $ => seq('(', optional(comma1($._expression)), ')'),
+    // the call `(` must be glued (token.immediate) — so a statement that begins with
+    // `(` (e.g. `(n < 0).match {…}`) is never absorbed as arguments of the line above.
+    arguments: $ => seq(token.immediate('('), optional(comma1($._expression)), ')'),
 
     integer: $ => /\d+/,
     boolean: $ => choice('true', 'false'),

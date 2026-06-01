@@ -33,7 +33,7 @@ fold = (xs: [i32], init: i32, f: (i32, i32) i32) i32 {
     xs.loop((h, i, x) { acc = f(acc, x) })
     acc
 }
-classify = (n: i32) i32 { match (n < 0) { true => 0, false => 1 } }
+classify = (n: i32) i32 { (n < 0).match { true => 0, false => 1 } }
 id* = (b: box) i32 { b.v }
 main* = () i32 {
     s := fold([1, 2, 3], 0, (a, x) { a + x })
