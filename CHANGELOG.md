@@ -13,7 +13,8 @@ Toward **self-hosting** — the compiler's backend, written in zen, run at runti
 - **`std.genc`** — a C backend *written in zen*, run at runtime. Coverage: expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond` (ternary); statements `Let`/`Return`; **typed,
   multiple parameters** (`[Param]` + a `Ty` enum → C type names) and a return `Ty`;
-  whole function bodies; and a **multi-function module** (`genModule([Func])`). The loop
+  whole function bodies; **struct typedefs** (`StructDecl`) via a top-level `Decl` union, so
+  `genModule([Decl])` emits a real translation unit (structs + functions). The loop
   closes — a running zen program emits a **recursive factorial**
   `int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }` → `fact(5) == 120`,
   a 2-arg `int32_t add(int32_t a, int32_t b) { return (a + b); }` → `add(3,4) == 7`, a
