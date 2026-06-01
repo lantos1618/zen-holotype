@@ -32,7 +32,7 @@ def test_prelude_is_loaded_but_never_lowered(tmp_path):
     files, space, results, passing = frontend(tmp_path, """
 { derive_zero } = prelude.derive
 Point: { x: i32, y: i32 }
-emit derive_zero(reflect(Point))
+@emit(derive_zero(reflect(Point)))
 main* = () i32 { p := Point_zero()  p.x }
 """)
     # the Ast model lives in Zen, under the prelude namespace
@@ -49,7 +49,7 @@ def test_derive_zero_self_hosted(tmp_path):
     files, space, results, passing = frontend(tmp_path, """
 { derive_zero } = prelude.derive
 Point: { x: i32, y: i32, z: i32 }
-emit derive_zero(reflect(Point))
+@emit(derive_zero(reflect(Point)))
 main* = () i32 { p := Point_zero()  p.x + p.y + p.z }
 """)
     assert ("m.Point_zero", True, "ok") in results
@@ -61,7 +61,7 @@ def test_derive_eq_self_hosted_and_runs(tmp_path):
     files, space, results, passing = frontend(tmp_path, """
 { derive_eq } = prelude.derive
 Point: { x: i32, y: i32 }
-emit derive_eq(reflect(Point))
+@emit(derive_eq(reflect(Point)))
 main* = () i32 {
     a := Point { x: 1, y: 2 }
     b := Point { x: 1, y: 2 }
@@ -87,7 +87,7 @@ def test_derive_tag_reflects_a_sum_type(tmp_path):
     files, space, results, passing = frontend(tmp_path, """
 { derive_tag } = prelude.derive
 Color: Red, Green, Blue
-emit derive_tag(reflect(Color))
+@emit(derive_tag(reflect(Color)))
 main* = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
 """)
     assert ("m.Color_tag", True, "ok") in results
@@ -106,7 +106,7 @@ def test_derive_payload_binds_variant_payloads(tmp_path):
     files, space, results, passing = frontend(tmp_path, """
 { derive_payload } = prelude.derive
 Shape: Circle(i32), Square(i32), Dot
-emit derive_payload(reflect(Shape))
+@emit(derive_payload(reflect(Shape)))
 main* = () i32 {
     Shape_payload(.Circle(7)) + Shape_payload(.Square(3)) + Shape_payload(.Dot())
 }
@@ -129,8 +129,8 @@ def test_derive_generates_a_trait_impl(tmp_path):
 Ranked:  { rank: (Self) i32 }
 Ordinal: { ord:  (Self) i32 }
 Color: Red, Green, Blue
-emit derive_tag_impl(reflect_trait(Ranked),  reflect(Color))
-emit derive_tag_impl(reflect_trait(Ordinal), reflect(Color))
+@emit(derive_tag_impl(reflect_trait(Ranked),  reflect(Color)))
+@emit(derive_tag_impl(reflect_trait(Ordinal), reflect(Color)))
 byRank<T: Ranked>  = (x: T) i32 { rank(x) }
 byOrd<T: Ordinal>  = (x: T) i32 { ord(x) }
 green = () Color { .Green() }
@@ -162,7 +162,7 @@ def test_emitted_decls_are_reachable_in_the_trie(tmp_path):
     files, space, _, passing = frontend(tmp_path, """
 { derive_zero } = prelude.derive
 Rgb: { r: u8, g: u8, b: u8, a: u8 }
-emit derive_zero(reflect(Rgb))
+@emit(derive_zero(reflect(Rgb)))
 main* = () i32 { c := Rgb_zero()  0 }
 """)
     assert isinstance(space.walk("m.Rgb_zero").value, Fn)
@@ -178,5 +178,5 @@ def test_reflect_requires_a_type(tmp_path):
     with pytest.raises(ComptimeErr):
         frontend(tmp_path, """
 { derive_zero } = prelude.derive
-emit derive_zero(reflect(missing))
+@emit(derive_zero(reflect(missing)))
 """)

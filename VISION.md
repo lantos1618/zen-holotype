@@ -265,7 +265,7 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 
 ```
   user.zen:   { derive_eq } = prelude.derive
-              emit derive_eq(reflect(Point))           // a top-level directive
+              @emit(derive_eq(reflect(Point)))         // a top-level directive
 
   kernel  :   resolve ─► run_emits ─► check ─► lower
                           │

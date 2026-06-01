@@ -23,9 +23,10 @@ module.exports = grammar({
     extern: $ => seq('extern', field('name', $.identifier), '=',
                      '(', optional(comma1($.param)), ')', field('ret', $._type)),
 
-    // emit arity_of(reflect(Point))   — run a comptime (Ast)->Ast generator and
-    // splice the declaration it returns into this module, then check + lower it.
-    emit: $ => seq('emit', field('value', $._expression)),
+    // @emit(gen(reflect(Point)))   — run a comptime (Ast)->Ast generator and splice
+    // the declaration it returns into this module, then check + lower it. The `@`
+    // marks it a compiler primitive (like @while), not a bare prefix keyword.
+    emit: $ => seq('@emit', '(', field('value', $._expression), ')'),
 
     comment: $ => token(seq('//', /[^\n]*/)),
 
