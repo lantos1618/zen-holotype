@@ -193,3 +193,30 @@ bad* = () i32 { v := slice(alloc(8), 2)  0 }
     build_scopes(files); resolve(files, space)
     results = check(files, space)[0]
     assert any(q == "main.bad" and not ok and "slice" in why for q, ok, why in results)
+
+
+# ── std.str view/dup — borrowed and owned bytes (#6 owned String) ──────────
+def test_str_view_borrows_bytes(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ view } = std.str
+main* = () i32 {
+    b := view("ABC")            // [65, 66, 67], borrowed
+    r := b[0] + b[1] + b[2]
+    (b.len == 3).match { true => r, false => 0 }   // 198
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 198 & 0xFF   # 198
+
+
+def test_str_dup_is_an_owned_independent_copy(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ dup } = std.str
+{ release } = std.mem
+main* = () i32 {
+    owned := dup("AB")          // heap [65, 66], independent of the literal
+    r := owned[0] + owned[1]    // 131
+    release(owned.ptr)          // caller owns it → frees it
+    r
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 131
