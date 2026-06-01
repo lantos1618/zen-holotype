@@ -79,3 +79,26 @@ def test_parse_error_reports_line_number():
     with pytest.raises(SyntaxError) as ei:
         parse(src, "m")
     assert str(ei.value).startswith("m:2:")
+
+
+# ── A bodyless function is a foreign (C) binding — no `extern` keyword ───────
+def test_bodyless_function_is_a_foreign_binding():
+    fn = only(parse("malloc = (n: i64) RawPtr<u8>", "m").decls, Fn)
+    assert fn.extern is True and fn.body is None
+    assert fn.name == "malloc" and isinstance(fn.ret, PtrT)
+
+
+def test_bodyless_function_without_ret_is_void():
+    fn = only(parse("flush = (p: RawPtr<u8>)", "m").decls, Fn)
+    assert fn.extern is True and fn.ret == PrimT(Prim.VOID)
+
+
+def test_function_with_body_is_not_extern():
+    fn = only(parse("area* = (v: i32) i32 { v }", "m").decls, Fn)
+    assert fn.extern is False and fn.body is not None
+
+
+def test_extern_keyword_is_gone():
+    # the old `extern name = (...)` syntax no longer parses
+    with pytest.raises(SyntaxError):
+        parse("extern malloc = (n: i64) RawPtr<u8>", "m")
