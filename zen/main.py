@@ -686,8 +686,7 @@ def run_test_root(root, test_rel, cc_extra=()):
     out_dir = pathlib.Path(root) / "build"
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{test_ns}_test.c", out_dir / f"{test_ns}_test"
-    cpath.write_text(emit_c(files, passing, space, harness))
-    subprocess.run(["cc", "-Wall", "-Wextra", *cc_extra, str(cpath), "-o", str(bpath)], check=True)
+    compile_if_changed(cpath, bpath, emit_c(files, passing, space, harness), cc_extra)
     print(f"\n── tests: {test_rel} ──")
     skipped = [d.name for d in tests if d not in runnable]
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
@@ -706,6 +705,21 @@ def cmd_check(root):
         print(f"   {'PASS ✓' if ok else 'FAIL ✗'}  {qual:<14} {'' if ok else why}")
     pathlib.Path("out.c").write_text(emit_c(files, passing, space))
     print("   -> wrote out.c")
+
+
+def compile_if_changed(cpath, bpath, c_text, cc_extra=()):
+    """Write `c_text` and compile it to `bpath` with cc, but skip the compile when
+    the source we'd write is byte-identical to last time and the binary still
+    exists. Sound because codegen is deterministic — same program → same C → same
+    binary. A header comment records the exact cc command, so changing cflags or
+    links changes the file and busts the cache too. Returns True if it compiled."""
+    cc = ["cc", "-Wall", "-Wextra", *cc_extra]
+    stamped = f"// built with: {' '.join(cc)} {cpath.name} -o {bpath.name}\n{c_text}"
+    if bpath.exists() and cpath.exists() and cpath.read_text() == stamped:
+        return False
+    cpath.write_text(stamped)
+    subprocess.run([*cc, str(cpath), "-o", str(bpath)], check=True)
+    return True
 
 
 def cmd_build(root):
@@ -748,11 +762,11 @@ def cmd_build(root):
     out_dir = pathlib.Path(root) / cfg["out_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{cfg['name']}.c", out_dir / cfg["name"]
-    cpath.write_text(emit_c(files, passing, space, harness))
-
     cc_extra = [*cfg["cflags"], *(f"-l{lib}" for lib in cfg["links"])]   # build.zen flags
-    print(f"\n── compiling {cpath} ──")
-    subprocess.run(["cc", "-Wall", "-Wextra", *cc_extra, str(cpath), "-o", str(bpath)], check=True)
+    if compile_if_changed(cpath, bpath, emit_c(files, passing, space, harness), cc_extra):
+        print(f"\n── compiled {cpath} ──")
+    else:
+        print(f"\n── {bpath} up to date (cached) ──")
     print(f"── running {bpath} ──")
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
 
