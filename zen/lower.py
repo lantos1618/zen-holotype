@@ -10,6 +10,13 @@ from .types import infer, subst, solve_call, match_type, struct_at, TraitMethod
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
 
+
+def _c_str(s: str) -> str:
+    """Escape a string's bytes for a C string literal (backslash first, so it doesn't
+    double-escape the others)."""
+    return (s.replace("\\", "\\\\").replace('"', '\\"')
+             .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+
 _slice_reg: dict = {}             # mangle(elem) -> elem type, for emitting slice typedefs
 _uid_reg: dict = {}               # id(node) -> stable small int (see _uid)
 
@@ -101,7 +108,7 @@ def c_expr(e, locals_, namespace, scope, expect=None) -> str:
         case Bool(b):
             return "true" if b else "false"
         case Str(s):                                     # a `str` literal -> a C string literal
-            return f'"{s}"'
+            return f'"{_c_str(s)}"'                      # re-escape so special chars stay valid C
         case Var(name):
             return name
         case Bin(op, l, r):

@@ -152,3 +152,16 @@ def test_same_line_method_chain_still_chains():
     body = fn.body[-1]
     assert isinstance(body, MethodCall) and body.method == "filter"
     assert isinstance(body.recv, MethodCall) and body.recv.method == "map"
+
+
+def test_string_escapes_are_resolved():
+    # \" \t \n in source become the real characters in the AST Str (lower re-escapes them)
+    from zen.ast import Str
+    fn = only(parse('s* = () str { "a\\"b\\tc\\n" }', "m").decls, Fn)
+    assert fn.body[-1] == Str('a"b\tc\n')
+
+
+def test_unescaped_backslash_passthrough():
+    from zen.ast import Str
+    fn = only(parse('s* = () str { "a\\\\b" }', "m").decls, Fn)   # source: "a\\b"  -> one backslash
+    assert fn.body[-1] == Str("a\\b")

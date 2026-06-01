@@ -19,6 +19,20 @@ _PRIM = {p.value: p for p in Prim}
 _DIR  = {d.value: d for d in Dir}
 _TYPES = {"primitive", "pointer", "slice_type", "fn_type", "named_type"}
 
+_ESC = {'"': '"', '\\': '\\', 'n': '\n', 't': '\t', 'r': '\r', '0': '\0'}
+
+
+def _unescape(s: str) -> str:
+    """Resolve a string literal's escapes (\\" \\\\ \\n \\t …) to the characters they
+    denote, so the AST `Str` holds real bytes; lower re-escapes them for the C output."""
+    out, i = [], 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            out.append(_ESC.get(s[i + 1], s[i + 1])); i += 2
+        else:
+            out.append(s[i]); i += 1
+    return "".join(out)
+
 
 def _language():
     so, src = _SO, _GRAMMAR / "src" / "parser.c"
@@ -80,7 +94,7 @@ def _expr_inner(n):
     if t == "boolean":
         return Bool(_t(n) == "true")
     if t == "string":
-        return Str(_t(n)[1:-1])
+        return Str(_unescape(_t(n)[1:-1]))
     if t == "identifier":
         return Var(_t(n))
     if t == "parenthesized":
