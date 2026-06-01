@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, mkenum, mktag, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -273,3 +273,20 @@ def test_genc_emits_enum_typedefs(tmp_path):
     # the emitted enums are valid C, used together
     call = "({ Shape s = {.tag=Shape_Circle, .u.Circle=5}; Color c = {.tag=Color_Green}; s.u.Circle + c.tag; })"
     assert compile_and_run(tmp_path, generated, call) == "6"
+
+
+def test_genc_enum_construction(tmp_path):
+    # construct a tagged-union value: (Shape){ .tag=Shape_Circle, .u.Circle=n } and { .tag=Shape_Dot }
+    body = """
+    shape := edef("Shape", [vdef("Circle", ti32()), vdef("Dot", tvoid())])
+    n := vref("n")
+    mk := mkenum("Shape", "Circle", addr(n))
+    mkc := Func { name: "mkc", params: [param("n", ti32())], ret: tnamed("Shape"), body: [sret(addr(mk))] }
+    dt := mktag("Shape", "Dot")
+    mkd := Func { name: "mkd", params: [], ret: tnamed("Shape"), body: [sret(addr(dt))] }
+    emit(genModule([denum(shape), dfunc(mkc), dfunc(mkd)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "return (Shape){ .tag = Shape_Circle, .u.Circle = n };" in generated
+    assert "return (Shape){ .tag = Shape_Dot };" in generated
+    assert compile_and_run(tmp_path, generated, "(mkc(7).u.Circle + mkd().tag)") == "8"
