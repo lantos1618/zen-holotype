@@ -44,3 +44,24 @@ def test_cflags_reach_the_compiler(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert subprocess.run([str(tmp_path / "o")]).returncode == 7
+
+
+# ── target scaffold (goal #18): native now, structured for wasm ─────────────
+def test_target_defaults_to_native_and_is_read():
+    bf = lambda t: parse(
+        "{ Builder, Executable } = @builtin.build\n"
+        f"build = (b: Builder) i32 {{ b.add(Executable {{ name: \"d\", main: \"m.zen\"{t} }})  0 }}",
+        "build")
+    assert interpret_build(bf("")).get("target") == "native"            # default
+    assert interpret_build(bf(', target: "wasm"')).get("target") == "wasm"  # read through
+
+
+def test_unknown_target_is_rejected(tmp_path):
+    import pytest
+    from zen.main import cmd_build
+    (tmp_path / "build.zen").write_text(
+        "{ Builder, Executable } = @builtin.build\n"
+        'build = (b: Builder) i32 { b.add(Executable { name: "d", main: "main.zen", target: "wasm" })  0 }')
+    (tmp_path / "main.zen").write_text("main* = () i32 { 0 }")
+    with pytest.raises(SystemExit, match="not supported yet"):
+        cmd_build(str(tmp_path))

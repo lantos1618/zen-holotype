@@ -660,7 +660,7 @@ def interpret_build(bf):
     method-call receivers to find every `b.add(Component {...})`.
     """
     cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": [], "uses": [],
-           "cflags": [], "links": []}
+           "cflags": [], "links": [], "target": "native"}
     fn = next((d for d in bf.decls if isinstance(d, Fn) and d.name == "build"), None)
     if fn is None:
         raise SystemExit("build.zen: no build() function")
@@ -683,6 +683,7 @@ def interpret_build(bf):
             cfg["out_dir"] = sval(f.get("out_dir")) or cfg["out_dir"]
             cfg["cflags"] = slist(f.get("cflags")) or cfg["cflags"]   # e.g. ["-O2", "-g"]
             cfg["links"] = slist(f.get("links")) or cfg["links"]      # e.g. ["m"] -> -lm
+            cfg["target"] = sval(f.get("target")) or cfg["target"]    # "native" (default) | "wasm"
         elif arg.type == "Test":
             if (r := sval(f.get("root"))):
                 cfg["tests"].append(r)
@@ -792,10 +793,19 @@ def compile_if_changed(cpath, bpath, c_text, cc_extra=()):
     return True
 
 
+# Build targets. Only "native" (compile C with cc) is implemented; the dict is the
+# extension point — a wasm backend slots in here as `"wasm": <emitter>` once it exists.
+_TARGETS = {"native"}
+
+
 def cmd_build(root):
     bf = parse((pathlib.Path(root) / "build.zen").read_text(), "build")
     cfg = interpret_build(bf)
-    print(f"── build.zen graph ──\n   Executable {cfg['name']}  (main={cfg['main']}, out={cfg['out_dir']})")
+    if cfg["target"] not in _TARGETS:
+        raise SystemExit(f"build.zen: target {cfg['target']!r} is not supported yet "
+                         f"(have: {', '.join(sorted(_TARGETS))}; wasm is the next backend)")
+    print(f"── build.zen graph ──\n   Executable {cfg['name']}  "
+          f"(main={cfg['main']}, out={cfg['out_dir']}, target={cfg['target']})")
     if cfg["cflags"] or cfg["links"]:
         print(f"   cc flags {cfg['cflags']}  links {cfg['links']}")
     for u in cfg["uses"]:
