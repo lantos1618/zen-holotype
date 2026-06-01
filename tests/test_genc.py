@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, slet, sret, sassign, sif, swhile, param, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, draw, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, draw, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -239,3 +239,20 @@ def test_genc_emits_an_if_else_that_runs(tmp_path):
     generated = emit_via_zen(tmp_path, body)
     assert generated == "int32_t clamp(int32_t x) { if ((x < 0)) { return 0; } else { return x; } }"
     assert compile_and_run(tmp_path, generated, "clamp(7)") == "7"
+
+
+def test_genc_named_struct_param_and_field_access(tmp_path):
+    # int32_t sumxy(Point p) { return (p.x + p.y); }  over a struct passed by value.
+    body = """
+    pt := sdef("Point", [field("x", ti32()), field("y", ti32())])
+    p1 := vref("p")
+    mx := member(addr(p1), "x")
+    p2 := vref("p")
+    my := member(addr(p2), "y")
+    sum := bin("+", addr(mx), addr(my))
+    fn := Func { name: "sumxy", params: [param("p", tnamed("Point"))], ret: ti32(), body: [sret(addr(sum))] }
+    emit(genModule([dstruct(pt), dfunc(fn)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "int32_t sumxy(Point p) { return (p.x + p.y); }" in generated
+    assert compile_and_run(tmp_path, generated, "({ Point p = {3, 4}; sumxy(p); })") == "7"
