@@ -93,21 +93,22 @@ every pointer's direction and nullability down. In return you delete two entire 
 ## The whole compiler, in four ideas
 
 **1. One trie is the namespace, the import resolver, and the conflict checker.**
-A path *is* an identity, so a diamond import resolves to a single node for free —
-the only possible name conflict is two files claiming the same path.
+A file's path *is* its name. `core/vec.zen` defining `Vec` becomes the one node
+`core.vec.Vec` — so every import of it lands on that same node, and the only way
+to get a name conflict is for two files to claim the same path.
 
 ```
-root
-├─ core
-│  └─ vec
-│     └─ Vec ─────── struct { len:i32, cap:i32 }   ← the canonical node for "core.vec.Vec"
-├─ ops
-│  ├─ len ────────── fn (Ptr<Vec>) i32
-│  └─ cap ────────── fn (Ptr<Vec>) i32
-└─ main
-   ├─ area ───────── fn (Ptr<Vec>) i32
-   └─ main ───────── fn () i32
+core/vec.zen     Vec*: { len: i32, cap: i32 }      →  defines node  core.vec.Vec
+
+ops/area.zen     { Vec } = core.vec    ─┐
+main.zen         { Vec } = core.vec    ─┴─►  both resolve to that ONE node
+                                             (a diamond import — never duplicated)
+
+conflict?  ONLY if two files both define  core.vec.Vec
 ```
+
+No separate symbol table, import resolver, or conflict pass — they're the same
+lookup in one trie.
 
 **2. Pointers are types. `fits()` is the only logic outside the trie.**
 Direction (`Ptr`/`MutPtr`/`RawPtr`) and nullability (`Option<T>`, no bare null)
