@@ -62,7 +62,8 @@ def _type(n):
         return FnT(params, _type(ret))
     if n.type == "named_type":
         args = tuple(_type(c) for c in _named(n) if c.type in _TYPES)
-        return NameT(_t(_field(n, "name")), args)
+        segs = [_t(s) for s in n.children_by_field_name("seg")]   # core.vec.Vec -> dotted path
+        return NameT(".".join([_t(_field(n, "name"))] + segs), args)
     raise ValueError(f"not a type node: {n.type}")
 
 
