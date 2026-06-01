@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, slet, sret, param, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, draw, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, slet, sret, sassign, sif, swhile, param, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, draw, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -199,3 +199,43 @@ def test_genc_emits_explicit_simd_via_raw(tmp_path):
     assert "__attribute__((vector_size(16)))" in generated
     call = "({ v4i a = {1,2,3,4}, b = {10,20,30,40}; v4i c = vadd(a, b); c[3]; })"
     assert compile_and_run(tmp_path, generated, call) == "44"
+
+
+def test_genc_emits_a_while_loop_that_runs(tmp_path):
+    # an iterative sum: while + assign. sum_to(5) == 15.
+    body = """
+    zero := lit(0)
+    one := lit(1)
+    i1 := vref("i")
+    n1 := vref("n")
+    c := bin("<=", addr(i1), addr(n1))
+    acc1 := vref("acc")
+    i2 := vref("i")
+    accpi := bin("+", addr(acc1), addr(i2))
+    i3 := vref("i")
+    one2 := lit(1)
+    ip1 := bin("+", addr(i3), addr(one2))
+    loopbody := [sassign("acc", addr(accpi)), sassign("i", addr(ip1))]
+    accret := vref("acc")
+    stmts := [slet("acc", addr(zero)), slet("i", addr(one)), swhile(addr(c), loopbody), sret(addr(accret))]
+    emit(genC(Func { name: "sum_to", params: [param("n", ti32())], ret: ti32(), body: stmts }))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "while ((i <= n)) {" in generated
+    assert compile_and_run(tmp_path, generated, "sum_to(5)") == "15"
+
+
+def test_genc_emits_an_if_else_that_runs(tmp_path):
+    # int32_t clamp(int32_t x) { if ((x < 0)) { return 0; } else { return x; } } -> clamp(7)==7
+    body = """
+    zero := lit(0)
+    x1 := vref("x")
+    neg := bin("<", addr(x1), addr(zero))
+    z2 := lit(0)
+    x2 := vref("x")
+    e := sif(addr(neg), [sret(addr(z2))], [sret(addr(x2))])
+    emit(genC(Func { name: "clamp", params: [param("x", ti32())], ret: ti32(), body: [e] }))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert generated == "int32_t clamp(int32_t x) { if ((x < 0)) { return 0; } else { return x; } }"
+    assert compile_and_run(tmp_path, generated, "clamp(7)") == "7"

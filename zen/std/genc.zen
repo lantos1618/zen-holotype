@@ -24,7 +24,10 @@ Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
-Stmt*: Let(LetData) | Return(Ptr<Expr>)
+AssignData*: { name: str, value: Ptr<Expr> }              // name = expr;
+IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } else { els }
+WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
+Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData)
 // types + typed parameters
 Ty*: I32 | I64 | U8 | Bool                                 // a C scalar type
 Param*: { name: str, ty: Ty }
@@ -44,6 +47,9 @@ call* = (fn: str, a: Ptr<Expr>) Expr { .Call(CallData { fn: fn, arg: a }) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData { c: c, t: t, e: e }) }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
+sassign* = (nm: str, v: Ptr<Expr>) Stmt { .Assign(AssignData { name: nm, value: v }) }
+sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt { .If(IfData { c: c, then: t, els: e }) }
+swhile* = (c: Ptr<Expr>, b: [Stmt]) Stmt { .While(WhileData { c: c, body: b }) }
 ti32* = () Ty { .I32() }
 ti64* = () Ty { .I64() }
 tu8* = () Ty { .U8() }
@@ -89,12 +95,26 @@ gen_cond = (s: String, d: CondData) String {
     s.append("(").gen_expr(d.c).append(" ? ").gen_expr(d.t).append(" : ").gen_expr(d.e).append(")")
 }
 
-// ── emit a statement, a parameter list, a function, a struct, a decl ────────
+// ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
 gen_stmt = (s: String, st: Stmt) String {
     st.match {
         .Let(l)    => s.append("int32_t ").append(l.name).append(" = ").gen_expr(l.value).append(";"),
-        .Return(e) => s.append("return ").gen_expr(e).append(";")
+        .Assign(a) => s.append(a.name).append(" = ").gen_expr(a.value).append(";"),
+        .Return(e) => s.append("return ").gen_expr(e).append(";"),
+        .If(f)     => s.gen_if(f),
+        .While(w)  => s.append("while (").gen_expr(w.c).append(") ").gen_block(w.body)
     }
+}
+
+// emit a brace-wrapped block: `{ s1; s2; … }`
+gen_block = (s: String, body: [Stmt]) String {
+    open := s.append("{ ")
+    body.loop((h, i, st) { open = open.gen_stmt(st).append(" ") })
+    open.append("}")
+}
+
+gen_if = (s: String, f: IfData) String {
+    s.append("if (").gen_expr(f.c).append(") ").gen_block(f.then).append(" else ").gen_block(f.els)
 }
 
 gen_params = (s: String, ps: [Param]) String {
@@ -108,9 +128,7 @@ gen_params = (s: String, ps: [Param]) String {
 
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 gen_func* = (s: String, f: Func) String {
-    open := s.append(cty(f.ret)).append(" ").append(f.name).append("(").gen_params(f.params).append(") { ")
-    f.body.loop((h, i, st) { open = open.gen_stmt(st).append(" ") })   // accumulate each statement
-    open.append("}")
+    s.append(cty(f.ret)).append(" ").append(f.name).append("(").gen_params(f.params).append(") ").gen_block(f.body)
 }
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
