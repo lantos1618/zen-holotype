@@ -51,6 +51,12 @@ where it's headed, [VISION](VISION.md).)
   (`malloc = (n: i64) RawPtr<u8>`); no `extern` keyword. libc by bare name, headers auto-included.
 - **Build flags from `build.zen`** — `Executable { …, cflags: ["-O2", "-g"], links: ["m"] }`
   threads through to `cc` (`-O2 -g … -lm`), for the exe and its tests.
+- **Incremental builds** — the C is byte-deterministic, so `zen build` skips `cc` when the
+  source it would emit is unchanged (the cc command is stamped in the `.c`, so flag changes
+  bust the cache).
+- **Dead-code elimination** — an executable emits only the functions reachable from its entry
+  (generic instances and trait impls were already pruned; this extends it to plain functions).
+  A `check`/library build still emits everything that type-checks.
 - **Binding modules via the build object** — `c = b.use("libc")` in `build.zen` installs a
   bundled Zen binding module (bodyless fns) under the namespace `c`; code then `{ malloc, free } = c`.
   A foreign binding is just a Zen module of decls — the kernel only loads-a-module-as-a-namespace,
