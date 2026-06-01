@@ -289,7 +289,7 @@ def _bind_subj(ty, t, subj, chain, expr) -> str:
     doesn't trip -Werror=unused-variable. The temp is referenced as `t.` (enum tag /
     payload) or `t ==` (literal), and a temp name is never a prefix of another at such a
     boundary, so the substring test is collision-safe across nested matches."""
-    used = (f"{t}." in chain) or (f"{t} ==" in chain)
+    used = (f"{t}." in chain) or (f"{t}->" in chain) or (f"{t} ==" in chain)
     guard = "" if used else f"(void){t}; "
     return f"({{ {ty} {t} = {subj}; {guard}{chain}; }})" if expr \
         else f"{{ {ty} {t} = {subj}; {guard}{chain} }}"
@@ -306,8 +306,11 @@ def c_match(e, locals_, namespace, scope, expect) -> str:
     subj = c_expr(e.subject, locals_, namespace, scope)
     st = infer(e.subject, locals_, namespace, scope)
     t = f"_subj{_uid(e)}"                                # unique per match node (nesting-safe)
+    ptr = isinstance(st, PtrT) and isinstance(st.pointee, NameT)   # match auto-derefs Ptr<Enum>
+    mt = st.pointee if ptr else st                      # the matched type; `sep` reaches members
+    sep = "->" if ptr else "."
 
-    if isinstance(st, PrimT):                           # literal match: t == lit ? … : …
+    if isinstance(mt, PrimT):                           # literal match: t == lit ? … : …
         body = lambda arm: f"({c_expr(arm.body, locals_, namespace, scope, expect)})"
         default = next((a for a in e.arms if a.lit is None), None) or e.arms[-1]
         chain = body(default)
@@ -316,23 +319,23 @@ def c_match(e, locals_, namespace, scope, expect) -> str:
             chain = f"({t} == {litc} ? {body(arm)} : {chain})"
         return _bind_subj(c_type(st), t, subj, chain, expr=True)
 
-    decl = namespace.walk(st.path).value
-    sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
-    cn = c_type(st)                                     # mangled instance name if a generic enum
+    decl = namespace.walk(mt.path).value
+    sub = dict(zip(decl.tparams, mt.args)) if decl.tparams else {}
+    cn = c_type(mt)                                     # mangled instance name if a generic enum
     variants = {v.name: v for v in decl.variants}
 
     def clause(arm):
         if arm.variant is not None and arm.binding is not None:
             pt = c_type(subst(variants[arm.variant].payload, sub))
             al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
-            return (f"({{ {pt} {arm.binding} = {t}.u.{arm.variant}; "
+            return (f"({{ {pt} {arm.binding} = {t}{sep}u.{arm.variant}; "
                     f"{c_expr(arm.body, al, namespace, scope, expect)}; }})")
         return f"({c_expr(arm.body, locals_, namespace, scope, expect)})"
 
     default = next((a for a in e.arms if a.variant is None), None) or e.arms[-1]
     chain = clause(default)
     for arm in reversed([a for a in e.arms if a is not default]):
-        chain = f"({t}.tag == {cn}_{arm.variant} ? {clause(arm)} : {chain})"
+        chain = f"({t}{sep}tag == {cn}_{arm.variant} ? {clause(arm)} : {chain})"
     return _bind_subj(c_type(st), t, subj, chain, expr=True)
 
 
@@ -343,10 +346,13 @@ def c_match_stmt(e, locals_, namespace, scope) -> str:
     subj = c_expr(e.subject, locals_, namespace, scope)
     st = infer(e.subject, locals_, namespace, scope)
     t = f"_subj{_uid(e)}"
+    ptr = isinstance(st, PtrT) and isinstance(st.pointee, NameT)   # match auto-derefs Ptr<Enum>
+    mt = st.pointee if ptr else st
+    sep = "->" if ptr else "."
     arm_stmt = lambda a, al: (c_match_stmt(a.body, al, namespace, scope) if isinstance(a.body, Match)
                               else f"{c_expr(a.body, al, namespace, scope)};")
 
-    if isinstance(st, PrimT):                            # literal match
+    if isinstance(mt, PrimT):                            # literal match
         default = next((a for a in e.arms if a.lit is None), None)
         clauses = [f"if ({t} == {c_expr(a.lit, locals_, namespace, scope)}) {{ {arm_stmt(a, locals_)} }}"
                    for a in e.arms if a is not default]
@@ -356,9 +362,9 @@ def c_match_stmt(e, locals_, namespace, scope) -> str:
                       else f"{{ {arm_stmt(default, locals_)} }}")
         return _bind_subj(c_type(st), t, subj, chain, expr=False)
 
-    decl = namespace.walk(st.path).value
-    sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
-    cn = c_type(st)
+    decl = namespace.walk(mt.path).value
+    sub = dict(zip(decl.tparams, mt.args)) if decl.tparams else {}
+    cn = c_type(mt)
     variants = {v.name: v for v in decl.variants}
     default = next((a for a in e.arms if a.variant is None), None)
     clauses = []
@@ -369,8 +375,8 @@ def c_match_stmt(e, locals_, namespace, scope) -> str:
         if a.binding is not None:
             pt = c_type(subst(variants[a.variant].payload, sub))
             al = {**locals_, a.binding: subst(variants[a.variant].payload, sub)}
-            bind = f"{pt} {a.binding} = {t}.u.{a.variant}; "
-        clauses.append(f"if ({t}.tag == {cn}_{a.variant}) {{ {bind}{arm_stmt(a, al)} }}")
+            bind = f"{pt} {a.binding} = {t}{sep}u.{a.variant}; "
+        clauses.append(f"if ({t}{sep}tag == {cn}_{a.variant}) {{ {bind}{arm_stmt(a, al)} }}")
     chain = " else ".join(clauses)
     if default is not None:
         chain += (f" else {{ {arm_stmt(default, locals_)} }}" if clauses

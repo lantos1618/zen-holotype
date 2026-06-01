@@ -304,6 +304,38 @@ def test_generic_struct_with_slice_field_infers_from_literal(tmp_path):
     assert subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout.strip() == "23"
 
 
+# ── match auto-derefs a Ptr<Enum>, so recursive heap structures walk cleanly ──
+def test_match_auto_derefs_pointer_to_enum(tmp_path):
+    # A binary tree built on the heap (stack-addressed here): `sum` recurses through
+    # Ptr<Tree>, and `t.match { … }` derefs the pointer like field access does, so
+    # `n.l` / `n.r` (themselves Ptr<Tree>) recurse. Sum = 3 + (4 + 5) = 12.
+    (tmp_path / "main.zen").write_text("""
+NodeData*: { l: Ptr<Tree>, r: Ptr<Tree> }
+Tree*: Leaf(i32), Node(NodeData)
+leaf = (v: i32) Tree { .Leaf(v) }
+node = (l: Ptr<Tree>, r: Ptr<Tree>) Tree { .Node(NodeData { l: l, r: r }) }
+sum* = (t: Ptr<Tree>) i32 { t.match { .Leaf(v) => v, .Node(n) => sum(n.l) + sum(n.r) } }
+main* = () i32 {
+    a := leaf(3)\n    b := leaf(4)\n    c := leaf(5)
+    bc := node(addr(b), addr(c))
+    rt := node(addr(a), addr(bc))
+    sum(addr(rt))
+}
+""")
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace)
+    assert "->tag" in c                                # the match reaches the tag through the pointer
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 12
+
+
 # ── A match subject with side effects is evaluated exactly once ─────────────
 def test_match_subject_evaluated_once(tmp_path):
     (tmp_path / "main.zen").write_text(

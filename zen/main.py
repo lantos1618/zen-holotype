@@ -413,6 +413,8 @@ def _scan_expr(e, locals_, namespace, scope, sink, expect=None, cenv=None):
     elif isinstance(e, Match):
         _scan_expr(e.subject, locals_, namespace, scope, sink, None, cenv)
         st = infer(e.subject, locals_, namespace, scope)
+        if isinstance(st, PtrT) and isinstance(st.pointee, NameT):   # match auto-derefs Ptr<Enum>
+            st = st.pointee
         if isinstance(st, PrimT):                         # literal match: arms bind nothing
             for arm in e.arms:
                 _scan_expr(arm.body, locals_, namespace, scope, sink, expect, cenv)
