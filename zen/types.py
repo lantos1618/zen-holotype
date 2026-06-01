@@ -544,6 +544,8 @@ def infer_match(e, expect, locals_, namespace, scope):
     """A match types each arm against the expected result, binds a variant's
     payload inside its arm (narrowing), and demands exhaustive coverage."""
     st = infer(e.subject, locals_, namespace, scope)
+    if isinstance(st, PtrT) and isinstance(st.pointee, NameT):   # match auto-derefs a Ptr<Enum>
+        st = st.pointee                                          # (like field access does)
     if isinstance(st, PrimT):
         return _infer_match_lit(e, st, expect, locals_, namespace, scope)
     try:
