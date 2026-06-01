@@ -15,12 +15,20 @@
 VarData*: { name: str }
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
 Expr*: Int(i32), Var(VarData), Bin(BinData)
-Func*: { name: str, param: str, body: Ptr<Expr> }       // int32_t name(int32_t param){ return body; }
 
-// constructors — return an Expr by value; the caller addr()s it to make a child
+// statements: `int32_t name = expr;`  and  `return expr;`
+LetData*: { name: str, value: Ptr<Expr> }
+Stmt*: Let(LetData), Return(Ptr<Expr>)
+// a function is a name, an i32 param, and a sequence of statements
+Func*: { name: str, param: str, body: [Stmt] }          // int32_t name(int32_t param) { body }
+
+// constructors — return a value; the caller addr()s an Expr to make a child, and
+// builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
 lit* = (n: i32) Expr { .Int(n) }
 vref* = (nm: str) Expr { .Var(VarData { name: nm }) }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: l, rhs: r }) }
+slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
+sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 
 // ── int -> decimal digits (no cast: digit bytes come from a str view) ────────
 digit = (d: i32) u8 { view("0123456789")[d] }
@@ -48,12 +56,20 @@ gen_bin = (s: String, b: BinData) String {
     append(right, ")")
 }
 
-// genC: an AST in, C source out — at runtime.
+// emit one statement, terminated by `;`
+gen_stmt = (s: String, st: Stmt) String {
+    st.match {
+        .Let(l)    => append(gen_expr(append(append(append(s, "int32_t "), l.name), " = "), l.value), ";"),
+        .Return(e) => append(gen_expr(append(s, "return "), e), ";")
+    }
+}
+
+// genC: an AST in, C source out — at runtime. Emits a whole function body.
 genC* = (f: Func) String {
     s := append(new(), "int32_t ")
     s = append(s, f.name)
     s = append(append(s, "(int32_t "), f.param)
-    s = append(s, ") { return ")
-    s = gen_expr(s, f.body)
-    append(s, "; }")
+    s = append(s, ") { ")
+    f.body.loop((h, i, st) { s = append(gen_stmt(s, st), " ") })   // accumulate each statement
+    append(s, "}")
 }
