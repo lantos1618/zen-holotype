@@ -6,6 +6,10 @@ All notable changes to **zen**. The format loosely follows
 
 ## Unreleased
 
+- **Enum variants are `|`-separated** (was `,`): `Opt*<T>: None | Some(T)`. A sum type is
+  a *choice*, so `|` ("or") — visually distinct from the `{a, b}` *record* (comma = "and").
+  The old comma form no longer parses.
+
 Toward **self-hosting** — the compiler's backend, written in zen, run at runtime:
 
 - **`std.string`** — a growable, owned heap `String` assembled at runtime (the
