@@ -66,3 +66,35 @@ def test_unused_std_emits_nothing(tmp_path):
     files, space, passing = build(tmp_path, "main* = () i32 { 0 }")
     c = emit_c(files, passing, space)
     assert "std_iter" not in c and "fold" not in c
+
+
+# ── std.mem — the library's allocator over libc ────────────────────────────
+def test_mem_round_trips_the_heap(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ alloc, release } = std.mem
+main* = () i32 {
+    p := alloc(8)
+    store(p, 42)
+    x := load(p)
+    release(p)
+    x
+}
+""")
+    assert "main.main" in passing
+    assert run(tmp_path, emit_c(files, passing, space)) == 42
+
+
+def test_mem_zeroed_and_copy(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ zeroed, copy, release } = std.mem
+main* = () i32 {
+    src := zeroed(4)
+    store(src, 7)
+    dst := zeroed(4)
+    copy(dst, src, 4)
+    r := load(dst)
+    release(src)  release(dst)
+    r
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 7
