@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, lit, vref, bin, call, cond, slet, sret, param, ti32, ti64, tu8, tbool, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, slet, sret, param, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -129,12 +129,29 @@ def test_genc_module_of_two_functions_compiles_and_runs(tmp_path):
     xp1 := bin("+", addr(x), addr(one))
     dc := call("dbl", addr(xp1))
     calc := Func { name: "calc", params: [param("x", ti32())], ret: ti32(), body: [sret(addr(dc))] }
-    emit(genModule([dbl, calc]))
+    emit(genModule([dfunc(dbl), dfunc(calc)]))
     0"""
     generated = emit_via_zen(tmp_path, body)
     assert "int32_t dbl(int32_t n) { return (n + n); }" in generated
     assert "int32_t calc(int32_t x) { return dbl((x + 1)); }" in generated
     assert compile_and_run(tmp_path, generated, "calc(4)") == "10"
+
+
+def test_genc_module_with_a_struct_and_a_function(tmp_path):
+    # a real translation unit: a struct typedef + a function, both valid C.
+    body = """
+    pt := sdef("Point", [field("x", ti32()), field("y", ti32())])
+    a := vref("a")
+    b := vref("b")
+    sum := bin("+", addr(a), addr(b))
+    add := Func { name: "add", params: [param("a", ti32()), param("b", ti32())], ret: ti32(), body: [sret(addr(sum))] }
+    emit(genModule([dstruct(pt), dfunc(add)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "typedef struct { int32_t x; int32_t y; } Point;" in generated
+    assert "int32_t add(int32_t a, int32_t b) { return (a + b); }" in generated
+    # the emitted struct + function are valid C used together
+    assert compile_and_run(tmp_path, generated, "({ Point p = {3, 4}; add(p.x, p.y); })") == "7"
 
 
 def test_genc_multi_statement_body_compiles_and_runs(tmp_path):

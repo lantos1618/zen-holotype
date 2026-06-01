@@ -26,6 +26,10 @@ Ty*: I32, I64, U8, Bool                                 // a C scalar type
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
+// a struct declaration, and a top-level Decl (a translation unit is a list of these)
+Field*: { name: str, ty: Ty }
+StructDecl*: { name: str, fields: [Field] }             // typedef struct { fields } name;
+Decl*: DFunc(Func), DStruct(StructDecl)
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -41,6 +45,10 @@ ti64* = () Ty { .I64() }
 tu8* = () Ty { .U8() }
 tbool* = () Ty { .Bool() }
 param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
+field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
+sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
+dfunc* = (f: Func) Decl { .DFunc(f) }
+dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 
 // ── int -> decimal digits (no cast: digit bytes come from a str view) ────────
 digit = (d: i32) u8 { view("0123456789")[d] }
@@ -108,12 +116,29 @@ gen_func* = (s: String, f: Func) String {
     append(open, "}")
 }
 
+// emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
+gen_struct* = (s: String, sd: StructDecl) String {
+    open := append(s, "typedef struct { ")
+    sd.fields.loop((h, i, fld) {
+        open = append(append(append(append(open, cty(fld.ty)), " "), fld.name), "; ")
+    })
+    append(append(append(open, "} "), sd.name), ";")
+}
+
+// emit a top-level declaration (a function or a struct)
+gen_decl* = (s: String, d: Decl) String {
+    d.match {
+        .DFunc(f) => gen_func(s, f),
+        .DStruct(sd) => gen_struct(s, sd)
+    }
+}
+
 // genC: an AST in, C source out — at runtime.
 genC* = (f: Func) String { gen_func(new(), f) }
 
-// genModule: a whole translation unit — several functions, space-separated.
-genModule* = (fns: [Func]) String {
+// genModule: a whole translation unit — a list of decls (structs + functions).
+genModule* = (decls: [Decl]) String {
     s := new()
-    fns.loop((h, i, f) { s = append(gen_func(s, f), " ") })
+    decls.loop((h, i, d) { s = append(gen_decl(s, d), " ") })
     s
 }
