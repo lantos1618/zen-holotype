@@ -13,7 +13,7 @@ import pytest
 import re
 from dataclasses import dataclass
 
-from zen.main import (load, build_space, build_scopes, resolve, check,
+from zen.main import (load, build_namespace, build_scopes, resolve, check,
                            emit_c, run_test_root)
 from conftest import EXAMPLES
 
@@ -21,11 +21,11 @@ from conftest import EXAMPLES
 @pytest.fixture
 def checked():
     files = load(EXAMPLES, skip={"test.zen"})    # library modules only (as the exe build does)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    results, passing = check(files, space)
-    return files, space, results, passing
+    resolve(files, namespace)
+    results, passing = check(files, namespace)
+    return files, namespace, results, passing
 
 
 # ── T9: the checker verdict on the example tree ─────────────────────────────
@@ -62,8 +62,8 @@ def test_type_errors_carry_a_source_location(checked):
 
 # ── T10: codegen golden properties ──────────────────────────────────────────
 def test_codegen_is_const_correct(checked):
-    files, space, _, passing = checked
-    c = emit_c(files, passing, space)
+    files, namespace, _, passing = checked
+    c = emit_c(files, passing, namespace)
     # Ptr<Vec> -> const *, MutPtr<Vec> -> plain *
     assert "ops_len(core_vec_Vec const * v)" in c
     assert "ops_bump(core_vec_Vec * v)" in c
@@ -71,8 +71,8 @@ def test_codegen_is_const_correct(checked):
 
 
 def test_codegen_excludes_failing_functions(checked):
-    files, space, _, passing = checked
-    c = emit_c(files, passing, space)
+    files, namespace, _, passing = checked
+    c = emit_c(files, passing, namespace)
     assert "main_area" in c and "main_main" in c
     assert "main_bad" not in c and "main_dirbad" not in c
 
@@ -84,13 +84,13 @@ class _UnknownDecl:           # a decl kind codegen has never heard of
 
 
 def test_unlowerable_decl_raises(checked):
-    files, space, _, passing = checked
+    files, namespace, _, passing = checked
     # codegen lowers struct/enum/fn; anything else must refuse loudly, not vanish
     # (skip the bundled prelude — it's comptime-only and never lowered)
     some_file = next(f for ns, f in files.items() if not ns.startswith("prelude"))
     some_file.decls.append(_UnknownDecl("mystery"))
     with pytest.raises(NotImplementedError) as ei:
-        emit_c(files, passing, space)
+        emit_c(files, passing, namespace)
     assert "_UnknownDecl" in str(ei.value) and "mystery" in str(ei.value)
 
 
@@ -101,11 +101,11 @@ def test_enum_lowers_to_tagged_union(tmp_path):
         "idle* = () Status { .Idle() }\n"
         "busy* = (n: i32) Status { .Busy(n) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "int32_t tag;" in c and "union { int32_t Busy; } u;" in c
     assert "enum { main_Status_Idle, main_Status_Busy };" in c
     assert ".tag = main_Status_Busy, .u.Busy = n" in c
@@ -126,11 +126,11 @@ def test_generic_fn_monomorphizes(tmp_path):
         "area* = (v: Ptr<Vec>) i32 { id(v).len * id(v).cap }\n"
         "main* = () i32 { area(addr(Vec { len: 5, cap: 4 })) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     # one specialized instance named for its type-arg; the template itself is gone
     assert "main_Vec const * main_id_main_Vec(main_Vec const * x)" in c
     assert "main_id_main_Vec(v)" in c
@@ -149,11 +149,11 @@ def test_match_lowers_and_runs(tmp_path):
         "code* = (s: Status) i32 { s.match { .Idle => 0, .Busy(n) => n } }\n"
         "main* = () i32 { code(.Busy(7)) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert ".tag == main_Status_Idle" in c             # tag test (subject bound to a temp)
     assert "int32_t n = " in c and ".u.Busy" in c      # payload binding
     harness = ("\n#include <stdio.h>\nint main(void){ "
@@ -177,12 +177,12 @@ def test_used_illtyped_impl_refused(tmp_path):
         "total*<T: Score> = (x: Ptr<T>) i32 { score(x) }\n"
         "main* = () i32 { total(addr(Box { val: 9 })) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
     with pytest.raises(NotImplementedError) as ei:
-        emit_c(files, passing, space)
+        emit_c(files, passing, namespace)
     assert "did not type-check" in str(ei.value) and "score" in str(ei.value)
 
 
@@ -194,11 +194,11 @@ def test_unused_illtyped_impl_still_builds(tmp_path):
         "Box.impl(Score) { score = (b: Ptr<Box>) i32 { b.val } }\n"
         "main* = () i32 { 42 }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    assert "main_main(void) { return 42; }" in emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main_main(void) { return 42; }" in emit_c(files, passing, namespace)
 
 
 # ── Traits: a bounded generic dispatches to the impl, compiles, and runs ────
@@ -210,11 +210,11 @@ def test_trait_dispatch_runs(tmp_path):
         "total*<T: Area> = (x: Ptr<T>) i32 { area(x) }\n"
         "main* = () i32 { total(addr(Vec { len: 5, cap: 4 })) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     # the bounded generic and the impl both monomorphize, and total calls the impl
     assert "main_total_main_Vec" in c
     assert "impl_main_Area_main_Vec_area" in c
@@ -237,11 +237,11 @@ def test_recursion_computes(tmp_path):
         "fib* = (n: i32) i32 { n.match { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
         "main* = () i32 { fact(5) + fib(10) }\n")   # 120 + 55 = 175
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "== 0 ?" in c                                # literal-pattern branch
     assert "main_fact((n - 1))" in c                    # the recursive call
     assert c.count("main_fact((n - 1))") == 1           # subject/arms evaluated once
@@ -263,11 +263,11 @@ def test_generic_struct_monomorphizes(tmp_path):
         "unwrap*<T> = (b: Ptr<Box<T>>) T { b.val }\n"
         "main* = () i32 { unwrap(addr(Box { val: 42 })) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "typedef struct { int32_t val; } main_Box_i32;" in c   # the instance struct
     assert "_T " not in c                                          # template not emitted raw
     harness = ("\n#include <stdio.h>\nint main(void){ "
@@ -288,11 +288,11 @@ def test_match_subject_evaluated_once(tmp_path):
         "kind* = (v: Ptr<Vec>) i32 { v.len }\n"
         "pick* = (v: Ptr<Vec>) i32 { (kind(v)).match { 0 => 10, 1 => 20, _ => 30 } }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    pick = [ln for ln in emit_c(files, passing, space).splitlines()
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    pick = [ln for ln in emit_c(files, passing, namespace).splitlines()
             if "main_pick" in ln and "return" in ln][0]
     assert pick.count("main_kind") == 1, pick      # not re-evaluated per arm
 
@@ -320,11 +320,11 @@ def test_generic_enum_monomorphizes(tmp_path):
         "get* = (o: Opt<i32>) i32 { o.match { .None => 0, .Some(v) => v } }\n"
         "main* = () i32 { get(some_i(42)) }\n")
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "union { int32_t Some; } u; } main_Opt_i32;" in c          # the instance struct
     assert "main_Opt_i32){ .tag = main_Opt_i32_Some" in c             # ctor uses the instance name
     harness = ("\n#include <stdio.h>\nint main(void){ "
@@ -351,11 +351,11 @@ main* = () i32 {
 }
 """)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     # intermediate side effects are emitted (not collapsed to the last expr)
     assert c.count("putchar(") == 4
     assert "extern" not in c.split("int32_t main_main")[0] or "#include <stdlib.h>" in c
@@ -386,11 +386,11 @@ main* = () i32 {
 }
 """)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "((buf) + (0))" in c and "= 72)" in c        # store(offset(..)) erases to *(p+i)=v
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
@@ -434,11 +434,11 @@ main* = () i32 {
 }
 """)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "typedef struct { uint8_t * ptr; int64_t len; } main_String;" in c   # heap string
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
@@ -475,11 +475,11 @@ main* = () i32 {
 }
 """)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     assert "->len = (" in c and "for (" in c                # field mutation + a loop (folds to for)
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
@@ -498,11 +498,11 @@ main* = () i32 {
 }
 """)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
     subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)

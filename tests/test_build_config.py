@@ -2,7 +2,7 @@
 them into the cc invocation (goals #16, #17)."""
 import subprocess
 
-from zen.main import (parse, interpret_build, load, load_uses, build_space,
+from zen.main import (parse, interpret_build, load, load_uses, build_namespace,
                       build_scopes, resolve, fold_comptime, run_emits, check, emit_c)
 
 
@@ -32,11 +32,11 @@ def test_cflags_reach_the_compiler(tmp_path):
     # a program built with the configured cflags (-O2) still compiles and runs
     (tmp_path / "main.zen").write_text("main* = () i32 { 7 }")
     files = load(tmp_path)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space)
-    fold_comptime(files, space); run_emits(files, space)
-    _, passing = check(files, space)
-    c = emit_c(files, passing, space)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
     cpath = tmp_path / "o.c"
     cpath.write_text(c + "\nint main(void){ return main_main(); }\n")
     cc_extra = ["-O2", "-g", "-lm"]              # what cmd_build would pass

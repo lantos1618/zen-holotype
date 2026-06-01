@@ -211,18 +211,18 @@ def scope_with_bounds(scope, bounds):
     return {**(scope or {}), _TBOUNDS: dict(bounds or {})}
 
 
-def infer(e, locals_, space, scope, expect=None):
+def infer(e, locals_, namespace, scope, expect=None):
     """Type `e`, tagging any TypeErr with the innermost offending expr's position
     (the deepest frame catches first, so the most specific location wins)."""
     try:
-        return _infer(e, locals_, space, scope, expect)
+        return _infer(e, locals_, namespace, scope, expect)
     except TypeErr as ex:
         if ex.pos is None:
             ex.pos = getattr(e, "pos", None)
         raise
 
 
-def _infer(e, locals_, space, scope, expect=None):
+def _infer(e, locals_, namespace, scope, expect=None):
     """Return the type of expression `e`; raise TypeErr on any call mismatch.
 
     `expect` is the type the surrounding context wants (return slot, parameter,
@@ -238,20 +238,20 @@ def _infer(e, locals_, space, scope, expect=None):
         case Str():                                      # a string literal "…" is a `str`
             return PrimT(Prim.STR)
         case EnumCtor():
-            return infer_enum_ctor(e, expect, locals_, space, scope)
+            return infer_enum_ctor(e, expect, locals_, namespace, scope)
         case Match():
-            return infer_match(e, expect, locals_, space, scope)
+            return infer_match(e, expect, locals_, namespace, scope)
         case Var(name):
             if name not in locals_:
                 raise TypeErr(f"unbound '{name}'")
             return locals_[name]
         case Not(operand):
-            if infer(operand, locals_, space, scope) != PrimT(Prim.BOOL):
+            if infer(operand, locals_, namespace, scope) != PrimT(Prim.BOOL):
                 raise TypeErr("'!' needs a bool operand")
             return PrimT(Prim.BOOL)
         case Bin(op, l, r):
-            lt = infer(l, locals_, space, scope)
-            rt = infer(r, locals_, space, scope)
+            lt = infer(l, locals_, namespace, scope)
+            rt = infer(r, locals_, namespace, scope)
             if op in ("&&", "||"):                       # logical: bool, bool -> bool
                 if lt != PrimT(Prim.BOOL) or rt != PrimT(Prim.BOOL):
                     raise TypeErr(f"'{op}' needs bool operands")
@@ -268,7 +268,7 @@ def _infer(e, locals_, space, scope, expect=None):
                 raise TypeErr(f"'{op}' needs numeric operands")
             return PrimT(Prim.I64 if Prim.I64 in (lt.prim, rt.prim) else Prim.I32)  # widen
         case Field(obj, name):
-            ot = infer(obj, locals_, space, scope)
+            ot = infer(obj, locals_, namespace, scope)
             st = ot.pointee if isinstance(ot, PtrT) else ot     # auto-deref through a pointer
             if isinstance(st, SliceT):                          # a slice exposes .ptr and .len
                 if name == "len":
@@ -278,7 +278,7 @@ def _infer(e, locals_, space, scope, expect=None):
                 raise TypeErr(f"a slice has no field '{name}' (only .ptr / .len)")
             if not isinstance(st, NameT):
                 raise TypeErr("field access on a non-struct value")
-            decl = space.walk(st.path).value
+            decl = namespace.walk(st.path).value
             if not isinstance(decl, Struct):                    # an enum payload is reachable
                 short = st.path.rsplit(".", 1)[-1]              # ONLY through match, never `.field`
                 raise TypeErr(f"cannot read fields of enum {short} — use match")
@@ -288,15 +288,15 @@ def _infer(e, locals_, space, scope, expect=None):
                     return subst(f.type, dict(zip(decl.tparams, st.args))) if decl.tparams else f.type
             raise TypeErr(f"no field '{name}' on {st.path}")
         case StructLit():
-            return _infer_struct_lit(e, locals_, space, scope)
+            return _infer_struct_lit(e, locals_, namespace, scope)
         case SliceLit(elems):                                  # [a, b, c] : [T]
             et = expect.elem if isinstance(expect, SliceT) else None
             if et is None:
                 if not elems:
                     raise TypeErr("cannot infer the type of an empty slice literal")
-                et = infer(elems[0], locals_, space, scope)
+                et = infer(elems[0], locals_, namespace, scope)
             for x in elems:                                    # every element must fit the elem type
-                xt = infer(x, locals_, space, scope, et)
+                xt = infer(x, locals_, namespace, scope, et)
                 if fits(xt, et):
                     continue
                 if et is not None and fits(et, xt):            # widen toward the larger int
@@ -305,12 +305,12 @@ def _infer(e, locals_, space, scope, expect=None):
                     raise TypeErr("slice element", xt, et)
             return SliceT(et)
         case Index(seq, idx):                                  # xs[i] : T
-            st = infer(seq, locals_, space, scope)
-            if not _numeric(infer(idx, locals_, space, scope)):
+            st = infer(seq, locals_, namespace, scope)
+            if not _numeric(infer(idx, locals_, namespace, scope)):
                 raise TypeErr("a slice index must be numeric")
             if isinstance(st, SliceT):
                 return st.elem
-            at = struct_at(st, space)                          # []-overloading: a struct's `at`
+            at = struct_at(st, namespace)                          # []-overloading: a struct's `at`
             if at is not None:
                 return at[2].ret                               # the `at` method's return type
             raise TypeErr("indexing a non-slice value")
@@ -320,13 +320,13 @@ def _infer(e, locals_, space, scope, expect=None):
             if len(params) != len(expect.params):
                 raise TypeErr(f"closure has {len(params)} param(s), expected {len(expect.params)}")
             cl = {**locals_, **dict(zip(params, expect.params))}   # captures + the bound params
-            rt = infer_block(body, cl, space, scope, expect.ret)
+            rt = infer_block(body, cl, namespace, scope, expect.ret)
             void = isinstance(expect.ret, PrimT) and expect.ret.prim is Prim.VOID
             if expect.ret is not None and not void and not fits(rt, expect.ret):
                 raise TypeErr("closure result", rt, expect.ret)
             return FnT(tuple(expect.params), expect.ret)
         case Call():
-            return _infer_call(e, expect, locals_, space, scope)
+            return _infer_call(e, expect, locals_, namespace, scope)
         case MethodCall(recv, method, args):                    # the loop handle: h.break()/h.continue()
             if method in ("break", "continue"):
                 if args:
@@ -337,30 +337,30 @@ def _infer(e, locals_, space, scope, expect=None):
             raise TypeErr(f"unknown expr {e!r}")
 
 
-def _infer_mem(e, locals_, space, scope):
+def _infer_mem(e, locals_, namespace, scope):
     """load(p)->T · store(p, v: T)->void · offset(p, i64)->same ptr. T comes from p."""
-    pt = infer(e.args[0], locals_, space, scope)
+    pt = infer(e.args[0], locals_, namespace, scope)
     if not isinstance(pt, PtrT):
         raise TypeErr(f"'{e.callee}' needs a pointer as its first argument")
     if e.callee == "load":
         return pt.pointee
     if e.callee == "offset":
-        idx = infer(e.args[1], locals_, space, scope)
+        idx = infer(e.args[1], locals_, namespace, scope)
         if not _numeric(idx):
             raise TypeErr("offset index must be numeric")
         return pt                                        # offset stays the same pointer type
     # store
     if pt.dir is Dir.READ:
         raise TypeErr("cannot store through a read-only Ptr (use MutPtr/RawPtr)")
-    val = infer(e.args[1], locals_, space, scope, pt.pointee)
+    val = infer(e.args[1], locals_, namespace, scope, pt.pointee)
     if not fits(val, pt.pointee):
         raise TypeErr("store value", val, pt.pointee)
     return PrimT(Prim.VOID)
 
 
-def _infer_struct_lit(e, locals_, space, scope):
+def _infer_struct_lit(e, locals_, namespace, scope):
     qual = scope.get(e.type, e.type)
-    decl = space.walk(qual).value
+    decl = namespace.walk(qual).value
     if not isinstance(decl, Struct):                 # `EnumName { … }` / `fn { … }` is not a struct
         raise TypeErr(f"'{qual.rsplit('.', 1)[-1]}' is not a struct")
     ftypes = {f.name: f.type for f in decl.fields}
@@ -368,7 +368,7 @@ def _infer_struct_lit(e, locals_, space, scope):
     for fname, fexpr in e.fields:                # pass 1: infer values, solve type-args
         if fname not in ftypes:
             raise TypeErr(f"no field '{fname}' on {qual}")
-        givens[fname] = infer(fexpr, locals_, space, scope, ftypes[fname])  # int lits adapt to the field
+        givens[fname] = infer(fexpr, locals_, namespace, scope, ftypes[fname])  # int lits adapt to the field
         if decl.tparams:
             match_type(ftypes[fname], givens[fname], s)
     missing = [t for t in decl.tparams if t not in s]
@@ -381,7 +381,7 @@ def _infer_struct_lit(e, locals_, space, scope):
     return NameT(qual, tuple(s[t] for t in decl.tparams))
 
 
-def struct_at(st, space):
+def struct_at(st, namespace):
     """`[]` overloading: if `st` is a struct (or a pointer to one) whose type has an
     impl with an `at` method, return `(trait_path, type_path, at_fn)` — so `s[i]`
     types as `at`'s return and lowers to that call. None if not indexable. This is
@@ -389,25 +389,25 @@ def struct_at(st, space):
     ty = st.pointee if isinstance(st, PtrT) else st
     if not isinstance(ty, NameT):
         return None
-    for (trait_path, type_path), methods in space.impls.items():
+    for (trait_path, type_path), methods in namespace.impls.items():
         if type_path == ty.path and "at" in methods:
             return (trait_path, type_path, methods["at"][0])
     return None
 
 
-def _infer_call(e, expect, locals_, space, scope):
+def _infer_call(e, expect, locals_, namespace, scope):
     if e.callee == "addr":                                # addr(x): take a mutable pointer
-        return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
+        return PtrT(Dir.MUT, infer(e.args[0], locals_, namespace, scope))
     if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
-        return _infer_mem(e, locals_, space, scope)
+        return _infer_mem(e, locals_, namespace, scope)
     if e.callee == "slice":                               # slice(ptr, len): a [T] view of raw memory
         if not isinstance(expect, SliceT):                # element type comes from the wanted slice
             raise TypeErr("slice(ptr, len) needs a known slice type here "
                           "(e.g. a `[T]` return slot or parameter)")
-        pt = infer(e.args[0], locals_, space, scope)      # a pointer, or a `str` (a C char*)
+        pt = infer(e.args[0], locals_, namespace, scope)      # a pointer, or a `str` (a C char*)
         if len(e.args) != 2 or not (isinstance(pt, PtrT) or pt == PrimT(Prim.STR)):
             raise TypeErr("slice(ptr, len): a pointer (or str) and a length")
-        if not isinstance(infer(e.args[1], locals_, space, scope), PrimT):
+        if not isinstance(infer(e.args[1], locals_, namespace, scope), PrimT):
             raise TypeErr("slice length must be numeric")
         return expect
     if isinstance(locals_.get(e.callee), FnT):            # calling a closure parameter: f(acc, x)
@@ -415,16 +415,16 @@ def _infer_call(e, expect, locals_, space, scope):
         if len(e.args) != len(fnt.params):
             raise TypeErr(f"closure '{e.callee}' wants {len(fnt.params)} args, got {len(e.args)}")
         for a, pt in zip(e.args, fnt.params):
-            given = infer(a, locals_, space, scope, pt)
+            given = infer(a, locals_, namespace, scope, pt)
             if not fits(given, pt):
                 raise TypeErr("closure argument", given, pt)
         return fnt.ret
     target = scope.get(e.callee)
     if isinstance(target, TraitMethod):                   # a bound's method, e.g. area(x)
-        return infer_trait_call(e, target, locals_, space, scope)
+        return infer_trait_call(e, target, locals_, namespace, scope)
     if target is None:
         raise TypeErr(f"unbound function '{e.callee}'")
-    callee = space.walk(target).value
+    callee = namespace.walk(target).value
     if not isinstance(callee, Fn):
         raise TypeErr(f"'{e.callee}' is not callable")
     if len(e.args) != len(callee.params):
@@ -437,12 +437,12 @@ def _infer_call(e, expect, locals_, space, scope):
         for i, (a, p) in enumerate(zip(e.args, callee.params)):
             if isinstance(a, Closure):
                 continue
-            arg_types[i] = infer(a, locals_, space, scope)
+            arg_types[i] = infer(a, locals_, namespace, scope)
             match_type(p.type, arg_types[i], s)
         for i, (a, p) in enumerate(zip(e.args, callee.params)):
             if not isinstance(a, Closure):
                 continue
-            arg_types[i] = infer(a, locals_, space, scope, subst(p.type, s))
+            arg_types[i] = infer(a, locals_, namespace, scope, subst(p.type, s))
             match_type(p.type, arg_types[i], s)
         missing = [n for n in callee.tparams if n not in s]
         if missing:
@@ -455,29 +455,29 @@ def _infer_call(e, expect, locals_, space, scope):
             got = s.get(tp)
             short = trait_path.rsplit('.', 1)[-1]
             if isinstance(got, NameT):                     # a concrete type — needs an impl
-                if (trait_path, got.path) not in space.impls:
+                if (trait_path, got.path) not in namespace.impls:
                     raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement {short}")
             elif isinstance(got, TVar):                    # a forwarded type var — must be bounded too
                 if scope.get(_TBOUNDS, {}).get(got.name) != trait_path:
                     raise TypeErr(f"type {got.name} is unbounded but '{e.callee}' requires "
                                   f"{got.name}: {short} — add the bound")
-        return subst(ret_type(target, space), s)
+        return subst(ret_type(target, namespace), s)
     for a, p in zip(e.args, callee.params):
-        given = infer(a, locals_, space, scope, p.type)
+        given = infer(a, locals_, namespace, scope, p.type)
         if not fits(given, p.type):
             raise TypeErr("pointer/null mismatch", given, p.type)
-    return ret_type(target, space)
+    return ret_type(target, namespace)
 
 
 _INFERRING = object()      # sentinel parked in fn.ret while its body is being inferred
 
 
-def ret_type(qual, space):
+def ret_type(qual, namespace):
     """The return type of a function: its annotation, or — when omitted — inferred
     from the body and memoized onto `fn.ret`. The sentinel doubles as the
     recursion guard, so no checking state lives on `Namespace`. Recursion through an
     un-annotated return is an error (annotate it), like every ML-family checker."""
-    fn = space.walk(qual).value
+    fn = namespace.walk(qual).value
     if fn.ret is _INFERRING:
         raise TypeErr(f"recursive function '{qual.rsplit('.', 1)[-1]}' needs a return-type annotation")
     if fn.ret is not None:
@@ -485,32 +485,32 @@ def ret_type(qual, space):
     fn.ret = _INFERRING
     try:
         fn.ret = infer_block(fn.body, {p.name: p.type for p in fn.params},
-                             space, scope_with_bounds(fn.scope, fn.bounds), None)
+                             namespace, scope_with_bounds(fn.scope, fn.bounds), None)
     except BaseException:
         fn.ret = None      # roll back so a later check of this fn re-infers cleanly
         raise
     return fn.ret
 
 
-def infer_trait_call(e, tm, locals_, space, scope):
+def infer_trait_call(e, tm, locals_, namespace, scope):
     """Type a call to a bound's trait method: check args against the signature
     with Self left abstract (the type var of the bound this method came from)."""
     params = [subst(p, {"Self": TVar(tm.tparam)}) for p in tm.sig.params]
     if len(e.args) != len(params):
         raise TypeErr(f"'{e.callee}' wants {len(params)} args, got {len(e.args)}")
     for a, pt in zip(e.args, params):
-        given = infer(a, locals_, space, scope)
+        given = infer(a, locals_, namespace, scope)
         if not fits(given, pt):
             raise TypeErr("trait-method argument", given, pt)
     return subst(tm.sig.ret, {"Self": TVar(tm.tparam)})
 
 
-def infer_enum_ctor(e, expect, locals_, space, scope):
+def infer_enum_ctor(e, expect, locals_, namespace, scope):
     """`.Variant(payload)` — the expected type names which enum, then the
     variant's declared payload type is checked like any other slot."""
     if not isinstance(expect, NameT):
         raise TypeErr(f"cannot tell which enum '.{e.name}' builds (no expected type here)")
-    decl = space.walk(expect.path).value
+    decl = namespace.walk(expect.path).value
     if not isinstance(decl, EnumDecl):
         raise TypeErr(f"'.{e.name}' used where {expect.path} (not an enum) is wanted")
     var = next((v for v in decl.variants if v.name == e.name), None)
@@ -524,21 +524,21 @@ def infer_enum_ctor(e, expect, locals_, space, scope):
         if len(e.args) != 1:
             raise TypeErr(f"variant '.{e.name}' takes one payload value")
         want = subst(var.payload, sub)
-        given = infer(e.args[0], locals_, space, scope, want)
+        given = infer(e.args[0], locals_, namespace, scope, want)
         if not fits(given, want):
             raise TypeErr("enum payload", given, want)
     return NameT(expect.path, expect.args)           # preserve the type-args (Opt<i32>, not Opt<>)
 
 
-def infer_match(e, expect, locals_, space, scope):
+def infer_match(e, expect, locals_, namespace, scope):
     """A match types each arm against the expected result, binds a variant's
     payload inside its arm (narrowing), and demands exhaustive coverage."""
-    st = infer(e.subject, locals_, space, scope)
+    st = infer(e.subject, locals_, namespace, scope)
     if isinstance(st, PrimT):
-        return _infer_match_lit(e, st, expect, locals_, space, scope)
-    if not isinstance(st, NameT) or not isinstance(space.walk(st.path).value, EnumDecl):
+        return _infer_match_lit(e, st, expect, locals_, namespace, scope)
+    if not isinstance(st, NameT) or not isinstance(namespace.walk(st.path).value, EnumDecl):
         raise TypeErr(f"match on a non-enum value ({show(st)})")
-    decl = space.walk(st.path).value
+    decl = namespace.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
     variants = {v.name: v for v in decl.variants}
 
@@ -560,7 +560,7 @@ def infer_match(e, expect, locals_, space, scope):
                 if var.payload is None:
                     raise TypeErr(f"variant '.{arm.variant}' has no payload to bind")
                 arm_locals = {**locals_, arm.binding: subst(var.payload, sub)}
-        bt = infer(arm.body, arm_locals, space, scope, result)
+        bt = infer(arm.body, arm_locals, namespace, scope, result)
         if result is None:
             result = bt
         elif not fits(bt, result):
@@ -572,7 +572,7 @@ def infer_match(e, expect, locals_, space, scope):
     return result
 
 
-def _infer_match_lit(e, st, expect, locals_, space, scope):
+def _infer_match_lit(e, st, expect, locals_, namespace, scope):
     """Match on an i32/bool subject: literal patterns and a wildcard. Integers
     can't be enumerated, so a `_` is required (bool may instead cover true+false)."""
     wildcard, result, seen = False, expect, set()
@@ -584,14 +584,14 @@ def _infer_match_lit(e, st, expect, locals_, space, scope):
         if arm.lit is None:
             wildcard = True
         else:
-            lt = infer(arm.lit, locals_, space, scope)
+            lt = infer(arm.lit, locals_, namespace, scope)
             if not fits(lt, st):
                 raise TypeErr("pattern type", lt, st)
             val = arm.lit.b if isinstance(arm.lit, Bool) else arm.lit.n
             if val in seen:
                 raise TypeErr(f"duplicate match arm '{val}'")
             seen.add(val)
-        bt = infer(arm.body, locals_, space, scope, result)
+        bt = infer(arm.body, locals_, namespace, scope, result)
         if result is None:
             result = bt
         elif not fits(bt, result):
@@ -601,7 +601,7 @@ def _infer_match_lit(e, st, expect, locals_, space, scope):
     return result
 
 
-def infer_block(stmts, locals_, space, scope, expect=None):
+def infer_block(stmts, locals_, namespace, scope, expect=None):
     """Type a function body: `x := v` bindings extend locals in order; the value
     of the block is the type of its final expression statement (void if none).
     `expect` (the function's return type) reaches the final statement."""
@@ -610,28 +610,28 @@ def infer_block(stmts, locals_, space, scope, expect=None):
     for i, s in enumerate(stmts):
         exp = expect if i == len(stmts) - 1 else None
         if isinstance(s, Let):
-            locals_[s.name] = infer(s.value, locals_, space, scope)
+            locals_[s.name] = infer(s.value, locals_, namespace, scope)
         elif isinstance(s, Assign):
-            _check_assign(s, locals_, space, scope)
+            _check_assign(s, locals_, namespace, scope)
             last = PrimT(Prim.VOID)
         elif isinstance(s, While):                       # @while / desugared loop
-            if infer(s.cond, locals_, space, scope) != PrimT(Prim.BOOL):
+            if infer(s.cond, locals_, namespace, scope) != PrimT(Prim.BOOL):
                 raise TypeErr("loop/@while condition must be a bool")
-            infer_block(s.body, dict(locals_), space, scope)   # body in its own scope
+            infer_block(s.body, dict(locals_), namespace, scope)   # body in its own scope
             if s.step is not None:                       # the count loop's i = i + 1
-                infer_block((s.step,), locals_, space, scope)
+                infer_block((s.step,), locals_, namespace, scope)
             last = PrimT(Prim.VOID)
         else:
-            last = infer(s, locals_, space, scope, exp)
+            last = infer(s, locals_, namespace, scope, exp)
     return last
 
 
-def _check_assign(s, locals_, space, scope):
-    target = infer(s.target, locals_, space, scope)      # the lvalue's type (also validates it)
+def _check_assign(s, locals_, namespace, scope):
+    target = infer(s.target, locals_, namespace, scope)      # the lvalue's type (also validates it)
     if isinstance(s.target, Field):                      # set a field through a pointer? must be writable
-        ot = infer(s.target.obj, locals_, space, scope)
+        ot = infer(s.target.obj, locals_, namespace, scope)
         if isinstance(ot, PtrT) and ot.dir is Dir.READ:
             raise TypeErr("cannot assign through a read-only Ptr (use MutPtr)")
-    val = infer(s.value, locals_, space, scope, target)
+    val = infer(s.value, locals_, namespace, scope, target)
     if not fits(val, target):
         raise TypeErr("assignment", val, target)

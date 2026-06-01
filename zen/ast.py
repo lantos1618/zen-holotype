@@ -26,7 +26,7 @@ class Prim(Enum):
     STR  = "str"      # a comptime string (names/ops in the reified AST); C `const char*`
 
 
-# ───────────────────────── types (the structural space) ─────────────────────
+# ───────────────────────── types (the structural namespace) ─────────────────────
 @dataclass(frozen=True)
 class PrimT:
     prim: Prim

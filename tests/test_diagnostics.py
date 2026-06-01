@@ -2,7 +2,7 @@
 location (a `Located` string), and the report renders a caret straight from that
 location — no re-parsing of the formatted text."""
 from zen.types import Located
-from zen.main import caret, check, build_space, build_scopes, resolve
+from zen.main import caret, check, build_namespace, build_scopes, resolve
 from zen.parser import parse
 
 
@@ -15,10 +15,10 @@ def test_located_is_a_string_but_carries_structure():
 
 def test_check_attaches_a_location_to_failures():
     files = {"m": parse("f* = (a: i32, b: bool) i32 { a + b }", "m")}
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    (_, ok, why), = [r for r in check(files, space)[0] if r[0] == "m.f"]
+    resolve(files, namespace)
+    (_, ok, why), = [r for r in check(files, namespace)[0] if r[0] == "m.f"]
     assert ok is False
     assert isinstance(why, Located) and why.ns == "m" and why.pos is not None
 

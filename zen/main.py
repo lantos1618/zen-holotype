@@ -80,14 +80,14 @@ def load(root, skip=()):
     return files
 
 
-def build_space(files):
-    space = Namespace()                       # trie + impls registry; impls filled in resolve()
+def build_namespace(files):
+    namespace = Namespace()                       # trie + impls registry; impls filled in resolve()
     for f in files.values():
         for d in f.decls:
             if isinstance(d, (Impl, Emit)):   # no name: impls registered in resolve, emits splice later
                 continue
-            space.insert(f"{f.ns}.{d.name}", d)
-    return space
+            namespace.insert(f"{f.ns}.{d.name}", d)
+    return namespace
 
 
 def build_scopes(files):
@@ -102,40 +102,40 @@ def build_scopes(files):
         f.scope = sc
 
 
-def trait_methods_scope(fn, base, space):
+def trait_methods_scope(fn, base, namespace):
     """`base` scope plus, for every bound `T: Trait`, the trait's methods bound
     as TraitMethod entries — so a bounded body can call them by name."""
     sc = dict(base)
     for tp, trait_path in fn.bounds.items():
-        trait = space.walk(trait_path).value
+        trait = namespace.walk(trait_path).value
         for sig in trait.methods:
             sc[sig.name] = TraitMethod(tp, sig, trait_path)
     return sc
 
 
-def resolve_type(t, scope, space, tparams=()):
+def resolve_type(t, scope, namespace, tparams=()):
     if isinstance(t, (PrimT, TVar)):
         return t
     if isinstance(t, SliceT):
-        return SliceT(resolve_type(t.elem, scope, space, tparams))
+        return SliceT(resolve_type(t.elem, scope, namespace, tparams))
     if isinstance(t, FnT):                        # (A, T) Ret — resolve params + ret
-        return FnT(tuple(resolve_type(p, scope, space, tparams) for p in t.params),
-                   resolve_type(t.ret, scope, space, tparams))
+        return FnT(tuple(resolve_type(p, scope, namespace, tparams) for p in t.params),
+                   resolve_type(t.ret, scope, namespace, tparams))
     if isinstance(t, PtrT):
-        return PtrT(t.dir, resolve_type(t.pointee, scope, space, tparams))
+        return PtrT(t.dir, resolve_type(t.pointee, scope, namespace, tparams))
     if isinstance(t, NameT):
         if t.path in tparams:                    # a bare name in scope as a type param
             return TVar(t.path)
-        args = tuple(resolve_type(a, scope, space, tparams) for a in t.args)
+        args = tuple(resolve_type(a, scope, namespace, tparams) for a in t.args)
         if t.path in BUILTIN:
             return NameT(t.path, args)
         qual = scope.get(t.path, t.path)
-        space.walk(qual)
+        namespace.walk(qual)
         return NameT(qual, args)
     raise TypeErr(f"unknown type node {t!r}")
 
 
-def check_visibility(files, space):
+def check_visibility(files, namespace):
     """A module may only import another module's *public* names — a decl is public
     when its name carries the glued `*` (`Vec*`, `area*`). A bare name is private to
     its file. Same-file references never go through an import, so they're unaffected."""
@@ -145,7 +145,7 @@ def check_visibility(files, space):
                 continue
             for name in imp.names:
                 try:
-                    decl = space.walk(f"{imp.module}.{name}").value
+                    decl = namespace.walk(f"{imp.module}.{name}").value
                 except Unresolved:
                     continue                              # resolve() reports the missing name
                 if not getattr(decl, "pub", False):
@@ -153,32 +153,32 @@ def check_visibility(files, space):
                                   f"(mark it '{name}*' there to export it)")
 
 
-def resolve(files, space):
-    check_visibility(files, space)
+def resolve(files, namespace):
+    check_visibility(files, namespace)
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Struct):
                 tp = set(d.tparams)
                 for fld in d.fields:
-                    fld.type = resolve_type(fld.type, f.scope, space, tp)
+                    fld.type = resolve_type(fld.type, f.scope, namespace, tp)
             elif isinstance(d, EnumDecl):
                 tp = set(d.tparams)
                 for v in d.variants:
                     if v.payload is not None:
-                        v.payload = resolve_type(v.payload, f.scope, space, tp)
+                        v.payload = resolve_type(v.payload, f.scope, namespace, tp)
             elif isinstance(d, Fn):
-                _resolve_fn(d, f.scope, space)
+                _resolve_fn(d, f.scope, namespace)
             elif isinstance(d, TraitDecl):
                 for sig in d.methods:                       # Self is the implementor's type var
-                    sig.params = tuple(resolve_type(p, f.scope, space, {"Self"}) for p in sig.params)
-                    sig.ret = resolve_type(sig.ret, f.scope, space, {"Self"})
+                    sig.params = tuple(resolve_type(p, f.scope, namespace, {"Self"}) for p in sig.params)
+                    sig.ret = resolve_type(sig.ret, f.scope, namespace, {"Self"})
             elif isinstance(d, Impl):
                 trait_path = f.scope.get(d.trait, d.trait)
                 type_path = f.scope.get(d.type, d.type)
-                space.walk(trait_path); space.walk(type_path)   # both must exist
+                namespace.walk(trait_path); namespace.walk(type_path)   # both must exist
                 for m in d.methods:
-                    _resolve_fn(m, f.scope, space)
-                space.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
+                    _resolve_fn(m, f.scope, namespace)
+                namespace.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
     desugar_loops(files)                                # loop → @while, before check + lower
 
 
@@ -244,16 +244,16 @@ def _desugar_stmt(s):
     return [s]
 
 
-def _resolve_fn(d, scope, space):
+def _resolve_fn(d, scope, namespace):
     tp = set(d.tparams)
     for p in d.params:
-        p.type = resolve_type(p.type, scope, space, tp)
+        p.type = resolve_type(p.type, scope, namespace, tp)
     if d.ret is not None:                                   # None -> inferred from the body later
-        d.ret = resolve_type(d.ret, scope, space, tp)
+        d.ret = resolve_type(d.ret, scope, namespace, tp)
     d.bounds = {k: (scope.get(v, v)) for k, v in d.bounds.items()}
     for trait_path in d.bounds.values():
-        space.walk(trait_path)                              # the bound trait must exist
-    d.scope = trait_methods_scope(d, scope, space) if d.bounds else scope   # for ret inference
+        namespace.walk(trait_path)                              # the bound trait must exist
+    d.scope = trait_methods_scope(d, scope, namespace) if d.bounds else scope   # for ret inference
 
 
 def is_prelude_ns(ns):
@@ -270,18 +270,18 @@ def is_generator(d):
     return isinstance(d, Fn) and isinstance(d.ret, NameT) and is_prelude_ns(d.ret.path)
 
 
-def _graft_impl(d, f, space):
+def _graft_impl(d, f, namespace):
     """Register a generated trait impl exactly like resolve() does for a written
     one: resolve its methods and record it in the impls registry."""
     trait_path = f.scope.get(d.trait, d.trait)
     type_path = f.scope.get(d.type, d.type)
-    space.walk(trait_path); space.walk(type_path)        # both must exist
+    namespace.walk(trait_path); namespace.walk(type_path)        # both must exist
     for m in d.methods:
-        _resolve_fn(m, f.scope, space)
-    space.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
+        _resolve_fn(m, f.scope, namespace)
+    namespace.impls[(trait_path, type_path)] = {m.name: (m, f.scope) for m in d.methods}
 
 
-def run_emits(files, space):
+def run_emits(files, namespace):
     """The splice pass: evaluate each `emit` generator at comptime, reify the
     Zen `Ast` value it returns into a real declaration (a free fn or a trait
     impl), and graft it into the module — so check + lower meet it as ordinary
@@ -291,27 +291,27 @@ def run_emits(files, space):
         for d in f.decls:
             if not isinstance(d, Emit):
                 continue
-            out = evaluate(d.value, space, f.scope)
+            out = evaluate(d.value, namespace, f.scope)
             for g in (out if isinstance(out, list) else [out]):
                 g = reify_decl(g)                        # Zen Ast value -> host Fn / Impl
                 if isinstance(g, Impl):
-                    _graft_impl(g, f, space)
+                    _graft_impl(g, f, namespace)
                 else:
                     f.scope[g.name] = f"{f.ns}.{g.name}"     # same dict the siblings see
-                    space.insert(f"{f.ns}.{g.name}", g)
-                    _resolve_fn(g, f.scope, space)
+                    namespace.insert(f"{f.ns}.{g.name}", g)
+                    _resolve_fn(g, f.scope, namespace)
                 grafted.append(g)
         if grafted:
             f.decls = [d for d in f.decls if not isinstance(d, Emit)] + grafted
 
 
-def _check_fn(qual, ns, d, space, results, passing):
+def _check_fn(qual, ns, d, namespace, results, passing):
     if not d.body:
         return
     locals_ = {p.name: p.type for p in d.params}
     try:
-        want = d.ret if d.ret is not None else ret_type(qual, space)   # declared or inferred
-        bt = infer_block(d.body, locals_, space, scope_with_bounds(d.scope, d.bounds), want)
+        want = d.ret if d.ret is not None else ret_type(qual, namespace)   # declared or inferred
+        bt = infer_block(d.body, locals_, namespace, scope_with_bounds(d.scope, d.bounds), want)
         void = isinstance(want, PrimT) and want.prim is Prim.VOID
         if want is not None and not void and not fits(bt, want):        # void discards the body value
             raise TypeErr("return type", bt, want)
@@ -323,23 +323,23 @@ def _check_fn(qual, ns, d, space, results, passing):
         results.append((qual, False, Located(loc + core, ns, ex.pos)))
 
 
-def check(files, space):
+def check(files, namespace):
     results, passing = [], set()
     for f in files.values():
         if is_prelude_ns(f.ns):                            # the prelude runs at comptime; never checked
             continue
         for d in f.decls:
             if isinstance(d, Fn):
-                _check_fn(f"{f.ns}.{d.name}", f.ns, d, space, results, passing)
+                _check_fn(f"{f.ns}.{d.name}", f.ns, d, namespace, results, passing)
             elif isinstance(d, Impl):
-                _check_impl(d, f, space, results, passing)
+                _check_impl(d, f, namespace, results, passing)
     return results, passing
 
 
-def _check_impl(d, f, space, results, passing):
+def _check_impl(d, f, namespace, results, passing):
     trait_path = f.scope.get(d.trait, d.trait)
     type_path = f.scope.get(d.type, d.type)
-    trait = space.walk(trait_path).value
+    trait = namespace.walk(trait_path).value
     sigs = {s.name: s for s in trait.methods}
     self_sub = {"Self": NameT(type_path, ())}
     for m in d.methods:
@@ -352,7 +352,7 @@ def _check_impl(d, f, space, results, passing):
         got_params = [p.type for p in m.params]
         if got_params != want_params or m.ret != subst(sig.ret, self_sub):
             results.append((tag, False, "signature does not match the trait")); continue
-        _check_fn(tag, f.ns, m, space, results, passing)
+        _check_fn(tag, f.ns, m, namespace, results, passing)
         if tag in passing:                          # record the codegen key in `passing` too
             passing.add((trait_path, type_path, m.name))
     missing = [name for name in sigs if name not in {m.name for m in d.methods}]
@@ -373,106 +373,106 @@ class _Sink:
         self.fn, self.impl, self.data, self.reach = fn, impl, data, reach
 
 
-def _scan_expr(e, locals_, space, scope, sink, expect=None, cenv=None):
+def _scan_expr(e, locals_, namespace, scope, sink, expect=None, cenv=None):
     """Walk an expression, feeding every monomorphization site to `sink`. `cenv`
     carries the active closure params while scanning an inlined template body."""
     if isinstance(e, Bin):
-        _scan_expr(e.l, locals_, space, scope, sink, None, cenv)
-        _scan_expr(e.r, locals_, space, scope, sink, None, cenv)
+        _scan_expr(e.l, locals_, namespace, scope, sink, None, cenv)
+        _scan_expr(e.r, locals_, namespace, scope, sink, None, cenv)
     elif isinstance(e, Not):
-        _scan_expr(e.operand, locals_, space, scope, sink, None, cenv)
+        _scan_expr(e.operand, locals_, namespace, scope, sink, None, cenv)
     elif isinstance(e, Field):
-        _scan_expr(e.obj, locals_, space, scope, sink, None, cenv)
+        _scan_expr(e.obj, locals_, namespace, scope, sink, None, cenv)
     elif isinstance(e, SliceLit):
-        et = infer(e, locals_, space, scope).elem if e.elems else None
+        et = infer(e, locals_, namespace, scope).elem if e.elems else None
         for x in e.elems:
-            _scan_expr(x, locals_, space, scope, sink, et, cenv)
+            _scan_expr(x, locals_, namespace, scope, sink, et, cenv)
     elif isinstance(e, Index):
-        _scan_expr(e.seq, locals_, space, scope, sink, None, cenv)
-        _scan_expr(e.idx, locals_, space, scope, sink, None, cenv)
-        at = struct_at(infer(e.seq, locals_, space, scope), space)   # []-overloading: the `at` impl
+        _scan_expr(e.seq, locals_, namespace, scope, sink, None, cenv)
+        _scan_expr(e.idx, locals_, namespace, scope, sink, None, cenv)
+        at = struct_at(infer(e.seq, locals_, namespace, scope), namespace)   # []-overloading: the `at` impl
         if at is not None:
             sink.impl(at[0], at[1])
     elif isinstance(e, StructLit):
-        st = infer(e, locals_, space, scope)
-        decl = space.walk(st.path).value
+        st = infer(e, locals_, namespace, scope)
+        decl = namespace.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args))
         ftypes = {fl.name: subst(fl.type, sub) for fl in decl.fields}
         for n, v in e.fields:                            # children first (inner-first emit order)
-            _scan_expr(v, locals_, space, scope, sink, ftypes[n], cenv)
+            _scan_expr(v, locals_, namespace, scope, sink, ftypes[n], cenv)
         if decl.tparams:
             sink.data(st.path, st.args)
     elif isinstance(e, EnumCtor):
-        decl = space.walk(expect.path).value             # expect names the enum (generic or not)
+        decl = namespace.walk(expect.path).value             # expect names the enum (generic or not)
         sub = dict(zip(decl.tparams, expect.args))
         var = next(v for v in decl.variants if v.name == e.name)
         for a in e.args:
-            _scan_expr(a, locals_, space, scope, sink, subst(var.payload, sub), cenv)
+            _scan_expr(a, locals_, namespace, scope, sink, subst(var.payload, sub), cenv)
         if decl.tparams:
             sink.data(expect.path, expect.args)
     elif isinstance(e, Match):
-        _scan_expr(e.subject, locals_, space, scope, sink, None, cenv)
-        st = infer(e.subject, locals_, space, scope)
+        _scan_expr(e.subject, locals_, namespace, scope, sink, None, cenv)
+        st = infer(e.subject, locals_, namespace, scope)
         if isinstance(st, PrimT):                         # literal match: arms bind nothing
             for arm in e.arms:
-                _scan_expr(arm.body, locals_, space, scope, sink, expect, cenv)
+                _scan_expr(arm.body, locals_, namespace, scope, sink, expect, cenv)
             return
-        decl = space.walk(st.path).value
+        decl = namespace.walk(st.path).value
         sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
         variants = {v.name: v for v in decl.variants}
         for arm in e.arms:
             al = locals_
             if arm.variant is not None and arm.binding is not None:
                 al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
-            _scan_expr(arm.body, al, space, scope, sink, expect, cenv)
+            _scan_expr(arm.body, al, namespace, scope, sink, expect, cenv)
     elif isinstance(e, Closure):                          # a closure literal that wasn't a call arg
         pass                                              # (only reachable via a template call, handled there)
     elif isinstance(e, Call):
         if e.callee in ("addr", "load", "store", "offset", "slice"):   # intrinsics: just scan args
             for a in e.args:
-                _scan_expr(a, locals_, space, scope, sink, None, cenv)
+                _scan_expr(a, locals_, namespace, scope, sink, None, cenv)
             return
         if cenv and e.callee in cenv:                     # calling a closure param: scan its inlined body
             clos, fnt, csite_locals, csite_scope = cenv[e.callee]
             for a, pt in zip(e.args, fnt.params):
-                _scan_expr(a, locals_, space, scope, sink, pt, cenv)
+                _scan_expr(a, locals_, namespace, scope, sink, pt, cenv)
             cl = {**csite_locals, **dict(zip(clos.params, fnt.params))}
-            _scan_block(clos.body, cl, space, csite_scope, sink, fnt.ret)
+            _scan_block(clos.body, cl, namespace, csite_scope, sink, fnt.ret)
             return
         target = scope.get(e.callee)
         if isinstance(target, TraitMethod):              # resolve concrete Self -> impl used
             s = {}
             for p, a in zip(target.sig.params, e.args):
-                match_type(p, infer(a, locals_, space, scope), s)
+                match_type(p, infer(a, locals_, namespace, scope), s)
             ptypes = [subst(p, {"Self": s["Self"]}) for p in target.sig.params]
             for a, pt in zip(e.args, ptypes):
-                _scan_expr(a, locals_, space, scope, sink, pt, cenv)
+                _scan_expr(a, locals_, namespace, scope, sink, pt, cenv)
             if isinstance(s.get("Self"), NameT):
                 sink.impl(target.trait, s["Self"].path)
             return
-        callee = space.walk(target).value
+        callee = namespace.walk(target).value
         if is_template(callee):                           # a closure-taking fn: scan the inlined body
-            _scan_template_call(e, callee, locals_, space, scope, sink, cenv)
+            _scan_template_call(e, callee, locals_, namespace, scope, sink, cenv)
             return
         if isinstance(callee, Fn) and callee.tparams:
-            s = solve_call(callee, [infer(a, locals_, space, scope) for a in e.args])
+            s = solve_call(callee, [infer(a, locals_, namespace, scope) for a in e.args])
             ptypes = [subst(p.type, s) for p in callee.params]
             sink.fn(target, tuple(s[n] for n in callee.tparams))
         else:
             sink.reach(target)                            # a plain fn call — mark it live
             ptypes = [p.type for p in callee.params]
         for a, pt in zip(e.args, ptypes):
-            _scan_expr(a, locals_, space, scope, sink, pt, cenv)
+            _scan_expr(a, locals_, namespace, scope, sink, pt, cenv)
 
 
-def _scan_template_call(e, tmpl, locals_, space, scope, sink, cenv):
+def _scan_template_call(e, tmpl, locals_, namespace, scope, sink, cenv):
     """A template is inlined, not instanced — so don't sink.fn it. Mirror the
     inlining: solve type-args from the value args, scan them, then scan the body
     with the closure params bound (so any monomorph sites inside are collected)."""
     s: dict = {}
     for a, p in zip(e.args, tmpl.params):
         if not isinstance(p.type, FnT):
-            match_type(p.type, infer(a, locals_, space, scope), s)
+            match_type(p.type, infer(a, locals_, namespace, scope), s)
     blocals, frame = dict(locals_), {}
     for a, p in zip(e.args, tmpl.params):
         if isinstance(p.type, FnT):
@@ -481,29 +481,29 @@ def _scan_template_call(e, tmpl, locals_, space, scope, sink, cenv):
             blocals[p.name] = fnt
         else:
             pt = subst(p.type, s)
-            _scan_expr(a, locals_, space, scope, sink, pt, cenv)
+            _scan_expr(a, locals_, namespace, scope, sink, pt, cenv)
             blocals[p.name] = pt
-    _scan_block(tmpl.body, blocals, space, tmpl.scope or scope, sink, subst(tmpl.ret, s),
+    _scan_block(tmpl.body, blocals, namespace, tmpl.scope or scope, sink, subst(tmpl.ret, s),
                 {**(cenv or {}), **frame})
 
 
-def _scan_block(stmts, locals_, space, scope, sink, expect=None, cenv=None):
+def _scan_block(stmts, locals_, namespace, scope, sink, expect=None, cenv=None):
     locals_ = dict(locals_)
     last = len(stmts) - 1
     for i, s in enumerate(stmts):
         if isinstance(s, Let):
-            _scan_expr(s.value, locals_, space, scope, sink, None, cenv)
-            locals_[s.name] = infer(s.value, locals_, space, scope)
+            _scan_expr(s.value, locals_, namespace, scope, sink, None, cenv)
+            locals_[s.name] = infer(s.value, locals_, namespace, scope)
         elif isinstance(s, Assign):
-            _scan_expr(s.target, locals_, space, scope, sink, None, cenv)
-            _scan_expr(s.value, locals_, space, scope, sink, None, cenv)
+            _scan_expr(s.target, locals_, namespace, scope, sink, None, cenv)
+            _scan_expr(s.value, locals_, namespace, scope, sink, None, cenv)
         elif isinstance(s, While):
-            _scan_expr(s.cond, locals_, space, scope, sink, None, cenv)
-            _scan_block(s.body, locals_, space, scope, sink, None, cenv)
+            _scan_expr(s.cond, locals_, namespace, scope, sink, None, cenv)
+            _scan_block(s.body, locals_, namespace, scope, sink, None, cenv)
             if s.step is not None:
-                _scan_block((s.step,), locals_, space, scope, sink, None, cenv)
+                _scan_block((s.step,), locals_, namespace, scope, sink, None, cenv)
         else:
-            _scan_expr(s, locals_, space, scope, sink, expect if i == last else None, cenv)
+            _scan_expr(s, locals_, namespace, scope, sink, expect if i == last else None, cenv)
 
 
 def specialize(fn, s):
@@ -513,7 +513,7 @@ def specialize(fn, s):
               subst(fn.ret, s), fn.body, fn.pub, (), fn.bounds)
 
 
-def collect_instances(files, passing, space, roots=None):
+def collect_instances(files, passing, namespace, roots=None):
     """Reachable, transitively, from the seed functions: every concrete generic-fn
     instance, trait impl, generic data-type instance, and (for dead-code
     elimination) every plain fn actually called.
@@ -533,8 +533,8 @@ def collect_instances(files, passing, space, roots=None):
     def add(qual, targs):
         if (qual, targs) in insts:
             return
-        fn = space.walk(qual).value
-        sc = trait_methods_scope(fn, decl_scope[qual], space)
+        fn = namespace.walk(qual).value
+        sc = trait_methods_scope(fn, decl_scope[qual], namespace)
         spec = specialize(fn, dict(zip(fn.tparams, targs)))
         insts[(qual, targs)] = (spec, sc)
         work.append((spec, sc))
@@ -543,22 +543,22 @@ def collect_instances(files, passing, space, roots=None):
         if (trait_path, type_path) in impls_used:
             return
         impls_used[(trait_path, type_path)] = None
-        for mfn, msc in space.impls[(trait_path, type_path)].values():
+        for mfn, msc in namespace.impls[(trait_path, type_path)].values():
             work.append((mfn, msc))
 
     def add_data(qual, targs):                # struct OR enum; inner-first insertion = emit order
-        data_insts.setdefault((qual, targs), dict(zip(space.walk(qual).value.tparams, targs)))
+        data_insts.setdefault((qual, targs), dict(zip(namespace.walk(qual).value.tparams, targs)))
 
     reached = None if roots is None else set()
 
     def add_reach(qual):                      # a plain fn became live — scan it once (DCE)
         if reached is None or qual in reached or qual not in passing:
             return
-        fn = space.walk(qual).value
+        fn = namespace.walk(qual).value
         if not isinstance(fn, Fn) or fn.tparams or is_template(fn) or fn.body is None:
             return                            # generics/templates/externs handled elsewhere
         reached.add(qual)
-        sc = trait_methods_scope(fn, decl_scope[qual], space) if fn.bounds else decl_scope[qual]
+        sc = trait_methods_scope(fn, decl_scope[qual], namespace) if fn.bounds else decl_scope[qual]
         work.append((fn, sc))
 
     sink = _Sink(add, add_impl, add_data, add_reach)
@@ -567,18 +567,18 @@ def collect_instances(files, passing, space, roots=None):
             for d in f.decls:
                 if (isinstance(d, Fn) and not d.tparams and not is_template(d)
                         and not is_generator(d) and f"{f.ns}.{d.name}" in passing):
-                    sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
-                    _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink, d.ret)
+                    sc = trait_methods_scope(d, f.scope, namespace) if d.bounds else f.scope
+                    _scan_block(d.body, {p.name: p.type for p in d.params}, namespace, sc, sink, d.ret)
     else:                                     # executable: seed from the entry, prune the rest
         for r in roots:
             add_reach(r)
     while work:
         fn, sc = work.pop()
-        _scan_block(fn.body, {p.name: p.type for p in fn.params}, space, sc, sink, fn.ret)
+        _scan_block(fn.body, {p.name: p.type for p in fn.params}, namespace, sc, sink, fn.ret)
     return insts, impls_used, data_insts, reached
 
 
-def emit_c(files, passing, space, extra="", roots=None):
+def emit_c(files, passing, namespace, extra="", roots=None):
     # `roots` (a set of entry quals) prunes plain fns to those reachable from it —
     # dead-code elimination for an executable. None emits every passing fn (a lib).
     # Integrity: codegen lowers struct/enum/fn directly and trait impls on demand.
@@ -591,11 +591,11 @@ def emit_c(files, passing, space, extra="", roots=None):
                 raise NotImplementedError(
                     f"cannot lower {type(d).__name__} '{getattr(d, 'name', '?')}' to C yet "
                     f"(codegen supports struct + enum + fn + trait/impl)")
-    insts, impls_used, data_insts, reached = collect_instances(files, passing, space, roots)
+    insts, impls_used, data_insts, reached = collect_instances(files, passing, namespace, roots)
     live = lambda qual: reached is None or qual in reached   # DCE: plain fn reachable?
     impl_fns = []                                         # the trait methods actually used
     for (tp, ty) in impls_used:
-        for m, (mfn, msc) in space.impls[(tp, ty)].items():
+        for m, (mfn, msc) in namespace.impls[(tp, ty)].items():
             if (tp, ty, m) not in passing:                # used but ill-typed -> refuse loudly
                 raise NotImplementedError(
                     f"trait impl {ty.rsplit('.', 1)[-1]}::{m} is used but did not type-check")
@@ -620,7 +620,7 @@ def emit_c(files, passing, space, extra="", roots=None):
             elif isinstance(d, EnumDecl) and not d.tparams:
                 lines.append(c_enum(f"{f.ns}.{d.name}", d))
     for (qual, targs), sub in data_insts.items():        # monomorphized generic structs + enums
-        decl = space.walk(qual).value
+        decl = namespace.walk(qual).value
         lower = c_struct if isinstance(decl, Struct) else c_enum
         lines.append(lower(qual, decl, sub, mangle(NameT(qual, targs))))
     lines.append("")
@@ -643,11 +643,11 @@ def emit_c(files, passing, space, extra="", roots=None):
             if (isinstance(d, Fn) and not d.tparams and not is_template(d)
                     and not is_generator(d)
                     and f"{f.ns}.{d.name}" in passing and live(f"{f.ns}.{d.name}")):
-                lines.append(c_def(f"{f.ns}.{d.name}", d, space, f.scope))
+                lines.append(c_def(f"{f.ns}.{d.name}", d, namespace, f.scope))
     for (qual, targs), (spec, sc) in insts.items():
-        lines.append(c_def(qual, spec, space, sc, inst_name(qual, targs)))
+        lines.append(c_def(qual, spec, namespace, sc, inst_name(qual, targs)))
     for cn, mfn, msc in impl_fns:
-        lines.append(c_def(cn, mfn, space, msc, cn))
+        lines.append(c_def(cn, mfn, namespace, msc, cn))
     lines[slice_at:slice_at] = slice_typedefs()          # now _slice_reg is fully populated
     return "\n".join(lines) + "\n" + extra
 
@@ -730,9 +730,9 @@ def run_test_root(root, test_rel, cc_extra=()):
     `cc_extra` are extra cc args (the Executable's cflags + `-l` links)."""
     test_ns = pathlib.Path(test_rel).with_suffix("").as_posix().replace("/", ".")
     files = load(root)                       # includes the test root (skips only build.zen)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
-    _, passing = check(files, space)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace); fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
 
     tf = files.get(test_ns)
     tests = [d for d in (tf.decls if tf else []) if is_test_fn(d)]
@@ -747,7 +747,7 @@ def run_test_root(root, test_rel, cc_extra=()):
     out_dir = pathlib.Path(root) / "build"
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{test_ns}_test.c", out_dir / f"{test_ns}_test"
-    compile_if_changed(cpath, bpath, emit_c(files, passing, space, harness), cc_extra)
+    compile_if_changed(cpath, bpath, emit_c(files, passing, namespace, harness), cc_extra)
     print(f"\n── tests: {test_rel} ──")
     skipped = [d.name for d in tests if d not in runnable]
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
@@ -779,12 +779,12 @@ def report(results, root):
 
 def cmd_check(root):
     files = load(root)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
-    results, passing = check(files, space)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace); fold_comptime(files, namespace); run_emits(files, namespace)
+    results, passing = check(files, namespace)
     print(f"── check {root} ──")
     report(results, root)
-    pathlib.Path("out.c").write_text(emit_c(files, passing, space))
+    pathlib.Path("out.c").write_text(emit_c(files, passing, namespace))
     print("   -> wrote out.c")
 
 
@@ -825,9 +825,9 @@ def cmd_build(root):
 
     files = load(root, skip={"build.zen"} | set(cfg["tests"]))
     load_uses(cfg, files)                          # install foreign-binding namespaces (b.use)
-    space = build_space(files)
-    build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
-    results, passing = check(files, space)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace); fold_comptime(files, namespace); run_emits(files, namespace)
+    results, passing = check(files, namespace)
     print("\n── type checks ──")
     report(results, root)
 
@@ -838,7 +838,7 @@ def cmd_build(root):
 
     # The entry must return i32 (printed) or void (run for effect) — anything else
     # has no sensible harness, so reject it rather than misformat (e.g. %d on a ptr).
-    entry_ret = space.walk(entry).value.ret
+    entry_ret = namespace.walk(entry).value.ret
     if entry_ret == PrimT(Prim.VOID):
         harness = (f'\nint main(void) {{\n    {c_name(entry)}();\n'
                    f'    return 0;\n}}\n')
@@ -852,7 +852,7 @@ def cmd_build(root):
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{cfg['name']}.c", out_dir / cfg["name"]
     cc_extra = [*cfg["cflags"], *(f"-l{lib}" for lib in cfg["links"])]   # build.zen flags
-    exe_c = emit_c(files, passing, space, harness, roots={entry})        # DCE from the entry
+    exe_c = emit_c(files, passing, namespace, harness, roots={entry})        # DCE from the entry
     if compile_if_changed(cpath, bpath, exe_c, cc_extra):
         print(f"\n── compiled {cpath} ──")
     else:

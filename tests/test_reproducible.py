@@ -11,17 +11,17 @@ import subprocess
 import sys
 import textwrap
 
-from zen.main import (load, build_space, build_scopes, resolve, check, emit_c)
+from zen.main import (load, build_namespace, build_scopes, resolve, check, emit_c)
 
 
 def emit(tmp_path, src):
     (tmp_path / "m.zen").write_text(src)
     files = load(tmp_path)
-    space = build_space(files)
+    namespace = build_namespace(files)
     build_scopes(files)
-    resolve(files, space)
-    _, passing = check(files, space)
-    return emit_c(files, passing, space)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    return emit_c(files, passing, namespace)
 
 
 # every temp-name site at once: a template + closure (_v), a match (_subj),
@@ -87,14 +87,14 @@ sum* = (a: Ptr<Sq>, b: Ptr<Rect>, c: Ptr<Circle>, d: Ptr<Tri>) i32 {
 
 _EMIT_SNIPPET = textwrap.dedent("""
     import sys, tempfile, pathlib, hashlib
-    from zen.main import (load, build_space, build_scopes, resolve, check,
+    from zen.main import (load, build_namespace, build_scopes, resolve, check,
                                emit_c, fold_comptime, run_emits)
     d = pathlib.Path(tempfile.mkdtemp()); (d / "m.zen").write_text(sys.argv[1])
-    files = load(d); space = build_space(files)
-    build_scopes(files); resolve(files, space)
-    fold_comptime(files, space); run_emits(files, space)
-    _, passing = check(files, space)
-    sys.stdout.write(hashlib.sha256(emit_c(files, passing, space).encode()).hexdigest())
+    files = load(d); namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    sys.stdout.write(hashlib.sha256(emit_c(files, passing, namespace).encode()).hexdigest())
 """)
 
 
