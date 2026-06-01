@@ -21,8 +21,11 @@ Expr*: Int(i32), Var(VarData), Bin(BinData), Call(CallData), Cond(CondData)
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
 Stmt*: Let(LetData), Return(Ptr<Expr>)
-// a function is a name, an i32 param, and a sequence of statements
-Func*: { name: str, param: str, body: [Stmt] }          // int32_t name(int32_t param) { body }
+// types + typed parameters
+Ty*: I32, I64, U8, Bool                                 // a C scalar type
+Param*: { name: str, ty: Ty }
+// a function is a name, typed parameters, a return type, and a sequence of statements
+Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -33,6 +36,11 @@ call* = (fn: str, a: Ptr<Expr>) Expr { .Call(CallData { fn: fn, arg: a }) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData { c: c, t: t, e: e }) }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
+ti32* = () Ty { .I32() }
+ti64* = () Ty { .I64() }
+tu8* = () Ty { .U8() }
+tbool* = () Ty { .Bool() }
+param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
 
 // ── int -> decimal digits (no cast: digit bytes come from a str view) ────────
 digit = (d: i32) u8 { view("0123456789")[d] }
@@ -77,12 +85,25 @@ gen_stmt = (s: String, st: Stmt) String {
     }
 }
 
+// a Ty -> its C type name
+cty = (t: Ty) str {
+    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool" }
+}
+
+// emit the parameter list, comma-separated: `int32_t a, int32_t b`
+gen_params = (s: String, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match { true => out, false => append(out, ", ") }   // comma between, not before
+        out = append(append(append(out, cty(p.ty)), " "), p.name)
+    })
+    out
+}
+
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 gen_func* = (s: String, f: Func) String {
-    h := append(s, "int32_t ")
-    h2 := append(h, f.name)
-    h3 := append(append(h2, "(int32_t "), f.param)
-    open := append(h3, ") { ")
+    sig := append(append(append(s, cty(f.ret)), " "), f.name)
+    open := append(gen_params(append(sig, "("), f.params), ") { ")
     f.body.loop((hd, i, st) { open = append(gen_stmt(open, st), " ") })   // accumulate each statement
     append(open, "}")
 }
