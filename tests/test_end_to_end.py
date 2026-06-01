@@ -97,7 +97,7 @@ def test_unlowerable_decl_raises(checked):
 # ── F3: user enums lower to a tagged union that cc accepts ──────────────────
 def test_enum_lowers_to_tagged_union(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "Status*: Idle, Busy(i32)\n"
+        "Status*: Idle | Busy(i32)\n"
         "idle* = () Status { .Idle() }\n"
         "busy* = (n: i32) Status { .Busy(n) }\n")
     files = load(tmp_path)
@@ -145,7 +145,7 @@ def test_generic_fn_monomorphizes(tmp_path):
 # ── Phase B: match compiles to a tag-switch and runs ────────────────────────
 def test_match_lowers_and_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "Status*: Idle, Busy(i32)\n"
+        "Status*: Idle | Busy(i32)\n"
         "code* = (s: Status) i32 { s.match { .Idle => 0, .Busy(n) => n } }\n"
         "main* = () i32 { code(.Busy(7)) }\n")
     files = load(tmp_path)
@@ -333,7 +333,7 @@ def test_match_auto_derefs_pointer_to_enum(tmp_path):
     # `n.l` / `n.r` (themselves Ptr<Tree>) recurse. Sum = 3 + (4 + 5) = 12.
     (tmp_path / "main.zen").write_text("""
 NodeData*: { l: Ptr<Tree>, r: Ptr<Tree> }
-Tree*: Leaf(i32), Node(NodeData)
+Tree*: Leaf(i32) | Node(NodeData)
 leaf = (v: i32) Tree { .Leaf(v) }
 node = (l: Ptr<Tree>, r: Ptr<Tree>) Tree { .Node(NodeData { l: l, r: r }) }
 sum* = (t: Ptr<Tree>) i32 { t.match { .Leaf(v) => v, .Node(n) => sum(n.l) + sum(n.r) } }
@@ -414,7 +414,7 @@ def test_void_main_harness(tmp_path):
 # ── Generic enums monomorphize and run ──────────────────────────────────────
 def test_generic_enum_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "Opt*<T>: None, Some(T)\n"
+        "Opt*<T>: None | Some(T)\n"
         "some_i* = (n: i32) Opt<i32> { .Some(n) }\n"
         "get* = (o: Opt<i32>) i32 { o.match { .None => 0, .Some(v) => v } }\n"
         "main* = () i32 { get(some_i(42)) }\n")

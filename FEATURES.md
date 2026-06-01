@@ -7,7 +7,8 @@ where it's headed, [VISION](VISION.md).)
 ## Type system
 - **Primitives:** `i32`, `i64`, `u8`, `bool`, `void`, `str` (`str` is comptime-only).
 - **Products** — structs: `Point: { x: i32, y: i32 }`.
-- **Sums** — enums with optional payloads: `Shape: Circle(i32), Square(i32), Dot`
+- **Sums** — enums with optional payloads, variants `|`-separated (a sum is a *choice*):
+  `Shape: Circle(i32) | Square(i32) | Dot`
   (lowered to C tagged unions).
 - **Slices** — `[T]`, a `(ptr, len)` view (lowers to `struct { T* ptr; int64_t len; }`).
   `[a, b, c]` literals, `xs[i]` indexing, `xs.len`. Iterated with the element-form `loop`.

@@ -86,7 +86,7 @@ def test_derive_tag_reflects_a_sum_type(tmp_path):
     # generates a `match` returning each variant's index.
     files, namespace, results, passing = frontend(tmp_path, """
 { derive_tag } = prelude.derive
-Color: Red, Green, Blue
+Color: Red | Green | Blue
 @emit(derive_tag(reflect(Color)))
 main* = () i32 { Color_tag(.Green()) + Color_tag(.Blue()) * 10 }
 """)
@@ -105,7 +105,7 @@ def test_derive_payload_binds_variant_payloads(tmp_path):
     # i32 inside each variant (0 for a nullary one).
     files, namespace, results, passing = frontend(tmp_path, """
 { derive_payload } = prelude.derive
-Shape: Circle(i32), Square(i32), Dot
+Shape: Circle(i32) | Square(i32) | Dot
 @emit(derive_payload(reflect(Shape)))
 main* = () i32 {
     Shape_payload(.Circle(7)) + Shape_payload(.Square(3)) + Shape_payload(.Dot())
@@ -128,7 +128,7 @@ def test_derive_generates_a_trait_impl(tmp_path):
 { derive_tag_impl } = prelude.derive
 Ranked:  { rank: (Self) i32 }
 Ordinal: { ord:  (Self) i32 }
-Color: Red, Green, Blue
+Color: Red | Green | Blue
 @emit(derive_tag_impl(reflect_trait(Ranked),  reflect(Color)))
 @emit(derive_tag_impl(reflect_trait(Ordinal), reflect(Color)))
 byRank<T: Ranked>  = (x: T) i32 { rank(x) }

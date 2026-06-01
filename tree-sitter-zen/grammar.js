@@ -59,10 +59,11 @@ module.exports = grammar({
                      '{', comma1($.field), optional(','), '}'),
     field: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
-    // Opt*<T>: None, Some(T)   (the glued `*` = public)
+    // Opt*<T>: None | Some(T)   (the glued `*` = public; variants are `|`-separated —
+    // a sum type is a *choice*, so `|` ("or"), vs the `{a, b}` *record* with commas)
     enum: $ => seq(field('name', $.identifier), optional(field('vis', token.immediate('*'))),
                    optional(field('tparams', $.type_params)), ':',
-                   comma1($.variant)),
+                   sep1($.variant, '|')),
     variant: $ => seq(field('name', $.identifier),
                       optional(seq('(', field('payload', $._type), ')'))),
 
