@@ -135,3 +135,20 @@ def test_statement_starting_with_paren_is_not_glued():
                     "m").decls, Fn)
     assert isinstance(fn.body[0], Call)            # g(n)
     assert isinstance(fn.body[1], Match)           # a separate statement
+
+
+def test_statement_starting_with_dot_is_an_enum_ctor_not_a_method_call():
+    # a `.Ok(…)` led statement after another statement is a fresh enum constructor,
+    # NOT a method call absorbed onto the previous statement (the postfix `.` is glued).
+    from zen.ast import EnumCtor
+    fn = only(parse("f = (b: i32) i32 { g(b)\n.Ok(b) }", "m").decls, Fn)
+    assert isinstance(fn.body[0], Call) and fn.body[0].callee == "g"
+    assert isinstance(fn.body[1], EnumCtor) and fn.body[1].name == "Ok"
+
+
+def test_same_line_method_chain_still_chains():
+    # the glued `.` must NOT break ordinary same-line chaining.
+    fn = only(parse("f = (xs: i32) i32 { xs.map(1).filter(2) }", "m").decls, Fn)
+    body = fn.body[-1]
+    assert isinstance(body, MethodCall) and body.method == "filter"
+    assert isinstance(body.recv, MethodCall) and body.recv.method == "map"
