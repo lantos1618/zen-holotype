@@ -369,10 +369,17 @@ def _params(d: Fn) -> str:
     return ", ".join(f"{c_type(p.type)} {p.name}" for p in d.params) or "void"
 
 
+def c_struct_fwd(cn) -> str:
+    """A forward declaration `typedef struct <cn> <cn>;`. Emitted for every struct/enum
+    tag before any slice typedef, so a `slice_<cn>` (which uses only `<cn>*`) compiles
+    regardless of whether the struct's full definition comes before or after it."""
+    return f"typedef struct {cn} {cn};"
+
+
 def c_struct(qual, d: Struct, sub=None, cname=None) -> str:
     sub = sub or {}
     body = " ".join(f"{c_type(subst(f.type, sub))} {f.name};" for f in d.fields)
-    return f"typedef struct {{ {body} }} {cname or c_name(qual)};"
+    return f"struct {cname or c_name(qual)} {{ {body} }};"      # definition (tag forward-declared)
 
 
 def c_enum(qual, d: EnumDecl, sub=None, cname=None) -> str:
@@ -385,7 +392,7 @@ def c_enum(qual, d: EnumDecl, sub=None, cname=None) -> str:
                        for v in d.variants if v.payload is not None)
     union = f" union {{ {members} }} u;" if members else ""
     tags = ", ".join(f"{cn}_{v.name}" for v in d.variants)
-    return f"typedef struct {{ int32_t tag;{union} }} {cn};\nenum {{ {tags} }};"
+    return f"struct {cn} {{ int32_t tag;{union} }};\nenum {{ {tags} }};"
 
 
 def c_proto(qual, d: Fn, cname=None) -> str:

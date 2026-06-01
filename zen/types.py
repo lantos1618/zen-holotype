@@ -510,9 +510,12 @@ def infer_enum_ctor(e, expect, locals_, namespace, scope):
     variant's declared payload type is checked like any other slot."""
     if not isinstance(expect, NameT):
         raise TypeErr(f"cannot tell which enum '.{e.name}' builds (no expected type here)")
-    decl = namespace.walk(expect.path).value
+    try:
+        decl = namespace.walk(expect.path).value
+    except Unresolved:                               # e.g. Option: a builtin coercion target,
+        decl = None                                  # not a declared, constructible enum
     if not isinstance(decl, EnumDecl):
-        raise TypeErr(f"'.{e.name}' used where {expect.path} (not an enum) is wanted")
+        raise TypeErr(f"'.{e.name}' used where {expect.path} (not a constructible enum) is wanted")
     var = next((v for v in decl.variants if v.name == e.name), None)
     if var is None:
         raise TypeErr(f"enum {expect.path} has no variant '.{e.name}'")
@@ -536,9 +539,12 @@ def infer_match(e, expect, locals_, namespace, scope):
     st = infer(e.subject, locals_, namespace, scope)
     if isinstance(st, PrimT):
         return _infer_match_lit(e, st, expect, locals_, namespace, scope)
-    if not isinstance(st, NameT) or not isinstance(namespace.walk(st.path).value, EnumDecl):
+    try:
+        decl = namespace.walk(st.path).value if isinstance(st, NameT) else None
+    except Unresolved:                               # Option and other non-declared names
+        decl = None
+    if not isinstance(decl, EnumDecl):
         raise TypeErr(f"match on a non-enum value ({show(st)})")
-    decl = namespace.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
     variants = {v.name: v for v in decl.variants}
 

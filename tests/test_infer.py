@@ -93,3 +93,32 @@ def test_field_on_non_struct_raises(namespace, scope):
 def test_structlit_unknown_field_raises(namespace, scope):
     with pytest.raises(TypeErr):
         infer(StructLit("Vec", (("bogus", Lit(1)),)), {}, namespace, scope)
+
+
+# ── robustness: a builtin/non-enum used as an enum is a clean error, not a crash ─
+def _check_program(tmp_path, src):
+    """Run the front-end + checker over a program; return the (qual, ok, why) results.
+    The point is that ill-formed enum use is *reported*, never an uncaught crash."""
+    from zen.main import (load, build_namespace, build_scopes, resolve,
+                          fold_comptime, run_emits, check)
+    (tmp_path / "main.zen").write_text(src)
+    files = load(tmp_path)
+    ns = build_namespace(files)
+    build_scopes(files); resolve(files, ns); fold_comptime(files, ns); run_emits(files, ns)
+    results, _ = check(files, ns)
+    return results
+
+
+def test_constructing_option_is_a_clean_error_not_a_crash(tmp_path):
+    # Option is a builtin coercion target (nullable pointers), not a constructible
+    # enum — `.None()` against it must report, not raise Unresolved.
+    results = _check_program(tmp_path,
+        "find* = (n: i32) Option<i32> { (n > 0).match { true => n, false => .None() } }")
+    assert any(q == "main.find" and not ok and "not a constructible enum" in why
+               for q, ok, why in results)
+
+
+def test_matching_on_option_is_a_clean_error_not_a_crash(tmp_path):
+    results = _check_program(tmp_path,
+        "g* = (o: Option<i32>) i32 { o.match { .Some(v) => v, .None => 0 } }")
+    assert any(q == "main.g" and not ok and "non-enum" in why for q, ok, why in results)
