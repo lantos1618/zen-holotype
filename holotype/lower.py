@@ -11,6 +11,16 @@ _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
 
 _slice_reg: dict = {}             # mangle(elem) -> elem type, for emitting slice typedefs
+_uid_reg: dict = {}               # id(node) -> stable small int (see _uid)
+
+
+def _uid(e) -> int:
+    """A reproducible, address-free integer name for a node. `id(e)` is a memory
+    address — using it for temp/subject names made the emitted C differ run-to-run
+    (breaking ccache, reproducible builds, and C diffs). Here we hand out small ints
+    in first-encounter order instead: same AST → same traversal → same names. Reset
+    per emit_c. AST nodes live for the whole emit, so `id` is never reused under us."""
+    return _uid_reg.setdefault(id(e), len(_uid_reg))
 
 
 def slice_typedefs() -> list:
@@ -152,7 +162,7 @@ _MISSING = object()
 
 
 def _tmp(e, i) -> str:
-    return f"_v{abs(id(e))}_{i}"
+    return f"_v{_uid(e)}_{i}"
 
 
 def _c_inline_body(stmts, locals_, space, scope, ret) -> str:
@@ -266,7 +276,7 @@ def c_match(e, locals_, space, scope, expect) -> str:
     # arms), so the final arm is the ternary's else.
     subj = c_expr(e.subject, locals_, space, scope)
     st = infer(e.subject, locals_, space, scope)
-    t = f"_subj{id(e)}"                                  # unique per match node (nesting-safe)
+    t = f"_subj{_uid(e)}"                                # unique per match node (nesting-safe)
 
     if isinstance(st, PrimT):                           # literal match: t == lit ? … : …
         body = lambda arm: f"({c_expr(arm.body, locals_, space, scope, expect)})"
@@ -303,7 +313,7 @@ def c_match_stmt(e, locals_, space, scope) -> str:
     assignment — which a ternary can't hold."""
     subj = c_expr(e.subject, locals_, space, scope)
     st = infer(e.subject, locals_, space, scope)
-    t = f"_subj{id(e)}"
+    t = f"_subj{_uid(e)}"
     arm_stmt = lambda a, al: (c_match_stmt(a.body, al, space, scope) if isinstance(a.body, Match)
                               else f"{c_expr(a.body, al, space, scope)};")
 

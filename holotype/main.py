@@ -14,7 +14,7 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, S
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
-                    impl_cname, mangle, slice_typedefs, _slice_reg, is_template, _CENV)
+                    impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
 from .comptime import fold_comptime, evaluate, reify_decl
 
@@ -133,7 +133,12 @@ def resolve(files, space):
 # The everyday `loop` sugar collapses onto the one structured primitive (While)
 # BEFORE checking, so check + lower only ever meet @while. Nothing is unravelled
 # to gotos — While stays structured (→ a C `for`) so it can auto-vectorize.
+_seq_ctr = [0]                                          # element-loop `_seq` names: a deterministic
+                                                        # counter (not id()) so desugaring is reproducible
+
+
 def desugar_loops(files):
+    _seq_ctr[0] = 0
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Fn) and d.body is not None and not d.extern:
@@ -170,7 +175,8 @@ def _desugar_stmt(s):
         if s.count is None:                          # loop((h){B}) -> @while(true){B}
             return [While(Bool(True), body, None)]
         if len(s.params) >= 3:                        # element form: loop(xs, (h, i, x) { B })
-            seq, idx, elem = f"_seq{id(s)}", s.params[1], s.params[2]
+            _seq_ctr[0] += 1
+            seq, idx, elem = f"_seq{_seq_ctr[0]}", s.params[1], s.params[2]
             cond = Bin("<", Var(idx), Field(Var(seq), "len"))      # i < xs.len
             step = Assign(Var(idx), Bin("+", Var(idx), Lit(1)))
             pre = (Let(elem, Index(Var(seq), Var(idx))),) if _mentions(body, elem) else ()  # x := xs[i]
@@ -502,6 +508,7 @@ def emit_c(files, passing, space, extra=""):
             impl_fns.append((impl_cname(tp, ty, m), mfn, msc))
 
     _slice_reg.clear()                                   # slice typedefs collected during lowering
+    _uid_reg.clear()                                     # node→name ids: reset so output is reproducible
     _CENV.clear()                                        # closure-inlining env (always empties itself)
     lines = ["#include <stdint.h>", "#include <stdbool.h>"]
     externs = [d for f in files.values() for d in f.decls if isinstance(d, Fn) and d.extern]
