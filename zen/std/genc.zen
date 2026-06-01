@@ -30,14 +30,17 @@ IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } els
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData)
 // types + typed parameters
-Ty*: I32 | I64 | U8 | Bool | Named(str)                    // a C scalar type, or a named struct
+Ty*: I32 | I64 | U8 | Bool | Named(str) | Void             // a C scalar type, a named struct, or void
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
 Field*: { name: str, ty: Ty }
 StructDecl*: { name: str, fields: [Field] }             // typedef struct { fields } name;
-Decl*: DFunc(Func) | DStruct(StructDecl) | DRaw(str)      // DRaw = verbatim C (the escape hatch)
+// an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
+VariantDef*: { name: str, payload: Ty }
+EnumDecl*: { name: str, variants: [VariantDef] }
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -60,8 +63,12 @@ tnamed* = (n: str) Ty { .Named(n) }
 param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
 field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
 sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
+tvoid* = () Ty { .Void() }
+vdef* = (nm: str, p: Ty) VariantDef { VariantDef { name: nm, payload: p } }
+edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl { name: nm, variants: vs } }
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
+denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 
@@ -76,7 +83,14 @@ gen_int = (s: String, n: i32) String {
 
 // a Ty -> its C type name
 cty = (t: Ty) str {
-    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool", .Named(n) => n }
+    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool", .Named(n) => n, .Void => "void" }
+}
+
+// does any variant carry a payload? (no payloads -> emit no union, like lower.py)
+any_payload = (vs: [VariantDef]) bool {
+    found := false
+    vs.loop((h, i, v) { found = v.payload.match { .Void => found, _ => true } })
+    found
 }
 
 // ── emit an expression (recursive) ──────────────────────────────────────────
@@ -142,11 +156,36 @@ gen_struct* = (s: String, sd: StructDecl) String {
     open.append("} ").append(sd.name).append(";")
 }
 
-// emit a top-level declaration (a function, a struct, or verbatim C)
+// emit an enum's union members (the payload-carrying variants) and tag constants
+gen_union = (s: String, vs: [VariantDef]) String {
+    u := s.append(" union { ")
+    vs.loop((h, i, v) {
+        u = v.payload.match { .Void => u, _ => u.append(cty(v.payload)).append(" ").append(v.name).append("; ") }
+    })
+    u.append("} u;")
+}
+gen_tags = (s: String, ename: str, vs: [VariantDef]) String {
+    e := s.append(" enum { ")
+    vs.loop((h, i, v) {
+        e = (i == 0).match { true => e, false => e.append(", ") }
+        e = e.append(ename).append("_").append(v.name)
+    })
+    e.append(" };")
+}
+
+// emit an enum (tagged union): `typedef struct { int32_t tag; union { … } u; } E; enum { E_A, … };`
+gen_enum* = (s: String, ed: EnumDecl) String {
+    head := s.append("typedef struct { int32_t tag;")
+    body := (any_payload(ed.variants)).match { true => head.gen_union(ed.variants), false => head }
+    body.append(" } ").append(ed.name).append(";").gen_tags(ed.name, ed.variants)
+}
+
+// emit a top-level declaration (a function, a struct, an enum, or verbatim C)
 gen_decl* = (s: String, d: Decl) String {
     d.match {
         .DFunc(f)    => s.gen_func(f),
         .DStruct(sd) => s.gen_struct(sd),
+        .DEnum(ed)   => s.gen_enum(ed),
         .DRaw(c)     => s.append(c)                     // verbatim — SIMD attrs/pragmas/intrinsics
     }
 }
