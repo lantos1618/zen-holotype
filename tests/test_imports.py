@@ -85,6 +85,18 @@ def test_deeply_nested_modules_resolve():
     assert ("main.use", True, "ok") in check(files, space)[0]
 
 
+def test_fully_qualified_type_needs_no_import():
+    # a type can be named by its full path inline — no `{ Vec } = core.vec` needed
+    files = files_from({
+        "core.vec": "Vec*: { len: i32 }",
+        "main": "use* = (v: Ptr<core.vec.Vec>) i32 { v.len }",
+    })
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    assert ("main.use", True, "ok") in check(files, space)[0]
+
+
 def test_same_module_can_use_its_own_private_names():
     # privacy is about IMPORTS across modules; a file freely uses its own bare names
     files = files_from({"m": "helper = (n: i32) i32 { n + 1 }\nf* = (x: i32) i32 { helper(x) }"})

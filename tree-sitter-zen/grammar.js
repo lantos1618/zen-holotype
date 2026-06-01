@@ -84,7 +84,10 @@ module.exports = grammar({
     pointer: $ => seq(field('dir', choice('Ptr', 'MutPtr', 'RawPtr')),
                       '<', field('pointee', $._type), '>'),
     slice_type: $ => seq('[', field('elem', $._type), ']'),   // [T] — a (ptr, len) view
+    // a nominal type: `Vec`, `Box<T>`, or a fully-qualified `core.vec.Vec`
+    // (a dotted path, so a type can be named without importing it first).
     named_type: $ => seq(field('name', $.identifier),
+                         repeat(seq('.', field('seg', $.identifier))),
                          optional(seq('<', comma1($._type), '>'))),
 
     block: $ => seq('{', repeat($._statement), '}'),
