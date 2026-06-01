@@ -383,6 +383,15 @@ def _infer_call(e, expect, locals_, space, scope):
         return PtrT(Dir.MUT, infer(e.args[0], locals_, space, scope))
     if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
         return _infer_mem(e, locals_, space, scope)
+    if e.callee == "slice":                               # slice(ptr, len): a [T] view of raw memory
+        if not isinstance(expect, SliceT):                # element type comes from the wanted slice
+            raise TypeErr("slice(ptr, len) needs a known slice type here "
+                          "(e.g. a `[T]` return slot or parameter)")
+        if len(e.args) != 2 or not isinstance(infer(e.args[0], locals_, space, scope), PtrT):
+            raise TypeErr("slice(ptr, len): a pointer and a length")
+        if not isinstance(infer(e.args[1], locals_, space, scope), PrimT):
+            raise TypeErr("slice length must be numeric")
+        return expect
     if isinstance(locals_.get(e.callee), FnT):            # calling a closure parameter: f(acc, x)
         fnt = locals_[e.callee]
         if len(e.args) != len(fnt.params):

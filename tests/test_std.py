@@ -142,3 +142,54 @@ main* = () i32 {
 """)
     assert "main.main" in passing
     assert run(tmp_path, emit_c(files, passing, space)) == 27   # 1 + 2 + 0 + 8 + 16
+
+
+# ── allocating map/filter (return a fresh heap slice) via the slice intrinsic ─
+def test_allocating_map_returns_fresh_slice(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ map } = std.iter
+main* = () i32 {
+    ys := map([1, 2, 3, 4], (x) { x * 10 })     // fresh [10, 20, 30, 40]
+    ys[0] + ys[1] + ys[2] + ys[3]
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 100
+
+
+def test_allocating_filter_packs_kept(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ filter } = std.iter
+main* = () i32 {
+    zs := filter([1, 2, 3, 4, 5, 6], (x) { x > 3 })   // fresh [4, 5, 6]
+    zs[0] + zs[1] + zs[2]
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 15   # 4 + 5 + 6
+
+
+def test_slice_intrinsic_views_raw_memory(tmp_path):
+    # slice(ptr, len) reinterprets raw bytes as a typed [i32] view (from_raw_parts)
+    files, space, passing = build(tmp_path, """
+{ alloc, release } = std.mem
+view* = (p: RawPtr<u8>, n: i64) [i32] { slice(p, n) }
+main* = () i32 {
+    xs := view(alloc(8), 2)
+    xs[0] = 30
+    xs[1] = 12
+    xs[0] + xs[1]
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 42
+
+
+def test_slice_needs_a_known_element_type(tmp_path):
+    # slice in a let has no expected slice type → a clear error (not silent)
+    (tmp_path / "main.zen").write_text("""
+{ alloc } = std.mem
+bad* = () i32 { v := slice(alloc(8), 2)  0 }
+""")
+    files = load(tmp_path)
+    space = build_space(files)
+    build_scopes(files); resolve(files, space)
+    results = check(files, space)[0]
+    assert any(q == "main.bad" and not ok and "slice" in why for q, ok, why in results)

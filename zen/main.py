@@ -417,7 +417,7 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None, cenv=None):
     elif isinstance(e, Closure):                          # a closure literal that wasn't a call arg
         pass                                              # (only reachable via a template call, handled there)
     elif isinstance(e, Call):
-        if e.callee in ("addr", "load", "store", "offset"):   # intrinsics: just scan args
+        if e.callee in ("addr", "load", "store", "offset", "slice"):   # intrinsics: just scan args
             for a in e.args:
                 _scan_expr(a, locals_, space, scope, sink, None, cenv)
             return
