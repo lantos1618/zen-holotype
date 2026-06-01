@@ -331,12 +331,15 @@ def _infer(e, locals_, namespace, scope, expect=None):
             return FnT(tuple(expect.params), expect.ret)
         case Call():
             return _infer_call(e, expect, locals_, namespace, scope)
-        case MethodCall(recv, method, args):                    # the loop handle: h.break()/h.continue()
-            if method in ("break", "continue"):
+        case MethodCall(recv, method, args):
+            if method in ("break", "continue"):                 # the loop handle: h.break()/h.continue()
                 if args:
                     raise TypeErr(f"'{method}' takes no arguments")
                 return PrimT(Prim.VOID)
-            raise TypeErr(f"unknown method '.{method}'")
+            # UFCS: `x.f(a, b)` is sugar for `f(x, a, b)` — the receiver is the first
+            # argument. Resolves free functions and trait-bound methods alike.
+            call = Call(method, (recv,) + tuple(args), getattr(e, "pos", None))
+            return _infer_call(call, expect, locals_, namespace, scope)
         case _:
             raise TypeErr(f"unknown expr {e!r}")
 

@@ -427,6 +427,11 @@ def _scan_expr(e, locals_, namespace, scope, sink, expect=None, cenv=None):
             _scan_expr(arm.body, al, namespace, scope, sink, expect, cenv)
     elif isinstance(e, Closure):                          # a closure literal that wasn't a call arg
         pass                                              # (only reachable via a template call, handled there)
+    elif isinstance(e, MethodCall):                       # UFCS: x.f(a) == f(x, a)
+        if e.method in ("break", "continue"):
+            return
+        call = Call(e.method, (e.recv,) + tuple(e.args), getattr(e, "pos", None))
+        _scan_expr(call, locals_, namespace, scope, sink, expect, cenv)
     elif isinstance(e, Call):
         if e.callee in ("addr", "load", "store", "offset", "slice"):   # intrinsics: just scan args
             for a in e.args:

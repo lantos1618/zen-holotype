@@ -45,6 +45,9 @@ where it's headed, [VISION](VISION.md).)
 - **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`), `xs[i] = v` (write a slice element).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
+- **UFCS** — `x.f(a, b)` is sugar for `f(x, a, b)`: the receiver becomes the first argument.
+  It desugars uniformly (checker, reachability scan, lowerer), so it resolves free functions and
+  trait-bound methods identically to the free-call form, and chains (`5.inc().dbl()`).
 - **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `Area*: { … }` —
   not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = private to
   its file, and **enforced**: another module importing a non-`*` name is a `Private` error.
@@ -137,8 +140,7 @@ driven by a `build.zen` written in the language itself. Ill-typed functions are 
 excluded from codegen; the rest builds and runs.
 
 ## Not yet (the honest gaps)
-- No modules beyond files. Trait methods are called as free functions (`area(x)`, not `x.area()`);
-  there's no method-call syntax for user/trait methods (only the built-in `.loop` / `.match`).
+- No modules beyond files.
 - The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
   (the `map_into`/`filter_into` forms are already generic).
 - Trait reflection exposes method *names* (any arity), but not method *signatures* (param/return
