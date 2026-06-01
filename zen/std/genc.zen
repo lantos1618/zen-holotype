@@ -14,7 +14,8 @@
 // which needs only a forward decl, so the recursion closes.
 VarData*: { name: str }
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
-Expr*: Int(i32), Var(VarData), Bin(BinData)
+CallData*: { fn: str, arg: Ptr<Expr> }                  // fn(arg) — a one-arg call
+Expr*: Int(i32), Var(VarData), Bin(BinData), Call(CallData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -27,6 +28,7 @@ Func*: { name: str, param: str, body: [Stmt] }          // int32_t name(int32_t 
 lit* = (n: i32) Expr { .Int(n) }
 vref* = (nm: str) Expr { .Var(VarData { name: nm }) }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: l, rhs: r }) }
+call* = (fn: str, a: Ptr<Expr>) Expr { .Call(CallData { fn: fn, arg: a }) }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 
@@ -44,7 +46,8 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
     e.match {                                       // match auto-derefs the Ptr<Expr>
         .Int(n) => gen_int(s, n),
         .Var(v) => append(s, v.name),
-        .Bin(b) => gen_bin(s, b)
+        .Bin(b) => gen_bin(s, b),
+        .Call(c) => append(gen_expr(append(append(s, c.fn), "("), c.arg), ")")   // fn(arg)
     }
 }
 
@@ -64,12 +67,22 @@ gen_stmt = (s: String, st: Stmt) String {
     }
 }
 
-// genC: an AST in, C source out — at runtime. Emits a whole function body.
-genC* = (f: Func) String {
-    s := append(new(), "int32_t ")
-    s = append(s, f.name)
-    s = append(append(s, "(int32_t "), f.param)
-    s = append(s, ") { ")
-    f.body.loop((h, i, st) { s = append(gen_stmt(s, st), " ") })   // accumulate each statement
-    append(s, "}")
+// emit one function, appending to `s` (so a module can stream several into one buffer)
+gen_func* = (s: String, f: Func) String {
+    h := append(s, "int32_t ")
+    h2 := append(h, f.name)
+    h3 := append(append(h2, "(int32_t "), f.param)
+    open := append(h3, ") { ")
+    f.body.loop((hd, i, st) { open = append(gen_stmt(open, st), " ") })   // accumulate each statement
+    append(open, "}")
+}
+
+// genC: an AST in, C source out — at runtime.
+genC* = (f: Func) String { gen_func(new(), f) }
+
+// genModule: a whole translation unit — several functions, space-separated.
+genModule* = (fns: [Func]) String {
+    s := new()
+    fns.loop((h, i, f) { s = append(gen_func(s, f), " ") })
+    s
 }

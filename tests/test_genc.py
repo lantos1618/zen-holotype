@@ -17,7 +17,7 @@ def emit_via_zen(tmp_path, main_body):
     """Compile + run a zen program whose main builds an AST and prints genC(it).
     Returns the C source the zen program produced at runtime."""
     prog = """
-{ Func, Stmt, Expr, lit, vref, bin, slet, sret, genC } = std.genc
+{ Func, Stmt, Expr, lit, vref, bin, call, slet, sret, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -78,6 +78,45 @@ def test_genc_emits_a_multi_statement_body(tmp_path):
     0"""
     assert emit_via_zen(tmp_path, body) == \
         "int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }"
+
+
+def test_genc_emits_a_call_expression(tmp_path):
+    # int32_t g(int32_t x) { return f((x + 1)); }
+    body = """
+    x := vref("x")
+    one := lit(1)
+    xp1 := bin("+", addr(x), addr(one))
+    c := call("f", addr(xp1))
+    emit(genC(Func { name: "g", param: "x", body: [sret(addr(c))] }))
+    0"""
+    assert emit_via_zen(tmp_path, body) == "int32_t g(int32_t x) { return f((x + 1)); }"
+
+
+def test_genc_module_of_two_functions_compiles_and_runs(tmp_path):
+    # a whole translation unit: dbl + calc (which CALLS dbl). THE LOOP closes on the
+    # generated multi-function C: calc(4) == dbl(5) == 10.
+    body = """
+    n1 := vref("n")
+    n2 := vref("n")
+    nn := bin("+", addr(n1), addr(n2))
+    dbl := Func { name: "dbl", param: "n", body: [sret(addr(nn))] }
+    x := vref("x")
+    one := lit(1)
+    xp1 := bin("+", addr(x), addr(one))
+    dc := call("dbl", addr(xp1))
+    calc := Func { name: "calc", param: "x", body: [sret(addr(dc))] }
+    emit(genModule([dbl, calc]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "int32_t dbl(int32_t n) { return (n + n); }" in generated
+    assert "int32_t calc(int32_t x) { return dbl((x + 1)); }" in generated
+    (tmp_path / "gen.c").write_text(
+        "#include <stdint.h>\n" + generated +
+        '\n#include <stdio.h>\nint main(void){ printf("%d\\n", calc(4)); return 0; }\n')
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "gen.c"), "-o", str(tmp_path / "gen")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip() == "10"
 
 
 def test_generated_multi_statement_c_compiles_and_runs(tmp_path):
