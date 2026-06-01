@@ -453,7 +453,10 @@ def collect_instances(files, passing, space):
     (struct or enum) used. -> (fn_insts, impls_used, data_insts)"""
     decl_scope = {f"{f.ns}.{d.name}": f.scope
                   for f in files.values() for d in f.decls if not isinstance(d, Impl)}
-    insts, impls_used, data_insts, work = {}, set(), {}, []
+    # impls_used is an *ordered* set (a dict): emit_c iterates it to order trait-impl
+    # output, and a plain set's iteration order varies with PYTHONHASHSEED — which
+    # would make codegen non-reproducible. Discovery order is deterministic; keep it.
+    insts, impls_used, data_insts, work = {}, {}, {}, []
 
     def add(qual, targs):
         if (qual, targs) in insts:
@@ -467,7 +470,7 @@ def collect_instances(files, passing, space):
     def add_impl(trait_path, type_path):
         if (trait_path, type_path) in impls_used:
             return
-        impls_used.add((trait_path, type_path))
+        impls_used[(trait_path, type_path)] = None
         for mfn, msc in space.impls[(trait_path, type_path)].values():
             work.append((mfn, msc))
 
