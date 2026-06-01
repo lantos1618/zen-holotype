@@ -335,13 +335,14 @@ def _check_impl(d, f, space, results, passing):
 
 # ───────────────────────── monomorphization ─────────────────────────────────
 class _Sink:
-    """Three collectors the scanner feeds: generic-fn instances, trait-impl uses,
-    and generic data-type instances (structs + enums). `expect` threads through
-    exactly like in c_expr, so an enum ctor knows which enum instance it builds."""
-    __slots__ = ("fn", "impl", "data")
+    """Collectors the scanner feeds: generic-fn instances, trait-impl uses,
+    generic data-type instances (structs + enums), and `reach` — a plain non-generic
+    fn that was called (for dead-code elimination from an entry point). `expect`
+    threads through exactly like in c_expr, so an enum ctor knows which instance."""
+    __slots__ = ("fn", "impl", "data", "reach")
 
-    def __init__(self, fn, impl, data):
-        self.fn, self.impl, self.data = fn, impl, data
+    def __init__(self, fn, impl, data, reach):
+        self.fn, self.impl, self.data, self.reach = fn, impl, data, reach
 
 
 def _scan_expr(e, locals_, space, scope, sink, expect=None, cenv=None):
@@ -427,6 +428,7 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None, cenv=None):
             ptypes = [subst(p.type, s) for p in callee.params]
             sink.fn(target, tuple(s[n] for n in callee.tparams))
         else:
+            sink.reach(target)                            # a plain fn call — mark it live
             ptypes = [p.type for p in callee.params]
         for a, pt in zip(e.args, ptypes):
             _scan_expr(a, locals_, space, scope, sink, pt, cenv)
@@ -480,10 +482,16 @@ def specialize(fn, s):
               subst(fn.ret, s), fn.body, fn.pub, (), fn.bounds)
 
 
-def collect_instances(files, passing, space):
-    """Reachable from the non-generic passing functions, transitively: every
-    concrete generic-fn instance, trait impl, and generic data-type instance
-    (struct or enum) used. -> (fn_insts, impls_used, data_insts)"""
+def collect_instances(files, passing, space, roots=None):
+    """Reachable, transitively, from the seed functions: every concrete generic-fn
+    instance, trait impl, generic data-type instance, and (for dead-code
+    elimination) every plain fn actually called.
+
+    `roots` None  → seed from ALL passing non-generic fns (a library: emit
+                    everything that type-checks); `reached` is returned as None.
+    `roots` a set → seed from just those quals (an executable's entry); `reached`
+                    is the set of plain fns transitively called, so emit_c can drop
+                    the rest. -> (fn_insts, impls_used, data_insts, reached)"""
     decl_scope = {f"{f.ns}.{d.name}": f.scope
                   for f in files.values() for d in f.decls if not isinstance(d, Impl)}
     # impls_used is an *ordered* set (a dict): emit_c iterates it to order trait-impl
@@ -510,20 +518,38 @@ def collect_instances(files, passing, space):
     def add_data(qual, targs):                # struct OR enum; inner-first insertion = emit order
         data_insts.setdefault((qual, targs), dict(zip(space.walk(qual).value.tparams, targs)))
 
-    sink = _Sink(add, add_impl, add_data)
-    for f in files.values():
-        for d in f.decls:
-            if (isinstance(d, Fn) and not d.tparams and not is_template(d)
-                    and f"{f.ns}.{d.name}" in passing):
-                sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
-                _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink, d.ret)
+    reached = None if roots is None else set()
+
+    def add_reach(qual):                      # a plain fn became live — scan it once (DCE)
+        if reached is None or qual in reached or qual not in passing:
+            return
+        fn = space.walk(qual).value
+        if not isinstance(fn, Fn) or fn.tparams or is_template(fn) or fn.body is None:
+            return                            # generics/templates/externs handled elsewhere
+        reached.add(qual)
+        sc = trait_methods_scope(fn, decl_scope[qual], space) if fn.bounds else decl_scope[qual]
+        work.append((fn, sc))
+
+    sink = _Sink(add, add_impl, add_data, add_reach)
+    if roots is None:                         # library: every passing non-generic fn is a seed
+        for f in files.values():
+            for d in f.decls:
+                if (isinstance(d, Fn) and not d.tparams and not is_template(d)
+                        and f"{f.ns}.{d.name}" in passing):
+                    sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
+                    _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink, d.ret)
+    else:                                     # executable: seed from the entry, prune the rest
+        for r in roots:
+            add_reach(r)
     while work:
         fn, sc = work.pop()
         _scan_block(fn.body, {p.name: p.type for p in fn.params}, space, sc, sink, fn.ret)
-    return insts, impls_used, data_insts
+    return insts, impls_used, data_insts, reached
 
 
-def emit_c(files, passing, space, extra=""):
+def emit_c(files, passing, space, extra="", roots=None):
+    # `roots` (a set of entry quals) prunes plain fns to those reachable from it —
+    # dead-code elimination for an executable. None emits every passing fn (a lib).
     # Integrity: codegen lowers struct/enum/fn directly and trait impls on demand.
     # A trait declaration emits nothing; anything else fails loudly.
     for f in files.values():
@@ -534,7 +560,8 @@ def emit_c(files, passing, space, extra=""):
                 raise NotImplementedError(
                     f"cannot lower {type(d).__name__} '{getattr(d, 'name', '?')}' to C yet "
                     f"(codegen supports struct + enum + fn + trait/impl)")
-    insts, impls_used, data_insts = collect_instances(files, passing, space)
+    insts, impls_used, data_insts, reached = collect_instances(files, passing, space, roots)
+    live = lambda qual: reached is None or qual in reached   # DCE: plain fn reachable?
     impl_fns = []                                         # the trait methods actually used
     for (tp, ty) in impls_used:
         for m, (mfn, msc) in space.impls[(tp, ty)].items():
@@ -572,7 +599,7 @@ def emit_c(files, passing, space, extra=""):
     for f in files.values():                             # prototypes: concrete fns…
         for d in f.decls:
             if (isinstance(d, Fn) and not d.tparams and not d.extern and not is_template(d)
-                    and f"{f.ns}.{d.name}" in passing):
+                    and f"{f.ns}.{d.name}" in passing and live(f"{f.ns}.{d.name}")):
                 lines.append(c_proto(f"{f.ns}.{d.name}", d))
     for (qual, targs), (spec, _) in insts.items():       # …monomorphized instances…
         lines.append(c_proto(qual, spec, inst_name(qual, targs)))
@@ -582,7 +609,7 @@ def emit_c(files, passing, space, extra=""):
     for f in files.values():                             # definitions
         for d in f.decls:
             if (isinstance(d, Fn) and not d.tparams and not is_template(d)
-                    and f"{f.ns}.{d.name}" in passing):
+                    and f"{f.ns}.{d.name}" in passing and live(f"{f.ns}.{d.name}")):
                 lines.append(c_def(f"{f.ns}.{d.name}", d, space, f.scope))
     for (qual, targs), (spec, sc) in insts.items():
         lines.append(c_def(qual, spec, space, sc, inst_name(qual, targs)))
@@ -763,7 +790,8 @@ def cmd_build(root):
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{cfg['name']}.c", out_dir / cfg["name"]
     cc_extra = [*cfg["cflags"], *(f"-l{lib}" for lib in cfg["links"])]   # build.zen flags
-    if compile_if_changed(cpath, bpath, emit_c(files, passing, space, harness), cc_extra):
+    exe_c = emit_c(files, passing, space, harness, roots={entry})        # DCE from the entry
+    if compile_if_changed(cpath, bpath, exe_c, cc_extra):
         print(f"\n── compiled {cpath} ──")
     else:
         print(f"\n── {bpath} up to date (cached) ──")
