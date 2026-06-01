@@ -99,6 +99,13 @@ where it's headed, [VISION](VISION.md).)
   `[u8]` view), `free`. Functional — each op returns the updated `(ptr,len,cap)` header while the
   buffer is `realloc`'d underneath, so `s := s.append("…")` threads it. This is the keystone for
   **runtime code generation** — a backend can emit source as a value the running program builds.
+- **`std.genc` — a C backend written in Zen, run at RUNTIME.** It walks a small AST (ordinary
+  lowered structs + enums — runtime values) and emits C source into a `String`: `genC(f: Func)
+  → String`. A running zen program builds an `Func`/`Expr`/`Term` value and gets C source as a
+  value — and that emitted C compiles and computes (the test closes the loop: zen emits
+  `int32_t addk(int32_t x) { return x + 5; }`, which is then compiled and run). The self-hosting
+  seed: codegen is the language's own ordinary code, not the host's. (A subset today; the path is
+  to grow it toward lowering zen in zen.)
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 
