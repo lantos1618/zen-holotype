@@ -262,6 +262,14 @@ def is_prelude_ns(ns):
     return ns == "prelude" or ns.startswith("prelude.")
 
 
+def is_generator(d):
+    """A comptime generator: a fn whose result is a prelude (Ast-model) type — e.g.
+    `(spec) Decl`. It IS type-checked (so its Ast construction is validated against
+    the model), but it's consumed by @emit at comptime and never lowered (those
+    types have no runtime C form)."""
+    return isinstance(d, Fn) and isinstance(d.ret, NameT) and is_prelude_ns(d.ret.path)
+
+
 def _graft_impl(d, f, space):
     """Register a generated trait impl exactly like resolve() does for a written
     one: resolve its methods and record it in the impls registry."""
@@ -558,7 +566,7 @@ def collect_instances(files, passing, space, roots=None):
         for f in files.values():
             for d in f.decls:
                 if (isinstance(d, Fn) and not d.tparams and not is_template(d)
-                        and f"{f.ns}.{d.name}" in passing):
+                        and not is_generator(d) and f"{f.ns}.{d.name}" in passing):
                     sc = trait_methods_scope(d, f.scope, space) if d.bounds else f.scope
                     _scan_block(d.body, {p.name: p.type for p in d.params}, space, sc, sink, d.ret)
     else:                                     # executable: seed from the entry, prune the rest
@@ -622,6 +630,7 @@ def emit_c(files, passing, space, extra="", roots=None):
     for f in files.values():                             # prototypes: concrete fns…
         for d in f.decls:
             if (isinstance(d, Fn) and not d.tparams and not d.extern and not is_template(d)
+                    and not is_generator(d)
                     and f"{f.ns}.{d.name}" in passing and live(f"{f.ns}.{d.name}")):
                 lines.append(c_proto(f"{f.ns}.{d.name}", d))
     for (qual, targs), (spec, _) in insts.items():       # …monomorphized instances…
@@ -632,6 +641,7 @@ def emit_c(files, passing, space, extra="", roots=None):
     for f in files.values():                             # definitions
         for d in f.decls:
             if (isinstance(d, Fn) and not d.tparams and not is_template(d)
+                    and not is_generator(d)
                     and f"{f.ns}.{d.name}" in passing and live(f"{f.ns}.{d.name}")):
                 lines.append(c_def(f"{f.ns}.{d.name}", d, space, f.scope))
     for (qual, targs), (spec, sc) in insts.items():

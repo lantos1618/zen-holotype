@@ -97,6 +97,10 @@ where it's headed, [VISION](VISION.md).)
     traits (`reflect_trait`, `trait_method_name`, `trait_method_count`,
     `trait_method_name_at` — every method, not just the first), plus `concat` — and
   - a ~40-line **reifier** (Zen `Ast` value → real `ast.Fn`/`Impl`).
+- **The `Ast` model is public**, so *you* can write generators, not just the prelude. A
+  generator is an ordinary Zen fn returning `Decl` — so it's **type-checked against the
+  `Ast`** (a malformed construction like `FuncData { nm: <i32> }` is a `str` mismatch at
+  check time, not a crash at reify) — yet never lowered (it's comptime-only).
 - **Five self-hosted derives, all ordinary Zen functions:**
 
   | derive | generates |
