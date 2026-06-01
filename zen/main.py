@@ -12,7 +12,8 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, S
                   Str, StructLit, SliceLit, Index, Bin, Not, Field, Let, Assign, While, Loop,
                   Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var, Closure)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
-                    ret_type, show, scope_with_bounds, TraitMethod, TypeErr, Unresolved, Private)
+                    ret_type, show, scope_with_bounds, TraitMethod, TypeErr, Unresolved, Private,
+                    Located)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
@@ -311,7 +312,7 @@ def _check_fn(qual, ns, d, space, results, passing):
         core = (f"{show(ex.given)}  ⊀  {show(ex.want)}"
                 if ex.given is not None else str(ex))
         loc = f"{ns}:{ex.pos[0] + 1}:{ex.pos[1] + 1}: " if ex.pos else ""
-        results.append((qual, False, loc + core))
+        results.append((qual, False, Located(loc + core, ns, ex.pos)))
 
 
 def check(files, space):
@@ -741,14 +742,34 @@ def run_test_root(root, test_rel, cc_extra=()):
 
 
 # ───────────────────────── commands ─────────────────────────────────────────
+def caret(root, why):
+    """The offending source line + a caret under the column, built straight from a
+    Located diagnostic's structured `(ns, pos)` — no message re-parsing. '' if the
+    location is absent or the source can't be read."""
+    ns, pos = getattr(why, "ns", None), getattr(why, "pos", None)
+    if not ns or not pos:
+        return ""
+    try:
+        line = (pathlib.Path(root) / (ns.replace(".", "/") + ".zen")).read_text().splitlines()[pos[0]]
+    except (OSError, IndexError):
+        return ""
+    return f"\n        {line}\n        {' ' * pos[1]}^"
+
+
+def report(results, root):
+    """Print the PASS/FAIL table; under each failure, show its source line + caret."""
+    for qual, ok, why in results:
+        print(f"   {'PASS ✓' if ok else 'FAIL ✗'}  {qual:<14} {'' if ok else why}"
+              + ("" if ok else caret(root, why)))
+
+
 def cmd_check(root):
     files = load(root)
     space = build_space(files)
     build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
     results, passing = check(files, space)
     print(f"── check {root} ──")
-    for qual, ok, why in results:
-        print(f"   {'PASS ✓' if ok else 'FAIL ✗'}  {qual:<14} {'' if ok else why}")
+    report(results, root)
     pathlib.Path("out.c").write_text(emit_c(files, passing, space))
     print("   -> wrote out.c")
 
@@ -785,8 +806,7 @@ def cmd_build(root):
     build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
     results, passing = check(files, space)
     print("\n── type checks ──")
-    for qual, ok, why in results:
-        print(f"   {'PASS ✓' if ok else 'FAIL ✗'}  {qual:<14} {'' if ok else why}")
+    report(results, root)
 
     entry_ns = pathlib.Path(cfg["main"]).with_suffix("").as_posix().replace("/", ".")
     entry = f"{entry_ns}.main"

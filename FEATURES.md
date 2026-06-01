@@ -107,6 +107,12 @@ where it's headed, [VISION](VISION.md).)
   @emit(derive_eq(reflect(Point)))   // -> bool Point_eq(Point const*, Point const*) { ... }
   ```
 
+## Diagnostics
+- A type error carries its **structured location** (a `Located` message holding `ns`+`(row,col)`),
+  and the `check`/`build` report draws a **caret** under the offending column straight from that
+  structure — no re-parsing of the formatted string. Each ill-typed function is reported
+  independently (the rest still builds).
+
 ## Pipeline
 `parse (tree-sitter) → trie → resolve → fold comptime → run emits → typecheck → lower to C → cc`,
 driven by a `build.zen` written in the language itself. Ill-typed functions are reported and
