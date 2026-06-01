@@ -87,3 +87,27 @@ def test_comptime_infinite_loop_is_fueled(tmp_path):
 spin* = (n: i32) i32 { spin(n) }
 bad*  = () i32 { comptime(spin(1)) }
 """)
+
+
+# ── multi-method trait reflection (goal #13): count + name_at over all methods ─
+def test_trait_method_count_reflects_all_methods(tmp_path):
+    files, space, passing = frontend(tmp_path, """
+TwoWay: { fwd: (Self) i32, back: (Self) i32 }
+n* = () i32 { comptime(trait_method_count(reflect_trait(TwoWay))) }
+""")
+    c = emit_c(files, passing, space)
+    assert "m_n(void) { return 2; }" in c                 # both methods seen (not just the first)
+
+
+def test_trait_method_name_at_indexes_methods():
+    # name_at(i) reaches ANY method, not just methods[0] — the core of the fix.
+    # (driven directly: comptime has no string compare to assert in-source)
+    from zen.parser import parse
+    from zen.comptime import evaluate
+    files = {"m": parse("TwoWay: { fwd: (Self) i32, back: (Self) i32 }", "m")}
+    space = build_space(files); build_scopes(files); resolve(files, space)
+    g = lambda src: evaluate(parse(f"x = () i32 {{ {src} }}", "q").decls[0].body[0],
+                             space, files["m"].scope)
+    assert g("trait_method_count(reflect_trait(TwoWay))") == 2
+    assert g("trait_method_name_at(reflect_trait(TwoWay), 0)") == "fwd"
+    assert g("trait_method_name_at(reflect_trait(TwoWay), 1)") == "back"   # the SECOND method

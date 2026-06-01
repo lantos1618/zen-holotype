@@ -170,7 +170,22 @@ def _bi_trait_method_name(e, env, space, scope, fuel):
     t = _eval(e.args[0], env, space, scope, fuel)
     if not isinstance(t, TraitDecl):
         raise ComptimeErr("trait_method_name: argument is not a trait")
-    return t.methods[0].name                     # single-method traits, for now
+    return t.methods[0].name                     # the first method (a convenience)
+
+
+def _bi_trait_method_count(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    if not isinstance(t, TraitDecl):
+        raise ComptimeErr("trait_method_count: argument is not a trait")
+    return len(t.methods)
+
+
+def _bi_trait_method_name_at(e, env, space, scope, fuel):
+    t = _eval(e.args[0], env, space, scope, fuel)
+    i = _eval(e.args[1], env, space, scope, fuel)
+    if not isinstance(t, TraitDecl):
+        raise ComptimeErr("trait_method_name_at: argument is not a trait")
+    return t.methods[i].name
 
 
 def _bi_name_of(e, env, space, scope, fuel):
@@ -224,6 +239,8 @@ def _bi_concat(e, env, space, scope, fuel):
 
 _BUILTINS = {"reflect": _bi_reflect, "reflect_trait": _bi_reflect_trait,
              "name_of": _bi_name_of, "trait_method_name": _bi_trait_method_name,
+             "trait_method_count": _bi_trait_method_count,
+             "trait_method_name_at": _bi_trait_method_name_at,
              "field_count": _bi_field_count, "field_name_at": _bi_field_name_at,
              "variant_count": _bi_variant_count, "variant_name_at": _bi_variant_name_at,
              "variant_has_payload": _bi_variant_has_payload, "concat": _bi_concat}

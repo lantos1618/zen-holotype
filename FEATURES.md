@@ -94,7 +94,8 @@ where it's headed, [VISION](VISION.md).)
 - **The reified AST lives in Zen** (`prelude/derive.zen`). The compiler keeps only:
   - a **reflection kernel** — over types (`reflect`, `name_of`, `field_count`,
     `field_name_at`, `variant_count`, `variant_name_at`, `variant_has_payload`) and over
-    traits (`reflect_trait`, `trait_method_name`), plus `concat` — and
+    traits (`reflect_trait`, `trait_method_name`, `trait_method_count`,
+    `trait_method_name_at` — every method, not just the first), plus `concat` — and
   - a ~40-line **reifier** (Zen `Ast` value → real `ast.Fn`/`Impl`).
 - **Five self-hosted derives, all ordinary Zen functions:**
 
