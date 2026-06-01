@@ -66,8 +66,8 @@ main* = () i32 {
     a := Point { x: 1, y: 2 }
     b := Point { x: 1, y: 2 }
     c := Point { x: 9, y: 2 }
-    g := match (Point_eq(addr(a), addr(b))) { true => 10, false => 0 }
-    h := match (Point_eq(addr(a), addr(c))) { true => 1, false => 0 }
+    g := (Point_eq(addr(a), addr(b))).match { true => 10, false => 0 }
+    h := (Point_eq(addr(a), addr(c))).match { true => 1, false => 0 }
     g + h
 }
 """)

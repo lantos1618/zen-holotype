@@ -145,7 +145,7 @@ def test_generic_fn_monomorphizes(tmp_path):
 def test_match_lowers_and_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Status*: Idle, Busy(i32)\n"
-        "code* = (s: Status) i32 { match s { .Idle => 0, .Busy(n) => n } }\n"
+        "code* = (s: Status) i32 { s.match { .Idle => 0, .Busy(n) => n } }\n"
         "main* = () i32 { code(.Busy(7)) }\n")
     files = load(tmp_path)
     space = build_space(files)
@@ -232,8 +232,8 @@ def test_trait_dispatch_runs(tmp_path):
 # ── Turing-complete: integer branching + recursion compiles and computes ────
 def test_recursion_computes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "fact* = (n: i32) i32 { match n { 0 => 1, _ => n * fact(n - 1) } }\n"
-        "fib* = (n: i32) i32 { match n { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
+        "fact* = (n: i32) i32 { n.match { 0 => 1, _ => n * fact(n - 1) } }\n"
+        "fib* = (n: i32) i32 { n.match { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
         "main* = () i32 { fact(5) + fib(10) }\n")   # 120 + 55 = 175
     files = load(tmp_path)
     space = build_space(files)
@@ -285,7 +285,7 @@ def test_match_subject_evaluated_once(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Vec*: { len: i32, cap: i32 }\n"
         "kind* = (v: Ptr<Vec>) i32 { v.len }\n"
-        "pick* = (v: Ptr<Vec>) i32 { match (kind(v)) { 0 => 10, 1 => 20, _ => 30 } }\n")
+        "pick* = (v: Ptr<Vec>) i32 { (kind(v)).match { 0 => 10, 1 => 20, _ => 30 } }\n")
     files = load(tmp_path)
     space = build_space(files)
     build_scopes(files)
@@ -316,7 +316,7 @@ def test_generic_enum_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Opt*<T>: None, Some(T)\n"
         "some_i* = (n: i32) Opt<i32> { .Some(n) }\n"
-        "get* = (o: Opt<i32>) i32 { match o { .None => 0, .Some(v) => v } }\n"
+        "get* = (o: Opt<i32>) i32 { o.match { .None => 0, .Some(v) => v } }\n"
         "main* = () i32 { get(some_i(42)) }\n")
     files = load(tmp_path)
     space = build_space(files)
@@ -421,7 +421,7 @@ build_hi = (a: Ptr<Allocator>) String {
 // print by recursing over the bytes
 step = (s: Ptr<String>, i: i64) i32 { putchar(load(offset(s.ptr, i))) print_from(s, i+1) }
 print_from = (s: Ptr<String>, i: i64) i32 {
-    match (i < s.len) { false => putchar(10), true => step(s, i) }
+    (i < s.len).match { false => putchar(10), true => step(s, i) }
 }
 
 main* = () i32 {

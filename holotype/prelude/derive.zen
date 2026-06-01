@@ -11,7 +11,7 @@ Ast: Int(i32), Boolean(bool), Var(str), Field(FieldData), Bin(BinData),
 FieldData:  { obj: Ast, fld: str }              // obj.fld
 BinData:    { op: str, lhs: Ast, rhs: Ast }     // lhs op rhs
 StructData: { ty: str, inits: FList }           // Ty { k0: v0, k1: v1, ... }
-MatchData:  { subj: Ast, arms: AList }          // match subj { .Tag => body, ... }
+MatchData:  { subj: Ast, arms: AList }          // subj.match { .Tag => body, ... }
 
 FList: FNil, FCons(FCell)                        // a list of field initializers
 FCell: { key: str, val: Ast, tail: FList }
@@ -29,7 +29,7 @@ PCell: { pnm: str, pty: str, ptr: bool, tail: PList }   // pnm: (Ptr<pty> if ptr
 
 // ── derive: a zero-constructor  ()-> T { T { f0: 0, f1: 0, ... } } ───────────
 zero_inits = (T: Ast, i: i32) FList {
-    match (field_count(T) - i) {
+    (field_count(T) - i).match {
         0 => .FNil(),
         _ => .FCons(FCell { key: field_name_at(T, i), val: .Int(0), tail: zero_inits(T, i + 1) })
     }
@@ -52,7 +52,7 @@ field_eq = (T: Ast, i: i32) Ast {
     })
 }
 eq_body = (T: Ast, acc: Ast, i: i32) Ast {
-    match (field_count(T) - i) {
+    (field_count(T) - i).match {
         0 => acc,
         _ => eq_body(T, .Bin(BinData { op: "&&", lhs: acc, rhs: field_eq(T, i) }), i + 1)
     }
@@ -67,9 +67,9 @@ derive_eq = (T: Ast) Decl {
     })
 }
 
-// ── derive (sum type): the variant tag  (e: E) i32 { match e { .V => idx } } ──
+// ── derive (sum type): the variant tag  (e: E) i32 { e.match { .V => idx } } ──
 tag_arms = (E: Ast, i: i32) AList {
-    match (variant_count(E) - i) {
+    (variant_count(E) - i).match {
         0 => .ANil(),
         _ => .ACons(ACell { tag: variant_name_at(E, i), bind: "",
                             body: .Int(i), tail: tag_arms(E, i + 1) })
@@ -86,15 +86,15 @@ derive_tag = (E: Ast) Decl {
 
 // ── derive (sum payload): bind each i32 payload, or 0 for a nullary variant ───
 //   Shape: Circle(i32), Square(i32), Dot
-//   -> Shape_payload = (e) i32 { match e { .Circle(v)=>v, .Square(v)=>v, .Dot=>0 } }
+//   -> Shape_payload = (e) i32 { e.match { .Circle(v)=>v, .Square(v)=>v, .Dot=>0 } }
 pay_arm = (E: Ast, i: i32, rest: AList) ACell {
-    match (variant_has_payload(E, i)) {
+    (variant_has_payload(E, i)).match {
         true  => ACell { tag: variant_name_at(E, i), bind: "v", body: .Var("v"), tail: rest },
         false => ACell { tag: variant_name_at(E, i), bind: "",  body: .Int(0),  tail: rest }
     }
 }
 pay_arms = (E: Ast, i: i32) AList {
-    match (variant_count(E) - i) {
+    (variant_count(E) - i).match {
         0 => .ANil(),
         _ => .ACons(pay_arm(E, i, pay_arms(E, i + 1)))
     }
@@ -113,7 +113,7 @@ derive_payload = (E: Ast) Decl {
 //   any such trait you name:
 //       Ranked: { rank: (Self) i32 }
 //       @emit(derive_tag_impl(reflect_trait(Ranked), reflect(Color)))
-//       // -> Color.impl(Ranked) { rank = (e: Color) i32 { match e { .V => idx } } }
+//       // -> Color.impl(Ranked) { rank = (e: Color) i32 { e.match { .V => idx } } }
 //   reachable through a bound `<T: Ranked>`, the way the compiler dispatches trait methods.
 derive_tag_impl = (Tr: Ast, E: Ast) Decl {
     .Impl(ImplData {

@@ -2,7 +2,7 @@
 import pytest
 
 from holotype.ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
-                          Import, Var, Bin, Field, Call, StructLit, MethodCall)
+                          Import, Var, Bin, Field, Call, StructLit, MethodCall, Match)
 from holotype.parser import parse
 
 
@@ -102,3 +102,36 @@ def test_extern_keyword_is_gone():
     # the old `extern name = (...)` syntax no longer parses
     with pytest.raises(SyntaxError):
         parse("extern malloc = (n: i64) RawPtr<u8>", "m")
+
+
+# ── match is postfix `subj.match { … }` — no `match` prefix keyword ──────────
+def test_postfix_match_on_identifier():
+    fn = only(parse("f = (s: i32) i32 { s.match { 0 => 1, _ => 2 } }", "m").decls, Fn)
+    m = fn.body[-1]
+    assert isinstance(m, Match) and isinstance(m.subject, Var) and m.subject.name == "s"
+
+
+def test_postfix_match_on_parenthesized():
+    fn = only(parse("f = (n: i32) i32 { (n < 0).match { true => 0, false => 1 } }", "m").decls, Fn)
+    m = fn.body[-1]
+    assert isinstance(m, Match) and isinstance(m.subject, Bin)
+
+
+def test_postfix_match_chains_on_a_call():
+    # subject-first reads well in chains: the match applies to the whole `head(xs)`
+    fn = only(parse("f = (xs: [i32]) i32 { head(xs).match { 0 => 1, _ => 2 } }", "m").decls, Fn)
+    assert isinstance(fn.body[-1].subject, Call)
+
+
+def test_match_prefix_keyword_is_gone():
+    with pytest.raises(SyntaxError):
+        parse("f = (s: i32) i32 { match s { 0 => 1, _ => 2 } }", "m")
+
+
+def test_statement_starting_with_paren_is_not_glued():
+    # a `(`-led statement after an expression statement is its own statement,
+    # not absorbed as a call's arguments (the call `(` must be glued).
+    fn = only(parse("f = (n: i32) i32 { g(n)\n(n < 0).match { true => 0, false => 1 } }",
+                    "m").decls, Fn)
+    assert isinstance(fn.body[0], Call)            # g(n)
+    assert isinstance(fn.body[1], Match)           # a separate statement
