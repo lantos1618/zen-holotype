@@ -8,8 +8,8 @@ mutate exactly as written. The emitted C stays warning-clean under
 import subprocess
 import pytest
 
-from holotype.main import (load, build_space, build_scopes, resolve, check, emit_c)
-from holotype.parser import parse
+from zen.main import (load, build_space, build_scopes, resolve, check, emit_c)
+from zen.parser import parse
 
 
 def build(tmp_path, src):

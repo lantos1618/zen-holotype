@@ -1,14 +1,13 @@
-# zen-holotype
+# zen
 
-A tiny compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
+**zen** is a tiny compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
 language, built to test one idea: **pin down what every value _is_ with type structure,
 and you lock out everything it isn't.** Do that for pointers, modules, and functions
 alike, and module imports, type-checking, and pointer safety all become the _same_
 operation — checking that a signature fits in one shared space.
 
-> In taxonomy a *holotype* is the single specimen that defines a name. Here,
-> every path resolves to exactly **one** canonical node — and diamond imports
-> collapse onto it.
+> Every path resolves to exactly **one** canonical node — the single definition that
+> *is* the meaning of a name — and diamond imports collapse onto it.
 
 ## What we're actually doing: structure *is* the constraint
 
@@ -101,7 +100,7 @@ the only possible name conflict is two files claiming the same path.
 root
 ├─ core
 │  └─ vec
-│     └─ Vec ─────── struct { len:i32, cap:i32 }   ← the holotype for "core.vec.Vec"
+│     └─ Vec ─────── struct { len:i32, cap:i32 }   ← the canonical node for "core.vec.Vec"
 ├─ ops
 │  ├─ len ────────── fn (Ptr<Vec>) i32
 │  └─ cap ────────── fn (Ptr<Vec>) i32
@@ -153,8 +152,8 @@ build = (b: Builder) Result<BuildConfig, BuildError> {
 
 ```sh
 pip install -r requirements.txt        # tree_sitter (front end)
-python3 -m holotype build examples     # read build.zen -> check -> emit C -> cc -> run
-python3 -m holotype check examples     # type-check report + emit a C lib
+python3 -m zen build examples     # read build.zen -> check -> emit C -> cc -> run
+python3 -m zen check examples     # type-check report + emit a C lib
 ```
 
 Tests (the lattice is the whole safety argument, so it's the most-covered part):
@@ -165,13 +164,13 @@ python3 -m pytest                       # fits() lattice + laws, infer(), Namesp
                                         # Zen //~ PASS/FAIL fixtures, end-to-end build, mypy
 ```
 
-The AST carries `Type`/`Expr` unions and `python3 -m mypy holotype` is clean (a test
+The AST carries `Type`/`Expr` unions and `python3 -m mypy zen` is clean (a test
 runs it), so the node types can't silently drift.
 
 The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
 `build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
 
-Ill-typed functions are **excluded from codegen** — `holotype build` reports them and
+Ill-typed functions are **excluded from codegen** — `zen build` reports them and
 builds only what type-checks:
 
 ```
@@ -189,11 +188,11 @@ vecdemo -> 12
 | file | role |
 |---|---|
 | `tree-sitter-zen/grammar.js` | the real grammar (a tree-sitter parser generator) |
-| `holotype/parser.py` | converts the tree-sitter parse tree → AST |
-| `holotype/ast.py`    | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
-| `holotype/types.py`  | `Namespace` (the trie + impl registry) + `fits()` lattice + `infer()` |
-| `holotype/lower.py`  | transcribe to C (the type system erases here) |
-| `holotype/main.py`   | driver + `build.zen` interpreter |
+| `zen/parser.py` | converts the tree-sitter parse tree → AST |
+| `zen/ast.py`    | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
+| `zen/types.py`  | `Namespace` (the trie + impl registry) + `fits()` lattice + `infer()` |
+| `zen/lower.py`  | transcribe to C (the type system erases here) |
+| `zen/main.py`   | driver + `build.zen` interpreter |
 | `tests/`             | pytest suite — `fits()` lattice + laws, `infer()`, Namespace, parser, mypy, end-to-end |
 
 `Namespace` is built during *resolve* and is strictly read-only during *checking* —
@@ -231,7 +230,7 @@ heap-allocating `String`), and a **comptime metaprogramming layer** whose headli
 (`prelude/derive.zen`) that the compiler runs at comptime and splices back in.
 See **[FEATURES.md](FEATURES.md)** for the full current inventory.
 
-`build.zen` can declare a `Test { root: "test.zen" }`; `holotype build` then
+`build.zen` can declare a `Test { root: "test.zen" }`; `zen build` then
 compiles that root with the project and runs each no-arg `bool` test, printing
 PASS/FAIL (SKIP if it doesn't type-check).
 

@@ -5,7 +5,7 @@ element each iteration and folds — like every loop — to a C `for`."""
 import subprocess
 import pytest
 
-from holotype.main import load, build_space, build_scopes, resolve, check, emit_c
+from zen.main import load, build_space, build_scopes, resolve, check, emit_c
 
 
 def build(tmp_path, src):

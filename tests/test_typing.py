@@ -13,6 +13,6 @@ ROOT = pathlib.Path(__file__).parent.parent
 
 @pytest.mark.skipif(importlib.util.find_spec("mypy") is None, reason="mypy not installed")
 def test_mypy_clean():
-    r = subprocess.run([sys.executable, "-m", "mypy", "holotype"],
+    r = subprocess.run([sys.executable, "-m", "mypy", "zen"],
                        cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr

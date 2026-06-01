@@ -10,10 +10,10 @@ hand-written code.
 import subprocess
 import pytest
 
-from holotype.main import (load, build_space, build_scopes, resolve, fold_comptime,
+from zen.main import (load, build_space, build_scopes, resolve, fold_comptime,
                            run_emits, check, emit_c, is_prelude_ns)
-from holotype.comptime import ComptimeErr, reify_decl
-from holotype.ast import Fn
+from zen.comptime import ComptimeErr, reify_decl
+from zen.ast import Fn
 
 
 def frontend(tmp_path, src):

@@ -1,4 +1,4 @@
-// tree-sitter grammar for the Zen subset that holotype type-checks.
+// tree-sitter grammar for the Zen subset that zen type-checks.
 // Mirrors lantos1618/zenlang surface syntax: `Name: {..}` structs, `name = (..) Ret {..}`
 // functions, `Ptr/MutPtr/RawPtr<T>` pointers, `{ a } = mod` imports.
 

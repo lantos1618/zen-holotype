@@ -1,7 +1,7 @@
-"""holotype driver.
+"""zen driver.
 
-    python3 -m holotype build [dir]   # read build.zen, compile + link + run the exe
-    python3 -m holotype check [dir]   # type-check report only, emit a C lib
+    python3 -m zen build [dir]   # read build.zen, compile + link + run the exe
+    python3 -m zen check [dir]   # type-check report only, emit a C lib
 
 Pipeline: parse -> insert into trie -> resolve refs -> infer/fits -> to_c.
 Only well-typed functions are codegen'd.

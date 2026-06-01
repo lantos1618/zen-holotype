@@ -1,5 +1,5 @@
 """Front end: parse Zen with the tree-sitter grammar, convert the CST into
-holotype's ast.py dataclasses. Exposes `parse(src, ns) -> File`.
+zen's ast.py dataclasses. Exposes `parse(src, ns) -> File`.
 
 The grammar lives in tree-sitter-zen/; its C parser is compiled to build/zen.so.
 """
@@ -11,7 +11,7 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, SliceT, FnT, Field_, Struct, Va
                   Emit, Lit, Bool, Var, Field, Bin, Not, Call, Str, StructLit, SliceLit,
                   Index, MethodCall, EnumCtor, Let, Assign, While, Loop, Arm, Match, Closure)
 
-_ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in holotype/)
+_ROOT = pathlib.Path(__file__).parent.parent          # repo root (package lives in zen/)
 _SO   = _ROOT / "build" / "zen.so"
 _GRAMMAR = _ROOT / "tree-sitter-zen"
 

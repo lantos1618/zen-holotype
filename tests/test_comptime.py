@@ -3,8 +3,8 @@ import subprocess
 import sys
 import pytest
 
-from holotype.main import load, build_space, build_scopes, resolve, check, emit_c
-from holotype.comptime import ComptimeErr, fold_comptime
+from zen.main import load, build_space, build_scopes, resolve, check, emit_c
+from zen.comptime import ComptimeErr, fold_comptime
 
 
 def frontend(tmp_path, src, fold=True):

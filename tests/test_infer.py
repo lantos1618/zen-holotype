@@ -5,8 +5,8 @@ mismatch — it's where fits() actually gets triggered on real programs.
 """
 import pytest
 
-from holotype.ast import Dir, Lit, Var, Bin, Field, Call, StructLit
-from holotype.types import infer, TypeErr
+from zen.ast import Dir, Lit, Var, Bin, Field, Call, StructLit
+from zen.types import infer, TypeErr
 from conftest import I32, VEC, ptr, option
 
 

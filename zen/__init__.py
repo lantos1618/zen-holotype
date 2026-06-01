@@ -1,4 +1,4 @@
-"""zen-holotype: an everything-is-a-type compiler.
+"""zen: an everything-is-a-type compiler.
 
 Module map:
     ast      AST dataclasses + enums

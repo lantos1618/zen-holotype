@@ -2,7 +2,7 @@
 
 T9  expected PASS/FAIL set from the checker
 T10 codegen is const-correct and excludes ill-typed fns
-T11 `holotype build` actually compiles, links, and runs -> "vecdemo -> 12"
+T11 `zen build` actually compiles, links, and runs -> "vecdemo -> 12"
 F1  un-lowerable declarations fail loudly instead of vanishing
 """
 import subprocess
@@ -13,7 +13,7 @@ import pytest
 import re
 from dataclasses import dataclass
 
-from holotype.main import (load, build_space, build_scopes, resolve, check,
+from zen.main import (load, build_space, build_scopes, resolve, check,
                            emit_c, run_test_root)
 from conftest import EXAMPLES
 
@@ -304,7 +304,7 @@ def test_void_main_harness(tmp_path):
         '    b.add(Executable { name: "v", main: "main.zen", out_dir: "build" })\n'
         '    .Ok(b.config())\n}\n')
     (tmp_path / "main.zen").write_text("main* = () void { y := 5 }\n")
-    out = subprocess.run([sys.executable, "-m", "holotype", "build", str(tmp_path)],
+    out = subprocess.run([sys.executable, "-m", "zen", "build", str(tmp_path)],
                          capture_output=True, text=True, cwd=str(EXAMPLES.parent))
     assert out.returncode == 0, out.stderr           # would fail at cc if it printf'd %d on void
     c = (tmp_path / "build" / "v.c").read_text()
@@ -511,7 +511,7 @@ main* = () i32 {
 # ── T11: the build really runs ──────────────────────────────────────────────
 def test_full_build_runs_and_prints_12():
     out = subprocess.run(
-        [sys.executable, "-m", "holotype", "build", str(EXAMPLES)],
+        [sys.executable, "-m", "zen", "build", str(EXAMPLES)],
         capture_output=True, text=True, cwd=str(EXAMPLES.parent))
     assert out.returncode == 0, out.stderr
     assert "vecdemo -> 12" in out.stdout
