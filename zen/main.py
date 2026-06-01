@@ -12,7 +12,7 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, S
                   Str, StructLit, SliceLit, Index, Bin, Not, Field, Let, Assign, While, Loop,
                   Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var, Closure)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
-                    ret_type, show, scope_with_bounds, TraitMethod, TypeErr)
+                    ret_type, show, scope_with_bounds, TraitMethod, TypeErr, Unresolved, Private)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
@@ -134,7 +134,26 @@ def resolve_type(t, scope, space, tparams=()):
     raise TypeErr(f"unknown type node {t!r}")
 
 
+def check_visibility(files, space):
+    """A module may only import another module's *public* names — a decl is public
+    when its name carries the glued `*` (`Vec*`, `area*`). A bare name is private to
+    its file. Same-file references never go through an import, so they're unaffected."""
+    for f in files.values():
+        for imp in f.imports:
+            if imp.module == f.ns:                       # (a file never imports itself, but be safe)
+                continue
+            for name in imp.names:
+                try:
+                    decl = space.walk(f"{imp.module}.{name}").value
+                except Unresolved:
+                    continue                              # resolve() reports the missing name
+                if not getattr(decl, "pub", False):
+                    raise Private(f"{f.ns}: '{name}' is private to {imp.module} "
+                                  f"(mark it '{name}*' there to export it)")
+
+
 def resolve(files, space):
+    check_visibility(files, space)
     for f in files.values():
         for d in f.decls:
             if isinstance(d, Struct):
