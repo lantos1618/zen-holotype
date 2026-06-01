@@ -125,3 +125,20 @@ main* = () i32 {
 }
 """)
     assert run(tmp_path, emit_c(files, passing, space)) == 12   # 3 + 4 + 5, and n == 3
+
+
+# ── std.str — read-only string ops over libc (first-class string literals) ──
+def test_str_len_and_eq(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ len, eq, ne, is_empty } = std.str
+main* = () i32 {
+    a := (len("hello") == 5).match  { true => 1,  false => 0 }
+    b := (eq("abc", "abc")).match   { true => 2,  false => 0 }
+    c := (eq("abc", "xyz")).match   { true => 4,  false => 0 }   // c stays 0
+    d := (ne("abc", "xyz")).match   { true => 8,  false => 0 }
+    e := (is_empty("")).match       { true => 16, false => 0 }
+    a + b + c + d + e
+}
+""")
+    assert "main.main" in passing
+    assert run(tmp_path, emit_c(files, passing, space)) == 27   # 1 + 2 + 0 + 8 + 16

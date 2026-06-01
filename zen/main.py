@@ -21,7 +21,7 @@ from .comptime import fold_comptime, evaluate, reify_decl
 BUILTIN = {"Option"}
 _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
          "printf", "write", "read", "memcpy", "memset", "memmove", "strlen",
-         "abort", "exit"}     # declared by the stdlib headers — don't re-proto
+         "strcmp", "strncmp", "abort", "exit"}     # declared by the stdlib headers — don't re-proto
 
 
 # ───────────────────────── front end ────────────────────────────────────────

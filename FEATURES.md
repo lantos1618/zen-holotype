@@ -75,6 +75,9 @@ where it's headed, [VISION](VISION.md).)
   ownership, no allocation): `map_into(xs, out, (x) { x * 2 })`.
 - **`std.mem`** — the library's allocator over libc: `alloc` / `zeroed` / `copy` / `release`.
   No GC or destructors, so ownership is explicit — you free what you alloc.
+- **`std.str`** — read-only ops on `str` (a C string): `len` / `eq` / `ne` / `is_empty`.
+  (String *literals* are first-class values now; an owned, growable String awaits the
+  allocator model.)
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 
