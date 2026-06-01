@@ -27,6 +27,7 @@ _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
 # ───────────────────────── front end ────────────────────────────────────────
 _PRELUDE_DIR = pathlib.Path(__file__).parent / "prelude"
 _BINDINGS_DIR = pathlib.Path(__file__).parent / "bindings"
+_STD_DIR = pathlib.Path(__file__).parent / "std"
 
 
 def load_uses(cfg, files):
@@ -55,9 +56,21 @@ def load_prelude():
             for p in sorted(_PRELUDE_DIR.glob("*.zen"))}
 
 
+def load_std():
+    """The bundled standard library — ordinary runtime Zen under `std.*`, importable
+    from any file. Unlike the prelude (comptime-only, never lowered), std IS checked
+    and lowered like user code. But its helpers are templates/generics, so nothing is
+    emitted unless a program imports AND uses them — the stdlib is zero-cost ambient."""
+    if not _STD_DIR.exists():
+        return {}
+    return {f"std.{p.stem}": parse(p.read_text(), f"std.{p.stem}")
+            for p in sorted(_STD_DIR.glob("*.zen"))}
+
+
 def load(root, skip=()):
     skip = set(skip) | {"build.zen"}        # build.zen is a build script, never a module
     files = dict(load_prelude())
+    files.update(load_std())
     for path in sorted(pathlib.Path(root).rglob("*.zen")):
         if path.name in skip:
             continue

@@ -57,11 +57,12 @@ def test_no_address_like_temp_names(tmp_path):
 
 
 def test_names_use_small_counters(tmp_path):
-    # sanity: the deterministic names actually appear, and they're small
+    # sanity: the deterministic names are small counters, not 6+ digit addresses
+    # (exact values shift as the bundled stdlib's loops advance the same counters)
     c = emit(tmp_path, _SRC)
-    assert "_seq1" in c                          # the element loop's sequence temp
-    assert re.search(r"_subj\d\b", c)            # a single-digit match subject
-    assert re.search(r"_v\d+_0", c)              # a template/closure binding temp
+    assert re.search(r"_seq\d{1,3}\b", c)        # an element-loop sequence temp
+    assert re.search(r"_subj\d{1,3}\b", c)       # a match subject
+    assert re.search(r"_v\d{1,3}_0", c)          # a template/closure binding temp
 
 
 # trait-impl emission order came from a `set`, whose iteration order varies with
