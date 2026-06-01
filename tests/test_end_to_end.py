@@ -67,7 +67,7 @@ def test_codegen_is_const_correct(checked):
     # Ptr<Vec> -> const *, MutPtr<Vec> -> plain *
     assert "ops_len(core_vec_Vec const * v)" in c
     assert "ops_bump(core_vec_Vec * v)" in c
-    assert "typedef struct { int32_t len; int32_t cap; } core_vec_Vec;" in c
+    assert "struct core_vec_Vec { int32_t len; int32_t cap; };" in c
 
 
 def test_codegen_excludes_failing_functions(checked):
@@ -268,7 +268,7 @@ def test_generic_struct_monomorphizes(tmp_path):
     resolve(files, namespace)
     _, passing = check(files, namespace)
     c = emit_c(files, passing, namespace)
-    assert "typedef struct { int32_t val; } main_Box_i32;" in c   # the instance struct
+    assert "struct main_Box_i32 { int32_t val; };" in c   # the instance struct
     assert "_T " not in c                                          # template not emitted raw
     harness = ("\n#include <stdio.h>\nint main(void){ "
                "printf(\"%d\\n\", main_main()); return 0; }\n")
@@ -325,7 +325,7 @@ def test_generic_enum_monomorphizes(tmp_path):
     resolve(files, namespace)
     _, passing = check(files, namespace)
     c = emit_c(files, passing, namespace)
-    assert "union { int32_t Some; } u; } main_Opt_i32;" in c          # the instance struct
+    assert "struct main_Opt_i32 { int32_t tag; union { int32_t Some; } u; };" in c   # instance struct
     assert "main_Opt_i32){ .tag = main_Opt_i32_Some" in c             # ctor uses the instance name
     harness = ("\n#include <stdio.h>\nint main(void){ "
                "printf(\"%d\\n\", main_main()); return 0; }\n")
@@ -439,7 +439,7 @@ main* = () i32 {
     resolve(files, namespace)
     _, passing = check(files, namespace)
     c = emit_c(files, passing, namespace)
-    assert "typedef struct { uint8_t * ptr; int64_t len; } main_String;" in c   # heap string
+    assert "struct main_String { uint8_t * ptr; int64_t len; };" in c   # heap string
     cfile = tmp_path / "o.c"
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
     bexe = tmp_path / "o"

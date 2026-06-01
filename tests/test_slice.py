@@ -137,3 +137,24 @@ main* = () i32 {
 """)
     assert ("m.main", True, "ok") in results
     assert run(tmp_path, c) == 20             # 2+4+6+8
+
+
+def test_slice_of_structs(tmp_path):
+    # a slice whose element type is a struct: the struct tag is forward-declared, so
+    # the `slice_m_P` typedef (which uses `m_P*`) compiles even though the struct's
+    # full definition is emitted after it. Regression: this used to emit the slice
+    # typedef before `m_P` existed -> "unknown type name 'm_P'".
+    results, _, c = build(tmp_path, """
+P*: { x: i32, y: i32 }
+main* = () i32 {
+    ps := [P { x: 1, y: 2 }, P { x: 3, y: 4 }]
+    s := 0
+    ps.loop((h, i, p) { s = s + p.x + p.y })
+    s
+}
+""")
+    assert ("m.main", True, "ok") in results
+    assert "typedef struct m_P m_P;" in c                 # forward decl, before the slice typedef
+    assert c.index("typedef struct m_P m_P;") < c.index("slice_m_P;")
+    assert c.index("slice_m_P;") < c.index("struct m_P { int32_t x; int32_t y; };")
+    assert run(tmp_path, c) == 10                          # (1+2) + (3+4)

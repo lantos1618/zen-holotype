@@ -14,7 +14,7 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, S
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
                     ret_type, show, scope_with_bounds, struct_at, TraitMethod, TypeErr,
                     Unresolved, Private, Located)
-from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
+from .lower import (c_struct, c_struct_fwd, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
 from .comptime import fold_comptime, evaluate, reify_decl, Host
@@ -610,19 +610,29 @@ def emit_c(files, passing, namespace, extra="", roots=None):
         lines += ["#include <stdlib.h>", "#include <stdio.h>",
                   "#include <string.h>", "#include <unistd.h>"]
     lines.append("")
-    slice_at = len(lines)                                # splice slice typedefs here (before structs)
+    # Forward-declare every struct/enum tag first, then the slice typedefs, then the
+    # full definitions. A slice typedef uses only `T*`, so a forward decl satisfies it —
+    # that lets a slice-of-struct and a struct-with-a-slice-field coexist (each would
+    # otherwise demand the other come first). Definitions stay in decl order.
+    fwd, defs = [], []
     for f in files.values():                             # types (generic templates emit nothing)
         if is_prelude_ns(f.ns):                          # prelude Ast model is never lowered
             continue
         for d in f.decls:
             if isinstance(d, Struct) and not d.tparams:
-                lines.append(c_struct(f"{f.ns}.{d.name}", d))
+                fwd.append(c_struct_fwd(c_name(f"{f.ns}.{d.name}")))
+                defs.append(c_struct(f"{f.ns}.{d.name}", d))
             elif isinstance(d, EnumDecl) and not d.tparams:
-                lines.append(c_enum(f"{f.ns}.{d.name}", d))
+                fwd.append(c_struct_fwd(c_name(f"{f.ns}.{d.name}")))
+                defs.append(c_enum(f"{f.ns}.{d.name}", d))
     for (qual, targs), sub in data_insts.items():        # monomorphized generic structs + enums
         decl = namespace.walk(qual).value
-        lower = c_struct if isinstance(decl, Struct) else c_enum
-        lines.append(lower(qual, decl, sub, mangle(NameT(qual, targs))))
+        cn = mangle(NameT(qual, targs))
+        fwd.append(c_struct_fwd(cn))
+        defs.append((c_struct if isinstance(decl, Struct) else c_enum)(qual, decl, sub, cn))
+    lines += fwd
+    slice_at = len(lines)                                # slice typedefs go here: after fwd-decls,
+    lines += defs                                        # before the full definitions
     lines.append("")
     for d in externs:                                    # protos only for non-libc externs
         if d.name not in _LIBC:                           # (the headers above declare libc)
