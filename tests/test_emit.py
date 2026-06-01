@@ -180,3 +180,34 @@ def test_reflect_requires_a_type(tmp_path):
 { derive_zero } = prelude.derive
 @emit(derive_zero(reflect(missing)))
 """)
+
+
+# ── user-written generators, type-checked against the Zen Ast (goal #15) ────
+def test_user_generator_is_emitted_and_typechecked(tmp_path):
+    # a generator is ordinary Zen returning a Decl — the Ast model is public now,
+    # so users (not just the prelude) can write one. It's checked, @emit'd, and run.
+    files, space, results, passing = frontend(tmp_path, """
+{ Decl, FuncData } = prelude.derive
+gen = (nm: str, v: i32) Decl {
+    .Func(FuncData { nm: nm, ps: .PNil(), ret: "i32", body: .Int(v) })
+}
+@emit(gen("answer", 42))
+main* = () i32 { answer() }
+""")
+    c = emit_c(files, passing, space)
+    assert "m_gen" not in c                          # a generator is comptime-only — never lowered
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + "\nint main(void){ return m_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
+                        str(cfile), "-o", str(tmp_path / "o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(tmp_path / "o")]).returncode == 42
+
+
+def test_malformed_generator_is_caught_at_check(tmp_path):
+    # the generator's Ast construction is type-checked: a str field given an i32 fails
+    files, space, results, passing = frontend(tmp_path, """
+{ Decl, FuncData } = prelude.derive
+bad* = (v: i32) Decl { .Func(FuncData { nm: v, ps: .PNil(), ret: "i32", body: .Int(v) }) }
+""")
+    assert any(q == "m.bad" and not ok and "str" in why for q, ok, why in results)
