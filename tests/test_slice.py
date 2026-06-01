@@ -110,3 +110,30 @@ def test_heterogeneous_slice_is_rejected(tmp_path):
 main* = () i32 { xs := [1, true, 3]  0 }
 """)
     assert any(q == "m.main" and not ok for q, ok, why in results)
+
+
+def test_writable_slice_element(tmp_path):
+    # `xs[i] = v` writes through the slice's ptr — slices are mutable element-wise
+    results, _, c = build(tmp_path, """
+main* = () i32 {
+    xs := [10, 20, 30]
+    xs[1] = 99
+    xs[0] + xs[1] + xs[2]
+}
+""")
+    assert ("m.main", True, "ok") in results
+    assert "xs.ptr[1] = 99" in c              # writes through the slice's ptr
+    assert run(tmp_path, c) == 139            # 10 + 99 + 30
+
+
+def test_writable_index_in_a_loop(tmp_path):
+    # double each element in place
+    results, _, c = build(tmp_path, """
+main* = () i32 {
+    xs := [1, 2, 3, 4]
+    loop(xs, (h, i, x) { xs[i] = x + x })
+    xs[0] + xs[1] + xs[2] + xs[3]
+}
+""")
+    assert ("m.main", True, "ok") in results
+    assert run(tmp_path, c) == 20             # 2+4+6+8
