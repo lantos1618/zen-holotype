@@ -25,8 +25,9 @@ MakeEnumData*: { ty: str, variant: str, payload: Ptr<Expr> }  // (E){ .tag=E_V, 
 TagData*: { ty: str, variant: str }                     // (E){ .tag=E_V }  (no payload)
 ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
 MatchData*: { subj: str, ename: str, arms: [ArmData] }  // subj is a variable; last arm is the default
+StrData*: { value: str }                                // a C string literal "…" (escaped on emit)
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData)
-     | Member(MemberData) | MakeEnum(MakeEnumData) | Tag(TagData) | Match(MatchData)
+     | Member(MemberData) | MakeEnum(MakeEnumData) | Tag(TagData) | Match(MatchData) | StrLit(StrData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -35,7 +36,7 @@ IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } els
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData)
 // types + typed parameters
-Ty*: I32 | I64 | U8 | Bool | Named(str) | Void             // a C scalar type, a named struct, or void
+Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str       // scalar, named struct, void, or const char*
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
@@ -59,6 +60,8 @@ mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
 ematch* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms }) }
+strlit* = (v: str) Expr { .StrLit(StrData { value: v }) }
+tstr* = () Ty { .Str() }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sassign* = (nm: str, v: Ptr<Expr>) Stmt { .Assign(AssignData { name: nm, value: v }) }
@@ -92,7 +95,8 @@ gen_int = (s: String, n: i32) String {
 
 // a Ty -> its C type name
 cty = (t: Ty) str {
-    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool", .Named(n) => n, .Void => "void" }
+    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool",
+              .Named(n) => n, .Void => "void", .Str => "const char*" }
 }
 
 // does any variant carry a payload? (no payloads -> emit no union, like lower.py)
@@ -113,7 +117,8 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Member(m) => s.gen_expr(m.obj).append(".").append(m.field),
         .MakeEnum(m) => s.gen_mkenum(m),
         .Tag(t) => s.append("(").append(t.ty).append("){ .tag = ").append(t.ty).append("_").append(t.variant).append(" }"),
-        .Match(m) => s.gen_match(m)
+        .Match(m) => s.gen_match(m),
+        .StrLit(sl) => s.gen_strlit(sl.value)
     }
 }
 
@@ -123,6 +128,23 @@ gen_bin = (s: String, b: BinData) String {
 
 gen_cond = (s: String, d: CondData) String {
     s.append("(").gen_expr(d.c).append(" ? ").gen_expr(d.t).append(" : ").gen_expr(d.e).append(")")
+}
+
+// escape one byte for a C string literal: " -> \" , \ -> \\ , newline -> \n , else itself
+gen_escape_byte = (s: String, b: u8) String {
+    (b == 34).match {
+        true  => s.append("\\\""),
+        false => (b == 92).match {
+            true  => s.append("\\\\"),
+            false => (b == 10).match { true => s.append("\\n"), false => s.push(b) }
+        }
+    }
+}
+// a C string literal: `"` + each byte escaped + `"`
+gen_strlit = (s: String, v: str) String {
+    out := s.append("\"")
+    view(v).loop((h, i, b) { out = out.gen_escape_byte(b) })
+    out.append("\"")
 }
 
 gen_mkenum = (s: String, m: MakeEnumData) String {
