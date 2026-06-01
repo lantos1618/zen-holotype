@@ -49,6 +49,8 @@ where it's headed, [VISION](VISION.md).)
 ## Systems / FFI
 - **Foreign C bindings** — a function with **no body** binds the C symbol of the same name
   (`malloc = (n: i64) RawPtr<u8>`); no `extern` keyword. libc by bare name, headers auto-included.
+- **Build flags from `build.zen`** — `Executable { …, cflags: ["-O2", "-g"], links: ["m"] }`
+  threads through to `cc` (`-O2 -g … -lm`), for the exe and its tests.
 - **Binding modules via the build object** — `c = b.use("libc")` in `build.zen` installs a
   bundled Zen binding module (bodyless fns) under the namespace `c`; code then `{ malloc, free } = c`.
   A foreign binding is just a Zen module of decls — the kernel only loads-a-module-as-a-namespace,
