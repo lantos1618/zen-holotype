@@ -69,8 +69,10 @@ where it's headed, [VISION](VISION.md).)
 ## Standard library (`std.*`)
 - A third bundled category beside the comptime-only **prelude** and the FFI **bindings**:
   ordinary runtime Zen, importable from any file, **checked and lowered like your code**.
-- **`std.iter`** — `fold` / `each` as generic templates over slices + closures:
-  `{ fold } = std.iter` then `fold([1, 2, 3], 0, (a, x) { a + x })`.
+- **`std.iter`** — `fold` / `each` / `map_into` / `filter_into` as generic templates over
+  slices + closures: `{ fold } = std.iter` then `fold([1, 2, 3], 0, (a, x) { a + x })`.
+  `map_into`/`filter_into` transform into a **caller-owned** output slice (explicit
+  ownership, no allocation): `map_into(xs, out, (x) { x * 2 })`.
 - **`std.mem`** — the library's allocator over libc: `alloc` / `zeroed` / `copy` / `release`.
   No GC or destructors, so ownership is explicit — you free what you alloc.
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits

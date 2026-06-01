@@ -98,3 +98,30 @@ main* = () i32 {
 }
 """)
     assert run(tmp_path, emit_c(files, passing, space)) == 7
+
+
+# ── std.iter map_into / filter_into — caller-owned output, no allocation ────
+def test_map_into(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ map_into } = std.iter
+main* = () i32 {
+    xs  := [1, 2, 3, 4]
+    out := [0, 0, 0, 0]
+    map_into(xs, out, (x) { x * 10 })
+    out[0] + out[1] + out[2] + out[3]
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 100   # (1+2+3+4)*10
+
+
+def test_filter_into_packs_and_counts(tmp_path):
+    files, space, passing = build(tmp_path, """
+{ filter_into } = std.iter
+main* = () i32 {
+    xs   := [1, 2, 3, 4, 5]
+    kept := [0, 0, 0, 0, 0]
+    n := filter_into(xs, kept, (x) { x > 2 })       // packs [3, 4, 5], returns n = 3
+    (n == 3).match { true => kept[0] + kept[1] + kept[2], false => 0 }   // 12 iff count right
+}
+""")
+    assert run(tmp_path, emit_c(files, passing, space)) == 12   # 3 + 4 + 5, and n == 3
