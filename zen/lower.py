@@ -5,7 +5,7 @@ from __future__ import annotations
 from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, FnT, Struct, EnumDecl, Fn,
                   Lit, Bool, Str, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
                   Let, Assign, While, EnumCtor, Match, Closure)
-from .types import infer, subst, solve_call, match_type, TraitMethod
+from .types import infer, subst, solve_call, match_type, struct_at, TraitMethod
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
@@ -137,7 +137,14 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
                    if elems else f"({et}*)0")
             return f"({c_type(st)}){{ .ptr = {arr}, .len = {len(elems)} }}"
         case Index(seq, idx):                                # xs[i] -> xs.ptr[i]
-            return f"{c_expr(seq, locals_, space, scope)}.ptr[{c_expr(idx, locals_, space, scope)}]"
+            st = infer(seq, locals_, space, scope)
+            sx = c_expr(seq, locals_, space, scope)
+            ix = c_expr(idx, locals_, space, scope)
+            if isinstance(st, SliceT):
+                return f"{sx}.ptr[{ix}]"
+            tp, ty, _ = struct_at(st, space)                 # []-overloading: dispatch to `at`
+            recv = sx if isinstance(st, PtrT) else f"&({sx})"  # `at` takes Ptr<Self>
+            return f"{impl_cname(tp, ty, 'at')}({recv}, {ix})"
         case Call():
             return _c_call(e, locals_, space, scope, expect)
         case MethodCall(recv, method, args):                 # loop handle control
