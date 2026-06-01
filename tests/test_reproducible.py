@@ -11,7 +11,7 @@ import subprocess
 import sys
 import textwrap
 
-from holotype.main import (load, build_space, build_scopes, resolve, check, emit_c)
+from zen.main import (load, build_space, build_scopes, resolve, check, emit_c)
 
 
 def emit(tmp_path, src):
@@ -86,7 +86,7 @@ sum* = (a: Ptr<Sq>, b: Ptr<Rect>, c: Ptr<Circle>, d: Ptr<Tri>) i32 {
 
 _EMIT_SNIPPET = textwrap.dedent("""
     import sys, tempfile, pathlib, hashlib
-    from holotype.main import (load, build_space, build_scopes, resolve, check,
+    from zen.main import (load, build_space, build_scopes, resolve, check,
                                emit_c, fold_comptime, run_emits)
     d = pathlib.Path(tempfile.mkdtemp()); (d / "m.zen").write_text(sys.argv[1])
     files = load(d); space = build_space(files)

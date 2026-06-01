@@ -2,8 +2,8 @@
 
 This is the entire safety argument of the project, so it gets the most cases.
 """
-from holotype.ast import Dir, Prim, PrimT, NameT
-from holotype.types import fits, dir_fits, is_option
+from zen.ast import Dir, Prim, PrimT, NameT
+from zen.types import fits, dir_fits, is_option
 from conftest import I32, VEC, ptr, option
 
 
@@ -87,7 +87,7 @@ def test_i32_widens_to_i64():
 
 
 def test_nominal_identity_by_path():
-    # same path == same type; different path == different type (holotype principle).
+    # same path == same type; different path == different type (zen principle).
     assert fits(NameT("a.b.C", ()), NameT("a.b.C", ()))
     assert not fits(NameT("a.b.C", ()), NameT("a.b.D", ()))
 

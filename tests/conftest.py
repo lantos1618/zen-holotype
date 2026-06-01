@@ -1,4 +1,4 @@
-"""Shared fixtures/helpers for the holotype test suite.
+"""Shared fixtures/helpers for the zen test suite.
 
 `make_space()` builds a tiny resolved type space by hand (no parsing) so the
 unit tests for fits()/infer() exercise the checker in isolation.
@@ -10,9 +10,9 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from holotype.ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct,
+from zen.ast import (Dir, Prim, PrimT, NameT, PtrT, Field_, Struct,
                           Param, Fn)
-from holotype.types import Namespace
+from zen.types import Namespace
 
 I32 = PrimT(Prim.I32)
 VEC = NameT("core.vec.Vec", ())

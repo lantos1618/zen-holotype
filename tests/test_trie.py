@@ -3,7 +3,7 @@ resolver, and conflict checker at once.
 """
 import pytest
 
-from holotype.types import Namespace, Conflict, Unresolved
+from zen.types import Namespace, Conflict, Unresolved
 
 
 def test_insert_then_walk_returns_value():
@@ -37,11 +37,11 @@ def test_diamond_import_lands_on_one_node():
     # A and B both reference core.vec.Vec; both resolve to the SAME node object,
     # so there's nothing to dedup — identity is the path.
     sp = Namespace()
-    sp.insert("core.vec.Vec", "the-holotype")
+    sp.insert("core.vec.Vec", "the-zen")
     from_a = sp.walk("core.vec.Vec")
     from_b = sp.walk("core.vec.Vec")
     assert from_a is from_b
-    assert from_a.value == "the-holotype"
+    assert from_a.value == "the-zen"
 
 
 def test_shared_prefix_does_not_collide():

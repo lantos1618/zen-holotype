@@ -17,8 +17,8 @@ import re
 
 import pytest
 
-from holotype.parser import parse
-from holotype.main import build_space, build_scopes, resolve, check
+from zen.parser import parse
+from zen.main import build_space, build_scopes, resolve, check
 
 CASES_DIR = pathlib.Path(__file__).parent / "cases"
 _ANNOT = re.compile(r"//~\s*(.+?)\s*$")

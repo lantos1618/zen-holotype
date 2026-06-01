@@ -10,7 +10,7 @@ Zen. A real *generating* adapter (translate-c / wasm / python) would run through
 the same `b.use` seam, producing `[Decl]` instead of being a static module."""
 import subprocess
 
-from holotype.main import (parse, interpret_build, load, load_uses, build_space,
+from zen.main import (parse, interpret_build, load, load_uses, build_space,
                            build_scopes, resolve, fold_comptime, run_emits, check, emit_c)
 
 

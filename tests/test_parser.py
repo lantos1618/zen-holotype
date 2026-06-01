@@ -1,9 +1,9 @@
 """T8 + F2: front-end — tree-sitter CST -> AST, and located parse errors."""
 import pytest
 
-from holotype.ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
+from zen.ast import (Dir, Prim, PrimT, NameT, PtrT, Struct, Fn,
                           Import, Var, Bin, Field, Call, StructLit, MethodCall, Match)
-from holotype.parser import parse
+from zen.parser import parse
 
 
 def only(decls, kind):
