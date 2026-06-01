@@ -31,7 +31,8 @@ def checked():
 # ── T9: the checker verdict on the example tree ─────────────────────────────
 def test_expected_pass_fail_set(checked):
     _, _, results, passing = checked
-    verdict = {qual: ok for qual, ok, _ in results}
+    # the bundled stdlib (std.*) is checked too; this test is about the example
+    verdict = {qual: ok for qual, ok, _ in results if not qual.startswith("std.")}
     assert verdict == {
         "main.area": True,
         "main.main": True,

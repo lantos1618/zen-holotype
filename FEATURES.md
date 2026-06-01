@@ -57,6 +57,14 @@ where it's headed, [VISION](VISION.md).)
 - **Raw memory intrinsics:** `addr(x)`, `load(p)`, `store(p, v)`, `offset(p, i)`.
 - Enough to build a **heap-allocating, growable `String`** on an allocator.
 
+## Standard library (`std.*`)
+- A third bundled category beside the comptime-only **prelude** and the FFI **bindings**:
+  ordinary runtime Zen, importable from any file, **checked and lowered like your code**.
+- **`std.iter`** — `fold` / `each` as generic templates over slices + closures:
+  `{ fold } = std.iter` then `fold([1, 2, 3], 0, (a, x) { a + x })`.
+- **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
+  nothing unless a program actually uses them (they inline at the call site).
+
 ## Comptime + metaprogramming — the AST is defined in Zen
 - **`comptime(expr)`** — a dedicated pass evaluates pure Zen at compile time and folds the
   result into a constant.
