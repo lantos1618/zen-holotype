@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, draw, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -256,3 +256,20 @@ def test_genc_named_struct_param_and_field_access(tmp_path):
     generated = emit_via_zen(tmp_path, body)
     assert "int32_t sumxy(Point p) { return (p.x + p.y); }" in generated
     assert compile_and_run(tmp_path, generated, "({ Point p = {3, 4}; sumxy(p); })") == "7"
+
+
+def test_genc_emits_enum_typedefs(tmp_path):
+    # a tagged-union enum (with payloads) and a no-payload enum (no union), both valid C.
+    body = """
+    shape := edef("Shape", [vdef("Circle", ti32()), vdef("Square", ti32()), vdef("Dot", tvoid())])
+    color := edef("Color", [vdef("Red", tvoid()), vdef("Green", tvoid()), vdef("Blue", tvoid())])
+    emit(genModule([denum(shape), denum(color)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "typedef struct { int32_t tag; union { int32_t Circle; int32_t Square; } u; } Shape;" in generated
+    assert "enum { Shape_Circle, Shape_Square, Shape_Dot };" in generated
+    assert "typedef struct { int32_t tag; } Color;" in generated          # no union: all variants are void
+    assert "enum { Color_Red, Color_Green, Color_Blue };" in generated
+    # the emitted enums are valid C, used together
+    call = "({ Shape s = {.tag=Shape_Circle, .u.Circle=5}; Color c = {.tag=Color_Green}; s.u.Circle + c.tag; })"
+    assert compile_and_run(tmp_path, generated, call) == "6"
