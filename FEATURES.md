@@ -54,7 +54,7 @@ where it's headed, [VISION](VISION.md).)
 ## Comptime + metaprogramming — the AST is defined in Zen
 - **`comptime(expr)`** — a dedicated pass evaluates pure Zen at compile time and folds the
   result into a constant.
-- **`emit gen(reflect(T))`** — a generator runs at comptime and **splices a real declaration**
+- **`@emit(gen(reflect(T)))`** — a generator runs at comptime and **splices a real declaration**
   (free fn or trait impl) into your program, which is then checked and lowered like
   hand-written code.
 - **The reified AST lives in Zen** (`prelude/derive.zen`). The compiler keeps only:
@@ -74,7 +74,7 @@ where it's headed, [VISION](VISION.md).)
 
   ```zen
   { derive_eq } = prelude.derive
-  emit derive_eq(reflect(Point))     // -> bool Point_eq(Point const*, Point const*) { ... }
+  @emit(derive_eq(reflect(Point)))   // -> bool Point_eq(Point const*, Point const*) { ... }
   ```
 
 ## Pipeline
