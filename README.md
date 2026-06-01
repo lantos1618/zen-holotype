@@ -134,7 +134,10 @@ fits(given, want):
 `Option<ptr>` → a bare pointer. All safety is proven *before* codegen, so the
 output is zero-overhead and the C compiler re-checks the const-correctness for free.
 
-**4. `build.zen` is the build graph, written in the language** (like Zig's `build.zig`):
+**4. `build.zen` is the build graph, written in the language** — and *executed*, not
+scraped: `build()` runs at compile time through the comptime engine, with `b` a live
+`Builder`. So `b.add` / `b.use` / `b.config` are real calls, and helpers, conditionals
+and computed values in the script are honoured. `b.config()` finalizes to a `Result`:
 
 ```zen
 { Builder, BuildConfig, BuildError, Executable, Test } = @builtin.build
@@ -145,7 +148,8 @@ build = (b: Builder) Result<BuildConfig, BuildError> {
         main: "main.zen",
         out_dir: "build",
     })
-    .Ok(b.config())
+    b.add(Test { root: "test.zen" })
+    b.config()
 }
 ```
 

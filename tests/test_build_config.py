@@ -65,3 +65,55 @@ def test_unknown_target_is_rejected(tmp_path):
     (tmp_path / "main.zen").write_text("main* = () i32 { 0 }")
     with pytest.raises(SystemExit, match="not supported yet"):
         cmd_build(str(tmp_path))
+
+
+# ── build.zen is EXECUTED, not scraped: helpers, conditionals, computed values ─
+def test_build_runs_helper_and_conditional():
+    # opt(debug) is a real helper; a `match` decides whether the Test is added.
+    # The old static reader could do neither — it could only see literal b.add(...).
+    bf = parse("""
+{ Builder, Executable, Test } = @builtin.build
+
+opt = (debug: bool) [str] {
+    debug.match { true => ["-O0", "-g"], false => ["-O2"] }
+}
+
+build = (b: Builder) i32 {
+    release := true
+    b.add(Executable { name: "app", main: "main.zen", cflags: opt(!release), links: ["m"] })
+    release.match {
+        true  => b.add(Test { root: "test.zen" }),
+        false => b
+    }
+    0
+}
+""", "build")
+    cfg = interpret_build(bf)
+    assert cfg["cflags"] == ["-O2"]       # opt(!true) = opt(false) -> ["-O2"], computed at build time
+    assert cfg["links"] == ["m"]
+    assert cfg["tests"] == ["test.zen"]   # added only because the release branch executed
+
+
+def test_build_use_namespace_from_assignment():
+    # `c = b.use("libc")` — the assigned name is captured as the install namespace.
+    bf = parse("""
+{ Builder, Executable } = @builtin.build
+build = (b: Builder) i32 {
+    c = b.use("libc")
+    b.add(Executable { name: "d", main: "main.zen" })
+    0
+}
+""", "build")
+    cfg = interpret_build(bf)
+    assert cfg["uses"] == [{"module": "libc", "ns": "c"}]
+
+
+def test_build_can_report_an_error():
+    # build() returning a Result.Err is surfaced, not silently ignored.
+    import pytest
+    bf = parse("""
+{ Builder, BuildError } = @builtin.build
+build = (b: Builder) i32 { .Err(BuildError { msg: "nope" }) }
+""", "build")
+    with pytest.raises(SystemExit, match="returned an error"):
+        interpret_build(bf)

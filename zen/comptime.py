@@ -21,6 +21,23 @@ class ComptimeErr(Exception):
     ...
 
 
+class Host:
+    """A host-provided comptime object (e.g. the build `Builder`). Method calls on
+    it during evaluation dispatch to `invoke`; subclasses live where their domain
+    does (the build Builder is in main.py)."""
+    def invoke(self, method, args):
+        raise ComptimeErr(f"comptime: host object has no method '{method}'")
+
+
+class StructVal(dict):
+    """A struct value that remembers its type name — so a host method can tell an
+    `Executable {…}` from a `Test {…}`. A plain dict everywhere else (field access,
+    reify, etc. are unaffected)."""
+    def __init__(self, type_name, fields):
+        super().__init__(fields)
+        self.type_name = type_name
+
+
 # ───────────────────────── the dedicated comptime pass ──────────────────────
 # A first-class run, after resolve and before check: walk every function body
 # and rewrite each `comptime(e)` node into the constant it evaluates to. The
@@ -87,10 +104,12 @@ def _fold(e, namespace, scope):
     return e                                  # Lit / Bool / Var / Str — nothing to fold
 
 
-def evaluate(e, namespace, scope):
-    """Evaluate `e` to a compile-time value (int/bool/struct/enum)."""
+def evaluate(e, namespace, scope, env=None):
+    """Evaluate `e` to a compile-time value (int/bool/struct/enum/list/host).
+    `env` seeds the locals (e.g. the build `b` Builder); the caller threads it
+    across statements to carry let/assign bindings."""
     try:
-        return _eval(e, {}, namespace, scope, [_FUEL])
+        return _eval(e, {} if env is None else env, namespace, scope, [_FUEL])
     except RecursionError:                   # deep comptime recursion → a clean error, not a crash
         raise ComptimeErr("comptime recursion too deep (infinite recursion?)")
 
@@ -120,10 +139,18 @@ def _eval(e, env, namespace, scope, fuel):
             raise ComptimeErr("comptime: field access on a non-struct")
         return obj[e.name]
     if isinstance(e, StructLit):
-        return {n: _eval(v, env, namespace, scope, fuel) for n, v in e.fields}
+        return StructVal(e.type, {n: _eval(v, env, namespace, scope, fuel) for n, v in e.fields})
+    if isinstance(e, SliceLit):
+        return [_eval(x, env, namespace, scope, fuel) for x in e.elems]
     if isinstance(e, EnumCtor):
         pay = _eval(e.args[0], env, namespace, scope, fuel) if e.args else None
         return ("@enum", e.name, pay)
+    if isinstance(e, MethodCall):
+        recv = _eval(e.recv, env, namespace, scope, fuel)
+        args = [_eval(a, env, namespace, scope, fuel) for a in e.args]
+        if isinstance(recv, Host):                # b.add(…) / b.use(…) / b.config()
+            return recv.invoke(e.method, args)
+        raise ComptimeErr(f"comptime: no method '{e.method}' on a {type(recv).__name__}")
     if isinstance(e, Match):
         return _match(e, env, namespace, scope, fuel)
     if isinstance(e, Call):

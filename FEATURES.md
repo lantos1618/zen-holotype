@@ -50,6 +50,10 @@ where it's headed, [VISION](VISION.md).)
 ## Systems / FFI
 - **Foreign C bindings** — a function with **no body** binds the C symbol of the same name
   (`malloc = (n: i64) RawPtr<u8>`); no `extern` keyword. libc by bare name, headers auto-included.
+- **`build.zen` is executed, not scraped** — `build(b)` runs at compile time through the
+  comptime engine with `b` a live `Builder`, so `b.add` / `b.use` / `b.config` are real calls
+  and helper functions, conditionals and computed values in the script are honoured.
+  `b.config()` finalizes to a `Result<BuildConfig, BuildError>`.
 - **Build flags from `build.zen`** — `Executable { …, cflags: ["-O2", "-g"], links: ["m"] }`
   threads through to `cc` (`-O2 -g … -lm`), for the exe and its tests.
 - **Incremental builds** — the C is byte-deterministic, so `zen build` skips `cc` when the
