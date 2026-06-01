@@ -92,7 +92,7 @@ module.exports = grammar({
     // x := expr  — a local binding (type inferred from the value)
     let_binding: $ => seq(field('name', $.identifier), ':=', field('value', $._expression)),
     // lvalue = expr  — reassign a local, or set a struct field (s.f = v)
-    assign: $ => prec(1, seq(field('target', choice($.identifier, $.field_access)),
+    assign: $ => prec(1, seq(field('target', choice($.identifier, $.field_access, $.index)),
                              '=', field('value', $._expression))),
     // @while(cond) { … } — the structured loop PRIMITIVE (plumbing; prefer `loop`).
     // It carries a backend-visible structure (lowers to a C `for`), so the C

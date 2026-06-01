@@ -40,7 +40,7 @@ where it's headed, [VISION](VISION.md).)
   parameter is called. **Zero-cost** (no function pointers), captures resolve in the caller's
   scope so they read *and* mutate as written, and the C stays clean under `-Wall -Wextra -Werror`.
   So `fold`/`each` are ordinary Zen on top of `loop` — `fold(xs, 0, (a, x) { a + x })`.
-- **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`).
+- **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`), `xs[i] = v` (write a slice element).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
 - **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `Area*: { … }` —
