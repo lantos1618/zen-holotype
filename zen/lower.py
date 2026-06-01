@@ -147,10 +147,11 @@ def c_expr(e, locals_, namespace, scope, expect=None) -> str:
             return f"{impl_cname(tp, ty, 'at')}({recv}, {ix})"
         case Call():
             return _c_call(e, locals_, namespace, scope, expect)
-        case MethodCall(recv, method, args):                 # loop handle control
-            if method in ("break", "continue"):
+        case MethodCall(recv, method, args):
+            if method in ("break", "continue"):              # loop handle control
                 return method                                # `h.break();` -> `break;`
-            return "0"
+            call = Call(method, (recv,) + tuple(args), getattr(e, "pos", None))  # UFCS: x.f(a) == f(x, a)
+            return _c_call(call, locals_, namespace, scope, expect)
         case Closure():
             raise TypeError("a closure may only be passed to a closure parameter (it is inlined there)")
         case _:
