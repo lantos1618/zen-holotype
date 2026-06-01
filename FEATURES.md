@@ -17,7 +17,9 @@ where it's headed, [VISION](VISION.md).)
   pointees, and integer widening (`u8 ≤ i32 ≤ i64`). All of it erases to plain C.
 - **Generics:** `Box<T>`, bounded `<T: Area>` — unification + **monomorphization** to
   concrete C.
-- **Traits & impls:** `trait Area { area: (Ptr<Self>) i32 }` + `impl Area for Vec { … }`,
+- **Traits & impls (keyword-free):** a trait is a record of method signatures
+  `Area*: { area: (Ptr<Self>) i32 }`; an impl is owned by the type
+  `Vec.impl(Area) { … }` (no `trait`/`impl`/`for` keywords),
   structural conformance; trait methods dispatch through bounds, an unsatisfied bound is a
   type error.
 - **Inference:** integer literals adapt to the expected type; return types inferred from
@@ -41,7 +43,7 @@ where it's headed, [VISION](VISION.md).)
 - **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
-- **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `trait Area* { … }` —
+- **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `Area*: { … }` —
   not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = local.
 
 ## Systems / FFI

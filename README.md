@@ -209,7 +209,8 @@ whose callee is a field access, so there's no special rule for it. The language
 now covers structs and **generic data types** (`Box<T>` — the type-arg inferred
 from the field values, monomorphized to concrete C), **user enums** (C tagged
 unions), **generic functions** (`id<T>` — type-args inferred by unification,
-**monomorphized**), **traits / constrained generics** (`trait`, `impl … for …`,
+**monomorphized**), **traits / constrained generics** (keyword-free: a trait is a
+record of signatures `Area*: { … }`, an impl is `Vec.impl(Area) { … }`,
 `<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound
 is a type error), **`match`** with payload-binding, exhaustiveness, and **literal
 patterns** on `i32`/`bool` (so with **recursion** the language is Turing-complete —

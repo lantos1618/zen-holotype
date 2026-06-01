@@ -17,7 +17,7 @@ module.exports = grammar({
 
   rules: {
     source_file: $ => repeat($._item),
-    _item: $ => choice($.import, $.struct, $.enum, $.function, $.trait, $.impl, $.extern, $.emit),
+    _item: $ => choice($.import, $.struct, $.enum, $.function, $.impl, $.extern, $.emit),
 
     // extern malloc = (n: i64) RawPtr<u8>   — bind a C symbol; no body
     extern: $ => seq('extern', field('name', $.identifier), '=',
@@ -39,15 +39,15 @@ module.exports = grammar({
     tparam: $ => seq(field('name', $.identifier),
                      optional(seq(':', field('bound', $.identifier)))),
 
-    // trait Area { area: (Ptr<Self>) i32 }   — a named set of method signatures
-    // a glued `*` after the name marks it public: `trait Area* { … }`.
-    trait: $ => seq('trait', field('name', $.identifier), optional(field('vis', token.immediate('*'))),
-                    '{', comma1($.method_sig), optional(','), '}'),
-    method_sig: $ => seq(field('name', $.identifier), ':',
-                         '(', optional(comma1($._type)), ')', field('ret', $._type)),
+    // A trait has NO keyword — it is a record whose every member is a function type:
+    //   Area*: { area: (Ptr<Self>) i32 }
+    // It shares the `struct` rule (a field type may be a fn_type); the parser tells a
+    // trait from a struct by that all-function-typed shape.
 
-    // impl Area for Vec { area = (v: Ptr<Vec>) i32 { ... } }
-    impl: $ => seq('impl', field('trait', $.identifier), 'for', field('type', $.identifier),
+    // Vec.impl(Area) { area = (v: Ptr<Vec>) i32 { ... } }   — no `impl`/`for` keywords
+    // leading the line; the implementing type owns it via a postfix `.impl(Trait)`.
+    impl: $ => seq(field('type', $.identifier), '.', 'impl',
+                   '(', field('trait', $.identifier), ')',
                    '{', repeat($.function), '}'),
 
     // Vec*: { len: i32, cap: i32 }   /   Box*<T>: { val: T }   (the glued `*` = public)

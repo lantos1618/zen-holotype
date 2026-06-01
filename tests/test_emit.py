@@ -126,8 +126,8 @@ def test_derive_generates_a_trait_impl(tmp_path):
     # named traits. Each registers, conformance-checks, and dispatches via a bound.
     files, space, results, passing = frontend(tmp_path, """
 { derive_tag_impl } = prelude.derive
-trait Ranked  { rank: (Self) i32 }
-trait Ordinal { ord:  (Self) i32 }
+Ranked:  { rank: (Self) i32 }
+Ordinal: { ord:  (Self) i32 }
 Color: Red, Green, Blue
 emit derive_tag_impl(reflect_trait(Ranked),  reflect(Color))
 emit derive_tag_impl(reflect_trait(Ordinal), reflect(Color))
