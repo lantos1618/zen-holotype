@@ -12,8 +12,8 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, S
                   Str, StructLit, SliceLit, Index, Bin, Not, Field, Let, Assign, While, Loop,
                   Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var, Closure)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
-                    ret_type, show, scope_with_bounds, TraitMethod, TypeErr, Unresolved, Private,
-                    Located)
+                    ret_type, show, scope_with_bounds, struct_at, TraitMethod, TypeErr,
+                    Unresolved, Private, Located)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
@@ -382,6 +382,9 @@ def _scan_expr(e, locals_, space, scope, sink, expect=None, cenv=None):
     elif isinstance(e, Index):
         _scan_expr(e.seq, locals_, space, scope, sink, None, cenv)
         _scan_expr(e.idx, locals_, space, scope, sink, None, cenv)
+        at = struct_at(infer(e.seq, locals_, space, scope), space)   # []-overloading: the `at` impl
+        if at is not None:
+            sink.impl(at[0], at[1])
     elif isinstance(e, StructLit):
         st = infer(e, locals_, space, scope)
         decl = space.walk(st.path).value

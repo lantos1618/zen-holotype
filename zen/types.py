@@ -306,11 +306,14 @@ def _infer(e, locals_, space, scope, expect=None):
             return SliceT(et)
         case Index(seq, idx):                                  # xs[i] : T
             st = infer(seq, locals_, space, scope)
-            if not isinstance(st, SliceT):
-                raise TypeErr("indexing a non-slice value")
             if not _numeric(infer(idx, locals_, space, scope)):
                 raise TypeErr("a slice index must be numeric")
-            return st.elem
+            if isinstance(st, SliceT):
+                return st.elem
+            at = struct_at(st, space)                          # []-overloading: a struct's `at`
+            if at is not None:
+                return at[2].ret                               # the `at` method's return type
+            raise TypeErr("indexing a non-slice value")
         case Closure(params, body):
             if not isinstance(expect, FnT):
                 raise TypeErr("a closure needs a known function type here (pass it to a closure parameter)")
@@ -376,6 +379,20 @@ def _infer_struct_lit(e, locals_, space, scope):
         if not fits(given, want):
             raise TypeErr("field type", given, want)
     return NameT(qual, tuple(s[t] for t in decl.tparams))
+
+
+def struct_at(st, space):
+    """`[]` overloading: if `st` is a struct (or a pointer to one) whose type has an
+    impl with an `at` method, return `(trait_path, type_path, at_fn)` — so `s[i]`
+    types as `at`'s return and lowers to that call. None if not indexable. This is
+    what makes a user struct *loopable*: the element-loop indexes it like a slice."""
+    ty = st.pointee if isinstance(st, PtrT) else st
+    if not isinstance(ty, NameT):
+        return None
+    for (trait_path, type_path), methods in space.impls.items():
+        if type_path == ty.path and "at" in methods:
+            return (trait_path, type_path, methods["at"][0])
+    return None
 
 
 def _infer_call(e, expect, locals_, space, scope):
