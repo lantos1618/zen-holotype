@@ -16,6 +16,20 @@ class Unresolved(Exception): ...
 class Private(Exception):    ...   # imported a name another module didn't export (no `*`)
 
 
+class Located(str):
+    """A diagnostic message that IS its text (so `in`, `startswith`, printing all
+    work) but also carries the structured `(ns, row, col)` of the error — so a
+    caret can be rendered straight from the location, never by re-parsing the
+    formatted string. Format at the edge, carry structure through."""
+    ns: "str | None"
+    pos: "tuple | None"
+
+    def __new__(cls, text, ns=None, pos=None):
+        s = super().__new__(cls, text)
+        s.ns, s.pos = ns, pos
+        return s
+
+
 @dataclass
 class TraitMethod:
     """A scope entry for a trait method reachable via a bound `T: Trait`."""
