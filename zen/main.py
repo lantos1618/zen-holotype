@@ -597,13 +597,20 @@ def sval(e):
     return e.s if isinstance(e, Str) else None
 
 
+def slist(e):
+    """The string literals of a slice literal `["a", "b"]` (else [])."""
+    return [s for el in (e.elems if isinstance(e, SliceLit) else ())
+            if (s := sval(el)) is not None]
+
+
 def interpret_build(bf):
     """Statically read the build() graph into a config dict (like reading build.zig).
 
     The CST chains the trailing `.Ok(...)` onto the last `b.add(...)`, so we walk
     method-call receivers to find every `b.add(Component {...})`.
     """
-    cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": [], "uses": []}
+    cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": [], "uses": [],
+           "cflags": [], "links": []}
     fn = next((d for d in bf.decls if isinstance(d, Fn) and d.name == "build"), None)
     if fn is None:
         raise SystemExit("build.zen: no build() function")
@@ -624,6 +631,8 @@ def interpret_build(bf):
             cfg["name"] = sval(f.get("name")) or cfg["name"]
             cfg["main"] = sval(f.get("main")) or cfg["main"]
             cfg["out_dir"] = sval(f.get("out_dir")) or cfg["out_dir"]
+            cfg["cflags"] = slist(f.get("cflags")) or cfg["cflags"]   # e.g. ["-O2", "-g"]
+            cfg["links"] = slist(f.get("links")) or cfg["links"]      # e.g. ["m"] -> -lm
         elif arg.type == "Test":
             if (r := sval(f.get("root"))):
                 cfg["tests"].append(r)
@@ -654,9 +663,10 @@ def is_test_fn(d) -> bool:
             and isinstance(d.ret, PrimT) and d.ret.prim is Prim.BOOL)
 
 
-def run_test_root(root, test_rel):
+def run_test_root(root, test_rel, cc_extra=()):
     """Compile the test root together with the project modules and run each
-    bool-returning no-arg test, reporting PASS/FAIL from its return value."""
+    bool-returning no-arg test, reporting PASS/FAIL from its return value.
+    `cc_extra` are extra cc args (the Executable's cflags + `-l` links)."""
     test_ns = pathlib.Path(test_rel).with_suffix("").as_posix().replace("/", ".")
     files = load(root)                       # includes the test root (skips only build.zen)
     space = build_space(files)
@@ -677,7 +687,7 @@ def run_test_root(root, test_rel):
     out_dir.mkdir(parents=True, exist_ok=True)
     cpath, bpath = out_dir / f"{test_ns}_test.c", out_dir / f"{test_ns}_test"
     cpath.write_text(emit_c(files, passing, space, harness))
-    subprocess.run(["cc", "-Wall", "-Wextra", str(cpath), "-o", str(bpath)], check=True)
+    subprocess.run(["cc", "-Wall", "-Wextra", *cc_extra, str(cpath), "-o", str(bpath)], check=True)
     print(f"\n── tests: {test_rel} ──")
     skipped = [d.name for d in tests if d not in runnable]
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
@@ -702,6 +712,8 @@ def cmd_build(root):
     bf = parse((pathlib.Path(root) / "build.zen").read_text(), "build")
     cfg = interpret_build(bf)
     print(f"── build.zen graph ──\n   Executable {cfg['name']}  (main={cfg['main']}, out={cfg['out_dir']})")
+    if cfg["cflags"] or cfg["links"]:
+        print(f"   cc flags {cfg['cflags']}  links {cfg['links']}")
     for u in cfg["uses"]:
         print(f"   use \"{u['module']}\"  -> namespace `{u['ns']}`")
     for t in cfg["tests"]:
@@ -738,13 +750,14 @@ def cmd_build(root):
     cpath, bpath = out_dir / f"{cfg['name']}.c", out_dir / cfg["name"]
     cpath.write_text(emit_c(files, passing, space, harness))
 
+    cc_extra = [*cfg["cflags"], *(f"-l{lib}" for lib in cfg["links"])]   # build.zen flags
     print(f"\n── compiling {cpath} ──")
-    subprocess.run(["cc", "-Wall", "-Wextra", str(cpath), "-o", str(bpath)], check=True)
+    subprocess.run(["cc", "-Wall", "-Wextra", *cc_extra, str(cpath), "-o", str(bpath)], check=True)
     print(f"── running {bpath} ──")
     print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
 
     for t in cfg["tests"]:
-        run_test_root(root, t)
+        run_test_root(root, t, cc_extra)
 
 
 def cli(argv=None):
