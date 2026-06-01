@@ -186,6 +186,16 @@ def _numeric(t) -> bool:
     return isinstance(t, PrimT) and t.prim in (Prim.U8, Prim.I32, Prim.I64)
 
 
+_TBOUNDS = "\x00tbounds"      # scope key carrying the enclosing fn's tparam bounds
+
+
+def scope_with_bounds(scope, bounds):
+    """Embed an enclosing fn's `{tvar: trait_path}` bounds in its body's scope, so a
+    call to a bounded generic can require a forwarded TYPE VARIABLE to be bounded too
+    (the key is non-identifier, so it never collides with a real name)."""
+    return {**(scope or {}), _TBOUNDS: dict(bounds or {})}
+
+
 def infer(e, locals_, space, scope, expect=None):
     """Type `e`, tagging any TypeErr with the innermost offending expr's position
     (the deepest frame catches first, so the most specific location wins)."""
@@ -399,9 +409,14 @@ def _infer_call(e, expect, locals_, space, scope):
                 raise TypeErr("pointer/null mismatch", given, want)
         for tp, trait_path in callee.bounds.items():      # the type-arg must satisfy its bound
             got = s.get(tp)
-            if isinstance(got, NameT) and (trait_path, got.path) not in space.impls:
-                raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement "
-                              f"{trait_path.rsplit('.', 1)[-1]}")
+            short = trait_path.rsplit('.', 1)[-1]
+            if isinstance(got, NameT):                     # a concrete type — needs an impl
+                if (trait_path, got.path) not in space.impls:
+                    raise TypeErr(f"{got.path.rsplit('.', 1)[-1]} does not implement {short}")
+            elif isinstance(got, TVar):                    # a forwarded type var — must be bounded too
+                if scope.get(_TBOUNDS, {}).get(got.name) != trait_path:
+                    raise TypeErr(f"type {got.name} is unbounded but '{e.callee}' requires "
+                                  f"{got.name}: {short} — add the bound")
         return subst(ret_type(target, space), s)
     for a, p in zip(e.args, callee.params):
         given = infer(a, locals_, space, scope, p.type)
@@ -426,7 +441,7 @@ def ret_type(qual, space):
     fn.ret = _INFERRING
     try:
         fn.ret = infer_block(fn.body, {p.name: p.type for p in fn.params},
-                             space, fn.scope, None)
+                             space, scope_with_bounds(fn.scope, fn.bounds), None)
     except BaseException:
         fn.ret = None      # roll back so a later check of this fn re-infers cleanly
         raise

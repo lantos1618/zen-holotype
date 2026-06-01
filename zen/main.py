@@ -12,7 +12,7 @@ from .ast import (Struct, EnumDecl, Fn, Param, Prim, PrimT, NameT, PtrT, TVar, S
                   Str, StructLit, SliceLit, Index, Bin, Not, Field, Let, Assign, While, Loop,
                   Call, MethodCall, EnumCtor, Match, TraitDecl, Impl, Emit, Lit, Bool, Var, Closure)
 from .types import (Namespace, fits, infer, infer_block, subst, solve_call, match_type,
-                    ret_type, show, TraitMethod, TypeErr)
+                    ret_type, show, scope_with_bounds, TraitMethod, TypeErr)
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
@@ -283,7 +283,7 @@ def _check_fn(qual, ns, d, space, results, passing):
     locals_ = {p.name: p.type for p in d.params}
     try:
         want = d.ret if d.ret is not None else ret_type(qual, space)   # declared or inferred
-        bt = infer_block(d.body, locals_, space, d.scope, want)
+        bt = infer_block(d.body, locals_, space, scope_with_bounds(d.scope, d.bounds), want)
         void = isinstance(want, PrimT) and want.prim is Prim.VOID
         if want is not None and not void and not fits(bt, want):        # void discards the body value
             raise TypeErr("return type", bt, want)
