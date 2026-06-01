@@ -303,7 +303,7 @@ def test_void_main_harness(tmp_path):
         '{ Builder, BuildConfig, BuildError, Executable } = @builtin.build\n'
         'build = (b: Builder) Result<BuildConfig, BuildError> {\n'
         '    b.add(Executable { name: "v", main: "main.zen", out_dir: "build" })\n'
-        '    .Ok(b.config())\n}\n')
+        '    b.config()\n}\n')
     (tmp_path / "main.zen").write_text("main* = () void { y := 5 }\n")
     out = subprocess.run([sys.executable, "-m", "zen", "build", str(tmp_path)],
                          capture_output=True, text=True, cwd=str(EXAMPLES.parent))

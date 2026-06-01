@@ -17,7 +17,7 @@ from .types import (Namespace, fits, infer, infer_block, subst, solve_call, matc
 from .lower import (c_struct, c_enum, c_proto, c_def, c_name, inst_name,
                     impl_cname, mangle, slice_typedefs, _slice_reg, _uid_reg, is_template, _CENV)
 from .parser import parse
-from .comptime import fold_comptime, evaluate, reify_decl
+from .comptime import fold_comptime, evaluate, reify_decl, Host
 
 BUILTIN = {"Option"}
 _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
@@ -653,69 +653,91 @@ def emit_c(files, passing, namespace, extra="", roots=None):
 
 
 # ───────────────────────── build.zen interpreter ────────────────────────────
-def sval(e):
-    return e.s if isinstance(e, Str) else None
+# build.zen is a real Zen program: we *run* its build() function through the
+# comptime engine, with `b` a live host Builder. b.add / b.use / b.config execute
+# as the script does, so conditionals, helper functions and computed values are
+# all honoured — nothing is scraped out of the AST.
+class _UseToken:
+    """The value of `b.use(mod)`. The name it's assigned to becomes the namespace
+    the module installs under — `c = b.use("libc")` → namespace `c`, so a program
+    then does `{ malloc, free } = c`."""
+    def __init__(self, module):
+        self.module = module
 
 
-def slist(e):
-    """The string literals of a slice literal `["a", "b"]` (else [])."""
-    return [s for el in (e.elems if isinstance(e, SliceLit) else ())
-            if (s := sval(el)) is not None]
+class _Builder(Host):
+    """The build `Builder`. `b.add(Executable/Test)` registers a graph node,
+    `b.use(mod)` a foreign-binding module, `b.config()` finalizes to a Result."""
+    def __init__(self):
+        self.execs, self.tests = [], []
+
+    def invoke(self, method, args):
+        if method == "add":
+            comp = args[0] if args else None
+            ty = getattr(comp, "type_name", None)
+            if ty == "Executable":
+                self.execs.append(comp)
+            elif ty == "Test":
+                self.tests.append(comp)
+            else:
+                raise SystemExit(f"build.zen: b.add expects an Executable or Test, got {ty!r}")
+            return self                                    # chainable: b.add(...).add(...)
+        if method == "use":
+            if not (args and isinstance(args[0], str)):
+                raise SystemExit("build.zen: b.use(<module>) needs a string module name")
+            return _UseToken(args[0])
+        if method == "config":
+            return ("@enum", "Ok", None)                   # Result<BuildConfig, BuildError>.Ok
+        raise SystemExit(f"build.zen: a Builder has no method '{method}'")
+
+
+def _build_cfg(b, uses):
+    """Read the executed Builder's accumulated graph into the config dict the rest
+    of the build pipeline consumes."""
+    cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": [], "uses": uses,
+           "cflags": [], "links": [], "target": "native"}
+    if b.execs:
+        e = b.execs[0]                                     # one executable per build, today
+        cfg["name"] = e.get("name", cfg["name"])
+        cfg["main"] = e.get("main", cfg["main"])
+        cfg["out_dir"] = e.get("out_dir", cfg["out_dir"])
+        cfg["cflags"] = e.get("cflags", []) or []          # ["-O2", "-g"]
+        cfg["links"] = e.get("links", []) or []            # ["m"] -> -lm
+        cfg["target"] = e.get("target", "native")
+    cfg["tests"] = [r for t in b.tests if (r := t.get("root"))]
+    return cfg
 
 
 def interpret_build(bf):
-    """Statically read the build() graph into a config dict (like reading build.zig).
-
-    The CST chains the trailing `.Ok(...)` onto the last `b.add(...)`, so we walk
-    method-call receivers to find every `b.add(Component {...})`.
-    """
-    cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": [], "uses": [],
-           "cflags": [], "links": [], "target": "native"}
+    """Run build() for real and return its config dict. `b` is a host Builder threaded
+    through the comptime evaluator; the graph it accumulates *is* the executed result."""
+    files = {"build": bf}
+    namespace = build_namespace(files)
+    build_scopes(files)
+    for d in bf.decls:
+        if isinstance(d, Fn):
+            d.scope = bf.scope                             # comptime _call reads fn.scope
     fn = next((d for d in bf.decls if isinstance(d, Fn) and d.name == "build"), None)
     if fn is None:
         raise SystemExit("build.zen: no build() function")
 
-    def handle_use(ns, call):
-        # c = b.use("libc")  — the binding name picks the module; the assigned name IS
-        # the namespace it's installed under (so `{ malloc } = c` resolves to c.malloc).
-        if not (isinstance(call, MethodCall) and call.method == "use" and call.args):
-            return
-        if (mod := sval(call.args[0])) is not None:
-            cfg["uses"].append({"module": mod, "ns": ns})
-
-    def handle_add(arg):
-        if not isinstance(arg, StructLit):
-            return
-        f = {n: v for n, v in arg.fields}
-        if arg.type == "Executable":
-            cfg["name"] = sval(f.get("name")) or cfg["name"]
-            cfg["main"] = sval(f.get("main")) or cfg["main"]
-            cfg["out_dir"] = sval(f.get("out_dir")) or cfg["out_dir"]
-            cfg["cflags"] = slist(f.get("cflags")) or cfg["cflags"]   # e.g. ["-O2", "-g"]
-            cfg["links"] = slist(f.get("links")) or cfg["links"]      # e.g. ["m"] -> -lm
-            cfg["target"] = sval(f.get("target")) or cfg["target"]    # "native" (default) | "wasm"
-        elif arg.type == "Test":
-            if (r := sval(f.get("root"))):
-                cfg["tests"].append(r)
-
-    def visit(node):
-        if isinstance(node, MethodCall):
-            if node.method == "add" and node.args:
-                handle_add(node.args[0])
-            visit(node.recv)
-            for a in node.args:
-                visit(a)
-        elif isinstance(node, EnumCtor):
-            for a in node.args:
-                visit(a)
-
+    b = _Builder()
+    env = {fn.params[0].name: b} if fn.params else {}      # bind the `b: Builder` parameter
+    uses, final = [], None
     for stmt in fn.body:
-        if isinstance(stmt, Let):                     # `c := b.use(...)` foreign-binding namespace
-            handle_use(stmt.name, stmt.value)
-        elif isinstance(stmt, Assign) and isinstance(stmt.target, Var):   # `c = b.use(...)`
-            handle_use(stmt.target.name, stmt.value)
-        visit(stmt)
-    return cfg
+        if isinstance(stmt, Let):
+            env[stmt.name] = v = evaluate(stmt.value, namespace, fn.scope, env)
+            if isinstance(v, _UseToken):                   # c := b.use(...)
+                uses.append({"module": v.module, "ns": stmt.name})
+        elif isinstance(stmt, Assign) and isinstance(stmt.target, Var):
+            env[stmt.target.name] = v = evaluate(stmt.value, namespace, fn.scope, env)
+            if isinstance(v, _UseToken):                   # c = b.use(...)
+                uses.append({"module": v.module, "ns": stmt.target.name})
+        else:
+            final = evaluate(stmt, namespace, fn.scope, env)
+    if isinstance(final, tuple) and len(final) == 3 and final[:2] == ("@enum", "Err"):
+        raise SystemExit(f"build.zen: build() returned an error: {final[2]!r}")
+    return _build_cfg(b, uses)
 
 
 def is_test_fn(d) -> bool:
