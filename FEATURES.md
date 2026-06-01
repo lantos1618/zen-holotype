@@ -78,9 +78,10 @@ where it's headed, [VISION](VISION.md).)
   and `new_i32` (a fresh typed slice). No GC or destructors — ownership is explicit.
 - **`slice(ptr, len)`** intrinsic — build a `[T]` view from a raw pointer + length (Rust's
   `from_raw_parts`); the element type comes from the wanted slice type (a return/param slot).
-- **`std.str`** — read-only ops on `str` (a C string): `len` / `eq` / `ne` / `is_empty`.
-  (String *literals* are first-class values now; an owned, growable String awaits the
-  allocator model.)
+- **`std.str`** — `len` / `eq` / `ne` / `is_empty` on a `str` (C string), plus `view` (a
+  read-only `[u8]` byte view that borrows a str's memory) and `dup` (an **owned** heap `[u8]`
+  copy the caller frees). An owned string is a length-tracked byte slice — `dup("hi").len`,
+  index its bytes, `release(it.ptr)`. String literals are first-class values.
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 

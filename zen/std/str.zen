@@ -1,10 +1,12 @@
-// std.str — read-only operations on `str` (a C string: a NUL-terminated `const
-// char*`). The owned, growable, length-tracked String needs heap allocation
-// (pending the allocator model); this is the read side, over libc.
+// std.str — operations on strings. A `str` is a C string (NUL-terminated `const
+// char*`); an owned, length-tracked string is a heap `[u8]` (a byte slice) the
+// caller owns. `view` borrows a str's bytes; `dup` copies them onto the heap.
 //
-//   { len, eq } = std.str
-//   n := len("hello")          // 5
-//   same := eq("abc", "abc")   // true
+//   { len, eq, dup } = std.str
+//   n := len("hello")            // 5
+//   owned := dup("hello")        // a heap [u8] you own (release(owned.ptr))
+
+{ new_u8 } = std.mem
 
 strlen = (s: str) i64
 strcmp = (a: str, b: str) i32
@@ -20,3 +22,16 @@ eq* = (a: str, b: str) bool { (strcmp(a, b)).match { 0 => true, _ => false } }
 
 // byte-wise inequality
 ne* = (a: str, b: str) bool { (eq(a, b)).match { true => false, false => true } }
+
+// ── bytes: borrow or own ────────────────────────────────────────────────────
+
+// a read-only [u8] view of a str's bytes — shares the str's memory (don't mutate)
+view* = (s: str) [u8] { slice(s, strlen(s)) }
+
+// an owned heap copy of a str's bytes — the caller owns it (free: release(it.ptr))
+dup* = (s: str) [u8] {
+    src := view(s)
+    out := new_u8(src.len)
+    src.loop((h, i, b) { out[i] = b })
+    out
+}

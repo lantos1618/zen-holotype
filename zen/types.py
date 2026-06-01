@@ -387,8 +387,9 @@ def _infer_call(e, expect, locals_, space, scope):
         if not isinstance(expect, SliceT):                # element type comes from the wanted slice
             raise TypeErr("slice(ptr, len) needs a known slice type here "
                           "(e.g. a `[T]` return slot or parameter)")
-        if len(e.args) != 2 or not isinstance(infer(e.args[0], locals_, space, scope), PtrT):
-            raise TypeErr("slice(ptr, len): a pointer and a length")
+        pt = infer(e.args[0], locals_, space, scope)      # a pointer, or a `str` (a C char*)
+        if len(e.args) != 2 or not (isinstance(pt, PtrT) or pt == PrimT(Prim.STR)):
+            raise TypeErr("slice(ptr, len): a pointer (or str) and a length")
         if not isinstance(infer(e.args[1], locals_, space, scope), PrimT):
             raise TypeErr("slice length must be numeric")
         return expect
