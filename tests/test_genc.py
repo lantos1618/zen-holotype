@@ -17,7 +17,7 @@ def emit_via_zen(tmp_path, main_body):
     """Compile + run a zen program whose main builds an AST and prints genC(it).
     Returns the C source the zen program produced at runtime."""
     prog = """
-{ Func, Stmt, Expr, lit, vref, bin, call, slet, sret, genC, genModule } = std.genc
+{ Func, Stmt, Expr, lit, vref, bin, call, cond, slet, sret, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -117,6 +117,36 @@ def test_genc_module_of_two_functions_compiles_and_runs(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip() == "10"
+
+
+def test_genc_emits_a_recursive_factorial_that_runs(tmp_path):
+    # The capstone: zen builds the AST for a RECURSIVE function with a conditional,
+    # genC emits it at runtime, and the generated C compiles and computes:
+    #   int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }
+    #   fact(5) == 120
+    body = """
+    n_a := vref("n")
+    one_a := lit(1)
+    nle1 := bin("<=", addr(n_a), addr(one_a))
+    thenE := lit(1)
+    n_b := vref("n")
+    one_b := lit(1)
+    nm1 := bin("-", addr(n_b), addr(one_b))
+    fcall := call("fact", addr(nm1))
+    n_c := vref("n")
+    nfact := bin("*", addr(n_c), addr(fcall))
+    e := cond(addr(nle1), addr(thenE), addr(nfact))
+    emit(genC(Func { name: "fact", param: "n", body: [sret(addr(e))] }))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert generated == "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }"
+    (tmp_path / "gen.c").write_text(
+        "#include <stdint.h>\n" + generated +
+        '\n#include <stdio.h>\nint main(void){ printf("%d\\n", fact(5)); return 0; }\n')
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "gen.c"), "-o", str(tmp_path / "gen")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip() == "120"
 
 
 def test_generated_multi_statement_c_compiles_and_runs(tmp_path):
