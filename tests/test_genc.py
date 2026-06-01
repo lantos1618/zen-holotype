@@ -2,30 +2,28 @@
 value and calls genC(f) -> String to emit C source while it runs. This is the
 self-hosting seed: codegen is the language's own lowered code, not the host's.
 
-The AST is recursive (Bin holds Ptr<Expr> children, walked with match-deref), and a
-function body is a [Stmt] (Let / Return) — genC emits whole function bodies.
+The AST is recursive (Bin holds Ptr<Expr> children, walked with match-deref); a body
+is a [Stmt] (Let / Return); a Func has typed parameters (`[Param]`) and a return Ty.
 
-The decisive test closes the loop: the C that the zen program emits at runtime is
-itself compiled and executed, and computes the right answer."""
+The decisive tests close the loop: the C the zen program emits at runtime is itself
+compiled and executed, and computes the right answer."""
 import subprocess
 
 from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptime,
                       run_emits, check, emit_c)
 
+_IMPORTS = """
+{ Func, Param, Ty, lit, vref, bin, call, cond, slet, sret, param, ti32, ti64, tu8, tbool, genC, genModule } = std.genc
+{ String, bytes } = std.string
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+"""
+
 
 def emit_via_zen(tmp_path, main_body):
     """Compile + run a zen program whose main builds an AST and prints genC(it).
     Returns the C source the zen program produced at runtime."""
-    prog = """
-{ Func, Stmt, Expr, lit, vref, bin, call, cond, slet, sret, genC, genModule } = std.genc
-{ String, bytes } = std.string
-putchar = (c: i32) i32
-emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
-main* = () i32 {
-%s
-}
-""" % main_body
-    (tmp_path / "main.zen").write_text(prog)
+    (tmp_path / "main.zen").write_text(_IMPORTS + "main* = () i32 {\n%s\n}\n" % main_body)
     files = load(tmp_path)
     namespace = build_namespace(files)
     build_scopes(files); resolve(files, namespace)
@@ -40,90 +38,66 @@ main* = () i32 {
     return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
 
 
+def compile_and_run(tmp_path, generated, call):
+    """cc the GENERATED C with a `main` that prints `call`, return its stdout."""
+    (tmp_path / "gen.c").write_text(
+        "#include <stdint.h>\n#include <stdbool.h>\n" + generated +
+        f'\n#include <stdio.h>\nint main(void){{ printf("%d\\n", {call}); return 0; }}\n')
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "gen.c"), "-o", str(tmp_path / "gen")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr                 # the GENERATED C is valid C
+    return subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip()
+
+
 def test_genc_emits_a_single_return(tmp_path):
-    # int32_t addk(int32_t x) { return (x + 5); }
     body = """
     x := vref("x")
     five := lit(5)
     e := bin("+", addr(x), addr(five))
-    emit(genC(Func { name: "addk", param: "x", body: [sret(addr(e))] }))
+    emit(genC(Func { name: "addk", params: [param("x", ti32())], ret: ti32(), body: [sret(addr(e))] }))
     0"""
     assert emit_via_zen(tmp_path, body) == "int32_t addk(int32_t x) { return (x + 5); }"
 
 
 def test_genc_emits_a_nested_expression(tmp_path):
-    # a recursive AST -> nested C: ((x + 5) * x)
     body = """
     five := lit(5)
     x1 := vref("x")
     xp5 := bin("+", addr(x1), addr(five))
     x2 := vref("x")
     e := bin("*", addr(xp5), addr(x2))
-    emit(genC(Func { name: "f", param: "x", body: [sret(addr(e))] }))
+    emit(genC(Func { name: "f", params: [param("x", ti32())], ret: ti32(), body: [sret(addr(e))] }))
     0"""
     assert emit_via_zen(tmp_path, body) == "int32_t f(int32_t x) { return ((x + 5) * x); }"
 
 
-def test_genc_emits_a_multi_statement_body(tmp_path):
-    # a Let + a Return: int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }
+def test_genc_emits_multiple_typed_params(tmp_path):
+    # int32_t add(int32_t a, int32_t b) { return (a + b); }  — and it runs: add(3,4) == 7
     body = """
-    five := lit(5)
-    x := vref("x")
-    xp5 := bin("+", addr(x), addr(five))
-    y1 := vref("y")
-    y2 := vref("y")
-    ysq := bin("*", addr(y1), addr(y2))
-    stmts := [slet("y", addr(xp5)), sret(addr(ysq))]
-    emit(genC(Func { name: "f", param: "x", body: stmts }))
-    0"""
-    assert emit_via_zen(tmp_path, body) == \
-        "int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }"
-
-
-def test_genc_emits_a_call_expression(tmp_path):
-    # int32_t g(int32_t x) { return f((x + 1)); }
-    body = """
-    x := vref("x")
-    one := lit(1)
-    xp1 := bin("+", addr(x), addr(one))
-    c := call("f", addr(xp1))
-    emit(genC(Func { name: "g", param: "x", body: [sret(addr(c))] }))
-    0"""
-    assert emit_via_zen(tmp_path, body) == "int32_t g(int32_t x) { return f((x + 1)); }"
-
-
-def test_genc_module_of_two_functions_compiles_and_runs(tmp_path):
-    # a whole translation unit: dbl + calc (which CALLS dbl). THE LOOP closes on the
-    # generated multi-function C: calc(4) == dbl(5) == 10.
-    body = """
-    n1 := vref("n")
-    n2 := vref("n")
-    nn := bin("+", addr(n1), addr(n2))
-    dbl := Func { name: "dbl", param: "n", body: [sret(addr(nn))] }
-    x := vref("x")
-    one := lit(1)
-    xp1 := bin("+", addr(x), addr(one))
-    dc := call("dbl", addr(xp1))
-    calc := Func { name: "calc", param: "x", body: [sret(addr(dc))] }
-    emit(genModule([dbl, calc]))
+    a := vref("a")
+    b := vref("b")
+    sum := bin("+", addr(a), addr(b))
+    ps := [param("a", ti32()), param("b", ti32())]
+    emit(genC(Func { name: "add", params: ps, ret: ti32(), body: [sret(addr(sum))] }))
     0"""
     generated = emit_via_zen(tmp_path, body)
-    assert "int32_t dbl(int32_t n) { return (n + n); }" in generated
-    assert "int32_t calc(int32_t x) { return dbl((x + 1)); }" in generated
-    (tmp_path / "gen.c").write_text(
-        "#include <stdint.h>\n" + generated +
-        '\n#include <stdio.h>\nint main(void){ printf("%d\\n", calc(4)); return 0; }\n')
-    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "gen.c"), "-o", str(tmp_path / "gen")],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip() == "10"
+    assert generated == "int32_t add(int32_t a, int32_t b) { return (a + b); }"
+    assert compile_and_run(tmp_path, generated, "add(3, 4)") == "7"
+
+
+def test_genc_maps_scalar_types(tmp_path):
+    # the Ty enum maps to C type names in both the return and the parameters
+    body = """
+    z := lit(0)
+    ps := [param("flag", tbool()), param("byte", tu8())]
+    emit(genC(Func { name: "f", params: ps, ret: ti64(), body: [sret(addr(z))] }))
+    0"""
+    assert emit_via_zen(tmp_path, body) == "int64_t f(bool flag, uint8_t byte) { return 0; }"
 
 
 def test_genc_emits_a_recursive_factorial_that_runs(tmp_path):
     # The capstone: zen builds the AST for a RECURSIVE function with a conditional,
-    # genC emits it at runtime, and the generated C compiles and computes:
-    #   int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }
-    #   fact(5) == 120
+    # genC emits it at runtime, the generated C compiles and computes fact(5) == 120.
     body = """
     n_a := vref("n")
     one_a := lit(1)
@@ -136,21 +110,35 @@ def test_genc_emits_a_recursive_factorial_that_runs(tmp_path):
     n_c := vref("n")
     nfact := bin("*", addr(n_c), addr(fcall))
     e := cond(addr(nle1), addr(thenE), addr(nfact))
-    emit(genC(Func { name: "fact", param: "n", body: [sret(addr(e))] }))
+    emit(genC(Func { name: "fact", params: [param("n", ti32())], ret: ti32(), body: [sret(addr(e))] }))
     0"""
     generated = emit_via_zen(tmp_path, body)
     assert generated == "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }"
-    (tmp_path / "gen.c").write_text(
-        "#include <stdint.h>\n" + generated +
-        '\n#include <stdio.h>\nint main(void){ printf("%d\\n", fact(5)); return 0; }\n')
-    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "gen.c"), "-o", str(tmp_path / "gen")],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip() == "120"
+    assert compile_and_run(tmp_path, generated, "fact(5)") == "120"
 
 
-def test_generated_multi_statement_c_compiles_and_runs(tmp_path):
-    # THE LOOP: the multi-statement C the zen program emits at runtime is compiled + run.
+def test_genc_module_of_two_functions_compiles_and_runs(tmp_path):
+    # a whole translation unit: dbl + calc (which CALLS dbl). calc(4) == dbl(5) == 10.
+    body = """
+    n1 := vref("n")
+    n2 := vref("n")
+    nn := bin("+", addr(n1), addr(n2))
+    dbl := Func { name: "dbl", params: [param("n", ti32())], ret: ti32(), body: [sret(addr(nn))] }
+    x := vref("x")
+    one := lit(1)
+    xp1 := bin("+", addr(x), addr(one))
+    dc := call("dbl", addr(xp1))
+    calc := Func { name: "calc", params: [param("x", ti32())], ret: ti32(), body: [sret(addr(dc))] }
+    emit(genModule([dbl, calc]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "int32_t dbl(int32_t n) { return (n + n); }" in generated
+    assert "int32_t calc(int32_t x) { return dbl((x + 1)); }" in generated
+    assert compile_and_run(tmp_path, generated, "calc(4)") == "10"
+
+
+def test_genc_multi_statement_body_compiles_and_runs(tmp_path):
+    # a Let + a Return: int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); } -> f(10)==225
     body = """
     five := lit(5)
     x := vref("x")
@@ -159,13 +147,8 @@ def test_generated_multi_statement_c_compiles_and_runs(tmp_path):
     y2 := vref("y")
     ysq := bin("*", addr(y1), addr(y2))
     stmts := [slet("y", addr(xp5)), sret(addr(ysq))]
-    emit(genC(Func { name: "f", param: "x", body: stmts }))
+    emit(genC(Func { name: "f", params: [param("x", ti32())], ret: ti32(), body: stmts }))
     0"""
-    generated = emit_via_zen(tmp_path, body)          # f(x){ int32_t y=(x+5); return (y*y); }
-    (tmp_path / "gen.c").write_text(
-        "#include <stdint.h>\n" + generated +
-        '\n#include <stdio.h>\nint main(void){ printf("%d\\n", f(10)); return 0; }\n')
-    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "gen.c"), "-o", str(tmp_path / "gen")],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr                # the GENERATED C is valid C
-    assert subprocess.run([str(tmp_path / "gen")], capture_output=True, text=True).stdout.strip() == "225"
+    generated = emit_via_zen(tmp_path, body)
+    assert generated == "int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }"
+    assert compile_and_run(tmp_path, generated, "f(10)") == "225"

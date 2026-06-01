@@ -100,13 +100,15 @@ where it's headed, [VISION](VISION.md).)
   buffer is `realloc`'d underneath, so `s := s.append("…")` threads it. This is the keystone for
   **runtime code generation** — a backend can emit source as a value the running program builds.
 - **`std.genc` — a C backend written in Zen, run at RUNTIME.** It walks a **recursive** AST
-  (ordinary lowered structs + enums — runtime values; a `Bin` holds `Ptr<Expr>` children) and
-  emits C source into a `String`: `genC(f: Func) → String`. A function body is a `[Stmt]` (`Let`
-  / `Return`), so it emits **whole function bodies**. A running zen program builds an AST and gets
-  C source as a value — and that emitted C compiles and computes (the test closes the loop: zen
-  emits `int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }`, which is then compiled
-  and run → `f(10) == 225`). The self-hosting seed: codegen is the language's own ordinary code,
-  not the host's. (A subset today; the path is to grow it toward lowering zen in zen.)
+  (ordinary lowered structs + enums — runtime values) — expressions `Int`/`Var`/`Bin`/`Call`/`Cond`
+  (a `Bin` holds `Ptr<Expr>` children), statements `Let`/`Return`, **typed parameters** (`[Param]`
+  with a `Ty` enum → C type names) and a return `Ty` — and emits C into a `String`: `genC(f: Func)
+  → String`, plus `genModule([Func])` for a whole translation unit. A running zen program builds an
+  AST and gets C source as a value — and that emitted C compiles and computes. The tests close the
+  loop: zen emits a **recursive factorial** `int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n *
+  fact((n - 1)))); }` → `fact(5) == 120`, and a 2-arg `int32_t add(int32_t a, int32_t b) { return
+  (a + b); }` → `add(3,4) == 7`. The self-hosting seed: codegen is the language's own ordinary
+  code, not the host's. (A subset today; the path is to grow it toward lowering zen in zen.)
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 

@@ -10,14 +10,14 @@ Toward **self-hosting** — the compiler's backend, written in zen, run at runti
 
 - **`std.string`** — a growable, owned heap `String` assembled at runtime (the
   keystone: source can now be built as a value while a program runs).
-- **`std.genc`** — a C backend *written in zen*, run at runtime. It walks a recursive
-  expression AST (`Int`/`Var`/`Bin`/`Call`/`Cond` — the last a `c ? t : e` ternary),
-  emits **whole function bodies** (`Func` body is a `[Stmt]` of `Let` / `Return`), and
-  a **multi-function module** via `genModule([Func]) -> String`. The loop closes — a
-  running zen program emits a **recursive factorial**
-  `int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }`, compiled
-  and run as `fact(5) == 120`; a `dbl`+`calc` module (`calc(4) == 10`); and
-  `int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }` → `f(10) == 225`.
+- **`std.genc`** — a C backend *written in zen*, run at runtime. Coverage: expressions
+  `Int`/`Var`/`Bin`/`Call`/`Cond` (ternary); statements `Let`/`Return`; **typed,
+  multiple parameters** (`[Param]` + a `Ty` enum → C type names) and a return `Ty`;
+  whole function bodies; and a **multi-function module** (`genModule([Func])`). The loop
+  closes — a running zen program emits a **recursive factorial**
+  `int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }` → `fact(5) == 120`,
+  a 2-arg `int32_t add(int32_t a, int32_t b) { return (a + b); }` → `add(3,4) == 7`, a
+  `dbl`+`calc` module (`calc(4) == 10`), and a `let`+`return` body → `f(10) == 225`.
 - Language work enabling the above: division `/` and remainder `%`; `match`
   auto-derefs a `Ptr<Enum>` (recursive heap structures); type definitions are
   toposorted (recursive types in any declaration order); UFCS (`x.f(a)` == `f(x, a)`).
