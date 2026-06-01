@@ -225,7 +225,7 @@ someone else's grammar generator rather than hand-rolled.
 
 Since then the language has grown well past that subset: a single `loop`
 construct (desugared onto a structured `@while` primitive that folds to a C
-`for`) and mutation, `extern` C bindings + raw memory intrinsics (a
+`for`) and mutation, bodyless-function C bindings + raw memory intrinsics (a
 heap-allocating `String`), and a **comptime metaprogramming layer** whose headline is that the
 **AST is defined in Zen** — `impl`/`derive` are ordinary Zen functions
 (`prelude/derive.zen`) that the compiler runs at comptime and splices back in.

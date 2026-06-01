@@ -13,15 +13,14 @@ module.exports = grammar({
 
   // loop(EXPR, (h,i){…}) vs loop((h){…}): after `loop(`, a `(` could begin the
   // count expression or the param group — GLR forks and the valid parse wins.
-  conflicts: $ => [[$.loop_, $._primary, $.closure], [$._primary, $.closure]],
+  conflicts: $ => [[$.loop_, $._primary, $.closure], [$._primary, $.closure],
+                   // a bodyless fn (foreign binding) vs one whose `{…}` body follows the
+                   // return type: after `name = (p) Ret`, a `{` lookahead forks — GLR wins.
+                   [$.function]],
 
   rules: {
     source_file: $ => repeat($._item),
-    _item: $ => choice($.import, $.struct, $.enum, $.function, $.impl, $.extern, $.emit),
-
-    // extern malloc = (n: i64) RawPtr<u8>   — bind a C symbol; no body
-    extern: $ => seq('extern', field('name', $.identifier), '=',
-                     '(', optional(comma1($.param)), ')', field('ret', $._type)),
+    _item: $ => choice($.import, $.struct, $.enum, $.function, $.impl, $.emit),
 
     // @emit(gen(reflect(Point)))   — run a comptime (Ast)->Ast generator and splice
     // the declaration it returns into this module, then check + lower it. The `@`
@@ -66,10 +65,12 @@ module.exports = grammar({
 
     // area* = (v: Ptr<Vec>) i32 { … }   — the glued `*` = public; the return type may be
     // omitted and inferred:  area* = (v: Ptr<Vec>) { len(v) * cap(v) }
+    // A function with NO body block is a foreign binding (the C symbol is the bare name),
+    // e.g.  malloc* = (n: i64) RawPtr<u8>  — replaces the old `extern` keyword.
     function: $ => seq(field('name', $.identifier), optional(field('vis', token.immediate('*'))),
                        optional(field('tparams', $.type_params)), '=',
                        '(', optional(comma1($.param)), ')',
-                       optional(field('ret', $._type)), field('body', $.block)),
+                       optional(field('ret', $._type)), optional(field('body', $.block))),
     param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
     _type: $ => choice($.primitive, $.pointer, $.slice_type, $.fn_type, $.named_type),

@@ -175,10 +175,14 @@ def _fn(n):
     pub = _field(n, "vis") is not None          # a glued `*` after the name = public
     params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
               for p in _named(n) if p.type == "param"]
-    body = [_stmt(s) for s in _named(_field(n, "body"))]
-    names, bounds = _tparams(n)
     rn = _field(n, "ret")
     ret = _type(rn) if rn is not None else None          # None -> infer from the body
+    bn = _field(n, "body")
+    if bn is None:                              # no body block ⇒ a foreign (C) binding
+        return Fn(_t(_field(n, "name")), params, ret or PrimT(Prim.VOID),
+                  body=None, pub=pub, extern=True)
+    names, bounds = _tparams(n)
+    body = [_stmt(s) for s in _named(bn)]
     return Fn(_t(_field(n, "name")), params, ret, body, pub, names, bounds)
 
 
@@ -203,11 +207,6 @@ def _decl(n):
     if n.type == "impl":
         methods = [_fn(f) for f in _named(n) if f.type == "function"]
         return Impl(_t(_field(n, "trait")), _t(_field(n, "type")), methods)
-    if n.type == "extern":
-        params = [Param(_t(_field(p, "name")), _type(_field(p, "type")))
-                  for p in _named(n) if p.type == "param"]
-        return Fn(_t(_field(n, "name")), params, _type(_field(n, "ret")),
-                  body=None, extern=True)
     if n.type == "emit":
         return Emit(_expr(_field(n, "value")))
     raise ValueError(f"unhandled decl: {n.type}")

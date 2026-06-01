@@ -76,7 +76,7 @@ mix* = (n: i32) i32 {
 def test_comptime_rejects_runtime_op(tmp_path):
     with pytest.raises(ComptimeErr):           # load is a runtime op — the fold pass rejects it
         frontend(tmp_path, """
-extern malloc = (n: i64) RawPtr<u8>
+malloc = (n: i64) RawPtr<u8>
 bad* = () u8 { comptime(load(malloc(1))) }
 """)
 

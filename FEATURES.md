@@ -47,7 +47,8 @@ where it's headed, [VISION](VISION.md).)
   not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = local.
 
 ## Systems / FFI
-- **`extern`** C bindings (binds libc by bare name; libc headers auto-included).
+- **Foreign C bindings** — a function with **no body** binds the C symbol of the same name
+  (`malloc = (n: i64) RawPtr<u8>`); no `extern` keyword. libc by bare name, headers auto-included.
 - **Raw memory intrinsics:** `addr(x)`, `load(p)`, `store(p, v)`, `offset(p, i)`.
 - Enough to build a **heap-allocating, growable `String`** on an allocator.
 

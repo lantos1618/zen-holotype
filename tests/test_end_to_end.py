@@ -340,9 +340,9 @@ def test_generic_enum_monomorphizes(tmp_path):
 # ── M1: extern FFI binds libc; side-effecting statements are preserved ──────
 def test_extern_ffi_runs(tmp_path):
     (tmp_path / "main.zen").write_text("""
-extern putchar = (c: i32) i32
-extern malloc  = (n: i64) RawPtr<u8>
-extern free    = (p: RawPtr<u8>) void
+putchar = (c: i32) i32
+malloc  = (n: i64) RawPtr<u8>
+free    = (p: RawPtr<u8>) void
 main* = () i32 {
     putchar(90) putchar(101) putchar(110) putchar(10)   // Z e n \\n
     free(malloc(64))
@@ -370,9 +370,9 @@ main* = () i32 {
 # ── M2: alloc a buffer, store/load/offset through it, run ───────────────────
 def test_raw_memory_runs(tmp_path):
     (tmp_path / "main.zen").write_text("""
-extern putchar = (c: i32) i32
-extern malloc  = (n: i64) RawPtr<u8>
-extern free    = (p: RawPtr<u8>) void
+putchar = (c: i32) i32
+malloc  = (n: i64) RawPtr<u8>
+free    = (p: RawPtr<u8>) void
 main* = () i32 {
     buf := malloc(8)
     store(offset(buf, 0), 72)            // 'H'
@@ -403,9 +403,9 @@ main* = () i32 {
 # ── M3: a String that TAKES AN ALLOCATOR, built on the memory primitives ────
 def test_string_takes_an_allocator(tmp_path):
     (tmp_path / "main.zen").write_text("""
-extern malloc  = (n: i64) RawPtr<u8>
-extern free    = (p: RawPtr<u8>) void
-extern putchar = (c: i32) i32
+malloc  = (n: i64) RawPtr<u8>
+free    = (p: RawPtr<u8>) void
+putchar = (c: i32) i32
 
 Allocator: { id: i32 }
 String: { ptr: RawPtr<u8>, len: i64 }
@@ -450,9 +450,9 @@ main* = () i32 {
 # ── B1+B2: mutation + loops — a growable String that pushes and prints ──────
 def test_growable_string_push_loop(tmp_path):
     (tmp_path / "main.zen").write_text("""
-extern malloc  = (n: i64) RawPtr<u8>
-extern free    = (p: RawPtr<u8>) void
-extern putchar = (c: i32) i32
+malloc  = (n: i64) RawPtr<u8>
+free    = (p: RawPtr<u8>) void
+putchar = (c: i32) i32
 
 String: { ptr: RawPtr<u8>, len: i64, cap: i64 }
 new_str = (cap: i64) String { String { ptr: malloc(cap), len: 0, cap: cap } }
