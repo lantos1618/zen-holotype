@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, mkenum, mktag, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, mkenum, mktag, arm, ematch, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -290,3 +290,27 @@ def test_genc_enum_construction(tmp_path):
     assert "return (Shape){ .tag = Shape_Circle, .u.Circle = n };" in generated
     assert "return (Shape){ .tag = Shape_Dot };" in generated
     assert compile_and_run(tmp_path, generated, "(mkc(7).u.Circle + mkd().tag)") == "8"
+
+
+def test_genc_match_dispatch(tmp_path):
+    # int32_t area(Shape s) { return s.match { Circle(r)=>r*r, Square(w)=>w*w, Dot=>0 }; }
+    # -> a tag-tested ternary chain with __auto_type payload binding. area over each variant.
+    body = """
+    shape := edef("Shape", [vdef("Circle", ti32()), vdef("Square", ti32()), vdef("Dot", tvoid())])
+    r1 := vref("r")
+    r2 := vref("r")
+    rr := bin("*", addr(r1), addr(r2))
+    w1 := vref("w")
+    w2 := vref("w")
+    ww := bin("*", addr(w1), addr(w2))
+    z := lit(0)
+    arms := [arm("Circle", "r", addr(rr)), arm("Square", "w", addr(ww)), arm("Dot", "", addr(z))]
+    m := ematch("s", "Shape", arms)
+    area := Func { name: "area", params: [param("s", tnamed("Shape"))], ret: ti32(), body: [sret(addr(m))] }
+    emit(genModule([denum(shape), dfunc(area)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "s.tag == Shape_Circle ? ({ __auto_type r = s.u.Circle; (r * r); })" in generated
+    call = ("({ Shape c={.tag=Shape_Circle,.u.Circle=5}; Shape sq={.tag=Shape_Square,.u.Square=4};"
+            " Shape dt={.tag=Shape_Dot}; area(c)+area(sq)+area(dt); })")
+    assert compile_and_run(tmp_path, generated, call) == "41"      # 25 + 16 + 0

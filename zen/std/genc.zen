@@ -11,7 +11,7 @@
 // left-to-right through the chain.
 
 { String, new, append, push } = std.string
-{ view } = std.str
+{ view, is_empty } = std.str
 
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
@@ -23,8 +23,10 @@ CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field
 MakeEnumData*: { ty: str, variant: str, payload: Ptr<Expr> }  // (E){ .tag=E_V, .u.V=payload }
 TagData*: { ty: str, variant: str }                     // (E){ .tag=E_V }  (no payload)
+ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
+MatchData*: { subj: str, ename: str, arms: [ArmData] }  // subj is a variable; last arm is the default
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData)
-     | Member(MemberData) | MakeEnum(MakeEnumData) | Tag(TagData)
+     | Member(MemberData) | MakeEnum(MakeEnumData) | Tag(TagData) | Match(MatchData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -55,6 +57,8 @@ cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData { c: c,
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData { obj: o, field: f }) }
 mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, variant: v, payload: p }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
+arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
+ematch* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms }) }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sassign* = (nm: str, v: Ptr<Expr>) Stmt { .Assign(AssignData { name: nm, value: v }) }
@@ -108,7 +112,8 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Cond(d) => s.gen_cond(d),
         .Member(m) => s.gen_expr(m.obj).append(".").append(m.field),
         .MakeEnum(m) => s.gen_mkenum(m),
-        .Tag(t) => s.append("(").append(t.ty).append("){ .tag = ").append(t.ty).append("_").append(t.variant).append(" }")
+        .Tag(t) => s.append("(").append(t.ty).append("){ .tag = ").append(t.ty).append("_").append(t.variant).append(" }"),
+        .Match(m) => s.gen_match(m)
     }
 }
 
@@ -124,6 +129,29 @@ gen_mkenum = (s: String, m: MakeEnumData) String {
     head := s.append("(").append(m.ty).append("){ .tag = ").append(m.ty).append("_").append(m.variant)
     head.append(", .u.").append(m.variant).append(" = ").gen_expr(m.payload).append(" }")
 }
+
+// an arm's body: bind the payload (GCC __auto_type, so no payload type needed here), then the body
+gen_armbind = (s: String, subj: str, a: ArmData) String {
+    s.append("({ __auto_type ").append(a.bind).append(" = ").append(subj).append(".u.").append(a.variant).append("; ").gen_expr(a.body).append("; })")
+}
+gen_armbody = (s: String, subj: str, a: ArmData) String {
+    (is_empty(a.bind)).match {
+        true  => s.append("(").gen_expr(a.body).append(")"),
+        false => s.gen_armbind(subj, a)
+    }
+}
+// one tag test:  `(subj.tag == E_V ? <body> : `   (the chain closes its `)` after the rest)
+gen_test = (s: String, subj: str, ename: str, a: ArmData) String {
+    s.append("(").append(subj).append(".tag == ").append(ename).append("_").append(a.variant).append(" ? ").gen_armbody(subj, a).append(" : ")
+}
+// emit arms[i:] as a nested ternary; the last arm is the default (no test)
+gen_arms = (s: String, subj: str, ename: str, arms: [ArmData], i: i64) String {
+    (i == arms.len - 1).match {
+        true  => s.gen_armbody(subj, arms[i]),
+        false => s.gen_test(subj, ename, arms[i]).gen_arms(subj, ename, arms, i + 1).append(")")
+    }
+}
+gen_match = (s: String, m: MatchData) String { s.gen_arms(m.subj, m.ename, m.arms, 0) }
 
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
 gen_stmt = (s: String, st: Stmt) String {

@@ -17,7 +17,7 @@ Toward **self-hosting** — the compiler's backend, written in zen, run at runti
 - **`std.genc`** — a C backend *written in zen*, run at runtime. Coverage: expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond` (ternary); statements `Let`/`Return`; **typed,
   multiple parameters** (`[Param]` + a `Ty` enum → C type names) and a return `Ty`;
-  control-flow statements (`if`/`while`/assign); whole function bodies; **struct typedefs** (`StructDecl`) via a top-level `Decl` union, so
+  control-flow (if/while/assign); field access; **enums + match** (tagged unions, construction, tag-tested dispatch); whole function bodies; **struct typedefs** (`StructDecl`) via a top-level `Decl` union, so
   `genModule([Decl])` emits a real translation unit (structs + functions); and a **raw
   escape** (`DRaw`) that emits verbatim C — the hatch for anything the AST doesn't model
   (qualifiers like `volatile`/`static`, `__attribute__`s, pragmas, SIMD intrinsics/vector
