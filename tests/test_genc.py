@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, mkenum, mktag, arm, ematch, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, mkenum, mktag, arm, ematch, strlit, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -314,3 +314,15 @@ def test_genc_match_dispatch(tmp_path):
     call = ("({ Shape c={.tag=Shape_Circle,.u.Circle=5}; Shape sq={.tag=Shape_Square,.u.Square=4};"
             " Shape dt={.tag=Shape_Dot}; area(c)+area(sq)+area(dt); })")
     assert compile_and_run(tmp_path, generated, call) == "41"      # 25 + 16 + 0
+
+
+def test_genc_string_literal_with_escaping(tmp_path):
+    # a string literal expr -> a C string literal, with " and newline escaped at emit time.
+    body = r"""
+    sl := strlit("a\"b\n")
+    emit(genC(Func { name: "msg", params: [], ret: tstr(), body: [sret(addr(sl))] }))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert generated == r'const char* msg() { return "a\"b\n"; }'
+    # the emitted C compiles and the runtime string is exactly a"b<newline>
+    assert compile_and_run(tmp_path, generated, '(msg()[0] + msg()[1] + msg()[2])') == str(ord('a') + ord('"') + ord('b'))
