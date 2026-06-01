@@ -88,7 +88,7 @@ def _expr_inner(n):
     if t == "binary":
         kids = _named(n)
         op = next(c.type for c in n.children
-                  if c.type in ("+", "-", "*", "==", "<", ">", "<=", ">=", "&&", "||"))
+                  if c.type in ("+", "-", "*", "/", "%", "==", "<", ">", "<=", ">=", "&&", "||"))
         return Bin(op, _expr(kids[0]), _expr(kids[1]))
     if t == "unary_op":
         return Not(_expr(_named(n)[0]))
