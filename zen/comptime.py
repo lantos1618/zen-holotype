@@ -158,9 +158,18 @@ def _eval(e, env, namespace, scope, fuel):
     raise ComptimeErr(f"comptime: can't evaluate {type(e).__name__}")
 
 
+def _cdiv(a, b):                          # C integer division: truncates toward zero
+    if b == 0:
+        raise ComptimeErr("comptime: division by zero")
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+
 def _binop(op, l, r):
     import operator as o
-    return {"+": o.add, "-": o.sub, "*": o.mul, "==": o.eq, "<": o.lt, ">": o.gt,
+    return {"+": o.add, "-": o.sub, "*": o.mul, "/": _cdiv,
+            "%": lambda a, b: a - _cdiv(a, b) * b,        # C remainder: sign of the dividend
+            "==": o.eq, "<": o.lt, ">": o.gt,
             "<=": o.le, ">=": o.ge, "&&": lambda a, b: a and b,
             "||": lambda a, b: a or b}[op](l, r)
 

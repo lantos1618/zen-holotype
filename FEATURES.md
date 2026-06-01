@@ -26,11 +26,13 @@ where it's headed, [VISION](VISION.md).)
   bodies (across calls); `match` exhaustiveness enforced.
 
 ## Expressions & control flow
-- Full operator set: `+ - *  ==  < > <= >=  && ||  !`, each operand-checked.
+- Full operator set: `+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked. `/` and `%`
+  are C truncate-toward-zero (the comptime folder agrees), and `/ %` bind tighter than `+ -`.
 - `match` with **literal patterns** (`i32`/`bool`), **payload binding** (`.Circle(v) => v`),
   exhaustiveness, and wildcards — usable as an expression *or* a statement (`?:` or `if/else`).
 - **`loop`** — the *one* iteration construct (no `while`/`for`). `loop(n, (h, i) { … })` counts;
-  `loop(xs, (h, i, x) { … })` / `xs.loop((h, i, x) { … })` iterates a slice's elements;
+  `loop(xs, (h, i, x) { … })` / `xs.loop((h, i, x) { … })` iterates a slice's elements — or a
+  **user struct**'s, when it supplies `len` and an `at(Ptr<Self>, i64) T` method (`[]`-overloading);
   `loop((h) { … })` is iterless and handle-driven; the handle does `h.break()` / `h.continue()`.
   It desugars onto the **`@while(cond) { … }`** structured primitive, which lowers to a C `for`
   (kept structured so it stays auto-vectorizable — never gotos).
@@ -135,7 +137,8 @@ driven by a `build.zen` written in the language itself. Ill-typed functions are 
 excluded from codegen; the rest builds and runs.
 
 ## Not yet (the honest gaps)
-- No `Loopable` trait yet — only slices have `.loop`, not user structs. No modules beyond files.
+- No modules beyond files. Trait methods are called as free functions (`area(x)`, not `x.area()`);
+  there's no method-call syntax for user/trait methods (only the built-in `.loop` / `.match`).
 - The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
   (the `map_into`/`filter_into` forms are already generic).
 - Trait reflection exposes method *names* (any arity), but not method *signatures* (param/return

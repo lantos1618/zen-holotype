@@ -159,7 +159,7 @@ module.exports = grammar({
       prec.left(2, seq($._expression, '&&', $._expression)),
       prec.left(3, seq($._expression, choice('==', '<', '>', '<=', '>='), $._expression)),  // -> bool
       prec.left(4, seq($._expression, choice('+', '-'), $._expression)),           // numeric
-      prec.left(5, seq($._expression, '*', $._expression)),
+      prec.left(5, seq($._expression, choice('*', '/', '%'), $._expression)),       // mul/div/rem
     ),
 
     struct_literal: $ => prec(5, seq(field('type', $.identifier),
