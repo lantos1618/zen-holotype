@@ -70,6 +70,8 @@ where it's headed, [VISION](VISION.md).)
   ordinary runtime Zen, importable from any file, **checked and lowered like your code**.
 - **`std.iter`** — `fold` / `each` as generic templates over slices + closures:
   `{ fold } = std.iter` then `fold([1, 2, 3], 0, (a, x) { a + x })`.
+- **`std.mem`** — the library's allocator over libc: `alloc` / `zeroed` / `copy` / `release`.
+  No GC or destructors, so ownership is explicit — you free what you alloc.
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 
