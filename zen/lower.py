@@ -281,6 +281,19 @@ def _c_call(e, locals_, namespace, scope, expect=None) -> str:
     return f"{cn}({args})"
 
 
+def _bind_subj(ty, t, subj, chain, expr) -> str:
+    """Bind the match subject to a temp once (so a side-effecting subject runs exactly
+    once), then the arm tests reference the temp. If NO arm references it — a lone `_`
+    wildcard, e.g. `n.match { _ => 42 }` — add `(void)t;` so the still-evaluated subject
+    doesn't trip -Werror=unused-variable. The temp is referenced as `t.` (enum tag /
+    payload) or `t ==` (literal), and a temp name is never a prefix of another at such a
+    boundary, so the substring test is collision-safe across nested matches."""
+    used = (f"{t}." in chain) or (f"{t} ==" in chain)
+    guard = "" if used else f"(void){t}; "
+    return f"({{ {ty} {t} = {subj}; {guard}{chain}; }})" if expr \
+        else f"{{ {ty} {t} = {subj}; {guard}{chain} }}"
+
+
 def c_match(e, locals_, namespace, scope, expect) -> str:
     """Lower a match to a tag-tested ternary chain. A variant with a payload
     binding uses a statement-expression `({ T b = subj.u.V; body; })` so the
@@ -300,7 +313,7 @@ def c_match(e, locals_, namespace, scope, expect) -> str:
         for arm in reversed([a for a in e.arms if a is not default]):
             litc = c_expr(arm.lit, locals_, namespace, scope)
             chain = f"({t} == {litc} ? {body(arm)} : {chain})"
-        return f"({{ {c_type(st)} {t} = {subj}; {chain}; }})"
+        return _bind_subj(c_type(st), t, subj, chain, expr=True)
 
     decl = namespace.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
@@ -319,7 +332,7 @@ def c_match(e, locals_, namespace, scope, expect) -> str:
     chain = clause(default)
     for arm in reversed([a for a in e.arms if a is not default]):
         chain = f"({t}.tag == {cn}_{arm.variant} ? {clause(arm)} : {chain})"
-    return f"({{ {c_type(st)} {t} = {subj}; {chain}; }})"
+    return _bind_subj(c_type(st), t, subj, chain, expr=True)
 
 
 def c_match_stmt(e, locals_, namespace, scope) -> str:
@@ -340,7 +353,7 @@ def c_match_stmt(e, locals_, namespace, scope) -> str:
         if default is not None:
             chain += (f" else {{ {arm_stmt(default, locals_)} }}" if clauses
                       else f"{{ {arm_stmt(default, locals_)} }}")
-        return f"{{ {c_type(st)} {t} = {subj}; {chain} }}"
+        return _bind_subj(c_type(st), t, subj, chain, expr=False)
 
     decl = namespace.walk(st.path).value
     sub = dict(zip(decl.tparams, st.args)) if decl.tparams else {}
@@ -361,7 +374,7 @@ def c_match_stmt(e, locals_, namespace, scope) -> str:
     if default is not None:
         chain += (f" else {{ {arm_stmt(default, locals_)} }}" if clauses
                   else f"{{ {arm_stmt(default, locals_)} }}")
-    return f"{{ {c_type(st)} {t} = {subj}; {chain} }}"
+    return _bind_subj(c_type(st), t, subj, chain, expr=False)
 
 
 # ───────────────────────── declaration codegen ─────────────────────────────

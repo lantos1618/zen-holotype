@@ -320,6 +320,28 @@ def test_match_subject_evaluated_once(tmp_path):
     assert pick.count("main_kind") == 1, pick      # not re-evaluated per arm
 
 
+# ── A lone wildcard match still evaluates its subject without a -Werror warning ─
+def test_wildcard_only_match_is_warning_clean(tmp_path):
+    # `n.match { _ => 42 }` binds the subject to a temp that no arm reads. The temp
+    # must still be emitted (the subject may have side effects) but guarded with
+    # `(void)` so -Werror=unused-variable doesn't fire. Regression.
+    (tmp_path / "main.zen").write_text(
+        "f* = (n: i32) i32 { n.match { _ => 42 } }\n"
+        "main* = () i32 { f(7) }\n")
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
+    assert "(void)_subj" in c                          # the guard is present
+    harness = '\n#include <stdio.h>\nint main(void){ printf("%d\\n", main_main()); return 0; }\n'
+    (tmp_path / "o.c").write_text(c + harness)
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr                 # would fail on -Werror=unused-variable before
+    assert subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout.strip() == "42"
+
+
 # ── A void-returning main gets a harness without printf("%d", …) ────────────
 def test_void_main_harness(tmp_path):
     (tmp_path / "build.zen").write_text(
