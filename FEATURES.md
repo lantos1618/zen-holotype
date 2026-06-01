@@ -44,7 +44,8 @@ where it's headed, [VISION](VISION.md).)
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
 - **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `Area*: { … }` —
-  not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = local.
+  not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = private to
+  its file, and **enforced**: another module importing a non-`*` name is a `Private` error.
 
 ## Systems / FFI
 - **Foreign C bindings** — a function with **no body** binds the C symbol of the same name

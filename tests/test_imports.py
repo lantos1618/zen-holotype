@@ -6,7 +6,7 @@ import pytest
 
 from zen.parser import parse
 from zen.main import build_space, build_scopes, resolve, check
-from zen.types import Conflict, Unresolved
+from zen.types import Conflict, Unresolved, Private
 
 
 def files_from(srcs):
@@ -46,6 +46,38 @@ def test_same_name_different_modules_is_fine():
     })
     space = build_space(files)                                # no Conflict raised
     assert space.walk("core.vec.Vec").value is not space.walk("other.Vec").value
+
+
+def test_importing_a_private_name_is_rejected():
+    # a bare (no `*`) name is private to its module — another module can't import it
+    files = files_from({
+        "core.vec": "secret = (n: i32) i32 { n + 1 }",      # no `*` → private
+        "m": "{ secret } = core.vec\nf* = (x: i32) i32 { secret(x) }",
+    })
+    space = build_space(files)
+    build_scopes(files)
+    with pytest.raises(Private, match="private to core.vec"):
+        resolve(files, space)
+
+
+def test_importing_a_public_name_is_allowed():
+    files = files_from({
+        "core.vec": "shared* = (n: i32) i32 { n + 1 }",      # `*` → public
+        "m": "{ shared } = core.vec\nf* = (x: i32) i32 { shared(x) }",
+    })
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)                                    # no Private raised
+    assert {q: ok for q, ok, _ in check(files, space)[0] if q.startswith("m.")} == {"m.f": True}
+
+
+def test_same_module_can_use_its_own_private_names():
+    # privacy is about IMPORTS across modules; a file freely uses its own bare names
+    files = files_from({"m": "helper = (n: i32) i32 { n + 1 }\nf* = (x: i32) i32 { helper(x) }"})
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    assert ("m.f", True, "ok") in check(files, space)[0]
 
 
 def test_importing_a_missing_name_is_unresolved():

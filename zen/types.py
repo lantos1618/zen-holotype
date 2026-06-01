@@ -13,6 +13,7 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, FnT, Fn, Struct, EnumDecl
 
 class Conflict(Exception):   ...
 class Unresolved(Exception): ...
+class Private(Exception):    ...   # imported a name another module didn't export (no `*`)
 
 
 @dataclass
