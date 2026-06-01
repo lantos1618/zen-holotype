@@ -26,6 +26,26 @@ _LIBC = {"malloc", "free", "realloc", "calloc", "putchar", "getchar", "puts",
 
 # ───────────────────────── front end ────────────────────────────────────────
 _PRELUDE_DIR = pathlib.Path(__file__).parent / "prelude"
+_BINDINGS_DIR = pathlib.Path(__file__).parent / "bindings"
+
+
+def load_uses(cfg, files):
+    """Install each build `use` as an importable namespace —
+    `c = b.use("libc")` makes `{ malloc, free } = c` work.
+
+    A foreign binding is a Zen module of decls (the libc bindings are bodyless
+    functions in bindings/libc.zen — content lives in Zen, never in this kernel).
+    `b.use(name)` loads that bundled module under the chosen namespace; the kernel
+    knows only how to load-a-module-as-a-namespace, nothing C-specific. A real
+    *generating* adapter (translate-c / wasm / python → [Decl]) is a future Zen
+    comptime function run through the same `b.use` seam — built when one exists."""
+    for u in cfg.get("uses", []):
+        path = _BINDINGS_DIR / f"{u['module']}.zen"
+        if not path.exists():
+            raise SystemExit(f"build.zen: no binding module '{u['module']}' "
+                             f"(looked in {_BINDINGS_DIR})")
+        files[u["ns"]] = parse(path.read_text(), u["ns"])
+    return files
 
 
 def load_prelude():
@@ -570,10 +590,18 @@ def interpret_build(bf):
     The CST chains the trailing `.Ok(...)` onto the last `b.add(...)`, so we walk
     method-call receivers to find every `b.add(Component {...})`.
     """
-    cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": []}
+    cfg = {"name": "a.out", "main": "main.zen", "out_dir": ".", "tests": [], "uses": []}
     fn = next((d for d in bf.decls if isinstance(d, Fn) and d.name == "build"), None)
     if fn is None:
         raise SystemExit("build.zen: no build() function")
+
+    def handle_use(ns, call):
+        # c = b.use("libc")  — the binding name picks the module; the assigned name IS
+        # the namespace it's installed under (so `{ malloc } = c` resolves to c.malloc).
+        if not (isinstance(call, MethodCall) and call.method == "use" and call.args):
+            return
+        if (mod := sval(call.args[0])) is not None:
+            cfg["uses"].append({"module": mod, "ns": ns})
 
     def handle_add(arg):
         if not isinstance(arg, StructLit):
@@ -599,6 +627,10 @@ def interpret_build(bf):
                 visit(a)
 
     for stmt in fn.body:
+        if isinstance(stmt, Let):                     # `c := b.use(...)` foreign-binding namespace
+            handle_use(stmt.name, stmt.value)
+        elif isinstance(stmt, Assign) and isinstance(stmt.target, Var):   # `c = b.use(...)`
+            handle_use(stmt.target.name, stmt.value)
         visit(stmt)
     return cfg
 
@@ -657,10 +689,13 @@ def cmd_build(root):
     bf = parse((pathlib.Path(root) / "build.zen").read_text(), "build")
     cfg = interpret_build(bf)
     print(f"── build.zen graph ──\n   Executable {cfg['name']}  (main={cfg['main']}, out={cfg['out_dir']})")
+    for u in cfg["uses"]:
+        print(f"   use \"{u['module']}\"  -> namespace `{u['ns']}`")
     for t in cfg["tests"]:
         print(f"   Test {t}  (declared)")
 
     files = load(root, skip={"build.zen"} | set(cfg["tests"]))
+    load_uses(cfg, files)                          # install foreign-binding namespaces (b.use)
     space = build_space(files)
     build_scopes(files); resolve(files, space); fold_comptime(files, space); run_emits(files, space)
     results, passing = check(files, space)
