@@ -585,6 +585,13 @@ def collect_instances(files, passing, namespace, roots=None):
     return insts, impls_used, data_insts, reached
 
 
+def _by_value_dep(t):
+    """The C type-name a field/payload embeds BY VALUE — so it must be defined before
+    the embedding type — or None. A `Ptr<T>` or `[T]` needs only a forward decl, and
+    `Option<…>` lowers to a pointer, so none of those create a definition dependency."""
+    return mangle(t) if isinstance(t, NameT) and t.path != "Option" else None
+
+
 def emit_c(files, passing, namespace, extra="", roots=None):
     # `roots` (a set of entry quals) prunes plain fns to those reachable from it —
     # dead-code elimination for an executable. None emits every passing fn (a lib).
@@ -618,28 +625,45 @@ def emit_c(files, passing, namespace, extra="", roots=None):
                   "#include <string.h>", "#include <unistd.h>"]
     lines.append("")
     # Forward-declare every struct/enum tag first, then the slice typedefs, then the
-    # full definitions. A slice typedef uses only `T*`, so a forward decl satisfies it —
-    # that lets a slice-of-struct and a struct-with-a-slice-field coexist (each would
-    # otherwise demand the other come first). Definitions stay in decl order.
-    fwd, defs = [], []
+    # full definitions TOPOSORTED by by-value containment: a struct/tagged-union embeds
+    # its payload, so the inner type must be defined before it; a Ptr<T> or [T] field
+    # needs only the forward decl (a slice typedef is just `T*`). So a recursive type
+    # (`Tree` holding `Ptr<Tree>`) or any nesting works regardless of declaration order.
+    entries = []                                         # (cname, by-value deps, emitted def)
     for f in files.values():                             # types (generic templates emit nothing)
         if is_prelude_ns(f.ns):                          # prelude Ast model is never lowered
             continue
         for d in f.decls:
             if isinstance(d, Struct) and not d.tparams:
-                fwd.append(c_struct_fwd(c_name(f"{f.ns}.{d.name}")))
-                defs.append(c_struct(f"{f.ns}.{d.name}", d))
+                deps = {dp for fld in d.fields if (dp := _by_value_dep(fld.type))}
+                entries.append((c_name(f"{f.ns}.{d.name}"), deps, c_struct(f"{f.ns}.{d.name}", d)))
             elif isinstance(d, EnumDecl) and not d.tparams:
-                fwd.append(c_struct_fwd(c_name(f"{f.ns}.{d.name}")))
-                defs.append(c_enum(f"{f.ns}.{d.name}", d))
+                deps = {dp for v in d.variants if v.payload is not None and (dp := _by_value_dep(v.payload))}
+                entries.append((c_name(f"{f.ns}.{d.name}"), deps, c_enum(f"{f.ns}.{d.name}", d)))
     for (qual, targs), sub in data_insts.items():        # monomorphized generic structs + enums
         decl = namespace.walk(qual).value
         cn = mangle(NameT(qual, targs))
-        fwd.append(c_struct_fwd(cn))
-        defs.append((c_struct if isinstance(decl, Struct) else c_enum)(qual, decl, sub, cn))
-    lines += fwd
+        if isinstance(decl, Struct):
+            deps = {dp for fld in decl.fields if (dp := _by_value_dep(subst(fld.type, sub)))}
+            entries.append((cn, deps, c_struct(qual, decl, sub, cn)))
+        else:
+            deps = {dp for v in decl.variants if v.payload is not None and (dp := _by_value_dep(subst(v.payload, sub)))}
+            entries.append((cn, deps, c_enum(qual, decl, sub, cn)))
+    emitted = {cn: s for cn, _, s in entries}
+    deps_of = {cn: d for cn, d, _ in entries}
+    order, placed = [], set()
+    def _emit_type(cn):                                  # DFS: a type's by-value deps precede it
+        if cn in placed or cn not in deps_of:
+            return
+        placed.add(cn)
+        for dep in deps_of[cn]:
+            _emit_type(dep)
+        order.append(cn)
+    for cn, _, _ in entries:
+        _emit_type(cn)
+    lines += [c_struct_fwd(cn) for cn, _, _ in entries]  # forward decls (any order)
     slice_at = len(lines)                                # slice typedefs go here: after fwd-decls,
-    lines += defs                                        # before the full definitions
+    lines += [emitted[cn] for cn in order]               # definitions, dependency-ordered
     lines.append("")
     for d in externs:                                    # protos only for non-libc externs
         if d.name not in _LIBC:                           # (the headers above declare libc)
