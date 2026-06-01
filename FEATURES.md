@@ -94,6 +94,11 @@ where it's headed, [VISION](VISION.md).)
   read-only `[u8]` byte view that borrows a str's memory) and `dup` (an **owned** heap `[u8]`
   copy the caller frees). An owned string is a length-tracked byte slice — `dup("hi").len`,
   index its bytes, `release(it.ptr)`. String literals are first-class values.
+- **`std.string`** — a growable, owned heap **`String`** assembled at **runtime** (vs a
+  comptime `str` literal): `new` / `with_cap`, `push` (a byte), `append` (a `str`), `bytes` (a
+  `[u8]` view), `free`. Functional — each op returns the updated `(ptr,len,cap)` header while the
+  buffer is `realloc`'d underneath, so `s := s.append("…")` threads it. This is the keystone for
+  **runtime code generation** — a backend can emit source as a value the running program builds.
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 
