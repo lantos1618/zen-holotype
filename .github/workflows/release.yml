@@ -1,0 +1,56 @@
+name: Release
+
+# Push a tag like `v0.1.0` to cut a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write          # create the GitHub release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Verify (mypy + tests)
+        run: |
+          python -m mypy zen
+          python -m pytest -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      # Build the bundled example, which EMITS its C to examples/build/*.c and links it.
+      # Today the released binary is the demo exe and the "generated C" is its codegen
+      # output — the same shape the bootstrap takes once the compiler self-hosts:
+      #   zen sources --(zenc, written in zen)--> C files --(cc)--> zenc binary
+      # at which point this step builds `zenc` and commits bootstrap/zenc.c (see CHANGELOG).
+      - name: Build (emit generated C + binary)
+        run: python -m zen build examples
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Package source + generated C + binary
+        run: |
+          mkdir -p dist
+          cp examples/build/vecdemo.c dist/vecdemo.generated.c
+          cp examples/build/vecdemo   dist/vecdemo
+          tar czf dist/zen-${{ github.ref_name }}-src.tar.gz \
+            zen examples README.md FEATURES.md VISION.md requirements*.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/zen-${{ github.ref_name }}-src.tar.gz
+            dist/vecdemo.generated.c
+            dist/vecdemo
