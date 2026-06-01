@@ -14,7 +14,10 @@ Toward **self-hosting** — the compiler's backend, written in zen, run at runti
   `Int`/`Var`/`Bin`/`Call`/`Cond` (ternary); statements `Let`/`Return`; **typed,
   multiple parameters** (`[Param]` + a `Ty` enum → C type names) and a return `Ty`;
   whole function bodies; **struct typedefs** (`StructDecl`) via a top-level `Decl` union, so
-  `genModule([Decl])` emits a real translation unit (structs + functions). The loop
+  `genModule([Decl])` emits a real translation unit (structs + functions); and a **raw
+  escape** (`DRaw`) that emits verbatim C — the hatch for anything the AST doesn't model
+  (qualifiers like `volatile`/`static`, `__attribute__`s, pragmas, SIMD intrinsics/vector
+  types). The loop
   closes — a running zen program emits a **recursive factorial**
   `int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }` → `fact(5) == 120`,
   a 2-arg `int32_t add(int32_t a, int32_t b) { return (a + b); }` → `add(3,4) == 7`, a

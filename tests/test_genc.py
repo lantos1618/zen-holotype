@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, slet, sret, param, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, slet, sret, param, ti32, ti64, tu8, tbool, field, sdef, dfunc, dstruct, draw, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -169,3 +169,33 @@ def test_genc_multi_statement_body_compiles_and_runs(tmp_path):
     generated = emit_via_zen(tmp_path, body)
     assert generated == "int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }"
     assert compile_and_run(tmp_path, generated, "f(10)") == "225"
+
+
+def test_genc_raw_escape_emits_verbatim_c(tmp_path):
+    # the escape hatch: a DRaw decl emits arbitrary C unchanged, so anything the AST
+    # doesn't model (qualifiers, attributes, pragmas, intrinsics) is still reachable.
+    body = """
+    emit(genModule([
+        draw("typedef int32_t Word;"),
+        draw(" static inline int32_t inc(int32_t x) { return x + 1; }")
+    ]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "typedef int32_t Word;" in generated
+    assert "static inline int32_t inc(int32_t x) { return x + 1; }" in generated
+    assert compile_and_run(tmp_path, generated, "inc(41)") == "42"
+
+
+def test_genc_emits_explicit_simd_via_raw(tmp_path):
+    # explicit SIMD: a GCC vector type + a 4-wide add, emitted verbatim by genc.
+    # The emitted C compiles and computes a real vector add (portable GCC vector ext).
+    body = """
+    emit(genModule([
+        draw("typedef int32_t v4i __attribute__((vector_size(16)));"),
+        draw(" v4i vadd(v4i a, v4i b) { return a + b; }")
+    ]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "__attribute__((vector_size(16)))" in generated
+    call = "({ v4i a = {1,2,3,4}, b = {10,20,30,40}; v4i c = vadd(a, b); c[3]; })"
+    assert compile_and_run(tmp_path, generated, call) == "44"
