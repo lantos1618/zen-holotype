@@ -71,6 +71,20 @@ def test_importing_a_public_name_is_allowed():
     assert {q: ok for q, ok, _ in check(files, space)[0] if q.startswith("m.")} == {"m.f": True}
 
 
+def test_deeply_nested_modules_resolve():
+    # a path is a path: a directory tree `a/b/c.zen` is the module `a.b.c`, and a
+    # deep submodule's public names import + resolve like any other (goal #7).
+    files = files_from({
+        "a.b.c": "Thing*: { v: i32 }\nmk* = (n: i32) Thing { Thing { v: n } }",
+        "main": "{ Thing, mk } = a.b.c\nuse* = (t: Ptr<Thing>) i32 { t.v }",
+    })
+    space = build_space(files)
+    build_scopes(files)
+    resolve(files, space)
+    assert files["main"].scope["Thing"] == "a.b.c.Thing"      # the deep path resolves
+    assert ("main.use", True, "ok") in check(files, space)[0]
+
+
 def test_same_module_can_use_its_own_private_names():
     # privacy is about IMPORTS across modules; a file freely uses its own bare names
     files = files_from({"m": "helper = (n: i32) i32 { n + 1 }\nf* = (x: i32) i32 { helper(x) }"})
