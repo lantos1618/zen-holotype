@@ -8,6 +8,8 @@
 //   { fold, each } = std.iter
 //   total := fold([1, 2, 3], 0, (acc, x) { acc + x })   // 6
 
+{ new_i32 } = std.mem
+
 fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
     acc := init
     xs.loop((h, i, x) { acc = f(acc, x) })
@@ -36,4 +38,25 @@ filter_into*<T> = (xs: [T], out: [T], keep: (T) bool) i64 {
         n = n + (keep(x)).match { true => 1, false => 0 }
     })
     n
+}
+
+// ── allocating forms: produce a FRESH heap slice the caller owns ─────────────
+// These return a new collection (the closure payoff). Currently `[i32]` — a
+// generic version needs type-parameter `sizeof`; for other element types use the
+// `_into` forms with your own buffer.
+
+map* = (xs: [i32], f: (i32) i32) [i32] {
+    out := new_i32(xs.len)
+    xs.loop((h, i, x) { out[i] = f(x) })
+    out
+}
+
+filter* = (xs: [i32], keep: (i32) bool) [i32] {
+    buf := new_i32(xs.len)
+    n := 0
+    xs.loop((h, i, x) {
+        buf[n] = x
+        n = n + (keep(x)).match { true => 1, false => 0 }
+    })
+    slice(addr(buf[0]), n)                 // the kept prefix, as its own [i32] view
 }

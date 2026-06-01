@@ -69,12 +69,15 @@ where it's headed, [VISION](VISION.md).)
 ## Standard library (`std.*`)
 - A third bundled category beside the comptime-only **prelude** and the FFI **bindings**:
   ordinary runtime Zen, importable from any file, **checked and lowered like your code**.
-- **`std.iter`** — `fold` / `each` / `map_into` / `filter_into` as generic templates over
-  slices + closures: `{ fold } = std.iter` then `fold([1, 2, 3], 0, (a, x) { a + x })`.
-  `map_into`/`filter_into` transform into a **caller-owned** output slice (explicit
-  ownership, no allocation): `map_into(xs, out, (x) { x * 2 })`.
-- **`std.mem`** — the library's allocator over libc: `alloc` / `zeroed` / `copy` / `release`.
-  No GC or destructors, so ownership is explicit — you free what you alloc.
+- **`std.iter`** — `fold` / `each` over slices + closures, plus two flavours of map/filter:
+  `map_into`/`filter_into` are **generic** and write into a caller-owned buffer (no allocation),
+  while **`map`/`filter`** return a **fresh heap slice** the caller owns (`map([1,2,3], (x){x*2})`
+  → a new `[i32]`). The allocating forms are `[i32]` today; a generic version needs
+  type-parameter `sizeof`.
+- **`std.mem`** — the library's allocator over libc: `alloc` / `zeroed` / `copy` / `release`,
+  and `new_i32` (a fresh typed slice). No GC or destructors — ownership is explicit.
+- **`slice(ptr, len)`** intrinsic — build a `[T]` view from a raw pointer + length (Rust's
+  `from_raw_parts`); the element type comes from the wanted slice type (a return/param slot).
 - **`std.str`** — read-only ops on `str` (a C string): `len` / `eq` / `ne` / `is_empty`.
   (String *literals* are first-class values now; an owned, growable String awaits the
   allocator model.)

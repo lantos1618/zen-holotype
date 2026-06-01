@@ -139,7 +139,7 @@ def c_expr(e, locals_, space, scope, expect=None) -> str:
         case Index(seq, idx):                                # xs[i] -> xs.ptr[i]
             return f"{c_expr(seq, locals_, space, scope)}.ptr[{c_expr(idx, locals_, space, scope)}]"
         case Call():
-            return _c_call(e, locals_, space, scope)
+            return _c_call(e, locals_, space, scope, expect)
         case MethodCall(recv, method, args):                 # loop handle control
             if method in ("break", "continue"):
                 return method                                # `h.break();` -> `break;`
@@ -233,7 +233,7 @@ def _c_inline_closure(e, locals_, space, scope) -> str:
     return f"({{ {head} {body} }})"
 
 
-def _c_call(e, locals_, space, scope) -> str:
+def _c_call(e, locals_, space, scope, expect=None) -> str:
     if e.callee == "addr":
         return f"&({c_expr(e.args[0], locals_, space, scope)})"
     if e.callee in ("load", "store", "offset"):           # raw memory ops erase to C
@@ -243,6 +243,12 @@ def _c_call(e, locals_, space, scope) -> str:
         if e.callee == "store":
             return f"(*({a[0]}) = {a[1]})"
         return f"(({a[0]}) + ({a[1]}))"                    # offset
+    if e.callee == "slice":                               # slice(ptr, len) -> a [T] view (T = expect)
+        styp = c_type(expect)                             # "slice_T" (also registers the typedef)
+        ct = c_type(expect.elem)
+        p = c_expr(e.args[0], locals_, space, scope)
+        n = c_expr(e.args[1], locals_, space, scope)
+        return f"({styp}){{ .ptr = ({ct}*)({p}), .len = ({n}) }}"
     if e.callee in _CENV:                                  # calling a closure param -> inline it
         return _c_inline_closure(e, locals_, space, scope)
     target = scope.get(e.callee)
