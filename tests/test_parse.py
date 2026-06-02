@@ -312,3 +312,15 @@ def test_parse_module_with_recursion(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 33   # fact(4)=24, sq(3)=9
+
+
+def test_parse_module_n_arg_calls(tmp_path):
+    # N-arg function calls: a 3-arg function, called with 3 args — the self-hosted compiler
+    # can now parse a call to a multi-arg function (which all its own helpers are).
+    gen = gen_module(tmp_path, r"add3* = (a: i32, b: i32, c: i32) i32 { a + b + c }\nfn* = () i32 { add3(1, 2, 3) }")
+    assert "int32_t add3(int32_t a, int32_t b, int32_t c) { return ((a + b) + c); }" in gen
+    assert "int32_t fn() { return add3(1, 2, 3); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return fn(); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 6

@@ -109,10 +109,27 @@ parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
         false => PExpr { expr: a.enode(vref(name)), next: sc.next }
     }
 }
+// `name(a, b, …)` — parse the comma-separated arguments into a heap [Expr] (each arg's
+// VALUE), then build the call. lp is the Scan of the opening '('.
+arg_buf<A: Allocator> = (a: Ptr<A>) [Expr] { slice(a.acquire(16 * sizeof(Expr)), 16) }   // cap 16 args
+take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }                           // exact length
 parse_call<A: Allocator> = (a: Ptr<A>, src: str, name: str, lp: Scan) PExpr {
-    arg   := a.parse_cmp(src, lp.next)               // the single argument
-    close := src.scan(arg.next)                      // consume the ')'
-    PExpr { expr: a.enode(call(name, arg.expr)), next: close.next }
+    buf := a.arg_buf()
+    ae  := a.fill_args(src, lp.next, buf, 0)         // args + pos just past ')'
+    PExpr { expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next }
+}
+fill_args<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_arg(src, pos, buf, i) }
+}
+fill_arg<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    arg   := a.parse_cmp(src, pos)                   // one argument
+    buf[i] = load(arg.expr)                          // store its Expr value
+    after := src.scan(arg.next)                      // ',' or ')'
+    src.is_comma(after.tok).match {
+        true  => a.fill_args(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }   // ')'
+    }
 }
 parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
     inner := a.parse_cmp(src, open.next)             // parse past the '(' (full expr incl. compare)

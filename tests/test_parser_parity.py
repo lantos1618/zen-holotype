@@ -26,8 +26,8 @@ def py_sexpr(e):
         return e.name
     if isinstance(e, Bin):
         return f"({e.op} {py_sexpr(e.l)} {py_sexpr(e.r)})"
-    if isinstance(e, Call):                          # genc's Call is one-arg: (fn arg)
-        return f"({e.callee} {' '.join(py_sexpr(a) for a in e.args)})"
+    if isinstance(e, Call):                          # (fn a b …) — space-prefixed args, N-ary
+        return f"({e.callee}{''.join(' ' + py_sexpr(a) for a in e.args)})"
     return "?"
 
 
@@ -77,11 +77,15 @@ def zen_parser_sexpr(tmp_path, expr):
     "a == b",
     "x * 2 >= y + 1",       # -> (>= (* x 2) (+ y 1))
     "n <= 0",
-    # one-arg function calls (genc's Call is single-arg)
+    # function calls — N-ary now
     "f(x)",                 # -> (f x)
     "g(1 + 2)",             # -> (g (+ 1 2))
     "h(a) + 1",             # -> (+ (h a) 1)
     "inc(inc(n))",          # -> (inc (inc n))   nested
+    "add(a, b)",            # -> (add a b)
+    "f(1, 2, 3)",           # -> (f 1 2 3)
+    "g(a, h(b, c))",        # -> (g a (h b c))   nested multi-arg
+    "sum(x, y) * 2",        # -> (* (sum x y) 2)
 ])
 def test_zen_and_python_parsers_build_the_same_tree(tmp_path, expr):
     assert zen_parser_sexpr(tmp_path, expr) == python_parser_sexpr(expr)
