@@ -25,7 +25,7 @@ ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
 MakeEnumData*: { ty: str, variant: str, payload: Ptr<Expr> }  // (E){ .tag=E_V, .u.V=payload }
 TagData*: { ty: str, variant: str }                     // (E){ .tag=E_V }  (no payload)
 ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
-MatchData*: { subj: str, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
+MatchData*: { subj: Ptr<Expr>, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
 StrData*: { value: str }                                // a C string literal "…" (escaped on emit)
 FieldInit*: { name: str, value: Ptr<Expr> }             // .name = value  (one struct-literal initializer)
 MakeStructData*: { ty: str, inits: [FieldInit] }        // (T){ .a = …, .b = … }  — a struct literal
@@ -65,8 +65,8 @@ finit* = (nm: str, v: Ptr<Expr>) FieldInit { FieldInit { name: nm, value: v } }
 mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, inits: inits }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
-ematch* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: false }) }
-ematchp* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: true }) }
+ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: false }) }
+ematchp* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: true }) }
 strlit* = (v: str) Expr { .StrLit(StrData { value: v }) }
 tstr* = () Ty { .Str() }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
@@ -239,9 +239,11 @@ gen_arms = (s: String, subj: str, sep: str, ename: str, arms: [ArmData], i: i64)
         false => s.gen_test(subj, sep, ename, arms[i]).gen_arms(subj, sep, ename, arms, i + 1).append(")")
     }
 }
+// the subject can be any expression, so bind it once to a temp (a GCC statement-expression),
+// then the tag-test chain reads that temp — no re-evaluation, and `sc.tok.kind.match {…}` works.
 gen_match = (s: String, m: MatchData) String {
     sep := m.ptr.match { true => "->", false => "." }
-    s.gen_arms(m.subj, sep, m.ename, m.arms, 0)
+    s.append("({ __auto_type _subj = ").gen_expr(m.subj).append("; ").gen_arms("_subj", sep, m.ename, m.arms, 0).append("; })")
 }
 
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─

@@ -322,12 +322,13 @@ def test_genc_match_dispatch(tmp_path):
     ww := bin("*", addr(w1), addr(w2))
     z := lit(0)
     arms := [arm("Circle", "r", addr(rr)), arm("Square", "w", addr(ww)), arm("Dot", "", addr(z))]
-    m := ematch("s", "Shape", arms)
+    sv := vref("s")
+    m := ematch(addr(sv), "Shape", arms)
     area := Func { name: "area", params: [param("s", tnamed("Shape"))], ret: ti32(), body: [sret(addr(m))] }
     emit(genModule([denum(shape), dfunc(area)]))
     0"""
     generated = emit_via_zen(tmp_path, body)
-    assert "s.tag == Shape_Circle ? ({ __auto_type r = s.u.Circle; (r * r); })" in generated
+    assert "_subj.tag == Shape_Circle ? ({ __auto_type r = _subj.u.Circle; (r * r); })" in generated
     call = ("({ Shape c={.tag=Shape_Circle,.u.Circle=5}; Shape sq={.tag=Shape_Square,.u.Square=4};"
             " Shape dt={.tag=Shape_Dot}; area(c)+area(sq)+area(dt); })")
     assert compile_and_run(tmp_path, generated, call) == "41"      # 25 + 16 + 0
@@ -374,7 +375,8 @@ def test_genc_recursive_cons_list_no_slices(tmp_path):
     scall := call("sum", [ct])
     body := bin("+", addr(ch), addr(scall))
     z := lit(0)
-    m := ematchp("l", "List", [arm("Nil", "", addr(z)), arm("Cons", "c", addr(body))])
+    lv := vref("l")
+    m := ematchp(addr(lv), "List", [arm("Nil", "", addr(z)), arm("Cons", "c", addr(body))])
     lt2 := tnamed("List")
     sumf := Func { name: "sum", params: [param("l", tptr(addr(lt2)))], ret: ti32(), body: [sret(addr(m))] }
     emit(genModule([dstruct(cell), denum(list), dfunc(sumf)]))
@@ -382,7 +384,7 @@ def test_genc_recursive_cons_list_no_slices(tmp_path):
     generated = emit_via_zen(tmp_path, body)
     assert "typedef struct Cell Cell; typedef struct List List;" in generated      # forward decls
     assert "struct Cell { int32_t head; List* tail; };" in generated
-    assert "int32_t sum(List* l) { return (l->tag == List_Nil ? (0) : ({ __auto_type c = l->u.Cons; (c.head + sum(c.tail)); })); }" in generated
+    assert "int32_t sum(List* l) { return ({ __auto_type _subj = l; (_subj->tag == List_Nil ? (0) : ({ __auto_type c = _subj->u.Cons; (c.head + sum(c.tail)); })); }); }" in generated
     call = ("({ List n={.tag=List_Nil}; List a={.tag=List_Cons,.u.Cons={3,&n}};"
             " List b={.tag=List_Cons,.u.Cons={2,&a}}; List c={.tag=List_Cons,.u.Cons={1,&b}}; sum(&c); })")
     assert compile_and_run(tmp_path, generated, call) == "6"

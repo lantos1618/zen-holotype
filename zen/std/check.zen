@@ -148,12 +148,13 @@ resolve_inits<A: Allocator> = (a: Ptr<A>, env: Env, inits: [FieldInit]) [FieldIn
 // fill an enum match's ename from the subject's declared type. If the subject is a POINTER
 // (`Ptr<Enum>`), emit genc's ematchp so the tag test is `subj->tag` (not `subj.tag`).
 resolve_match<A: Allocator> = (a: Ptr<A>, env: Env, m: MatchData) Ptr<Expr> {
-    t    := env.vars.lookup_var(m.subj)
-    en   := t.enum_name()
-    arms := a.resolve_arms(env, m.arms)
+    t     := env.infer_expr(m.subj)            // the subject is any expression — infer its type
+    en    := t.enum_name()
+    subj2 := a.resolve_expr(env, m.subj)       // resolve nested ctors/matches in the subject too
+    arms  := a.resolve_arms(env, m.arms)
     t.ty_is_ptr().match {
-        true  => a.enode(ematchp(m.subj, en, arms)),
-        false => a.enode(ematch(m.subj, en, arms))
+        true  => a.enode(ematchp(subj2, en, arms)),
+        false => a.enode(ematch(subj2, en, arms))
     }
 }
 resolve_args<A: Allocator> = (a: Ptr<A>, env: Env, args: [Expr]) [Expr] {
