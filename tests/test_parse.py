@@ -445,6 +445,19 @@ def test_parse_char_literal_escape(tmp_path):
     assert "int32_t nl() { return 10; }" in gen      # '\n' -> byte 10 via esc_byte
 
 
+# ── string literals: `"…"` parse to genc StrLit; escapes are resolved then re-escaped ────
+# (The `\"` here escapes the quotes through the driver's own Zen-string layer.)
+def test_parse_string_literal(tmp_path):
+    gen = gen_module(tmp_path, r'greet* = () str { \"hello\" }')
+    assert 'const char* greet() { return "hello"; }' in gen
+
+
+def test_parse_string_literal_escape(tmp_path):
+    # source `"a\nb"` -> unescaped to a real newline byte -> genc re-escapes it back to \n
+    gen = gen_module(tmp_path, r'bang* = () str { \"a\\nb\" }')
+    assert r'const char* bang() { return "a\nb"; }' in gen
+
+
 # ── Ptr<T> types: a type can be a pointer (in params, fields, returns, recursively) ──────
 # `Ptr<T>` parses via a position-returning parse_ty (a single-token ty_of can't span the
 # `< … >`), recursing so `Ptr<Ptr<T>>` works. genc lowers Ptr(T) to `T*`.
