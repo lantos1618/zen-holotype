@@ -145,13 +145,13 @@ def test_parse_fn_lowers_a_whole_function(tmp_path):
     # let-bind x, return an expression that USES x — the identifier survives as a runtime
     # name, the whole fn lowers, compiles, and runs.
     gen = gen_fn(tmp_path, r"x := 1 + 2\nx * 3")
-    assert gen == "int32_t f() { int32_t x = (1 + 2); return (x * 3); }"
+    assert gen == "int32_t f() { __auto_type x = (1 + 2); return (x * 3); }"
     assert run_generated(tmp_path, gen) == 9
 
 
 def test_parse_fn_another_binding(tmp_path):
     gen = gen_fn(tmp_path, r"total := 10 - 1\ntotal * total")
-    assert gen == "int32_t f() { int32_t total = (10 - 1); return (total * total); }"
+    assert gen == "int32_t f() { __auto_type total = (10 - 1); return (total * total); }"
     assert run_generated(tmp_path, gen) == 81
 
 
@@ -160,8 +160,8 @@ def test_parse_fn_dynamic_statement_list(tmp_path):
     # as a cons-list while parsing, then materialized to a HEAP [Stmt] — if it were a
     # stack slice literal it would dangle once the Func is returned and genC would crash.
     gen = gen_fn(tmp_path, r"a := 2\nb := a + 3\nc := b * b\nc - 1")
-    assert gen == ("int32_t f() { int32_t a = 2; int32_t b = (a + 3); "
-                   "int32_t c = (b * b); return (c - 1); }")
+    assert gen == ("int32_t f() { __auto_type a = 2; __auto_type b = (a + 3); "
+                   "__auto_type c = (b * b); return (c - 1); }")
     assert run_generated(tmp_path, gen) == 24          # a=2, b=5, c=25, c-1=24
 
 
@@ -175,7 +175,7 @@ def test_parse_fn_zero_lets_is_just_a_return(tmp_path):
 def test_parse_fn_assignment_statement(tmp_path):
     # `name = value` (single =, not := ) reassigns a binding — distinct from a let
     gen = gen_fn(tmp_path, r"x := 1\nx = x + 5\nx")
-    assert gen == "int32_t f() { int32_t x = 1; x = (x + 5); return x; }"
+    assert gen == "int32_t f() { __auto_type x = 1; x = (x + 5); return x; }"
     assert run_generated(tmp_path, gen) == 6
 
 
@@ -215,7 +215,7 @@ def gen_decl(tmp_path, src):
 def test_parse_decl_reads_a_whole_function(tmp_path):
     # the name is taken from the source; the body lowers and runs.
     gen = gen_decl(tmp_path, r"f* = () i32 { x := 4\n x + 3 }")
-    assert gen == "int32_t f() { int32_t x = 4; return (x + 3); }"
+    assert gen == "int32_t f() { __auto_type x = 4; return (x + 3); }"
     assert run_generated(tmp_path, gen) == 7
 
 
@@ -610,6 +610,19 @@ def test_parse_enum_match_paren_form(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 27   # Circle(3) -> 3*3*3
 
 
+def test_parse_let_bound_match_subject(tmp_path):
+    # the match subject is bound by a `let`, not a parameter: std.check INFERS the let's type
+    # from its RHS (a Call -> the callee's return type), threads it into the environment, and
+    # resolves the match's enum. genc's Let now uses __auto_type so the binding compiles.
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Square(n) }\nuse* = (n: i32) i32 { s := mk(n)\n s.match { .Circle(r) => r, .Square(w) => w + 1 } }")
+    assert "__auto_type s = mk(n);" in gen
+    assert "(s.tag == Shape_Circle ? ({ __auto_type r = s.u.Circle; r; }) : ({ __auto_type w = s.u.Square; (w + 1); }))" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return use(5); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 6   # mk(5) -> Square(5) -> 5 + 1
+
+
 def test_parse_enum_match_pointer_subject(tmp_path):
     # a match on a `Ptr<Enum>` subject: std.check sees through the pointer for the ename AND
     # emits ematchp so the tag test uses `->` (l->tag), not `.` (l.tag). A recursive list_len
@@ -644,21 +657,21 @@ def test_parse_enum_match_no_payload(tmp_path):
 # These are real iterative algorithms — lexed, parsed and lowered entirely in Zen.
 def test_parse_while_iterative_factorial(tmp_path):
     gen = gen_decl(tmp_path, r"fact* = (n: i32) i32 { acc := 1\n i := 1\n @while(i <= n) { acc = acc * i\n i = i + 1 }\n acc }")
-    assert gen == ("int32_t fact(int32_t n) { int32_t acc = 1; int32_t i = 1; "
+    assert gen == ("int32_t fact(int32_t n) { __auto_type acc = 1; __auto_type i = 1; "
                    "while ((i <= n)) { acc = (acc * i); i = (i + 1); } return acc; }")
     assert _compile_run(tmp_path, gen, "fact(5)") == 120
 
 
 def test_parse_while_power(tmp_path):
     gen = gen_decl(tmp_path, r"powi* = (base: i32, n: i32) i32 { acc := 1\n i := 0\n @while(i < n) { acc = acc * base\n i = i + 1 }\n acc }")
-    assert gen == ("int32_t powi(int32_t base, int32_t n) { int32_t acc = 1; int32_t i = 0; "
+    assert gen == ("int32_t powi(int32_t base, int32_t n) { __auto_type acc = 1; __auto_type i = 0; "
                    "while ((i < n)) { acc = (acc * base); i = (i + 1); } return acc; }")
     assert _compile_run(tmp_path, gen, "powi(3, 4)") == 81   # exit codes are 8-bit, so keep it < 256
 
 
 def test_parse_while_digit_sum(tmp_path):
     gen = gen_decl(tmp_path, r"digit_sum* = (n: i32) i32 { acc := 0\n m := n\n @while(m > 0) { acc = acc + (m % 10)\n m = m / 10 }\n acc }")
-    assert gen == ("int32_t digit_sum(int32_t n) { int32_t acc = 0; int32_t m = n; "
+    assert gen == ("int32_t digit_sum(int32_t n) { __auto_type acc = 0; __auto_type m = n; "
                    "while ((m > 0)) { acc = (acc + (m % 10)); m = (m / 10); } return acc; }")
     assert _compile_run(tmp_path, gen, "digit_sum(12345)") == 15
 
@@ -667,7 +680,7 @@ def test_parse_while_is_prime(tmp_path):
     # the loop body ASSIGNS a value computed by a boolean `.match` (-> ternary); the result
     # type is bool, so the harness pulls in <stdbool.h>.
     gen = gen_decl(tmp_path, r"is_prime* = (n: i32) bool { d := 2\n ok := true\n @while((d * d) <= n) { ok = ((n % d) == 0).match { true => false, false => ok }\n d = d + 1 }\n (n >= 2) && ok }")
-    assert gen == ("bool is_prime(int32_t n) { int32_t d = 2; int32_t ok = true; "
+    assert gen == ("bool is_prime(int32_t n) { __auto_type d = 2; __auto_type ok = true; "
                    "while (((d * d) <= n)) { ok = (((n % d) == 0) ? false : ok); d = (d + 1); } "
                    "return ((n >= 2) && ok); }")
     (tmp_path / "g.c").write_text("#include <stdint.h>\n#include <stdbool.h>\n" + gen +
@@ -681,7 +694,7 @@ def test_parse_while_nested_loops(tmp_path):
     # a @while inside a @while — the loop-body block parser recurses (the inner `j :=` is a
     # let inside the outer block). Counts the n*n pairs.
     gen = gen_decl(tmp_path, r"grid* = (n: i32) i32 { total := 0\n i := 0\n @while(i < n) { j := 0\n @while(j < n) { total = total + 1\n j = j + 1 }\n i = i + 1 }\n total }")
-    assert gen == ("int32_t grid(int32_t n) { int32_t total = 0; int32_t i = 0; "
-                   "while ((i < n)) { int32_t j = 0; while ((j < n)) { total = (total + 1); j = (j + 1); } "
+    assert gen == ("int32_t grid(int32_t n) { __auto_type total = 0; __auto_type i = 0; "
+                   "while ((i < n)) { __auto_type j = 0; while ((j < n)) { total = (total + 1); j = (j + 1); } "
                    "i = (i + 1); } return total; }")
     assert _compile_run(tmp_path, gen, "grid(4)") == 16
