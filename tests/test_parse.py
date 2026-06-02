@@ -228,3 +228,9 @@ def test_parse_decl_typed_parameters(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 7
+
+
+def test_parse_decl_return_type(tmp_path):
+    # the return-type token after `)` maps via ty_of (here i64 -> int64_t)
+    gen = gen_decl(tmp_path, r"wide* = (x: i64) i64 { x + 1 }")
+    assert gen == "int64_t wide(int64_t x) { return (x + 1); }"
