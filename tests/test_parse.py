@@ -445,6 +445,26 @@ def test_parse_char_literal_escape(tmp_path):
     assert "int32_t nl() { return 10; }" in gen      # '\n' -> byte 10 via esc_byte
 
 
+# ── if statements: `if (c) { … } else { … }` -> genc If (sibling to @while) ───────────
+def test_parse_if_else(tmp_path):
+    gen = gen_module(tmp_path, r"sign* = (x: i32) i32 { r := 0\n if (x > 0) { r = 1 } else { r = 2 }\n r }")
+    assert "if ((x > 0)) { r = 1; } else { r = 2; }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return sign(5) * 10 + sign(-3); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 12   # sign(5)=1, sign(-3)=2 -> 12
+
+
+def test_parse_if_nested_in_while(tmp_path):
+    # an if (no else) inside a @while body — block_stmt recurses into both forms
+    gen = gen_module(tmp_path, r"cnt* = (n: i32) i32 { c := 0\n i := 0\n @while(i < n) { if (i > 2) { c = c + 1 }\n i = i + 1 }\n c }")
+    assert "while ((i < n)) { if ((i > 2)) { c = (c + 1); } else { } i = (i + 1); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return cnt(7); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 4    # i = 3,4,5,6 are > 2
+
+
 # ── string literals: `"…"` parse to genc StrLit; escapes are resolved then re-escaped ────
 # (The `\"` here escapes the quotes through the driver's own Zen-string layer.)
 def test_parse_string_literal(tmp_path):
