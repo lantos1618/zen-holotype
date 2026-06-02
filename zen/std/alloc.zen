@@ -1,0 +1,28 @@
+// std.alloc — an explicit allocator, Zig-style. Nothing in here hides a malloc:
+// a function that allocates takes the allocator as a parameter, so you choose WHERE
+// memory comes from (libc, an arena, a fixed buffer) and allocation is visible in the
+// signature. Because zen monomorphizes a `<A: Allocator>` bound, the dispatch is
+// zero-cost — `acquire(a, n)` compiles straight to the chosen allocator's code.
+//
+//   m := Malloc { _: 0 }
+//   p := acquire(addr(m), 64)      // explicit: this allocation came from `m`
+//   release(addr(m), p)
+
+malloc = (n: i64) RawPtr<u8>           // libc, declared bodyless
+realloc = (p: RawPtr<u8>, n: i64) RawPtr<u8>
+free = (p: RawPtr<u8>) void
+
+// the interface: acquire n bytes, resize a block, release it. Self = the allocator.
+Allocator*: {
+    acquire: (Ptr<Self>, i64) RawPtr<u8>,
+    resize:  (Ptr<Self>, RawPtr<u8>, i64) RawPtr<u8>,
+    release: (Ptr<Self>, RawPtr<u8>) void
+}
+
+// the default: a stateless allocator backed by libc malloc/realloc/free.
+Malloc*: { _: i32 }
+Malloc.impl(Allocator) {
+    acquire = (s: Ptr<Malloc>, n: i64) RawPtr<u8> { malloc(n) }
+    resize  = (s: Ptr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+    release = (s: Ptr<Malloc>, p: RawPtr<u8>) void { free(p) }
+}

@@ -500,16 +500,21 @@ def ret_type(qual, namespace):
 
 
 def infer_trait_call(e, tm, locals_, namespace, scope):
-    """Type a call to a bound's trait method: check args against the signature
-    with Self left abstract (the type var of the bound this method came from)."""
-    params = [subst(p, {"Self": TVar(tm.tparam)}) for p in tm.sig.params]
-    if len(e.args) != len(params):
-        raise TypeErr(f"'{e.callee}' wants {len(params)} args, got {len(e.args)}")
-    for a, pt in zip(e.args, params):
-        given = infer(a, locals_, namespace, scope)
-        if not fits(given, pt):
-            raise TypeErr("trait-method argument", given, pt)
-    return subst(tm.sig.ret, {"Self": TVar(tm.tparam)})
+    """Type a call to a bound's trait method. Self is solved from the arguments (the
+    receiver), so the call checks both in a generic body (Self -> the bound's type var)
+    and after instantiation (Self -> the concrete type) — e.g. a let-bound trait call
+    inside a generic fn, which the monomorphizer re-infers with a concrete receiver."""
+    if len(e.args) != len(tm.sig.params):
+        raise TypeErr(f"'{e.callee}' wants {len(tm.sig.params)} args, got {len(e.args)}")
+    givens = [infer(a, locals_, namespace, scope) for a in e.args]
+    s: dict = {}
+    for p, g in zip(tm.sig.params, givens):
+        match_type(p, g, s)                          # solve Self (+ any tvars) from the args
+    self_t = s.get("Self", TVar(tm.tparam))          # unsolved -> stay abstract (the bound's var)
+    for g, p in zip(givens, tm.sig.params):
+        if not fits(g, subst(p, {"Self": self_t})):
+            raise TypeErr("trait-method argument", g, subst(p, {"Self": self_t}))
+    return subst(tm.sig.ret, {"Self": self_t})       # ret with Self resolved from the receiver
 
 
 def infer_enum_ctor(e, expect, locals_, namespace, scope):
