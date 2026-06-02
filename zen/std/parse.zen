@@ -1,10 +1,15 @@
 // std.parse — a recursive-descent parser in zen. It pulls tokens from the lexer's pure
-// positional scan() and builds genc's Expr AST (a heap tree of Ptr<Expr> nodes, allocated
-// through an explicit allocator). The result is the AST genc already lowers — so the
-// front (lexer) and back (genc) meet here into one tiny self-hosted compiler.
+// positional scan() and builds genc's Expr/Stmt/Decl AST (a heap tree, allocated through
+// an explicit allocator). The result is the AST genc lowers — so the front (lexer) and
+// back (genc) meet here into one tiny self-hosted compiler.
 //
-// This first cut handles arithmetic: integers, + - * /, and parentheses, with the usual
-// precedence. eval() interprets the tree to prove the parse is right:
+// Coverage: expressions (ints, idents, + - * /, comparisons, one-arg calls, parens),
+// statements (`name := v` let, `name = v` assign, a final-expression return), and whole
+// function declarations `name* = (params) RetType { body }`, several per module.
+//
+// Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `src.byte_at(i).op_str()`
+// is `op_str(byte_at(src, i))`, `a.enode(v)` is `enode(a, v)`. The source flows as the
+// receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
 { Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, slet, sassign, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
@@ -29,22 +34,22 @@ enode<A: Allocator> = (a: Ptr<A>, v: Expr) Ptr<Expr> {
 copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
     i := 0
     @while(i < n) {
-        store(offset(dst, i), byte_at(src, start + i))
+        store(offset(dst, i), src.byte_at(start + i))
         i = i + 1
     }
 }
 lexeme<A: Allocator> = (a: Ptr<A>, src: str, t: Token) str {
     p := a.acquire(t.len + 1)
-    copy_span(src, t.start, p, t.len)
+    src.copy_span(t.start, p, t.len)
     store(offset(p, t.len), 0)              // NUL terminator
     cstr(p)
 }
 
 // ── token helpers ────────────────────────────────────────────────────────────────
 // a Sym token whose (single) byte is `c`
-is_op = (src: str, t: Token, c: u8) bool { t.kind.match { .Sym => byte_at(src, t.start) == c, _ => false } }
-is_addsub = (src: str, t: Token) bool { is_op(src, t, '+') || is_op(src, t, '-') }
-is_muldiv = (src: str, t: Token) bool { is_op(src, t, '*') || is_op(src, t, '/') }
+is_op = (src: str, t: Token, c: u8) bool { t.kind.match { .Sym => src.byte_at(t.start) == c, _ => false } }
+is_addsub = (src: str, t: Token) bool { src.is_op(t, '+') || src.is_op(t, '-') }
+is_muldiv = (src: str, t: Token) bool { src.is_op(t, '*') || src.is_op(t, '/') }
 // the operator byte as the str genc wants
 op_str = (b: u8) str {
     (b == '+').match { true => "+", false =>
@@ -54,69 +59,69 @@ op_str = (b: u8) str {
 // parse an Int token's decimal digits
 digit_val = (b: u8) i32 { b - '0' }
 to_int_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
-    (pos < end).match { true => to_int_from(src, pos + 1, end, acc * 10 + digit_val(byte_at(src, pos))), false => acc }
+    (pos < end).match { true => src.to_int_from(pos + 1, end, acc * 10 + src.byte_at(pos).digit_val()), false => acc }
 }
-to_int = (src: str, t: Token) i32 { to_int_from(src, t.start, t.start + t.len, 0) }
+to_int = (src: str, t: Token) i32 { src.to_int_from(t.start, t.start + t.len, 0) }
 
 // ── atom := integer | call | identifier | '(' expr ')' ───────────────────────────
 parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
-    sc := scan(src, pos)
+    sc := src.scan(pos)
     sc.tok.kind.match {
-        .Int   => PExpr { expr: a.enode(lit(to_int(src, sc.tok))), next: sc.next },
+        .Int   => PExpr { expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next },
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
         _      => a.parse_paren(src, sc)             // a '(' (the only other atom)
     }
 }
 // an Ident is a variable — unless the very next token is `(`, making it a one-arg call
-is_lparen = (src: str, t: Token) bool { is_op(src, t, '(') }
+is_lparen = (src: str, t: Token) bool { src.is_op(t, '(') }
 parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
-    nx := scan(src, sc.next)
-    is_lparen(src, nx.tok).match {
+    nx := src.scan(sc.next)
+    src.is_lparen(nx.tok).match {
         true  => a.parse_call(src, name, nx),
         false => PExpr { expr: a.enode(vref(name)), next: sc.next }
     }
 }
 parse_call<A: Allocator> = (a: Ptr<A>, src: str, name: str, lp: Scan) PExpr {
     arg   := a.parse_cmp(src, lp.next)               // the single argument
-    close := scan(src, arg.next)                     // consume the ')'
+    close := src.scan(arg.next)                      // consume the ')'
     PExpr { expr: a.enode(call(name, arg.expr)), next: close.next }
 }
 parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
     inner := a.parse_cmp(src, open.next)             // parse past the '(' (full expr incl. compare)
-    close := scan(src, inner.next)                   // consume the ')'
+    close := src.scan(inner.next)                    // consume the ')'
     PExpr { expr: inner.expr, next: close.next }
 }
 
 // ── term := atom (('*' | '/') atom)*   (left-associative) ─────────────────────────
 parse_term<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.term_rest(src, a.parse_atom(src, pos)) }
 term_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
-    sc := scan(src, lhs.next)
-    is_muldiv(src, sc.tok).match { false => lhs, true => a.term_more(src, lhs, sc) }
+    sc := src.scan(lhs.next)
+    src.is_muldiv(sc.tok).match { false => lhs, true => a.term_more(src, lhs, sc) }
 }
 term_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_atom(src, sc.next)
-    a.term_rest(src, PExpr { expr: a.enode(bin(op_str(byte_at(src, sc.tok.start)), lhs.expr, rhs.expr)), next: rhs.next })
+    a.term_rest(src, PExpr { expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next })
 }
 
 // ── expr := term (('+' | '-') term)*   (left-associative) ─────────────────────────
 parse_expr<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
 expr_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
-    sc := scan(src, lhs.next)
-    is_addsub(src, sc.tok).match { false => lhs, true => a.expr_more(src, lhs, sc) }
+    sc := src.scan(lhs.next)
+    src.is_addsub(sc.tok).match { false => lhs, true => a.expr_more(src, lhs, sc) }
 }
 expr_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_term(src, sc.next)
-    a.expr_rest(src, PExpr { expr: a.enode(bin(op_str(byte_at(src, sc.tok.start)), lhs.expr, rhs.expr)), next: rhs.next })
+    a.expr_rest(src, PExpr { expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next })
 }
 
 // ── compare := expr (('==' | '<' | '>' | '<=' | '>=') expr)*  (loosest, left-assoc) ──
 // A single `=` is assignment, not comparison, so `==` must be the two-byte symbol; `<`/`>`
 // are comparisons at either length (`<` or `<=`).
 is_cmp_byte = (b: u8, len: i32) bool { ((b == '=') && (len == 2)) || (b == '<') || (b == '>') }
-is_cmp = (src: str, t: Token) bool { t.kind.match { .Sym => is_cmp_byte(byte_at(src, t.start), t.len), _ => false } }
+is_cmp = (src: str, t: Token) bool { t.kind.match { .Sym => src.byte_at(t.start).is_cmp_byte(t.len), _ => false } }
 cmp_op_str = (src: str, t: Token) str {
-    b0 := byte_at(src, t.start)
+    b0 := src.byte_at(t.start)
     (b0 == '=').match { true => "==", false =>
     (b0 == '<').match {
         true  => (t.len == 2).match { true => "<=", false => "<" },
@@ -125,12 +130,12 @@ cmp_op_str = (src: str, t: Token) str {
 }
 parse_cmp<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.cmp_rest(src, a.parse_expr(src, pos)) }
 cmp_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
-    sc := scan(src, lhs.next)
-    is_cmp(src, sc.tok).match { false => lhs, true => a.cmp_more(src, lhs, sc) }
+    sc := src.scan(lhs.next)
+    src.is_cmp(sc.tok).match { false => lhs, true => a.cmp_more(src, lhs, sc) }
 }
 cmp_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_expr(src, sc.next)
-    a.cmp_rest(src, PExpr { expr: a.enode(bin(cmp_op_str(src, sc.tok), lhs.expr, rhs.expr)), next: rhs.next })
+    a.cmp_rest(src, PExpr { expr: a.enode(bin(src.cmp_op_str(sc.tok), lhs.expr, rhs.expr)), next: rhs.next })
 }
 
 // parse a whole source string to an expression tree (the loosest level is comparison)
@@ -157,41 +162,41 @@ scons<A: Allocator>  = (a: Ptr<A>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode
 
 // is there a `name :=` at `pos`? (an Ident, then the two-byte ':=' symbol)
 is_assign = (src: str, t: Token) bool {
-    t.kind.match { .Sym => (t.len == 2) && (byte_at(src, t.start) == ':') && (byte_at(src, t.start + 1) == '='), _ => false }
+    t.kind.match { .Sym => (t.len == 2) && (src.byte_at(t.start) == ':') && (src.byte_at(t.start + 1) == '='), _ => false }
 }
 is_let_here = (src: str, pos: i32) bool {
-    a := scan(src, pos)
-    a.tok.kind.match { .Ident => is_assign(src, scan(src, a.next).tok), _ => false }
+    sc := src.scan(pos)
+    sc.tok.kind.match { .Ident => src.is_assign(src.scan(sc.next).tok), _ => false }
 }
 // is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
-is_eq = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 1) && (byte_at(src, t.start) == '='), _ => false } }
+is_eq = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false } }
 is_set_here = (src: str, pos: i32) bool {
-    a := scan(src, pos)
-    a.tok.kind.match { .Ident => is_eq(src, scan(src, a.next).tok), _ => false }
+    sc := src.scan(pos)
+    sc.tok.kind.match { .Ident => src.is_eq(src.scan(sc.next).tok), _ => false }
 }
 
 // parse statements [pos..] into a cons-list: `name := expr` is a Let, `name = expr` an
 // Assign; the first token that's neither begins the final expression (the `return`).
 parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    is_let_here(src, pos).match {
+    src.is_let_here(pos).match {
         true  => a.parse_let_stmt(src, pos),
-        false => is_set_here(src, pos).match {
+        false => src.is_set_here(pos).match {
             true  => a.parse_set_stmt(src, pos),
             false => a.parse_ret_stmt(src, pos)
         }
     }
 }
 parse_set_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    nt   := scan(src, pos)                   // the assigned name
+    nt   := src.scan(pos)                    // the assigned name
     name := a.lexeme(src, nt.tok)
-    eq   := scan(src, nt.next)               // '='
+    eq   := src.scan(nt.next)                // '='
     v    := a.parse_cmp(src, eq.next)        // value
     a.scons(sassign(name, v.expr), a.parse_stmts(src, v.next))
 }
 parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    nt   := scan(src, pos)                   // the bound name
+    nt   := src.scan(pos)                    // the bound name
     name := a.lexeme(src, nt.tok)
-    at   := scan(src, nt.next)               // ':='
+    at   := src.scan(nt.next)                // ':='
     v    := a.parse_cmp(src, at.next)        // value (full expression, incl. comparison)
     a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
 }
@@ -201,11 +206,11 @@ parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
 }
 
 // count the statements, then fill a heap [Stmt] from the list (return the next index)
-scount = (l: Ptr<SList>) i32 { l.match { .SNil => 0, .SCons(c) => 1 + scount(c.tail) } }
-sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 { l.match { .SNil => i, .SCons(c) => sfill_cons(buf, c, i) } }
+scount = (l: Ptr<SList>) i32 { l.match { .SNil => 0, .SCons(c) => 1 + c.tail.scount() } }
+sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 { l.match { .SNil => i, .SCons(c) => buf.sfill_cons(c, i) } }
 sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
     buf[i] = c.head
-    sfill(buf, c.tail, i + 1)
+    buf.sfill(c.tail, i + 1)
 }
 
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
@@ -214,8 +219,8 @@ stmt_buf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof
 // parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
 build_body<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) [Stmt] {
     stmts := a.parse_stmts(src, pos)
-    body  := a.stmt_buf(scount(stmts))
-    sfill(body, stmts, 0)
+    body  := a.stmt_buf(stmts.scount())
+    body.sfill(stmts, 0)
     body
 }
 
@@ -225,53 +230,50 @@ parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
     Func { name: fname, params: [], ret: ti32(), body: a.build_body(src, 0) }
 }
 
-// ── a whole function DECLARATION — `name* = () i32 { body }` ────────────────────────
-// Reads real decl syntax: the leading Ident is the name; everything up to the first `{`
-// (the `*` visibility, `= ()`, the return type) is skipped, and the brace body is parsed.
-// (Empty params + i32 return for now — typed params and arbitrary return types are next.)
-is_lbrace = (src: str, t: Token) bool { is_op(src, t, '{') }
+// ── type tokens ──────────────────────────────────────────────────────────────────
+is_lbrace = (src: str, t: Token) bool { src.is_op(t, '{') }
 skip_to_brace = (src: str, pos: i32) i32 {
-    sc := scan(src, pos)
-    is_lbrace(src, sc.tok).match { true => sc.next, false => skip_to_brace(src, sc.next) }
+    sc := src.scan(pos)
+    src.is_lbrace(sc.tok).match { true => sc.next, false => src.skip_to_brace(sc.next) }
 }
-// ── parameter types: map a type token to genc's Ty (primitives; named/Ptr are next) ──
+// map a type token to genc's Ty (primitives; named/Ptr default to i32 — TODO)
 span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
     (i == len).match {
-        true  => byte_at(kw, i) == 0,                    // kw is exactly `len` bytes
-        false => (byte_at(src, start + i) == byte_at(kw, i)) && span_eq(src, start, len, kw, i + 1)
+        true  => kw.byte_at(i) == 0,                     // kw is exactly `len` bytes
+        false => (src.byte_at(start + i) == kw.byte_at(i)) && src.span_eq(start, len, kw, i + 1)
     }
 }
-tok_eq = (src: str, t: Token, kw: str) bool { span_eq(src, t.start, t.len, kw, 0) }
+tok_eq = (src: str, t: Token, kw: str) bool { src.span_eq(t.start, t.len, kw, 0) }
 ty_of = (src: str, t: Token) Ty {
-    tok_eq(src, t, "i64").match { true => ti64(), false =>
-    tok_eq(src, t, "u8").match { true => tu8(), false =>
-    tok_eq(src, t, "bool").match { true => tbool(), false =>
-    tok_eq(src, t, "str").match { true => tstr(), false =>
-    tok_eq(src, t, "void").match { true => tvoid(), false => ti32() } } } } }   // default i32 (named/Ptr: TODO)
+    src.tok_eq(t, "i64").match { true => ti64(), false =>
+    src.tok_eq(t, "u8").match { true => tu8(), false =>
+    src.tok_eq(t, "bool").match { true => tbool(), false =>
+    src.tok_eq(t, "str").match { true => tstr(), false =>
+    src.tok_eq(t, "void").match { true => tvoid(), false => ti32() } } } } }
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
 PEnd*: { count: i32, next: i32 }                         // params filled + pos just past ')'
-is_rparen = (src: str, t: Token) bool { is_op(src, t, ')') }
-is_comma  = (src: str, t: Token) bool { is_op(src, t, ',') }
+is_rparen = (src: str, t: Token) bool { src.is_op(t, ')') }
+is_comma  = (src: str, t: Token) bool { src.is_op(t, ',') }
 skip_to_lparen = (src: str, pos: i32) i32 {
-    sc := scan(src, pos)
-    is_lparen(src, sc.tok).match { true => sc.next, false => skip_to_lparen(src, sc.next) }
+    sc := src.scan(pos)
+    src.is_lparen(sc.tok).match { true => sc.next, false => src.skip_to_lparen(sc.next) }
 }
 param_buf<A: Allocator> = (a: Ptr<A>) [Param] { slice(a.acquire(16 * sizeof(Param)), 16) }   // cap 16
 take_params = (buf: [Param], n: i32) [Param] { slice(buf.ptr, n) }                            // exact length
 fill_params<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
-    sc := scan(src, pos)
-    is_rparen(src, sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_one(src, pos, buf, i) }
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_one(src, pos, buf, i) }
 }
 fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
-    nt    := scan(src, pos)                              // param name
+    nt    := src.scan(pos)                               // param name
     nm    := a.lexeme(src, nt.tok)
-    colon := scan(src, nt.next)                          // ':'
-    tt    := scan(src, colon.next)                       // the type token
-    buf[i] = param(nm, ty_of(src, tt.tok))
-    after := scan(src, tt.next)                          // ',' or ')'
-    is_comma(src, after.tok).match {
+    colon := src.scan(nt.next)                           // ':'
+    tt    := src.scan(colon.next)                        // the type token
+    buf[i] = param(nm, src.ty_of(tt.tok))
+    after := src.scan(tt.next)                           // ',' or ')'
+    src.is_comma(after.tok).match {
         true  => a.fill_params(src, after.next, buf, i + 1),
         false => PEnd { count: i + 1, next: after.next }  // ')'
     }
@@ -280,37 +282,36 @@ fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) P
 // skip a brace-delimited block: `pos` is just past the opening `{`; returns the position
 // just past the matching `}` (so the next declaration can be found). Brace-counted — in
 // this subset `{`/`}` only ever open/close a body, so token scanning suffices.
-is_rbrace = (src: str, t: Token) bool { is_op(src, t, '}') }
-skip_block = (src: str, pos: i32) i32 { skip_block_d(src, pos, 1) }
+is_rbrace = (src: str, t: Token) bool { src.is_op(t, '}') }
+skip_block = (src: str, pos: i32) i32 { src.skip_block_d(pos, 1) }
 skip_block_d = (src: str, pos: i32, depth: i32) i32 {
-    sc := scan(src, pos)
+    sc := src.scan(pos)
     sc.tok.kind.match {
         .Eof => pos,
-        _    => is_lbrace(src, sc.tok).match {
-            true  => skip_block_d(src, sc.next, depth + 1),
-            false => is_rbrace(src, sc.tok).match {
-                true  => (depth == 1).match { true => sc.next, false => skip_block_d(src, sc.next, depth - 1) },
-                false => skip_block_d(src, sc.next, depth)
+        _    => src.is_lbrace(sc.tok).match {
+            true  => src.skip_block_d(sc.next, depth + 1),
+            false => src.is_rbrace(sc.tok).match {
+                true  => (depth == 1).match { true => sc.next, false => src.skip_block_d(sc.next, depth - 1) },
+                false => src.skip_block_d(sc.next, depth)
             }
         }
     }
 }
 
 // ── a whole function DECLARATION — `name* = (params) RetType { body }` ──────────────
-// Reads real decl syntax: the leading Ident is the name; the typed parameter list parses
-// into a heap [Param]; the return-type token (after `)`) maps via ty_of; the brace body
-// is parsed. parse_decl_at also reports where the decl ENDS (past `}`), so a module can
-// parse the next one. (A `{` right after `)` — no return type — falls through ty_of to i32.)
+// The leading Ident is the name; the typed parameter list parses into a heap [Param]; the
+// return-type token (after `)`) maps via ty_of; the brace body is parsed. parse_decl_at
+// also reports where the decl ENDS (past `}`), so a module can parse the next one.
 DeclEnd*: { func: Func, next: i32 }
 parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
-    nt     := scan(src, pos)                             // the function name
+    nt     := src.scan(pos)                              // the function name
     name   := a.lexeme(src, nt.tok)
     buf    := a.param_buf()
-    pe     := a.fill_params(src, skip_to_lparen(src, nt.next), buf, 0)   // params + pos past ')'
-    bstart := skip_to_brace(src, pe.next)               // pos just past '{'
-    func   := Func { name: name, params: take_params(buf, pe.count), ret: ty_of(src, scan(src, pe.next).tok),
+    pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)   // params + pos past ')'
+    bstart := src.skip_to_brace(pe.next)                // pos just past '{'
+    func   := Func { name: name, params: buf.take_params(pe.count), ret: src.ty_of(src.scan(pe.next).tok),
                      body: a.build_body(src, bstart) }
-    DeclEnd { func: func, next: skip_block(src, bstart) }
+    DeclEnd { func: func, next: src.skip_block(bstart) }
 }
 parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func { a.parse_decl_at(src, 0).func }
 
@@ -320,7 +321,7 @@ parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func { a.parse_decl_at(src, 0)
 decl_buf<A: Allocator> = (a: Ptr<A>) [Decl] { slice(a.acquire(64 * sizeof(Decl)), 64) }   // cap 64
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
-    sc := scan(src, pos)
+    sc := src.scan(pos)
     sc.tok.kind.match { .Eof => i, _ => a.fill_decl(src, pos, buf, i) }
 }
 fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
@@ -330,17 +331,17 @@ fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i
 }
 parse_module*<A: Allocator> = (a: Ptr<A>, src: str) [Decl] {
     buf := a.decl_buf()
-    take_decls(buf, a.fill_decls(src, 0, buf, 0))
+    buf.take_decls(a.fill_decls(src, 0, buf, 0))
 }
 
 // ── eval: interpret the tree (proof the parse is right) ───────────────────────────
 eval_bin = (b: BinData) i32 {
-    o := byte_at(b.op, 0)
-    l := eval(b.lhs)
-    r := eval(b.rhs)
+    o := b.op.byte_at(0)
+    l := b.lhs.eval()
+    r := b.rhs.eval()
     (o == '+').match { true => l + r, false =>
     (o == '-').match { true => l - r, false =>
     (o == '*').match { true => l * r, false => l / r } } }
 }
-eval* = (e: Ptr<Expr>) i32 { e.match { .Int(n) => n, .Bin(b) => eval_bin(b), _ => 0 } }
-eval_str*<A: Allocator> = (a: Ptr<A>, src: str) i32 { eval(a.parse(src)) }
+eval* = (e: Ptr<Expr>) i32 { e.match { .Int(n) => n, .Bin(b) => b.eval_bin(), _ => 0 } }
+eval_str*<A: Allocator> = (a: Ptr<A>, src: str) i32 { a.parse(src).eval() }
