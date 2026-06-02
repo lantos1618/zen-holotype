@@ -6,6 +6,7 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, FnT, Struct, Enum
                   Lit, Bool, Str, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
                   Let, Assign, While, EnumCtor, Match, Closure)
 from .types import infer, subst, solve_call, match_type, struct_at, TraitMethod
+from .resolve import _mentions               # does an arm body actually use its payload binding?
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
@@ -332,12 +333,12 @@ def c_match(e, locals_, namespace, scope, expect) -> str:
     variants = {v.name: v for v in decl.variants}
 
     def clause(arm):
-        if arm.variant is not None and arm.binding is not None:
+        if arm.variant is not None and arm.binding is not None and _mentions(arm.body, arm.binding):
             pt = c_type(subst(variants[arm.variant].payload, sub))
             al = {**locals_, arm.binding: subst(variants[arm.variant].payload, sub)}
             return (f"({{ {pt} {arm.binding} = {t}{sep}u.{arm.variant}; "
                     f"{c_expr(arm.body, al, namespace, scope, expect)}; }})")
-        return f"({c_expr(arm.body, locals_, namespace, scope, expect)})"
+        return f"({c_expr(arm.body, locals_, namespace, scope, expect)})"  # no binding / unused payload
 
     default = next((a for a in e.arms if a.variant is None), None) or e.arms[-1]
     chain = clause(default)
@@ -379,7 +380,7 @@ def c_match_stmt(e, locals_, namespace, scope) -> str:
         if a is default:
             continue
         al, bind = locals_, ""
-        if a.binding is not None:
+        if a.binding is not None and _mentions(a.body, a.binding):   # skip an unused payload binding
             pt = c_type(subst(variants[a.variant].payload, sub))
             al = {**locals_, a.binding: subst(variants[a.variant].payload, sub)}
             bind = f"{pt} {a.binding} = {t}{sep}u.{a.variant}; "
@@ -426,13 +427,30 @@ def c_proto(qual, d: Fn, cname=None) -> str:
     return f"{c_type(d.ret)} {cname or c_name(qual)}({_params(d)});"
 
 
+def _loop_index(s, nxt):
+    """If `s` is `idx := 0` and `nxt` is the While that steps idx (a desugared counting
+    loop), return idx — so the index can be scoped to the C `for`, not the block (two
+    loops in one block must not collide on the index variable)."""
+    if (isinstance(s, Let) and isinstance(s.value, Lit) and s.value.n == 0
+            and isinstance(nxt, While) and isinstance(nxt.step, Assign)
+            and isinstance(nxt.step.target, Var) and nxt.step.target.name == s.name):
+        return s.name
+    return None
+
+
 def c_block(stmts, locals_, namespace, scope, expect=None) -> str:
     """Lower a statement list: each `x := v` becomes a typed C local; the final
     expression statement becomes the `return` (and gets the expected type)."""
     locals_ = dict(locals_)
     is_void = isinstance(expect, PrimT) and expect.prim is Prim.VOID
-    lines, last = [], len(stmts) - 1
-    for i, s in enumerate(stmts):
+    lines, last, i = [], len(stmts) - 1, 0
+    while i < len(stmts):
+        s = stmts[i]
+        idx = _loop_index(s, stmts[i + 1]) if i < last else None
+        if idx is not None:                              # fuse `idx:=0` + While -> for(idx scoped)
+            locals_[idx] = infer(s.value, locals_, namespace, scope)
+            lines.append(_c_for(stmts[i + 1], idx, locals_, namespace, scope))
+            i += 2; continue
         if isinstance(s, (Let, Assign, While)):
             lines.append(c_stmt(s, locals_, namespace, scope))
         elif i == last and not is_void:
@@ -441,9 +459,21 @@ def c_block(stmts, locals_, namespace, scope, expect=None) -> str:
             lines.append(c_match_stmt(s, locals_, namespace, scope))
         else:                                            # statement — keep its effect, discard value
             lines.append(f"{c_expr(s, locals_, namespace, scope)};")
+        i += 1
     if not is_void and (not stmts or isinstance(stmts[-1], (Let, Assign, While))):
         lines.append("return 0;")                        # non-void body ending without a value expr
     return " ".join(lines)
+
+
+def _c_for(w, idx, locals_, namespace, scope) -> str:
+    """A desugared counting loop -> a C `for` with its index scoped to the loop:
+    `for (int32_t idx = 0; cond; step) { body }`."""
+    bl = dict(locals_)
+    body = " ".join(c_stmt(x, bl, namespace, scope) if isinstance(x, (Let, Assign, While, Match))
+                    else f"{c_expr(x, bl, namespace, scope)};" for x in w.body)
+    cond = c_expr(w.cond, locals_, namespace, scope)
+    step = c_stmt(w.step, locals_, namespace, scope).rstrip(";")
+    return f"for ({c_type(locals_[idx])} {idx} = 0; {cond}; {step}) {{ {body} }}"
 
 
 def c_stmt(s, locals_, namespace, scope) -> str:

@@ -25,7 +25,7 @@ ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
 MakeEnumData*: { ty: str, variant: str, payload: Ptr<Expr> }  // (E){ .tag=E_V, .u.V=payload }
 TagData*: { ty: str, variant: str }                     // (E){ .tag=E_V }  (no payload)
 ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
-MatchData*: { subj: str, ename: str, arms: [ArmData] }  // subj is a variable; last arm is the default
+MatchData*: { subj: str, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
 StrData*: { value: str }                                // a C string literal "…" (escaped on emit)
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData)
      | Member(MemberData) | Arrow(ArrowData) | MakeEnum(MakeEnumData) | Tag(TagData) | Match(MatchData) | StrLit(StrData)
@@ -61,7 +61,8 @@ arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData { obj: o, field: f }) }
 mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, variant: v, payload: p }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
-ematch* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms }) }
+ematch* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: false }) }
+ematchp* = (subj: str, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: true }) }
 strlit* = (v: str) Expr { .StrLit(StrData { value: v }) }
 tstr* = () Ty { .Str() }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
@@ -160,27 +161,30 @@ gen_mkenum = (s: String, m: MakeEnumData) String {
 }
 
 // an arm's body: bind the payload (GCC __auto_type, so no payload type needed here), then the body
-gen_armbind = (s: String, subj: str, a: ArmData) String {
-    s.append("({ __auto_type ").append(a.bind).append(" = ").append(subj).append(".u.").append(a.variant).append("; ").gen_expr(a.body).append("; })")
+gen_armbind = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("({ __auto_type ").append(a.bind).append(" = ").append(subj).append(sep).append("u.").append(a.variant).append("; ").gen_expr(a.body).append("; })")
 }
-gen_armbody = (s: String, subj: str, a: ArmData) String {
+gen_armbody = (s: String, subj: str, sep: str, a: ArmData) String {
     (is_empty(a.bind)).match {
         true  => s.append("(").gen_expr(a.body).append(")"),
-        false => s.gen_armbind(subj, a)
+        false => s.gen_armbind(subj, sep, a)
     }
 }
 // one tag test:  `(subj.tag == E_V ? <body> : `   (the chain closes its `)` after the rest)
-gen_test = (s: String, subj: str, ename: str, a: ArmData) String {
-    s.append("(").append(subj).append(".tag == ").append(ename).append("_").append(a.variant).append(" ? ").gen_armbody(subj, a).append(" : ")
+gen_test = (s: String, subj: str, sep: str, ename: str, a: ArmData) String {
+    s.append("(").append(subj).append(sep).append("tag == ").append(ename).append("_").append(a.variant).append(" ? ").gen_armbody(subj, sep, a).append(" : ")
 }
 // emit arms[i:] as a nested ternary; the last arm is the default (no test)
-gen_arms = (s: String, subj: str, ename: str, arms: [ArmData], i: i64) String {
+gen_arms = (s: String, subj: str, sep: str, ename: str, arms: [ArmData], i: i64) String {
     (i == arms.len - 1).match {
-        true  => s.gen_armbody(subj, arms[i]),
-        false => s.gen_test(subj, ename, arms[i]).gen_arms(subj, ename, arms, i + 1).append(")")
+        true  => s.gen_armbody(subj, sep, arms[i]),
+        false => s.gen_test(subj, sep, ename, arms[i]).gen_arms(subj, sep, ename, arms, i + 1).append(")")
     }
 }
-gen_match = (s: String, m: MatchData) String { s.gen_arms(m.subj, m.ename, m.arms, 0) }
+gen_match = (s: String, m: MatchData) String {
+    sep := m.ptr.match { true => "->", false => "." }
+    s.gen_arms(m.subj, sep, m.ename, m.arms, 0)
+}
 
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
 gen_stmt = (s: String, st: Stmt) String {
@@ -220,9 +224,9 @@ gen_func* = (s: String, f: Func) String {
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 gen_struct* = (s: String, sd: StructDecl) String {
-    open := s.append("typedef struct { ")
+    open := s.append("struct ").append(sd.name).append(" { ")
     sd.fields.loop((h, i, fld) { open = open.gen_ty(addr(fld.ty)).append(" ").append(fld.name).append("; ") })
-    open.append("} ").append(sd.name).append(";")
+    open.append("};")
 }
 
 // emit an enum's union members (the payload-carrying variants) and tag constants
@@ -244,9 +248,19 @@ gen_tags = (s: String, ename: str, vs: [VariantDef]) String {
 
 // emit an enum (tagged union): `typedef struct { int32_t tag; union { … } u; } E; enum { E_A, … };`
 gen_enum* = (s: String, ed: EnumDecl) String {
-    head := s.append("typedef struct { int32_t tag;")
+    head := s.append("struct ").append(ed.name).append(" { int32_t tag;")
     body := (any_payload(ed.variants)).match { true => head.gen_union(ed.variants), false => head }
-    body.append(" } ").append(ed.name).append(";").gen_tags(ed.name, ed.variants)
+    body.append(" };").gen_tags(ed.name, ed.variants)
+}
+
+// forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
+gen_fwd = (s: String, d: Decl) String {
+    d.match {
+        .DStruct(sd) => s.append("typedef struct ").append(sd.name).append(" ").append(sd.name).append("; "),
+        .DEnum(ed)   => s.append("typedef struct ").append(ed.name).append(" ").append(ed.name).append("; "),
+        .DFunc(f)    => s,
+        .DRaw(c)     => s
+    }
 }
 
 // emit a top-level declaration (a function, a struct, an enum, or verbatim C)
@@ -265,6 +279,7 @@ genC* = (f: Func) String { new().gen_func(f) }
 // genModule: a whole translation unit — a list of decls (structs + functions).
 genModule* = (decls: [Decl]) String {
     s := new()
-    decls.loop((h, i, d) { s = s.gen_decl(d).append(" ") })
+    decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
+    decls.loop((h, i, d) { s = s.gen_decl(d).append(" ") })  // pass 2: definitions + functions
     s
 }
