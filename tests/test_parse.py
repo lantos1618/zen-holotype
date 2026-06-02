@@ -269,6 +269,40 @@ def gen_module(tmp_path, src):
     return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
 
 
+# parse -> std.check (resolve enum match enames) -> genModule. The check pass is what fills
+# each multi-variant match's enum type name, which the parser can't know on its own.
+CHECKED_DRIVER = """
+{ Malloc } = std.alloc
+{ parse_module } = std.parse
+{ resolve_module } = std.check
+{ genModule } = std.genc
+{ String, bytes } = std.string
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+main* = () i32 {
+    m := Malloc { _: 0 }
+    emit(genModule(addr(m).resolve_module(addr(m).parse_module("%s"))))
+    0
+}
+"""
+
+
+def gen_checked_module(tmp_path, src):
+    (tmp_path / "main.zen").write_text(CHECKED_DRIVER % src)
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
+                        str(tmp_path / "o.c"), "-o", str(tmp_path / "o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+
+
 def _compile_run(tmp_path, generated, call):
     """cc the generated C with `int main(){ return <call>; }`; return the exit code."""
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + generated + f"\nint main(void){{ return {call}; }}\n")
@@ -424,6 +458,40 @@ def test_parse_module_enum_struct_function_mix(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 7
+
+
+# ── THE ENUM WALL FALLS: multi-variant match (parse -> std.check -> genc) ──────────────
+# A `subject.match { .Variant(bind) => body, … }` parses into a genc Match with an EMPTY
+# ename (the parser has no types). std.check fills the ename by looking up the subject's
+# declared type among the function's params, so genc can emit the `subj.tag == E_V` chain.
+# This is the wall that blocked multi-variant match since #131 — it needed the enum's name.
+def test_parse_enum_match_resolves_ename(tmp_path):
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\narea* = (s: Shape) i32 { s.match { .Circle(r) => r * r * 3, .Square(w) => w * w } }")
+    # the match lowered to a tag-test ternary with payload binding — and ename is "Shape"
+    assert "int32_t area(Shape s) { return (s.tag == Shape_Circle ? " in gen
+    assert "({ __auto_type r = s.u.Circle; ((r * r) * 3); })" in gen
+    assert "({ __auto_type w = s.u.Square; (w * w); })" in gen
+    # construct each variant and run the self-hosted-compiled match
+    (tmp_path / "g.c").write_text(
+        "#include <stdint.h>\n" + gen +
+        "\nint main(void){ Shape c = { .tag = Shape_Circle, .u.Circle = 3 };"
+        " Shape q = { .tag = Shape_Square, .u.Square = 5 };"
+        " return area(c) + area(q); }\n")   # 27 + 25 = 52
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 52
+
+
+def test_parse_enum_match_no_payload(tmp_path):
+    # variants without payloads: the arms are bare bodies, no __auto_type binding
+    gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match { .Lo => 0, .Hi => 1 } }")
+    assert "int32_t val(Bit b) { return (b.tag == Bit_Lo ? (0) : (1)); }" in gen
+    (tmp_path / "g.c").write_text(
+        "#include <stdint.h>\n" + gen +
+        "\nint main(void){ Bit h = { .tag = Bit_Hi }; return val(h); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 1
 
 
 # ── @while loops: the self-hosted parser handles ITERATION, not just recursion ───────

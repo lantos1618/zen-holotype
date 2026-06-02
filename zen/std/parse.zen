@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, lit, vref, bin, call, cond, member, mkstruct, finit, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, arm, ematch, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -109,15 +109,62 @@ parse_arm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {   // `true =>`
     arrow := src.scan(pat.next)                                     // '=>'
     a.parse_or(src, arrow.next)
 }
+// `.match {` either has boolean arms (`true => X, false => Y`, -> Cond) or enum-variant arms
+// (`.Circle(r) => …, .Square(w) => …`, -> genc Match). The first arm's leading token tells
+// them apart: a `.` starts a variant pattern, anything else is the boolean form.
 parse_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr) PExpr {
     dot   := src.scan(subj.next)                                    // '.'
     kw    := src.scan(dot.next)                                     // 'match'
     open  := src.scan(kw.next)                                      // '{'
+    src.is_dot(src.scan(open.next).tok).match {
+        true  => a.parse_variant_match(src, subj, open),            // .Variant => …  -> Match
+        false => a.parse_bool_match(src, subj, open)                // true/false => …  -> Cond
+    }
+}
+parse_bool_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr, open: Scan) PExpr {
     ta    := a.parse_arm(src, open.next)                            // true  => X
     comma := src.scan(ta.next)                                      // ','
     fa    := a.parse_arm(src, comma.next)                           // false => Y
     close := src.scan(fa.next)                                      // '}'
     PExpr { expr: a.enode(cond(subj.expr, ta.expr, fa.expr)), next: close.next }
+}
+// the subject of an enum match must be a bare variable (genc's MatchData.subj is its NAME);
+// pull the name back out of the already-parsed Var node.
+subj_name = (e: Ptr<Expr>) str { load(e).match { .Var(v) => v.name, _ => "" } }
+// `.Variant(bind) => body` / `.Variant => body` arms, comma-separated, into a heap [ArmData].
+// ename is left "" here — std.check fills it once the subject's enum type is known.
+BindEnd*: { bind: str, next: i32 }
+arm_buf<A: Allocator> = (a: Ptr<A>) [ArmData] { slice(a.acquire(16 * sizeof(ArmData)), 16) }   // cap 16
+take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }                            // exact length
+arm_bind<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BindEnd {     // pos just past '('
+    bt := src.scan(pos)                                              // the payload binding name
+    bn := a.lexeme(src, bt.tok)
+    rp := src.scan(bt.next)                                          // ')'
+    BindEnd { bind: bn, next: rp.next }
+}
+fill_arms<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_marm(src, pos, buf, i) }
+}
+fill_marm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    dot := src.scan(pos)                                             // '.'
+    vt  := src.scan(dot.next)                                        // variant name
+    vn  := a.lexeme(src, vt.tok)
+    pk  := src.scan(vt.next)                                         // '(' (a binding) or '=>'
+    be  := src.is_lparen(pk.tok).match { true => a.arm_bind(src, pk.next), false => BindEnd { bind: "", next: vt.next } }
+    arrow := src.scan(be.next)                                       // '=>'
+    body  := a.parse_or(src, arrow.next)                             // the arm body
+    buf[i] = arm(vn, be.bind, body.expr)
+    after := src.scan(body.next)                                     // ',' or '}'
+    src.is_comma(after.tok).match {
+        true  => a.fill_arms(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }              // '}'
+    }
+}
+parse_variant_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr, open: Scan) PExpr {
+    buf := a.arm_buf()
+    ae  := a.fill_arms(src, open.next, buf, 0)                       // arms + pos just past '}'
+    PExpr { expr: a.enode(ematch(subj_name(subj.expr), "", buf.take_arms(ae.count))), next: ae.next }
 }
 // an Ident is a variable — unless the very next token is `(`, making it a one-arg call
 is_lparen = (src: str, t: Token) bool { src.is_op(t, '(') }
