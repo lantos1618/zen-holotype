@@ -6,7 +6,7 @@ from .ast import (Dir, Prim, PrimT, NameT, PtrT, TVar, SliceT, FnT, Struct, Enum
                   Lit, Bool, Str, Var, Field, Bin, Not, Call, MethodCall, StructLit, SliceLit, Index,
                   Let, Assign, While, EnumCtor, Match, Closure)
 from .types import infer, subst, solve_call, match_type, struct_at, TraitMethod
-from .resolve import _mentions               # does an arm body actually use its payload binding?
+from .resolve import _mentions, resolve_type   # _mentions: arm-body payload use; resolve_type: sizeof(T)
 
 _CMAP = {Prim.I32: "int32_t", Prim.I64: "int64_t", Prim.U8: "uint8_t",
          Prim.BOOL: "bool", Prim.VOID: "void", Prim.STR: "const char*"}
@@ -259,6 +259,9 @@ def _c_call(e, locals_, namespace, scope, expect=None) -> str:
         if e.callee == "store":
             return f"(*({a[0]}) = {a[1]})"
         return f"(({a[0]}) + ({a[1]}))"                    # offset
+    if e.callee == "sizeof":                              # sizeof(T) -> C sizeof of the named type
+        ty = resolve_type(NameT(e.args[0].name), scope, namespace)
+        return f"sizeof({c_type(ty)})"
     if e.callee == "slice":                               # slice(ptr, len) -> a [T] view (T = expect)
         styp = c_type(expect)                             # "slice_T" (also registers the typedef)
         ct = c_type(expect.elem)

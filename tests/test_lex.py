@@ -109,3 +109,58 @@ def test_count_walks_the_whole_stream(tmp_path):
     assert count(tmp_path, r'"foo = 42 // hi\n\"hey\" bar"') == 5   # foo = 42 "hey" bar
     assert count(tmp_path, r'""') == 0                              # empty -> just Eof
     assert count(tmp_path, r'"a*b"') == 3                           # a * b
+
+
+# tokenize() materializes the stream as a heap cons-list (nodes allocated through the
+# allocator via sizeof). This driver builds the list, then WALKS it — printing each
+# node's kind:lexeme — to prove the list faithfully holds the real tokens (no Eof node).
+LIST_DRIVER = r"""
+{ Malloc } = std.alloc
+{ TokList, TokCell, TokKind, tokenize, byte_at } = std.lex
+putchar = (c: i32) i32
+kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Sym => 89, .Eof => 69 } }
+emit_span = (src: str, start: i32, len: i32) void {
+    i := start
+    e := start + len
+    @while(i < e) {
+        putchar(byte_at(src, i))
+        i = i + 1
+    }
+}
+emit_cell = (src: str, c: TokCell) i32 {
+    putchar(kind_char(c.head.kind))
+    putchar(58)
+    emit_span(src, c.head.start, c.head.len)
+    putchar(10)
+    walk(src, c.tail)
+}
+walk = (src: str, l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => emit_cell(src, c) } }
+main* = () i32 {
+    src := %s
+    m := Malloc { _: 0 }
+    walk(src, addr(m).tokenize(src))
+}
+"""
+
+
+def walk_list(tmp_path, zen_string_literal):
+    (tmp_path / "main.zen").write_text(LIST_DRIVER % zen_string_literal)
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
+                        str(tmp_path / "o.c"), "-o", str(tmp_path / "o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+
+
+def test_materialized_cons_list_holds_the_real_tokens(tmp_path):
+    # the heap cons-list, walked, yields exactly the 5 tokens (Eof is the terminal Nil,
+    # not a node) — same stream the streaming scanner produced.
+    out = walk_list(tmp_path, r'"foo = 42 // hi\n\"hey\" bar"')
+    assert out == "I:foo\nY:=\nN:42\nS:\"hey\"\nI:bar\n"

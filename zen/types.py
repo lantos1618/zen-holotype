@@ -409,6 +409,11 @@ def _infer_call(e, expect, locals_, namespace, scope):
         return PtrT(Dir.MUT, infer(e.args[0], locals_, namespace, scope))
     if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
         return _infer_mem(e, locals_, namespace, scope)
+    if e.callee == "sizeof":                              # sizeof(T): byte size of a named type, i64
+        if len(e.args) != 1 or not isinstance(e.args[0], Var):
+            raise TypeErr("sizeof(T) takes a single type name")
+        namespace.walk(scope.get(e.args[0].name, e.args[0].name))   # the type must exist
+        return PrimT(Prim.I64)
     if e.callee == "slice":                               # slice(ptr, len): a [T] view of raw memory
         if not isinstance(expect, SliceT):                # element type comes from the wanted slice
             raise TypeErr("slice(ptr, len) needs a known slice type here "
