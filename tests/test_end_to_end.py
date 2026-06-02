@@ -93,6 +93,13 @@ def test_unlowerable_decl_raises(checked):
     assert "_UnknownDecl" in str(ei.value) and "mystery" in str(ei.value)
 
 
+def test_empty_body_fn_is_checked_and_emitted(compile_main):
+    # an EMPTY body `[]` is NOT a foreign binding (`body is None`): it must type-check,
+    # enter `passing`, and be emitted — with no bogus `return 0;` in a void function (which
+    # -Werror rejects). `not d.body` used to drop it -> undefined symbol -> link error.
+    assert compile_main("noop = () void { }\nmain* = () i32 { noop()\n 7 }") == 7
+
+
 # ── F3: user enums lower to a tagged union that cc accepts ──────────────────
 def test_enum_lowers_to_tagged_union(tmp_path):
     (tmp_path / "main.zen").write_text(
