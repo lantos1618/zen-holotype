@@ -170,3 +170,10 @@ def test_parse_fn_zero_lets_is_just_a_return(tmp_path):
     gen = gen_fn(tmp_path, r"7 * 6")
     assert gen == "int32_t f() { return (7 * 6); }"
     assert run_generated(tmp_path, gen) == 42
+
+
+def test_parse_fn_assignment_statement(tmp_path):
+    # `name = value` (single =, not := ) reassigns a binding — distinct from a let
+    gen = gen_fn(tmp_path, r"x := 1\nx = x + 5\nx")
+    assert gen == "int32_t f() { int32_t x = 1; x = (x + 5); return x; }"
+    assert run_generated(tmp_path, gen) == 6

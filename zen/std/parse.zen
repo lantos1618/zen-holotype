@@ -7,7 +7,7 @@
 // precedence. eval() interprets the tree to prove the parse is right:
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, lit, vref, bin, call, slet, sret, ti32 } = std.genc
+{ Expr, BinData, Func, Stmt, lit, vref, bin, call, slet, sassign, sret, ti32 } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -163,11 +163,30 @@ is_let_here = (src: str, pos: i32) bool {
     a := scan(src, pos)
     a.tok.kind.match { .Ident => is_assign(src, scan(src, a.next).tok), _ => false }
 }
+// is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
+is_eq = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 1) && (byte_at(src, t.start) == '='), _ => false } }
+is_set_here = (src: str, pos: i32) bool {
+    a := scan(src, pos)
+    a.tok.kind.match { .Ident => is_eq(src, scan(src, a.next).tok), _ => false }
+}
 
-// parse statements [pos..] into a cons-list: each `name := expr` is a Let; the first
-// non-let token begins the final expression, parsed as the function's `return`.
+// parse statements [pos..] into a cons-list: `name := expr` is a Let, `name = expr` an
+// Assign; the first token that's neither begins the final expression (the `return`).
 parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    is_let_here(src, pos).match { true => a.parse_let_stmt(src, pos), false => a.parse_ret_stmt(src, pos) }
+    is_let_here(src, pos).match {
+        true  => a.parse_let_stmt(src, pos),
+        false => is_set_here(src, pos).match {
+            true  => a.parse_set_stmt(src, pos),
+            false => a.parse_ret_stmt(src, pos)
+        }
+    }
+}
+parse_set_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    nt   := scan(src, pos)                   // the assigned name
+    name := a.lexeme(src, nt.tok)
+    eq   := scan(src, nt.next)               // '='
+    v    := a.parse_cmp(src, eq.next)        // value
+    a.scons(sassign(name, v.expr), a.parse_stmts(src, v.next))
 }
 parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     nt   := scan(src, pos)                   // the bound name
