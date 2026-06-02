@@ -7,7 +7,7 @@
 // precedence. eval() interprets the tree to prove the parse is right:
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, lit, vref, bin, call, slet, sassign, sret, param, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, slet, sassign, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -277,17 +277,60 @@ fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) P
     }
 }
 
+// skip a brace-delimited block: `pos` is just past the opening `{`; returns the position
+// just past the matching `}` (so the next declaration can be found). Brace-counted — in
+// this subset `{`/`}` only ever open/close a body, so token scanning suffices.
+is_rbrace = (src: str, t: Token) bool { is_op(src, t, '}') }
+skip_block = (src: str, pos: i32) i32 { skip_block_d(src, pos, 1) }
+skip_block_d = (src: str, pos: i32, depth: i32) i32 {
+    sc := scan(src, pos)
+    sc.tok.kind.match {
+        .Eof => pos,
+        _    => is_lbrace(src, sc.tok).match {
+            true  => skip_block_d(src, sc.next, depth + 1),
+            false => is_rbrace(src, sc.tok).match {
+                true  => (depth == 1).match { true => sc.next, false => skip_block_d(src, sc.next, depth - 1) },
+                false => skip_block_d(src, sc.next, depth)
+            }
+        }
+    }
+}
+
 // ── a whole function DECLARATION — `name* = (params) RetType { body }` ──────────────
 // Reads real decl syntax: the leading Ident is the name; the typed parameter list parses
 // into a heap [Param]; the return-type token (after `)`) maps via ty_of; the brace body
-// is parsed. (A `{` right after `)` — no return type — falls through ty_of to i32.)
-parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func {
-    nt    := scan(src, 0)                                // the function name
-    name  := a.lexeme(src, nt.tok)
-    buf   := a.param_buf()
-    pe    := a.fill_params(src, skip_to_lparen(src, nt.next), buf, 0)   // params + pos past ')'
-    Func { name: name, params: take_params(buf, pe.count), ret: ty_of(src, scan(src, pe.next).tok),
-           body: a.build_body(src, skip_to_brace(src, pe.next)) }
+// is parsed. parse_decl_at also reports where the decl ENDS (past `}`), so a module can
+// parse the next one. (A `{` right after `)` — no return type — falls through ty_of to i32.)
+DeclEnd*: { func: Func, next: i32 }
+parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
+    nt     := scan(src, pos)                             // the function name
+    name   := a.lexeme(src, nt.tok)
+    buf    := a.param_buf()
+    pe     := a.fill_params(src, skip_to_lparen(src, nt.next), buf, 0)   // params + pos past ')'
+    bstart := skip_to_brace(src, pe.next)               // pos just past '{'
+    func   := Func { name: name, params: take_params(buf, pe.count), ret: ty_of(src, scan(src, pe.next).tok),
+                     body: a.build_body(src, bstart) }
+    DeclEnd { func: func, next: skip_block(src, bstart) }
+}
+parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func { a.parse_decl_at(src, 0).func }
+
+// ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
+// `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
+// which genModule lowers to a translation unit. Parses decls until Eof.
+decl_buf<A: Allocator> = (a: Ptr<A>) [Decl] { slice(a.acquire(64 * sizeof(Decl)), 64) }   // cap 64
+take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
+fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    sc := scan(src, pos)
+    sc.tok.kind.match { .Eof => i, _ => a.fill_decl(src, pos, buf, i) }
+}
+fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    de := a.parse_decl_at(src, pos)
+    buf[i] = dfunc(de.func)
+    a.fill_decls(src, de.next, buf, i + 1)
+}
+parse_module*<A: Allocator> = (a: Ptr<A>, src: str) [Decl] {
+    buf := a.decl_buf()
+    take_decls(buf, a.fill_decls(src, 0, buf, 0))
 }
 
 // ── eval: interpret the tree (proof the parse is right) ───────────────────────────
