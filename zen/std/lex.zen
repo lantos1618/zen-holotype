@@ -1,8 +1,12 @@
-// std.lex — turn zen source text into a token stream. The source is read RAW: a `str`
-// is a const char*, so `load(offset(src, i))` gives byte i with NO slices — which means
-// a later genc can lower this lexer. C strings are NUL-terminated, so byte 0 marks the
-// end and we never thread a length around. A token is a span into the source —
-// { kind, start, len } — so scanning allocates nothing.
+// std.lex — turn zen source text into a token stream. Two forms, both in this file:
+//   • scan(src, pos) — the default: one token at a time, PURE (position in, position
+//     out). Allocation-free and slice-free — the source is read raw (a `str` is a const
+//     char*, so load(offset(src,i)) gives byte i), and a token is just a span
+//     { kind, start, len } into it. So genc can lower this. Iterate to Eof.
+//   • tokenize(a, src) — the whole stream as one value: a cons-list of heap nodes
+//     allocated through an explicit allocator (bottom of the file). Use it when you want
+//     to hand a file's tokens around; the scan form is better when you just consume them.
+// C strings are NUL-terminated, so byte 0 ends the scan and no length is threaded.
 //
 //   sc := scan(src, 0)        // one token + where to resume
 //   sc.tok.kind               // Ident | Int | Str | Sym | Eof
@@ -55,6 +59,22 @@ str_end   = (src: str, pos: i32) i32 {                 // pos just past the open
     }
 }
 
+// ── symbols ──────────────────────────────────────────────────────────────────
+// zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
+// bytes when the pair forms one of these, else one — so the parser never re-glues.
+two_op = (b0: u8, b1: u8) bool {
+    ((b0 == 58) && (b1 == 61)) ||      // :=
+    ((b0 == 61) && (b1 == 61)) ||      // ==
+    ((b0 == 60) && (b1 == 61)) ||      // <=
+    ((b0 == 62) && (b1 == 61)) ||      // >=
+    ((b0 == 61) && (b1 == 62)) ||      // =>
+    ((b0 == 38) && (b1 == 38)) ||      // &&
+    ((b0 == 124) && (b1 == 124))       // ||
+}
+sym_end = (src: str, pos: i32) i32 {
+    two_op(byte_at(src, pos), byte_at(src, pos + 1)).match { true => pos + 2, false => pos + 1 }
+}
+
 // ── one token ──────────────────────────────────────────────────────────────────
 mk = (k: TokKind, start: i32, end: i32) Scan { Scan { tok: Token { kind: k, start: start, len: end - start }, next: end } }
 scan_one = (src: str, pos: i32, b: u8) Scan {
@@ -64,7 +84,7 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
             true  => mk(.Int(), pos, int_end(src, pos + 1)),
             false => (b == 34).match {
                 true  => mk(.Str(), pos, str_end(src, pos + 1)),
-                false => mk(.Sym(), pos, pos + 1)       // single-char symbol (multi-char ops later)
+                false => mk(.Sym(), pos, sym_end(src, pos))
             }
         }
     }
@@ -78,12 +98,11 @@ scan* = (src: str, pos0: i32) Scan {
     }
 }
 
-// ── the token stream ───────────────────────────────────────────────────────────
-// There is no materialized token list — `scan(src, pos)` iterated to Eof IS the stream,
-// just as the compiler needs no slices. scan is pure (no state; the position is passed
-// in and returned), so a consumer can look AHEAD for free: peek = scan(src, pos), the
-// one after = scan(src, scan(src, pos).next). The parser will pull tokens this way,
-// keeping the whole token layer allocation-free and slice-free.
+// ── the stream, without materializing it ───────────────────────────────────────
+// scan iterated to Eof IS the token stream — pure and positional, so a consumer gets
+// free lookahead (peek = scan(src, pos); the one after = scan(src, scan(src, pos).next))
+// and the token layer stays allocation-free. count() traverses the whole stream this
+// way; tokenize() (below) is the alternative when you want it as a heap value.
 
 // total token count, Eof excluded — a traversal of the entire stream by iteration.
 count* = (src: str) i32 { count_from(src, 0) }
