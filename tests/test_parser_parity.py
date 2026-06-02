@@ -91,6 +91,8 @@ def zen_parser_sexpr(tmp_path, expr):
     "a || b && c",          # -> (|| a (&& b c))
     "x < 1 || y > 2",       # -> (|| (< x 1) (> y 2))
     "p && q || r && s",     # -> (|| (&& p q) (&& r s))
+    "n % 2",                # -> (% n 2)
+    "a % b + 1",            # -> (+ (% a b) 1)
 ])
 def test_zen_and_python_parsers_build_the_same_tree(tmp_path, expr):
     assert zen_parser_sexpr(tmp_path, expr) == python_parser_sexpr(expr)
