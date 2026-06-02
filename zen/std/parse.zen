@@ -172,14 +172,27 @@ parse_arm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {   // `true =>`
 // `.match {` either has boolean arms (`true => X, false => Y`, -> Cond) or enum-variant arms
 // (`.Circle(r) => …, .Square(w) => …`, -> genc Match). The first arm's leading token tells
 // them apart: a `.` starts a variant pattern, anything else is the boolean form.
+// `match` may optionally wrap the arm-record in parens: `subj.match ({…})`. The parens
+// are pure punctuation — an optional `(` before the `{`, an optional `)` after the `}`.
+// skip_rparen drops a trailing `)` so both `.match {…}` and `.match ({…})` end cleanly.
+skip_rparen = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match { true => sc.next, false => pos }
+}
+close_match = (src: str, paren: bool, e: PExpr) PExpr {
+    paren.match { true => PExpr { expr: e.expr, next: src.skip_rparen(e.next) }, false => e }
+}
 parse_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr) PExpr {
     dot   := src.scan(subj.next)                                    // '.'
     kw    := src.scan(dot.next)                                     // 'match'
-    open  := src.scan(kw.next)                                      // '{'
-    src.is_dot(src.scan(open.next).tok).match {
-        true  => a.parse_variant_match(src, subj, open),            // .Variant => …  -> Match
-        false => a.parse_bool_match(src, subj, open)                // true/false => …  -> Cond
+    lp    := src.scan(kw.next)                                      // '(' (optional) or '{'
+    paren := src.is_lparen(lp.tok)                                  // is the arm-record paren-wrapped?
+    open  := paren.match { true => src.scan(lp.next), false => lp } // the '{'
+    body  := src.is_dot(src.scan(open.next).tok).match {
+        true  => a.parse_variant_match(src, subj, open),           // .Variant => …  -> Match
+        false => a.parse_bool_match(src, subj, open)               // true/false => …  -> Cond
     }
+    src.close_match(paren, body)                                    // drop the trailing ')' if any
 }
 parse_bool_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr, open: Scan) PExpr {
     ta    := a.parse_arm(src, open.next)                            // true  => X
