@@ -211,14 +211,33 @@ sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
 stmt_buf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
 
-// ── a whole function: N `name := value` lines, then a final expression ─────────────
-// `x := 1 + 2\n y := x * 2\n y - 1`  ->  int32_t f(){ int32_t x=…; int32_t y=…; return …; }
-// Each let-bound name is materialized (runtime str), so later lines can reference it.
-parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
-    stmts := a.parse_stmts(src, 0)
+// parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
+build_body<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) [Stmt] {
+    stmts := a.parse_stmts(src, pos)
     body  := a.stmt_buf(scount(stmts))
     sfill(body, stmts, 0)
-    Func { name: fname, params: [], ret: ti32(), body: body }
+    body
+}
+
+// ── a function BODY under a caller-chosen name (the source is just the statements) ──
+// `x := 1 + 2\n y := x * 2\n y - 1`  ->  int32_t f(){ int32_t x=…; int32_t y=…; return …; }
+parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
+    Func { name: fname, params: [], ret: ti32(), body: a.build_body(src, 0) }
+}
+
+// ── a whole function DECLARATION — `name* = () i32 { body }` ────────────────────────
+// Reads real decl syntax: the leading Ident is the name; everything up to the first `{`
+// (the `*` visibility, `= ()`, the return type) is skipped, and the brace body is parsed.
+// (Empty params + i32 return for now — typed params and arbitrary return types are next.)
+is_lbrace = (src: str, t: Token) bool { is_op(src, t, '{') }
+skip_to_brace = (src: str, pos: i32) i32 {
+    sc := scan(src, pos)
+    is_lbrace(src, sc.tok).match { true => sc.next, false => skip_to_brace(src, sc.next) }
+}
+parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func {
+    nt   := scan(src, 0)                                 // the function name
+    name := a.lexeme(src, nt.tok)
+    Func { name: name, params: [], ret: ti32(), body: a.build_body(src, skip_to_brace(src, nt.next)) }
 }
 
 // ── eval: interpret the tree (proof the parse is right) ───────────────────────────
