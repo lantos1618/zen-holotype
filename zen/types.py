@@ -347,6 +347,8 @@ def _infer(e, locals_, namespace, scope, expect=None):
 def _infer_mem(e, locals_, namespace, scope):
     """load(p)->T · store(p, v: T)->void · offset(p, i64)->same ptr. T comes from p."""
     pt = infer(e.args[0], locals_, namespace, scope)
+    if pt == PrimT(Prim.STR):                            # a str is a const char* — read its bytes raw
+        pt = PtrT(Dir.READ, PrimT(Prim.U8))              # (READ: store stays blocked; the text is const)
     if not isinstance(pt, PtrT):
         raise TypeErr(f"'{e.callee}' needs a pointer as its first argument")
     if e.callee == "load":

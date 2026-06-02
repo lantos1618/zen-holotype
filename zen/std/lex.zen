@@ -1,0 +1,79 @@
+// std.lex — turn zen source text into a token stream. The source is read RAW: a `str`
+// is a const char*, so `load(offset(src, i))` gives byte i with NO slices — which means
+// a later genc can lower this lexer. C strings are NUL-terminated, so byte 0 marks the
+// end and we never thread a length around. A token is a span into the source —
+// { kind, start, len } — so scanning allocates nothing.
+//
+//   sc := scan(src, 0)        // one token + where to resume
+//   sc.tok.kind               // Ident | Int | Str | Sym | Eof
+//   sc.next                   // feed back into scan for the next token
+
+// ── source bytes (slice-free: a str is a const char*) ────────────────────────
+byte_at* = (s: str, i: i32) u8 { load(offset(s, i)) }
+
+// ── tokens ───────────────────────────────────────────────────────────────────
+TokKind*: Ident | Int | Str | Sym | Eof
+Token*: { kind: TokKind, start: i32, len: i32 }    // lexeme = source[start .. start+len]
+Scan*:  { tok: Token, next: i32 }                  // one scan step: the token + resume pos
+
+// ── byte classes ──────────────────────────────────────────────────────────────
+is_digit* = (b: u8) bool { (b >= 48) && (b <= 57) }                                  // 0-9
+is_alpha* = (b: u8) bool { ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90)) || (b == 95) }  // a-z A-Z _
+is_alnum* = (b: u8) bool { is_alpha(b) || is_digit(b) }
+is_space* = (b: u8) bool { (b == 32) || (b == 9) || (b == 10) || (b == 13) }         // space tab nl cr
+
+// ── skip whitespace and `//` line comments, returning the next significant pos ──
+is_comment = (src: str, pos: i32) bool { (byte_at(src, pos) == 47) && (byte_at(src, pos + 1) == 47) }
+skip_line = (src: str, pos: i32) i32 {
+    b := byte_at(src, pos)
+    ((b == 0) || (b == 10)).match { true => pos, false => skip_line(src, pos + 1) }   // stop at NUL / newline
+}
+skip = (src: str, pos: i32) i32 {
+    is_space(byte_at(src, pos)).match {
+        true  => skip(src, pos + 1),
+        false => is_comment(src, pos).match {
+            true  => skip(src, skip_line(src, pos + 2)),
+            false => pos
+        }
+    }
+}
+
+// ── span ends: advance while the class holds ───────────────────────────────────
+ident_end = (src: str, pos: i32) i32 { is_alnum(byte_at(src, pos)).match { true => ident_end(src, pos + 1), false => pos } }
+int_end   = (src: str, pos: i32) i32 { is_digit(byte_at(src, pos)).match { true => int_end(src, pos + 1), false => pos } }
+str_end   = (src: str, pos: i32) i32 {                 // pos just past the opening quote
+    b := byte_at(src, pos)
+    (b == 0).match {
+        true  => pos,                                  // unterminated — stop at NUL
+        false => (b == 34).match {                     // closing quote
+            true  => pos + 1,
+            false => (b == 92).match {                 // backslash: skip the escaped char
+                true  => str_end(src, pos + 2),
+                false => str_end(src, pos + 1)
+            }
+        }
+    }
+}
+
+// ── one token ──────────────────────────────────────────────────────────────────
+mk = (k: TokKind, start: i32, end: i32) Scan { Scan { tok: Token { kind: k, start: start, len: end - start }, next: end } }
+scan_one = (src: str, pos: i32, b: u8) Scan {
+    is_alpha(b).match {
+        true  => mk(.Ident(), pos, ident_end(src, pos + 1)),
+        false => is_digit(b).match {
+            true  => mk(.Int(), pos, int_end(src, pos + 1)),
+            false => (b == 34).match {
+                true  => mk(.Str(), pos, str_end(src, pos + 1)),
+                false => mk(.Sym(), pos, pos + 1)       // single-char symbol (multi-char ops later)
+            }
+        }
+    }
+}
+scan* = (src: str, pos0: i32) Scan {
+    pos := skip(src, pos0)
+    b := byte_at(src, pos)
+    (b == 0).match {
+        true  => Scan { tok: Token { kind: .Eof(), start: pos, len: 0 }, next: pos },
+        false => scan_one(src, pos, b)
+    }
+}
