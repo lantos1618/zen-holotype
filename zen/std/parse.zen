@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, lit, vref, bin, call, cond, member, mkstruct, finit, slet, sassign, swhile, sret, param, field, sdef, dfunc, dstruct, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, lit, vref, bin, call, cond, member, mkstruct, finit, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -544,15 +544,63 @@ parse_struct_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) StructEnd {
 }
 parse_struct*<A: Allocator> = (a: Ptr<A>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
-// after the decl name (and an optional `*` public marker) comes `=` for a function or
-// `:` for a type declaration; `: {` specifically is a struct (vs `: A | B`, an enum).
+// ── an ENUM declaration — `name*: Red | Green | Blue` or `Circle(i32) | Square(i32)` ──
+// A `|`-separated variant list after `:`. Each variant is a bare name (Void payload) or
+// `Name(Type)` (a typed payload). Unlike a struct, there's no closing brace — the list
+// ends at the first token that isn't `|`. Lowers to genc's EnumDecl (a tagged union).
+EnumEnd*: { ed: EnumDecl, next: i32 }
+VPay*:    { ty: Ty, next: i32 }                          // a variant's payload Ty + pos past it
+is_bar = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false } }
+variant_buf<A: Allocator> = (a: Ptr<A>) [VariantDef] { slice(a.acquire(16 * sizeof(VariantDef)), 16) }   // cap 16
+take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }                            // exact length
+// `(Type)` after a variant name -> the payload Ty; pos is just past the '('
+variant_payload<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) VPay {
+    tt := src.scan(pos)                                  // the payload type token
+    rp := src.scan(tt.next)                              // ')'
+    VPay { ty: a.ty_of(src, tt.tok), next: rp.next }
+}
+fill_variants<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
+    nt   := src.scan(pos)                                // variant name
+    nm   := a.lexeme(src, nt.tok)
+    pk   := src.scan(nt.next)                            // '(' (payload), '|', or the next decl
+    vp   := src.is_lparen(pk.tok).match { true => a.variant_payload(src, pk.next), false => VPay { ty: tvoid(), next: nt.next } }
+    buf[i] = vdef(nm, vp.ty)
+    after := src.scan(vp.next)                           // '|' continues the list, else it ends
+    src.is_bar(after.tok).match {
+        true  => a.fill_variants(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: vp.next }     // enum done; resume after the last variant
+    }
+}
+skip_to_colon = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_colon(sc.tok).match { true => sc.next, false => src.skip_to_colon(sc.next) }
+}
+parse_enum_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) EnumEnd {
+    nt   := src.scan(pos)                                // the enum name
+    name := a.lexeme(src, nt.tok)
+    cpos := src.skip_to_colon(nt.next)                   // pos just past ':' (skips `*`)
+    buf  := a.variant_buf()
+    ve   := a.fill_variants(src, cpos, buf, 0)           // variants + pos after the last one
+    EnumEnd { ed: edef(name, buf.take_variants(ve.count)), next: ve.next }
+}
+parse_enum*<A: Allocator> = (a: Ptr<A>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
+
+// after the decl name (and an optional `*` public marker) comes `=` for a function or `:`
+// for a type declaration; `: {` is a struct, `: Variant…` is an enum.
 is_star = (src: str, t: Token) bool { src.is_op(t, '*') }
 is_colon = (src: str, t: Token) bool { src.is_op(t, ':') }
+decl_marker = (src: str, pos: i32) Scan {               // the Scan of `=` or `:` (skips name + `*`)
+    nt := src.scan(pos)
+    a1 := src.scan(nt.next)
+    src.is_star(a1.tok).match { true => src.scan(a1.next), false => a1 }
+}
 decl_is_struct = (src: str, pos: i32) bool {
-    nt    := src.scan(pos)                               // the name
-    a1    := src.scan(nt.next)                           // `*`, `=` or `:`
-    colon := src.is_star(a1.tok).match { true => src.scan(a1.next), false => a1 }   // skip `*`
-    src.is_colon(colon.tok).match { true => src.is_lbrace(src.scan(colon.next).tok), false => false }
+    m := src.decl_marker(pos)
+    src.is_colon(m.tok).match { true => src.is_lbrace(src.scan(m.next).tok), false => false }
+}
+decl_is_enum = (src: str, pos: i32) bool {              // `:` but NOT `{` -> an enum variant list
+    m := src.decl_marker(pos)
+    src.is_colon(m.tok).match { true => src.is_lbrace(src.scan(m.next).tok).match { true => false, false => true }, false => false }
 }
 
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
@@ -564,12 +612,20 @@ fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) 
     sc := src.scan(pos)
     sc.tok.kind.match { .Eof => i, _ => a.fill_decl(src, pos, buf, i) }
 }
-// a top-level decl is a struct (`name: { … }`) or a function (`name = (…) { … }`)
+// a top-level decl is a struct (`name: { … }`), an enum (`name: A | B`), or a function
 fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     src.decl_is_struct(pos).match {
         true  => a.fill_struct(src, pos, buf, i),
-        false => a.fill_func(src, pos, buf, i)
+        false => src.decl_is_enum(pos).match {
+            true  => a.fill_enum(src, pos, buf, i),
+            false => a.fill_func(src, pos, buf, i)
+        }
     }
+}
+fill_enum<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    ee := a.parse_enum_at(src, pos)
+    buf[i] = denum(ee.ed)
+    a.fill_decls(src, ee.next, buf, i + 1)
 }
 fill_func<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     de := a.parse_decl_at(src, pos)
