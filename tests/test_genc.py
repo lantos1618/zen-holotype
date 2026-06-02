@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, arrow, mkenum, mktag, arm, ematch, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, arrow, mkenum, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -148,7 +148,8 @@ def test_genc_module_with_a_struct_and_a_function(tmp_path):
     emit(genModule([dstruct(pt), dfunc(add)]))
     0"""
     generated = emit_via_zen(tmp_path, body)
-    assert "typedef struct { int32_t x; int32_t y; } Point;" in generated
+    assert "typedef struct Point Point;" in generated
+    assert "struct Point { int32_t x; int32_t y; };" in generated
     assert "int32_t add(int32_t a, int32_t b) { return (a + b); }" in generated
     # the emitted struct + function are valid C used together
     assert compile_and_run(tmp_path, generated, "({ Point p = {3, 4}; add(p.x, p.y); })") == "7"
@@ -266,9 +267,9 @@ def test_genc_emits_enum_typedefs(tmp_path):
     emit(genModule([denum(shape), denum(color)]))
     0"""
     generated = emit_via_zen(tmp_path, body)
-    assert "typedef struct { int32_t tag; union { int32_t Circle; int32_t Square; } u; } Shape;" in generated
+    assert "struct Shape { int32_t tag; union { int32_t Circle; int32_t Square; } u; };" in generated
     assert "enum { Shape_Circle, Shape_Square, Shape_Dot };" in generated
-    assert "typedef struct { int32_t tag; } Color;" in generated          # no union: all variants are void
+    assert "struct Color { int32_t tag; };" in generated                  # no union: all variants are void
     assert "enum { Color_Red, Color_Green, Color_Blue };" in generated
     # the emitted enums are valid C, used together
     call = "({ Shape s = {.tag=Shape_Circle, .u.Circle=5}; Color c = {.tag=Color_Green}; s.u.Circle + c.tag; })"
@@ -341,3 +342,31 @@ def test_genc_pointer_type_and_arrow(tmp_path):
     generated = emit_via_zen(tmp_path, body)
     assert "int32_t getx(Point* p) { return p->x; }" in generated
     assert compile_and_run(tmp_path, generated, "({ Point pt = {9, 0}; getx(&pt); })") == "9"
+
+
+def test_genc_recursive_cons_list_no_slices(tmp_path):
+    # the goal: genc emits a RECURSIVE linked list (forward-declared) + a recursive sum,
+    # built only from structs + enums + pointers — no slices. sum([1,2,3]) == 6.
+    body = """
+    lt1 := tnamed("List")
+    cell := sdef("Cell", [field("head", ti32()), field("tail", tptr(addr(lt1)))])
+    list := edef("List", [vdef("Nil", tvoid()), vdef("Cons", tnamed("Cell"))])
+    c1 := vref("c")
+    ch := member(addr(c1), "head")
+    c2 := vref("c")
+    ct := member(addr(c2), "tail")
+    scall := call("sum", addr(ct))
+    body := bin("+", addr(ch), addr(scall))
+    z := lit(0)
+    m := ematchp("l", "List", [arm("Nil", "", addr(z)), arm("Cons", "c", addr(body))])
+    lt2 := tnamed("List")
+    sumf := Func { name: "sum", params: [param("l", tptr(addr(lt2)))], ret: ti32(), body: [sret(addr(m))] }
+    emit(genModule([dstruct(cell), denum(list), dfunc(sumf)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "typedef struct Cell Cell; typedef struct List List;" in generated      # forward decls
+    assert "struct Cell { int32_t head; List* tail; };" in generated
+    assert "int32_t sum(List* l) { return (l->tag == List_Nil ? (0) : ({ __auto_type c = l->u.Cons; (c.head + sum(c.tail)); })); }" in generated
+    call = ("({ List n={.tag=List_Nil}; List a={.tag=List_Cons,.u.Cons={3,&n}};"
+            " List b={.tag=List_Cons,.u.Cons={2,&a}}; List c={.tag=List_Cons,.u.Cons={1,&b}}; sum(&c); })")
+    assert compile_and_run(tmp_path, generated, call) == "6"

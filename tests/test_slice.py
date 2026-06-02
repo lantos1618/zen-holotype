@@ -51,7 +51,7 @@ main* = () i32 {
 }
 """)
     assert ("m.main", True, "ok") in results
-    assert "for (; (i < " in c and ".len); i = (i + 1))" in c    # folds to a counted C for
+    assert "for (int32_t i = 0; (i < " in c and ".len); i = (i + 1))" in c    # folds to a counted C for
     assert "int32_t x = " in c                     # the element is bound as a typed local
     assert run(tmp_path, c) == 60
 

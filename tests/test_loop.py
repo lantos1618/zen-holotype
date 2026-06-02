@@ -38,7 +38,7 @@ main* = () i32 {
 }
 """)
     assert ("m.main", True, "ok") in results
-    assert "for (; (i < 11); i = (i + 1)) {" in c          # a real, structured C for
+    assert "for (int32_t i = 0; (i < 11); i = (i + 1)) {" in c          # a real, structured C for
     assert "while (" not in c                              # never a C `while`
     assert run(tmp_path, c, "main") == 55                  # 0+1+…+10
 
