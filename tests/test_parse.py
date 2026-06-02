@@ -445,6 +445,13 @@ def test_parse_char_literal_escape(tmp_path):
     assert "int32_t nl() { return 10; }" in gen      # '\n' -> byte 10 via esc_byte
 
 
+# ── imports: `{ A, B } = std.x` is recognized and skipped (it emits no code) ──────────
+def test_parse_imports_are_skipped(tmp_path):
+    # a real file starts with imports; the parser skips them and parses the decls that follow.
+    gen = gen_module(tmp_path, r"{ Expr, Func } = std.genc\n{ scan } = std.lex\ninc* = (x: i32) i32 { x + 1 }")
+    assert gen == "int32_t inc(int32_t x) { return (x + 1); } "   # only the function, no import noise
+
+
 # ── if statements: `if (c) { … } else { … }` -> genc If (sibling to @while) ───────────
 def test_parse_if_else(tmp_path):
     gen = gen_module(tmp_path, r"sign* = (x: i32) i32 { r := 0\n if (x > 0) { r = 1 } else { r = 2 }\n r }")
