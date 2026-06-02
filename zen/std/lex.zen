@@ -16,7 +16,7 @@
 byte_at* = (s: str, i: i32) u8 { load(offset(s, i)) }
 
 // ── tokens ───────────────────────────────────────────────────────────────────
-TokKind*: Ident | Int | Str | Sym | Eof
+TokKind*: Ident | Int | Str | Char | Sym | Eof
 Token*: { kind: TokKind, start: i32, len: i32 }    // lexeme = source[start .. start+len]
 Scan*:  { tok: Token, next: i32 }                  // one scan step: the token + resume pos
 
@@ -59,6 +59,12 @@ str_end   = (src: str, pos: i32) i32 {                 // pos just past the open
     }
 }
 
+// a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
+// position just past the closing quote. One char, or a `\.` escape.
+char_end = (src: str, pos: i32) i32 {
+    (src.byte_at(pos) == '\\').match { true => pos + 3, false => pos + 2 }   // '\x'  vs  'x'
+}
+
 // ── symbols ──────────────────────────────────────────────────────────────────
 // zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
@@ -84,7 +90,10 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
             true  => mk(.Int(), pos, src.int_end(pos + 1)),
             false => (b == '"').match {
                 true  => mk(.Str(), pos, src.str_end(pos + 1)),
-                false => mk(.Sym(), pos, src.sym_end(pos))
+                false => (b == '\'').match {
+                    true  => mk(.Char(), pos, src.char_end(pos + 1)),
+                    false => mk(.Sym(), pos, src.sym_end(pos))
+                }
             }
         }
     }
