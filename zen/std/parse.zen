@@ -7,7 +7,7 @@
 // precedence. eval() interprets the tree to prove the parse is right:
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, lit, vref, bin, slet, sret, ti32 } = std.genc
+{ Expr, BinData, Func, Stmt, lit, vref, bin, call, slet, sret, ti32 } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -58,14 +58,29 @@ to_int_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
 }
 to_int = (src: str, t: Token) i32 { to_int_from(src, t.start, t.start + t.len, 0) }
 
-// ── atom := integer | identifier | '(' expr ')' ──────────────────────────────────
+// ── atom := integer | call | identifier | '(' expr ')' ───────────────────────────
 parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
     sc := scan(src, pos)
     sc.tok.kind.match {
         .Int   => PExpr { expr: a.enode(lit(to_int(src, sc.tok))), next: sc.next },
-        .Ident => PExpr { expr: a.enode(vref(a.lexeme(src, sc.tok))), next: sc.next },
+        .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
         _      => a.parse_paren(src, sc)             // a '(' (the only other atom)
     }
+}
+// an Ident is a variable — unless the very next token is `(`, making it a one-arg call
+is_lparen = (src: str, t: Token) bool { is_op(src, t, '(') }
+parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
+    name := a.lexeme(src, sc.tok)
+    nx := scan(src, sc.next)
+    is_lparen(src, nx.tok).match {
+        true  => a.parse_call(src, name, nx),
+        false => PExpr { expr: a.enode(vref(name)), next: sc.next }
+    }
+}
+parse_call<A: Allocator> = (a: Ptr<A>, src: str, name: str, lp: Scan) PExpr {
+    arg   := a.parse_cmp(src, lp.next)               // the single argument
+    close := scan(src, arg.next)                     // consume the ')'
+    PExpr { expr: a.enode(call(name, arg.expr)), next: close.next }
 }
 parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
     inner := a.parse_cmp(src, open.next)             // parse past the '(' (full expr incl. compare)
