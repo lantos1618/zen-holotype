@@ -140,8 +140,13 @@ module.exports = grammar({
     // subject is any postfix expression (`result.match {…}`, `xs.head().match {…}`);
     // wrap a binary subject in parens: `(n < 0).match {…}`. `match` stays a reserved
     // word, so `.match {` is unambiguous against a `.name` field access.
+    // The arm-record may optionally be wrapped in parens — `subject.match ({…})` —
+    // so match reads as "a function taking a `{}`". The parens are pure punctuation
+    // (no field), so both forms produce the same match node.
     match: $ => prec.left(8, seq(field('subject', $._unary), token.immediate('.'), 'match',
-                    '{', comma1($.match_arm), optional(','), '}')),
+                    optional('('),
+                    '{', comma1($.match_arm), optional(','), '}',
+                    optional(')'))),
     match_arm: $ => seq(field('pat', $.pattern), '=>', field('body', $._expression)),
     pattern: $ => choice($.ctor_pattern, $.literal_pattern, $.wildcard),
     ctor_pattern: $ => seq('.', field('name', $.identifier),

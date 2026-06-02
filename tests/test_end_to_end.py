@@ -174,6 +174,36 @@ def test_match_lowers_and_runs(tmp_path):
     assert run.stdout.strip() == "7"
 
 
+# ── match's optional paren form: `subj.match ({ … })` — the arms wrapped in parens ──
+# The parens are pure punctuation (stripped in the grammar), so the paren form lowers and
+# runs identically to the brace form. Covers both the bool subject and the enum subject.
+def test_match_paren_form_lowers_and_runs(tmp_path):
+    (tmp_path / "main.zen").write_text(
+        "Status*: Idle | Busy(i32)\n"
+        "code* = (s: Status) i32 { s.match({ .Idle => 0, .Busy(n) => n }) }\n"
+        "sign* = (n: i32) i32 { (n < 0).match({ true => 0, false => 1 }) }\n"
+        "main* = () i32 { code(.Busy(7)) + sign(5) }\n")
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files)
+    resolve(files, namespace)
+    _, passing = check(files, namespace)
+    c = emit_c(files, passing, namespace)
+    assert ".tag == main_Status_Idle" in c             # variant match still lowers
+    assert "int32_t n = " in c and ".u.Busy" in c      # payload binding intact
+    assert "? (0) : (1)" in c                           # bool match -> ternary
+    harness = ("\n#include <stdio.h>\nint main(void){ "
+               "printf(\"%d\\n\", main_main()); return 0; }\n")
+    cfile = tmp_path / "o.c"
+    cfile.write_text(c + harness)
+    bexe = tmp_path / "o"
+    r = subprocess.run(["cc", "-Wall", "-Wextra", str(cfile), "-o", str(bexe)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    run = subprocess.run([str(bexe)], capture_output=True, text=True)
+    assert run.stdout.strip() == "8"                   # code(.Busy(7))=7 + sign(5)=1
+
+
 # ── A used but ill-typed trait impl is refused loudly (not silently emitted) ─
 def test_used_illtyped_impl_refused(tmp_path):
     (tmp_path / "main.zen").write_text(

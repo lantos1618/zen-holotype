@@ -570,6 +570,27 @@ def test_parse_enum_milestone(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 27   # Circle(3) -> 3*3*3
 
 
+# ── match's optional paren form: `subj.match ({ … })` reads as "a function taking a {}" ──
+# The arm-record may be wrapped in parens; they are pure punctuation, stripped by the
+# self-hosted parser. Both forms must produce IDENTICAL C — proven below by reusing the
+# exact expectations of the brace-form tests above.
+def test_parse_decl_bool_match_paren_form(tmp_path):
+    gen = gen_decl(tmp_path, r"fact* = (n: i32) i32 { (n <= 1).match({ true => 1, false => n * fact(n - 1) }) }")
+    assert gen == "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }"
+    assert _compile_run(tmp_path, gen, "fact(5)") == 120
+
+
+def test_parse_enum_match_paren_form(tmp_path):
+    # the parenthesized arm-record parses to the same Match as the brace form
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }\narea* = (s: Shape) i32 { s.match({ .Circle(r) => r * r * 3, .Square(w) => w * w }) }")
+    assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
+    assert "int32_t area(Shape s) { return (s.tag == Shape_Circle ? " in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return area(mk(3)); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 27   # Circle(3) -> 3*3*3
+
+
 def test_parse_enum_match_no_payload(tmp_path):
     # variants without payloads: the arms are bare bodies, no __auto_type binding
     gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match { .Lo => 0, .Hi => 1 } }")
