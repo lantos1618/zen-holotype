@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, ArmData, bin, cond, call, member, ematch, mkenum, mktag, arm, slet, sassign, sret, sif, swhile, dfunc } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, ArmData, MatchData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, slet, sassign, sret, sif, swhile, dfunc, tvoid } = std.genc
 { Allocator } = std.alloc
 { eq } = std.str
 
@@ -28,13 +28,16 @@ abuf<A: Allocator> = (a: Ptr<A>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(
 sbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
 dbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
 
-// the enum type bound to variable `name` among params: a Named param yields its type name.
-ty_name = (t: Ty) str { t.match { .Named(n) => n, _ => "" } }
-lookup_enum = (ps: [Param], name: str) str {
-    found := ""
-    ps.loop((h, i, p) { found = eq(p.name, name).match { true => p.ty.ty_name(), false => found } })
+// the type bound to variable `name` among params (void if `name` is not a parameter).
+lookup_var = (ps: [Param], name: str) Ty {
+    found := tvoid()
+    ps.loop((h, i, p) { found = eq(p.name, name).match { true => p.ty, false => found } })
     found
 }
+// the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
+ty_name = (t: Ty) str { t.match { .Named(n) => n, _ => "" } }
+enum_name = (t: Ty) str { t.match { .Named(n) => n, .Ptr(p) => load(p).ty_name(), _ => "" } }
+ty_is_ptr = (t: Ty) bool { t.match { .Ptr(p) => true, _ => false } }
 // the enum that declares variant `vn` (scan every enum decl) — "" if none
 enum_has = (ed: EnumDecl, vn: str) bool {
     f := false
@@ -51,7 +54,7 @@ enum_of_variant = (decls: [Decl], vn: str) str {
 // ── rebuild an expression, filling enum match enames + constructor types ───────────────
 resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match {
-        .Match(m)     => a.enode(ematch(m.subj, env.ps.lookup_enum(m.subj), a.resolve_arms(env, m.arms))),
+        .Match(m)     => a.resolve_match(env, m),
         .MakeEnum(mk) => a.enode(mkenum(env.decls.enum_of_variant(mk.variant), mk.variant, a.resolve_expr(env, mk.payload))),
         .Tag(t)       => a.enode(mktag(env.decls.enum_of_variant(t.variant), t.variant)),
         .Bin(b)       => a.enode(bin(b.op, a.resolve_expr(env, b.lhs), a.resolve_expr(env, b.rhs))),
@@ -59,6 +62,17 @@ resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Call(c)      => a.enode(call(c.fn, a.resolve_args(env, c.args))),
         .Member(mm)   => a.enode(member(a.resolve_expr(env, mm.obj), mm.field)),
         _             => e                            // Int/Var/MakeStruct/StrLit/Arrow: unchanged
+    }
+}
+// fill an enum match's ename from the subject's declared type. If the subject is a POINTER
+// (`Ptr<Enum>`), emit genc's ematchp so the tag test is `subj->tag` (not `subj.tag`).
+resolve_match<A: Allocator> = (a: Ptr<A>, env: Env, m: MatchData) Ptr<Expr> {
+    t    := env.ps.lookup_var(m.subj)
+    en   := t.enum_name()
+    arms := a.resolve_arms(env, m.arms)
+    t.ty_is_ptr().match {
+        true  => a.enode(ematchp(m.subj, en, arms)),
+        false => a.enode(ematch(m.subj, en, arms))
     }
 }
 resolve_args<A: Allocator> = (a: Ptr<A>, env: Env, args: [Expr]) [Expr] {
