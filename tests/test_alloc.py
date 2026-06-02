@@ -38,3 +38,25 @@ roundtrip*<A: Allocator> = (a: Ptr<A>) i32 {
 main* = () i32 { m := Malloc { _: 0 }\n addr(m).roundtrip() }
 """)
     assert rc == 42
+
+
+def test_vec_grows_through_its_allocator(tmp_path):
+    # a Vec carries no allocator of its own — push takes it explicitly. Start at cap 2,
+    # push 4 (forcing a grow via the allocator's resize), sum the items view -> 10.
+    rc = build_and_run(tmp_path, """
+{ Malloc } = std.alloc
+{ Vec, vec, push, items, vfree } = std.vec
+main* = () i32 {
+    m := Malloc { _: 0 }
+    v := addr(m).vec(2)
+    v = v.push(addr(m), 1)
+    v = v.push(addr(m), 2)
+    v = v.push(addr(m), 3)
+    v = v.push(addr(m), 4)
+    s := 0
+    addr(v).items().loop((h, i, x) { s = s + x })
+    v.vfree(addr(m))
+    s
+}
+""")
+    assert rc == 10

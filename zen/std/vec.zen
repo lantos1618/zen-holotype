@@ -1,0 +1,39 @@
+// std.vec — a growable array backed by an EXPLICIT allocator (std.alloc). Nothing
+// here allocates without one: every op that may grow takes `a: Ptr<A>`. (A generic
+// Vec<T> awaits a type-parameter `sizeof`; this is the i32 instance, enough to show
+// the allocator threading cleanly through a container.)
+//
+//   m := Malloc { _: 0 }
+//   v := addr(m).vec(2)            // capacity 2, from `m`
+//   v = v.push(addr(m), 10)        // grows via `m` when full
+//   addr(v).items().loop((h, i, x) { … })
+//   v.vfree(addr(m))
+
+{ Allocator, acquire, resize, release } = std.alloc
+
+Vec*: { ptr: RawPtr<u8>, len: i64, cap: i64 }    // ptr -> a buffer of `cap` i32s
+
+// an empty Vec with room for `cap` i32s, allocated from `a`
+vec*<A: Allocator> = (a: Ptr<A>, cap: i64) Vec { Vec { ptr: a.acquire(cap * 4), len: 0, cap: cap } }
+
+// the whole backing buffer as a [i32] (cap elements) — for indexed writes
+buffer = (v: Vec) [i32] { slice(v.ptr, v.cap) }
+// the live elements as a read [i32] view (len elements) — borrows the buffer
+items* = (v: Ptr<Vec>) [i32] { slice(v.ptr, v.len) }
+
+// grow (double + 1) the buffer through `a`
+grow*<A: Allocator> = (v: Vec, a: Ptr<A>) Vec {
+    ncap := (v.cap * 2) + 1
+    Vec { ptr: a.resize(v.ptr, ncap * 4), len: v.len, cap: ncap }
+}
+
+// push x, growing through `a` if full; returns the updated Vec
+push*<A: Allocator> = (v: Vec, a: Ptr<A>, x: i32) Vec {
+    r := (v.len < v.cap).match { true => v, false => v.grow(a) }
+    b := r.buffer()
+    b[r.len] = x
+    Vec { ptr: r.ptr, len: r.len + 1, cap: r.cap }
+}
+
+// hand the buffer back to `a`
+vfree*<A: Allocator> = (v: Vec, a: Ptr<A>) void { a.release(v.ptr) }
