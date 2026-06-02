@@ -793,9 +793,36 @@ decl_is_enum = (src: str, pos: i32) bool {              // `:` but NOT `{` -> an
 // which genModule lowers to a translation unit. Parses decls until Eof.
 decl_buf<A: Allocator> = (a: Ptr<A>) [Decl] { slice(a.acquire(64 * sizeof(Decl)), 64) }   // cap 64
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
+// ── imports ──────────────────────────────────────────────────────────────────────
+// `{ A, B } = std.x` — a destructuring import. It carries no code (modules resolve at
+// link time, so genc emits nothing for it), so the parser RECOGNIZES and SKIPS it: past
+// the brace list, the `=`, and the dotted module path. This lets a real file (whose first
+// lines are imports) be parsed without choking.
+decl_is_import = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
+skip_to_rbrace = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match { true => sc.next, false => src.skip_to_rbrace(sc.next) }
+}
+skip_path = (src: str, pos: i32) i32 {                  // a dotted path `std.genc`: ident (`.` ident)*
+    id  := src.scan(pos)
+    dot := src.scan(id.next)
+    src.is_dot(dot.tok).match { true => src.skip_path(dot.next), false => id.next }
+}
+skip_import = (src: str, pos: i32) i32 {                // pos at '{'
+    rb := src.skip_to_rbrace(pos)                       // past '}'
+    eq := src.scan(rb)                                  // '='
+    src.skip_path(eq.next)                              // past the module path
+}
+
 fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     sc := src.scan(pos)
-    sc.tok.kind.match { .Eof => i, _ => a.fill_decl(src, pos, buf, i) }
+    sc.tok.kind.match {
+        .Eof => i,
+        _    => src.decl_is_import(pos).match {
+            true  => a.fill_decls(src, src.skip_import(pos), buf, i),   // skip an import, add no decl
+            false => a.fill_decl(src, pos, buf, i)
+        }
+    }
 }
 // a top-level decl is a struct (`name: { … }`), an enum (`name: A | B`), or a function
 fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
