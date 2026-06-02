@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -71,7 +71,8 @@ parse_base<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     sc.tok.kind.match {
         .Int   => PExpr { expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next },
-        .Char  => PExpr { expr: a.enode(lit(src.char_val(sc.tok.start))), next: sc.next },   // 'a' -> 97
+        .Char  => PExpr { expr: a.enode(lit(src.char_val(sc.tok.start))), next: sc.next },   // a char -> its byte
+        .Str   => PExpr { expr: a.enode(strlit(a.str_val(src, sc.tok))), next: sc.next },    // a string -> StrLit
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
         _      => src.is_dot(sc.tok).match {
             true  => a.parse_ctor(src, sc),          // `.Variant` / `.Variant(arg)` — an enum constructor
@@ -79,17 +80,44 @@ parse_base<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
         }
     }
 }
-// a char literal `'c'` / `'\n'` is an integer — its byte value. start is the opening quote;
-// a backslash escape maps via esc_byte, else the raw byte. (Matches lex's char_end span.)
-esc_byte = (e: u8) i32 {
+// the byte a backslash escape denotes: n -> 10, t -> 9, r -> 13, 0 -> 0; any other escaped
+// char (a backslash, a quote) maps to itself.
+esc_byte = (e: u8) u8 {
     (e == 'n').match { true => 10, false =>
     (e == 't').match { true => 9, false =>
     (e == 'r').match { true => 13, false =>
-    (e == '0').match { true => 0, false => e } } } }   // \\ \' \" map to themselves (the raw byte)
+    (e == '0').match { true => 0, false => e } } } }
 }
+// a char literal is an integer — its byte value. start is the opening quote.
 char_val = (src: str, start: i32) i32 {
     b := src.byte_at(start + 1)
     (b == '\\').match { true => esc_byte(src.byte_at(start + 2)), false => b }
+}
+// a string literal's value: copy the bytes between the quotes into a fresh NUL-terminated
+// buffer, RESOLVING backslash escapes (genc's gen_strlit re-escapes them on emit). The token
+// spans `"…"`, so the content is [start+1 .. start+len-1).
+str_val<A: Allocator> = (a: Ptr<A>, src: str, t: Token) str {
+    p := a.acquire(t.len)                            // upper bound: content (<= len-2) + NUL
+    n := src.unescape(t.start + 1, t.start + t.len - 1, p, 0)
+    store(offset(p, n), 0)                           // NUL terminator
+    cstr(p)
+}
+unescape = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    (pos < end).match { true => src.unescape_one(pos, end, dst, di), false => di }
+}
+unescape_one = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    (src.byte_at(pos) == '\\').match {
+        true  => src.unescape_esc(pos, end, dst, di),
+        false => src.unescape_plain(pos, end, dst, di)
+    }
+}
+unescape_esc = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    store(offset(dst, di), esc_byte(src.byte_at(pos + 1)))   // `\x` -> one byte
+    src.unescape(pos + 2, end, dst, di + 1)
+}
+unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    store(offset(dst, di), src.byte_at(pos))
+    src.unescape(pos + 1, end, dst, di + 1)
 }
 // a leading-dot enum constructor `.Variant` (a Tag) or `.Variant(payload)` (a MakeEnum). The
 // enum TYPE is left "" — std.check fills it by looking the variant up among the enum decls.
