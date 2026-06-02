@@ -35,7 +35,7 @@ def run_driver(tmp_path, src):
 SCAN_DRIVER = """
 { Scan, Token, TokKind, scan, byte_at } = std.lex
 putchar = (c: i32) i32
-kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Sym => 89, .Eof => 69 } }
+kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 } }
 is_eof = (k: TokKind) bool { k.match { .Eof => true, _ => false } }
 emit_span = (src: str, start: i32, len: i32) void {
     i := start
@@ -68,7 +68,7 @@ LIST_DRIVER = """
 { Malloc } = std.alloc
 { TokList, TokCell, TokKind, tokenize, byte_at } = std.lex
 putchar = (c: i32) i32
-kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Sym => 89, .Eof => 69 } }
+kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 } }
 emit_span = (src: str, start: i32, len: i32) void {
     i := start
     e := start + len
@@ -117,6 +117,13 @@ def test_multi_char_operators_lex_as_one_token(tmp_path):
     out = scan_tokens(tmp_path, r'"x := y == z"')
     assert out == "I:x\nY::=\nI:y\nY:==\nI:z\nE:\n"
     assert scan_tokens(tmp_path, r'"a*b"') == "I:a\nY:*\nI:b\nE:\n"
+
+
+def test_char_literals_are_one_token(tmp_path):
+    # a char literal is a single Char token (the quotes stay in the span) — the self-hosted
+    # lexer can now tokenize its OWN source, which is full of '0' / 'a' / ':' etc.
+    assert scan_tokens(tmp_path, "\"x := '0'\"") == "I:x\nY::=\nC:'0'\nE:\n"
+    assert scan_tokens(tmp_path, "\"b == 'a'\"") == "I:b\nY:==\nC:'a'\nE:\n"
 
 
 def test_underscore_and_digits_in_identifiers(tmp_path):

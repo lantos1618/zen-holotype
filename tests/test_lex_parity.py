@@ -16,7 +16,7 @@ from zen.parser import _PARSER
 from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptime,
                       run_emits, check, emit_c)
 
-_NAMED = {"identifier": "I", "integer": "N", "string": "S"}
+_NAMED = {"identifier": "I", "integer": "N", "string": "S", "char": "C"}
 
 
 def ts_tokens(src):
@@ -44,7 +44,7 @@ def ts_tokens(src):
 _DRIVER = """
 { TokKind, scan, byte_at } = std.lex
 putchar = (c: i32) i32
-kc = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Sym => 89, .Eof => 69 } }
+kc = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 } }
 is_eof = (k: TokKind) bool { k.match { .Eof => true, _ => false } }
 sp = (src: str, s: i32, l: i32) void { i := s\n e := s + l\n @while(i < e) { putchar(byte_at(src, i))\n i = i + 1 } }
 main* = () i32 {
@@ -96,7 +96,17 @@ SNIPPETS = [
     "cmp* = (x: i32) bool { x <= 3 }",
 ]
 
+# THE LEXER LEXES ITSELF: actual lines from std/lex.zen, char-literal-heavy. lex.zen uses no
+# `@`, so std.lex and tree-sitter must agree token-for-token — including char literals and
+# the two-char operators the lexer is built on.
+LEX_SELF = [
+    "is_digit* = (b: u8) bool { (b >= '0') && (b <= '9') }",
+    "is_alpha* = (b: u8) bool { ((b >= 'a') && (b <= 'z')) || (b == '_') }",
+    "is_space* = (b: u8) bool { (b == ' ') || (b == '\\t') || (b == '\\n') || (b == '\\r') }",
+    "two = (b0: u8, b1: u8) bool { ((b0 == ':') && (b1 == '=')) || ((b0 == '=') && (b1 == '>')) }",
+]
 
-@pytest.mark.parametrize("src", SNIPPETS)
+
+@pytest.mark.parametrize("src", SNIPPETS + LEX_SELF)
 def test_std_lex_matches_tree_sitter(tmp_path, src):
     assert zen_tokens(tmp_path, src) == ts_tokens(src)
