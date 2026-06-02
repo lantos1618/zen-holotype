@@ -32,3 +32,21 @@ jobs:
           grep -q "vecdemo -> 12" build.log
         env:
           PYTHONPATH: ${{ github.workspace }}
+
+  # The committed tree-sitter-zen/src (parser.c, grammar.json, node-types.json) is what
+  # the compiler actually parses with. CI's `test` job builds from it — so an edit to
+  # grammar.js that forgets to regenerate would pass against the STALE parser. This job
+  # regenerates from grammar.js (pinned CLI, the version the committed files were built
+  # with) and fails if src/ drifts.
+  grammar-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Regenerate parser from grammar.js and check src/ is in sync
+        run: |
+          (cd tree-sitter-zen && npx --yes -p tree-sitter-cli@0.26.9 tree-sitter generate)
+          git diff --exit-status tree-sitter-zen/src \
+            || { echo "::error::tree-sitter-zen/src is stale — run 'tree-sitter generate' in tree-sitter-zen/ and commit"; exit 1; }
