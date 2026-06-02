@@ -445,6 +445,25 @@ def test_parse_char_literal_escape(tmp_path):
     assert "int32_t nl() { return 10; }" in gen      # '\n' -> byte 10 via esc_byte
 
 
+# ── UFCS method calls: `recv.f(args)` desugars to `f(recv, args)` ─────────────────────
+# The dominant construct in our own stdlib. `recv.name` is field access; `recv.name(args)`
+# prepends the receiver as the first call argument. Both chain.
+def test_parse_ufcs_method_call(tmp_path):
+    gen = gen_module(tmp_path, r"is_alnum* = (b: u8) bool { b.is_alpha() || b.is_digit() }")
+    assert "bool is_alnum(uint8_t b) { return (is_alpha(b) || is_digit(b)); }" in gen
+
+
+def test_parse_ufcs_with_args(tmp_path):
+    gen = gen_module(tmp_path, r"at* = (s: str, i: i32) u8 { s.byte_at(i) }\nadd3* = (a: i32, b: i32, c: i32) i32 { a.sum(b, c) }")
+    assert "uint8_t at(const char* s, int32_t i) { return byte_at(s, i); }" in gen   # receiver first
+    assert "int32_t add3(int32_t a, int32_t b, int32_t c) { return sum(a, b, c); }" in gen
+
+
+def test_parse_ufcs_does_not_break_field_access(tmp_path):
+    gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }\ngx* = (p: Pt) i32 { p.x }")
+    assert "int32_t gx(Pt p) { return p.x; }" in gen   # `.x` with no `(` stays a Member
+
+
 # ── imports: `{ A, B } = std.x` is recognized and skipped (it emits no code) ──────────
 def test_parse_imports_are_skipped(tmp_path):
     # a real file starts with imports; the parser skips them and parses the decls that follow.
