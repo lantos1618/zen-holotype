@@ -68,7 +68,7 @@ parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
     }
 }
 parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
-    inner := a.parse_expr(src, open.next)            // parse past the '('
+    inner := a.parse_cmp(src, open.next)             // parse past the '(' (full expr incl. compare)
     close := scan(src, inner.next)                   // consume the ')'
     PExpr { expr: inner.expr, next: close.next }
 }
@@ -95,8 +95,31 @@ expr_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
     a.expr_rest(src, PExpr { expr: a.enode(bin(op_str(byte_at(src, sc.tok.start)), lhs.expr, rhs.expr)), next: rhs.next })
 }
 
-// parse a whole source string to an expression tree
-parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_expr(src, 0).expr }
+// ── compare := expr (('==' | '<' | '>' | '<=' | '>=') expr)*  (loosest, left-assoc) ──
+// A single `=` is assignment, not comparison, so `==` must be the two-byte symbol; `<`/`>`
+// are comparisons at either length (`<` or `<=`).
+is_cmp_byte = (b: u8, len: i32) bool { ((b == '=') && (len == 2)) || (b == '<') || (b == '>') }
+is_cmp = (src: str, t: Token) bool { t.kind.match { .Sym => is_cmp_byte(byte_at(src, t.start), t.len), _ => false } }
+cmp_op_str = (src: str, t: Token) str {
+    b0 := byte_at(src, t.start)
+    (b0 == '=').match { true => "==", false =>
+    (b0 == '<').match {
+        true  => (t.len == 2).match { true => "<=", false => "<" },
+        false => (t.len == 2).match { true => ">=", false => ">" }
+    } }
+}
+parse_cmp<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.cmp_rest(src, a.parse_expr(src, pos)) }
+cmp_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+    sc := scan(src, lhs.next)
+    is_cmp(src, sc.tok).match { false => lhs, true => a.cmp_more(src, lhs, sc) }
+}
+cmp_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_expr(src, sc.next)
+    a.cmp_rest(src, PExpr { expr: a.enode(bin(cmp_op_str(src, sc.tok), lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// parse a whole source string to an expression tree (the loosest level is comparison)
+parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_cmp(src, 0).expr }
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -135,11 +158,11 @@ parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     nt   := scan(src, pos)                   // the bound name
     name := a.lexeme(src, nt.tok)
     at   := scan(src, nt.next)               // ':='
-    v    := a.parse_expr(src, at.next)       // value
+    v    := a.parse_cmp(src, at.next)        // value (full expression, incl. comparison)
     a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
 }
 parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    r := a.parse_expr(src, pos)
+    r := a.parse_cmp(src, pos)
     a.scons(sret(r.expr), a.snil())
 }
 

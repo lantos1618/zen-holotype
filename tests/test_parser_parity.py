@@ -70,6 +70,11 @@ def zen_parser_sexpr(tmp_path, expr):
     "x * (y + 1)",
     "10 - 2 * 3 + 1",
     "((1 + 1)) * 2",
+    # comparisons — the loosest level, so arithmetic binds tighter
+    "1 + 2 < 4",            # -> (< (+ 1 2) 4)
+    "a == b",
+    "x * 2 >= y + 1",       # -> (>= (* x 2) (+ y 1))
+    "n <= 0",
 ])
 def test_zen_and_python_parsers_build_the_same_tree(tmp_path, expr):
     assert zen_parser_sexpr(tmp_path, expr) == python_parser_sexpr(expr)
