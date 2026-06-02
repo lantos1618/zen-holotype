@@ -588,9 +588,9 @@ def test_parse_module_enum_struct_function_mix(tmp_path):
 def test_parse_enum_match_resolves_ename(tmp_path):
     gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\narea* = (s: Shape) i32 { s.match { .Circle(r) => r * r * 3, .Square(w) => w * w } }")
     # the match lowered to a tag-test ternary with payload binding — and ename is "Shape"
-    assert "int32_t area(Shape s) { return (s.tag == Shape_Circle ? " in gen
-    assert "({ __auto_type r = s.u.Circle; ((r * r) * 3); })" in gen
-    assert "({ __auto_type w = s.u.Square; (w * w); })" in gen
+    assert "int32_t area(Shape s) { return ({ __auto_type _subj = s; (_subj.tag == Shape_Circle ? " in gen
+    assert "({ __auto_type r = _subj.u.Circle; ((r * r) * 3); })" in gen
+    assert "({ __auto_type w = _subj.u.Square; (w * w); })" in gen
     # construct each variant and run the self-hosted-compiled match
     (tmp_path / "g.c").write_text(
         "#include <stdint.h>\n" + gen +
@@ -622,7 +622,7 @@ def test_parse_enum_milestone(tmp_path):
     # whole module lexed -> parsed -> CHECKED -> lowered -> compiled -> run, entirely in Zen.
     gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }\narea* = (s: Shape) i32 { s.match { .Circle(r) => r * r * 3, .Square(w) => w * w } }")
     assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
-    assert "int32_t area(Shape s) { return (s.tag == Shape_Circle ? " in gen
+    assert "int32_t area(Shape s) { return ({ __auto_type _subj = s; (_subj.tag == Shape_Circle ? " in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return area(mk(3)); }\n")
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
@@ -643,7 +643,7 @@ def test_parse_enum_match_paren_form(tmp_path):
     # the parenthesized arm-record parses to the same Match as the brace form
     gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }\narea* = (s: Shape) i32 { s.match({ .Circle(r) => r * r * 3, .Square(w) => w * w }) }")
     assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
-    assert "int32_t area(Shape s) { return (s.tag == Shape_Circle ? " in gen
+    assert "int32_t area(Shape s) { return ({ __auto_type _subj = s; (_subj.tag == Shape_Circle ? " in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return area(mk(3)); }\n")
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
@@ -656,11 +656,23 @@ def test_parse_let_bound_match_subject(tmp_path):
     # resolves the match's enum. genc's Let now uses __auto_type so the binding compiles.
     gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Square(n) }\nuse* = (n: i32) i32 { s := mk(n)\n s.match { .Circle(r) => r, .Square(w) => w + 1 } }")
     assert "__auto_type s = mk(n);" in gen
-    assert "(s.tag == Shape_Circle ? ({ __auto_type r = s.u.Circle; r; }) : ({ __auto_type w = s.u.Square; (w + 1); }))" in gen
+    assert "(_subj.tag == Shape_Circle ? ({ __auto_type r = _subj.u.Circle; r; }) : ({ __auto_type w = _subj.u.Square; (w + 1); }))" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return use(5); }\n")
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 6   # mk(5) -> Square(5) -> 5 + 1
+
+
+def test_parse_match_expression_subject_and_wildcard(tmp_path):
+    # the subject is an EXPRESSION (a field chain), not a bare variable — genc binds it to a
+    # temp; and `_ =>` is a wildcard catch-all (the default arm). Both are pervasive in lex.zen.
+    gen = gen_checked_module(tmp_path, r"K*: A | B | C\nWrap*: { kind: K, n: i32 }\nf* = (w: Wrap) i32 { w.kind.match { .A => 10, _ => w.n } }")
+    assert "({ __auto_type _subj = w.kind; (_subj.tag == K_A ? (10) : (w.n)); })" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
+        "\nint main(void){ Wrap a={.kind={.tag=K_A},.n=7}; Wrap b={.kind={.tag=K_C},.n=5}; return f(a)+f(b); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 15   # f(a)=10 (A), f(b)=5 (wildcard -> n)
 
 
 def test_parse_enum_match_pointer_subject(tmp_path):
@@ -669,7 +681,7 @@ def test_parse_enum_match_pointer_subject(tmp_path):
     # over a cons-list — the shape the compiler's own AST/token types are built from.
     # (TokCell is declared before TokList so the emitted C is in dependency order.)
     gen = gen_checked_module(tmp_path, r"TokCell*: { head: i32, tail: Ptr<TokList> }\nTokList*: Nil | Cons(TokCell)\nllen* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.llen() } }")
-    assert "int32_t llen(TokList* l) { return (l->tag == TokList_Nil ? (0) : ({ __auto_type c = l->u.Cons; (1 + llen(c.tail)); })); }" in gen
+    assert "int32_t llen(TokList* l) { return ({ __auto_type _subj = l; (_subj->tag == TokList_Nil ? (0) : ({ __auto_type c = _subj->u.Cons; (1 + llen(c.tail)); })); }); }" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
         "\nint main(void){ TokList nil={.tag=TokList_Nil};"
         " TokList a={.tag=TokList_Cons,.u.Cons={.head=1,.tail=&nil}};"
@@ -682,7 +694,7 @@ def test_parse_enum_match_pointer_subject(tmp_path):
 def test_parse_enum_match_no_payload(tmp_path):
     # variants without payloads: the arms are bare bodies, no __auto_type binding
     gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match { .Lo => 0, .Hi => 1 } }")
-    assert "int32_t val(Bit b) { return (b.tag == Bit_Lo ? (0) : (1)); }" in gen
+    assert "int32_t val(Bit b) { return ({ __auto_type _subj = b; (_subj.tag == Bit_Lo ? (0) : (1)); }); }" in gen
     (tmp_path / "g.c").write_text(
         "#include <stdint.h>\n" + gen +
         "\nint main(void){ Bit h = { .tag = Bit_Hi }; return val(h); }\n")

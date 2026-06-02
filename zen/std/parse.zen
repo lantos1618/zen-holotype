@@ -239,7 +239,15 @@ fill_arms<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_marm(src, pos, buf, i) }
 }
+// an arm is `.Variant(bind) => body` or a wildcard `_ => body` (the catch-all default, which
+// genc emits as the last arm with no tag test). The leading token tells them apart.
 fill_marm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    src.is_dot(src.scan(pos).tok).match {
+        true  => a.fill_varm(src, pos, buf, i),
+        false => a.fill_wild(src, pos, buf, i)                       // `_ => body`
+    }
+}
+fill_varm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     dot := src.scan(pos)                                             // '.'
     vt  := src.scan(dot.next)                                        // variant name
     vn  := a.lexeme(src, vt.tok)
@@ -248,7 +256,18 @@ fill_marm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32
     arrow := src.scan(be.next)                                       // '=>'
     body  := a.parse_or(src, arrow.next)                             // the arm body
     buf[i] = arm(vn, be.bind, body.expr)
-    after := src.scan(body.next)                                     // ',' or '}'
+    a.arm_tail(src, body.next, buf, i)
+}
+fill_wild<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    us    := src.scan(pos)                                           // '_'
+    arrow := src.scan(us.next)                                       // '=>'
+    body  := a.parse_or(src, arrow.next)
+    buf[i] = arm("_", "", body.expr)                                 // a no-bind catch-all
+    a.arm_tail(src, body.next, buf, i)
+}
+// after an arm body: a ',' continues the list, else the '}' ends it
+arm_tail<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    after := src.scan(pos)
     src.is_comma(after.tok).match {
         true  => a.fill_arms(src, after.next, buf, i + 1),
         false => PEnd { count: i + 1, next: after.next }              // '}'
@@ -257,7 +276,7 @@ fill_marm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32
 parse_variant_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr, open: Scan) PExpr {
     buf := a.arm_buf()
     ae  := a.fill_arms(src, open.next, buf, 0)                       // arms + pos just past '}'
-    PExpr { expr: a.enode(ematch(subj_name(subj.expr), "", buf.take_arms(ae.count))), next: ae.next }
+    PExpr { expr: a.enode(ematch(subj.expr, "", buf.take_arms(ae.count))), next: ae.next }
 }
 // an Ident is a variable — unless the very next token is `(`, making it a one-arg call
 is_lparen = (src: str, t: Token) bool { src.is_op(t, '(') }
