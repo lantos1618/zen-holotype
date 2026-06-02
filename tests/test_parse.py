@@ -234,3 +234,47 @@ def test_parse_decl_return_type(tmp_path):
     # the return-type token after `)` maps via ty_of (here i64 -> int64_t)
     gen = gen_decl(tmp_path, r"wide* = (x: i64) i64 { x + 1 }")
     assert gen == "int64_t wide(int64_t x) { return (x + 1); }"
+
+
+# parse_module reads EVERY top-level function declaration (decl boundaries found by
+# brace-matching), into a [Decl] genModule lowers to a whole translation unit.
+MODULE_DRIVER = """
+{ Malloc } = std.alloc
+{ parse_module } = std.parse
+{ genModule } = std.genc
+{ String, bytes } = std.string
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+main* = () i32 {
+    m := Malloc { _: 0 }
+    emit(genModule(addr(m).parse_module("%s")))
+    0
+}
+"""
+
+
+def gen_module(tmp_path, src):
+    (tmp_path / "main.zen").write_text(MODULE_DRIVER % src)
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
+                        str(tmp_path / "o.c"), "-o", str(tmp_path / "o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+
+
+def test_parse_module_multiple_functions(tmp_path):
+    # two function decls in one source -> a whole translation unit; one calls the other.
+    gen = gen_module(tmp_path, r"inc* = (x: i32) i32 { x + 1 }\ndbl* = (x: i32) i32 { x + x }")
+    assert gen == ("int32_t inc(int32_t x) { return (x + 1); } "
+                   "int32_t dbl(int32_t x) { return (x + x); } ")
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return inc(dbl(5)); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 11   # dbl(5)=10, inc(10)=11
