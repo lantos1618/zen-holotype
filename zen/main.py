@@ -95,8 +95,9 @@ def run_emits(files, namespace):
 
 
 def _check_fn(qual, ns, d, namespace, results, passing):
-    if not d.body:
-        return
+    if d.body is None:               # a foreign binding (bodyless) — nothing to check or emit.
+        return                       # NB: `not d.body` would also skip an EMPTY body [] (e.g. a
+                                     # `() void {}`), dropping it from `passing` -> never emitted -> link error.
     locals_ = {p.name: p.type for p in d.params}
     try:
         want = d.ret if d.ret is not None else ret_type(qual, namespace)   # declared or inferred
