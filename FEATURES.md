@@ -1,11 +1,13 @@
 # Features
 
-What the language has and does today. ~2,890 LOC of compiler, 285 tests, compiles to C
-via `cc`. (For the *why* — "structure is the constraint" — see [README](README.md); for
-where it's headed, [VISION](VISION.md).)
+What the language has and does today. ~3,230 LOC of compiler (Python host) + ~990 LOC of
+bundled Zen stdlib/prelude, 367 tests, compiles to C via `cc`. (For the *why* — "structure
+is the constraint" — see [README](README.md); for where it's headed, [VISION](VISION.md).)
 
 ## Type system
-- **Primitives:** `i32`, `i64`, `u8`, `bool`, `void`, `str` (`str` is comptime-only).
+- **Primitives:** `i32`, `i64`, `u8`, `bool`, `void`, `str` (a C string; comptime literals,
+  or built at runtime via `cstr` — see Systems/FFI). **Char literals** `'a'` are sugar for the
+  byte value (reuse the integer path, so `b == ':'` not `b == 58`).
 - **Products** — structs: `Point: { x: i32, y: i32 }`.
 - **Sums** — enums with optional payloads, variants `|`-separated (a sum is a *choice*):
   `Shape: Circle(i32) | Square(i32) | Dot`
@@ -76,8 +78,13 @@ where it's headed, [VISION](VISION.md).)
   reified `Ast` has an `Extern` `Decl` variant, so a generator produces `[Decl]` of bodyless C
   bindings, spliced + installed by `b.use` exactly like a static one. A translate-c adapter is this
   shape — parse a header, `@emit` one `Extern` per declaration (`bindings/gen_demo.zen` shows it).
-- **Raw memory intrinsics:** `addr(x)`, `load(p)`, `store(p, v)`, `offset(p, i)`.
-- Enough to build a **heap-allocating, growable `String`** on an allocator.
+- **Raw memory intrinsics:** `addr(x)`, `load(p)`, `store(p, v)`, `offset(p, i)`,
+  `slice(ptr, len)`, **`sizeof(T)`** (byte size of a named type → heap-allocate a typed node),
+  and **`cstr(p)`** (reinterpret a NUL-terminated byte pointer as a runtime `str`).
+  `load`/`offset` also read a `str`'s bytes raw (a `str` is a `const char*`), so source text
+  can be scanned slice-free.
+- Enough to build a **heap-allocating, growable `String`** on an allocator — and on top of
+  that, an explicit allocator, a `Vec`, and a self-hosted lexer + parser (see stdlib below).
 
 ## Standard library (`std.*`)
 - A third bundled category beside the comptime-only **prelude** and the FFI **bindings**:
@@ -100,16 +107,36 @@ where it's headed, [VISION](VISION.md).)
   `[u8]` view), `free`. Functional — each op returns the updated `(ptr,len,cap)` header while the
   buffer is `realloc`'d underneath, so `s := s.append("…")` threads it. This is the keystone for
   **runtime code generation** — a backend can emit source as a value the running program builds.
+- **`std.alloc` — an explicit, Zig-style allocator.** An `Allocator` trait
+  (`acquire`/`resize`/`release`) + a stateless libc-backed `Malloc`. A function that allocates
+  takes the allocator as a parameter, so allocation is visible in the signature; a `<A: Allocator>`
+  bound monomorphizes, so dispatch is zero-cost (`a.acquire(n)` compiles straight to the chosen
+  allocator). Nothing hides a `malloc`.
+- **`std.vec`** — a growable array that threads the allocator explicitly: `a.vec(cap)` /
+  `v.push(a, x)` (grows via `a.resize`) / `v.items()` / `v.vfree(a)`.
 - **`std.genc` — a C backend written in Zen, run at RUNTIME.** It walks a **recursive** AST
-  (ordinary lowered structs + enums — runtime values) — expressions `Int`/`Var`/`Bin`/`Call`/`Cond`
-  (a `Bin` holds `Ptr<Expr>` children), statements `Let`/`Return`, **typed parameters** (`[Param]`
-  with a `Ty` enum → C type names) and a return `Ty` — and emits C into a `String`: `genC(f: Func)
-  → String`, plus `genModule([Func])` for a whole translation unit. A running zen program builds an
-  AST and gets C source as a value — and that emitted C compiles and computes. The tests close the
-  loop: zen emits a **recursive factorial** `int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n *
-  fact((n - 1)))); }` → `fact(5) == 120`, and a 2-arg `int32_t add(int32_t a, int32_t b) { return
-  (a + b); }` → `add(3,4) == 7`. The self-hosting seed: codegen is the language's own ordinary
-  code, not the host's. (A subset today; the path is to grow it toward lowering zen in zen.)
+  (ordinary lowered structs + enums — runtime values): expressions
+  `Int`/`Var`/`Bin`/`Call`/`Cond`/`Member`/`Arrow`/`MakeEnum`/`Tag`/`Match`/`StrLit` (children are
+  heap `Ptr<Expr>`), statements `Let`/`Assign`/`Return`/`If`/`While`, **typed parameters** (`[Param]`
+  with a `Ty` enum incl. `Ptr`) and a return `Ty`, plus `Struct`/`Enum`/`DRaw` **decls** — and emits
+  C into a `String`: `genC(f: Func) → String`, `genModule([Decl])` for a whole translation unit
+  (forward-declared so recursive types compile). Milestones: a recursive `fact(5)==120`, a
+  `match`-on-`Shape`, a cons-list `sum([1,2,3])==6` built from structs+enums+pointers (**no slices**).
+- **`std.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
+  kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (a `str` is a `const char*`),
+  tokens are spans (allocation-free), and it handles idents, ints, strings (with escapes), multi-char
+  operators (`:= == => <= …`), and `//` comments. The token stream is the pure positional `scan`
+  iterated to Eof — or a materialized heap cons-list via `tokenize(a, src)`.
+- **`std.parse` — a recursive-descent parser written in Zen.** Pulls tokens from `std.lex` and
+  builds `std.genc`'s `Expr`/`Stmt` AST (a heap tree, allocated through the allocator). Handles
+  arithmetic with precedence (`+ - * /`, parens), identifiers, and `name := value` statement lists
+  → a whole `Func`.
+- **The loop closes — entirely in Zen.** A running zen program lexes + parses + lowers a *source
+  string* to running native code: `"(1 + 2) * 3"` → `scan` → `parse` → `genC` →
+  `int32_t f(){ return ((1 + 2) * 3); }` → `cc` → `f() == 9`. A backend-parity test asserts this
+  Zen pipeline agrees with the Python `emit_c` on the subset both cover. The self-hosting seed,
+  made real on a subset: codegen *and* the front end are the language's own ordinary code, not the
+  host's. (The path from here is to grow the Zen front end up to the production `ast.py`.)
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 
