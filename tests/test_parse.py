@@ -103,3 +103,53 @@ def test_source_to_c_respects_precedence(tmp_path):
     generated = gen_c(tmp_path, "1 + 2 * 3")
     assert generated == "int32_t f() { return (1 + (2 * 3)); }"
     assert run_generated(tmp_path, generated) == 7
+
+
+# ── identifiers + let: a whole function, source -> C -> run ──────────────────────
+# parse_fn parses `x := <expr>` then a return `<expr>` into a whole function. This
+# crosses the runtime-string wall: an identifier is a SPAN into the source, so its
+# lexeme is copied out and NUL-terminated (cstr) to become a genc name. The body lives
+# on the heap (a stack slice literal would dangle once the Func is returned).
+FN_DRIVER = """
+{ Malloc } = std.alloc
+{ parse_fn } = std.parse
+{ genC } = std.genc
+{ String, bytes } = std.string
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+main* = () i32 {
+    m := Malloc { _: 0 }
+    emit(genC(addr(m).parse_fn("%s", "f")))
+    0
+}
+"""
+
+
+def gen_fn(tmp_path, src):
+    (tmp_path / "main.zen").write_text(FN_DRIVER % src)
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
+                        str(tmp_path / "o.c"), "-o", str(tmp_path / "o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+
+
+def test_parse_fn_lowers_a_whole_function(tmp_path):
+    # let-bind x, return an expression that USES x — the identifier survives as a runtime
+    # name, the whole fn lowers, compiles, and runs.
+    gen = gen_fn(tmp_path, r"x := 1 + 2\nx * 3")
+    assert gen == "int32_t f() { int32_t x = (1 + 2); return (x * 3); }"
+    assert run_generated(tmp_path, gen) == 9
+
+
+def test_parse_fn_another_binding(tmp_path):
+    gen = gen_fn(tmp_path, r"total := 10 - 1\ntotal * total")
+    assert gen == "int32_t f() { int32_t total = (10 - 1); return (total * total); }"
+    assert run_generated(tmp_path, gen) == 81
