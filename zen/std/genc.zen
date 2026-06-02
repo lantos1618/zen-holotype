@@ -11,7 +11,7 @@
 // left-to-right through the chain.
 
 { String, new, append, push } = std.string
-{ view, is_empty } = std.str
+{ view, is_empty, eq } = std.str
 
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
@@ -123,7 +123,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Int(n)  => s.gen_int(n),
         .Var(v)  => s.append(v.name),
         .Bin(b)  => s.gen_bin(b),
-        .Call(c) => s.append(c.fn).append("(").gen_args(c.args).append(")"),
+        .Call(c) => s.gen_call(c),
         .Cond(d) => s.gen_cond(d),
         .Member(m) => s.gen_expr(m.obj).append(".").append(m.field),
         .Arrow(a) => s.gen_expr(a.obj).append("->").append(a.field),
@@ -137,6 +137,21 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
 
 gen_bin = (s: String, b: BinData) String {
     s.append("(").gen_expr(b.lhs).append(" ").append(b.op).append(" ").gen_expr(b.rhs).append(")")
+}
+
+// a call. The memory INTRINSICS (load/store/offset/addr/cstr) are not real C functions —
+// they erase to raw pointer ops, exactly as the Python lowerer does. Everything else is an
+// ordinary `fn(args)`. (sizeof/slice need a type argument and are left for the slice/generic
+// work — they don't appear in the scanner core.)
+arg0 = (c: CallData) Ptr<Expr> { c.args[0].addr() }
+arg1 = (c: CallData) Ptr<Expr> { c.args[1].addr() }
+gen_call = (s: String, c: CallData) String {
+    eq(c.fn, "load").match   { true => s.append("(*(").gen_expr(c.arg0()).append("))"), false =>
+    eq(c.fn, "offset").match { true => s.append("((").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"), false =>
+    eq(c.fn, "store").match  { true => s.append("(*(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"), false =>
+    eq(c.fn, "addr").match   { true => s.append("(&(").gen_expr(c.arg0()).append("))"), false =>
+    eq(c.fn, "cstr").match   { true => s.append("((const char*)(").gen_expr(c.arg0()).append("))"), false =>
+    s.append(c.fn).append("(").gen_args(c.args).append(")") } } } } }
 }
 
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
@@ -261,9 +276,13 @@ gen_params = (s: String, ps: [Param]) String {
 }
 
 // emit one function, appending to `s` (so a module can stream several into one buffer)
-gen_func* = (s: String, f: Func) String {
-    s.gen_ty(f.ret.addr()).append(" ").append(f.name).append("(").gen_params(f.params).append(") ").gen_block(f.body)
+// a function signature `ret name(params)` — shared by the definition and the forward proto
+gen_sig = (s: String, f: Func) String {
+    s.gen_ty(f.ret.addr()).append(" ").append(f.name).append("(").gen_params(f.params).append(")")
 }
+gen_func* = (s: String, f: Func) String { s.gen_sig(f).append(" ").gen_block(f.body) }
+// a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
+gen_proto = (s: String, d: Decl) String { d.match { .DFunc(f) => s.gen_sig(f).append("; "), _ => s } }
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 gen_struct* = (s: String, sd: StructDecl) String {
@@ -323,6 +342,7 @@ genC* = (f: Func) String { new().gen_func(f) }
 genModule* = (decls: [Decl]) String {
     s := new()
     decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
-    decls.loop((h, i, d) { s = s.gen_decl(d).append(" ") })  // pass 2: definitions + functions
+    decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
+    decls.loop((h, i, d) { s = s.gen_decl(d).append(" ") })  // pass 3: definitions + functions
     s
 }
