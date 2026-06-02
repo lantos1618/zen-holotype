@@ -7,7 +7,7 @@
 // precedence. eval() interprets the tree to prove the parse is right:
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, lit, vref, bin, call, slet, sassign, sret, param, ti32, ti64, tu8, tbool, tstr } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, lit, vref, bin, call, slet, sassign, sret, param, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -246,7 +246,8 @@ ty_of = (src: str, t: Token) Ty {
     tok_eq(src, t, "i64").match { true => ti64(), false =>
     tok_eq(src, t, "u8").match { true => tu8(), false =>
     tok_eq(src, t, "bool").match { true => tbool(), false =>
-    tok_eq(src, t, "str").match { true => tstr(), false => ti32() } } } }   // default i32 (named/Ptr: TODO)
+    tok_eq(src, t, "str").match { true => tstr(), false =>
+    tok_eq(src, t, "void").match { true => tvoid(), false => ti32() } } } } }   // default i32 (named/Ptr: TODO)
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
@@ -276,15 +277,16 @@ fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) P
     }
 }
 
-// ── a whole function DECLARATION — `name* = (params) i32 { body }` ──────────────────
-// Reads real decl syntax: the leading Ident is the name; the typed parameter list is
-// parsed into a heap [Param]; the brace body is parsed. (i32 return for now.)
+// ── a whole function DECLARATION — `name* = (params) RetType { body }` ──────────────
+// Reads real decl syntax: the leading Ident is the name; the typed parameter list parses
+// into a heap [Param]; the return-type token (after `)`) maps via ty_of; the brace body
+// is parsed. (A `{` right after `)` — no return type — falls through ty_of to i32.)
 parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func {
     nt    := scan(src, 0)                                // the function name
     name  := a.lexeme(src, nt.tok)
     buf   := a.param_buf()
     pe    := a.fill_params(src, skip_to_lparen(src, nt.next), buf, 0)   // params + pos past ')'
-    Func { name: name, params: take_params(buf, pe.count), ret: ti32(),
+    Func { name: name, params: take_params(buf, pe.count), ret: ty_of(src, scan(src, pe.next).tok),
            body: a.build_body(src, skip_to_brace(src, pe.next)) }
 }
 
