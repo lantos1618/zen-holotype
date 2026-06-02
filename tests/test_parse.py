@@ -334,6 +334,26 @@ def test_parse_module_n_arg_calls(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 6
 
 
+# ── struct declarations: the self-hosted parser reads user-defined TYPES ──────────────
+# `name*: { field: Type, … }` parses into genc's StructDecl (a `typedef struct`). The decl
+# dispatch branches on the token after the name (`:` -> struct, `=` -> function), so a
+# module mixes structs and functions freely.
+def test_parse_module_struct_declaration(tmp_path):
+    gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }")
+    assert gen == "typedef struct Pt Pt; struct Pt { int32_t x; int32_t y; }; "
+
+
+def test_parse_module_struct_and_function(tmp_path):
+    # one module mixing a struct decl and a function decl -> a single translation unit
+    gen = gen_module(tmp_path, r"V3*: { x: i32, y: i32, z: i32 }\nsum3* = (a: i32, b: i32, c: i32) i32 { a + b + c }")
+    assert "typedef struct V3 V3; struct V3 { int32_t x; int32_t y; int32_t z; };" in gen
+    assert "int32_t sum3(int32_t a, int32_t b, int32_t c) { return ((a + b) + c); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return sum3(1, 2, 3); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 6
+
+
 # ── @while loops: the self-hosted parser handles ITERATION, not just recursion ───────
 # `@while(cond) { stmts }` parses into genc's While. The loop body is a brace block of
 # let / assign / nested-@while statements with NO trailing return (a loop yields no value).
