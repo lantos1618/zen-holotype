@@ -259,6 +259,8 @@ def _c_call(e, locals_, namespace, scope, expect=None) -> str:
         if e.callee == "store":
             return f"(*({a[0]}) = {a[1]})"
         return f"(({a[0]}) + ({a[1]}))"                    # offset
+    if e.callee == "cstr":                                # cstr(p) -> reinterpret a byte ptr as const char*
+        return f"((const char*)({c_expr(e.args[0], locals_, namespace, scope)}))"
     if e.callee == "sizeof":                              # sizeof(T) -> C sizeof of the named type
         ty = resolve_type(NameT(e.args[0].name), scope, namespace)
         return f"sizeof({c_type(ty)})"

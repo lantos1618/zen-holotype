@@ -7,7 +7,7 @@
 // precedence. eval() interprets the tree to prove the parse is right:
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, lit, bin } = std.genc
+{ Expr, BinData, Func, Stmt, lit, vref, bin, slet, sret, ti32 } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -20,6 +20,24 @@ enode<A: Allocator> = (a: Ptr<A>, v: Expr) Ptr<Expr> {
     buf := a.ebuf()
     buf[0] = v
     addr(buf[0])
+}
+
+// ── materialize a token's span as an owned, NUL-terminated str ───────────────────
+// genc's names are `str` (const char*), but a token is a span {start,len} into the
+// source — so an identifier's lexeme must be copied out and NUL-terminated, then viewed
+// as a str (cstr reinterprets the byte pointer). This is the runtime-string step.
+copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
+    i := 0
+    @while(i < n) {
+        store(offset(dst, i), byte_at(src, start + i))
+        i = i + 1
+    }
+}
+lexeme<A: Allocator> = (a: Ptr<A>, src: str, t: Token) str {
+    p := a.acquire(t.len + 1)
+    copy_span(src, t.start, p, t.len)
+    store(offset(p, t.len), 0)              // NUL terminator
+    cstr(p)
 }
 
 // ── token helpers ────────────────────────────────────────────────────────────────
@@ -40,12 +58,13 @@ to_int_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
 }
 to_int = (src: str, t: Token) i32 { to_int_from(src, t.start, t.start + t.len, 0) }
 
-// ── atom := integer | '(' expr ')' ───────────────────────────────────────────────
+// ── atom := integer | identifier | '(' expr ')' ──────────────────────────────────
 parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
     sc := scan(src, pos)
     sc.tok.kind.match {
-        .Int => PExpr { expr: a.enode(lit(to_int(src, sc.tok))), next: sc.next },
-        _    => a.parse_paren(src, sc)               // a '(' (the only other atom for now)
+        .Int   => PExpr { expr: a.enode(lit(to_int(src, sc.tok))), next: sc.next },
+        .Ident => PExpr { expr: a.enode(vref(a.lexeme(src, sc.tok))), next: sc.next },
+        _      => a.parse_paren(src, sc)             // a '(' (the only other atom)
     }
 }
 parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
@@ -78,6 +97,27 @@ expr_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
 
 // parse a whole source string to an expression tree
 parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_expr(src, 0).expr }
+
+// a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
+sbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
+
+// ── a whole function: `name := value` then a final expression ─────────────────────
+// Parses `x := <expr>` followed by a return `<expr>` into `int32_t fname() { int32_t
+// x = …; return …; }`. The let-bound name is materialized (runtime str), so the return
+// expression can reference it. The body lives on the HEAP — a `[…]` literal has stack
+// storage and would dangle once this Func is returned. One let for now; a dynamic
+// statement list is the next rung.
+parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
+    nt   := scan(src, 0)                     // the let-bound name (an Ident)
+    name := a.lexeme(src, nt.tok)
+    at   := scan(src, nt.next)               // the ':=' token
+    v    := a.parse_expr(src, at.next)       // the bound value
+    r    := a.parse_expr(src, v.next)        // the final, returned expression
+    body := a.sbuf(2)
+    body[0] = slet(name, v.expr)
+    body[1] = sret(r.expr)
+    Func { name: fname, params: [], ret: ti32(), body: body }
+}
 
 // ── eval: interpret the tree (proof the parse is right) ───────────────────────────
 eval_bin = (b: BinData) i32 {

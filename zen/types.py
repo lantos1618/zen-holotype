@@ -409,6 +409,11 @@ def _infer_call(e, expect, locals_, namespace, scope):
         return PtrT(Dir.MUT, infer(e.args[0], locals_, namespace, scope))
     if e.callee in ("load", "store", "offset"):           # raw memory ops, T inferred from the ptr
         return _infer_mem(e, locals_, namespace, scope)
+    if e.callee == "cstr":                                # cstr(p): view a NUL-terminated byte ptr as a str
+        pt = infer(e.args[0], locals_, namespace, scope)
+        if not (isinstance(pt, PtrT) or pt == PrimT(Prim.STR)):
+            raise TypeErr("cstr(p) needs a byte pointer")
+        return PrimT(Prim.STR)
     if e.callee == "sizeof":                              # sizeof(T): byte size of a named type, i64
         if len(e.args) != 1 or not isinstance(e.args[0], Var):
             raise TypeErr("sizeof(T) takes a single type name")

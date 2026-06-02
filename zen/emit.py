@@ -97,7 +97,7 @@ def _scan_expr(e, locals_, namespace, scope, sink, expect=None, cenv=None):
     elif isinstance(e, Call):
         if e.callee == "sizeof":                          # sizeof(T): the arg is a TYPE, not a value
             return
-        if e.callee in ("addr", "load", "store", "offset", "slice"):   # intrinsics: just scan args
+        if e.callee in ("addr", "load", "store", "offset", "slice", "cstr"):   # intrinsics: just scan args
             for a in e.args:
                 _scan_expr(a, locals_, namespace, scope, sink, None, cenv)
             return
