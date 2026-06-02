@@ -269,6 +269,28 @@ def gen_module(tmp_path, src):
     return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
 
 
+def _compile_run(tmp_path, generated, call):
+    """cc the generated C with `int main(){ return <call>; }`; return the exit code."""
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + generated + f"\nint main(void){{ return {call}; }}\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    return subprocess.run([str(tmp_path / "g")]).returncode
+
+
+def test_parse_decl_recursive_factorial(tmp_path):
+    # a boolean `.match` lowers to genc's ternary Cond, so the self-hosted compiler handles
+    # BRANCHING — and therefore RECURSION. The whole thing is parsed + lowered in Zen.
+    gen = gen_decl(tmp_path, r"fact* = (n: i32) i32 { (n <= 1).match { true => 1, false => n * fact(n - 1) } }")
+    assert gen == "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }"
+    assert _compile_run(tmp_path, gen, "fact(5)") == 120
+
+
+def test_parse_decl_recursive_fibonacci(tmp_path):
+    gen = gen_decl(tmp_path, r"fib* = (n: i32) i32 { (n < 2).match { true => n, false => fib(n - 1) + fib(n - 2) } }")
+    assert gen == "int32_t fib(int32_t n) { return ((n < 2) ? n : (fib((n - 1)) + fib((n - 2)))); }"
+    assert _compile_run(tmp_path, gen, "fib(10)") == 55   # 0,1,1,2,3,5,8,13,21,34,55
+
+
 def test_parse_module_multiple_functions(tmp_path):
     # two function decls in one source -> a whole translation unit; one calls the other.
     gen = gen_module(tmp_path, r"inc* = (x: i32) i32 { x + 1 }\ndbl* = (x: i32) i32 { x + x }")
