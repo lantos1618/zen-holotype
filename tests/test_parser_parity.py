@@ -86,6 +86,11 @@ def zen_parser_sexpr(tmp_path, expr):
     "f(1, 2, 3)",           # -> (f 1 2 3)
     "g(a, h(b, c))",        # -> (g a (h b c))   nested multi-arg
     "sum(x, y) * 2",        # -> (* (sum x y) 2)
+    # logical operators — && binds tighter than ||, both looser than comparison
+    "a && b",               # -> (&& a b)
+    "a || b && c",          # -> (|| a (&& b c))
+    "x < 1 || y > 2",       # -> (|| (< x 1) (> y 2))
+    "p && q || r && s",     # -> (|| (&& p q) (&& r s))
 ])
 def test_zen_and_python_parsers_build_the_same_tree(tmp_path, expr):
     assert zen_parser_sexpr(tmp_path, expr) == python_parser_sexpr(expr)

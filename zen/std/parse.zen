@@ -87,7 +87,7 @@ parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
 parse_arm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then an expr
     pat   := src.scan(pos)                                          // the pattern (true / false)
     arrow := src.scan(pat.next)                                     // '=>'
-    a.parse_cmp(src, arrow.next)
+    a.parse_or(src, arrow.next)
 }
 parse_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr) PExpr {
     dot   := src.scan(subj.next)                                    // '.'
@@ -123,7 +123,7 @@ fill_args<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) P
     src.is_rparen(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_arg(src, pos, buf, i) }
 }
 fill_arg<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
-    arg   := a.parse_cmp(src, pos)                   // one argument
+    arg   := a.parse_or(src, pos)                   // one argument
     buf[i] = load(arg.expr)                          // store its Expr value
     after := src.scan(arg.next)                      // ',' or ')'
     src.is_comma(after.tok).match {
@@ -132,7 +132,7 @@ fill_arg<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PE
     }
 }
 parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
-    inner := a.parse_cmp(src, open.next)             // parse past the '(' (full expr incl. compare)
+    inner := a.parse_or(src, open.next)             // parse past the '(' (full expr incl. compare)
     close := src.scan(inner.next)                    // consume the ')'
     PExpr { expr: inner.expr, next: close.next }
 }
@@ -182,8 +182,32 @@ cmp_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
     a.cmp_rest(src, PExpr { expr: a.enode(bin(src.cmp_op_str(sc.tok), lhs.expr, rhs.expr)), next: rhs.next })
 }
 
-// parse a whole source string to an expression tree (the loosest level is comparison)
-parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_cmp(src, 0).expr }
+// ── logic := and ('||' and)* ;  and := compare ('&&' compare)*   (left-assoc) ────────
+// `&&` binds tighter than `||`, both looser than comparison — so `a || b && c` parses as
+// `(a || (b && c))` (two levels), matching C.
+is_and = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 2) && (src.byte_at(t.start) == '&'), _ => false } }
+is_or  = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 2) && (src.byte_at(t.start) == '|'), _ => false } }
+parse_and<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.and_rest(src, a.parse_cmp(src, pos)) }
+and_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_and(sc.tok).match { false => lhs, true => a.and_more(src, lhs, sc) }
+}
+and_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_cmp(src, sc.next)
+    a.and_rest(src, PExpr { expr: a.enode(bin("&&", lhs.expr, rhs.expr)), next: rhs.next })
+}
+parse_or<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.or_rest(src, a.parse_and(src, pos)) }
+or_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_or(sc.tok).match { false => lhs, true => a.or_more(src, lhs, sc) }
+}
+or_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_and(src, sc.next)
+    a.or_rest(src, PExpr { expr: a.enode(bin("||", lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// parse a whole source string to an expression tree (the loosest level is `||`)
+parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -234,18 +258,18 @@ parse_set_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the assigned name
     name := a.lexeme(src, nt.tok)
     eq   := src.scan(nt.next)                // '='
-    v    := a.parse_cmp(src, eq.next)        // value
+    v    := a.parse_or(src, eq.next)        // value
     a.scons(sassign(name, v.expr), a.parse_stmts(src, v.next))
 }
 parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the bound name
     name := a.lexeme(src, nt.tok)
     at   := src.scan(nt.next)                // ':='
-    v    := a.parse_cmp(src, at.next)        // value (full expression, incl. comparison)
+    v    := a.parse_or(src, at.next)        // value (full expression, incl. comparison)
     a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
 }
 parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    r := a.parse_cmp(src, pos)
+    r := a.parse_or(src, pos)
     a.scons(sret(r.expr), a.snil())
 }
 
