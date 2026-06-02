@@ -149,7 +149,12 @@ module.exports = grammar({
     literal_pattern: $ => choice($.integer, $.boolean),   // n.match { 0 => …, _ => … }
     wildcard: $ => '_',
 
-    call:         $ => prec.left(4, seq(field('fn', $._unary), $.arguments)),
+    // The callee is a name `f(…)` or a method receiver chain `a.b.f(…)` — NOT an
+    // arbitrary expression. ast.py's Call.callee is a `str`, and the parser only reads
+    // an identifier or field_access here; allowing any `_unary` let `f()()` / `xs[0]()`
+    // parse into a garbage callee. (field_access's own `obj` is still any _unary, so
+    // `addr(x).f()` and `a.b.c(…)` chains keep working.)
+    call:         $ => prec.left(4, seq(field('fn', choice($.identifier, $.field_access)), $.arguments)),
     // the postfix `.` is glued (token.immediate) — like the call `(` and index `[` —
     // so a statement-leading `.Ok(…)` on the next line is a fresh enum_ctor, not a
     // method call absorbed onto the previous statement.
