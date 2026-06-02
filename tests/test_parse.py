@@ -577,6 +577,14 @@ def test_parse_enum_constructor(tmp_path):
     assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
 
 
+def test_parse_enum_constructor_empty_parens(tmp_path):
+    # `.Nil()` (empty parens) is a payload-less Tag, not a MakeEnum — `()` must not be parsed
+    # as a payload. This is the cons-list `nil` constructor shape from lex.zen.
+    gen = gen_checked_module(tmp_path, r"List*: Nil | Cons(i32)\nmk_nil* = () List { .Nil() }\nmk_cons* = (x: i32) List { .Cons(x) }")
+    assert "List mk_nil() { return (List){ .tag = List_Nil }; }" in gen                       # .Nil() -> Tag
+    assert "List mk_cons(int32_t x) { return (List){ .tag = List_Cons, .u.Cons = x }; }" in gen   # .Cons(x) -> MakeEnum
+
+
 def test_parse_enum_milestone(tmp_path):
     # 🏁 THE MILESTONE: an enum DECLARED, CONSTRUCTED (.Circle), passed, and MATCHED — the
     # whole module lexed -> parsed -> CHECKED -> lowered -> compiled -> run, entirely in Zen.

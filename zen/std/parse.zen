@@ -126,9 +126,16 @@ parse_ctor<A: Allocator> = (a: Ptr<A>, src: str, dot: Scan) PExpr {
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)                          // '(' (payload) or anything else (a bare tag)
     src.is_lparen(nx.tok).match {
-        true  => a.parse_ctor_payload(src, vn, nx),
+        true  => src.is_rparen(src.scan(nx.next).tok).match {
+            true  => a.parse_ctor_empty(src, vn, nx),     // `.Variant()` -> Tag (empty payload)
+            false => a.parse_ctor_payload(src, vn, nx)    // `.Variant(arg)` -> MakeEnum
+        },
         false => PExpr { expr: a.enode(mktag("", vn)), next: vt.next }   // `.Variant` -> Tag
     }
+}
+parse_ctor_empty<A: Allocator> = (a: Ptr<A>, src: str, vn: str, lp: Scan) PExpr {
+    rp := src.scan(lp.next)                          // ')'
+    PExpr { expr: a.enode(mktag("", vn)), next: rp.next }
 }
 parse_ctor_payload<A: Allocator> = (a: Ptr<A>, src: str, vn: str, lp: Scan) PExpr {
     arg := a.parse_or(src, lp.next)                  // the single payload expression
