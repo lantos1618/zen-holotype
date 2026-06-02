@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from zen.ast import Lit, Var, Bin
+from zen.ast import Lit, Var, Bin, Call
 from zen.parser import parse
 from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptime,
                       run_emits, check, emit_c)
@@ -26,6 +26,8 @@ def py_sexpr(e):
         return e.name
     if isinstance(e, Bin):
         return f"({e.op} {py_sexpr(e.l)} {py_sexpr(e.r)})"
+    if isinstance(e, Call):                          # genc's Call is one-arg: (fn arg)
+        return f"({e.callee} {' '.join(py_sexpr(a) for a in e.args)})"
     return "?"
 
 
@@ -75,6 +77,11 @@ def zen_parser_sexpr(tmp_path, expr):
     "a == b",
     "x * 2 >= y + 1",       # -> (>= (* x 2) (+ y 1))
     "n <= 0",
+    # one-arg function calls (genc's Call is single-arg)
+    "f(x)",                 # -> (f x)
+    "g(1 + 2)",             # -> (g (+ 1 2))
+    "h(a) + 1",             # -> (+ (h a) 1)
+    "inc(inc(n))",          # -> (inc (inc n))   nested
 ])
 def test_zen_and_python_parsers_build_the_same_tree(tmp_path, expr):
     assert zen_parser_sexpr(tmp_path, expr) == python_parser_sexpr(expr)
