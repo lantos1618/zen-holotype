@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, slet, sassign, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, cond, slet, sassign, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -63,14 +63,41 @@ to_int_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
 }
 to_int = (src: str, t: Token) i32 { src.to_int_from(t.start, t.start + t.len, 0) }
 
-// ── atom := integer | call | identifier | '(' expr ')' ───────────────────────────
-parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
+// ── atom := base postfixed by an optional `.match { true => X, false => Y }` ───────
+// base := integer | call | identifier | '(' expr ')'
+parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.parse_postfix(src, a.parse_base(src, pos)) }
+parse_base<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     sc.tok.kind.match {
         .Int   => PExpr { expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next },
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
         _      => a.parse_paren(src, sc)             // a '(' (the only other atom)
     }
+}
+// a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
+is_dot      = (src: str, t: Token) bool { src.is_op(t, '.') }
+is_match_kw = (src: str, t: Token) bool { t.kind.match { .Ident => src.tok_eq(t, "match"), _ => false } }
+is_match_at = (src: str, pos: i32) bool {
+    dot := src.scan(pos)                                            // a '.' followed by `match`?
+    src.is_dot(dot.tok).match { true => src.is_match_kw(src.scan(dot.next).tok), false => false }
+}
+parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+    src.is_match_at(base.next).match { true => a.parse_match(src, base), false => base }
+}
+parse_arm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then an expr
+    pat   := src.scan(pos)                                          // the pattern (true / false)
+    arrow := src.scan(pat.next)                                     // '=>'
+    a.parse_cmp(src, arrow.next)
+}
+parse_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr) PExpr {
+    dot   := src.scan(subj.next)                                    // '.'
+    kw    := src.scan(dot.next)                                     // 'match'
+    open  := src.scan(kw.next)                                      // '{'
+    ta    := a.parse_arm(src, open.next)                            // true  => X
+    comma := src.scan(ta.next)                                      // ','
+    fa    := a.parse_arm(src, comma.next)                           // false => Y
+    close := src.scan(fa.next)                                      // '}'
+    PExpr { expr: a.enode(cond(subj.expr, ta.expr, fa.expr)), next: close.next }
 }
 // an Ident is a variable — unless the very next token is `(`, making it a one-arg call
 is_lparen = (src: str, t: Token) bool { src.is_op(t, '(') }
