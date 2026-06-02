@@ -1,7 +1,8 @@
 """zen driver.
 
-    python3 -m zen build [dir]   # read build.zen, compile + link + run the exe
-    python3 -m zen check [dir]   # type-check report only, emit a C lib
+    python3 -m zen build [dir]        # read build.zen, compile + link + run the exe
+    python3 -m zen check [dir]        # type-check, report only (--emit writes out.c)
+    python3 -m zen dump  [dir]        # canonical AST dump + hash of each .zen module
 
 Pipeline: parse -> insert into trie -> resolve refs -> infer/fits -> to_c.
 Only well-typed functions are codegen'd. The phases live in their own modules —
@@ -16,6 +17,7 @@ from .types import (fits, infer_block, ret_type, show, scope_with_bounds, subst,
                     TypeErr, Private, Unresolved, Located)        # Private/Unresolved re-exported
 from .lower import c_name
 from .parser import parse
+from .astdump import dump, ast_hash
 from .comptime import fold_comptime, evaluate, reify_decl
 from .resolve import build_namespace, build_scopes, resolve, _resolve_fn, is_prelude_ns
 from .emit import emit_c
@@ -277,6 +279,22 @@ def cmd_build(root):
         raise SystemExit(f"\n{failures} zen test(s) failed or did not type-check")
 
 
+def cmd_dump(root):
+    """Print the canonical, structural AST dump + hash of each .zen module under `root` —
+    the reference a future Zen-written parser is diffed against (see zen/astdump.py)."""
+    paths = sorted(pathlib.Path(root).glob("*.zen"))
+    if not paths:
+        raise SystemExit(f"no .zen files in {root!r}")
+    for p in paths:
+        try:
+            f = parse(p.read_text(), p.stem)
+        except SyntaxError as e:
+            print(f"── {p.name} ──  PARSE ERROR: {e}")
+            continue
+        print(f"── {p.name} ──  [{ast_hash(f)}]")
+        print(dump(f))
+
+
 def cli(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd = argv[0] if argv else "build"
@@ -286,8 +304,10 @@ def cli(argv=None):
         cmd_build(root)
     elif cmd == "check":
         cmd_check(root, emit="--emit" in rest)           # check is report-only; --emit writes out.c
+    elif cmd == "dump":
+        cmd_dump(root)
     else:
-        raise SystemExit(f"usage: zen [build|check] <root> [--emit]   (unknown command {cmd!r})")
+        raise SystemExit(f"usage: zen [build|check|dump] <root> [--emit]   (unknown command {cmd!r})")
 
 
 if __name__ == "__main__":
