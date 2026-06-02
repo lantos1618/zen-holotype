@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, slet, sassign, swhile, sif, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -407,7 +407,10 @@ parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
             true  => a.parse_set_stmt(src, pos),
             false => src.is_while_here(pos).match {
                 true  => a.parse_while_stmt(src, pos),
-                false => a.parse_ret_stmt(src, pos)
+                false => src.is_if_here(pos).match {
+                    true  => a.parse_if_stmt(src, pos),
+                    false => a.parse_ret_stmt(src, pos)
+                }
             }
         }
     }
@@ -462,6 +465,48 @@ parse_while_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     a.scons(w.stmt, a.parse_stmts(src, w.next))
 }
 
+// ── if statements ────────────────────────────────────────────────────────────────
+// `if (cond) { then } else { els }` (the else is optional) — both arms are no-return
+// statement blocks (like a loop body). Lowers to genc's If. Detected by the `if` Ident
+// followed by `(`. Sibling to @while.
+is_if_kw   = (src: str, t: Token) bool { t.kind.match { .Ident => src.tok_eq(t, "if"), _ => false } }
+is_else_kw = (src: str, t: Token) bool { t.kind.match { .Ident => src.tok_eq(t, "else"), _ => false } }
+is_if_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_if_kw(sc.tok).match { true => src.is_lparen(src.scan(sc.next).tok), false => false }
+}
+empty_stmts<A: Allocator> = (a: Ptr<A>) [Stmt] { a.materialize(a.snil()) }
+
+IfEnd*:   { stmt: Stmt, next: i32 }
+ElseEnd*: { els: [Stmt], next: i32 }
+parse_if<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) IfEnd {
+    kw     := src.scan(pos)                        // 'if'
+    lp     := src.skip_to_lparen(kw.next)          // pos just past '('
+    c      := a.parse_or(src, lp)                  // condition (stops at ')')
+    rp     := src.scan(c.next)                      // ')'
+    tstart := src.skip_to_brace(rp.next)           // pos just past the then-'{'
+    tblk   := a.parse_block(src, tstart)           // then-block statements
+    eb     := a.parse_else(src, tblk.next)         // optional else-block
+    IfEnd { stmt: sif(c.expr, a.materialize(tblk.list), eb.els), next: eb.next }
+}
+parse_else<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) ElseEnd {
+    sc := src.scan(pos)
+    src.is_else_kw(sc.tok).match {
+        true  => a.parse_else_block(src, sc.next),
+        false => ElseEnd { els: a.empty_stmts(), next: pos }   // no else -> empty block
+    }
+}
+parse_else_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) ElseEnd {   // pos just past 'else'
+    estart := src.skip_to_brace(pos)               // pos just past the else-'{'
+    eblk   := a.parse_block(src, estart)
+    ElseEnd { els: a.materialize(eblk.list), next: eblk.next }
+}
+// the top-level statement form: an If, then the rest of the function body
+parse_if_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    f := a.parse_if(src, pos)
+    a.scons(f.stmt, a.parse_stmts(src, f.next))
+}
+
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
 BlockEnd*: { list: Ptr<SList>, next: i32 }
 parse_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
@@ -476,9 +521,17 @@ block_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
         true  => a.block_let(src, pos),
         false => src.is_set_here(pos).match {
             true  => a.block_set(src, pos),
-            false => a.block_while(src, pos)        // the only remaining statement form
+            false => src.is_while_here(pos).match {
+                true  => a.block_while(src, pos),
+                false => a.block_if(src, pos)       // remaining: an if (or malformed)
+            }
         }
     }
+}
+block_if<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    f    := a.parse_if(src, pos)
+    rest := a.parse_block(src, f.next)
+    BlockEnd { list: a.scons(f.stmt, rest.list), next: rest.next }
 }
 block_let<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)
