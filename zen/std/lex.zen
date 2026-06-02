@@ -21,16 +21,16 @@ Token*: { kind: TokKind, start: i32, len: i32 }    // lexeme = source[start .. s
 Scan*:  { tok: Token, next: i32 }                  // one scan step: the token + resume pos
 
 // ── byte classes ──────────────────────────────────────────────────────────────
-is_digit* = (b: u8) bool { (b >= 48) && (b <= 57) }                                  // 0-9
-is_alpha* = (b: u8) bool { ((b >= 97) && (b <= 122)) || ((b >= 65) && (b <= 90)) || (b == 95) }  // a-z A-Z _
+is_digit* = (b: u8) bool { (b >= '0') && (b <= '9') }
+is_alpha* = (b: u8) bool { ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_') }
 is_alnum* = (b: u8) bool { is_alpha(b) || is_digit(b) }
-is_space* = (b: u8) bool { (b == 32) || (b == 9) || (b == 10) || (b == 13) }         // space tab nl cr
+is_space* = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r') }
 
 // ── skip whitespace and `//` line comments, returning the next significant pos ──
-is_comment = (src: str, pos: i32) bool { (byte_at(src, pos) == 47) && (byte_at(src, pos + 1) == 47) }
+is_comment = (src: str, pos: i32) bool { (byte_at(src, pos) == '/') && (byte_at(src, pos + 1) == '/') }
 skip_line = (src: str, pos: i32) i32 {
     b := byte_at(src, pos)
-    ((b == 0) || (b == 10)).match { true => pos, false => skip_line(src, pos + 1) }   // stop at NUL / newline
+    ((b == '\0') || (b == '\n')).match { true => pos, false => skip_line(src, pos + 1) }   // stop at NUL / newline
 }
 skip = (src: str, pos: i32) i32 {
     is_space(byte_at(src, pos)).match {
@@ -47,11 +47,11 @@ ident_end = (src: str, pos: i32) i32 { is_alnum(byte_at(src, pos)).match { true 
 int_end   = (src: str, pos: i32) i32 { is_digit(byte_at(src, pos)).match { true => int_end(src, pos + 1), false => pos } }
 str_end   = (src: str, pos: i32) i32 {                 // pos just past the opening quote
     b := byte_at(src, pos)
-    (b == 0).match {
+    (b == '\0').match {
         true  => pos,                                  // unterminated — stop at NUL
-        false => (b == 34).match {                     // closing quote
+        false => (b == '"').match {                    // closing quote
             true  => pos + 1,
-            false => (b == 92).match {                 // backslash: skip the escaped char
+            false => (b == '\\').match {               // backslash: skip the escaped char
                 true  => str_end(src, pos + 2),
                 false => str_end(src, pos + 1)
             }
@@ -63,13 +63,13 @@ str_end   = (src: str, pos: i32) i32 {                 // pos just past the open
 // zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
 two_op = (b0: u8, b1: u8) bool {
-    ((b0 == 58) && (b1 == 61)) ||      // :=
-    ((b0 == 61) && (b1 == 61)) ||      // ==
-    ((b0 == 60) && (b1 == 61)) ||      // <=
-    ((b0 == 62) && (b1 == 61)) ||      // >=
-    ((b0 == 61) && (b1 == 62)) ||      // =>
-    ((b0 == 38) && (b1 == 38)) ||      // &&
-    ((b0 == 124) && (b1 == 124))       // ||
+    ((b0 == ':') && (b1 == '=')) ||      // :=
+    ((b0 == '=') && (b1 == '=')) ||      // ==
+    ((b0 == '<') && (b1 == '=')) ||      // <=
+    ((b0 == '>') && (b1 == '=')) ||      // >=
+    ((b0 == '=') && (b1 == '>')) ||      // =>
+    ((b0 == '&') && (b1 == '&')) ||      // &&
+    ((b0 == '|') && (b1 == '|'))         // ||
 }
 sym_end = (src: str, pos: i32) i32 {
     two_op(byte_at(src, pos), byte_at(src, pos + 1)).match { true => pos + 2, false => pos + 1 }
@@ -82,7 +82,7 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
         true  => mk(.Ident(), pos, ident_end(src, pos + 1)),
         false => is_digit(b).match {
             true  => mk(.Int(), pos, int_end(src, pos + 1)),
-            false => (b == 34).match {
+            false => (b == '"').match {
                 true  => mk(.Str(), pos, str_end(src, pos + 1)),
                 false => mk(.Sym(), pos, sym_end(src, pos))
             }
@@ -92,7 +92,7 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
 scan* = (src: str, pos0: i32) Scan {
     pos := skip(src, pos0)
     b := byte_at(src, pos)
-    (b == 0).match {
+    (b == '\0').match {
         true  => Scan { tok: Token { kind: .Eof(), start: pos, len: 0 }, next: pos },
         false => scan_one(src, pos, b)
     }
