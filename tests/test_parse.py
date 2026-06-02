@@ -482,6 +482,25 @@ def test_parse_enum_match_resolves_ename(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 52
 
 
+def test_parse_enum_constructor(tmp_path):
+    # `.Variant(payload)` -> genc MakeEnum, `.Variant` -> Tag. The parser leaves the enum type
+    # "" ; std.check fills it by looking the variant up among the module's enum decls.
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }")
+    assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
+
+
+def test_parse_enum_milestone(tmp_path):
+    # 🏁 THE MILESTONE: an enum DECLARED, CONSTRUCTED (.Circle), passed, and MATCHED — the
+    # whole module lexed -> parsed -> CHECKED -> lowered -> compiled -> run, entirely in Zen.
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }\narea* = (s: Shape) i32 { s.match { .Circle(r) => r * r * 3, .Square(w) => w * w } }")
+    assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
+    assert "int32_t area(Shape s) { return (s.tag == Shape_Circle ? " in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return area(mk(3)); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 27   # Circle(3) -> 3*3*3
+
+
 def test_parse_enum_match_no_payload(tmp_path):
     # variants without payloads: the arms are bare bodies, no __auto_type binding
     gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match { .Lo => 0, .Hi => 1 } }")

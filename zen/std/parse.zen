@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, arm, ematch, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -72,8 +72,27 @@ parse_base<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
     sc.tok.kind.match {
         .Int   => PExpr { expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next },
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
-        _      => a.parse_paren(src, sc)             // a '(' (the only other atom)
+        _      => src.is_dot(sc.tok).match {
+            true  => a.parse_ctor(src, sc),          // `.Variant` / `.Variant(arg)` — an enum constructor
+            false => a.parse_paren(src, sc)          // '(' (the only other atom)
+        }
     }
+}
+// a leading-dot enum constructor `.Variant` (a Tag) or `.Variant(payload)` (a MakeEnum). The
+// enum TYPE is left "" — std.check fills it by looking the variant up among the enum decls.
+parse_ctor<A: Allocator> = (a: Ptr<A>, src: str, dot: Scan) PExpr {
+    vt := src.scan(dot.next)                         // the variant name
+    vn := a.lexeme(src, vt.tok)
+    nx := src.scan(vt.next)                          // '(' (payload) or anything else (a bare tag)
+    src.is_lparen(nx.tok).match {
+        true  => a.parse_ctor_payload(src, vn, nx),
+        false => PExpr { expr: a.enode(mktag("", vn)), next: vt.next }   // `.Variant` -> Tag
+    }
+}
+parse_ctor_payload<A: Allocator> = (a: Ptr<A>, src: str, vn: str, lp: Scan) PExpr {
+    arg := a.parse_or(src, lp.next)                  // the single payload expression
+    rp  := src.scan(arg.next)                        // ')'
+    PExpr { expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next }     // `.Variant(arg)` -> MakeEnum
 }
 // a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
 is_dot      = (src: str, t: Token) bool { src.is_op(t, '.') }

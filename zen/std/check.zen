@@ -1,28 +1,32 @@
 // std.check — a minimal type resolver over the genc AST, the smallest slice of a checker.
-// Today it does ONE job: fill in each enum `match`'s `ename` (the enum type name genc needs
-// to emit tag constants like `Shape_Circle`) by looking up the match subject's declared type
-// among the enclosing function's parameters. The parser leaves ename "" because it has no
-// type information; this pass supplies it — exactly what's needed to cross the "enum match"
-// wall (multi-variant match was blocked on knowing the subject's enum).
+// It supplies the two pieces of type information the parser can't compute on its own:
+//   • each enum `match`'s `ename` — the enum type name genc needs to emit `subj.tag == E_V`,
+//     found by looking the match subject up among the enclosing function's PARAMETERS;
+//   • each enum constructor's type — `.Circle(5)` / `.Lo` carry no enum name from the parser,
+//     so we look the VARIANT up among the module's enum decls and fill it in.
+// Together that's exactly what's needed to cross the "enum" wall (match was blocked on the
+// subject's enum name; construction on the variant's enum name) — not the 700-LOC full port.
 //
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
-// unchanged leaves by their original pointer. Allocation goes through the same allocator the
-// parser used.
-{ Expr, Stmt, Decl, Func, Param, Ty, ArmData, bin, cond, call, member, ematch, arm, slet, sassign, sret, sif, swhile, dfunc } = std.genc
+// unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, ArmData, bin, cond, call, member, ematch, mkenum, mktag, arm, slet, sassign, sret, sif, swhile, dfunc } = std.genc
 { Allocator } = std.alloc
 { eq } = std.str
 
-// heap-allocate a fresh node (same pattern the parser uses for its Expr nodes)
-ebuf<A: Allocator>    = (a: Ptr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
+// the resolution environment: the current function's params + every module decl (for enums)
+Env*: { ps: [Param], decls: [Decl] }
+
+// heap-allocate fresh nodes (the same pattern the parser uses)
+ebuf<A: Allocator> = (a: Ptr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
 enode<A: Allocator> = (a: Ptr<A>, v: Expr) Ptr<Expr> {
     buf := a.ebuf(1)
     buf[0] = v
     buf[0].addr()
 }
-abuf<A: Allocator>    = (a: Ptr<A>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(ArmData)), n) }
-sbuf<A: Allocator>    = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
-dbuf<A: Allocator>    = (a: Ptr<A>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
+abuf<A: Allocator> = (a: Ptr<A>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(ArmData)), n) }
+sbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
+dbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
 
 // the enum type bound to variable `name` among params: a Named param yields its type name.
 ty_name = (t: Ty) str { t.match { .Named(n) => n, _ => "" } }
@@ -31,54 +35,70 @@ lookup_enum = (ps: [Param], name: str) str {
     ps.loop((h, i, p) { found = eq(p.name, name).match { true => p.ty.ty_name(), false => found } })
     found
 }
+// the enum that declares variant `vn` (scan every enum decl) — "" if none
+enum_has = (ed: EnumDecl, vn: str) bool {
+    f := false
+    ed.variants.loop((h, i, v) { f = eq(v.name, vn).match { true => true, false => f } })
+    f
+}
+pick_enum = (ed: EnumDecl, vn: str, found: str) str { ed.enum_has(vn).match { true => ed.name, false => found } }
+enum_of_variant = (decls: [Decl], vn: str) str {
+    found := ""
+    decls.loop((h, i, d) { found = d.match { .DEnum(ed) => ed.pick_enum(vn, found), _ => found } })
+    found
+}
 
-// ── rebuild an expression, filling any Match's ename (recurse into every sub-expression) ──
-resolve_expr<A: Allocator> = (a: Ptr<A>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
+// ── rebuild an expression, filling enum match enames + constructor types ───────────────
+resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match {
-        .Match(m)   => a.enode(ematch(m.subj, ps.lookup_enum(m.subj), a.resolve_arms(ps, m.arms))),
-        .Bin(b)     => a.enode(bin(b.op, a.resolve_expr(ps, b.lhs), a.resolve_expr(ps, b.rhs))),
-        .Cond(c)    => a.enode(cond(a.resolve_expr(ps, c.c), a.resolve_expr(ps, c.t), a.resolve_expr(ps, c.e))),
-        .Call(c)    => a.enode(call(c.fn, a.resolve_args(ps, c.args))),
-        .Member(mm) => a.enode(member(a.resolve_expr(ps, mm.obj), mm.field)),
-        _           => e                              // Int/Var/Tag/MakeEnum/MakeStruct/StrLit/Arrow: unchanged
+        .Match(m)     => a.enode(ematch(m.subj, env.ps.lookup_enum(m.subj), a.resolve_arms(env, m.arms))),
+        .MakeEnum(mk) => a.enode(mkenum(env.decls.enum_of_variant(mk.variant), mk.variant, a.resolve_expr(env, mk.payload))),
+        .Tag(t)       => a.enode(mktag(env.decls.enum_of_variant(t.variant), t.variant)),
+        .Bin(b)       => a.enode(bin(b.op, a.resolve_expr(env, b.lhs), a.resolve_expr(env, b.rhs))),
+        .Cond(c)      => a.enode(cond(a.resolve_expr(env, c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
+        .Call(c)      => a.enode(call(c.fn, a.resolve_args(env, c.args))),
+        .Member(mm)   => a.enode(member(a.resolve_expr(env, mm.obj), mm.field)),
+        _             => e                            // Int/Var/MakeStruct/StrLit/Arrow: unchanged
     }
 }
-resolve_args<A: Allocator> = (a: Ptr<A>, ps: [Param], args: [Expr]) [Expr] {
+resolve_args<A: Allocator> = (a: Ptr<A>, env: Env, args: [Expr]) [Expr] {
     buf := a.ebuf(args.len)
-    args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(ps, ar.addr())) })
+    args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env, ar.addr())) })
     buf
 }
-resolve_arms<A: Allocator> = (a: Ptr<A>, ps: [Param], arms: [ArmData]) [ArmData] {
+resolve_arms<A: Allocator> = (a: Ptr<A>, env: Env, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
-    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(ps, ar.body)) })
+    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(env, ar.body)) })
     buf
 }
 
 // ── rebuild statements ────────────────────────────────────────────────────────────────
-resolve_stmt<A: Allocator> = (a: Ptr<A>, ps: [Param], st: Stmt) Stmt {
+resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
     st.match {
-        .Let(l)    => slet(l.name, a.resolve_expr(ps, l.value)),
-        .Assign(x) => sassign(x.name, a.resolve_expr(ps, x.value)),
-        .Return(r) => sret(a.resolve_expr(ps, r)),
-        .If(f)     => sif(a.resolve_expr(ps, f.c), a.resolve_body(ps, f.then), a.resolve_body(ps, f.els)),
-        .While(w)  => swhile(a.resolve_expr(ps, w.c), a.resolve_body(ps, w.body))
+        .Let(l)    => slet(l.name, a.resolve_expr(env, l.value)),
+        .Assign(x) => sassign(x.name, a.resolve_expr(env, x.value)),
+        .Return(r) => sret(a.resolve_expr(env, r)),
+        .If(f)     => sif(a.resolve_expr(env, f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
+        .While(w)  => swhile(a.resolve_expr(env, w.c), a.resolve_body(env, w.body))
     }
 }
-resolve_body<A: Allocator> = (a: Ptr<A>, ps: [Param], body: [Stmt]) [Stmt] {
+resolve_body<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
-    body.loop((h, i, st) { buf[i] = a.resolve_stmt(ps, st) })
+    body.loop((h, i, st) { buf[i] = a.resolve_stmt(env, st) })
     buf
 }
 
-// ── rebuild decls: a function's body is resolved against its own parameters ────────────
-resolve_func<A: Allocator> = (a: Ptr<A>, f: Func) Func {
-    Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(f.params, f.body) }
+// ── rebuild decls: a function's body is resolved against its params + the module's enums ──
+resolve_func<A: Allocator> = (a: Ptr<A>, decls: [Decl], f: Func) Func {
+    Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(Env { ps: f.params, decls: decls }, f.body) }
 }
-resolve_decl<A: Allocator> = (a: Ptr<A>, d: Decl) Decl { d.match { .DFunc(f) => dfunc(a.resolve_func(f)), _ => d } }
+resolve_decl<A: Allocator> = (a: Ptr<A>, decls: [Decl], d: Decl) Decl {
+    d.match { .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d }
+}
 
-// resolve a whole module, returning new decls with every enum match's ename filled in
+// resolve a whole module, returning new decls with enum match enames + constructor types set
 resolve_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) [Decl] {
     buf := a.dbuf(decls.len)
-    decls.loop((h, i, d) { buf[i] = a.resolve_decl(d) })
+    decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
     buf
 }
