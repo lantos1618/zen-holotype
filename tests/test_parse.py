@@ -336,7 +336,8 @@ def test_parse_decl_recursive_gcd(tmp_path):
 def test_parse_module_multiple_functions(tmp_path):
     # two function decls in one source -> a whole translation unit; one calls the other.
     gen = gen_module(tmp_path, r"inc* = (x: i32) i32 { x + 1 }\ndbl* = (x: i32) i32 { x + x }")
-    assert gen == ("int32_t inc(int32_t x) { return (x + 1); } "
+    assert gen == ("int32_t inc(int32_t x); int32_t dbl(int32_t x); "          # forward protos
+                   "int32_t inc(int32_t x) { return (x + 1); } "
                    "int32_t dbl(int32_t x) { return (x + x); } ")
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return inc(dbl(5)); }\n")
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
@@ -380,7 +381,8 @@ def test_parse_module_struct_declaration(tmp_path):
 def test_parse_module_struct_and_function(tmp_path):
     # one module mixing a struct decl and a function decl -> a single translation unit
     gen = gen_module(tmp_path, r"V3*: { x: i32, y: i32, z: i32 }\nsum3* = (a: i32, b: i32, c: i32) i32 { a + b + c }")
-    assert "typedef struct V3 V3; struct V3 { int32_t x; int32_t y; int32_t z; };" in gen
+    assert "typedef struct V3 V3;" in gen
+    assert "struct V3 { int32_t x; int32_t y; int32_t z; };" in gen
     assert "int32_t sum3(int32_t a, int32_t b, int32_t c) { return ((a + b) + c); }" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return sum3(1, 2, 3); }\n")
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
@@ -445,6 +447,36 @@ def test_parse_char_literal_escape(tmp_path):
     assert "int32_t nl() { return 10; }" in gen      # '\n' -> byte 10 via esc_byte
 
 
+# ── self-hosting lex.zen: genc now lowers memory intrinsics, forward-declares functions ──
+def test_genc_lowers_memory_intrinsics(tmp_path):
+    # load/offset/store/addr/cstr are not real C functions — genc erases them to raw pointer
+    # ops (like the Python lowerer), so byte_at compiles instead of calling a phantom `load`.
+    gen = gen_module(tmp_path, r"at* = (s: str, i: i32) u8 { load(offset(s, i)) }")
+    assert "uint8_t at(const char* s, int32_t i) { return (*(((s) + (i)))); }" in gen
+    (tmp_path / "g.c").write_text('#include <stdint.h>\n' + gen + '\nint main(void){ return at("ABC", 1); }\n')
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 66   # 'B'
+
+
+def test_genmodule_forward_declares_functions(tmp_path):
+    # a function may call one defined LATER (out-of-order / mutual recursion): genModule emits
+    # a prototype pass so the forward reference is declared before use.
+    gen = gen_module(tmp_path, r"f* = (x: i32) i32 { g(x) + 1 }\ng* = (x: i32) i32 { x * 2 }")
+    assert "int32_t f(int32_t x); int32_t g(int32_t x);" in gen   # both forward-declared first
+    (tmp_path / "g.c").write_text('#include <stdint.h>\n' + gen + '\nint main(void){ return f(5); }\n')
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 11   # g(5)=10, +1
+
+
+def test_check_resolves_ctor_inside_struct_literal(tmp_path):
+    # std.check recurses into struct-literal field values, so a `.A()` nested in a struct
+    # literal gets its enum resolved (K_A), not left as the broken `_A`.
+    gen = gen_checked_module(tmp_path, r"K*: A | B\nBox*: { tag: K, n: i32 }\nmk* = (n: i32) Box { Box { tag: .A(), n: n } }")
+    assert ".tag = (K){ .tag = K_A }" in gen   # the nested .A() resolved to K_A
+
+
 # ── UFCS method calls: `recv.f(args)` desugars to `f(recv, args)` ─────────────────────
 # The dominant construct in our own stdlib. `recv.name` is field access; `recv.name(args)`
 # prepends the receiver as the first call argument. Both chain.
@@ -468,7 +500,7 @@ def test_parse_ufcs_does_not_break_field_access(tmp_path):
 def test_parse_imports_are_skipped(tmp_path):
     # a real file starts with imports; the parser skips them and parses the decls that follow.
     gen = gen_module(tmp_path, r"{ Expr, Func } = std.genc\n{ scan } = std.lex\ninc* = (x: i32) i32 { x + 1 }")
-    assert gen == "int32_t inc(int32_t x) { return (x + 1); } "   # only the function, no import noise
+    assert gen == "int32_t inc(int32_t x); int32_t inc(int32_t x) { return (x + 1); } "   # proto + def, no import noise
 
 
 # ── if statements: `if (c) { … } else { … }` -> genc If (sibling to @while) ───────────
