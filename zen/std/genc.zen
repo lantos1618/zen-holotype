@@ -20,14 +20,15 @@ VarData*: { name: str }
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
 CallData*: { fn: str, arg: Ptr<Expr> }                  // fn(arg) — a one-arg call
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
-MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field
+MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
+ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
 MakeEnumData*: { ty: str, variant: str, payload: Ptr<Expr> }  // (E){ .tag=E_V, .u.V=payload }
 TagData*: { ty: str, variant: str }                     // (E){ .tag=E_V }  (no payload)
 ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
 MatchData*: { subj: str, ename: str, arms: [ArmData] }  // subj is a variable; last arm is the default
 StrData*: { value: str }                                // a C string literal "…" (escaped on emit)
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData)
-     | Member(MemberData) | MakeEnum(MakeEnumData) | Tag(TagData) | Match(MatchData) | StrLit(StrData)
+     | Member(MemberData) | Arrow(ArrowData) | MakeEnum(MakeEnumData) | Tag(TagData) | Match(MatchData) | StrLit(StrData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -36,7 +37,7 @@ IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } els
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData)
 // types + typed parameters
-Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str       // scalar, named struct, void, or const char*
+Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>)   // scalar/struct/void/str, or T*
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
@@ -56,6 +57,7 @@ bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: 
 call* = (fn: str, a: Ptr<Expr>) Expr { .Call(CallData { fn: fn, arg: a }) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData { c: c, t: t, e: e }) }
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData { obj: o, field: f }) }
+arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData { obj: o, field: f }) }
 mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, variant: v, payload: p }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
@@ -72,6 +74,7 @@ ti64* = () Ty { .I64() }
 tu8* = () Ty { .U8() }
 tbool* = () Ty { .Bool() }
 tnamed* = (n: str) Ty { .Named(n) }
+tptr* = (t: Ptr<Ty>) Ty { .Ptr(t) }
 param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
 field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
 sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
@@ -93,10 +96,13 @@ gen_int = (s: String, n: i32) String {
     }
 }
 
-// a Ty -> its C type name
-cty = (t: Ty) str {
-    t.match { .I32 => "int32_t", .I64 => "int64_t", .U8 => "uint8_t", .Bool => "bool",
-              .Named(n) => n, .Void => "void", .Str => "const char*" }
+// append a C type — recurses for pointers (`T*`), so it can't be a plain str-returning fn
+gen_ty = (s: String, t: Ptr<Ty>) String {
+    t.match {
+        .I32 => s.append("int32_t"), .I64 => s.append("int64_t"), .U8 => s.append("uint8_t"),
+        .Bool => s.append("bool"), .Void => s.append("void"), .Str => s.append("const char*"),
+        .Named(n) => s.append(n), .Ptr(p) => s.gen_ty(p).append("*")
+    }
 }
 
 // does any variant carry a payload? (no payloads -> emit no union, like lower.py)
@@ -115,6 +121,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Call(c) => s.append(c.fn).append("(").gen_expr(c.arg).append(")"),
         .Cond(d) => s.gen_cond(d),
         .Member(m) => s.gen_expr(m.obj).append(".").append(m.field),
+        .Arrow(a) => s.gen_expr(a.obj).append("->").append(a.field),
         .MakeEnum(m) => s.gen_mkenum(m),
         .Tag(t) => s.append("(").append(t.ty).append("){ .tag = ").append(t.ty).append("_").append(t.variant).append(" }"),
         .Match(m) => s.gen_match(m),
@@ -201,20 +208,20 @@ gen_params = (s: String, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match { true => out, false => out.append(", ") }   // comma between, not before
-        out = out.append(cty(p.ty)).append(" ").append(p.name)
+        out = out.gen_ty(addr(p.ty)).append(" ").append(p.name)
     })
     out
 }
 
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 gen_func* = (s: String, f: Func) String {
-    s.append(cty(f.ret)).append(" ").append(f.name).append("(").gen_params(f.params).append(") ").gen_block(f.body)
+    s.gen_ty(addr(f.ret)).append(" ").append(f.name).append("(").gen_params(f.params).append(") ").gen_block(f.body)
 }
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 gen_struct* = (s: String, sd: StructDecl) String {
     open := s.append("typedef struct { ")
-    sd.fields.loop((h, i, fld) { open = open.append(cty(fld.ty)).append(" ").append(fld.name).append("; ") })
+    sd.fields.loop((h, i, fld) { open = open.gen_ty(addr(fld.ty)).append(" ").append(fld.name).append("; ") })
     open.append("} ").append(sd.name).append(";")
 }
 
@@ -222,7 +229,7 @@ gen_struct* = (s: String, sd: StructDecl) String {
 gen_union = (s: String, vs: [VariantDef]) String {
     u := s.append(" union { ")
     vs.loop((h, i, v) {
-        u = v.payload.match { .Void => u, _ => u.append(cty(v.payload)).append(" ").append(v.name).append("; ") }
+        u = v.payload.match { .Void => u, _ => u.gen_ty(addr(v.payload)).append(" ").append(v.name).append("; ") }
     })
     u.append("} u;")
 }

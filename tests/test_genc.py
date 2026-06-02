@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, mkenum, mktag, arm, ematch, strlit, slet, sret, sassign, sif, swhile, param, tnamed, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, arrow, mkenum, mktag, arm, ematch, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -326,3 +326,18 @@ def test_genc_string_literal_with_escaping(tmp_path):
     assert generated == r'const char* msg() { return "a\"b\n"; }'
     # the emitted C compiles and the runtime string is exactly a"b<newline>
     assert compile_and_run(tmp_path, generated, '(msg()[0] + msg()[1] + msg()[2])') == str(ord('a') + ord('"') + ord('b'))
+
+
+def test_genc_pointer_type_and_arrow(tmp_path):
+    # int32_t getx(Point* p) { return p->x; }  — pointer parameter + arrow field access.
+    body = """
+    pt := sdef("Point", [field("x", ti32()), field("y", ti32())])
+    pty := tnamed("Point")
+    p1 := vref("p")
+    px := arrow(addr(p1), "x")
+    getx := Func { name: "getx", params: [param("p", tptr(addr(pty)))], ret: ti32(), body: [sret(addr(px))] }
+    emit(genModule([dstruct(pt), dfunc(getx)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "int32_t getx(Point* p) { return p->x; }" in generated
+    assert compile_and_run(tmp_path, generated, "({ Point pt = {9, 0}; getx(&pt); })") == "9"
