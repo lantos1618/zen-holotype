@@ -152,7 +152,9 @@ def _check_impl(d, f, namespace, results, passing):
 def run_test_root(root, test_rel, cc_extra=()):
     """Compile the test root together with the project modules and run each
     bool-returning no-arg test, reporting PASS/FAIL from its return value.
-    `cc_extra` are extra cc args (the Executable's cflags + `-l` links)."""
+    `cc_extra` are extra cc args (the Executable's cflags + `-l` links).
+    Returns the number of FAILED tests (a false return, a crash, or a test that
+    didn't type-check) so the caller can make the build fail honestly."""
     test_ns = pathlib.Path(test_rel).with_suffix("").as_posix().replace("/", ".")
     files = load(root)                       # includes the test root (skips only build.zen)
     namespace = build_namespace(files)
@@ -164,10 +166,12 @@ def run_test_root(root, test_rel, cc_extra=()):
     runnable = [d for d in tests if f"{test_ns}.{d.name}" in passing]
 
     calls = "\n".join(
-        f'    printf("   %s  {test_ns}.{d.name}\\n", '
-        f'{c_name(f"{test_ns}.{d.name}")}() ? "PASS \\u2713" : "FAIL \\u2717");'
+        f'    {{ int ok = {c_name(f"{test_ns}.{d.name}")}(); '
+        f'printf("   %s  {test_ns}.{d.name}\\n", ok ? "PASS \\u2713" : "FAIL \\u2717"); '
+        f'if (!ok) fails++; }}'
         for d in runnable)
-    harness = f'\n#include <stdio.h>\nint main(void) {{\n{calls}\n    return 0;\n}}\n'
+    harness = (f'\n#include <stdio.h>\nint main(void) {{\n    int fails = 0;\n'
+               f'{calls}\n    return fails;\n}}\n')         # exit code = number of failed tests
 
     out_dir = pathlib.Path(root) / "build"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -175,9 +179,12 @@ def run_test_root(root, test_rel, cc_extra=()):
     compile_if_changed(cpath, bpath, emit_c(files, passing, namespace, harness), cc_extra)
     print(f"\n── tests: {test_rel} ──")
     skipped = [d.name for d in tests if d not in runnable]
-    print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
+    res = subprocess.run([str(bpath)], capture_output=True, text=True, timeout=120)
+    print(res.stdout, end="")
     for name in skipped:
         print(f"   SKIP    {test_ns}.{name}  (did not type-check)")
+    rc = res.returncode                                    # >0: that many FAILs; <0: crashed
+    return (rc if rc > 0 else (0 if rc == 0 else 1)) + len(skipped)
 
 
 def caret(root, why):
@@ -201,15 +208,16 @@ def report(results, root):
               + ("" if ok else caret(root, why)))
 
 
-def cmd_check(root):
+def cmd_check(root, emit=False):
     files = load(root)
     namespace = build_namespace(files)
     build_scopes(files); resolve(files, namespace); fold_comptime(files, namespace); run_emits(files, namespace)
     results, passing = check(files, namespace)
     print(f"── check {root} ──")
     report(results, root)
-    pathlib.Path("out.c").write_text(emit_c(files, passing, namespace))
-    print("   -> wrote out.c")
+    if emit:                                             # `check` is report-only unless asked to emit
+        pathlib.Path("out.c").write_text(emit_c(files, passing, namespace))
+        print("   -> wrote out.c")
 
 
 def cmd_build(root):
@@ -262,17 +270,24 @@ def cmd_build(root):
     else:
         print(f"\n── {bpath} up to date (cached) ──")
     print(f"── running {bpath} ──")
-    print(subprocess.run([str(bpath)], capture_output=True, text=True).stdout, end="")
+    print(subprocess.run([str(bpath)], capture_output=True, text=True, timeout=120).stdout, end="")
 
-    for t in cfg["tests"]:
-        run_test_root(root, t, cc_extra)
+    failures = sum(run_test_root(root, t, cc_extra) for t in cfg["tests"])
+    if failures:
+        raise SystemExit(f"\n{failures} zen test(s) failed or did not type-check")
 
 
 def cli(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd = argv[0] if argv else "build"
-    arg = argv[1] if len(argv) > 1 else "examples"
-    (cmd_build if cmd == "build" else cmd_check)(arg)
+    rest = argv[1:]
+    root = next((a for a in rest if not a.startswith("-")), "examples")
+    if cmd == "build":
+        cmd_build(root)
+    elif cmd == "check":
+        cmd_check(root, emit="--emit" in rest)           # check is report-only; --emit writes out.c
+    else:
+        raise SystemExit(f"usage: zen [build|check] <root> [--emit]   (unknown command {cmd!r})")
 
 
 if __name__ == "__main__":
