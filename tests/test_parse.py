@@ -153,3 +153,20 @@ def test_parse_fn_another_binding(tmp_path):
     gen = gen_fn(tmp_path, r"total := 10 - 1\ntotal * total")
     assert gen == "int32_t f() { int32_t total = (10 - 1); return (total * total); }"
     assert run_generated(tmp_path, gen) == 81
+
+
+def test_parse_fn_dynamic_statement_list(tmp_path):
+    # N lets (not a fixed count), each able to reference earlier ones. The body is built
+    # as a cons-list while parsing, then materialized to a HEAP [Stmt] — if it were a
+    # stack slice literal it would dangle once the Func is returned and genC would crash.
+    gen = gen_fn(tmp_path, r"a := 2\nb := a + 3\nc := b * b\nc - 1")
+    assert gen == ("int32_t f() { int32_t a = 2; int32_t b = (a + 3); "
+                   "int32_t c = (b * b); return (c - 1); }")
+    assert run_generated(tmp_path, gen) == 24          # a=2, b=5, c=25, c-1=24
+
+
+def test_parse_fn_zero_lets_is_just_a_return(tmp_path):
+    # the degenerate case: no lets, the whole source is the returned expression.
+    gen = gen_fn(tmp_path, r"7 * 6")
+    assert gen == "int32_t f() { return (7 * 6); }"
+    assert run_generated(tmp_path, gen) == 42

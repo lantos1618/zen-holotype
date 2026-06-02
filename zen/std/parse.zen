@@ -98,24 +98,69 @@ expr_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
 // parse a whole source string to an expression tree
 parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_expr(src, 0).expr }
 
-// a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
-sbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
+// ── statement sequence: zero or more `name := expr` lines, then a final expression ──
+// The count is unknown while parsing, so statements accumulate into a cons-list, then
+// get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
+// dangles the moment the Func is returned (genc would then walk freed memory).
+SList*: SNil | SCons(SCell)
+SCell*: { head: Stmt, tail: Ptr<SList> }
 
-// ── a whole function: `name := value` then a final expression ─────────────────────
-// Parses `x := <expr>` followed by a return `<expr>` into `int32_t fname() { int32_t
-// x = …; return …; }`. The let-bound name is materialized (runtime str), so the return
-// expression can reference it. The body lives on the HEAP — a `[…]` literal has stack
-// storage and would dangle once this Func is returned. One let for now; a dynamic
-// statement list is the next rung.
-parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
-    nt   := scan(src, 0)                     // the let-bound name (an Ident)
+// ctor fns — a leading-dot enum can't infer its type passed straight into a generic call
+snil_val  = () SList { .SNil() }
+scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell { head: h, tail: t }) }
+slbuf<A: Allocator>  = (a: Ptr<A>) [SList] { slice(a.acquire(sizeof(SList)), 1) }
+slnode<A: Allocator> = (a: Ptr<A>, v: SList) Ptr<SList> {
+    buf := a.slbuf()
+    buf[0] = v
+    addr(buf[0])
+}
+snil<A: Allocator>   = (a: Ptr<A>) Ptr<SList> { a.slnode(snil_val()) }
+scons<A: Allocator>  = (a: Ptr<A>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
+
+// is there a `name :=` at `pos`? (an Ident, then the two-byte ':=' symbol)
+is_assign = (src: str, t: Token) bool {
+    t.kind.match { .Sym => (t.len == 2) && (byte_at(src, t.start) == ':') && (byte_at(src, t.start + 1) == '='), _ => false }
+}
+is_let_here = (src: str, pos: i32) bool {
+    a := scan(src, pos)
+    a.tok.kind.match { .Ident => is_assign(src, scan(src, a.next).tok), _ => false }
+}
+
+// parse statements [pos..] into a cons-list: each `name := expr` is a Let; the first
+// non-let token begins the final expression, parsed as the function's `return`.
+parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    is_let_here(src, pos).match { true => a.parse_let_stmt(src, pos), false => a.parse_ret_stmt(src, pos) }
+}
+parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    nt   := scan(src, pos)                   // the bound name
     name := a.lexeme(src, nt.tok)
-    at   := scan(src, nt.next)               // the ':=' token
-    v    := a.parse_expr(src, at.next)       // the bound value
-    r    := a.parse_expr(src, v.next)        // the final, returned expression
-    body := a.sbuf(2)
-    body[0] = slet(name, v.expr)
-    body[1] = sret(r.expr)
+    at   := scan(src, nt.next)               // ':='
+    v    := a.parse_expr(src, at.next)       // value
+    a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
+}
+parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    r := a.parse_expr(src, pos)
+    a.scons(sret(r.expr), a.snil())
+}
+
+// count the statements, then fill a heap [Stmt] from the list (return the next index)
+scount = (l: Ptr<SList>) i32 { l.match { .SNil => 0, .SCons(c) => 1 + scount(c.tail) } }
+sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 { l.match { .SNil => i, .SCons(c) => sfill_cons(buf, c, i) } }
+sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
+    buf[i] = c.head
+    sfill(buf, c.tail, i + 1)
+}
+
+// a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
+stmt_buf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
+
+// ── a whole function: N `name := value` lines, then a final expression ─────────────
+// `x := 1 + 2\n y := x * 2\n y - 1`  ->  int32_t f(){ int32_t x=…; int32_t y=…; return …; }
+// Each let-bound name is materialized (runtime str), so later lines can reference it.
+parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
+    stmts := a.parse_stmts(src, 0)
+    body  := a.stmt_buf(scount(stmts))
+    sfill(body, stmts, 0)
     Func { name: fname, params: [], ret: ti32(), body: body }
 }
 
