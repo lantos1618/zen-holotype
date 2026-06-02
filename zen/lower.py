@@ -98,7 +98,7 @@ def c_type(t) -> str:
         if t.args:                          # a generic struct/enum instance -> monomorphized name
             return mangle(t)
         return c_name(t.path)
-    return "void"
+    raise TypeError(f"no C type for {t!r} — an unresolved/unknown type reached codegen")
 
 
 # ───────────────────────── expression codegen ──────────────────────────────
@@ -163,7 +163,7 @@ def c_expr(e, locals_, namespace, scope, expect=None) -> str:
         case Closure():
             raise TypeError("a closure may only be passed to a closure parameter (it is inlined there)")
         case _:
-            return "0"
+            raise TypeError(f"no C lowering for {e!r} — an unknown expression node reached codegen")
 
 
 # ── closures: an inline template + a per-site closure environment ────────────
