@@ -397,6 +397,35 @@ def test_parse_struct_milestone(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 25   # 3*3 + 4*4 = 25
 
 
+# ── enum declarations: the self-hosted parser reads SUM types ─────────────────────────
+# `name*: A | B | C` (or `Circle(i32) | Square(i32)`) parses into genc's EnumDecl (a tagged
+# union). The decl dispatch picks struct vs enum by the token after `:` (`{` -> struct,
+# else a variant list -> enum). Variants are `|`-separated; a `Name(Type)` carries a payload.
+def test_parse_module_enum_no_payload(tmp_path):
+    gen = gen_module(tmp_path, r"Color*: Red | Green | Blue")
+    assert "typedef struct Color Color;" in gen
+    assert "struct Color { int32_t tag; };" in gen
+    assert "enum { Color_Red, Color_Green, Color_Blue };" in gen
+
+
+def test_parse_module_enum_with_payloads(tmp_path):
+    gen = gen_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)")
+    assert "struct Shape { int32_t tag; union { int32_t Circle; int32_t Square; } u; };" in gen
+    assert "enum { Shape_Circle, Shape_Square };" in gen
+
+
+def test_parse_module_enum_struct_function_mix(tmp_path):
+    # one module with an enum, a struct, and a function -> a single translation unit that compiles
+    gen = gen_module(tmp_path, r"Color*: Red | Green | Blue\nPt*: { x: i32, y: i32 }\nf* = (n: i32) i32 { n }")
+    assert "enum { Color_Red, Color_Green, Color_Blue };" in gen
+    assert "struct Pt { int32_t x; int32_t y; };" in gen
+    assert "int32_t f(int32_t n) { return n; }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return f(7); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 7
+
+
 # ── @while loops: the self-hosted parser handles ITERATION, not just recursion ───────
 # `@while(cond) { stmts }` parses into genc's While. The loop body is a brace block of
 # let / assign / nested-@while statements with NO trailing return (a loop yields no value).
