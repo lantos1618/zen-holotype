@@ -77,3 +77,17 @@ scan* = (src: str, pos0: i32) Scan {
         false => scan_one(src, pos, b)
     }
 }
+
+// ── the token stream ───────────────────────────────────────────────────────────
+// There is no materialized token list — `scan(src, pos)` iterated to Eof IS the stream,
+// just as the compiler needs no slices. scan is pure (no state; the position is passed
+// in and returned), so a consumer can look AHEAD for free: peek = scan(src, pos), the
+// one after = scan(src, scan(src, pos).next). The parser will pull tokens this way,
+// keeping the whole token layer allocation-free and slice-free.
+
+// total token count, Eof excluded — a traversal of the entire stream by iteration.
+count* = (src: str) i32 { count_from(src, 0) }
+count_from = (src: str, pos: i32) i32 {
+    sc := scan(src, pos)
+    sc.tok.kind.match { .Eof => 0, _ => 1 + count_from(src, sc.next) }
+}

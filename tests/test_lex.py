@@ -82,3 +82,30 @@ def test_underscore_and_digits_in_identifiers(tmp_path):
 def test_only_whitespace_and_comment_yields_just_eof(tmp_path):
     out = tokenize(tmp_path, r'"   // nothing here\n  "')
     assert out == "E:\n"
+
+
+# count() recursively walks the ENTIRE stream (scan -> Eof) — proof that the token stream
+# needs no materialized list: pure positional scan IS the stream.
+COUNT_DRIVER = '{ count } = std.lex\nmain* = () i32 { count(%s) }\n'
+
+
+def count(tmp_path, zen_string_literal):
+    (tmp_path / "main.zen").write_text(COUNT_DRIVER % zen_string_literal)
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return subprocess.run([str(tmp_path / "o")]).returncode
+
+
+def test_count_walks_the_whole_stream(tmp_path):
+    assert count(tmp_path, r'"foo = 42 // hi\n\"hey\" bar"') == 5   # foo = 42 "hey" bar
+    assert count(tmp_path, r'""') == 0                              # empty -> just Eof
+    assert count(tmp_path, r'"a*b"') == 3                           # a * b
