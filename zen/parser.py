@@ -91,6 +91,8 @@ def _expr_inner(n):
     t = n.type
     if t == "integer":
         return Lit(int(_t(n)))
+    if t == "char":                                  # 'a' is sugar for its byte value
+        return Lit(ord(_unescape(_t(n)[1:-1])))
     if t == "boolean":
         return Bool(_t(n) == "true")
     if t == "string":

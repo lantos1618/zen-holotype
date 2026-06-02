@@ -128,7 +128,7 @@ module.exports = grammar({
     // xs[i] — the `[` must be glued (token.immediate), so a statement-leading
     // `[a,b,c]` slice literal is never absorbed as an index of the previous line.
     index: $ => prec.left(4, seq(field('seq', $._unary), token.immediate('['), field('idx', $._expression), ']')),
-    _primary: $ => choice($.parenthesized, $.closure, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.boolean, $.string, $.identifier),
+    _primary: $ => choice($.parenthesized, $.closure, $.enum_ctor, $.struct_literal, $.slice_literal, $.integer, $.char, $.boolean, $.string, $.identifier),
     slice_literal: $ => seq('[', optional(seq(comma1($._expression), optional(','))), ']'),  // [a, b, c]
     // (a, x) { a + x } — a closure value; the trailing block is what tells it apart
     // from a parenthesized expression (GLR forks, the one with a `{` body wins).
@@ -172,6 +172,7 @@ module.exports = grammar({
     arguments: $ => seq(token.immediate('('), optional(comma1($._expression)), ')'),
 
     integer: $ => /\d+/,
+    char: $ => token(seq("'", choice(/[^'\\]/, /\\./), "'")),   // 'a' '0' ':' '\n' — its byte value
     boolean: $ => choice('true', 'false'),
     string: $ => token(seq('"', repeat(choice(/[^"\\]/, /\\./)), '"')),  // escapes: \" \\ \n \t …
     identifier: $ => /@?[A-Za-z_]\w*/,
