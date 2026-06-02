@@ -291,6 +291,14 @@ def test_parse_decl_recursive_fibonacci(tmp_path):
     assert _compile_run(tmp_path, gen, "fib(10)") == 55   # 0,1,1,2,3,5,8,13,21,34,55
 
 
+def test_parse_decl_recursive_gcd(tmp_path):
+    # Euclid's gcd: recursion + `%` + a boolean `.match` (-> ternary), all self-hosted. The
+    # headline — a Zen program reads gcd's source as a string and emits a running native gcd.
+    gen = gen_decl(tmp_path, r"gcd* = (a: i32, b: i32) i32 { (b == 0).match { true => a, false => gcd(b, a % b) } }")
+    assert gen == "int32_t gcd(int32_t a, int32_t b) { return ((b == 0) ? a : gcd(b, (a % b))); }"
+    assert _compile_run(tmp_path, gen, "gcd(48, 36)") == 12
+
+
 def test_parse_module_multiple_functions(tmp_path):
     # two function decls in one source -> a whole translation unit; one calls the other.
     gen = gen_module(tmp_path, r"inc* = (x: i32) i32 { x + 1 }\ndbl* = (x: i32) i32 { x + x }")
@@ -324,3 +332,52 @@ def test_parse_module_n_arg_calls(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 6
+
+
+# ── @while loops: the self-hosted parser handles ITERATION, not just recursion ───────
+# `@while(cond) { stmts }` parses into genc's While. The loop body is a brace block of
+# let / assign / nested-@while statements with NO trailing return (a loop yields no value).
+# These are real iterative algorithms — lexed, parsed and lowered entirely in Zen.
+def test_parse_while_iterative_factorial(tmp_path):
+    gen = gen_decl(tmp_path, r"fact* = (n: i32) i32 { acc := 1\n i := 1\n @while(i <= n) { acc = acc * i\n i = i + 1 }\n acc }")
+    assert gen == ("int32_t fact(int32_t n) { int32_t acc = 1; int32_t i = 1; "
+                   "while ((i <= n)) { acc = (acc * i); i = (i + 1); } return acc; }")
+    assert _compile_run(tmp_path, gen, "fact(5)") == 120
+
+
+def test_parse_while_power(tmp_path):
+    gen = gen_decl(tmp_path, r"powi* = (base: i32, n: i32) i32 { acc := 1\n i := 0\n @while(i < n) { acc = acc * base\n i = i + 1 }\n acc }")
+    assert gen == ("int32_t powi(int32_t base, int32_t n) { int32_t acc = 1; int32_t i = 0; "
+                   "while ((i < n)) { acc = (acc * base); i = (i + 1); } return acc; }")
+    assert _compile_run(tmp_path, gen, "powi(3, 4)") == 81   # exit codes are 8-bit, so keep it < 256
+
+
+def test_parse_while_digit_sum(tmp_path):
+    gen = gen_decl(tmp_path, r"digit_sum* = (n: i32) i32 { acc := 0\n m := n\n @while(m > 0) { acc = acc + (m % 10)\n m = m / 10 }\n acc }")
+    assert gen == ("int32_t digit_sum(int32_t n) { int32_t acc = 0; int32_t m = n; "
+                   "while ((m > 0)) { acc = (acc + (m % 10)); m = (m / 10); } return acc; }")
+    assert _compile_run(tmp_path, gen, "digit_sum(12345)") == 15
+
+
+def test_parse_while_is_prime(tmp_path):
+    # the loop body ASSIGNS a value computed by a boolean `.match` (-> ternary); the result
+    # type is bool, so the harness pulls in <stdbool.h>.
+    gen = gen_decl(tmp_path, r"is_prime* = (n: i32) bool { d := 2\n ok := true\n @while((d * d) <= n) { ok = ((n % d) == 0).match { true => false, false => ok }\n d = d + 1 }\n (n >= 2) && ok }")
+    assert gen == ("bool is_prime(int32_t n) { int32_t d = 2; int32_t ok = true; "
+                   "while (((d * d) <= n)) { ok = (((n % d) == 0) ? false : ok); d = (d + 1); } "
+                   "return ((n >= 2) && ok); }")
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n#include <stdbool.h>\n" + gen +
+                                  "\nint main(void){ return is_prime(7) + is_prime(9) * 2; }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 1   # is_prime(7)=1, is_prime(9)=0
+
+
+def test_parse_while_nested_loops(tmp_path):
+    # a @while inside a @while — the loop-body block parser recurses (the inner `j :=` is a
+    # let inside the outer block). Counts the n*n pairs.
+    gen = gen_decl(tmp_path, r"grid* = (n: i32) i32 { total := 0\n i := 0\n @while(i < n) { j := 0\n @while(j < n) { total = total + 1\n j = j + 1 }\n i = i + 1 }\n total }")
+    assert gen == ("int32_t grid(int32_t n) { int32_t total = 0; int32_t i = 0; "
+                   "while ((i < n)) { int32_t j = 0; while ((j < n)) { total = (total + 1); j = (j + 1); } "
+                   "i = (i + 1); } return total; }")
+    assert _compile_run(tmp_path, gen, "grid(4)") == 16
