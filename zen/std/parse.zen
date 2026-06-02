@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, cond, slet, sassign, swhile, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, lit, vref, bin, call, cond, slet, sassign, swhile, sret, param, field, sdef, dfunc, dstruct, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -462,6 +462,50 @@ parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
 }
 parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func { a.parse_decl_at(src, 0).func }
 
+// ── a STRUCT declaration — `name*: { field: Type, … }` ──────────────────────────────
+// The field list is `name: Type` pairs (the same shape as a parameter list) terminated by
+// `}` instead of `)`. Lowers to genc's StructDecl (typedef struct). parse_struct_at also
+// reports where the decl ENDS (past `}`), so a module can parse the next one.
+StructEnd*: { sd: StructDecl, next: i32 }
+field_buf<A: Allocator> = (a: Ptr<A>) [Field] { slice(a.acquire(16 * sizeof(Field)), 16) }   // cap 16
+take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
+fill_fields<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_field(src, pos, buf, i) }
+}
+fill_field<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+    nt    := src.scan(pos)                               // field name
+    nm    := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)                           // ':'
+    tt    := src.scan(colon.next)                        // the type token
+    buf[i] = field(nm, src.ty_of(tt.tok))
+    after := src.scan(tt.next)                           // ',' or '}'
+    src.is_comma(after.tok).match {
+        true  => a.fill_fields(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // '}'
+    }
+}
+parse_struct_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) StructEnd {
+    nt     := src.scan(pos)                              // the struct name
+    name   := a.lexeme(src, nt.tok)
+    bstart := src.skip_to_brace(nt.next)                // pos just past '{' (skips `* :`)
+    buf    := a.field_buf()
+    fe     := a.fill_fields(src, bstart, buf, 0)        // fields + pos just past '}'
+    StructEnd { sd: sdef(name, buf.take_fields(fe.count)), next: fe.next }
+}
+parse_struct*<A: Allocator> = (a: Ptr<A>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
+
+// after the decl name (and an optional `*` public marker) comes `=` for a function or
+// `:` for a type declaration; `: {` specifically is a struct (vs `: A | B`, an enum).
+is_star = (src: str, t: Token) bool { src.is_op(t, '*') }
+is_colon = (src: str, t: Token) bool { src.is_op(t, ':') }
+decl_is_struct = (src: str, pos: i32) bool {
+    nt    := src.scan(pos)                               // the name
+    a1    := src.scan(nt.next)                           // `*`, `=` or `:`
+    colon := src.is_star(a1.tok).match { true => src.scan(a1.next), false => a1 }   // skip `*`
+    src.is_colon(colon.tok).match { true => src.is_lbrace(src.scan(colon.next).tok), false => false }
+}
+
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
 // `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
 // which genModule lowers to a translation unit. Parses decls until Eof.
@@ -471,10 +515,22 @@ fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) 
     sc := src.scan(pos)
     sc.tok.kind.match { .Eof => i, _ => a.fill_decl(src, pos, buf, i) }
 }
+// a top-level decl is a struct (`name: { … }`) or a function (`name = (…) { … }`)
 fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    src.decl_is_struct(pos).match {
+        true  => a.fill_struct(src, pos, buf, i),
+        false => a.fill_func(src, pos, buf, i)
+    }
+}
+fill_func<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     de := a.parse_decl_at(src, pos)
     buf[i] = dfunc(de.func)
     a.fill_decls(src, de.next, buf, i + 1)
+}
+fill_struct<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    se := a.parse_struct_at(src, pos)
+    buf[i] = dstruct(se.sd)
+    a.fill_decls(src, se.next, buf, i + 1)
 }
 parse_module*<A: Allocator> = (a: Ptr<A>, src: str) [Decl] {
     buf := a.decl_buf()
