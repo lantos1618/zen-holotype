@@ -44,7 +44,19 @@ jobs:
           cp examples/build/vecdemo.c dist/vecdemo.generated.c
           cp examples/build/vecdemo   dist/vecdemo
           tar czf dist/zen-${{ github.ref_name }}-src.tar.gz \
-            zen examples README.md FEATURES.md VISION.md requirements*.txt
+            zen tree-sitter-zen examples README.md FEATURES.md VISION.md requirements*.txt
+
+      # The tarball must be BUILDABLE from scratch: extract into a clean dir (no build/
+      # zen.so, no node_modules), install only the runtime deps, and parse a snippet —
+      # which forces parser.py to compile build/zen.so from tree-sitter-zen/src/parser.c.
+      # This is the guard that the parser sources actually ship (they were omitted before).
+      - name: Release dry-run — tarball builds + parses from scratch
+        run: |
+          rm -rf /tmp/relcheck && mkdir -p /tmp/relcheck
+          tar xzf dist/zen-${{ github.ref_name }}-src.tar.gz -C /tmp/relcheck
+          cd /tmp/relcheck
+          pip install -r requirements.txt
+          PYTHONPATH=. python -c "from zen.parser import parse; parse('main* = () i32 { 42 }', 'main'); print('tarball parses OK')"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
