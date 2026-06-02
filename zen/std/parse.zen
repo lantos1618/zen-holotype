@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, lit, vref, bin, call, cond, slet, sassign, swhile, sret, param, field, sdef, dfunc, dstruct, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, lit, vref, bin, call, cond, member, mkstruct, finit, slet, sassign, swhile, sret, param, field, sdef, dfunc, dstruct, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -82,8 +82,27 @@ is_match_at = (src: str, pos: i32) bool {
     dot := src.scan(pos)                                            // a '.' followed by `match`?
     src.is_dot(dot.tok).match { true => src.is_match_kw(src.scan(dot.next).tok), false => false }
 }
+// `.field` is field access (genc Member, chainable: `a.b.c`); `.match` is the ternary above.
+// match is checked first, so a `.match` is never mistaken for a field named `match`.
+is_ident_tok = (t: Token) bool { t.kind.match { .Ident => true, _ => false } }
+is_field_at = (src: str, pos: i32) bool {
+    dot := src.scan(pos)
+    src.is_dot(dot.tok).match { true => is_ident_tok(src.scan(dot.next).tok), false => false }
+}
 parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
-    src.is_match_at(base.next).match { true => a.parse_match(src, base), false => base }
+    src.is_match_at(base.next).match {
+        true  => a.parse_match(src, base),
+        false => src.is_field_at(base.next).match {
+            true  => a.parse_field(src, base),
+            false => base
+        }
+    }
+}
+parse_field<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+    dot  := src.scan(base.next)                                    // '.'
+    fld  := src.scan(dot.next)                                     // the field name
+    name := a.lexeme(src, fld.tok)
+    a.parse_postfix(src, PExpr { expr: a.enode(member(base.expr, name)), next: fld.next })   // chain
 }
 parse_arm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then an expr
     pat   := src.scan(pos)                                          // the pattern (true / false)
@@ -106,8 +125,36 @@ parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     src.is_lparen(nx.tok).match {
-        true  => a.parse_call(src, name, nx),
-        false => PExpr { expr: a.enode(vref(name)), next: sc.next }
+        true  => a.parse_call(src, name, nx),                      // `name(args)` — a call
+        false => src.is_lbrace(nx.tok).match {
+            true  => a.parse_struct_lit(src, name, nx),            // `Name { f: v, … }` — a struct literal
+            false => PExpr { expr: a.enode(vref(name)), next: sc.next }   // a bare variable
+        }
+    }
+}
+// `Name { field: value, … }` — the `field: value` inits parse into a heap [FieldInit], then
+// the struct literal is built. open is the Scan of the opening '{'.
+finit_buf<A: Allocator> = (a: Ptr<A>) [FieldInit] { slice(a.acquire(16 * sizeof(FieldInit)), 16) }   // cap 16
+take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }                            // exact length
+parse_struct_lit<A: Allocator> = (a: Ptr<A>, src: str, name: str, open: Scan) PExpr {
+    buf := a.finit_buf()
+    fe  := a.fill_inits(src, open.next, buf, 0)                    // inits + pos just past '}'
+    PExpr { expr: a.enode(mkstruct(name, buf.take_inits(fe.count))), next: fe.next }
+}
+fill_inits<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match { true => PEnd { count: i, next: sc.next }, false => a.fill_init(src, pos, buf, i) }
+}
+fill_init<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    nt    := src.scan(pos)                               // field name
+    nm    := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)                           // ':'
+    v     := a.parse_or(src, colon.next)                 // the value (a full expression)
+    buf[i] = finit(nm, v.expr)
+    after := src.scan(v.next)                            // ',' or '}'
+    src.is_comma(after.tok).match {
+        true  => a.fill_inits(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // '}'
     }
 }
 // `name(a, b, …)` — parse the comma-separated arguments into a heap [Expr] (each arg's

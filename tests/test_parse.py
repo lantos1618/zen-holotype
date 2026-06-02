@@ -371,6 +371,32 @@ def test_parse_named_type_param_and_field_and_return(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 3
 
 
+# ── field access + struct literals: the self-hosted parser reads/builds struct VALUES ──
+# `p.x` parses to genc's Member (a postfix on an atom, chainable). `Pt { x: 1, y: 2 }`
+# parses to genc's MakeStruct (a C compound literal `(Pt){ .x = 1, .y = 2 }`).
+def test_parse_field_access(tmp_path):
+    gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }\nnorm_sq* = (p: Pt) i32 { p.x * p.x + p.y * p.y }")
+    assert "int32_t norm_sq(Pt p) { return ((p.x * p.x) + (p.y * p.y)); }" in gen
+
+
+def test_parse_struct_literal(tmp_path):
+    gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }\nmk* = (a: i32, b: i32) Pt { Pt { x: a, y: b } }")
+    assert "Pt mk(int32_t a, int32_t b) { return (Pt){ .x = a, .y = b }; }" in gen
+
+
+def test_parse_struct_milestone(tmp_path):
+    # THE MILESTONE: a struct DECLARED, CONSTRUCTED (literal), PASSED (by value), and
+    # FIELD-ACCESSED — the whole module lexed -> parsed -> lowered -> compiled -> run in Zen.
+    gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }\nmk* = (a: i32, b: i32) Pt { Pt { x: a, y: b } }\nnorm_sq* = (p: Pt) i32 { p.x * p.x + p.y * p.y }")
+    assert "struct Pt { int32_t x; int32_t y; };" in gen
+    assert "Pt mk(int32_t a, int32_t b) { return (Pt){ .x = a, .y = b }; }" in gen
+    assert "int32_t norm_sq(Pt p) { return ((p.x * p.x) + (p.y * p.y)); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return norm_sq(mk(3, 4)); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 25   # 3*3 + 4*4 = 25
+
+
 # ── @while loops: the self-hosted parser handles ITERATION, not just recursion ───────
 # `@while(cond) { stmts }` parses into genc's While. The loop body is a brace block of
 # let / assign / nested-@while statements with NO trailing return (a loop yields no value).

@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, lit, vref, bin, call, cond, member, arrow, mkenum, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -153,6 +153,22 @@ def test_genc_module_with_a_struct_and_a_function(tmp_path):
     assert "int32_t add(int32_t a, int32_t b) { return (a + b); }" in generated
     # the emitted struct + function are valid C used together
     assert compile_and_run(tmp_path, generated, "({ Point p = {3, 4}; add(p.x, p.y); })") == "7"
+
+
+def test_genc_struct_literal_compound(tmp_path):
+    # MakeStruct emits a C compound literal `(Point){ .x = 3, .y = 4 }`. A function that
+    # CONSTRUCTS a struct value and returns it, paired with the struct typedef.
+    body = """
+    pt := sdef("Point", [field("x", ti32()), field("y", ti32())])
+    xv := lit(3)
+    yv := lit(4)
+    sv := mkstruct("Point", [finit("x", addr(xv)), finit("y", addr(yv))])
+    mk := Func { name: "origin", params: [], ret: tnamed("Point"), body: [sret(addr(sv))] }
+    emit(genModule([dstruct(pt), dfunc(mk)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "Point origin() { return (Point){ .x = 3, .y = 4 }; }" in generated
+    assert compile_and_run(tmp_path, generated, "origin().x + origin().y") == "7"
 
 
 def test_genc_multi_statement_body_compiles_and_runs(tmp_path):
