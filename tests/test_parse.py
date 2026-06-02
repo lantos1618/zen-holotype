@@ -610,6 +610,22 @@ def test_parse_enum_match_paren_form(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 27   # Circle(3) -> 3*3*3
 
 
+def test_parse_enum_match_pointer_subject(tmp_path):
+    # a match on a `Ptr<Enum>` subject: std.check sees through the pointer for the ename AND
+    # emits ematchp so the tag test uses `->` (l->tag), not `.` (l.tag). A recursive list_len
+    # over a cons-list — the shape the compiler's own AST/token types are built from.
+    # (TokCell is declared before TokList so the emitted C is in dependency order.)
+    gen = gen_checked_module(tmp_path, r"TokCell*: { head: i32, tail: Ptr<TokList> }\nTokList*: Nil | Cons(TokCell)\nllen* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.llen() } }")
+    assert "int32_t llen(TokList* l) { return (l->tag == TokList_Nil ? (0) : ({ __auto_type c = l->u.Cons; (1 + llen(c.tail)); })); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
+        "\nint main(void){ TokList nil={.tag=TokList_Nil};"
+        " TokList a={.tag=TokList_Cons,.u.Cons={.head=1,.tail=&nil}};"
+        " TokList b={.tag=TokList_Cons,.u.Cons={.head=2,.tail=&a}}; return llen(&b); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 2   # 2 Cons nodes
+
+
 def test_parse_enum_match_no_payload(tmp_path):
     # variants without payloads: the arms are bare bodies, no __auto_type binding
     gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match { .Lo => 0, .Hi => 1 } }")
