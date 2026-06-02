@@ -217,3 +217,14 @@ def test_parse_decl_reads_a_whole_function(tmp_path):
     gen = gen_decl(tmp_path, r"f* = () i32 { x := 4\n x + 3 }")
     assert gen == "int32_t f() { int32_t x = 4; return (x + 3); }"
     assert run_generated(tmp_path, gen) == 7
+
+
+def test_parse_decl_typed_parameters(tmp_path):
+    # a typed parameter list parses into genc's [Param]; the params lower as C parameters
+    # and the body references them. Call it with arguments.
+    gen = gen_decl(tmp_path, r"add* = (x: i32, y: i32) i32 { x + y }")
+    assert gen == "int32_t add(int32_t x, int32_t y) { return (x + y); }"
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return add(3, 4); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 7
