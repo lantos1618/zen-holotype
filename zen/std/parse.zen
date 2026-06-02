@@ -1,0 +1,92 @@
+// std.parse — a recursive-descent parser in zen. It pulls tokens from the lexer's pure
+// positional scan() and builds genc's Expr AST (a heap tree of Ptr<Expr> nodes, allocated
+// through an explicit allocator). The result is the AST genc already lowers — so the
+// front (lexer) and back (genc) meet here into one tiny self-hosted compiler.
+//
+// This first cut handles arithmetic: integers, + - * /, and parentheses, with the usual
+// precedence. eval() interprets the tree to prove the parse is right:
+//   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
+
+{ Expr, BinData, lit, bin } = std.genc
+{ Token, Scan, scan, byte_at } = std.lex
+{ Allocator } = std.alloc
+
+// a parse step: the expression built, and the position just past it (mirrors lex's Scan)
+PExpr*: { expr: Ptr<Expr>, next: i32 }
+
+// ── heap-allocate one Expr node, return a pointer to it ──────────────────────────
+ebuf<A: Allocator>  = (a: Ptr<A>) [Expr] { slice(a.acquire(sizeof(Expr)), 1) }
+enode<A: Allocator> = (a: Ptr<A>, v: Expr) Ptr<Expr> {
+    buf := a.ebuf()
+    buf[0] = v
+    addr(buf[0])
+}
+
+// ── token helpers ────────────────────────────────────────────────────────────────
+// a Sym token whose (single) byte is `c`
+is_op = (src: str, t: Token, c: u8) bool { t.kind.match { .Sym => byte_at(src, t.start) == c, _ => false } }
+is_addsub = (src: str, t: Token) bool { is_op(src, t, '+') || is_op(src, t, '-') }
+is_muldiv = (src: str, t: Token) bool { is_op(src, t, '*') || is_op(src, t, '/') }
+// the operator byte as the str genc wants
+op_str = (b: u8) str {
+    (b == '+').match { true => "+", false =>
+    (b == '-').match { true => "-", false =>
+    (b == '*').match { true => "*", false => "/" } } }
+}
+// parse an Int token's decimal digits
+digit_val = (b: u8) i32 { b - '0' }
+to_int_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
+    (pos < end).match { true => to_int_from(src, pos + 1, end, acc * 10 + digit_val(byte_at(src, pos))), false => acc }
+}
+to_int = (src: str, t: Token) i32 { to_int_from(src, t.start, t.start + t.len, 0) }
+
+// ── atom := integer | '(' expr ')' ───────────────────────────────────────────────
+parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
+    sc := scan(src, pos)
+    sc.tok.kind.match {
+        .Int => PExpr { expr: a.enode(lit(to_int(src, sc.tok))), next: sc.next },
+        _    => a.parse_paren(src, sc)               // a '(' (the only other atom for now)
+    }
+}
+parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
+    inner := a.parse_expr(src, open.next)            // parse past the '('
+    close := scan(src, inner.next)                   // consume the ')'
+    PExpr { expr: inner.expr, next: close.next }
+}
+
+// ── term := atom (('*' | '/') atom)*   (left-associative) ─────────────────────────
+parse_term<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.term_rest(src, a.parse_atom(src, pos)) }
+term_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+    sc := scan(src, lhs.next)
+    is_muldiv(src, sc.tok).match { false => lhs, true => a.term_more(src, lhs, sc) }
+}
+term_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_atom(src, sc.next)
+    a.term_rest(src, PExpr { expr: a.enode(bin(op_str(byte_at(src, sc.tok.start)), lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// ── expr := term (('+' | '-') term)*   (left-associative) ─────────────────────────
+parse_expr<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
+expr_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+    sc := scan(src, lhs.next)
+    is_addsub(src, sc.tok).match { false => lhs, true => a.expr_more(src, lhs, sc) }
+}
+expr_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_term(src, sc.next)
+    a.expr_rest(src, PExpr { expr: a.enode(bin(op_str(byte_at(src, sc.tok.start)), lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// parse a whole source string to an expression tree
+parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_expr(src, 0).expr }
+
+// ── eval: interpret the tree (proof the parse is right) ───────────────────────────
+eval_bin = (b: BinData) i32 {
+    o := byte_at(b.op, 0)
+    l := eval(b.lhs)
+    r := eval(b.rhs)
+    (o == '+').match { true => l + r, false =>
+    (o == '-').match { true => l - r, false =>
+    (o == '*').match { true => l * r, false => l / r } } }
+}
+eval* = (e: Ptr<Expr>) i32 { e.match { .Int(n) => n, .Bin(b) => eval_bin(b), _ => 0 } }
+eval_str*<A: Allocator> = (a: Ptr<A>, src: str) i32 { eval(a.parse(src)) }
