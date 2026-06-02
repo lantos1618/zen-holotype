@@ -233,7 +233,9 @@ construct (desugared onto a structured `@while` primitive that folds to a C
 heap-allocating `String`), and a **comptime metaprogramming layer** whose headline is that the
 **AST is defined in Zen** — `impl`/`derive` are ordinary Zen functions
 (`prelude/derive.zen`) that the compiler runs at comptime and splices back in.
-See **[FEATURES.md](FEATURES.md)** for the full current inventory.
+See **[FEATURES.md](FEATURES.md)** for the full current inventory, and
+**[ARCHITECTURE.md](ARCHITECTURE.md)** for the compiler pipeline, the three ASTs, and the
+path to self-hosting.
 
 `build.zen` can declare a `Test { root: "test.zen" }`; `zen build` then
 compiles that root with the project and runs each no-arg `bool` test, printing
