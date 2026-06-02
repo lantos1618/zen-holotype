@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 from .ast import (Struct, EnumDecl, Fn, PrimT, NameT, PtrT, TVar, SliceT, FnT,
                   Index, Bin, Field, Let, Assign, While, Loop, TraitDecl, Impl, Emit, Lit, Bool, Var)
-from .types import Namespace, TraitMethod, TypeErr, Unresolved, Private
+from .types import Namespace, TraitMethod, TypeErr, Unresolved, Private, Conflict
 
 BUILTIN = {"Option"}
 
@@ -26,13 +26,22 @@ def build_namespace(files):
 
 def build_scopes(files):
     for f in files.values():
-        sc = {}
+        sc: dict = {}
+
+        def bind(name, path):
+            # A local name resolves to ONE path. Two imports of different things under the
+            # same name, or an import colliding with a local decl, is ambiguous — reject it
+            # rather than silently take the last (re-binding the SAME path is a harmless dup).
+            if sc.get(name, path) != path:
+                raise Conflict(f"{f.ns}: '{name}' is bound to both '{sc[name]}' and '{path}'")
+            sc[name] = path
+
         for imp in f.imports:
             for n in imp.names:
-                sc[n] = f"{imp.module}.{n}"
+                bind(n, f"{imp.module}.{n}")
         for d in f.decls:
             if not isinstance(d, (Impl, Emit)):
-                sc[d.name] = f"{f.ns}.{d.name}"
+                bind(d.name, f"{f.ns}.{d.name}")
         f.scope = sc
 
 

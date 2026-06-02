@@ -32,6 +32,24 @@ def test_diamond_import_resolves_to_one_node():
     assert {q: ok for q, ok, _ in results} == {"a.fa": True, "b.fb": True}
 
 
+def test_clashing_names_in_a_scope_are_a_conflict():
+    # a local name must resolve to ONE path. Two imports of different things under the same
+    # name — or an import colliding with a local decl — is ambiguous, so build_scopes rejects
+    # it rather than silently taking the last binding.
+    with pytest.raises(Conflict):
+        build_scopes(files_from({"m": "{ X } = a\n{ X } = b\nf* = () i32 { 0 }"}))
+    with pytest.raises(Conflict):
+        build_scopes(files_from({"m": "{ len } = ops\nlen* = () i32 { 1 }"}))
+
+
+def test_duplicate_import_of_the_same_path_is_fine():
+    # re-importing the SAME name -> same path is a harmless duplicate, not a conflict
+    files = files_from({"core.vec": "Vec*: { len: i32, cap: i32 }",
+                        "m": "{ Vec } = core.vec\n{ Vec } = core.vec\nf* = (v: Ptr<Vec>) i32 { v.len }"})
+    build_scopes(files)
+    assert files["m"].scope["Vec"] == "core.vec.Vec"
+
+
 def test_two_decls_at_the_same_path_conflict():
     # the only possible name conflict: two declarations claiming one path
     with pytest.raises(Conflict, match="m.Vec"):
