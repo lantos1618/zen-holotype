@@ -177,3 +177,43 @@ def test_parse_fn_assignment_statement(tmp_path):
     gen = gen_fn(tmp_path, r"x := 1\nx = x + 5\nx")
     assert gen == "int32_t f() { int32_t x = 1; x = (x + 5); return x; }"
     assert run_generated(tmp_path, gen) == 6
+
+
+# parse_decl reads a whole function DECLARATION from real source — the name comes from the
+# source (not a caller arg), the `* = () i32` head is skipped, and the brace body is parsed.
+DECL_DRIVER = """
+{ Malloc } = std.alloc
+{ parse_decl } = std.parse
+{ genC } = std.genc
+{ String, bytes } = std.string
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+main* = () i32 {
+    m := Malloc { _: 0 }
+    emit(genC(addr(m).parse_decl("%s")))
+    0
+}
+"""
+
+
+def gen_decl(tmp_path, src):
+    (tmp_path / "main.zen").write_text(DECL_DRIVER % src)
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    r = subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
+                        str(tmp_path / "o.c"), "-o", str(tmp_path / "o")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+
+
+def test_parse_decl_reads_a_whole_function(tmp_path):
+    # the name is taken from the source; the body lowers and runs.
+    gen = gen_decl(tmp_path, r"f* = () i32 { x := 4\n x + 3 }")
+    assert gen == "int32_t f() { int32_t x = 4; return (x + 3); }"
+    assert run_generated(tmp_path, gen) == 7
