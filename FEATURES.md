@@ -128,15 +128,23 @@ is the constraint" — see [README](README.md); for where it's headed, [VISION](
   operators (`:= == => <= …`), and `//` comments. The token stream is the pure positional `scan`
   iterated to Eof — or a materialized heap cons-list via `tokenize(a, src)`.
 - **`std.parse` — a recursive-descent parser written in Zen.** Pulls tokens from `std.lex` and
-  builds `std.genc`'s `Expr`/`Stmt` AST (a heap tree, allocated through the allocator). Handles
-  arithmetic with precedence (`+ - * /`, parens), identifiers, and `name := value` statement lists
-  → a whole `Func`.
-- **The loop closes — entirely in Zen.** A running zen program lexes + parses + lowers a *source
-  string* to running native code: `"(1 + 2) * 3"` → `scan` → `parse` → `genC` →
-  `int32_t f(){ return ((1 + 2) * 3); }` → `cc` → `f() == 9`. A backend-parity test asserts this
-  Zen pipeline agrees with the Python `emit_c` on the subset both cover. The self-hosting seed,
-  made real on a subset: codegen *and* the front end are the language's own ordinary code, not the
-  host's. (The path from here is to grow the Zen front end up to the production `ast.py`.)
+  builds `std.genc`'s `Expr`/`Stmt`/`Decl` AST (a heap tree, allocated through the allocator).
+  Covers a real subset: **expressions** — integers, identifiers, `+ - * /`, comparisons
+  (`== < > <= >=`), one-arg calls, parens, and a boolean **`.match`** that lowers to a ternary;
+  **statements** — `name := v` (let), `name = v` (assign), a final-expression return, N of them;
+  and whole **function declarations** `name* = (typed params) RetType { body }`, **several per
+  module** (`parse_module → genModule` = a translation unit). Written UFCS throughout
+  (`src.scan(pos)`, `src.byte_at(i).op_str()`).
+- **The loop closes — entirely in Zen, now with branching + recursion.** A running zen program
+  lexes + parses + lowers a *source string* to running native code:
+  `"(1 + 2) * 3"` → `f() == 9`, and a whole recursive function —
+  `fact* = (n: i32) i32 { (n <= 1).match { true => 1, false => n * fact(n - 1) } }` →
+  `int32_t fact(int32_t n){ return ((n <= 1) ? 1 : (n * fact((n - 1)))); }` → `fact(5) == 120`
+  (`fib(10) == 55` too). **Three parity gates** assert the Zen pipeline agrees with the Python host:
+  `std.lex` vs the tree-sitter tokens, `std.parse` vs the `ast.py` tree (structural), and `genC` vs
+  `emit_c` (results, including conditionals). The self-hosting seed, made real on a growing subset:
+  codegen *and* the front end are the language's own ordinary code, not the host's. (The path from
+  here is to grow the Zen front end up to the production `ast.py`.)
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
 

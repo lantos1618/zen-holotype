@@ -300,3 +300,15 @@ def test_parse_module_multiple_functions(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 11   # dbl(5)=10, inc(10)=11
+
+
+def test_parse_module_with_recursion(tmp_path):
+    # the full picture: a whole module with a RECURSIVE function + a plain one, parsed and
+    # lowered entirely in Zen, then compiled and run.
+    gen = gen_module(tmp_path, r"sq* = (n: i32) i32 { n * n }\nfact* = (n: i32) i32 { (n <= 1).match { true => 1, false => n * fact(n - 1) } }")
+    assert "int32_t sq(int32_t n) { return (n * n); }" in gen
+    assert "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return fact(4) + sq(3); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 33   # fact(4)=24, sq(3)=9
