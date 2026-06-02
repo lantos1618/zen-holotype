@@ -102,3 +102,29 @@ resolve_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) [Decl] {
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
     buf
 }
+
+// ── the type lattice: fits(given, want) ───────────────────────────────────────────────
+// Goal C Phase 1. genc's Ty is monomorphic (no pointer direction, no Option, no closures),
+// so the lattice is just: numeric WIDENING (u8 <= i32 <= i64) for the scalar ranks, and
+// structural EQUALITY otherwise (Named by name, Ptr by pointee, Bool/Str/Void exact). This
+// is the `fits` a self-hosted checker calls at every assignment / argument / return slot.
+ty_rank = (t: Ty) i32 { t.match { .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 } }   // -1 = non-numeric
+ty_eq* = (g: Ty, w: Ty) bool {
+    g.match {
+        .I32      => w.match { .I32 => true, _ => false },
+        .I64      => w.match { .I64 => true, _ => false },
+        .U8       => w.match { .U8 => true, _ => false },
+        .Bool     => w.match { .Bool => true, _ => false },
+        .Void     => w.match { .Void => true, _ => false },
+        .Str      => w.match { .Str => true, _ => false },
+        .Named(a) => w.match { .Named(b) => eq(a, b), _ => false },
+        .Ptr(pa)  => w.match { .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }   // pointee invariant
+    }
+}
+fits* = (g: Ty, w: Ty) bool {
+    numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
+    numeric.match {
+        true  => g.ty_rank() <= w.ty_rank(),   // u8 <= i32 <= i64
+        false => g.ty_eq(w)                     // non-numeric: exact structural match
+    }
+}
