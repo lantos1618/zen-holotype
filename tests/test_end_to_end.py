@@ -1,22 +1,17 @@
-"""T9-T11 + F1: the whole pipeline on the real `examples/` tree.
+"""T9-T10 + F1: the whole pipeline on the real `examples/` tree — checker verdicts and
+codegen that compiles + runs. (The `zen build` / CLI driver tests live in test_cli.py.)
 
 T9  expected PASS/FAIL set from the checker
 T10 codegen is const-correct and excludes ill-typed fns
-T11 `zen build` actually compiles, links, and runs -> "vecdemo -> 12"
 F1  un-lowerable declarations fail loudly instead of vanishing
 """
-import subprocess
-import sys
-
-import pytest
-
 import re
+import subprocess
 from dataclasses import dataclass
 
 import pytest
 
-from zen.main import (load, build_namespace, build_scopes, resolve, check,
-                           emit_c, run_test_root, cmd_build)
+from zen.main import (load, build_namespace, build_scopes, resolve, check, emit_c)
 from conftest import EXAMPLES
 
 
@@ -400,21 +395,6 @@ def test_wildcard_only_match_is_warning_clean(tmp_path):
     assert subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout.strip() == "42"
 
 
-# ── A void-returning main gets a harness without printf("%d", …) ────────────
-def test_void_main_harness(tmp_path):
-    (tmp_path / "build.zen").write_text(
-        '{ Builder, BuildConfig, BuildError, Executable } = @builtin.build\n'
-        'build = (b: Builder) Result<BuildConfig, BuildError> {\n'
-        '    b.add(Executable { name: "v", main: "main.zen", out_dir: "build" })\n'
-        '    b.config()\n}\n')
-    (tmp_path / "main.zen").write_text("main* = () void { y := 5 }\n")
-    out = subprocess.run([sys.executable, "-m", "zen", "build", str(tmp_path)],
-                         capture_output=True, text=True, cwd=str(EXAMPLES.parent))
-    assert out.returncode == 0, out.stderr           # would fail at cc if it printf'd %d on void
-    c = (tmp_path / "build" / "v.c").read_text()
-    assert "main_main();" in c and "printf" not in c.split("int main(void)")[1]
-
-
 # ── Generic enums monomorphize and run ──────────────────────────────────────
 def test_generic_enum_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
@@ -610,49 +590,3 @@ main* = () i32 {
     cfile.write_text(c + "\nint main(void){ return main_main(); }\n")
     subprocess.run(["cc", str(cfile), "-o", str(tmp_path / "o")], check=True)
     assert subprocess.run([str(tmp_path / "o")]).returncode == 55
-
-
-# ── T11: the build really runs ──────────────────────────────────────────────
-def test_full_build_runs_and_prints_12():
-    out = subprocess.run(
-        [sys.executable, "-m", "zen", "build", str(EXAMPLES)],
-        capture_output=True, text=True, cwd=str(EXAMPLES.parent))
-    assert out.returncode == 0, out.stderr
-    assert "vecdemo -> 12" in out.stdout
-    # the declared Test root is compiled and run, reporting per-test verdicts
-    assert "tests: test.zen" in out.stdout
-    assert "PASS ✓  test.test_len" in out.stdout
-
-
-# ── F5: the test runner reports pass / fail / skip ──────────────────────────
-def test_test_runner_reports_pass_fail_skip(tmp_path, capsys):
-    (tmp_path / "lib.zen").write_text("three* = () i32 { 3 }\n")
-    (tmp_path / "t.zen").write_text(
-        "{ three } = lib\n"
-        "t_pass* = () bool { three() == 3 }\n"   # true  -> PASS
-        "t_fail* = () bool { three() == 9 }\n"   # false -> FAIL
-        "t_bad*  = () bool { three() == true }\n")  # type error -> SKIP
-    failures = run_test_root(tmp_path, "t.zen")
-    out = capsys.readouterr().out
-    assert "PASS ✓  t.t_pass" in out
-    assert "FAIL ✗  t.t_fail" in out
-    assert "SKIP    t.t_bad" in out
-    # the count is the contract: a FAIL and a SKIP (didn't type-check) each count, so the
-    # caller (cmd_build) can fail the build honestly — one PASS, one FAIL, one SKIP -> 2.
-    assert failures == 2
-
-
-def test_build_exits_nonzero_when_a_zen_test_fails(tmp_path):
-    # the honest-CLI contract: `zen build` must FAIL (SystemExit) when a declared Test FAILs,
-    # not print ✗ and exit 0. (Regression guard for the harness-returns-fails change.)
-    (tmp_path / "build.zen").write_text(
-        '{ Builder, Executable, Test } = @builtin.build\n'
-        'build* = (b: Builder) i32 {\n'
-        '    b.add(Executable { name: "x", main: "main.zen" })\n'
-        '    b.add(Test { root: "test.zen" })\n'
-        '    0\n'
-        '}\n')
-    (tmp_path / "main.zen").write_text("main* = () i32 { 0 }\n")
-    (tmp_path / "test.zen").write_text("t_fail* = () bool { 1 == 2 }\n")   # always FAILs
-    with pytest.raises(SystemExit):
-        cmd_build(str(tmp_path))
