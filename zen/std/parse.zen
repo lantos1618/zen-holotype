@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, cond, slet, sassign, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, lit, vref, bin, call, cond, slet, sassign, swhile, sret, param, dfunc, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -251,7 +251,10 @@ parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
         true  => a.parse_let_stmt(src, pos),
         false => src.is_set_here(pos).match {
             true  => a.parse_set_stmt(src, pos),
-            false => a.parse_ret_stmt(src, pos)
+            false => src.is_while_here(pos).match {
+                true  => a.parse_while_stmt(src, pos),
+                false => a.parse_ret_stmt(src, pos)
+            }
         }
     }
 }
@@ -274,6 +277,77 @@ parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     a.scons(sret(r.expr), a.snil())
 }
 
+// ── @while loops ─────────────────────────────────────────────────────────────────
+// `@while(cond) { stmts }` — a `@` Sym, the `while` Ident, a parenthesized condition,
+// then a brace block of statements (let / assign / nested-while; NO trailing return — a
+// loop body yields no value, unlike a function body). Lowers to genc's While. The block
+// reuses the SList cons-list (materialized into a heap [Stmt]), terminated by `}` rather
+// than by a final expression.
+is_at         = (src: str, t: Token) bool { src.is_op(t, '@') }
+is_while_kw   = (src: str, t: Token) bool { t.kind.match { .Ident => src.tok_eq(t, "while"), _ => false } }
+is_while_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_at(sc.tok).match { true => src.is_while_kw(src.scan(sc.next).tok), false => false }
+}
+
+// a parsed `@while`: the While statement + where it ends (just past the closing `}`)
+WhileEnd*: { stmt: Stmt, next: i32 }
+parse_while<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) WhileEnd {
+    at     := src.scan(pos)                        // '@'
+    wk     := src.scan(at.next)                    // 'while'
+    lp     := src.skip_to_lparen(wk.next)          // pos just past '('
+    c      := a.parse_or(src, lp)                  // condition (stops at ')')
+    rp     := src.scan(c.next)                      // ')'
+    bstart := src.skip_to_brace(rp.next)           // pos just past '{'
+    blk    := a.parse_block(src, bstart)           // statements until '}'
+    WhileEnd { stmt: swhile(c.expr, a.materialize(blk.list)), next: blk.next }
+}
+// the top-level statement form: a While, then the rest of the function body
+parse_while_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    w := a.parse_while(src, pos)
+    a.scons(w.stmt, a.parse_stmts(src, w.next))
+}
+
+// a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
+BlockEnd*: { list: Ptr<SList>, next: i32 }
+parse_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match {
+        true  => BlockEnd { list: a.snil(), next: sc.next },   // '}' — block done
+        false => a.block_stmt(src, pos)
+    }
+}
+block_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    src.is_let_here(pos).match {
+        true  => a.block_let(src, pos),
+        false => src.is_set_here(pos).match {
+            true  => a.block_set(src, pos),
+            false => a.block_while(src, pos)        // the only remaining statement form
+        }
+    }
+}
+block_let<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    nt   := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    at   := src.scan(nt.next)                       // ':='
+    v    := a.parse_or(src, at.next)
+    rest := a.parse_block(src, v.next)
+    BlockEnd { list: a.scons(slet(name, v.expr), rest.list), next: rest.next }
+}
+block_set<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    nt   := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    eq   := src.scan(nt.next)                       // '='
+    v    := a.parse_or(src, eq.next)
+    rest := a.parse_block(src, v.next)
+    BlockEnd { list: a.scons(sassign(name, v.expr), rest.list), next: rest.next }
+}
+block_while<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    w    := a.parse_while(src, pos)
+    rest := a.parse_block(src, w.next)
+    BlockEnd { list: a.scons(w.stmt, rest.list), next: rest.next }
+}
+
 // count the statements, then fill a heap [Stmt] from the list (return the next index)
 scount = (l: Ptr<SList>) i32 { l.match { .SNil => 0, .SCons(c) => 1 + c.tail.scount() } }
 sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 { l.match { .SNil => i, .SCons(c) => buf.sfill_cons(c, i) } }
@@ -285,12 +359,16 @@ sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
 stmt_buf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
 
-// parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
-build_body<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) [Stmt] {
-    stmts := a.parse_stmts(src, pos)
-    body  := a.stmt_buf(stmts.scount())
+// materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
+materialize<A: Allocator> = (a: Ptr<A>, stmts: Ptr<SList>) [Stmt] {
+    body := a.stmt_buf(stmts.scount())
     body.sfill(stmts, 0)
     body
+}
+
+// parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
+build_body<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) [Stmt] {
+    a.materialize(a.parse_stmts(src, pos))
 }
 
 // ── a function BODY under a caller-chosen name (the source is just the statements) ──
