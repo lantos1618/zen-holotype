@@ -501,4 +501,7 @@ def c_stmt(s, locals_, namespace, scope) -> str:
 def c_def(qual, d: Fn, namespace, scope, cname=None) -> str:
     locals_ = {p.name: p.type for p in d.params}
     body = c_block(d.body, locals_, namespace, scope, d.ret) if d.body else "return 0;"
-    return f"{c_type(d.ret)} {cname or c_name(qual)}({_params(d)}) {{ {body} }}"
+    # a param the body never reads is fine in zen (e.g. a stateless trait impl's self);
+    # `(void)p;` silences -Werror=unused-parameter without changing behaviour.
+    voids = "".join(f"(void){p.name}; " for p in d.params if d.body and not _mentions(d.body, p.name))
+    return f"{c_type(d.ret)} {cname or c_name(qual)}({_params(d)}) {{ {voids}{body} }}"
