@@ -431,6 +431,21 @@ def test_parse_struct_milestone(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 25   # 3*3 + 4*4 = 25
 
 
+# ── Ptr<T> types: a type can be a pointer (in params, fields, returns, recursively) ──────
+# `Ptr<T>` parses via a position-returning parse_ty (a single-token ty_of can't span the
+# `< … >`), recursing so `Ptr<Ptr<T>>` works. genc lowers Ptr(T) to `T*`.
+def test_parse_ptr_param_and_field(tmp_path):
+    gen = gen_module(tmp_path, r"Node*: { v: i32, next: Ptr<Node> }\nhead* = (p: Ptr<Node>) i32 { 0 }")
+    assert "struct Node { int32_t v; Node* next; };" in gen     # a self-referential pointer field
+    assert "int32_t head(Node* p) { return 0; }" in gen          # a pointer parameter
+
+
+def test_parse_ptr_nested_and_return(tmp_path):
+    gen = gen_module(tmp_path, r"Node*: { v: i32, next: Ptr<Node> }\nderef2* = (pp: Ptr<Ptr<i32>>) i32 { 0 }\nself* = (p: Ptr<Node>) Ptr<Node> { p }")
+    assert "int32_t deref2(int32_t** pp) { return 0; }" in gen   # nested Ptr<Ptr<…>> -> **
+    assert "Node* self(Node* p) { return p; }" in gen            # a pointer RETURN type
+
+
 # ── enum declarations: the self-hosted parser reads SUM types ─────────────────────────
 # `name*: A | B | C` (or `Circle(i32) | Square(i32)`) parses into genc's EnumDecl (a tagged
 # union). The decl dispatch picks struct vs enum by the token after `:` (`{` -> struct,
