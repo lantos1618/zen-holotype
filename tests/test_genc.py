@@ -106,7 +106,7 @@ def test_genc_emits_a_recursive_factorial_that_runs(tmp_path):
     n_b := vref("n")
     one_b := lit(1)
     nm1 := bin("-", addr(n_b), addr(one_b))
-    fcall := call("fact", addr(nm1))
+    fcall := call("fact", [nm1])
     n_c := vref("n")
     nfact := bin("*", addr(n_c), addr(fcall))
     e := cond(addr(nle1), addr(thenE), addr(nfact))
@@ -127,7 +127,7 @@ def test_genc_module_of_two_functions_compiles_and_runs(tmp_path):
     x := vref("x")
     one := lit(1)
     xp1 := bin("+", addr(x), addr(one))
-    dc := call("dbl", addr(xp1))
+    dc := call("dbl", [xp1])
     calc := Func { name: "calc", params: [param("x", ti32())], ret: ti32(), body: [sret(addr(dc))] }
     emit(genModule([dfunc(dbl), dfunc(calc)]))
     0"""
@@ -355,7 +355,7 @@ def test_genc_recursive_cons_list_no_slices(tmp_path):
     ch := member(addr(c1), "head")
     c2 := vref("c")
     ct := member(addr(c2), "tail")
-    scall := call("sum", addr(ct))
+    scall := call("sum", [ct])
     body := bin("+", addr(ch), addr(scall))
     z := lit(0)
     m := ematchp("l", "List", [arm("Nil", "", addr(z)), arm("Cons", "c", addr(body))])
