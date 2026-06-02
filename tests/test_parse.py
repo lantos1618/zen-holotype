@@ -431,6 +431,20 @@ def test_parse_struct_milestone(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 25   # 3*3 + 4*4 = 25
 
 
+# ── char literals: `'c'` / `'\n'` parse to their byte value (an integer) ──────────────
+# This is the self-hosted parser's OWN idiom — its byte tests read `b == ':'`, not `b == 58`.
+def test_parse_char_literal(tmp_path):
+    gen = gen_module(tmp_path, r"is_colon* = (b: u8) bool { b == ':' }")
+    assert "bool is_colon(uint8_t b) { return (b == 58); }" in gen   # ':' is byte 58
+
+
+def test_parse_char_literal_escape(tmp_path):
+    # the runtime source must contain a genuine backslash escape `'\n'`; through the driver's
+    # Zen-string layer that takes a doubled backslash here (`\\n` -> `\n` in the source).
+    gen = gen_module(tmp_path, r"nl* = () i32 { '\\n' }")
+    assert "int32_t nl() { return 10; }" in gen      # '\n' -> byte 10 via esc_byte
+
+
 # ── Ptr<T> types: a type can be a pointer (in params, fields, returns, recursively) ──────
 # `Ptr<T>` parses via a position-returning parse_ty (a single-token ty_of can't span the
 # `< … >`), recursing so `Ptr<Ptr<T>>` works. genc lowers Ptr(T) to `T*`.
