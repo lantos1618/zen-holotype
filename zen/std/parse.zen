@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, slet, sassign, swhile, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -505,6 +505,7 @@ span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
     }
 }
 tok_eq = (src: str, t: Token, kw: str) bool { src.span_eq(t.start, t.len, kw, 0) }
+// a single type token -> genc's Ty: a primitive keyword, else a Named type (the lexeme).
 ty_of<A: Allocator> = (a: Ptr<A>, src: str, t: Token) Ty {
     src.tok_eq(t, "i32").match { true => ti32(), false =>
     src.tok_eq(t, "i64").match { true => ti64(), false =>
@@ -512,6 +513,30 @@ ty_of<A: Allocator> = (a: Ptr<A>, src: str, t: Token) Ty {
     src.tok_eq(t, "bool").match { true => tbool(), false =>
     src.tok_eq(t, "str").match { true => tstr(), false =>
     src.tok_eq(t, "void").match { true => tvoid(), false => tnamed(a.lexeme(src, t)) } } } } } }
+}
+
+// ── a whole type, which may span several tokens (`Ptr<T>`) — returns the Ty + pos past it ──
+// `Ptr<Inner>` -> genc's Ptr(Inner) (heap Ptr<Ty>, recursive so `Ptr<Ptr<T>>` works); any
+// other token is a leaf type via ty_of. This is what lets params/fields/returns be pointers.
+TyEnd*: { ty: Ty, next: i32 }
+tybuf<A: Allocator> = (a: Ptr<A>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
+tynode<A: Allocator> = (a: Ptr<A>, t: Ty) Ptr<Ty> {
+    buf := a.tybuf()
+    buf[0] = t
+    buf[0].addr()
+}
+parse_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {
+    tt := src.scan(pos)                                  // the head type token
+    src.tok_eq(tt.tok, "Ptr").match {
+        true  => a.parse_ptr_ty(src, tt.next),           // Ptr < inner >
+        false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+    }
+}
+parse_ptr_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
+    lt    := src.scan(pos)                               // '<'
+    inner := a.parse_ty(src, lt.next)                    // the pointee (recursive)
+    gt    := src.scan(inner.next)                        // '>'
+    TyEnd { ty: tptr(a.tynode(inner.ty)), next: gt.next }
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
@@ -532,9 +557,9 @@ fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) P
     nt    := src.scan(pos)                               // param name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
-    tt    := src.scan(colon.next)                        // the type token
-    buf[i] = param(nm, a.ty_of(src, tt.tok))
-    after := src.scan(tt.next)                           // ',' or ')'
+    te    := a.parse_ty(src, colon.next)                 // the type (may be Ptr<…>)
+    buf[i] = param(nm, te.ty)
+    after := src.scan(te.next)                           // ',' or ')'
     src.is_comma(after.tok).match {
         true  => a.fill_params(src, after.next, buf, i + 1),
         false => PEnd { count: i + 1, next: after.next }  // ')'
@@ -571,7 +596,7 @@ parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
     buf    := a.param_buf()
     pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)   // params + pos past ')'
     bstart := src.skip_to_brace(pe.next)                // pos just past '{'
-    func   := Func { name: name, params: buf.take_params(pe.count), ret: a.ty_of(src, src.scan(pe.next).tok),
+    func   := Func { name: name, params: buf.take_params(pe.count), ret: a.parse_ty(src, pe.next).ty,
                      body: a.build_body(src, bstart) }
     DeclEnd { func: func, next: src.skip_block(bstart) }
 }
@@ -592,9 +617,9 @@ fill_field<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32)
     nt    := src.scan(pos)                               // field name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
-    tt    := src.scan(colon.next)                        // the type token
-    buf[i] = field(nm, a.ty_of(src, tt.tok))
-    after := src.scan(tt.next)                           // ',' or '}'
+    te    := a.parse_ty(src, colon.next)                 // the type (may be Ptr<…>)
+    buf[i] = field(nm, te.ty)
+    after := src.scan(te.next)                           // ',' or '}'
     src.is_comma(after.tok).match {
         true  => a.fill_fields(src, after.next, buf, i + 1),
         false => PEnd { count: i + 1, next: after.next }  // '}'
@@ -621,9 +646,9 @@ variant_buf<A: Allocator> = (a: Ptr<A>) [VariantDef] { slice(a.acquire(16 * size
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }                            // exact length
 // `(Type)` after a variant name -> the payload Ty; pos is just past the '('
 variant_payload<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) VPay {
-    tt := src.scan(pos)                                  // the payload type token
-    rp := src.scan(tt.next)                              // ')'
-    VPay { ty: a.ty_of(src, tt.tok), next: rp.next }
+    te := a.parse_ty(src, pos)                           // the payload type (may be Ptr<…>)
+    rp := src.scan(te.next)                              // ')'
+    VPay { ty: te.ty, next: rp.next }
 }
 fill_variants<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
     nt   := src.scan(pos)                                // variant name
