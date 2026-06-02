@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, lit, vref, bin, call, cond, slet, sassign, swhile, sret, param, field, sdef, dfunc, dstruct, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, lit, vref, bin, call, cond, slet, sassign, swhile, sret, param, field, sdef, dfunc, dstruct, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -383,7 +383,8 @@ skip_to_brace = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_lbrace(sc.tok).match { true => sc.next, false => src.skip_to_brace(sc.next) }
 }
-// map a type token to genc's Ty (primitives; named/Ptr default to i32 — TODO)
+// map a type token to genc's Ty: a primitive keyword, else a Named type (the lexeme
+// materialized — a `Pt` becomes Named("Pt"), lowering to a `struct Pt`). Ptr<T> still TODO.
 span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
     (i == len).match {
         true  => kw.byte_at(i) == 0,                     // kw is exactly `len` bytes
@@ -391,12 +392,13 @@ span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
     }
 }
 tok_eq = (src: str, t: Token, kw: str) bool { src.span_eq(t.start, t.len, kw, 0) }
-ty_of = (src: str, t: Token) Ty {
+ty_of<A: Allocator> = (a: Ptr<A>, src: str, t: Token) Ty {
+    src.tok_eq(t, "i32").match { true => ti32(), false =>
     src.tok_eq(t, "i64").match { true => ti64(), false =>
     src.tok_eq(t, "u8").match { true => tu8(), false =>
     src.tok_eq(t, "bool").match { true => tbool(), false =>
     src.tok_eq(t, "str").match { true => tstr(), false =>
-    src.tok_eq(t, "void").match { true => tvoid(), false => ti32() } } } } }
+    src.tok_eq(t, "void").match { true => tvoid(), false => tnamed(a.lexeme(src, t)) } } } } } }
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
@@ -418,7 +420,7 @@ fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) P
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
     tt    := src.scan(colon.next)                        // the type token
-    buf[i] = param(nm, src.ty_of(tt.tok))
+    buf[i] = param(nm, a.ty_of(src, tt.tok))
     after := src.scan(tt.next)                           // ',' or ')'
     src.is_comma(after.tok).match {
         true  => a.fill_params(src, after.next, buf, i + 1),
@@ -456,7 +458,7 @@ parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
     buf    := a.param_buf()
     pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)   // params + pos past ')'
     bstart := src.skip_to_brace(pe.next)                // pos just past '{'
-    func   := Func { name: name, params: buf.take_params(pe.count), ret: src.ty_of(src.scan(pe.next).tok),
+    func   := Func { name: name, params: buf.take_params(pe.count), ret: a.ty_of(src, src.scan(pe.next).tok),
                      body: a.build_body(src, bstart) }
     DeclEnd { func: func, next: src.skip_block(bstart) }
 }
@@ -478,7 +480,7 @@ fill_field<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32)
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
     tt    := src.scan(colon.next)                        // the type token
-    buf[i] = field(nm, src.ty_of(tt.tok))
+    buf[i] = field(nm, a.ty_of(src, tt.tok))
     after := src.scan(tt.next)                           // ',' or '}'
     src.is_comma(after.tok).match {
         true  => a.fill_fields(src, after.next, buf, i + 1),

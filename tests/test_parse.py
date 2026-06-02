@@ -354,6 +354,23 @@ def test_parse_module_struct_and_function(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 6
 
 
+# ── named types: a type token that isn't a primitive becomes a Named type ─────────────
+# ty_of materializes the lexeme into genc's Named (a `Pt` -> `struct Pt`), so struct types
+# flow through parameter, field and return positions instead of defaulting to i32.
+def test_parse_named_type_param_and_field_and_return(tmp_path):
+    gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }\nLine*: { a: Pt, b: Pt }\nfx* = (p: Pt) i32 { 0 }\norigin* = (p: Pt) Pt { p }")
+    assert "struct Pt { int32_t x; int32_t y; };" in gen          # primitives still primitive
+    assert "struct Line { Pt a; Pt b; };" in gen                  # a field typed by another struct
+    assert "int32_t fx(Pt p) { return 0; }" in gen                # a struct PARAMETER
+    assert "Pt origin(Pt p) { return p; }" in gen                 # a struct RETURN type
+    # the whole translation unit compiles (struct passed by value, returned by value)
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
+                                  "\nint main(void){ Pt p = {3, 4}; return origin(p).x; }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 3
+
+
 # ── @while loops: the self-hosted parser handles ITERATION, not just recursion ───────
 # `@while(cond) { stmts }` parses into genc's While. The loop body is a brace block of
 # let / assign / nested-@while statements with NO trailing return (a loop yields no value).
