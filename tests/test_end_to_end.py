@@ -13,8 +13,10 @@ import pytest
 import re
 from dataclasses import dataclass
 
+import pytest
+
 from zen.main import (load, build_namespace, build_scopes, resolve, check,
-                           emit_c, run_test_root)
+                           emit_c, run_test_root, cmd_build)
 from conftest import EXAMPLES
 
 
@@ -630,8 +632,27 @@ def test_test_runner_reports_pass_fail_skip(tmp_path, capsys):
         "t_pass* = () bool { three() == 3 }\n"   # true  -> PASS
         "t_fail* = () bool { three() == 9 }\n"   # false -> FAIL
         "t_bad*  = () bool { three() == true }\n")  # type error -> SKIP
-    run_test_root(tmp_path, "t.zen")
+    failures = run_test_root(tmp_path, "t.zen")
     out = capsys.readouterr().out
     assert "PASS ✓  t.t_pass" in out
     assert "FAIL ✗  t.t_fail" in out
     assert "SKIP    t.t_bad" in out
+    # the count is the contract: a FAIL and a SKIP (didn't type-check) each count, so the
+    # caller (cmd_build) can fail the build honestly — one PASS, one FAIL, one SKIP -> 2.
+    assert failures == 2
+
+
+def test_build_exits_nonzero_when_a_zen_test_fails(tmp_path):
+    # the honest-CLI contract: `zen build` must FAIL (SystemExit) when a declared Test FAILs,
+    # not print ✗ and exit 0. (Regression guard for the harness-returns-fails change.)
+    (tmp_path / "build.zen").write_text(
+        '{ Builder, Executable, Test } = @builtin.build\n'
+        'build* = (b: Builder) i32 {\n'
+        '    b.add(Executable { name: "x", main: "main.zen" })\n'
+        '    b.add(Test { root: "test.zen" })\n'
+        '    0\n'
+        '}\n')
+    (tmp_path / "main.zen").write_text("main* = () i32 { 0 }\n")
+    (tmp_path / "test.zen").write_text("t_fail* = () bool { 1 == 2 }\n")   # always FAILs
+    with pytest.raises(SystemExit):
+        cmd_build(str(tmp_path))
