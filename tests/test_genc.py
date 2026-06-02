@@ -172,7 +172,7 @@ def test_genc_struct_literal_compound(tmp_path):
 
 
 def test_genc_multi_statement_body_compiles_and_runs(tmp_path):
-    # a Let + a Return: int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); } -> f(10)==225
+    # a Let + a Return: int32_t f(int32_t x) { __auto_type y = (x + 5); return (y * y); } -> f(10)==225
     body = """
     five := lit(5)
     x := vref("x")
@@ -184,7 +184,7 @@ def test_genc_multi_statement_body_compiles_and_runs(tmp_path):
     emit(genC(Func { name: "f", params: [param("x", ti32())], ret: ti32(), body: stmts }))
     0"""
     generated = emit_via_zen(tmp_path, body)
-    assert generated == "int32_t f(int32_t x) { int32_t y = (x + 5); return (y * y); }"
+    assert generated == "int32_t f(int32_t x) { __auto_type y = (x + 5); return (y * y); }"
     assert compile_and_run(tmp_path, generated, "f(10)") == "225"
 
 
