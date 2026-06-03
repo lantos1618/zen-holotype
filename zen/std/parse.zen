@@ -774,12 +774,14 @@ parse_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
     src.is_lbracket(tt.tok).match ({
         true  => a.parse_slice_ty(src, tt.next),         // [ T ]
-        false => src.tok_eq(tt.tok, "Ptr").match ({
-            true  => a.parse_ptr_ty(src, tt.next),       // Ptr < inner >
+        false => src.is_ptr_kw(tt.tok).match ({
+            true  => a.parse_ptr_ty(src, tt.next),       // Ptr<inner> / RawPtr<inner> -> inner*
             false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
         })
     })
 }
+// `Ptr` and `RawPtr` both lower to `T*` — accept either as the pointer-type head.
+is_ptr_kw = (src: str, t: Token) bool { src.tok_eq(t, "Ptr") || src.tok_eq(t, "RawPtr") }
 parse_slice_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
     inner := a.parse_ty(src, pos)                        // the element type
     rb    := src.scan(inner.next)                        // ']'
