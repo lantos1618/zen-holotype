@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, slit, index, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, sidxset, param, tnamed, tptr, tslice, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, slit, eindex, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, sidxset, param, tnamed, tptr, tslice, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -400,10 +400,10 @@ def test_genc_slice_literal_index_runs(tmp_path):
     slc := slit(ti32(), [ten, twenty, thirty])
     xs0 := vref("xs")
     i0 := lit(0)
-    e0 := index(addr(xs0), addr(i0), ti32())
+    e0 := eindex(addr(xs0), addr(i0), ti32())
     xs2 := vref("xs")
     i2 := lit(2)
-    e2 := index(addr(xs2), addr(i2), ti32())
+    e2 := eindex(addr(xs2), addr(i2), ti32())
     sm := bin("+", addr(e0), addr(e2))
     f := Func { name: "g", params: [], ret: ti32(), body: [slet("xs", addr(slc)), sret(addr(sm))] }
     emit(genModule([dfunc(f)]))
@@ -426,7 +426,7 @@ def test_genc_index_assignment_runs(tmp_path):
     setst := sidxset(addr(buf), addr(one), ti32(), addr(nine))
     buf2 := vref("buf")
     one2 := lit(1)
-    rd := index(addr(buf2), addr(one2), ti32())
+    rd := eindex(addr(buf2), addr(one2), ti32())
     f := Func { name: "set1", params: [param("buf", tslice(addr(et))), param("v", ti32())], ret: ti32(),
                 body: [setst, sret(addr(rd))] }
     emit(genModule([dfunc(f)]))
