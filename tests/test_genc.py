@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, slit, index, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, tslice, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, slit, index, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, sidxset, param, tnamed, tptr, tslice, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -413,3 +413,25 @@ def test_genc_slice_literal_index_runs(tmp_path):
     assert "(zslice){ .ptr = (int32_t[]){ 10, 20, 30 }, .len = 3 }" in generated
     assert "((int32_t*)(xs).ptr)[0]" in generated
     assert compile_and_run(tmp_path, generated, "g()") == "40"
+
+
+def test_genc_index_assignment_runs(tmp_path):
+    # buf[i] = v: an IndexSet statement -> ((T*)(buf).ptr)[i] = v. A function takes a [i32]
+    # slice, writes to element 1, and returns it. set1([0,0,0], 9) -> reads back 9.
+    body = """
+    et := ti32()
+    buf := vref("buf")
+    one := lit(1)
+    nine := vref("v")
+    setst := sidxset(addr(buf), addr(one), ti32(), addr(nine))
+    buf2 := vref("buf")
+    one2 := lit(1)
+    rd := index(addr(buf2), addr(one2), ti32())
+    f := Func { name: "set1", params: [param("buf", tslice(addr(et))), param("v", ti32())], ret: ti32(),
+                body: [setst, sret(addr(rd))] }
+    emit(genModule([dfunc(f)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "((int32_t*)(buf).ptr)[1] = v;" in generated
+    call = "({ int32_t a[3] = {0,0,0}; zslice buf = { .ptr = a, .len = 3 }; set1(buf, 9); })"
+    assert compile_and_run(tmp_path, generated, call) == "9"
