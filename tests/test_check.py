@@ -47,3 +47,39 @@ def test_fits_lattice(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "o")]).returncode == 12   # all 12 verdicts correct
+
+
+# check_module: a validating pass (Goal C Phase 1) — counts CALL ARITY errors.
+ARITY_DRIVER = """
+{ Malloc } = std.alloc
+{ parse_module } = std.parse
+{ check_module } = std.check
+main* = () i32 { m := Malloc { _: 0 }\n addr(m).parse_module("%s").check_module() }
+"""
+
+
+def _arity_errors(tmp_path, src):
+    (tmp_path / "main.zen").write_text(ARITY_DRIVER % src.replace("\n", "\\n"))
+    files = load(tmp_path)
+    namespace = build_namespace(files)
+    build_scopes(files); resolve(files, namespace)
+    fold_comptime(files, namespace); run_emits(files, namespace)
+    _, passing = check(files, namespace)
+    assert "main.main" in passing
+    c = emit_c(files, passing, namespace, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                          capture_output=True, text=True).returncode == 0
+    return subprocess.run([str(tmp_path / "o")]).returncode
+
+
+def test_check_arity_accepts_correct_calls(tmp_path):
+    assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nuse* = () i32 { add(1, 2) }") == 0
+
+
+def test_check_arity_flags_wrong_count(tmp_path):
+    # one too few, then one too many -> two errors; a call to an unknown name (an intrinsic /
+    # external) is NOT flagged.
+    assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }") == 1
+    assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }\ng* = () i32 { add(1, 2, 3) }") == 2
+    assert _arity_errors(tmp_path, "f* = (x: i32) i32 { putchar(x) }") == 0   # putchar unknown -> not flagged

@@ -243,3 +243,67 @@ fits* = (g: Ty, w: Ty) bool {
         false => g.ty_eq(w)                     // non-numeric: exact structural match
     }
 }
+
+// ── check_module: a VALIDATING pass (Goal C Phase 1) — count type errors ───────────────
+// Distinct from resolve_module (which rewrites the AST): this walks the module and reports
+// how many type errors it found. Today it checks CALL ARITY — every call to a known function
+// must pass the right number of arguments (a call to an unknown name is an intrinsic/extern,
+// not an error). Returns the error count; Phase 2 adds arg-type checks (via fits) + messages.
+call_err_pick = (f: Func, fn: str, nargs: i64, found: i32) i32 {
+    eq(f.name, fn).match {
+        true  => (f.params.len == nargs).match { true => 0, false => 1 },   // known fn: arity must match
+        false => found
+    }
+}
+call_arity_err = (decls: [Decl], fn: str, nargs: i64) i32 {
+    found := 0                                          // unknown fn -> 0 (intrinsic / external)
+    decls.loop((h, i, d) { found = d.match { .DFunc(f) => f.call_err_pick(fn, nargs, found), _ => found } })
+    found
+}
+check_args = (decls: [Decl], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc + decls.check_expr(ar.addr()) })
+    acc
+}
+check_arms = (decls: [Decl], arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc + decls.check_expr(ar.body) })
+    acc
+}
+check_inits = (decls: [Decl], inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc + decls.check_expr(fi.value) })
+    acc
+}
+check_expr = (decls: [Decl], e: Ptr<Expr>) i32 {
+    load(e).match {
+        .Call(c)        => decls.call_arity_err(c.fn, c.args.len) + decls.check_args(c.args),
+        .Bin(b)         => decls.check_expr(b.lhs) + decls.check_expr(b.rhs),
+        .Cond(d)        => decls.check_expr(d.c) + decls.check_expr(d.t) + decls.check_expr(d.e),
+        .Member(m)      => decls.check_expr(m.obj),
+        .Match(m)       => decls.check_expr(m.subj) + decls.check_arms(m.arms),
+        .MakeEnum(mk)   => decls.check_expr(mk.payload),
+        .MakeStruct(sd) => decls.check_inits(sd.inits),
+        _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
+    }
+}
+check_stmt = (decls: [Decl], st: Stmt) i32 {
+    st.match {
+        .Let(l)    => decls.check_expr(l.value),
+        .Assign(x) => decls.check_expr(x.value),
+        .Return(r) => decls.check_expr(r),
+        .If(f)     => decls.check_expr(f.c) + decls.check_body(f.then) + decls.check_body(f.els),
+        .While(w)  => decls.check_expr(w.c) + decls.check_body(w.body)
+    }
+}
+check_body = (decls: [Decl], body: [Stmt]) i32 {
+    acc := 0
+    body.loop((h, i, st) { acc = acc + decls.check_stmt(st) })
+    acc
+}
+check_func = (decls: [Decl], f: Func) i32 { decls.check_body(f.body) }
+check_module* = (decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc + d.match { .DFunc(f) => decls.check_func(f), _ => 0 } })
+    acc
+}
