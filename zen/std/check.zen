@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tbool, tstr, tnamed, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -141,6 +141,7 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
         .Loop(l)       => tvoid(),                            // a loop is a void statement
+        .SliceLit(sd)  => tslice(sd.elem.addr()),             // `[a, b, c]` of element E -> [E]
         _              => tvoid()
     })
 }
@@ -389,11 +390,16 @@ inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
 // resolve a whole module, then splice every template call. Pass 1 fills enum match enames +
 // constructor types; pass 2 inlines templates (using their now-resolved bodies). The template
 // decls stay in the list but genModule skips them (genc.is_template).
+// pass 3 re-resolves AFTER inlining so that types which were generic in a template body
+// (a `.loop` over `[T]`, an index) re-infer against the now-CONCRETE arguments spliced in at the
+// call site — that's what lets a generic template like `fold<T>` run once monomorphized by use.
 resolve_module* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
-    out := a.dbuf(buf.len)
-    buf.loop((h, i, d) { out[i] = a.inline_decl(buf, d) })
+    inl := a.dbuf(buf.len)
+    buf.loop((h, i, d) { inl[i] = a.inline_decl(buf, d) })
+    out := a.dbuf(inl.len)
+    inl.loop((h, i, d) { out[i] = a.resolve_decl(inl, d) })   // re-infer concrete types post-inline
     out
 }
 
