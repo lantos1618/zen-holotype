@@ -266,7 +266,7 @@ subj_name = (e: Ptr<Expr>) str { load(e).match { .Var(v) => v.name, _ => "" } }
 // `.Variant(bind) => body` / `.Variant => body` arms, comma-separated, into a heap [ArmData].
 // ename is left "" here — std.check fills it once the subject's enum type is known.
 BindEnd*: { bind: str, next: i32 }
-arm_buf<A: Allocator> = (a: Ptr<A>) [ArmData] { slice(a.acquire(16 * sizeof(ArmData)), 16) }   // cap 16
+arm_buf<A: Allocator> = (a: Ptr<A>) [ArmData] { slice(a.acquire(64 * sizeof(ArmData)), 64) }   // cap 64
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }                            // exact length
 arm_bind<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BindEnd {     // pos just past '('
     bt := src.scan(pos)                                              // the payload binding name
@@ -332,7 +332,7 @@ parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
 }
 // `Name { field: value, … }` — the `field: value` inits parse into a heap [FieldInit], then
 // the struct literal is built. open is the Scan of the opening '{'.
-finit_buf<A: Allocator> = (a: Ptr<A>) [FieldInit] { slice(a.acquire(16 * sizeof(FieldInit)), 16) }   // cap 16
+finit_buf<A: Allocator> = (a: Ptr<A>) [FieldInit] { slice(a.acquire(64 * sizeof(FieldInit)), 64) }   // cap 64
 take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }                            // exact length
 parse_struct_lit<A: Allocator> = (a: Ptr<A>, src: str, name: str, open: Scan) PExpr {
     buf := a.finit_buf()
@@ -357,7 +357,7 @@ fill_init<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [FieldInit], i: i
 }
 // `name(a, b, …)` — parse the comma-separated arguments into a heap [Expr] (each arg's
 // VALUE), then build the call. lp is the Scan of the opening '('.
-arg_buf<A: Allocator> = (a: Ptr<A>) [Expr] { slice(a.acquire(16 * sizeof(Expr)), 16) }   // cap 16 args
+arg_buf<A: Allocator> = (a: Ptr<A>) [Expr] { slice(a.acquire(64 * sizeof(Expr)), 64) }   // cap 64 args
 take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }                           // exact length
 parse_call<A: Allocator> = (a: Ptr<A>, src: str, name: str, lp: Scan) PExpr {
     buf := a.arg_buf()
@@ -780,7 +780,7 @@ skip_to_lparen = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_lparen(sc.tok).match { true => sc.next, false => src.skip_to_lparen(sc.next) }
 }
-param_buf<A: Allocator> = (a: Ptr<A>) [Param] { slice(a.acquire(16 * sizeof(Param)), 16) }   // cap 16
+param_buf<A: Allocator> = (a: Ptr<A>) [Param] { slice(a.acquire(64 * sizeof(Param)), 64) }   // cap 64
 take_params = (buf: [Param], n: i32) [Param] { slice(buf.ptr, n) }                            // exact length
 fill_params<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
@@ -840,7 +840,7 @@ parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func { a.parse_decl_at(src, 0)
 // `}` instead of `)`. Lowers to genc's StructDecl (typedef struct). parse_struct_at also
 // reports where the decl ENDS (past `}`), so a module can parse the next one.
 StructEnd*: { sd: StructDecl, next: i32 }
-field_buf<A: Allocator> = (a: Ptr<A>) [Field] { slice(a.acquire(16 * sizeof(Field)), 16) }   // cap 16
+field_buf<A: Allocator> = (a: Ptr<A>) [Field] { slice(a.acquire(64 * sizeof(Field)), 64) }   // cap 64
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
 fill_fields<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     sc := src.scan(pos)
@@ -875,7 +875,7 @@ parse_struct*<A: Allocator> = (a: Ptr<A>, src: str) StructDecl { a.parse_struct_
 EnumEnd*: { ed: EnumDecl, next: i32 }
 VPay*:    { ty: Ty, next: i32 }                          // a variant's payload Ty + pos past it
 is_bar = (src: str, t: Token) bool { t.kind.match { .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false } }
-variant_buf<A: Allocator> = (a: Ptr<A>) [VariantDef] { slice(a.acquire(16 * sizeof(VariantDef)), 16) }   // cap 16
+variant_buf<A: Allocator> = (a: Ptr<A>) [VariantDef] { slice(a.acquire(64 * sizeof(VariantDef)), 64) }   // cap 64
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }                            // exact length
 // `(Type)` after a variant name -> the payload Ty; pos is just past the '('
 variant_payload<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) VPay {
@@ -930,7 +930,7 @@ decl_is_enum = (src: str, pos: i32) bool {              // `:` but NOT `{` -> an
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
 // `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
 // which genModule lowers to a translation unit. Parses decls until Eof.
-decl_buf<A: Allocator> = (a: Ptr<A>) [Decl] { slice(a.acquire(64 * sizeof(Decl)), 64) }   // cap 64
+decl_buf<A: Allocator> = (a: Ptr<A>) [Decl] { slice(a.acquire(1024 * sizeof(Decl)), 1024) }   // cap 1024
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── imports ──────────────────────────────────────────────────────────────────────
 // `{ A, B } = std.x` — a destructuring import. It carries no code (modules resolve at
