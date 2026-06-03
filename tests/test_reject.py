@@ -80,3 +80,14 @@ def test_checker_accepts_index_store(tmp_path, src):
 ])
 def test_operand_type_checking(tmp_path, src, want):
     assert _errors(tmp_path, src) == want
+
+
+# index validation: `seq[idx]` needs a slice seq and a numeric idx — matching the Python frontend.
+@pytest.mark.parametrize("src,want", [
+    ("f* = (xs: [i32]) i32 { xs[(3 < 4)] }", 1),          # bool index
+    ("f* = (n: i32) i32 { n[0] }", 1),                     # indexing a non-slice
+    ("f* = (xs: [i32]) i32 { xs[0] }", 0),                 # numeric literal index -> ok
+    ("f* = (xs: [i32], i: i32) i32 { xs[i] }", 0),         # numeric var index -> ok
+])
+def test_index_validation(tmp_path, src, want):
+    assert _errors(tmp_path, src) == want

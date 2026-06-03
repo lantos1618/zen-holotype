@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, BinData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -609,9 +609,20 @@ operand_err = (env: Env, b: BinData) i32 {
         })
     })
 }
+// index validation (reject-parity): `seq[idx]` needs a SLICE `seq` and a NUMERIC `idx` — matching the
+// Python frontend ("indexing a non-slice value" / "a slice index must be numeric"). Uninferable -> skip.
+is_slice_ty = (t: Ty) bool { t.match ({ .Slice(e) => true, _ => false }) }
+non_slice = (env: Env, e: Ptr<Expr>) bool {
+    t := env.infer_expr(e)
+    t.is_uninferable().match ({ true => false, false => t.is_slice_ty().match ({ true => false, false => true }) })
+}
+index_err = (env: Env, ix: IndexData) i32 {
+    (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
+}
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.check_call(c) + env.check_args(c.args),
+        .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
         .Member(m)      => env.check_expr(m.obj),
