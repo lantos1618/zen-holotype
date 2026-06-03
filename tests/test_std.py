@@ -121,7 +121,7 @@ main* = () i32 {
     xs   := [1, 2, 3, 4, 5]
     kept := [0, 0, 0, 0, 0]
     n := filter_into(xs, kept, (x) { x > 2 })       // packs [3, 4, 5], returns n = 3
-    (n == 3).match { true => kept[0] + kept[1] + kept[2], false => 0 }   // 12 iff count right
+    (n == 3).match ({ true => kept[0] + kept[1] + kept[2], false => 0 })   // 12 iff count right
 }
 """)
     assert run(tmp_path, emit_c(files, passing, namespace)) == 12   # 3 + 4 + 5, and n == 3
@@ -132,11 +132,11 @@ def test_str_len_and_eq(tmp_path):
     files, namespace, passing = build(tmp_path, """
 { len, eq, ne, is_empty } = std.str
 main* = () i32 {
-    a := (len("hello") == 5).match  { true => 1,  false => 0 }
-    b := (eq("abc", "abc")).match   { true => 2,  false => 0 }
-    c := (eq("abc", "xyz")).match   { true => 4,  false => 0 }   // c stays 0
-    d := (ne("abc", "xyz")).match   { true => 8,  false => 0 }
-    e := (is_empty("")).match       { true => 16, false => 0 }
+    a := (len("hello") == 5).match  ({ true => 1,  false => 0 })
+    b := (eq("abc", "abc")).match   ({ true => 2,  false => 0 })
+    c := (eq("abc", "xyz")).match   ({ true => 4,  false => 0 })   // c stays 0
+    d := (ne("abc", "xyz")).match   ({ true => 8,  false => 0 })
+    e := (is_empty("")).match       ({ true => 16, false => 0 })
     a + b + c + d + e
 }
 """)
@@ -202,7 +202,7 @@ def test_str_view_borrows_bytes(tmp_path):
 main* = () i32 {
     b := view("ABC")            // [65, 66, 67], borrowed
     r := b[0] + b[1] + b[2]
-    (b.len == 3).match { true => r, false => 0 }   // 198
+    (b.len == 3).match ({ true => r, false => 0 })   // 198
 }
 """)
     assert run(tmp_path, emit_c(files, passing, namespace)) == 198 & 0xFF   # 198

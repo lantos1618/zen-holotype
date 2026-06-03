@@ -99,9 +99,9 @@ def test_python_and_zen_backends_agree(tmp_path, expr):
 # the Python pipeline keeps a Match node and lowers it to a ternary later. Different paths,
 # so the gate checks they still AGREE on the result.
 CONDITIONALS = [
-    "(1 <= 0).match { true => 5, false => 9 }",     # -> 9
-    "(3 < 5).match { true => 7, false => 0 }",      # -> 7
-    "(2 + 2 == 4).match { true => 1, false => 2 }", # -> 1
+    "(1 <= 0).match ({ true => 5, false => 9 })",     # -> 9
+    "(3 < 5).match ({ true => 7, false => 0 })",      # -> 7
+    "(2 + 2 == 4).match ({ true => 1, false => 2 })", # -> 1
 ]
 
 

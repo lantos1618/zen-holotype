@@ -35,8 +35,8 @@ def run_driver(tmp_path, src):
 SCAN_DRIVER = """
 { Scan, Token, TokKind, scan, byte_at } = std.lex
 putchar = (c: i32) i32
-kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 } }
-is_eof = (k: TokKind) bool { k.match { .Eof => true, _ => false } }
+kind_char = (k: TokKind) i32 { k.match ({ .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 }) }
+is_eof = (k: TokKind) bool { k.match ({ .Eof => true, _ => false }) }
 emit_span = (src: str, start: i32, len: i32) void {
     i := start
     e := start + len
@@ -68,7 +68,7 @@ LIST_DRIVER = """
 { Malloc } = std.alloc
 { TokList, TokCell, TokKind, tokenize, byte_at } = std.lex
 putchar = (c: i32) i32
-kind_char = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 } }
+kind_char = (k: TokKind) i32 { k.match ({ .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 }) }
 emit_span = (src: str, start: i32, len: i32) void {
     i := start
     e := start + len
@@ -84,7 +84,7 @@ emit_cell = (src: str, c: TokCell) i32 {
     putchar(10)
     walk(src, c.tail)
 }
-walk = (src: str, l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => emit_cell(src, c) } }
+walk = (src: str, l: Ptr<TokList>) i32 { l.match ({ .Nil => 0, .Cons(c) => emit_cell(src, c) }) }
 main* = () i32 {
     src := %s
     m := Malloc { _: 0 }

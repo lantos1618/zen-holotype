@@ -19,7 +19,7 @@ def test_char_adapts_to_u8_like_an_int_literal(compile_main):
     # a char compares against a u8 with no cast, exactly as a bare int literal would.
     assert compile_main("""
 is_digit = (b: u8) bool { (b >= '0') && (b <= '9') }
-main* = () i32 { is_digit('7').match { true => 1, false => 0 } }
+main* = () i32 { is_digit('7').match ({ true => 1, false => 0 }) }
 """) == 1
 
 
