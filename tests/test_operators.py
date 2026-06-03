@@ -79,3 +79,13 @@ def test_operator_runs(tmp_path, prog, want):
 ])
 def test_multi_statement_match_arm_runs(tmp_path, prog, want):
     _run(tmp_path, prog, want)
+
+
+@pytest.mark.parametrize("prog,want", [
+    # prefix `!` (logical not), lowered as (x ? false : true)
+    ("test* = () i32 { (!(5 < 3)).match({ true => 1, false => 0 }) }", 1),
+    ("test* = () i32 { (!(5 < 8)).match({ true => 1, false => 0 }) }", 0),
+    ("test* = () i32 { ok := 3 != 4\n (!ok).match({ true => 1, false => 0 }) }", 0),
+])
+def test_logical_not_runs(tmp_path, prog, want):
+    _run(tmp_path, prog, want)
