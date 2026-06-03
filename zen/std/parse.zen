@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Malloc, heap } = std.alloc
 
@@ -76,7 +76,10 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
         _      => src.is_dot(sc.tok).match ({
             true  => a.parse_ctor(src, sc),          // `.Variant` / `.Variant(arg)` — an enum constructor
-            false => a.parse_paren(src, sc)          // '(' (the only other atom)
+            false => src.lam_open(sc).match ({       // '(' — either a lambda `(names){…}` or a paren'd expr
+                true  => a.parse_lambda(src, sc),
+                false => a.parse_paren(src, sc)
+            })
         })
     })
 }
@@ -387,6 +390,52 @@ parse_paren = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {
     inner := a.parse_or(src, open.next)             // parse past the '(' (full expr incl. compare)
     close := src.scan(inner.next)                    // consume the ')'
     PExpr { expr: inner.expr, next: close.next }
+}
+// is the `(` (scanned as `open`) the start of a lambda `(names){…}`, not a parenthesized expr?
+// A lambda's parens hold only a (possibly empty) comma-list of identifiers, closed by `)` then
+// `{`. Anything else (an operator, a literal, no trailing brace) is a parenthesized expression.
+lam_brace = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }   // '{' right after ')'?
+lam_open = (src: str, open: Scan) bool { src.lam_params_ok(open.next) }
+lam_params_ok = (src: str, pos: i32) bool {         // pos just past '(' — idents/commas then ')'{
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({
+        true  => src.lam_brace(sc.next),             // '()' is a lambda iff '{' follows
+        false => sc.tok.kind.match ({
+            .Ident => src.lam_after_name(sc.next),
+            _      => false                          // first token not an ident -> a paren'd expr
+        })
+    })
+}
+lam_after_name = (src: str, pos: i32) bool {         // after a name: ',' (more) or ')' then '{'
+    sc := src.scan(pos)
+    src.is_comma(sc.tok).match ({
+        true  => src.lam_params_ok(sc.next),
+        false => src.is_rparen(sc.tok).match ({ true => src.lam_brace(sc.next), false => false })
+    })
+}
+// a lambda value `(a, x) { body }` — names only (each becomes a Param with a Void placeholder type;
+// the real types come from the FnT it is passed to). The body is a function-style block (a trailing
+// expression is its result), inlined where its FnT parameter is called.
+fill_lnames = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_lname(src, pos, buf, i) })
+}
+fill_lname = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+    nt    := src.scan(pos)                               // the parameter name
+    buf[i] = param(a.lexeme(src, nt.tok), tvoid())
+    after := src.scan(nt.next)                           // ',' or ')'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_lnames(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // ')'
+    })
+}
+parse_lambda = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {   // open = the '(' scan
+    buf  := a.param_buf()
+    pe   := a.fill_lnames(src, open.next, buf, 0)        // param names, pos just past ')'
+    ob   := src.scan(pe.next)                            // '{'
+    body := a.build_body(src, ob.next)                   // statements (trailing expr = the value)
+    endp := src.skip_block(ob.next)                      // pos just past the matching '}'
+    a.parse_postfix(src, PExpr { expr: a.enode(lam(buf.take_params(pe.count), body)), next: endp })
 }
 
 // ── term := atom (('*' | '/') atom)*   (left-associative) ─────────────────────────
@@ -784,11 +833,37 @@ parse_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
     src.is_lbracket(tt.tok).match ({
         true  => a.parse_slice_ty(src, tt.next),         // [ T ]
-        false => src.is_ptr_kw(tt.tok).match ({
-            true  => a.parse_ptr_ty(src, tt.next),       // Ptr<inner> / RawPtr<inner> -> inner*
-            false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+        false => src.is_lparen(tt.tok).match ({
+            true  => a.parse_fn_ty(src, tt.next),        // ( A, T ) R -> FnT (a closure/template param)
+            false => src.is_ptr_kw(tt.tok).match ({
+                true  => a.parse_ptr_ty(src, tt.next),   // Ptr<inner> / RawPtr<inner> -> inner*
+                false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+            })
         })
     })
+}
+// a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
+// parameter type — a function with one is an inline template (lowered at the call site).
+ty_buf = (a: Ptr<Malloc>) [Ty] { slice(heap(16 * sizeof(Ty)), 16) }
+take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
+fill_tys = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_ty(src, pos, buf, i) })
+}
+fill_ty = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
+    te    := a.parse_ty(src, pos)                        // one parameter type
+    buf[i] = te.ty
+    after := src.scan(te.next)                           // ',' or ')'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_tys(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // ')'
+    })
+}
+parse_fn_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '('
+    buf := a.ty_buf()
+    pe  := a.fill_tys(src, pos, buf, 0)                  // param types, pos just past ')'
+    rt  := a.parse_ty(src, pe.next)                      // the return type
+    TyEnd { ty: fntype(buf.take_tys(pe.count), a.tynode(rt.ty)), next: rt.next }
 }
 // `Ptr` and `RawPtr` both lower to `T*` — accept either as the pointer-type head.
 is_ptr_kw = (src: str, t: Token) bool { src.tok_eq(t, "Ptr") || src.tok_eq(t, "RawPtr") }
