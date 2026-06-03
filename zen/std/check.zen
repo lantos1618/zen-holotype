@@ -79,7 +79,7 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
 }
 // the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
-enum_name = (t: Ty) str { t.match ({ .Named(n) => n, .Ptr(p) => load(p).ty_name(), _ => "" }) }
+enum_name = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }   // a generic enum instance -> its monomorphized name
 ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
 elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }   // the element type of a [T]
 // the enum that declares variant `vn` (scan every enum decl) — "" if none
@@ -102,7 +102,17 @@ named_has = (decls: [Decl], ename: str, vn: str) bool {
 }
 // the enum for constructor `.vn(…)`: prefer the EXPECTED type (env.exp) when it has the variant,
 // else scan by name. This is what disambiguates Expr.Int from TokKind.Int in a combined module.
+// the enum name to stamp on a constructor `.Some(5)`. A generic enum is monomorphized, so when the
+// EXPECTED type is a generic instance (`Opt<i32>`), use its mangled name directly — the concrete
+// `Opt_i32` enum doesn't exist yet at resolve time (monomorphize emits it later), so named_has can't
+// find it. Otherwise: the expected enum if it has the variant, else a by-variant scan.
 ctor_enum = (env: Env, vn: str) str {
+    env.exp.match ({
+        .Generic(g) => g.mangled,
+        _           => env.ctor_enum_plain(vn)
+    })
+}
+ctor_enum_plain = (env: Env, vn: str) str {
     en := env.exp.enum_name()
     env.decls.named_has(en, vn).match ({ true => en, false => env.decls.enum_of_variant(vn) })
 }
@@ -188,7 +198,7 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Tag(t)       => a.cenode(mktag(env.ctor_enum(t.variant), t.variant)),
         .Bin(b)       => a.cenode(bin(b.op, a.resolve_expr(env.clr_exp(), b.lhs), a.resolve_expr(env.clr_exp(), b.rhs))),
         .Cond(c)      => a.cenode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
-        .Call(c)      => a.cenode(call(c.fn, a.resolve_args(env.clr_exp(), c.args))),
+        .Call(c)      => a.resolve_call(env, c),
         .Member(mm)   => a.resolve_member(env, mm),
         .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse, preserving the monomorphized name + type args
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.infer_expr(ix.seq).elem_of())),
@@ -245,6 +255,16 @@ resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
     buf := a.cebuf(args.len)
     args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env, ar.addr())) })
     buf
+}
+// resolve a call, threading each PARAMETER's type as the expected type for its argument — so a bare
+// constructor `.Some(5)` in `f(.Some(5))` sees `f`'s param type (e.g. a generic `Opt<i32>`) and is
+// stamped with the right (monomorphized) enum name. An unknown fn has no params -> no expectation.
+arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
+resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
+    ps  := env.decls.fn_params(c.fn)
+    buf := a.cebuf(c.args.len)
+    c.args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env.with_exp(ps.arg_exp(i)), ar.addr())) })
+    a.cenode(call(c.fn, buf))
 }
 resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
