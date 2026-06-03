@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -126,6 +126,22 @@ bin_ty = (op: str, lt: Ty) Ty {
     cmp := (b == '=') || (b == '<') || (b == '>') || (b == '&') || (b == '|') || (b == '!')
     cmp.match ({ true => tbool(), false => lt })
 }
+// is `e` a purely-LITERAL numeric expression? Such a value is polymorphic — it fits any numeric
+// type (`10` is a valid u8 / i32 / i64) — so the checker must not read it as a narrowing.
+is_lit_numeric = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Int(n)  => true,
+        .Byte(n) => true,
+        .Bin(b)  => b.lhs.is_lit_numeric() && b.rhs.is_lit_numeric(),
+        .Cond(c) => c.t.is_lit_numeric() && c.e.is_lit_numeric(),
+        _        => false
+    })
+}
+// a `c ? t : e` conditional's type. A LITERAL then-branch (polymorphic) defers to the else, so
+// `cond ? 10 : e` where `e: u8` types as u8, not i32 — matching how literals size to context.
+cond_ty = (env: Env, d: CondData) Ty {
+    d.t.is_lit_numeric().match ({ true => env.infer_expr(d.e), false => env.infer_expr(d.t) })
+}
 infer_expr = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
@@ -133,7 +149,7 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Var(v)        => env.vars.lookup_var(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
         .Call(c)       => env.infer_call(c),
-        .Cond(d)       => env.infer_expr(d.t),
+        .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),
         .MakeEnum(mk)  => tnamed(env.decls.enum_of_variant(mk.variant)),
         .Tag(t)        => tnamed(env.decls.enum_of_variant(t.variant)),
@@ -527,12 +543,11 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
 // concrete mismatch is an error. This is what catches `(…) i32 { someStr }`-style return bugs.
 ret_err = (env: Env, r: Ptr<Expr>) i32 {
     rt := env.infer_expr(r)
-    // skip uninferable types, AND skip numeric->numeric (int literals are polymorphic — a `10`
-    // returned as u8 is fine; the checker can't track literal-ness through a Cond). What's left
-    // is the high-value catch: a CATEGORY mismatch — str / bool / a struct returned where another
-    // category is declared.
-    both_num := (rt.ty_rank() >= 0) && (env.exp.ty_rank() >= 0)
-    (rt.is_uninferable() || env.exp.is_uninferable() || both_num).match ({
+    // skip when uninferable, OR when a polymorphic literal is returned to a numeric type (`10` as
+    // u8 is fine). Otherwise fits() — which catches BOTH a category mismatch (str/bool/struct where
+    // another is declared) AND a computed numeric narrowing (an i64-returning call declared i32).
+    lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0)
+    (rt.is_uninferable() || env.exp.is_uninferable() || lit_to_num).match ({
         true  => 0,
         false => fits(rt, env.exp).match ({ true => 0, false => 1 })
     })
