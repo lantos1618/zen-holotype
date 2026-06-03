@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -548,8 +548,30 @@ check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret }
     env.check_body(f.body)
 }
+// trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares. The Trait is
+// a struct whose FnT fields are the method signatures; im.methods is the set this impl actually
+// provides. A declared method missing from that set is one error. (Name-level — signatures aren't
+// compared yet; but it's tied to THIS impl, not a global function search.)
+has_method = (methods: [Param], name: str) bool {
+    found := false
+    methods.loop((h, i, p) { found = eq(p.name, name).match ({ true => true, false => found }) })
+    found
+}
+method_missing = (im: ImplData, f: Field) i32 {
+    f.ty.is_fnt().match ({ true => im.methods.has_method(f.name).match ({ true => 0, false => 1 }), false => 0 })
+}
+trait_conformance = (im: ImplData, sd: StructDecl) i32 {
+    acc := 0
+    sd.fields.loop((h, i, f) { acc = acc + im.method_missing(f) })
+    acc
+}
+impl_errs = (decls: [Decl], im: ImplData) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => im.trait_conformance(sd), false => 0 }), _ => 0 }) })
+    acc
+}
 check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc := 0
-    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), _ => 0 }) })
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => decls.impl_errs(im), _ => 0 }) })
     acc
 }

@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, dimpl, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
 { Malloc, heap } = std.alloc
 
@@ -1168,25 +1168,38 @@ fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
-// `Type.impl(Trait) { m1 = (…){…}  m2 = (…){…} }` — the methods become ordinary top-level
-// functions (named by the method name), so a UFCS call `x.m1(a)` -> `m1(x, a)` resolves to one.
-// (Monomorphic static dispatch: one impl per method name. The `Type.impl(Trait)` header is skipped.)
+// `Type.impl(Trait) { m1 = (…){…}  m2 = (…){…} }` — each method becomes an ordinary top-level
+// function (named by the method), so a UFCS call `x.m1(a)` -> `m1(x, a)` resolves to one
+// (monomorphic static dispatch). A DImpl record (the Type, the Trait, and the names of the methods
+// THIS impl defines) is emitted after them, so the checker can verify the impl provides every method
+// the Trait declares. The methods fill the decl buffer; their names fill `mbuf` in parallel.
+ImplEnd*: { decls: i32, methods: i32, next: i32 }
 fill_impl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
-    bstart := src.skip_to_brace(pos)                    // past the impl block's opening '{'
-    pe := a.fill_impl_methods(src, bstart, buf, i)
-    a.fill_decls(src, pe.next, buf, pe.count)
+    tnt    := src.scan(pos)                                  // the Type name
+    tyname := a.lexeme(src, tnt.tok)
+    dot    := src.scan(tnt.next)                             // '.'
+    kw     := src.scan(dot.next)                             // 'impl'
+    lp     := src.scan(kw.next)                              // '('
+    trt    := src.scan(lp.next)                              // the Trait name
+    trname := a.lexeme(src, trt.tok)
+    bstart := src.skip_to_brace(pos)                         // past the impl block's opening '{'
+    mbuf   := a.param_buf()                                  // the impl's method names (name-only Params)
+    ie     := a.fill_impl_methods(src, bstart, buf, i, mbuf, 0)
+    buf[ie.decls] = dimpl(tyname, trname, mbuf.take_params(ie.methods))   // the record, after its methods
+    a.fill_decls(src, ie.next, buf, ie.decls + 1)
 }
-fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) PEnd {
+fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32) ImplEnd {
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match ({
-        true  => PEnd { count: i, next: sc.next },      // '}' ends the impl block
-        false => a.fill_impl_one(src, pos, buf, i)
+        true  => ImplEnd { decls: i, methods: m, next: sc.next },   // '}' ends the impl block
+        false => a.fill_impl_one(src, pos, buf, i, mbuf, m)
     })
 }
-fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) PEnd {
-    de := a.parse_decl_at(src, pos)                     // one method is just a function decl
-    buf[i] = dfunc(de.func)
-    a.fill_impl_methods(src, de.next, buf, i + 1)
+fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32) ImplEnd {
+    de := a.parse_decl_at(src, pos)                          // one method is just a function decl
+    buf[i]  = dfunc(de.func)                                 // emitted as a plain top-level function
+    mbuf[m] = param(de.func.name, tvoid())                  // its name, for the conformance record
+    a.fill_impl_methods(src, de.next, buf, i + 1, mbuf, m + 1)
 }
 fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)

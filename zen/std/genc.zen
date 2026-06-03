@@ -70,7 +70,12 @@ StructDecl*: { name: str, fields: [Field] }             // typedef struct { fiel
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
 VariantDef*: { name: str, payload: Ty }
 EnumDecl*: { name: str, variants: [VariantDef] }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str)   // DRaw = verbatim C escape
+// records a `Type.impl(Trait) { … }` block: the type, the trait, and the method names THIS impl
+// actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
+// functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
+// verify conformance (every method the Trait declares is one this impl provides). genModule skips it.
+ImplData*: { ty: str, trname: str, methods: [Param] }
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -138,6 +143,7 @@ edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl { name: nm, variants: vs
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
+dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 
@@ -443,7 +449,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DStruct(sd) => s.append("typedef struct ").append(sd.name).append(" ").append(sd.name).append("; "),
         .DEnum(ed)   => s.append("typedef struct ").append(ed.name).append(" ").append(ed.name).append("; "),
         .DFunc(f)    => s,
-        .DRaw(c)     => s
+        .DRaw(c)     => s,
+        .DImpl(im)   => s
     }) })
 }
 
@@ -453,7 +460,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DFunc(f)    => s.gen_func(f),
         .DStruct(sd) => s.gen_struct(sd),
         .DEnum(ed)   => s.gen_enum(ed),
-        .DRaw(c)     => s.append(c)                     // verbatim — SIMD attrs/pragmas/intrinsics
+        .DRaw(c)     => s.append(c),                    // verbatim — SIMD attrs/pragmas/intrinsics
+        .DImpl(im)   => s                               // an impl record — no runtime form (methods are DFuncs)
     })
 }
 
