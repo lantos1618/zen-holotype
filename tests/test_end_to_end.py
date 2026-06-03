@@ -152,7 +152,7 @@ def test_generic_fn_monomorphizes(tmp_path):
 def test_match_lowers_and_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Status*: Idle | Busy(i32)\n"
-        "code* = (s: Status) i32 { s.match { .Idle => 0, .Busy(n) => n } }\n"
+        "code* = (s: Status) i32 { s.match ({ .Idle => 0, .Busy(n) => n }) }\n"
         "main* = () i32 { code(.Busy(7)) }\n")
     files = load(tmp_path)
     namespace = build_namespace(files)
@@ -269,8 +269,8 @@ def test_trait_dispatch_runs(tmp_path):
 # ── Turing-complete: integer branching + recursion compiles and computes ────
 def test_recursion_computes(tmp_path):
     (tmp_path / "main.zen").write_text(
-        "fact* = (n: i32) i32 { n.match { 0 => 1, _ => n * fact(n - 1) } }\n"
-        "fib* = (n: i32) i32 { n.match { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }\n"
+        "fact* = (n: i32) i32 { n.match ({ 0 => 1, _ => n * fact(n - 1) }) }\n"
+        "fib* = (n: i32) i32 { n.match ({ 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) }) }\n"
         "main* = () i32 { fact(5) + fib(10) }\n")   # 120 + 55 = 175
     files = load(tmp_path)
     namespace = build_namespace(files)
@@ -365,14 +365,14 @@ def test_types_emitted_in_dependency_order(tmp_path):
 # ── match auto-derefs a Ptr<Enum>, so recursive heap structures walk cleanly ──
 def test_match_auto_derefs_pointer_to_enum(tmp_path):
     # A binary tree built on the heap (stack-addressed here): `sum` recurses through
-    # Ptr<Tree>, and `t.match { … }` derefs the pointer like field access does, so
+    # Ptr<Tree>, and `t.match ({ … })` derefs the pointer like field access does, so
     # `n.l` / `n.r` (themselves Ptr<Tree>) recurse. Sum = 3 + (4 + 5) = 12.
     (tmp_path / "main.zen").write_text("""
 NodeData*: { l: Ptr<Tree>, r: Ptr<Tree> }
 Tree*: Leaf(i32) | Node(NodeData)
 leaf = (v: i32) Tree { .Leaf(v) }
 node = (l: Ptr<Tree>, r: Ptr<Tree>) Tree { .Node(NodeData { l: l, r: r }) }
-sum* = (t: Ptr<Tree>) i32 { t.match { .Leaf(v) => v, .Node(n) => sum(n.l) + sum(n.r) } }
+sum* = (t: Ptr<Tree>) i32 { t.match ({ .Leaf(v) => v, .Node(n) => sum(n.l) + sum(n.r) }) }
 main* = () i32 {
     a := leaf(3)\n    b := leaf(4)\n    c := leaf(5)
     bc := node(addr(b), addr(c))
@@ -399,7 +399,7 @@ def test_match_subject_evaluated_once(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Vec*: { len: i32, cap: i32 }\n"
         "kind* = (v: Ptr<Vec>) i32 { v.len }\n"
-        "pick* = (v: Ptr<Vec>) i32 { (kind(v)).match { 0 => 10, 1 => 20, _ => 30 } }\n")
+        "pick* = (v: Ptr<Vec>) i32 { (kind(v)).match ({ 0 => 10, 1 => 20, _ => 30 }) }\n")
     files = load(tmp_path)
     namespace = build_namespace(files)
     build_scopes(files)
@@ -412,11 +412,11 @@ def test_match_subject_evaluated_once(tmp_path):
 
 # ── A lone wildcard match still evaluates its subject without a -Werror warning ─
 def test_wildcard_only_match_is_warning_clean(tmp_path):
-    # `n.match { _ => 42 }` binds the subject to a temp that no arm reads. The temp
+    # `n.match ({ _ => 42 })` binds the subject to a temp that no arm reads. The temp
     # must still be emitted (the subject may have side effects) but guarded with
     # `(void)` so -Werror=unused-variable doesn't fire. Regression.
     (tmp_path / "main.zen").write_text(
-        "f* = (n: i32) i32 { n.match { _ => 42 } }\n"
+        "f* = (n: i32) i32 { n.match ({ _ => 42 }) }\n"
         "main* = () i32 { f(7) }\n")
     files = load(tmp_path)
     namespace = build_namespace(files)
@@ -437,7 +437,7 @@ def test_generic_enum_monomorphizes(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Opt*<T>: None | Some(T)\n"
         "some_i* = (n: i32) Opt<i32> { .Some(n) }\n"
-        "get* = (o: Opt<i32>) i32 { o.match { .None => 0, .Some(v) => v } }\n"
+        "get* = (o: Opt<i32>) i32 { o.match ({ .None => 0, .Some(v) => v }) }\n"
         "main* = () i32 { get(some_i(42)) }\n")
     files = load(tmp_path)
     namespace = build_namespace(files)
@@ -542,7 +542,7 @@ build_hi = (a: Ptr<Allocator>) String {
 // print by recursing over the bytes
 step = (s: Ptr<String>, i: i64) i32 { putchar(load(offset(s.ptr, i))) print_from(s, i+1) }
 print_from = (s: Ptr<String>, i: i64) i32 {
-    (i < s.len).match { false => putchar(10), true => step(s, i) }
+    (i < s.len).match ({ false => putchar(10), true => step(s, i) })
 }
 
 main* = () i32 {

@@ -13,7 +13,7 @@ FITS_DRIVER = """
 { ti32, ti64, tu8, tbool, tstr, tnamed } = std.genc
 { fits } = std.check
 beq = (got: bool, want: bool) i32 {
-    got.match { true => want.match { true => 1, false => 0 }, false => want.match { true => 0, false => 1 } }
+    got.match ({ true => want.match ({ true => 1, false => 0 }), false => want.match ({ true => 0, false => 1 }) })
 }
 main* = () i32 {
     c := 0

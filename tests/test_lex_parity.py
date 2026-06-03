@@ -44,8 +44,8 @@ def ts_tokens(src):
 _DRIVER = """
 { TokKind, scan, byte_at } = std.lex
 putchar = (c: i32) i32
-kc = (k: TokKind) i32 { k.match { .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 } }
-is_eof = (k: TokKind) bool { k.match { .Eof => true, _ => false } }
+kc = (k: TokKind) i32 { k.match ({ .Ident => 73, .Int => 78, .Str => 83, .Char => 67, .Sym => 89, .Eof => 69 }) }
+is_eof = (k: TokKind) bool { k.match ({ .Eof => true, _ => false }) }
 sp = (src: str, s: i32, l: i32) void { i := s\n e := s + l\n @while(i < e) { putchar(byte_at(src, i))\n i = i + 1 } }
 main* = () i32 {
     src := "%s"

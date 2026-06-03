@@ -41,7 +41,7 @@ main* = () i32 {
 
 def test_sizeof(compile_main):
     assert compile_main("Pair*: { a: i32, b: i32 }\n"
-                        "main* = () i32 { (sizeof(Pair) == 8).match { true => 1, false => 0 } }") == 1
+                        "main* = () i32 { (sizeof(Pair) == 8).match ({ true => 1, false => 0 }) }") == 1
 
 
 def test_cstr(compile_main):
@@ -54,6 +54,6 @@ main* = () i32 {
     store(p, 'h')
     store(offset(p, 1), 'i')
     store(offset(p, 2), '\\0')
-    eq(cstr(p), "hi").match { true => 1, false => 0 }
+    eq(cstr(p), "hi").match ({ true => 1, false => 0 })
 }
 """) == 1

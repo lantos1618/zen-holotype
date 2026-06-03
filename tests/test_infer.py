@@ -113,12 +113,12 @@ def test_constructing_option_is_a_clean_error_not_a_crash(tmp_path):
     # Option is a builtin coercion target (nullable pointers), not a constructible
     # enum — `.None()` against it must report, not raise Unresolved.
     results = _check_program(tmp_path,
-        "find* = (n: i32) Option<i32> { (n > 0).match { true => n, false => .None() } }")
+        "find* = (n: i32) Option<i32> { (n > 0).match ({ true => n, false => .None() }) }")
     assert any(q == "main.find" and not ok and "not a constructible enum" in why
                for q, ok, why in results)
 
 
 def test_matching_on_option_is_a_clean_error_not_a_crash(tmp_path):
     results = _check_program(tmp_path,
-        "g* = (o: Option<i32>) i32 { o.match { .Some(v) => v, .None => 0 } }")
+        "g* = (o: Option<i32>) i32 { o.match ({ .Some(v) => v, .None => 0 }) }")
     assert any(q == "main.g" and not ok and "non-enum" in why for q, ok, why in results)

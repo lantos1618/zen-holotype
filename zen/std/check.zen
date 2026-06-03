@@ -55,26 +55,26 @@ params_env<A: Allocator> = (a: Ptr<A>, ps: [Param]) Ptr<VList> {
 }
 // the type bound to `name` (walk the cons-list); void if unbound
 lookup_var = (v: Ptr<VList>, name: str) Ty {
-    v.match {
+    v.match ({
         .VNil     => tvoid(),
-        .VCons(c) => eq(c.name, name).match { true => c.ty, false => c.tail.lookup_var(name) }
-    }
+        .VCons(c) => eq(c.name, name).match ({ true => c.ty, false => c.tail.lookup_var(name) })
+    })
 }
 // the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
-ty_name = (t: Ty) str { t.match { .Named(n) => n, _ => "" } }
-enum_name = (t: Ty) str { t.match { .Named(n) => n, .Ptr(p) => load(p).ty_name(), _ => "" } }
-ty_is_ptr = (t: Ty) bool { t.match { .Ptr(p) => true, _ => false } }
-elem_of = (t: Ty) Ty { t.match { .Slice(e) => load(e), _ => tvoid() } }   // the element type of a [T]
+ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
+enum_name = (t: Ty) str { t.match ({ .Named(n) => n, .Ptr(p) => load(p).ty_name(), _ => "" }) }
+ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }   // the element type of a [T]
 // the enum that declares variant `vn` (scan every enum decl) — "" if none
 enum_has = (ed: EnumDecl, vn: str) bool {
     f := false
-    ed.variants.loop((h, i, v) { f = eq(v.name, vn).match { true => true, false => f } })
+    ed.variants.loop((h, i, v) { f = eq(v.name, vn).match ({ true => true, false => f }) })
     f
 }
-pick_enum = (ed: EnumDecl, vn: str, found: str) str { ed.enum_has(vn).match { true => ed.name, false => found } }
+pick_enum = (ed: EnumDecl, vn: str, found: str) str { ed.enum_has(vn).match ({ true => ed.name, false => found }) }
 enum_of_variant = (decls: [Decl], vn: str) str {
     found := ""
-    decls.loop((h, i, d) { found = d.match { .DEnum(ed) => ed.pick_enum(vn, found), _ => found } })
+    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.pick_enum(vn, found), _ => found }) })
     found
 }
 
@@ -83,30 +83,30 @@ enum_of_variant = (decls: [Decl], vn: str) str {
 // match subject (`s := scan(…)\n s.match { … }`) resolves. A comparison/logical Bin is bool;
 // an arithmetic Bin is the operand type; a Call is the callee's return type; a constructor is
 // its enum; a Member is the field's type (seeing through a Ptr to the struct).
-fn_ret_pick = (f: Func, name: str, found: Ty) Ty { eq(f.name, name).match { true => f.ret, false => found } }
+fn_ret_pick = (f: Func, name: str, found: Ty) Ty { eq(f.name, name).match ({ true => f.ret, false => found }) }
 fn_ret = (decls: [Decl], name: str) Ty {
     found := tvoid()
-    decls.loop((h, i, d) { found = d.match { .DFunc(f) => f.fn_ret_pick(name, found), _ => found } })
+    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => f.fn_ret_pick(name, found), _ => found }) })
     found
 }
 field_ty = (sd: StructDecl, fname: str) Ty {
     found := tvoid()
-    sd.fields.loop((h, i, f) { found = eq(f.name, fname).match { true => f.ty, false => found } })
+    sd.fields.loop((h, i, f) { found = eq(f.name, fname).match ({ true => f.ty, false => found }) })
     found
 }
 struct_field = (decls: [Decl], sname: str, fname: str) Ty {
     found := tvoid()
-    decls.loop((h, i, d) { found = d.match { .DStruct(sd) => eq(sd.name, sname).match { true => sd.field_ty(fname), false => found }, _ => found } })
+    decls.loop((h, i, d) { found = d.match ({ .DStruct(sd) => eq(sd.name, sname).match ({ true => sd.field_ty(fname), false => found }), _ => found }) })
     found
 }
 // a comparison / logical operator yields bool; an arithmetic one yields its operand type
 bin_ty = (op: str, lt: Ty) Ty {
     b := op.byte_at(0)
     cmp := (b == '=') || (b == '<') || (b == '>') || (b == '&') || (b == '|')
-    cmp.match { true => tbool(), false => lt }
+    cmp.match ({ true => tbool(), false => lt })
 }
 infer_expr = (env: Env, e: Ptr<Expr>) Ty {
-    load(e).match {
+    load(e).match ({
         .Int(n)        => ti32(),
         .Var(v)        => env.vars.lookup_var(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
@@ -121,16 +121,16 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
         .Loop(l)       => tvoid(),                            // a loop is a void statement
         _              => tvoid()
-    }
+    })
 }
 infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
 infer_match_ty = (env: Env, m: MatchData) Ty {
-    (m.arms.len > 0).match { true => env.infer_expr(m.arms[0].body), false => tvoid() }
+    (m.arms.len > 0).match ({ true => env.infer_expr(m.arms[0].body), false => tvoid() })
 }
 
 // ── rebuild an expression, filling enum match enames + constructor types ───────────────
 resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
-    load(e).match {
+    load(e).match ({
         .Match(m)     => a.resolve_match(env, m),
         .MakeEnum(mk) => a.enode(mkenum(env.decls.enum_of_variant(mk.variant), mk.variant, a.resolve_expr(env, mk.payload))),
         .Tag(t)       => a.enode(mktag(env.decls.enum_of_variant(t.variant), t.variant)),
@@ -142,7 +142,7 @@ resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Index(ix)    => a.enode(eindex(a.resolve_expr(env, ix.seq), a.resolve_expr(env, ix.idx), env.infer_expr(ix.seq).elem_of())),
         .Loop(l)      => a.resolve_loop(env, l),
         _             => e                            // Int/Var/StrLit/Arrow: unchanged
-    }
+    })
 }
 // a foreach loop: infer the element type from the sequence, then resolve the body with the
 // loop variables (index i: i32, element x: elemTy) added to the environment.
@@ -164,10 +164,10 @@ resolve_match<A: Allocator> = (a: Ptr<A>, env: Env, m: MatchData) Ptr<Expr> {
     en    := t.enum_name()
     subj2 := a.resolve_expr(env, m.subj)       // resolve nested ctors/matches in the subject too
     arms  := a.resolve_arms(env, m.arms)
-    t.ty_is_ptr().match {
+    t.ty_is_ptr().match ({
         true  => a.enode(ematchp(subj2, en, arms)),
         false => a.enode(ematch(subj2, en, arms))
-    }
+    })
 }
 resolve_args<A: Allocator> = (a: Ptr<A>, env: Env, args: [Expr]) [Expr] {
     buf := a.ebuf(args.len)
@@ -182,7 +182,7 @@ resolve_arms<A: Allocator> = (a: Ptr<A>, env: Env, arms: [ArmData]) [ArmData] {
 
 // ── rebuild statements ────────────────────────────────────────────────────────────────
 resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
-    st.match {
+    st.match ({
         .Let(l)    => slet(l.name, a.resolve_expr(env, l.value)),
         .Assign(x) => sassign(x.name, a.resolve_expr(env, x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),
@@ -190,7 +190,7 @@ resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
         .If(f)     => sif(a.resolve_expr(env, f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env, w.c), a.resolve_body(env, w.body)),
         .IndexSet(x) => sidxset(a.resolve_expr(env, x.seq), a.resolve_expr(env, x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env, x.value))
-    }
+    })
 }
 // resolve a statement sequence, THREADING the environment: a `let` adds its binding (the
 // inferred type of its value) for every statement that follows — that's what lets a later
@@ -202,7 +202,7 @@ resolve_body<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt]) [Stmt] {
     buf
 }
 fill_stmts<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
-    (i < body.len).match { true => a.fill_stmt(env, body, buf, i), false => noop2() }
+    (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i), false => noop2() })
 }
 fill_stmt<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     st     := body[i]
@@ -210,10 +210,10 @@ fill_stmt<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt], buf: [Stmt], i: i3
     a.fill_stmts(a.extend_env(env, st), body, buf, i + 1)
 }
 extend_env<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Env {
-    st.match {
+    st.match ({
         .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls },
         _       => env
-    }
+    })
 }
 
 // ── rebuild decls: a function's body is resolved against its params + the module's enums ──
@@ -222,7 +222,7 @@ resolve_func<A: Allocator> = (a: Ptr<A>, decls: [Decl], f: Func) Func {
     Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(env, f.body) }
 }
 resolve_decl<A: Allocator> = (a: Ptr<A>, decls: [Decl], d: Decl) Decl {
-    d.match { .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d }
+    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d })
 }
 
 // resolve a whole module, returning new decls with enum match enames + constructor types set
@@ -237,26 +237,26 @@ resolve_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) [Decl] {
 // so the lattice is just: numeric WIDENING (u8 <= i32 <= i64) for the scalar ranks, and
 // structural EQUALITY otherwise (Named by name, Ptr by pointee, Bool/Str/Void exact). This
 // is the `fits` a self-hosted checker calls at every assignment / argument / return slot.
-ty_rank = (t: Ty) i32 { t.match { .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 } }   // -1 = non-numeric
+ty_rank = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }   // -1 = non-numeric
 ty_eq* = (g: Ty, w: Ty) bool {
-    g.match {
-        .I32      => w.match { .I32 => true, _ => false },
-        .I64      => w.match { .I64 => true, _ => false },
-        .U8       => w.match { .U8 => true, _ => false },
-        .Bool     => w.match { .Bool => true, _ => false },
-        .Void     => w.match { .Void => true, _ => false },
-        .Str      => w.match { .Str => true, _ => false },
-        .Named(a) => w.match { .Named(b) => eq(a, b), _ => false },
-        .Ptr(pa)  => w.match { .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false },  // pointee invariant
-        .Slice(pa) => w.match { .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }
-    }
+    g.match ({
+        .I32      => w.match ({ .I32 => true, _ => false }),
+        .I64      => w.match ({ .I64 => true, _ => false }),
+        .U8       => w.match ({ .U8 => true, _ => false }),
+        .Bool     => w.match ({ .Bool => true, _ => false }),
+        .Void     => w.match ({ .Void => true, _ => false }),
+        .Str      => w.match ({ .Str => true, _ => false }),
+        .Named(a) => w.match ({ .Named(b) => eq(a, b), _ => false }),
+        .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),  // pointee invariant
+        .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false })
+    })
 }
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
-    numeric.match {
+    numeric.match ({
         true  => g.ty_rank() <= w.ty_rank(),   // u8 <= i32 <= i64
         false => g.ty_eq(w)                     // non-numeric: exact structural match
-    }
+    })
 }
 
 // ── check_module: a VALIDATING pass (Goal C Phases 1-2) — count type errors ────────────
@@ -268,19 +268,19 @@ fits* = (g: Ty, w: Ty) bool {
 empty_params = () [Param] { [] }
 is_known_fn = (decls: [Decl], fn: str) bool {
     found := false
-    decls.loop((h, i, d) { found = d.match { .DFunc(f) => eq(f.name, fn).match { true => true, false => found }, _ => found } })
+    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, fn).match ({ true => true, false => found }), _ => found }) })
     found
 }
-fn_params_pick = (f: Func, fn: str, found: [Param]) [Param] { eq(f.name, fn).match { true => f.params, false => found } }
+fn_params_pick = (f: Func, fn: str, found: [Param]) [Param] { eq(f.name, fn).match ({ true => f.params, false => found }) }
 fn_params = (decls: [Decl], fn: str) [Param] {
     found := empty_params()
-    decls.loop((h, i, d) { found = d.match { .DFunc(f) => f.fn_params_pick(fn, found), _ => found } })
+    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => f.fn_params_pick(fn, found), _ => found }) })
     found
 }
 // one argument fits its parameter? a void (uninferable) arg type is skipped (0), else fits()
-fit_err = (argty: Ty, pty: Ty) i32 { argty.match { .Void => 0, _ => fits(argty, pty).match { true => 0, false => 1 } } }
+fit_err = (argty: Ty, pty: Ty) i32 { argty.match ({ .Void => 0, _ => fits(argty, pty).match ({ true => 0, false => 1 }) }) }
 arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
-    (i < params.len).match { true => fit_err(env.infer_expr(ar.addr()), params[i].ty), false => 0 }
+    (i < params.len).match ({ true => fit_err(env.infer_expr(ar.addr()), params[i].ty), false => 0 })
 }
 arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
     acc := 0
@@ -289,11 +289,11 @@ arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
 }
 // a call: an unknown fn is fine; a known fn must match arity, then each arg must fit its param
 check_call = (env: Env, c: CallData) i32 {
-    env.decls.is_known_fn(c.fn).match { false => 0, true => env.call_errs(c) }
+    env.decls.is_known_fn(c.fn).match ({ false => 0, true => env.call_errs(c) })
 }
 call_errs = (env: Env, c: CallData) i32 {
     ps := env.decls.fn_params(c.fn)
-    (ps.len == c.args.len).match { true => env.arg_type_errs(ps, c.args), false => 1 }
+    (ps.len == c.args.len).match ({ true => env.arg_type_errs(ps, c.args), false => 1 })
 }
 check_args = (env: Env, args: [Expr]) i32 {
     acc := 0
@@ -311,7 +311,7 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
     acc
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
-    load(e).match {
+    load(e).match ({
         .Call(c)        => env.check_call(c) + env.check_args(c.args),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
@@ -320,10 +320,10 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits),
         _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
-    }
+    })
 }
 check_stmt = (env: Env, st: Stmt) i32 {
-    st.match {
+    st.match ({
         .Let(l)    => env.check_expr(l.value),
         .Assign(x) => env.check_expr(x.value),
         .Return(r) => env.check_expr(r),
@@ -331,7 +331,7 @@ check_stmt = (env: Env, st: Stmt) i32 {
         .If(f)     => env.check_expr(f.c) + env.check_body(f.then) + env.check_body(f.els),
         .While(w)  => env.check_expr(w.c) + env.check_body(w.body),
         .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value)
-    }
+    })
 }
 check_body = (env: Env, body: [Stmt]) i32 {
     acc := 0
@@ -344,6 +344,6 @@ check_func<A: Allocator> = (a: Ptr<A>, decls: [Decl], f: Func) i32 {
 }
 check_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) i32 {
     acc := 0
-    decls.loop((h, i, d) { acc = acc + d.match { .DFunc(f) => a.check_func(decls, f), _ => 0 } })
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), _ => 0 }) })
     acc
 }

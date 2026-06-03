@@ -30,39 +30,39 @@ is_space* = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r
 is_comment = (src: str, pos: i32) bool { (src.byte_at(pos) == '/') && (src.byte_at(pos + 1) == '/') }
 skip_line = (src: str, pos: i32) i32 {
     b := src.byte_at(pos)
-    ((b == '\0') || (b == '\n')).match { true => pos, false => src.skip_line(pos + 1) }   // stop at NUL / newline
+    ((b == '\0') || (b == '\n')).match ({ true => pos, false => src.skip_line(pos + 1) })   // stop at NUL / newline
 }
 skip = (src: str, pos: i32) i32 {
-    src.byte_at(pos).is_space().match {
+    src.byte_at(pos).is_space().match ({
         true  => src.skip(pos + 1),
-        false => src.is_comment(pos).match {
+        false => src.is_comment(pos).match ({
             true  => src.skip(src.skip_line(pos + 2)),
             false => pos
-        }
-    }
+        })
+    })
 }
 
 // ── span ends: advance while the class holds ───────────────────────────────────
-ident_end = (src: str, pos: i32) i32 { src.byte_at(pos).is_alnum().match { true => src.ident_end(pos + 1), false => pos } }
-int_end   = (src: str, pos: i32) i32 { src.byte_at(pos).is_digit().match { true => src.int_end(pos + 1), false => pos } }
+ident_end = (src: str, pos: i32) i32 { src.byte_at(pos).is_alnum().match ({ true => src.ident_end(pos + 1), false => pos }) }
+int_end   = (src: str, pos: i32) i32 { src.byte_at(pos).is_digit().match ({ true => src.int_end(pos + 1), false => pos }) }
 str_end   = (src: str, pos: i32) i32 {                 // pos just past the opening quote
     b := src.byte_at(pos)
-    (b == '\0').match {
+    (b == '\0').match ({
         true  => pos,                                  // unterminated — stop at NUL
-        false => (b == '"').match {                    // closing quote
+        false => (b == '"').match ({                    // closing quote
             true  => pos + 1,
-            false => (b == '\\').match {               // backslash: skip the escaped char
+            false => (b == '\\').match ({               // backslash: skip the escaped char
                 true  => src.str_end(pos + 2),
                 false => src.str_end(pos + 1)
-            }
-        }
-    }
+            })
+        })
+    })
 }
 
 // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
 // position just past the closing quote. One char, or a `\.` escape.
 char_end = (src: str, pos: i32) i32 {
-    (src.byte_at(pos) == '\\').match { true => pos + 3, false => pos + 2 }   // '\x'  vs  'x'
+    (src.byte_at(pos) == '\\').match ({ true => pos + 3, false => pos + 2 })   // '\x'  vs  'x'
 }
 
 // ── symbols ──────────────────────────────────────────────────────────────────
@@ -78,33 +78,33 @@ two_op = (b0: u8, b1: u8) bool {
     ((b0 == '|') && (b1 == '|'))         // ||
 }
 sym_end = (src: str, pos: i32) i32 {
-    src.byte_at(pos).two_op(src.byte_at(pos + 1)).match { true => pos + 2, false => pos + 1 }
+    src.byte_at(pos).two_op(src.byte_at(pos + 1)).match ({ true => pos + 2, false => pos + 1 })
 }
 
 // ── one token ──────────────────────────────────────────────────────────────────
 mk = (k: TokKind, start: i32, end: i32) Scan { Scan { tok: Token { kind: k, start: start, len: end - start }, next: end } }
 scan_one = (src: str, pos: i32, b: u8) Scan {
-    b.is_alpha().match {
+    b.is_alpha().match ({
         true  => mk(.Ident(), pos, src.ident_end(pos + 1)),
-        false => b.is_digit().match {
+        false => b.is_digit().match ({
             true  => mk(.Int(), pos, src.int_end(pos + 1)),
-            false => (b == '"').match {
+            false => (b == '"').match ({
                 true  => mk(.Str(), pos, src.str_end(pos + 1)),
-                false => (b == '\'').match {
+                false => (b == '\'').match ({
                     true  => mk(.Char(), pos, src.char_end(pos + 1)),
                     false => mk(.Sym(), pos, src.sym_end(pos))
-                }
-            }
-        }
-    }
+                })
+            })
+        })
+    })
 }
 scan* = (src: str, pos0: i32) Scan {
     pos := src.skip(pos0)
     b := src.byte_at(pos)
-    (b == '\0').match {
+    (b == '\0').match ({
         true  => Scan { tok: Token { kind: .Eof(), start: pos, len: 0 }, next: pos },
         false => src.scan_one(pos, b)
-    }
+    })
 }
 
 // ── the stream, without materializing it ───────────────────────────────────────
@@ -117,7 +117,7 @@ scan* = (src: str, pos0: i32) Scan {
 count* = (src: str) i32 { src.count_from(0) }
 count_from = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
-    sc.tok.kind.match { .Eof => 0, _ => 1 + src.count_from(sc.next) }
+    sc.tok.kind.match ({ .Eof => 0, _ => 1 + src.count_from(sc.next) })
 }
 
 // ── a materialized token list ──────────────────────────────────────────────────
@@ -147,12 +147,12 @@ cons_node = (h: Token, t: Ptr<TokList>) TokList { .Cons(TokCell { head: h, tail:
 // build the token list [pos .. Eof] in order; recursion builds the tail first
 build = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<TokList> {
     sc := src.scan(pos)
-    sc.tok.kind.match {
+    sc.tok.kind.match ({
         .Eof => a.node(nil_node()),
         _    => a.node(cons_node(sc.tok, a.build(src, sc.next)))
-    }
+    })
 }
 tokenize* = (a: Ptr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }
 
 // walk the list: number of Cons nodes (the terminal Nil ends it)
-list_len* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.list_len() } }
+list_len* = (l: Ptr<TokList>) i32 { l.match ({ .Nil => 0, .Cons(c) => 1 + c.tail.list_len() }) }

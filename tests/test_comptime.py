@@ -21,7 +21,7 @@ def frontend(tmp_path, src, fold=True):
 
 def test_comptime_folds_to_a_constant(tmp_path):
     files, namespace, passing = frontend(tmp_path, """
-fact* = (n: i32) i32 { n.match { 0 => 1, _ => n * fact(n - 1) } }
+fact* = (n: i32) i32 { n.match ({ 0 => 1, _ => n * fact(n - 1) }) }
 runtime*  = () i32 { fact(5) }
 folded*   = () i32 { comptime(fact(5)) }
 """)
@@ -42,7 +42,7 @@ b* = () bool { comptime(10 > 3 && 1 == 1) }
 
 def test_comptime_runs(tmp_path):
     files, namespace, passing = frontend(tmp_path, """
-fib* = (n: i32) i32 { n.match { 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) } }
+fib* = (n: i32) i32 { n.match ({ 0 => 0, 1 => 1, _ => fib(n-1) + fib(n-2) }) }
 main* = () i32 { comptime(fib(10)) }
 """)
     c = emit_c(files, passing, namespace)

@@ -310,7 +310,7 @@ def test_genc_enum_construction(tmp_path):
 
 
 def test_genc_match_dispatch(tmp_path):
-    # int32_t area(Shape s) { return s.match { Circle(r)=>r*r, Square(w)=>w*w, Dot=>0 }; }
+    # int32_t area(Shape s) { return s.match ({ Circle(r)=>r*r, Square(w)=>w*w, Dot=>0 }); }
     # -> a tag-tested ternary chain with __auto_type payload binding. area over each variant.
     body = """
     shape := edef("Shape", [vdef("Circle", ti32()), vdef("Square", ti32()), vdef("Dot", tvoid())])

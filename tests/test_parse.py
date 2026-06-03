@@ -314,13 +314,13 @@ def _compile_run(tmp_path, generated, call):
 def test_parse_decl_recursive_factorial(tmp_path):
     # a boolean `.match` lowers to genc's ternary Cond, so the self-hosted compiler handles
     # BRANCHING — and therefore RECURSION. The whole thing is parsed + lowered in Zen.
-    gen = gen_decl(tmp_path, r"fact* = (n: i32) i32 { (n <= 1).match { true => 1, false => n * fact(n - 1) } }")
+    gen = gen_decl(tmp_path, r"fact* = (n: i32) i32 { (n <= 1).match ({ true => 1, false => n * fact(n - 1) }) }")
     assert gen == "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }"
     assert _compile_run(tmp_path, gen, "fact(5)") == 120
 
 
 def test_parse_decl_recursive_fibonacci(tmp_path):
-    gen = gen_decl(tmp_path, r"fib* = (n: i32) i32 { (n < 2).match { true => n, false => fib(n - 1) + fib(n - 2) } }")
+    gen = gen_decl(tmp_path, r"fib* = (n: i32) i32 { (n < 2).match ({ true => n, false => fib(n - 1) + fib(n - 2) }) }")
     assert gen == "int32_t fib(int32_t n) { return ((n < 2) ? n : (fib((n - 1)) + fib((n - 2)))); }"
     assert _compile_run(tmp_path, gen, "fib(10)") == 55   # 0,1,1,2,3,5,8,13,21,34,55
 
@@ -328,7 +328,7 @@ def test_parse_decl_recursive_fibonacci(tmp_path):
 def test_parse_decl_recursive_gcd(tmp_path):
     # Euclid's gcd: recursion + `%` + a boolean `.match` (-> ternary), all self-hosted. The
     # headline — a Zen program reads gcd's source as a string and emits a running native gcd.
-    gen = gen_decl(tmp_path, r"gcd* = (a: i32, b: i32) i32 { (b == 0).match { true => a, false => gcd(b, a % b) } }")
+    gen = gen_decl(tmp_path, r"gcd* = (a: i32, b: i32) i32 { (b == 0).match ({ true => a, false => gcd(b, a % b) }) }")
     assert gen == "int32_t gcd(int32_t a, int32_t b) { return ((b == 0) ? a : gcd(b, (a % b))); }"
     assert _compile_run(tmp_path, gen, "gcd(48, 36)") == 12
 
@@ -348,7 +348,7 @@ def test_parse_module_multiple_functions(tmp_path):
 def test_parse_module_with_recursion(tmp_path):
     # the full picture: a whole module with a RECURSIVE function + a plain one, parsed and
     # lowered entirely in Zen, then compiled and run.
-    gen = gen_module(tmp_path, r"sq* = (n: i32) i32 { n * n }\nfact* = (n: i32) i32 { (n <= 1).match { true => 1, false => n * fact(n - 1) } }")
+    gen = gen_module(tmp_path, r"sq* = (n: i32) i32 { n * n }\nfact* = (n: i32) i32 { (n <= 1).match ({ true => 1, false => n * fact(n - 1) }) }")
     assert "int32_t sq(int32_t n) { return (n * n); }" in gen
     assert "int32_t fact(int32_t n) { return ((n <= 1) ? 1 : (n * fact((n - 1)))); }" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return fact(4) + sq(3); }\n")
@@ -605,12 +605,12 @@ def test_parse_module_enum_struct_function_mix(tmp_path):
 
 
 # ── THE ENUM WALL FALLS: multi-variant match (parse -> std.check -> genc) ──────────────
-# A `subject.match { .Variant(bind) => body, … }` parses into a genc Match with an EMPTY
+# A `subject.match ({ .Variant(bind) => body, … })` parses into a genc Match with an EMPTY
 # ename (the parser has no types). std.check fills the ename by looking up the subject's
 # declared type among the function's params, so genc can emit the `subj.tag == E_V` chain.
 # This is the wall that blocked multi-variant match since #131 — it needed the enum's name.
 def test_parse_enum_match_resolves_ename(tmp_path):
-    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\narea* = (s: Shape) i32 { s.match { .Circle(r) => r * r * 3, .Square(w) => w * w } }")
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\narea* = (s: Shape) i32 { s.match ({ .Circle(r) => r * r * 3, .Square(w) => w * w }) }")
     # the match lowered to a tag-test ternary with payload binding — and ename is "Shape"
     assert "int32_t area(Shape s) { return ({ __auto_type _subj = s; (_subj.tag == Shape_Circle ? " in gen
     assert "({ __auto_type r = _subj.u.Circle; ((r * r) * 3); })" in gen
@@ -644,7 +644,7 @@ def test_parse_enum_constructor_empty_parens(tmp_path):
 def test_parse_enum_milestone(tmp_path):
     # 🏁 THE MILESTONE: an enum DECLARED, CONSTRUCTED (.Circle), passed, and MATCHED — the
     # whole module lexed -> parsed -> CHECKED -> lowered -> compiled -> run, entirely in Zen.
-    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }\narea* = (s: Shape) i32 { s.match { .Circle(r) => r * r * 3, .Square(w) => w * w } }")
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Circle(n) }\narea* = (s: Shape) i32 { s.match ({ .Circle(r) => r * r * 3, .Square(w) => w * w }) }")
     assert "Shape mk(int32_t n) { return (Shape){ .tag = Shape_Circle, .u.Circle = n }; }" in gen
     assert "int32_t area(Shape s) { return ({ __auto_type _subj = s; (_subj.tag == Shape_Circle ? " in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return area(mk(3)); }\n")
@@ -678,7 +678,7 @@ def test_parse_let_bound_match_subject(tmp_path):
     # the match subject is bound by a `let`, not a parameter: std.check INFERS the let's type
     # from its RHS (a Call -> the callee's return type), threads it into the environment, and
     # resolves the match's enum. genc's Let now uses __auto_type so the binding compiles.
-    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Square(n) }\nuse* = (n: i32) i32 { s := mk(n)\n s.match { .Circle(r) => r, .Square(w) => w + 1 } }")
+    gen = gen_checked_module(tmp_path, r"Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape { .Square(n) }\nuse* = (n: i32) i32 { s := mk(n)\n s.match ({ .Circle(r) => r, .Square(w) => w + 1 }) }")
     assert "__auto_type s = mk(n);" in gen
     assert "(_subj.tag == Shape_Circle ? ({ __auto_type r = _subj.u.Circle; r; }) : ({ __auto_type w = _subj.u.Square; (w + 1); }))" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return use(5); }\n")
@@ -690,7 +690,7 @@ def test_parse_let_bound_match_subject(tmp_path):
 def test_parse_match_expression_subject_and_wildcard(tmp_path):
     # the subject is an EXPRESSION (a field chain), not a bare variable — genc binds it to a
     # temp; and `_ =>` is a wildcard catch-all (the default arm). Both are pervasive in lex.zen.
-    gen = gen_checked_module(tmp_path, r"K*: A | B | C\nWrap*: { kind: K, n: i32 }\nf* = (w: Wrap) i32 { w.kind.match { .A => 10, _ => w.n } }")
+    gen = gen_checked_module(tmp_path, r"K*: A | B | C\nWrap*: { kind: K, n: i32 }\nf* = (w: Wrap) i32 { w.kind.match ({ .A => 10, _ => w.n }) }")
     assert "({ __auto_type _subj = w.kind; (_subj.tag == K_A ? (10) : (w.n)); })" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
         "\nint main(void){ Wrap a={.kind={.tag=K_A},.n=7}; Wrap b={.kind={.tag=K_C},.n=5}; return f(a)+f(b); }\n")
@@ -703,7 +703,7 @@ def test_genmodule_topo_sorts_types(tmp_path):
     # genModule emits type DEFINITIONS in dependency order: TokList holds TokCell BY VALUE, so
     # TokCell must be defined first — even though the source declares TokList first. (A Ptr<T>
     # field needs only the forward decl, so it doesn't constrain order.) Previously this failed.
-    gen = gen_checked_module(tmp_path, r"TokList*: Nil | Cons(TokCell)\nTokCell*: { head: i32, tail: Ptr<TokList> }\nllen* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.llen() } }")
+    gen = gen_checked_module(tmp_path, r"TokList*: Nil | Cons(TokCell)\nTokCell*: { head: i32, tail: Ptr<TokList> }\nllen* = (l: Ptr<TokList>) i32 { l.match ({ .Nil => 0, .Cons(c) => 1 + c.tail.llen() }) }")
     assert gen.index("struct TokCell {") < gen.index("struct TokList {")   # dependency order
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
         "\nint main(void){ TokList n={.tag=TokList_Nil}; TokList a={.tag=TokList_Cons,.u.Cons={1,&n}}; return llen(&a); }\n")
@@ -717,7 +717,7 @@ def test_parse_enum_match_pointer_subject(tmp_path):
     # emits ematchp so the tag test uses `->` (l->tag), not `.` (l.tag). A recursive list_len
     # over a cons-list — the shape the compiler's own AST/token types are built from.
     # (TokCell is declared before TokList so the emitted C is in dependency order.)
-    gen = gen_checked_module(tmp_path, r"TokCell*: { head: i32, tail: Ptr<TokList> }\nTokList*: Nil | Cons(TokCell)\nllen* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.llen() } }")
+    gen = gen_checked_module(tmp_path, r"TokCell*: { head: i32, tail: Ptr<TokList> }\nTokList*: Nil | Cons(TokCell)\nllen* = (l: Ptr<TokList>) i32 { l.match ({ .Nil => 0, .Cons(c) => 1 + c.tail.llen() }) }")
     assert "int32_t llen(TokList* l) { return ({ __auto_type _subj = l; (_subj->tag == TokList_Nil ? (0) : ({ __auto_type c = _subj->u.Cons; (1 + llen(c.tail)); })); }); }" in gen
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
         "\nint main(void){ TokList nil={.tag=TokList_Nil};"
@@ -730,7 +730,7 @@ def test_parse_enum_match_pointer_subject(tmp_path):
 
 def test_parse_enum_match_no_payload(tmp_path):
     # variants without payloads: the arms are bare bodies, no __auto_type binding
-    gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match { .Lo => 0, .Hi => 1 } }")
+    gen = gen_checked_module(tmp_path, r"Bit*: Lo | Hi\nval* = (b: Bit) i32 { b.match ({ .Lo => 0, .Hi => 1 }) }")
     assert "int32_t val(Bit b) { return ({ __auto_type _subj = b; (_subj.tag == Bit_Lo ? (0) : (1)); }); }" in gen
     (tmp_path / "g.c").write_text(
         "#include <stdint.h>\n" + gen +
@@ -768,7 +768,7 @@ def test_parse_while_digit_sum(tmp_path):
 def test_parse_while_is_prime(tmp_path):
     # the loop body ASSIGNS a value computed by a boolean `.match` (-> ternary); the result
     # type is bool, so the harness pulls in <stdbool.h>.
-    gen = gen_decl(tmp_path, r"is_prime* = (n: i32) bool { d := 2\n ok := true\n @while((d * d) <= n) { ok = ((n % d) == 0).match { true => false, false => ok }\n d = d + 1 }\n (n >= 2) && ok }")
+    gen = gen_decl(tmp_path, r"is_prime* = (n: i32) bool { d := 2\n ok := true\n @while((d * d) <= n) { ok = ((n % d) == 0).match ({ true => false, false => ok })\n d = d + 1 }\n (n >= 2) && ok }")
     assert gen == ("bool is_prime(int32_t n) { __auto_type d = 2; __auto_type ok = true; "
                    "while (((d * d) <= n)) { ok = (((n % d) == 0) ? false : ok); d = (d + 1); } "
                    "return ((n >= 2) && ok); }")

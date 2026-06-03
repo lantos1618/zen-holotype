@@ -75,16 +75,16 @@ def test_build_runs_helper_and_conditional():
 { Builder, Executable, Test } = @builtin.build
 
 opt = (debug: bool) [str] {
-    debug.match { true => ["-O0", "-g"], false => ["-O2"] }
+    debug.match ({ true => ["-O0", "-g"], false => ["-O2"] })
 }
 
 build = (b: Builder) i32 {
     release := true
     b.add(Executable { name: "app", main: "main.zen", cflags: opt(!release), links: ["m"] })
-    release.match {
+    release.match ({
         true  => b.add(Test { root: "test.zen" }),
         false => b
-    }
+    })
     0
 }
 """, "build")
