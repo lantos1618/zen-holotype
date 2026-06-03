@@ -214,3 +214,18 @@ def test_generic_constructor_substitutes_in_emitted_c(tmp_path):
         "g* = (b: Box<i32>) i32 { b.v }\ntest* = () i32 { g(wrap(7)) }")
     assert "(Box_i32){" in c        # the body's Box<T> was substituted to Box_i32, not Box_T
     assert "Box_T" not in c
+
+
+# Integration: the whole generic story in one pipeline — a generic struct `Pair<A,B>`, generic
+# constructors (mkpair, and swap which REORDERS the type params -> Pair<B,A>), and generic consumers
+# (fst/snd), all monomorphizing together. Proves generic data structures + functions run end-to-end.
+def test_generic_pipeline_end_to_end(tmp_path):
+    src = ("Pair<A, B>: { fst: A, snd: B }\n"
+           "mkpair<A, B> = (a: A, b: B) Pair<A, B> { Pair<A, B>{ fst: a, snd: b } }\n"
+           "fst<A, B> = (p: Pair<A, B>) A { p.fst }\n"
+           "snd<A, B> = (p: Pair<A, B>) B { p.snd }\n"
+           "swap<A, B> = (p: Pair<A, B>) Pair<B, A> { Pair<B, A>{ fst: p.snd, snd: p.fst } }\n"
+           "useSwap* = (p: Pair<i32, i32>) i32 { fst(p) * 10 + snd(p) }\n"
+           "test* = () i32 { useSwap(swap(mkpair(2, 4))) }")     # swap(2,4)->(4,2) -> 4*10+2 = 42
+    assert "struct Pair_i32_i32" in emit_c_for(tmp_path, src)
+    run_value(tmp_path, src, 42)
