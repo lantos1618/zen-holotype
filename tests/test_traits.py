@@ -79,3 +79,43 @@ def test_impl_method_runs(tmp_path, prog, want):
 ])
 def test_declared_trait_with_impl_runs(tmp_path, prog, want):
     _run(tmp_path, prog, want)
+
+
+# Trait conformance: an impl must DEFINE every method its trait declares. The check is tied to the
+# impl's OWN methods (recorded in DImpl), not a global function search — so an unrelated same-named
+# function elsewhere does NOT make a deficient impl conform.
+def _check_errors(tmp_path, prog):
+    drv = _DRIVER.replace("{ resolve_module } = std.check",
+                          "{ resolve_module, check_module } = std.check").replace(
+        "emit(genModule(addr(m).resolve_module(addr(m).parse_module(\"%s\"))))\n    0",
+        "addr(m).check_module(addr(m).resolve_module(addr(m).parse_module(\"%s\")))")
+    (tmp_path / "main.zen").write_text(drv % _zlit(prog))
+    files = load(tmp_path); ns = build_namespace(files)
+    build_scopes(files); resolve(files, ns)
+    fold_comptime(files, ns); run_emits(files, ns)
+    _, passing = check(files, ns)
+    c = emit_c(files, passing, ns, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                          capture_output=True, text=True).returncode == 0
+    return subprocess.run([str(tmp_path / "o")]).returncode
+
+
+def test_conformance_accepts_complete_impl(tmp_path):
+    assert _check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>) i32 { p.x }  area = (p: Ptr<Point>) i32 { p.x } }") == 0
+
+
+def test_conformance_rejects_missing_method(tmp_path):
+    assert _check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>) i32 { p.x } }") == 1
+
+
+def test_conformance_unrelated_global_does_not_satisfy(tmp_path):
+    # a top-level `area` exists, but Point's impl doesn't DEFINE area -> still non-conforming
+    assert _check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
+        "area* = (n: i32) i32 { n }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>) i32 { p.x } }") == 1
