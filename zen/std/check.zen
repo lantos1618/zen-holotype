@@ -112,12 +112,7 @@ ctor_enum = (env: Env, vn: str) str {
 // match subject (`s := scan(…)\n s.match { … }`) resolves. A comparison/logical Bin is bool;
 // an arithmetic Bin is the operand type; a Call is the callee's return type; a constructor is
 // its enum; a Member is the field's type (seeing through a Ptr to the struct).
-fn_ret_pick = (f: Func, name: str, found: Ty) Ty { eq(f.name, name).match ({ true => f.ret, false => found }) }
-fn_ret = (decls: [Decl], name: str) Ty {
-    found := tvoid()
-    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => f.fn_ret_pick(name, found), .DForeign(f) => f.fn_ret_pick(name, found), _ => found }) })
-    found
-}
+fn_ret = (decls: [Decl], name: str) Ty { decls.the_func(name).ret }   // the_func's sentinel.ret is tvoid()
 field_ty = (sd: StructDecl, fname: str) Ty {
     found := tvoid()
     sd.fields.loop((h, i, f) { found = eq(f.name, fname).match ({ true => f.ty, false => found }) })
@@ -483,17 +478,9 @@ fits* = (g: Ty, w: Ty) bool {
 // `fit` the parameter — widening or structural). An arg whose type can't be inferred (void)
 // is SKIPPED, so a valid program never gets a false positive. The param env feeds infer_expr.
 empty_params = () [Param] { slice(heap(0), 0) }    // an empty [Param] without a `[]` literal (self-hostable)
-is_known_fn = (decls: [Decl], fn: str) bool {
-    found := false
-    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, fn).match ({ true => true, false => found }), .DForeign(f) => eq(f.name, fn).match ({ true => true, false => found }), _ => found }) })
-    found
-}
-fn_params_pick = (f: Func, fn: str, found: [Param]) [Param] { eq(f.name, fn).match ({ true => f.params, false => found }) }
-fn_params = (decls: [Decl], fn: str) [Param] {
-    found := empty_params()
-    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => f.fn_params_pick(fn, found), .DForeign(f) => f.fn_params_pick(fn, found), _ => found }) })
-    found
-}
+// a LOCAL fn (DFunc or DForeign) is known iff the_func finds it by name (sentinel name is "").
+is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
+fn_params = (decls: [Decl], fn: str) [Param] { decls.the_func(fn).params }   // sentinel.params is empty
 // one argument fits its parameter? an UNINFERABLE arg type is skipped (sound: never false-reject)
 // — that's a bare void OR a slice/pointer whose element/pointee is void (the checker couldn't type
 // it, e.g. it came through an imported fn). Otherwise fits().
