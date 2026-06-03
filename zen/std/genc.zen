@@ -78,7 +78,13 @@ ImplData*: { ty: str, trname: str, methods: [Param] }
 // DForeign is a function DECLARATION with no body — a foreign binding like `malloc = (n: i64) …`.
 // It's emitted as a C prototype `ret name(params);` (the definition comes from libc / another TU),
 // so genModule emits its signature but no body, and the checker knows its full signature.
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func)   // DRaw = verbatim C escape
+// DImport records a destructuring import `{ a, b } = std.x`: just the imported NAMES (carried as
+// name-only Params, the same idiom DImpl uses for method names — a Param is a real C struct, so a
+// `[Param]` buffer needs no `sizeof(str)`). It carries no code (modules link separately, so
+// genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
+// flagged undefined) — its signature is unknown, so it's unchecked.
+ImportData*: { names: [Param] }
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -147,6 +153,7 @@ dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
+dimport* = (names: [Param]) Decl { .DImport(ImportData { names: names }) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
@@ -455,7 +462,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DFunc(f)    => s,
         .DRaw(c)     => s,
         .DImpl(im)   => s,
-        .DForeign(f) => s
+        .DForeign(f) => s,
+        .DImport(im) => s
     }) })
 }
 
@@ -467,7 +475,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DEnum(ed)   => s.gen_enum(ed),
         .DRaw(c)     => s.append(c),                    // verbatim — SIMD attrs/pragmas/intrinsics
         .DImpl(im)   => s,                              // an impl record — no runtime form (methods are DFuncs)
-        .DForeign(f) => s                               // a foreign decl — only a prototype (gen_proto), no body
+        .DForeign(f) => s,                              // a foreign decl — only a prototype (gen_proto), no body
+        .DImport(im) => s                               // an import — modules link separately, emits nothing
     })
 }
 
