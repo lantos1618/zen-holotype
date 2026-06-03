@@ -99,3 +99,36 @@ def test_derive_accessors_covers_every_field_with_its_type(tmp_path):
     out = _run(tmp_path, _DERIVE_ALL)
     assert "int32_t x(Pt* s) { return s->x; }" in out   # i32 field
     assert "int64_t y(Pt* s) { return s->y; }" in out   # i64 field — the derive respects the type
+
+
+# derive_eq: a structural equality generated field-by-field — another derive on the same foundation.
+_DERIVE_EQ = r'''
+{ Malloc } = std.alloc
+{ String, new, bytes } = std.string
+{ genModule, field, dstruct, StructDecl, ti32, Decl } = std.genc
+{ resolve_module } = std.check
+{ derive_eq, fields, decls, concat } = std.ast
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+main* = () i32 {
+    a  := Malloc { _: 0 }
+    sd := StructDecl { name: "Pt", fields: addr(a).fields([field("x", ti32()), field("y", ti32())]) }
+    mod := addr(a).concat(addr(a).decls([dstruct(sd)]), addr(a).decls([addr(a).derive_eq("pt_eq", sd)]))
+    emit(genModule(addr(a).resolve_module(mod)))
+    0
+}
+'''
+
+
+def test_derive_eq_generates_field_by_field_equality(tmp_path):
+    out = _run(tmp_path, _DERIVE_EQ)
+    assert "bool pt_eq(Pt* x, Pt* y)" in out
+    assert "(x->x == y->x)" in out and "(x->y == y->y)" in out
+    # and it RUNS: equal structs compare equal, differing ones don't
+    (tmp_path / "g.c").write_text(
+        "#include <stdint.h>\n#include <stdbool.h>\n" + out
+        + "\nint main(void){ Pt a={1,2}, b={1,2}, c={1,9};"
+          " return (pt_eq(&a,&b) && !pt_eq(&a,&c)) ? 0 : 1; }\n")
+    assert subprocess.run(["cc", "-std=gnu11", "-w", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 0
