@@ -513,11 +513,26 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
     })
 }
+// a returned value must fit the function's declared return type (env.exp). Sound-leaning: skip
+// when the value's type OR the return type is uninferable (void / slice·ptr-of-void) — only a
+// concrete mismatch is an error. This is what catches `(…) i32 { someStr }`-style return bugs.
+ret_err = (env: Env, r: Ptr<Expr>) i32 {
+    rt := env.infer_expr(r)
+    // skip uninferable types, AND skip numeric->numeric (int literals are polymorphic — a `10`
+    // returned as u8 is fine; the checker can't track literal-ness through a Cond). What's left
+    // is the high-value catch: a CATEGORY mismatch — str / bool / a struct returned where another
+    // category is declared.
+    both_num := (rt.ty_rank() >= 0) && (env.exp.ty_rank() >= 0)
+    (rt.is_uninferable() || env.exp.is_uninferable() || both_num).match ({
+        true  => 0,
+        false => fits(rt, env.exp).match ({ true => 0, false => 1 })
+    })
+}
 check_stmt = (env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)    => env.check_expr(l.value),
         .Assign(x) => env.check_expr(x.value),
-        .Return(r) => env.check_expr(r),
+        .Return(r) => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
         .If(f)     => env.check_expr(f.c) + env.check_body(f.then) + env.check_body(f.els),
         .While(w)  => env.check_expr(w.c) + env.check_body(w.body),
