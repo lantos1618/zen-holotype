@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, block, is_fnt, has_fnt_param, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -255,11 +255,134 @@ resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d })
 }
 
-// resolve a whole module, returning new decls with enum match enames + constructor types set
+// ── inline templates: a function with an FnT parameter is spliced at each call site ──────
+// ONE traversal (xform) does it all. Walking a body: a Call to a TEMPLATE recurses into the
+// template's body with the call's args bound to its params; a Call to an FnT PARAMETER splices
+// the lambda passed for it (its params bound to the call args). A template's own locals and a
+// lambda's captures just resolve at the splice site — the inlined body is a GCC statement-
+// expression `({ … })` nested in the caller's scope. (Mirrors lower.py's _c_inline_template.)
+no_stmts = () [Stmt] { slice(heap(0), 0) }
+empty_args = () [Expr] { slice(heap(0), 0) }
+pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
+    (i == params.len).match ({
+        true  => found,
+        false => eq(params[i].name, name).match ({ true => i, false => params.pidx(name, found, i + 1) })
+    })
+}
+param_index = (params: [Param], name: str) i32 { params.pidx(name, 0 - 1, 0) }
+the_func = (decls: [Decl], name: str) Func {
+    found := Func { name: "", params: empty_params(), ret: tvoid(), body: no_stmts() }
+    decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => f, false => found }), _ => found }) })
+    found
+}
+is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).params.has_fnt_param() }
+// the substituted argument for a Var, or the Var unchanged if it isn't one of `params`
+subst_var = (a: Ptr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
+    idx := params.param_index(name)
+    (idx < 0).match ({ true => e, false => args[idx].addr() })
+}
+// build `({ … })` from a body: the trailing `return e;` becomes a bare `e;` so the block yields it
+ret_to_expr = (st: Stmt) Stmt { st.match ({ .Return(e) => sexpr(e), _ => st }) }
+blockify = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+    buf := a.sbuf(stmts.len)
+    stmts.loop((h, i, st) { buf[i] = (i == stmts.len - 1).match ({ true => ret_to_expr(st), false => st }) })
+    a.cenode(block(buf))
+}
+xform_args = (a: Ptr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr]) [Expr] {
+    buf := a.cebuf(args.len)
+    args.loop((h, i, ar) { buf[i] = load(a.xform_expr(decls, ar.addr(), params, fargs)) })
+    buf
+}
+xform_arms = (a: Ptr<Malloc>, decls: [Decl], arms: [ArmData], params: [Param], fargs: [Expr]) [ArmData] {
+    buf := a.abuf(arms.len)
+    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.xform_expr(decls, ar.body, params, fargs)) })
+    buf
+}
+inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr]) Ptr<Expr> {
+    lamx.match ({
+        .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs)),
+        _           => a.cenode(lamx)                     // not a lambda (shouldn't happen) — keep
+    })
+}
+inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr]) Ptr<Expr> {
+    tf := decls.the_func(name)
+    a.blockify(a.xform_body(decls, tf.body, tf.params, cargs))
+}
+maybe_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr]) Ptr<Expr> {
+    decls.is_template_call(name).match ({
+        true  => a.inline_template(decls, name, cargs),
+        false => a.cenode(call(name, cargs))
+    })
+}
+xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr]) Ptr<Expr> {
+    cargs := a.xform_args(decls, c.args, params, fargs)
+    fi    := params.param_index(c.fn)                     // is the callee one of this frame's FnT params?
+    (fi < 0).match ({
+        true  => a.maybe_template(decls, c.fn, cargs),
+        false => params[fi].ty.is_fnt().match ({
+            true  => a.inline_lambda(decls, fargs[fi], cargs),
+            false => a.maybe_template(decls, c.fn, cargs)
+        })
+    })
+}
+xform_match = (a: Ptr<Malloc>, decls: [Decl], m: MatchData, params: [Param], fargs: [Expr]) Ptr<Expr> {
+    subj := a.xform_expr(decls, m.subj, params, fargs)
+    arms := a.xform_arms(decls, m.arms, params, fargs)
+    m.ptr.match ({ true => a.cenode(ematchp(subj, m.ename, arms)), false => a.cenode(ematch(subj, m.ename, arms)) })
+}
+xform_inits = (a: Ptr<Malloc>, decls: [Decl], inits: [FieldInit], params: [Param], fargs: [Expr]) [FieldInit] {
+    buf := a.fbuf(inits.len)
+    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.xform_expr(decls, fi.value, params, fargs)) })
+    buf
+}
+xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr]) Ptr<Expr> {
+    load(e).match ({
+        .Var(v)       => a.subst_var(params, fargs, v.name, e),
+        .Call(c)      => a.xform_call(decls, c, params, fargs),
+        .Bin(b)       => a.cenode(bin(b.op, a.xform_expr(decls, b.lhs, params, fargs), a.xform_expr(decls, b.rhs, params, fargs))),
+        .Cond(d)      => a.cenode(cond(a.xform_expr(decls, d.c, params, fargs), a.xform_expr(decls, d.t, params, fargs), a.xform_expr(decls, d.e, params, fargs))),
+        .Member(m)    => a.cenode(member(a.xform_expr(decls, m.obj, params, fargs), m.field)),
+        .Arrow(ar)    => a.cenode(arrow(a.xform_expr(decls, ar.obj, params, fargs), ar.field)),
+        .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.xform_expr(decls, mk.payload, params, fargs))),
+        .MakeStruct(sd) => a.cenode(mkstruct(sd.ty, a.xform_inits(decls, sd.inits, params, fargs))),
+        .Match(m)     => a.xform_match(decls, m, params, fargs),
+        .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs), a.xform_expr(decls, ix.idx, params, fargs), ix.elem)),
+        .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs))),
+        _             => e                            // Int/StrLit/Tag/SliceLit/Lambda/Block: no params inside
+    })
+}
+xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr]) Stmt {
+    st.match ({
+        .Let(l)      => slet(l.name, a.xform_expr(decls, l.value, params, fargs)),
+        .Assign(x)   => sassign(x.name, a.xform_expr(decls, x.value, params, fargs)),
+        .Return(r)   => sret(a.xform_expr(decls, r, params, fargs)),
+        .ExprStmt(e) => sexpr(a.xform_expr(decls, e, params, fargs)),
+        .If(f)       => sif(a.xform_expr(decls, f.c, params, fargs), a.xform_body(decls, f.then, params, fargs), a.xform_body(decls, f.els, params, fargs)),
+        .While(w)    => swhile(a.xform_expr(decls, w.c, params, fargs), a.xform_body(decls, w.body, params, fargs)),
+        .IndexSet(x) => sidxset(a.xform_expr(decls, x.seq, params, fargs), a.xform_expr(decls, x.idx, params, fargs), x.elem, a.xform_expr(decls, x.value, params, fargs))
+    })
+}
+xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr]) [Stmt] {
+    buf := a.sbuf(body.len)
+    body.loop((h, i, st) { buf[i] = a.xform_stmt(decls, st, params, fargs) })
+    buf
+}
+inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
+    d.match ({
+        .DFunc(f) => dfunc(Func { name: f.name, params: f.params, ret: f.ret, body: a.xform_body(decls, f.body, empty_params(), empty_args()) }),
+        _         => d
+    })
+}
+
+// resolve a whole module, then splice every template call. Pass 1 fills enum match enames +
+// constructor types; pass 2 inlines templates (using their now-resolved bodies). The template
+// decls stay in the list but genModule skips them (genc.is_template).
 resolve_module* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
-    buf
+    out := a.dbuf(buf.len)
+    buf.loop((h, i, d) { out[i] = a.inline_decl(buf, d) })
+    out
 }
 
 // ── the type lattice: fits(given, want) ───────────────────────────────────────────────
