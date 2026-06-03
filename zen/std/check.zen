@@ -305,10 +305,19 @@ subst_var = (a: Ptr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Ex
 }
 // build `({ … })` from a body: the trailing `return e;` becomes a bare `e;` so the block yields it
 ret_to_expr = (st: Stmt) Stmt { st.match ({ .Return(e) => sexpr(e), _ => st }) }
-blockify = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+block_of = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     buf := a.sbuf(stmts.len)
     stmts.loop((h, i, st) { buf[i] = (i == stmts.len - 1).match ({ true => ret_to_expr(st), false => st }) })
     a.cenode(block(buf))
+}
+// a body inlined as an expression. A ONE-statement body whose statement is a value (a return or a
+// bare expr) IS that expression — no `({ … })` wrapper needed (so `f(x)` inlines to `(a + x)`, not
+// `({ (a + x); })`). Anything else (lets, assigns, multiple statements) becomes a statement-expr.
+blockify = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+    (stmts.len == 1).match ({
+        true  => stmts[0].match ({ .Return(e) => e, .ExprStmt(e) => e, _ => a.block_of(stmts) }),
+        false => a.block_of(stmts)
+    })
 }
 xform_args = (a: Ptr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr]) [Expr] {
     buf := a.cebuf(args.len)
