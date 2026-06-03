@@ -168,7 +168,7 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Bin(b)       => a.cenode(bin(b.op, a.resolve_expr(env.clr_exp(), b.lhs), a.resolve_expr(env.clr_exp(), b.rhs))),
         .Cond(c)      => a.cenode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
         .Call(c)      => a.cenode(call(c.fn, a.resolve_args(env.clr_exp(), c.args))),
-        .Member(mm)   => a.cenode(member(a.resolve_expr(env.clr_exp(), mm.obj), mm.field)),
+        .Member(mm)   => a.resolve_member(env, mm),
         .MakeStruct(sd) => a.cenode(mkstruct(sd.ty, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse into field values
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.infer_expr(ix.seq).elem_of())),
         .Loop(l)      => a.resolve_loop(env, l),
@@ -184,6 +184,16 @@ sl_elem = (env: Env, items: [Expr]) Ty {
 }
 resolve_slicelit = (a: Ptr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
     a.cenode(slit(env.sl_elem(sd.items), a.resolve_args(env.clr_exp(), sd.items)))
+}
+// field access auto-derefs a pointer receiver: `p.field` on a `Ptr<Struct>` emits `p->field`
+// (genc Arrow), on a value struct emits `p.field` (Member). This is what lets impl methods —
+// whose receiver is `Ptr<Type>` — read fields with plain `.`.
+resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
+    obj := a.resolve_expr(env.clr_exp(), mm.obj)
+    env.infer_expr(mm.obj).ty_is_ptr().match ({
+        true  => a.cenode(arrow(obj, mm.field)),
+        false => a.cenode(member(obj, mm.field))
+    })
 }
 // a foreach loop: infer the element type from the sequence, then resolve the body with the
 // loop variables (index i: i32, element x: elemTy) added to the environment.
