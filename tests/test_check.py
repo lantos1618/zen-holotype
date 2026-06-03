@@ -78,11 +78,13 @@ def test_check_arity_accepts_correct_calls(tmp_path):
 
 
 def test_check_arity_flags_wrong_count(tmp_path):
-    # one too few, then one too many -> two errors; a call to an unknown name (an intrinsic /
-    # external) is NOT flagged.
+    # one too few, then one too many -> two errors.
     assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }") == 1
     assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }\ng* = () i32 { add(1, 2, 3) }") == 2
-    assert _arity_errors(tmp_path, "f* = (x: i32) i32 { putchar(x) }") == 0   # putchar unknown -> not flagged
+    # an undefined name (a typo or a missing binding) IS flagged — matching the Python frontend,
+    # which rejects `putchar` here as an unbound function. (A foreign decl or import makes it known;
+    # see tests/test_undefined.py and tests/test_foreign.py.)
+    assert _arity_errors(tmp_path, "f* = (x: i32) i32 { putchar(x) }") == 1
 
 
 def test_check_arg_type_widening_ok(tmp_path):

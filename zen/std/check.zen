@@ -512,9 +512,40 @@ arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
     args.loop((h, i, ar) { acc = acc + env.arg_err_at(params, i, ar) })
     acc
 }
-// a call: an unknown fn is fine; a known fn must match arity, then each arg must fit its param
+// a name is RESOLVABLE without a local signature if it's imported (`{ f } = std.x`) or a compiler
+// intrinsic (lowered specially by genc — see gen_call). Such a call is KNOWN but UNCHECKED (we have
+// no signature to check arity/types against), so it's accepted as-is — never false-rejected.
+names_has = (names: [Param], fn: str) bool {
+    found := false
+    names.loop((h, i, n) { found = eq(n.name, fn).match ({ true => true, false => found }) })
+    found
+}
+is_imported = (decls: [Decl], fn: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DImport(im) => im.names.names_has(fn).match ({ true => true, false => found }), _ => found }) })
+    found
+}
+// the genc intrinsics (gen_call) + `heap`/`sizeof` (runtime/builtin) — names with no Zen decl.
+is_intrinsic = (fn: str) bool {
+    eq(fn, "load").match   ({ true => true, false =>
+    eq(fn, "store").match  ({ true => true, false =>
+    eq(fn, "addr").match   ({ true => true, false =>
+    eq(fn, "offset").match ({ true => true, false =>
+    eq(fn, "cstr").match   ({ true => true, false =>
+    eq(fn, "slice").match  ({ true => true, false =>
+    eq(fn, "heap").match   ({ true => true, false =>
+    eq(fn, "sizeof").match ({ true => true, false => false }) }) }) }) }) }) }) })
+}
+is_resolvable = (decls: [Decl], fn: str) bool {
+    decls.is_imported(fn).match ({ true => true, false => fn.is_intrinsic() })
+}
+// a call: a LOCAL fn must match arity + arg types; an imported/intrinsic name is known-but-unchecked;
+// anything else is UNDEFINED — a typo or a missing import — and is rejected (1 error).
 check_call = (env: Env, c: CallData) i32 {
-    env.decls.is_known_fn(c.fn).match ({ false => 0, true => env.call_errs(c) })
+    env.decls.is_known_fn(c.fn).match ({
+        true  => env.call_errs(c),
+        false => env.decls.is_resolvable(c.fn).match ({ true => 0, false => 1 })
+    })
 }
 call_errs = (env: Env, c: CallData) i32 {
     ps := env.decls.fn_params(c.fn)
