@@ -148,3 +148,26 @@ def test_lambda_runs(tmp_path, prog, want):
     assert subprocess.run(["cc", "-std=gnu11", "-w", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 0, f"{prog!r} should give {want}"
+
+
+# Generic templates: a function with a type parameter `<T>` AND an FnT parameter. Because a
+# template is inlined per call site and types re-infer against the concrete args (std.check's
+# post-inline re-resolve), `<T>` erases — the generic higher-order fn RUNS, monomorphized by use.
+@pytest.mark.parametrize("prog,want", [
+    ("fold*<T> = (xs: [T], init: T, f: (T, T) T) T {\n"
+     "    acc := init\n    xs.loop((h, i, x) { acc = f(acc, x) })\n    acc\n}\n"
+     "test* = () i32 { fold([3, 4, 5], 0, (a, x) { a + x }) }", 12),
+    ("fold*<T> = (xs: [T], init: T, f: (T, T) T) T {\n"
+     "    acc := init\n    xs.loop((h, i, x) { acc = f(acc, x) })\n    acc\n}\n"
+     "test* = () i32 { fold([1, 2, 3, 4], 1, (a, x) { a * x }) }", 24),
+    ("apply*<T> = (f: (T) T, x: T) T { f(x) }\n"
+     "test* = () i32 { apply((n) { n + 100 }, 5) }", 105),
+])
+def test_generic_template_runs(tmp_path, prog, want):
+    emitted = _compile_module(tmp_path, prog)
+    body = emitted[len(_HEAD):] if emitted.startswith(_HEAD) else emitted
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + _HEAD + "\n" + body
+                                  + "\nint main(void){ return test() == %d ? 0 : 1; }\n" % want)
+    assert subprocess.run(["cc", "-std=gnu11", "-w", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 0, f"{prog!r} should give {want}"
