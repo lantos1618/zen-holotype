@@ -451,8 +451,9 @@ def test_parse_char_literal_escape(tmp_path):
 def test_genc_lowers_memory_intrinsics(tmp_path):
     # load/offset/store/addr/cstr are not real C functions — genc erases them to raw pointer
     # ops (like the Python lowerer), so byte_at compiles instead of calling a phantom `load`.
+    # offset casts to uint8_t* so it works on a `void*` (heap's result) without a void-deref.
     gen = gen_module(tmp_path, r"at* = (s: str, i: i32) u8 { load(offset(s, i)) }")
-    assert "uint8_t at(const char* s, int32_t i) { return (*(((s) + (i)))); }" in gen
+    assert "uint8_t at(const char* s, int32_t i) { return (*(((uint8_t*)(s) + (i)))); }" in gen
     (tmp_path / "g.c").write_text('#include <stdint.h>\n' + gen + '\nint main(void){ return at("ABC", 1); }\n')
     assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
