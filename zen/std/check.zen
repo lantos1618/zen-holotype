@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, slet, sassign, sret, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, index, slet, sassign, sret, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
 { Allocator } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -64,6 +64,7 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
 ty_name = (t: Ty) str { t.match { .Named(n) => n, _ => "" } }
 enum_name = (t: Ty) str { t.match { .Named(n) => n, .Ptr(p) => load(p).ty_name(), _ => "" } }
 ty_is_ptr = (t: Ty) bool { t.match { .Ptr(p) => true, _ => false } }
+elem_of = (t: Ty) Ty { t.match { .Slice(e) => load(e), _ => tvoid() } }   // the element type of a [T]
 // the enum that declares variant `vn` (scan every enum decl) — "" if none
 enum_has = (ed: EnumDecl, vn: str) bool {
     f := false
@@ -117,6 +118,7 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .MakeStruct(s) => tnamed(s.ty),
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
+        .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
         _              => tvoid()
     }
 }
@@ -136,6 +138,7 @@ resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Call(c)      => a.enode(call(c.fn, a.resolve_args(env, c.args))),
         .Member(mm)   => a.enode(member(a.resolve_expr(env, mm.obj), mm.field)),
         .MakeStruct(sd) => a.enode(mkstruct(sd.ty, a.resolve_inits(env, sd.inits))),   // recurse into field values
+        .Index(ix)    => a.enode(index(a.resolve_expr(env, ix.seq), a.resolve_expr(env, ix.idx), env.infer_expr(ix.seq).elem_of())),
         _             => e                            // Int/Var/StrLit/Arrow: unchanged
     }
 }
@@ -176,7 +179,7 @@ resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
         .Return(r) => sret(a.resolve_expr(env, r)),
         .If(f)     => sif(a.resolve_expr(env, f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env, w.c), a.resolve_body(env, w.body)),
-        .IndexSet(x) => sidxset(a.resolve_expr(env, x.seq), a.resolve_expr(env, x.idx), x.elem, a.resolve_expr(env, x.value))
+        .IndexSet(x) => sidxset(a.resolve_expr(env, x.seq), a.resolve_expr(env, x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env, x.value))
     }
 }
 // resolve a statement sequence, THREADING the environment: a `let` adds its binding (the

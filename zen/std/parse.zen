@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, slet, sassign, swhile, sif, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, index, slit, slet, sassign, sidxset, swhile, sif, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -156,14 +156,24 @@ is_field_at = (src: str, pos: i32) bool {
     dot := src.scan(pos)
     src.is_dot(dot.tok).match { true => is_ident_tok(src.scan(dot.next).tok), false => false }
 }
+is_index_at = (src: str, pos: i32) bool { src.is_lbracket(src.scan(pos).tok) }
 parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
     src.is_match_at(base.next).match {
         true  => a.parse_match(src, base),
         false => src.is_field_at(base.next).match {
             true  => a.parse_field(src, base),
-            false => base
+            false => src.is_index_at(base.next).match {
+                true  => a.parse_index(src, base),       // seq[i] — element type filled by std.check
+                false => base
+            }
         }
     }
+}
+parse_index<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+    lb := src.scan(base.next)                            // '['
+    ie := a.parse_or(src, lb.next)                       // the index expression
+    rb := src.scan(ie.next)                              // ']'
+    a.parse_postfix(src, PExpr { expr: a.enode(index(base.expr, ie.expr, tvoid())), next: rb.next })   // chain
 }
 // `recv.name` is field access (genc Member); `recv.name(args)` is a UFCS method call, which
 // DESUGARS to `name(recv, args)` — a plain Call with the receiver as the first argument
@@ -449,23 +459,52 @@ is_set_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
     sc.tok.kind.match { .Ident => src.is_eq(src.scan(sc.next).tok), _ => false }
 }
+// is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
+skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'
+    sc := src.scan(pos)
+    src.is_rbracket(sc.tok).match { true => sc.next, false => src.skip_brackets(sc.next) }
+}
+is_idxset_here = (src: str, pos: i32) bool {
+    nt := src.scan(pos)
+    nt.tok.kind.match {
+        .Ident => src.is_lbracket(src.scan(nt.next).tok).match {
+            true  => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
+            false => false
+        },
+        _ => false
+    }
+}
 
 // parse statements [pos..] into a cons-list: `name := expr` is a Let, `name = expr` an
-// Assign; the first token that's neither begins the final expression (the `return`).
+// Assign, `name[i] = expr` an IndexSet; the first token that's none begins the return expr.
 parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     src.is_let_here(pos).match {
         true  => a.parse_let_stmt(src, pos),
-        false => src.is_set_here(pos).match {
-            true  => a.parse_set_stmt(src, pos),
-            false => src.is_while_here(pos).match {
-                true  => a.parse_while_stmt(src, pos),
-                false => src.is_if_here(pos).match {
-                    true  => a.parse_if_stmt(src, pos),
-                    false => a.parse_ret_stmt(src, pos)
+        false => src.is_idxset_here(pos).match {
+            true  => a.parse_idxset_stmt(src, pos),
+            false => src.is_set_here(pos).match {
+                true  => a.parse_set_stmt(src, pos),
+                false => src.is_while_here(pos).match {
+                    true  => a.parse_while_stmt(src, pos),
+                    false => src.is_if_here(pos).match {
+                        true  => a.parse_if_stmt(src, pos),
+                        false => a.parse_ret_stmt(src, pos)
+                    }
                 }
             }
         }
     }
+}
+// `name[i] = value` — an index assignment. The element type is left void; std.check fills it.
+parse_idxset_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+    nt   := src.scan(pos)                    // the array name
+    name := a.lexeme(src, nt.tok)
+    lb   := src.scan(nt.next)                // '['
+    ie   := a.parse_or(src, lb.next)         // the index
+    rb   := src.scan(ie.next)                // ']'
+    eq   := src.scan(rb.next)                // '='
+    v    := a.parse_or(src, eq.next)         // the value
+    a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), a.parse_stmts(src, v.next))
 }
 parse_set_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the assigned name
@@ -671,12 +710,22 @@ tynode<A: Allocator> = (a: Ptr<A>, t: Ty) Ptr<Ty> {
     buf[0] = t
     buf[0].addr()
 }
+is_lbracket = (src: str, t: Token) bool { src.is_op(t, '[') }
+is_rbracket = (src: str, t: Token) bool { src.is_op(t, ']') }
 parse_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
-    src.tok_eq(tt.tok, "Ptr").match {
-        true  => a.parse_ptr_ty(src, tt.next),           // Ptr < inner >
-        false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+    src.is_lbracket(tt.tok).match {
+        true  => a.parse_slice_ty(src, tt.next),         // [ T ]
+        false => src.tok_eq(tt.tok, "Ptr").match {
+            true  => a.parse_ptr_ty(src, tt.next),       // Ptr < inner >
+            false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+        }
     }
+}
+parse_slice_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {   // pos just past '['
+    inner := a.parse_ty(src, pos)                        // the element type
+    rb    := src.scan(inner.next)                        // ']'
+    TyEnd { ty: tslice(a.tynode(inner.ty)), next: rb.next }
 }
 parse_ptr_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
     lt    := src.scan(pos)                               // '<'
