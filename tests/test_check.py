@@ -100,3 +100,37 @@ def test_check_arg_type_uninferable_arg_is_skipped(tmp_path):
     # `true` parses as a Var whose type the checker can't infer (void) -> SKIPPED, no false
     # positive. (Soundness: a valid program is never rejected.)
     assert _arity_errors(tmp_path, "f* = (b: bool) i32 { 0 }\nuse* = () i32 { f(true) }") == 0
+
+
+# ── Phase 3: the PARITY GATE — the Zen checker (check_module) and the Python checker must
+# agree on accept/reject for the same programs. The Zen checker covers a SOUND subset (arity
+# + clear arg-type mismatches), so the suite stays within what both decide the same way.
+import pytest
+
+
+def _python_accepts(tmp_path, src):
+    """Run the Python pipeline through check on `src`; True iff every user fn type-checks."""
+    (tmp_path / "main.zen").write_text(src)
+    files = load(tmp_path)
+    ns = build_namespace(files)
+    build_scopes(files); resolve(files, ns)
+    fold_comptime(files, ns); run_emits(files, ns)
+    errs, _ = check(files, ns)
+    return all(ok for name, ok, _ in errs if name.startswith("main."))
+
+
+@pytest.mark.parametrize("src,valid", [
+    # valid monomorphic programs — both accept
+    ("add* = (a: i32, b: i32) i32 { a + b }\nuse* = () i32 { add(1, 2) }", True),
+    ("wide* = (n: i64) i32 { 0 }\ng* = (b: u8) i32 { wide(b) }", True),            # u8 -> i64 widens
+    ("Pt*: { x: i32, y: i32 }\nfx* = (p: Pt) i32 { p.x }", True),
+    # rejected — both reject
+    ("add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }", False),       # too few args
+    ("add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1, 2, 3) }", False), # too many args
+    ("narrow* = (n: u8) i32 { 0 }\ng* = (m: i64) i32 { narrow(m) }", False),        # i64 -> u8 narrows
+])
+def test_checker_parity_with_python(tmp_path, src, valid):
+    # sanity: the Python checker agrees with our label, then the Zen checker agrees with Python
+    assert _python_accepts(tmp_path, src) == valid
+    zen_errors = _arity_errors(tmp_path, src)
+    assert (zen_errors == 0) == valid, f"Zen checker disagreed with Python on: {src!r}"
