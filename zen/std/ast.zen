@@ -1,0 +1,95 @@
+// std.ast — ergonomic, heap-allocating builders over std.genc's reified AST.
+//
+// THIS is how you metaprogram in Zen: an ordinary function that builds AST values and returns
+// them, emitted at runtime by std.genc.genModule. No `@emit` pragma, no comptime evaluator — a
+// generator is just a function, a `derive` is just a function over a StructDecl, a build is just
+// a program that assembles decls (hand-written + generated) and calls genModule.
+//
+// Why a builder and not genc's raw ctors? genc's ctors return VALUES whose slice/pointer children
+// (`Bin.lhs: Ptr<Expr>`, `Func.body: [Stmt]`) are STACK-allocated by `addr()` / `[a, b]` literals.
+// That's fine within one frame, but a generator that RETURNS the AST it built dangles — the
+// children die with its frame. These wrappers HEAP-allocate every node and copy every slice, so
+// generated AST safely outlives the function that built it, and you never write `addr()`.
+{ Malloc, heap } = std.alloc
+{ Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl,
+  vref, lit, bin, call, member, mkstruct, finit, FieldInit,
+  slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
+  tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
+
+// ── typed heap buffers: a `[T]`-return slot gives `slice()` the element type genc needs ──
+ebuf = (a: Ptr<Malloc>, n: i64) [Expr]      { slice(heap(n * sizeof(Expr)), n) }
+tbuf = (a: Ptr<Malloc>, n: i64) [Ty]        { slice(heap(n * sizeof(Ty)), n) }
+pbuf = (a: Ptr<Malloc>, n: i64) [Param]     { slice(heap(n * sizeof(Param)), n) }
+sbuf = (a: Ptr<Malloc>, n: i64) [Stmt]      { slice(heap(n * sizeof(Stmt)), n) }
+fbuf = (a: Ptr<Malloc>, n: i64) [Field]     { slice(heap(n * sizeof(Field)), n) }
+ibuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(heap(n * sizeof(FieldInit)), n) }
+dbuf = (a: Ptr<Malloc>, n: i64) [Decl]      { slice(heap(n * sizeof(Decl)), n) }
+
+// ── heap nodes: a child that outlives its builder (the keystone — the parser's `enode`) ──
+enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
+    buf := a.ebuf(1)
+    buf[0] = v
+    buf[0].addr()
+}
+tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
+    buf := a.tbuf(1)
+    buf[0] = t
+    buf[0].addr()
+}
+
+// ── heap-backed slice copies: a stack `[a, b]` literal copied onto the heap so it can be returned ──
+exprs* = (a: Ptr<Malloc>, xs: [Expr]) [Expr] {
+    buf := a.ebuf(xs.len)
+    xs.loop((h, i, x) { buf[i] = x })
+    buf
+}
+params* = (a: Ptr<Malloc>, ps: [Param]) [Param] {
+    buf := a.pbuf(ps.len)
+    ps.loop((h, i, p) { buf[i] = p })
+    buf
+}
+stmts* = (a: Ptr<Malloc>, ss: [Stmt]) [Stmt] {
+    buf := a.sbuf(ss.len)
+    ss.loop((h, i, s) { buf[i] = s })
+    buf
+}
+fields* = (a: Ptr<Malloc>, fs: [Field]) [Field] {
+    buf := a.fbuf(fs.len)
+    fs.loop((h, i, f) { buf[i] = f })
+    buf
+}
+inits* = (a: Ptr<Malloc>, xs: [FieldInit]) [FieldInit] {
+    buf := a.ibuf(xs.len)
+    xs.loop((h, i, x) { buf[i] = x })
+    buf
+}
+decls* = (a: Ptr<Malloc>, ds: [Decl]) [Decl] {
+    buf := a.dbuf(ds.len)
+    ds.loop((h, i, d) { buf[i] = d })
+    buf
+}
+
+// ── expressions (return Ptr<Expr>, so they compose directly — `a.add(a.var("n"), a.int(1))`) ──
+evar*   = (a: Ptr<Malloc>, name: str) Ptr<Expr> { a.enode(vref(name)) }
+eint*   = (a: Ptr<Malloc>, n: i32) Ptr<Expr>    { a.enode(lit(n)) }
+ebin*   = (a: Ptr<Malloc>, op: str, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.enode(bin(op, l, r)) }
+ecall*  = (a: Ptr<Malloc>, fn: str, args: [Expr]) Ptr<Expr> { a.enode(call(fn, a.exprs(args))) }
+efield* = (a: Ptr<Malloc>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.enode(member(o, f)) }
+estruct* = (a: Ptr<Malloc>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.enode(mkstruct(ty, a.inits(fi))) }
+
+// ── types (named / pointer-to-named; the primitives re-exported for one import) ──
+named* = (name: str) Ty { tnamed(name) }
+ptrto* = (a: Ptr<Malloc>, inner: Ty) Ty { tptr(a.tnode(inner)) }
+i32t*  = () Ty { ti32() }
+
+// ── statements (a body is built from these, then heap-copied by `func`) ──
+ret*   = (e: Ptr<Expr>) Stmt { sret(e) }
+letb*  = (name: str, v: Ptr<Expr>) Stmt { slet(name, v) }
+set*   = (name: str, v: Ptr<Expr>) Stmt { sassign(name, v) }
+expr*  = (e: Ptr<Expr>) Stmt { sexpr(e) }
+
+// ── declarations (the slices are heap-copied here, so the result is safe to return) ──
+func*   = (a: Ptr<Malloc>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
+    dfunc(Func { name: name, params: a.params(ps), ret: ret, body: a.stmts(body) })
+}
+struct* = (a: Ptr<Malloc>, name: str, fs: [Field]) Decl { dstruct(StructDecl { name: name, fields: a.fields(fs) }) }
