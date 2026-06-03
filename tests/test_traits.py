@@ -60,3 +60,35 @@ def test_conformance_unrelated_global_does_not_satisfy(tmp_path):
         "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
         "area* = (n: i32) i32 { n }\n"
         "Point.impl(Show) { render = (p: Ptr<Point>) i32 { p.x } }") == 1
+
+
+# Signature conformance (Goal Arc 2): an impl method must match the trait's declared signature, with
+# `Self` read as the implementing type — not just exist by name. Verdicts match the Python frontend
+# ("signature does not match the trait").
+def test_conformance_accepts_matching_signature(tmp_path):
+    # Self -> Point: the impl's `Ptr<Point>` matches the trait's `Ptr<Self>`, ret i32 == i32.
+    # (an FnT param list is bare TYPES: `(Ptr<Self>, i32)`; the impl's params may be named.)
+    assert check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>, k: i32) i32 { p.x + k } }") == 0
+
+
+def test_conformance_rejects_arity_mismatch(tmp_path):
+    # trait declares one param (the Self receiver); impl takes an extra -> non-conforming
+    assert check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>, k: i32) i32 { p.x } }") == 1
+
+
+def test_conformance_rejects_return_mismatch(tmp_path):
+    # trait declares ret i32; impl returns bool -> non-conforming
+    assert check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>) bool { p.x < 1 } }") == 1
+
+
+def test_conformance_rejects_param_type_mismatch(tmp_path):
+    # trait declares the second param i32; impl takes u8 -> non-conforming (not the Self param)
+    assert check_errors(tmp_path,
+        "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\n"
+        "Point.impl(Show) { render = (p: Ptr<Point>, k: u8) i32 { p.x } }") == 1
