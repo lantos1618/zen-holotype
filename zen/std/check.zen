@@ -743,6 +743,17 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
         false => env.decls.is_struct(m.ty).match ({ true => env.struct_init_errs(env.decls.struct_fields(m.ty), m.inits), false => 0 })
     })
 }
+// field-access validation (reject-parity): `obj.field` must name a real field of obj's struct ("no
+// field 'nope' on P") — matching the Python frontend. Handles a value receiver (Member) and a Ptr
+// receiver (Arrow, after resolve auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is
+// checked; an uninferable receiver, an enum, or a monomorphized-only generic name is skipped.
+member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
+    sname := env.infer_expr(obj).enum_name()                        // struct name (sees through a Ptr)
+    env.decls.is_struct(sname).match ({
+        true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
+        false => 0
+    })
+}
 // operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
 // `&& ||` needs BOOL operands — matching the Python frontend ("'+' needs numeric operands"). Sound:
 // an UNINFERABLE operand (void — e.g. a match-arm binding the partial checker can't type) is skipped,
@@ -786,7 +797,8 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
-        .Member(m)      => env.check_expr(m.obj),
+        .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
+        .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
         .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
