@@ -178,11 +178,18 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Block(b) => s.gen_blockexpr(b)     // a statement-expression `({ … })` (an inlined template body)
     })
 }
-// `({ s1 s2 … })` — a GCC statement-expression; its value is the last statement's expression.
+// `({ s1 s2 … })` — a GCC statement-expression; its value is the last statement's. A trailing
+// `return e;` is emitted as a bare `e;` (a `return` would escape the enclosing function, not yield).
 gen_blockexpr = (s: String, b: BlockData) String {
     out := s.append("({ ")
-    b.stmts.loop((h, i, st) { out = out.gen_stmt(st).append(" ") })
+    b.stmts.loop((h, i, st) { out = out.gen_block_one(st, i == b.stmts.len - 1).append(" ") })
     out.append("})")
+}
+gen_block_one = (s: String, st: Stmt, last: bool) String {
+    last.match ({
+        true  => st.match ({ .Return(e) => s.gen_expr(e).append(";"), _ => s.gen_stmt(st) }),
+        false => s.gen_stmt(st)
+    })
 }
 // xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
 // sequence is bound once (_seq); i is the index, x the element (cast from the fat pointer).

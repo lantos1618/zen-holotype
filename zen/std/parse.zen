@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Malloc, heap } = std.alloc
 
@@ -232,10 +232,24 @@ parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan) PExp
     ae     := a.fill_args(src, lp.next, buf, 1)                    // the rest of the args follow it
     a.parse_postfix(src, PExpr { expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next })   // chain
 }
-parse_arm = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then an expr
+parse_arm = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then a body
     pat   := src.scan(pos)                                          // the pattern (true / false)
     arrow := src.scan(pat.next)                                     // '=>'
-    a.parse_or(src, arrow.next)
+    a.parse_arm_body(src, arrow.next)
+}
+// an arm body: a brace block `{ stmts }` (multi-statement, value = the trailing expression, a
+// genc Block / statement-expression) or a single expression.
+parse_arm_body = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
+    sc := src.scan(pos)
+    src.is_lbrace(sc.tok).match ({
+        true  => a.parse_arm_block(src, sc),
+        false => a.parse_or(src, pos)
+    })
+}
+parse_arm_block = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {    // open = '{'
+    body := a.build_body(src, open.next)                            // statements (trailing expr = value)
+    endp := src.skip_block(open.next)                               // pos just past the matching '}'
+    PExpr { expr: a.enode(block(body)), next: endp }
 }
 // `.match ({` either has boolean arms (`true => X, false => Y`, -> Cond) or enum-variant arms
 // (`.Circle(r) => …, .Square(w) => …`, -> genc Match). The first arm's leading token tells
@@ -308,14 +322,14 @@ fill_varm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     pk  := src.scan(vt.next)                                         // '(' (a binding) or '=>'
     be  := src.is_lparen(pk.tok).match ({ true => a.arm_bind(src, pk.next), false => BindEnd { bind: "", next: vt.next } })
     arrow := src.scan(be.next)                                       // '=>'
-    body  := a.parse_or(src, arrow.next)                             // the arm body
+    body  := a.parse_arm_body(src, arrow.next)                       // the arm body (expr or `{ … }`)
     buf[i] = arm(vn, be.bind, body.expr)
     a.arm_tail(src, body.next, buf, i)
 }
 fill_wild = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     us    := src.scan(pos)                                           // '_'
     arrow := src.scan(us.next)                                       // '=>'
-    body  := a.parse_or(src, arrow.next)
+    body  := a.parse_arm_body(src, arrow.next)
     buf[i] = arm("_", "", body.expr)                                 // a no-bind catch-all
     a.arm_tail(src, body.next, buf, i)
 }
