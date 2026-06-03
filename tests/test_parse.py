@@ -477,6 +477,19 @@ def test_check_resolves_ctor_inside_struct_literal(tmp_path):
     assert ".tag = (K){ .tag = K_A }" in gen   # the nested .A() resolved to K_A
 
 
+def test_parse_loop_foreach(tmp_path):
+    # `xs.loop((h, i, x) { body })` — a foreach: i is the index, x the element (type inferred
+    # from xs's slice type by std.check), the body mutates a captured local. The dominant
+    # construct in genc.zen. Lowers to a C for-loop over the fat pointer.
+    gen = gen_checked_module(tmp_path, r"sum* = (xs: [i32]) i32 { total := 0\n xs.loop((h, i, x) { total = total + x })\n total }")
+    assert "for (int64_t i = 0; i < _seq.len; i = i + 1) { __auto_type x = ((int32_t*)_seq.ptr)[i]; total = (total + x);" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
+        "\nint main(void){ zslice xs = { .ptr = (int32_t[]){1,2,3,4}, .len = 4 }; return sum(xs); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 10   # 1+2+3+4
+
+
 def test_parse_bare_expression_statements(tmp_path):
     # a non-final expression is a statement (evaluated for effect), not the return; only the
     # LAST expression of a body is the return. This is what `.loop(...)`-as-a-statement needs.

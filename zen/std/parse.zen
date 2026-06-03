@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, index, slit, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, index, slit, eloop, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -157,17 +157,46 @@ is_field_at = (src: str, pos: i32) bool {
     src.is_dot(dot.tok).match { true => is_ident_tok(src.scan(dot.next).tok), false => false }
 }
 is_index_at = (src: str, pos: i32) bool { src.is_lbracket(src.scan(pos).tok) }
+is_loop_kw = (src: str, t: Token) bool { t.kind.match { .Ident => src.tok_eq(t, "loop"), _ => false } }
+is_loop_at = (src: str, pos: i32) bool {
+    dot := src.scan(pos)
+    src.is_dot(dot.tok).match { true => src.is_loop_kw(src.scan(dot.next).tok), false => false }
+}
 parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
     src.is_match_at(base.next).match {
         true  => a.parse_match(src, base),
-        false => src.is_field_at(base.next).match {
-            true  => a.parse_field(src, base),
-            false => src.is_index_at(base.next).match {
-                true  => a.parse_index(src, base),       // seq[i] — element type filled by std.check
-                false => base
+        false => src.is_loop_at(base.next).match {
+            true  => a.parse_loop(src, base),            // recv.loop((h, i, x) { … }) — a foreach
+            false => src.is_field_at(base.next).match {
+                true  => a.parse_field(src, base),
+                false => src.is_index_at(base.next).match {
+                    true  => a.parse_index(src, base),   // seq[i] — element type filled by std.check
+                    false => base
+                }
             }
         }
     }
+}
+// `recv.loop((h, i, x) { body })` — a foreach over recv: h is the (ignored) loop handle, i the
+// index, x the element. The body is a no-return statement block (it mutates captured locals).
+// The element type is left void; std.check fills it from recv's inferred slice type.
+parse_loop<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+    dot   := src.scan(base.next)                         // '.'
+    kw    := src.scan(dot.next)                          // 'loop'
+    lp    := src.scan(kw.next)                           // '(' the loop call
+    op    := src.scan(lp.next)                           // '(' the closure params
+    ht    := src.scan(op.next)                           // h (handle, ignored)
+    c1    := src.scan(ht.next)                           // ','
+    it    := src.scan(c1.next)                           // i (index name)
+    iname := a.lexeme(src, it.tok)
+    c2    := src.scan(it.next)                           // ','
+    xt    := src.scan(c2.next)                           // x (element name)
+    xname := a.lexeme(src, xt.tok)
+    cl    := src.scan(xt.next)                           // ')' closing the params
+    ob    := src.scan(cl.next)                           // '{' the body
+    blk   := a.parse_block(src, ob.next)                 // body statements (no return), to '}'
+    rp    := src.scan(blk.next)                          // ')' closing the loop call
+    a.parse_postfix(src, PExpr { expr: a.enode(eloop(base.expr, iname, xname, tvoid(), a.materialize(blk.list))), next: rp.next })
 }
 parse_index<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
     lb := src.scan(base.next)                            // '['

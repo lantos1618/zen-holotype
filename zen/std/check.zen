@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, index, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, index, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
 { Allocator } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -119,6 +119,7 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
+        .Loop(l)       => tvoid(),                            // a loop is a void statement
         _              => tvoid()
     }
 }
@@ -139,8 +140,16 @@ resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Member(mm)   => a.enode(member(a.resolve_expr(env, mm.obj), mm.field)),
         .MakeStruct(sd) => a.enode(mkstruct(sd.ty, a.resolve_inits(env, sd.inits))),   // recurse into field values
         .Index(ix)    => a.enode(index(a.resolve_expr(env, ix.seq), a.resolve_expr(env, ix.idx), env.infer_expr(ix.seq).elem_of())),
+        .Loop(l)      => a.resolve_loop(env, l),
         _             => e                            // Int/Var/StrLit/Arrow: unchanged
     }
+}
+// a foreach loop: infer the element type from the sequence, then resolve the body with the
+// loop variables (index i: i32, element x: elemTy) added to the environment.
+resolve_loop<A: Allocator> = (a: Ptr<A>, env: Env, l: LoopData) Ptr<Expr> {
+    et   := env.infer_expr(l.seq).elem_of()
+    env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls }
+    a.enode(eloop(a.resolve_expr(env, l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
 fbuf<A: Allocator> = (a: Ptr<A>, n: i64) [FieldInit] { slice(a.acquire(n * sizeof(FieldInit)), n) }
 resolve_inits<A: Allocator> = (a: Ptr<A>, env: Env, inits: [FieldInit]) [FieldInit] {

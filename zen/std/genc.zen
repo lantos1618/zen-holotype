@@ -33,8 +33,11 @@ MakeStructData*: { ty: str, inits: [FieldInit] }        // (T){ .a = …, .b = �
 // type T is recovered at the literal (array type) and at indexing (the cast) — carried in the AST.
 SliceData*: { elem: Ty, items: [Expr] }                 // [a, b, c]  ->  (zslice){ .ptr = (T[]){…}, .len = N }
 IndexData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty }  // seq[idx]  ->  ((T*)(seq).ptr)[idx]
+// a foreach loop `xs.loop((h, i, x) { body })` — i is the index, x the element. Lowers to a C
+// for-loop (the body runs for effect, capturing outer locals), as a void statement-expression.
+LoopData*: { seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt] }
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
-     | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData)
+     | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -70,6 +73,7 @@ finit* = (nm: str, v: Ptr<Expr>) FieldInit { FieldInit { name: nm, value: v } }
 mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, inits: inits }) }
 slit* = (elem: Ty, items: [Expr]) Expr { .SliceLit(SliceData { elem: elem, items: items }) }
 index* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr { .Index(IndexData { seq: seq, idx: i, elem: elem }) }
+eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt]) Expr { .Loop(LoopData { seq: seq, idx: idx, elem: elem, elemTy: elemTy, body: body }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
 ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: false }) }
@@ -144,8 +148,21 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Match(m) => s.gen_match(m),
         .StrLit(sl) => s.gen_strlit(sl.value),
         .SliceLit(sd) => s.gen_slicelit(sd),
-        .Index(ix) => s.gen_index(ix)
+        .Index(ix) => s.gen_index(ix),
+        .Loop(l) => s.gen_loop(l)
     }
+}
+// xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
+// sequence is bound once (_seq); i is the index, x the element (cast from the fat pointer).
+gen_loop = (s: String, l: LoopData) String {
+    head := s.append("({ __auto_type _seq = ").gen_expr(l.seq).append("; for (int64_t ").append(l.idx).append(" = 0; ").append(l.idx).append(" < _seq.len; ").append(l.idx).append(" = ").append(l.idx).append(" + 1) { __auto_type ").append(l.elem).append(" = ((").gen_ty(l.elemTy.addr()).append("*)_seq.ptr)[").append(l.idx).append("]; ")
+    body := head.gen_loop_body(l.body)
+    body.append(" } })")
+}
+gen_loop_body = (s: String, body: [Stmt]) String {
+    out := s
+    body.loop((h, i, st) { out = out.gen_stmt(st).append(" ") })
+    out
 }
 // [a, b, c] of element T  ->  (zslice){ .ptr = (T[]){ a, b, c }, .len = N }
 gen_slicelit = (s: String, sd: SliceData) String {
