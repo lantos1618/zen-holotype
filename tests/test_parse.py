@@ -675,6 +675,19 @@ def test_parse_match_expression_subject_and_wildcard(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 15   # f(a)=10 (A), f(b)=5 (wildcard -> n)
 
 
+def test_genmodule_topo_sorts_types(tmp_path):
+    # genModule emits type DEFINITIONS in dependency order: TokList holds TokCell BY VALUE, so
+    # TokCell must be defined first — even though the source declares TokList first. (A Ptr<T>
+    # field needs only the forward decl, so it doesn't constrain order.) Previously this failed.
+    gen = gen_checked_module(tmp_path, r"TokList*: Nil | Cons(TokCell)\nTokCell*: { head: i32, tail: Ptr<TokList> }\nllen* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.llen() } }")
+    assert gen.index("struct TokCell {") < gen.index("struct TokList {")   # dependency order
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen +
+        "\nint main(void){ TokList n={.tag=TokList_Nil}; TokList a={.tag=TokList_Cons,.u.Cons={1,&n}}; return llen(&a); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 1
+
+
 def test_parse_enum_match_pointer_subject(tmp_path):
     # a match on a `Ptr<Enum>` subject: std.check sees through the pointer for the ename AND
     # emits ematchp so the tag test uses `->` (l->tag), not `.` (l.tag). A recursive list_len
