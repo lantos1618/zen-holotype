@@ -132,3 +132,21 @@ def test_generic_payload_in_plain_enum(tmp_path):
     # a NON-generic enum whose variant payload is a generic instance — discovered via the payload scan
     c = emit_c_for(tmp_path, "Box<T>: { v: T }\nWrap*: Has(Box<i32>) | Nil\nf* = (w: Wrap) i32 { w.match({ .Has(b) => b.v, .Nil => 0 }) }")
     assert "struct Box_i32 { int32_t v; }" in c
+
+
+# Literal-only discovery: a generic struct used ONLY via a literal in an expression (no typed
+# param/return naming it) is still discovered + emitted — the monomorphize pass walks fn bodies for
+# struct literals carrying type args, not just signatures.
+def test_literal_only_let(tmp_path):
+    c = emit_c_for(tmp_path, "Box<T>: { v: T }\ntest* = () i32 { b := Box<i32>{ v: 42 }\n b.v }")
+    assert "struct Box_i32 { int32_t v; }" in c
+    run_value(tmp_path, "Box<T>: { v: T }\ntest* = () i32 { b := Box<i32>{ v: 42 }\n b.v }", 42)
+
+
+def test_literal_only_inline(tmp_path):
+    run_value(tmp_path, "Box<T>: { v: T }\ntest* = () i32 { Box<i32>{ v: 20 }.v + Box<i32>{ v: 22 }.v }", 42)
+
+
+def test_literal_in_match_arm(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\ntest* = () i32 { (3 < 4).match({ true => Box<i32>{ v: 42 }.v, false => 0 }) }", 42)

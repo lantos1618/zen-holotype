@@ -698,7 +698,66 @@ collect_pays = (buf: [GenericData], cnt: i32, variants: [VariantDef]) i32 {
 collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
     c := cnt
     f.params.loop((h, i, p) { c = buf.collect_ty(c, p.ty) })
-    buf.collect_ty(c, f.ret)
+    buf.collect_body(buf.collect_ty(c, f.ret), f.body)   // also walk the BODY for generic literals
+}
+// ── body walk: discover generic instances from struct LITERALS in expressions, not just from typed
+//    signatures. A `b := Box<i32>{…}` with no typed param/return still needs Box_i32 emitted. A
+//    MakeStruct with type args carries its instance (ty + targs + mangled mty); recurse everywhere. ──
+add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+    buf.has_mangled(cnt, g.mangled).match ({ true => cnt, false => buf.add_inst(cnt, g) })
+}
+collect_exprs = (buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
+    c := cnt
+    xs.loop((h, i, x) { c = buf.collect_expr(c, x) })
+    c
+}
+collect_arms = (buf: [GenericData], cnt: i32, arms: [ArmData]) i32 {
+    c := cnt
+    arms.loop((h, i, a) { c = buf.collect_expr(c, load(a.body)) })
+    c
+}
+collect_inits2 = (buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
+    c := cnt
+    inits.loop((h, i, fi) { c = buf.collect_expr(c, load(fi.value)) })
+    c
+}
+collect_makestruct = (buf: [GenericData], cnt: i32, m: MakeStructData) i32 {
+    c := (m.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData { name: m.ty, args: m.targs, mangled: m.mty }), false => cnt })
+    buf.collect_inits2(c, m.inits)
+}
+collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
+    e.match ({
+        .MakeStruct(m) => buf.collect_makestruct(cnt, m),
+        .Bin(b)        => buf.collect_expr(buf.collect_expr(cnt, load(b.lhs)), load(b.rhs)),
+        .Call(c)       => buf.collect_exprs(cnt, c.args),
+        .Cond(d)       => buf.collect_expr(buf.collect_expr(buf.collect_expr(cnt, load(d.c)), load(d.t)), load(d.e)),
+        .Member(m)     => buf.collect_expr(cnt, load(m.obj)),
+        .Arrow(m)      => buf.collect_expr(cnt, load(m.obj)),
+        .MakeEnum(mk)  => buf.collect_expr(cnt, load(mk.payload)),
+        .Match(m)      => buf.collect_arms(buf.collect_expr(cnt, load(m.subj)), m.arms),
+        .Index(ix)     => buf.collect_expr(buf.collect_expr(cnt, load(ix.seq)), load(ix.idx)),
+        .SliceLit(sd)  => buf.collect_exprs(cnt, sd.items),
+        .Loop(l)       => buf.collect_body(buf.collect_expr(cnt, load(l.seq)), l.body),
+        .Block(bl)     => buf.collect_body(cnt, bl.stmts),
+        .Lambda(la)    => buf.collect_body(cnt, la.body),
+        _              => cnt
+    })
+}
+collect_stmt = (buf: [GenericData], cnt: i32, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => buf.collect_expr(cnt, load(l.value)),
+        .Assign(x)   => buf.collect_expr(cnt, load(x.value)),
+        .Return(r)   => buf.collect_expr(cnt, load(r)),
+        .ExprStmt(e) => buf.collect_expr(cnt, load(e)),
+        .If(f)       => buf.collect_body(buf.collect_body(buf.collect_expr(cnt, load(f.c)), f.then), f.els),
+        .While(w)    => buf.collect_body(buf.collect_expr(cnt, load(w.c)), w.body),
+        .IndexSet(x) => buf.collect_expr(buf.collect_expr(buf.collect_expr(cnt, load(x.seq)), load(x.idx)), load(x.value))
+    })
+}
+collect_body = (buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
+    c := cnt
+    body.loop((h, i, st) { c = buf.collect_stmt(c, st) })
+    c
 }
 GBufEnd*: { buf: [GenericData], count: i32 }
 collect_insts = (decls: [Decl]) GBufEnd {
