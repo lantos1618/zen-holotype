@@ -76,9 +76,12 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
         _      => src.is_dot(sc.tok).match ({
             true  => a.parse_ctor(src, sc),          // `.Variant` / `.Variant(arg)` — an enum constructor
-            false => src.lam_open(sc).match ({       // '(' — either a lambda `(names){…}` or a paren'd expr
-                true  => a.parse_lambda(src, sc),
-                false => a.parse_paren(src, sc)
+            false => src.is_lbracket(sc.tok).match ({
+                true  => a.parse_slicelit(src, sc),  // `[a, b, c]` — a slice literal
+                false => src.lam_open(sc).match ({   // '(' — either a lambda `(names){…}` or a paren'd expr
+                    true  => a.parse_lambda(src, sc),
+                    false => a.parse_paren(src, sc)
+                })
             })
         })
     })
@@ -390,6 +393,26 @@ parse_paren = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {
     inner := a.parse_or(src, open.next)             // parse past the '(' (full expr incl. compare)
     close := src.scan(inner.next)                    // consume the ')'
     PExpr { expr: inner.expr, next: close.next }
+}
+// `[a, b, c]` — a slice literal: comma-separated expressions to `]`. The element type is left
+// void; std.check fills it from the first item's inferred type (like an index's element type).
+fill_sitems = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbracket(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_sitem(src, pos, buf, i) })
+}
+fill_sitem = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    it    := a.parse_or(src, pos)                    // one item
+    buf[i] = load(it.expr)
+    after := src.scan(it.next)                       // ',' or ']'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_sitems(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }   // ']'
+    })
+}
+parse_slicelit = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {   // open = the '['
+    buf := a.arg_buf()
+    ae  := a.fill_sitems(src, open.next, buf, 0)
+    a.parse_postfix(src, PExpr { expr: a.enode(slit(tvoid(), buf.take_args(ae.count))), next: ae.next })
 }
 // is the `(` (scanned as `open`) the start of a lambda `(names){…}`, not a parenthesized expr?
 // A lambda's parens hold only a (possibly empty) comma-list of identifiers, closed by `)` then
