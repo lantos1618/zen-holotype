@@ -477,6 +477,17 @@ def test_check_resolves_ctor_inside_struct_literal(tmp_path):
     assert ".tag = (K){ .tag = K_A }" in gen   # the nested .A() resolved to K_A
 
 
+def test_parse_bare_expression_statements(tmp_path):
+    # a non-final expression is a statement (evaluated for effect), not the return; only the
+    # LAST expression of a body is the return. This is what `.loop(...)`-as-a-statement needs.
+    gen = gen_module(tmp_path, r"log* = (x: i32) i32 { x }\nf* = (x: i32) i32 { log(x)\n log(x + 1)\n x + 2 }")
+    assert "int32_t f(int32_t x) { log(x); log((x + 1)); return (x + 2); }" in gen
+    (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return f(5); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([str(tmp_path / "g")]).returncode == 7   # f(5) returns 5+2
+
+
 # ── UFCS method calls: `recv.f(args)` desugars to `f(recv, args)` ─────────────────────
 # The dominant construct in our own stdlib. `recv.name` is field access; `recv.name(args)`
 # prepends the receiver as the first call argument. Both chain.

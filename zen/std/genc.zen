@@ -42,7 +42,7 @@ AssignData*: { name: str, value: Ptr<Expr> }              // name = expr;
 IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } else { els }
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
 IndexSetData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty, value: Ptr<Expr> }  // seq[idx] = value;
-Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData) | IndexSet(IndexSetData)
+Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData) | IndexSet(IndexSetData) | ExprStmt(Ptr<Expr>)
 // types + typed parameters
 Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>)   // scalar/struct/void/str, T*, or [T]
 Param*: { name: str, ty: Ty }
@@ -78,6 +78,7 @@ strlit* = (v: str) Expr { .StrLit(StrData { value: v }) }
 tstr* = () Ty { .Str() }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
+sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }                  // a bare expression evaluated for effect
 sassign* = (nm: str, v: Ptr<Expr>) Stmt { .Assign(AssignData { name: nm, value: v }) }
 sidxset* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>) Stmt { .IndexSet(IndexSetData { seq: seq, idx: i, elem: elem, value: v }) }
 sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt { .If(IfData { c: c, then: t, els: e }) }
@@ -279,6 +280,7 @@ gen_stmt = (s: String, st: Stmt) String {
         .Let(l)    => s.append("__auto_type ").append(l.name).append(" = ").gen_expr(l.value).append(";"),
         .Assign(a) => s.append(a.name).append(" = ").gen_expr(a.value).append(";"),
         .Return(e) => s.append("return ").gen_expr(e).append(";"),
+        .ExprStmt(e) => s.gen_expr(e).append(";"),
         .If(f)     => s.gen_if(f),
         .While(w)  => s.append("while (").gen_expr(w.c).append(") ").gen_block(w.body),
         .IndexSet(x) => s.append("((").gen_ty(x.elem.addr()).append("*)(").gen_expr(x.seq).append(").ptr)[").gen_expr(x.idx).append("] = ").gen_expr(x.value).append(";")
