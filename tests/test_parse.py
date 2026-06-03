@@ -336,7 +336,7 @@ def test_parse_decl_recursive_gcd(tmp_path):
 def test_parse_module_multiple_functions(tmp_path):
     # two function decls in one source -> a whole translation unit; one calls the other.
     gen = gen_module(tmp_path, r"inc* = (x: i32) i32 { x + 1 }\ndbl* = (x: i32) i32 { x + x }")
-    assert gen == ("int32_t inc(int32_t x); int32_t dbl(int32_t x); "          # forward protos
+    assert gen == ("typedef struct { void* ptr; int64_t len; } zslice; int32_t inc(int32_t x); int32_t dbl(int32_t x); "          # forward protos
                    "int32_t inc(int32_t x) { return (x + 1); } "
                    "int32_t dbl(int32_t x) { return (x + x); } ")
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + gen + "\nint main(void){ return inc(dbl(5)); }\n")
@@ -375,7 +375,7 @@ def test_parse_module_n_arg_calls(tmp_path):
 # module mixes structs and functions freely.
 def test_parse_module_struct_declaration(tmp_path):
     gen = gen_module(tmp_path, r"Pt*: { x: i32, y: i32 }")
-    assert gen == "typedef struct Pt Pt; struct Pt { int32_t x; int32_t y; }; "
+    assert gen == "typedef struct { void* ptr; int64_t len; } zslice; typedef struct Pt Pt; struct Pt { int32_t x; int32_t y; }; "
 
 
 def test_parse_module_struct_and_function(tmp_path):
@@ -500,7 +500,7 @@ def test_parse_ufcs_does_not_break_field_access(tmp_path):
 def test_parse_imports_are_skipped(tmp_path):
     # a real file starts with imports; the parser skips them and parses the decls that follow.
     gen = gen_module(tmp_path, r"{ Expr, Func } = std.genc\n{ scan } = std.lex\ninc* = (x: i32) i32 { x + 1 }")
-    assert gen == "int32_t inc(int32_t x); int32_t inc(int32_t x) { return (x + 1); } "   # proto + def, no import noise
+    assert gen == "typedef struct { void* ptr; int64_t len; } zslice; int32_t inc(int32_t x); int32_t inc(int32_t x) { return (x + 1); } "   # proto + def
 
 
 # ── if statements: `if (c) { … } else { … }` -> genc If (sibling to @while) ───────────

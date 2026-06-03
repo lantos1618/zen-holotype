@@ -13,7 +13,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
                       run_emits, check, emit_c)
 
 _IMPORTS = """
-{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
+{ Func, Param, Ty, Decl, StructDecl, Field, FieldInit, lit, vref, bin, call, cond, member, arrow, mkenum, mkstruct, finit, slit, index, mktag, arm, ematch, ematchp, strlit, slet, sret, sassign, sif, swhile, param, tnamed, tptr, tslice, ti32, ti64, tu8, tbool, tstr, field, sdef, vdef, edef, dfunc, dstruct, denum, draw, tvoid, genC, genModule } = std.genc
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -388,3 +388,28 @@ def test_genc_recursive_cons_list_no_slices(tmp_path):
     call = ("({ List n={.tag=List_Nil}; List a={.tag=List_Cons,.u.Cons={3,&n}};"
             " List b={.tag=List_Cons,.u.Cons={2,&a}}; List c={.tag=List_Cons,.u.Cons={1,&b}}; sum(&c); })")
     assert compile_and_run(tmp_path, generated, call) == "6"
+
+
+def test_genc_slice_literal_index_runs(tmp_path):
+    # a [T] slice is a `zslice` fat pointer { void* ptr; int64_t len; }. A function builds a
+    # slice literal [10,20,30], binds it, and indexes elements 0 and 2 -> 10 + 30 = 40.
+    body = """
+    ten := lit(10)
+    twenty := lit(20)
+    thirty := lit(30)
+    slc := slit(ti32(), [ten, twenty, thirty])
+    xs0 := vref("xs")
+    i0 := lit(0)
+    e0 := index(addr(xs0), addr(i0), ti32())
+    xs2 := vref("xs")
+    i2 := lit(2)
+    e2 := index(addr(xs2), addr(i2), ti32())
+    sm := bin("+", addr(e0), addr(e2))
+    f := Func { name: "g", params: [], ret: ti32(), body: [slet("xs", addr(slc)), sret(addr(sm))] }
+    emit(genModule([dfunc(f)]))
+    0"""
+    generated = emit_via_zen(tmp_path, body)
+    assert "typedef struct { void* ptr; int64_t len; } zslice;" in generated
+    assert "(zslice){ .ptr = (int32_t[]){ 10, 20, 30 }, .len = 3 }" in generated
+    assert "((int32_t*)(xs).ptr)[0]" in generated
+    assert compile_and_run(tmp_path, generated, "g()") == "40"
