@@ -126,14 +126,14 @@ count_from = (src: str, pos: i32) i32 {
 // the EXPLICIT allocator (std.alloc) — sizeof(TokList) bytes, reinterpreted to a typed
 // pointer. The list shape (TokList / TokCell / Ptr) is slice-free; only the one-node
 // allocator reinterprets raw memory.
-{ Allocator } = std.alloc
+{ Malloc, heap } = std.alloc
 
 TokList*: Nil | Cons(TokCell)
 TokCell*: { head: Token, tail: Ptr<TokList> }
 
 // heap-allocate one node holding `v`, returning a pointer to it
-nodebuf<A: Allocator> = (a: Ptr<A>) [TokList] { slice(a.acquire(sizeof(TokList)), 1) }
-node<A: Allocator> = (a: Ptr<A>, v: TokList) Ptr<TokList> {
+nodebuf = (a: Ptr<Malloc>) [TokList] { slice(heap(sizeof(TokList)), 1) }
+node = (a: Ptr<Malloc>, v: TokList) Ptr<TokList> {
     buf := a.nodebuf()
     buf[0] = v
     buf[0].addr()
@@ -145,14 +145,14 @@ nil_node  = () TokList { .Nil() }
 cons_node = (h: Token, t: Ptr<TokList>) TokList { .Cons(TokCell { head: h, tail: t }) }
 
 // build the token list [pos .. Eof] in order; recursion builds the tail first
-build<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<TokList> {
+build = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<TokList> {
     sc := src.scan(pos)
     sc.tok.kind.match {
         .Eof => a.node(nil_node()),
         _    => a.node(cons_node(sc.tok, a.build(src, sc.next)))
     }
 }
-tokenize*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<TokList> { a.build(src, 0) }
+tokenize* = (a: Ptr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }
 
 // walk the list: number of Cons nodes (the terminal Nil ends it)
 list_len* = (l: Ptr<TokList>) i32 { l.match { .Nil => 0, .Cons(c) => 1 + c.tail.list_len() } }
