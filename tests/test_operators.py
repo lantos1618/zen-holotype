@@ -64,3 +64,18 @@ def _run(tmp_path, prog, want):
 ])
 def test_operator_runs(tmp_path, prog, want):
     _run(tmp_path, prog, want)
+
+
+@pytest.mark.parametrize("prog,want", [
+    # a multi-statement match arm `{ … }` (a genc Block / statement-expression)
+    ("test* = () i32 { (3 < 5).match({ true => { x := 10\n y := 20\n x + y }, false => 0 }) }", 30),
+    # one single-expr arm, one block arm
+    ("classify* = (n: i32) i32 { (n < 0).match({ true => { 0 - n }, false => { d := n * 2\n d + 1 } }) }\n"
+     "test* = () i32 { classify(5) }", 11),
+    # a variant arm whose block uses the payload binding `r`
+    ("Shape*: Circle(i32) | Square(i32)\n"
+     "area* = (s: Shape) i32 { s.match({ .Circle(r) => { rr := r * r\n rr * 3 }, .Square(w) => w * w }) }\n"
+     "test* = () i32 { area(.Circle(2)) }", 12),
+])
+def test_multi_statement_match_arm_runs(tmp_path, prog, want):
+    _run(tmp_path, prog, want)
