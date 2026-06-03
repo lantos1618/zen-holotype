@@ -68,6 +68,13 @@ decls* = (a: Ptr<Malloc>, ds: [Decl]) [Decl] {
     ds.loop((h, i, d) { buf[i] = d })
     buf
 }
+// assemble a module: hand-written decls ++ generated decls (the core build operation)
+concat* = (a: Ptr<Malloc>, xs: [Decl], ys: [Decl]) [Decl] {
+    buf := a.dbuf(xs.len + ys.len)
+    xs.loop((h, i, d) { buf[i] = d })
+    ys.loop((h, i, d) { buf[xs.len + i] = d })
+    buf
+}
 
 // ── expressions (return Ptr<Expr>, so they compose directly — `a.add(a.var("n"), a.int(1))`) ──
 evar*   = (a: Ptr<Malloc>, name: str) Ptr<Expr> { a.enode(vref(name)) }
@@ -93,3 +100,15 @@ func*   = (a: Ptr<Malloc>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
     dfunc(Func { name: name, params: a.params(ps), ret: ret, body: a.stmts(body) })
 }
 struct* = (a: Ptr<Malloc>, name: str, fs: [Field]) Decl { dstruct(StructDecl { name: name, fields: a.fields(fs) }) }
+
+// ── derive: generate code from a struct's SHAPE — metaprogramming as ordinary functions, the
+//    Zen answer to a `#[derive]` attribute. `derive_accessors(sd)` returns a getter per field. ──
+accessor = (a: Ptr<Malloc>, sname: str, f: Field) Decl {
+    s := a.evar("s")                                                       // the Ptr<Struct> receiver
+    a.func(f.name, [param("s", a.ptrto(named(sname)))], f.ty, [ret(a.efield(s, f.name))])
+}
+derive_accessors* = (a: Ptr<Malloc>, sd: StructDecl) [Decl] {
+    buf := a.dbuf(sd.fields.len)
+    sd.fields.loop((h, i, f) { buf[i] = a.accessor(sd.name, f) })
+    buf
+}

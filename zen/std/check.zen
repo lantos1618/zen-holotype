@@ -25,8 +25,8 @@ VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 // threaded into return/branch positions). It disambiguates a constructor whose variant name is
 // shared by several enums — `lit = (n) Expr { .Int(n) }` picks Expr.Int over TokKind.Int because
 // Expr is the expected type. tvoid() means "no expectation" → fall back to a name-only scan.
-Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty }
-with_exp = (env: Env, t: Ty) Env { Env { vars: env.vars, decls: env.decls, exp: t } }
+Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: Ptr<Malloc> }   // a = allocator (heap-alloc in infer)
+with_exp = (env: Env, t: Ty) Env { Env { vars: env.vars, decls: env.decls, exp: t, a: env.a } }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 
 // heap-allocate fresh nodes (the same pattern the parser uses). Named cebuf/cenode (not
@@ -42,6 +42,14 @@ cenode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
 abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(heap(n * sizeof(ArmData)), n) }
 sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(heap(n * sizeof(Stmt)), n) }
 dbuf = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
+tbuf = (a: Ptr<Malloc>, n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
+// a heap Ptr<Ty> — so a Ty a function builds (e.g. a slice's element type in infer_expr) outlives
+// the frame, instead of dangling via `&(localTy)` (which silently corrupts fits/ty_eq downstream).
+tnode = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
+    buf := a.tbuf(1)
+    buf[0] = t
+    buf[0].addr()
+}
 
 // ── the variable environment (a cons-list) ────────────────────────────────────────────
 vlbuf = (a: Ptr<Malloc>) [VList] { slice(heap(sizeof(VList)), 1) }
@@ -159,7 +167,7 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
         .Loop(l)       => tvoid(),                            // a loop is a void statement
-        .SliceLit(sd)  => tslice(sd.elem.addr()),             // `[a, b, c]` of element E -> [E]
+        .SliceLit(sd)  => tslice(env.a.tnode(sd.elem)),       // `[a, b, c]` of element E -> [E] (elem heap-alloc'd)
         _              => tvoid()
     })
 }
@@ -217,7 +225,7 @@ resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
 // loop variables (index i: i32, element x: elemTy) added to the environment.
 resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.infer_expr(l.seq).elem_of()
-    env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp }
+    env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a }
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
 fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(heap(n * sizeof(FieldInit)), n) }
@@ -280,14 +288,14 @@ fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
 }
 extend_env = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
-        .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp },
+        .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp, a: env.a },
         _       => env
     })
 }
 
 // ── rebuild decls: a function's body is resolved against its params + the module's enums ──
 resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
-    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret }
+    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
     Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(env, f.body) }
 }
 resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
@@ -587,7 +595,7 @@ check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc
 }
 check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret }
+    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
     a.check_body(env, f.body)
 }
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares. The Trait is
