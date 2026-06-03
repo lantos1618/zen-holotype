@@ -11,7 +11,7 @@
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
-{ Allocator } = std.alloc
+{ Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
 
@@ -24,19 +24,19 @@ VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 Env*: { vars: Ptr<VList>, decls: [Decl] }
 
 // heap-allocate fresh nodes (the same pattern the parser uses)
-ebuf<A: Allocator> = (a: Ptr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
-enode<A: Allocator> = (a: Ptr<A>, v: Expr) Ptr<Expr> {
+ebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(heap(n * sizeof(Expr)), n) }
+enode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.ebuf(1)
     buf[0] = v
     buf[0].addr()
 }
-abuf<A: Allocator> = (a: Ptr<A>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(ArmData)), n) }
-sbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
-dbuf<A: Allocator> = (a: Ptr<A>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
+abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(heap(n * sizeof(ArmData)), n) }
+sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(heap(n * sizeof(Stmt)), n) }
+dbuf = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
 
 // ── the variable environment (a cons-list) ────────────────────────────────────────────
-vlbuf<A: Allocator> = (a: Ptr<A>) [VList] { slice(a.acquire(sizeof(VList)), 1) }
-vlnode<A: Allocator> = (a: Ptr<A>, v: VList) Ptr<VList> {
+vlbuf = (a: Ptr<Malloc>) [VList] { slice(heap(sizeof(VList)), 1) }
+vlnode = (a: Ptr<Malloc>, v: VList) Ptr<VList> {
     buf := a.vlbuf()
     buf[0] = v
     buf[0].addr()
@@ -45,10 +45,10 @@ vlnode<A: Allocator> = (a: Ptr<A>, v: VList) Ptr<VList> {
 // generic vlnode can't infer its enum)
 vnil_val  = () VList { .VNil() }
 vcons_val = (nm: str, t: Ty, tail: Ptr<VList>) VList { .VCons(VCell { name: nm, ty: t, tail: tail }) }
-vnil<A: Allocator>  = (a: Ptr<A>) Ptr<VList> { a.vlnode(vnil_val()) }
-vcons<A: Allocator> = (a: Ptr<A>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
+vnil = (a: Ptr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
+vcons = (a: Ptr<Malloc>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
 // the initial environment: each parameter consed onto an empty list
-params_env<A: Allocator> = (a: Ptr<A>, ps: [Param]) Ptr<VList> {
+params_env = (a: Ptr<Malloc>, ps: [Param]) Ptr<VList> {
     e := a.vnil()
     ps.loop((h, i, p) { e = a.vcons(p.name, p.ty, e) })
     e
@@ -110,7 +110,7 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Int(n)        => ti32(),
         .Var(v)        => env.vars.lookup_var(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
-        .Call(c)       => env.decls.fn_ret(c.fn),
+        .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.infer_expr(d.t),
         .Member(mm)    => env.infer_member(mm),
         .MakeEnum(mk)  => tnamed(env.decls.enum_of_variant(mk.variant)),
@@ -123,13 +123,22 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         _              => tvoid()
     })
 }
+// a call's result type: the `load(p)` intrinsic yields the pointee (so `load(e).match` resolves);
+// any other call yields the callee's declared return type.
+pointee_of = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => tvoid() }) }
+infer_call = (env: Env, c: CallData) Ty {
+    eq(c.fn, "load").match ({
+        true  => env.infer_expr(c.args[0].addr()).pointee_of(),
+        false => env.decls.fn_ret(c.fn)
+    })
+}
 infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
 infer_match_ty = (env: Env, m: MatchData) Ty {
     (m.arms.len > 0).match ({ true => env.infer_expr(m.arms[0].body), false => tvoid() })
 }
 
 // ── rebuild an expression, filling enum match enames + constructor types ───────────────
-resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
+resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)     => a.resolve_match(env, m),
         .MakeEnum(mk) => a.enode(mkenum(env.decls.enum_of_variant(mk.variant), mk.variant, a.resolve_expr(env, mk.payload))),
@@ -146,20 +155,20 @@ resolve_expr<A: Allocator> = (a: Ptr<A>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
 }
 // a foreach loop: infer the element type from the sequence, then resolve the body with the
 // loop variables (index i: i32, element x: elemTy) added to the environment.
-resolve_loop<A: Allocator> = (a: Ptr<A>, env: Env, l: LoopData) Ptr<Expr> {
+resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.infer_expr(l.seq).elem_of()
     env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls }
     a.enode(eloop(a.resolve_expr(env, l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
-fbuf<A: Allocator> = (a: Ptr<A>, n: i64) [FieldInit] { slice(a.acquire(n * sizeof(FieldInit)), n) }
-resolve_inits<A: Allocator> = (a: Ptr<A>, env: Env, inits: [FieldInit]) [FieldInit] {
+fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(heap(n * sizeof(FieldInit)), n) }
+resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.resolve_expr(env, fi.value)) })
     buf
 }
 // fill an enum match's ename from the subject's declared type. If the subject is a POINTER
 // (`Ptr<Enum>`), emit genc's ematchp so the tag test is `subj->tag` (not `subj.tag`).
-resolve_match<A: Allocator> = (a: Ptr<A>, env: Env, m: MatchData) Ptr<Expr> {
+resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
     t     := env.infer_expr(m.subj)            // the subject is any expression — infer its type
     en    := t.enum_name()
     subj2 := a.resolve_expr(env, m.subj)       // resolve nested ctors/matches in the subject too
@@ -169,19 +178,19 @@ resolve_match<A: Allocator> = (a: Ptr<A>, env: Env, m: MatchData) Ptr<Expr> {
         false => a.enode(ematch(subj2, en, arms))
     })
 }
-resolve_args<A: Allocator> = (a: Ptr<A>, env: Env, args: [Expr]) [Expr] {
+resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
     buf := a.ebuf(args.len)
     args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env, ar.addr())) })
     buf
 }
-resolve_arms<A: Allocator> = (a: Ptr<A>, env: Env, arms: [ArmData]) [ArmData] {
+resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(env, ar.body)) })
     buf
 }
 
 // ── rebuild statements ────────────────────────────────────────────────────────────────
-resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
+resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) Stmt {
     st.match ({
         .Let(l)    => slet(l.name, a.resolve_expr(env, l.value)),
         .Assign(x) => sassign(x.name, a.resolve_expr(env, x.value)),
@@ -196,20 +205,20 @@ resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
 // inferred type of its value) for every statement that follows — that's what lets a later
 // `s.match { … }` find s's enum type when s was bound by `s := scan(…)`.
 noop2 = () void { }
-resolve_body<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt]) [Stmt] {
+resolve_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
     a.fill_stmts(env, body, buf, 0)
     buf
 }
-fill_stmts<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
+fill_stmts = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i), false => noop2() })
 }
-fill_stmt<A: Allocator> = (a: Ptr<A>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
+fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     st     := body[i]
     buf[i] = a.resolve_stmt(env, st)
     a.fill_stmts(a.extend_env(env, st), body, buf, i + 1)
 }
-extend_env<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Env {
+extend_env = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
         .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls },
         _       => env
@@ -217,16 +226,16 @@ extend_env<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Env {
 }
 
 // ── rebuild decls: a function's body is resolved against its params + the module's enums ──
-resolve_func<A: Allocator> = (a: Ptr<A>, decls: [Decl], f: Func) Func {
+resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
     env := Env { vars: a.params_env(f.params), decls: decls }
     Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(env, f.body) }
 }
-resolve_decl<A: Allocator> = (a: Ptr<A>, decls: [Decl], d: Decl) Decl {
+resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d })
 }
 
 // resolve a whole module, returning new decls with enum match enames + constructor types set
-resolve_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) [Decl] {
+resolve_module* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
     buf
@@ -338,11 +347,11 @@ check_body = (env: Env, body: [Stmt]) i32 {
     body.loop((h, i, st) { acc = acc + env.check_stmt(st) })
     acc
 }
-check_func<A: Allocator> = (a: Ptr<A>, decls: [Decl], f: Func) i32 {
+check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env { vars: a.params_env(f.params), decls: decls }
     env.check_body(f.body)
 }
-check_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) i32 {
+check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), _ => 0 }) })
     acc
