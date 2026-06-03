@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -652,4 +652,30 @@ check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => decls.impl_errs(im), _ => 0 }) })
     acc
+}
+
+// ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
+// The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
+// every function becomes a bodyless DForeign (structs/enums pass through). Checking a file against
+// another module's header puts the imported names in `the_func`'s reach, so a cross-module call is
+// arity/arg-type-checked exactly like a local one — while the header's bodyless sigs are never
+// re-checked (check_module only descends DFunc bodies). A name imported but absent from the header
+// stays known-but-unchecked (the #204 DImport path), so partial headers never false-reject.
+as_sig = (a: Ptr<Malloc>, d: Decl) Decl {
+    d.match ({ .DFunc(f) => dforeign(Func { name: f.name, params: f.params, ret: f.ret, body: no_stmts() }), _ => d })
+}
+module_header* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
+    buf := a.dbuf(decls.len)
+    decls.loop((h, i, d) { buf[i] = a.as_sig(d) })
+    buf
+}
+// check `decls` (one file) against an imported module's `lib` decls: the file is resolved as usual,
+// then checked in a WORLD that prepends lib's header, so its imported calls resolve to real sigs.
+check_linked* = (a: Ptr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
+    hdr   := a.module_header(lib)
+    rfile := a.resolve_module(decls)
+    world := a.dbuf(hdr.len + rfile.len)
+    hdr.loop((h, i, d) { world[i] = d })
+    rfile.loop((h, i, d) { world[hdr.len + i] = d })
+    a.check_module(world)
 }
