@@ -83,6 +83,9 @@ GenStructDecl*: { name: str, tparams: [Param], fields: [Field] }   // tparams = 
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
 VariantDef*: { name: str, payload: Ty }
 EnumDecl*: { name: str, variants: [VariantDef] }
+// a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
+// The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
+GenEnumDecl*: { name: str, tparams: [Param], variants: [VariantDef] }
 // records a `Type.impl(Trait) { … }` block: the type, the trait, and the method names THIS impl
 // actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
 // functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
@@ -97,7 +100,7 @@ ImplData*: { ty: str, trname: str, methods: [Param] }
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
 ImportData*: { names: [Param] }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl)   // DRaw = verbatim C escape
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -181,6 +184,7 @@ param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
 field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
 sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
 gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl { GenStructDecl { name: nm, tparams: tps, fields: fs } }
+genumdef* = (nm: str, tps: [Param], vs: [VariantDef]) GenEnumDecl { GenEnumDecl { name: nm, tparams: tps, variants: vs } }
 tvoid* = () Ty { .Void() }
 vdef* = (nm: str, p: Ty) VariantDef { VariantDef { name: nm, payload: p } }
 edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl { name: nm, variants: vs } }
@@ -190,6 +194,7 @@ denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
 dimport* = (names: [Param]) Decl { .DImport(ImportData { names: names }) }
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
+dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
@@ -501,7 +506,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DImpl(im)   => s,
         .DForeign(f) => s,
         .DImport(im) => s,
-        .DGenStruct(g) => s                             // a generic template — only its instances emit
+        .DGenStruct(g) => s,                            // a generic template — only its instances emit
+        .DGenEnum(g)   => s
     }) })
 }
 
@@ -515,7 +521,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DImpl(im)   => s,                              // an impl record — no runtime form (methods are DFuncs)
         .DForeign(f) => s,                              // a foreign decl — only a prototype (gen_proto), no body
         .DImport(im) => s,                              // an import — modules link separately, emits nothing
-        .DGenStruct(g) => s                             // a generic template — monomorphize replaced it
+        .DGenStruct(g) => s,                            // a generic template — monomorphize replaced it
+        .DGenEnum(g)   => s
     })
 }
 
@@ -623,6 +630,28 @@ find_genstruct = (decls: [Decl], name: str) GenStructDecl {
     decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
     found
 }
+// the concrete EnumDecl for one instance: the matching DGenEnum's variants, tparam→arg substituted.
+mono_vbuf = (n: i64) [VariantDef] { slice(heap(n * sizeof(VariantDef)), n) }
+mono_enum = (decls: [Decl], g: GenericData) Decl {
+    ged := decls.find_genenum(g.name)
+    buf := mono_vbuf(ged.variants.len)
+    ged.variants.loop((h, i, v) { buf[i] = VariantDef { name: v.name, payload: ged.tparams.subst_ty(g.args, v.payload) } })
+    denum(EnumDecl { name: g.mangled, variants: buf })
+}
+find_genenum = (decls: [Decl], name: str) GenEnumDecl {
+    found := GenEnumDecl { name: "", tparams: slice(heap(0), 0), variants: slice(heap(0), 0) }
+    decls.loop((h, i, d) { found = d.match ({ .DGenEnum(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
+    found
+}
+// is `name` a generic STRUCT (vs a generic enum)? — picks which monomorphizer an instance needs.
+is_genstruct_name = (decls: [Decl], name: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => true, false => found }), _ => found }) })
+    found
+}
+mono_inst = (decls: [Decl], g: GenericData) Decl {
+    decls.is_genstruct_name(g.name).match ({ true => decls.mono_struct(g), false => decls.mono_enum(g) })
+}
 // discovery: scan all typed positions for generic instances, deduped by mangled name.
 has_mangled = (buf: [GenericData], cnt: i32, m: str) bool {
     found := false
@@ -666,13 +695,15 @@ collect_insts = (decls: [Decl]) GBufEnd {
     GBufEnd { buf: buf, count: cnt }
 }
 is_gen_struct = (d: Decl) bool { d.match ({ .DGenStruct(g) => true, _ => false }) }
-// monomorphize: drop the DGenStruct templates, append one concrete StructDecl per discovered instance.
+is_gen_enum = (d: Decl) bool { d.match ({ .DGenEnum(g) => true, _ => false }) }
+is_gen_template = (d: Decl) bool { d.is_gen_struct() || d.is_gen_enum() }
+// monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
 monomorphize* = (decls: [Decl]) [Decl] {
     ce  := decls.collect_insts()
     out := mono_dbuf(decls.len + ce.count)
     k   := 0
-    decls.loop((h, i, d) { k = d.is_gen_struct().match ({ true => k, false => out.put_decl(k, d) }) })
-    ce.buf.loop((h, i, g) { k = (i < ce.count).match ({ true => out.put_decl(k, decls.mono_struct(g)), false => k }) })
+    decls.loop((h, i, d) { k = d.is_gen_template().match ({ true => k, false => out.put_decl(k, d) }) })
+    ce.buf.loop((h, i, g) { k = (i < ce.count).match ({ true => out.put_decl(k, decls.mono_inst(g)), false => k }) })
     slice(out.ptr, k)
 }
 put_decl = (out: [Decl], k: i32, d: Decl) i32 {

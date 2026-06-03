@@ -61,3 +61,44 @@ def test_plain_struct_still_works(tmp_path):
 def test_comparison_not_mistaken_for_generic(tmp_path):
     # `a < b` in expression position must still parse as a comparison, not a generic literal
     run_value(tmp_path, "test* = () i32 { x := 5\n (x < 9).match({ true => 42, false => 0 }) }", 42)
+
+
+# Slice 2 — generic ENUMs. `Opt<T>: Some(T) | None` monomorphizes to `Opt_i32` (tag + union with the
+# substituted payload). A bare constructor `.Some(5)` is stamped with the monomorphized name via the
+# expected type threaded from the callee's parameter.
+def test_generic_enum_some(tmp_path):
+    run_value(tmp_path,
+        "Opt<T>: Some(T) | None\n"
+        "f* = (o: Opt<i32>) i32 { o.match({ .Some(x) => x, .None => 0 }) }\n"
+        "test* = () i32 { f(.Some(42)) }", 42)
+
+
+def test_generic_enum_none(tmp_path):
+    run_value(tmp_path,
+        "Opt<T>: Some(T) | None\n"
+        "f* = (o: Opt<i32>) i32 { o.match({ .Some(x) => x, .None => 99 }) }\n"
+        "test* = () i32 { f(.None) }", 99)
+
+
+def test_generic_enum_emits_monomorphized_tagged_union(tmp_path):
+    c = emit_c_for(tmp_path, "Opt<T>: Some(T) | None\nf* = (o: Opt<i32>) i32 { o.match({ .Some(x) => x, .None => 0 }) }")
+    assert "struct Opt_i32 { int32_t tag; union { int32_t Some; } u; }" in c
+    assert "Opt_i32_Some" in c
+
+
+def test_two_distinct_enum_instantiations(tmp_path):
+    src = ("Opt<T>: Some(T) | None\n"
+           "gi* = (o: Opt<i32>) i32 { o.match({ .Some(x) => x, .None => 0 }) }\n"
+           "gu* = (o: Opt<u8>) i32 { o.match({ .Some(x) => x, .None => 0 }) }\n"
+           "test* = () i32 { gi(.Some(40)) + gu(.Some(2)) }")
+    c = emit_c_for(tmp_path, src)
+    assert "struct Opt_i32" in c and "struct Opt_u8" in c
+    run_value(tmp_path, src, 42)
+
+
+def test_plain_enum_still_works(tmp_path):
+    # a non-generic enum + bare constructor is unaffected
+    run_value(tmp_path,
+        "Sh*: Circle(i32) | Square(i32)\n"
+        "area* = (s: Sh) i32 { s.match({ .Circle(r) => r, .Square(w) => w * w }) }\n"
+        "test* = () i32 { area(.Square(6)) + area(.Circle(6)) }", 42)

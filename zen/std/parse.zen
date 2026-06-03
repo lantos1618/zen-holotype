@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, gsdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, mkstructg, tgeneric, mangle_str, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, mkstructg, tgeneric, mangle_str, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
 { Malloc, heap } = std.alloc
 
@@ -1167,7 +1167,7 @@ parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0
 // A `|`-separated variant list after `:`. Each variant is a bare name (Void payload) or
 // `Name(Type)` (a typed payload). Unlike a struct, there's no closing brace — the list
 // ends at the first token that isn't `|`. Lowers to genc's EnumDecl (a tagged union).
-EnumEnd*: { ed: EnumDecl, next: i32 }
+EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }   // ntp>0 -> a generic enum
 VPay*:    { ty: Ty, next: i32 }                          // a variant's payload Ty + pos past it
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false }) }
 variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(heap(64 * sizeof(VariantDef)), 64) }   // cap 64
@@ -1197,10 +1197,11 @@ skip_to_colon = (src: str, pos: i32) i32 {
 parse_enum_at = (a: Ptr<Malloc>, src: str, pos: i32) EnumEnd {
     nt   := src.scan(pos)                                // the enum name
     name := a.lexeme(src, nt.tok)
-    cpos := src.skip_to_colon(nt.next)                   // pos just past ':' (skips `*`)
+    tp   := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (empty for a plain enum)
+    cpos := src.skip_to_colon(nt.next)                   // pos just past ':' (skips `* <…>`)
     buf  := a.variant_buf()
     ve   := a.fill_variants(src, cpos, buf, 0)           // variants + pos after the last one
-    EnumEnd { ed: edef(name, buf.take_variants(ve.count)), next: ve.next }
+    EnumEnd { ed: edef(name, buf.take_variants(ve.count)), tparams: tp.names, ntp: tp.count, next: ve.next }
 }
 parse_enum* = (a: Ptr<Malloc>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
 
@@ -1326,7 +1327,10 @@ fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: 
 }
 fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)
-    buf[i] = denum(ee.ed)
+    buf[i] = (ee.ntp > 0).match ({                       // tparams present -> a generic enum template
+        true  => dgenenum(genumdef(ee.ed.name, ee.tparams, ee.ed.variants)),
+        false => denum(ee.ed)
+    })
     a.fill_decls(src, ee.next, buf, i + 1)
 }
 fill_func = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
