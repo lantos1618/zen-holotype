@@ -63,3 +63,35 @@ def test_self_hosted_toolchain_compiles_genc_zen(tmp_path):
     r = subprocess.run(["cc", "-c", "-std=gnu11", str(tmp_path / "genc.c"), "-o", str(tmp_path / "genc.o")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr   # genc.zen, compiled by the compiler-in-itself, is valid C
+
+
+def test_self_hosted_toolchain_compiles_genc_AND_check(tmp_path):
+    # genc.zen + check.zen together (check imports genc's types+ctors) — the self-hosted
+    # toolchain parses, checks, lowers BOTH; the emitted C compiles given the std externs.
+    def strip(f):
+        return "\n".join(l for l in Path(f).read_text().splitlines()
+                         if not (l.strip().startswith("{ ") and "= std." in l))
+    src = strip("zen/std/genc.zen") + "\n" + strip("zen/std/check.zen")
+    (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
+    files = load(tmp_path); ns = build_namespace(files)
+    build_scopes(files); resolve(files, ns)
+    fold_comptime(files, ns); run_emits(files, ns)
+    _, passing = check(files, ns)
+    assert "main.main" in passing
+    c = emit_c(files, passing, ns, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                          capture_output=True, text=True).returncode == 0
+    out = subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+    for fn in ("genModule", "resolve_module", "infer_expr", "check_module", "fits"):
+        assert fn in out
+    head = "typedef struct { void* ptr; int64_t len; } zslice; "
+    prelude = ("#include <stdint.h>\n#include <stdbool.h>\n" + head + "\n"
+        "typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } String;\n"
+        "String new(void); String append(String s, const char* x); String push(String s, uint8_t b);\n"
+        "zslice view(const char* v); bool is_empty(const char* s); bool eq(const char* a, const char* b);\n"
+        "typedef struct { int32_t _; } Malloc;\nvoid* heap(int64_t n);\n")
+    (tmp_path / "gc.c").write_text(prelude + out[len(head):])
+    r = subprocess.run(["cc", "-c", "-std=gnu11", str(tmp_path / "gc.c"), "-o", str(tmp_path / "gc.o")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr   # genc.zen + check.zen, compiled by the compiler-in-itself
