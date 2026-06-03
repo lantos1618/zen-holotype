@@ -50,3 +50,20 @@ def test_checker_rejects_assignment_mismatch(tmp_path, src):
 ])
 def test_checker_accepts_valid_assignment(tmp_path, src):
     assert _errors(tmp_path, src) == 0
+
+
+@pytest.mark.parametrize("src", [
+    # xs[i] = v where v doesn't fit the element type
+    "mk* = (a: Ptr<Malloc>) [i32] { slice(heap(8), 2) }\n"
+    "f* = (a: Ptr<Malloc>) i32 { b := addr(mk)\n b[0] = (3 < 4)\n 0 }".replace("addr(mk)", "a.mk()"),
+])
+def test_checker_rejects_index_store_mismatch(tmp_path, src):
+    assert _errors(tmp_path, src) >= 1
+
+
+@pytest.mark.parametrize("src", [
+    "mk* = (a: Ptr<Malloc>) [i32] { slice(heap(8), 2) }\n"
+    "f* = (a: Ptr<Malloc>) i32 { b := a.mk()\n b[0] = 7\n 0 }",   # literal store: fine
+])
+def test_checker_accepts_index_store(tmp_path, src):
+    assert _errors(tmp_path, src) == 0
