@@ -21,7 +21,13 @@
 VList*: VNil | VCons(VCell)
 VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 // the resolution environment: the live variable bindings + every module decl (for enums/fns)
-Env*: { vars: Ptr<VList>, decls: [Decl] }
+// `exp` is the EXPECTED type at the current expression position (the function's return type,
+// threaded into return/branch positions). It disambiguates a constructor whose variant name is
+// shared by several enums — `lit = (n) Expr { .Int(n) }` picks Expr.Int over TokKind.Int because
+// Expr is the expected type. tvoid() means "no expectation" → fall back to a name-only scan.
+Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty }
+with_exp = (env: Env, t: Ty) Env { Env { vars: env.vars, decls: env.decls, exp: t } }
+clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 
 // heap-allocate fresh nodes (the same pattern the parser uses)
 ebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(heap(n * sizeof(Expr)), n) }
@@ -76,6 +82,18 @@ enum_of_variant = (decls: [Decl], vn: str) str {
     found := ""
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.pick_enum(vn, found), _ => found }) })
     found
+}
+// does the enum named `ename` declare variant `vn`?
+named_has = (decls: [Decl], ename: str, vn: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.enum_has(vn), false => found }), _ => found }) })
+    found
+}
+// the enum for constructor `.vn(…)`: prefer the EXPECTED type (env.exp) when it has the variant,
+// else scan by name. This is what disambiguates Expr.Int from TokKind.Int in a combined module.
+ctor_enum = (env: Env, vn: str) str {
+    en := env.exp.enum_name()
+    env.decls.named_has(en, vn).match ({ true => en, false => env.decls.enum_of_variant(vn) })
 }
 
 // ── infer_expr: the Ty of an expression in an environment (Goal C Phase 2) ──────────────
@@ -141,14 +159,14 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
 resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)     => a.resolve_match(env, m),
-        .MakeEnum(mk) => a.enode(mkenum(env.decls.enum_of_variant(mk.variant), mk.variant, a.resolve_expr(env, mk.payload))),
-        .Tag(t)       => a.enode(mktag(env.decls.enum_of_variant(t.variant), t.variant)),
-        .Bin(b)       => a.enode(bin(b.op, a.resolve_expr(env, b.lhs), a.resolve_expr(env, b.rhs))),
-        .Cond(c)      => a.enode(cond(a.resolve_expr(env, c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
-        .Call(c)      => a.enode(call(c.fn, a.resolve_args(env, c.args))),
-        .Member(mm)   => a.enode(member(a.resolve_expr(env, mm.obj), mm.field)),
-        .MakeStruct(sd) => a.enode(mkstruct(sd.ty, a.resolve_inits(env, sd.inits))),   // recurse into field values
-        .Index(ix)    => a.enode(eindex(a.resolve_expr(env, ix.seq), a.resolve_expr(env, ix.idx), env.infer_expr(ix.seq).elem_of())),
+        .MakeEnum(mk) => a.enode(mkenum(env.ctor_enum(mk.variant), mk.variant, a.resolve_expr(env.clr_exp(), mk.payload))),
+        .Tag(t)       => a.enode(mktag(env.ctor_enum(t.variant), t.variant)),
+        .Bin(b)       => a.enode(bin(b.op, a.resolve_expr(env.clr_exp(), b.lhs), a.resolve_expr(env.clr_exp(), b.rhs))),
+        .Cond(c)      => a.enode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
+        .Call(c)      => a.enode(call(c.fn, a.resolve_args(env.clr_exp(), c.args))),
+        .Member(mm)   => a.enode(member(a.resolve_expr(env.clr_exp(), mm.obj), mm.field)),
+        .MakeStruct(sd) => a.enode(mkstruct(sd.ty, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse into field values
+        .Index(ix)    => a.enode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.infer_expr(ix.seq).elem_of())),
         .Loop(l)      => a.resolve_loop(env, l),
         _             => e                            // Int/Var/StrLit/Arrow: unchanged
     })
@@ -157,8 +175,8 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
 // loop variables (index i: i32, element x: elemTy) added to the environment.
 resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.infer_expr(l.seq).elem_of()
-    env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls }
-    a.enode(eloop(a.resolve_expr(env, l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
+    env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp }
+    a.enode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
 fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(heap(n * sizeof(FieldInit)), n) }
 resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
@@ -171,7 +189,7 @@ resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
 resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
     t     := env.infer_expr(m.subj)            // the subject is any expression — infer its type
     en    := t.enum_name()
-    subj2 := a.resolve_expr(env, m.subj)       // resolve nested ctors/matches in the subject too
+    subj2 := a.resolve_expr(env.clr_exp(), m.subj)  // resolve nested ctors/matches in the subject too
     arms  := a.resolve_arms(env, m.arms)
     t.ty_is_ptr().match ({
         true  => a.enode(ematchp(subj2, en, arms)),
@@ -192,13 +210,13 @@ resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
 // ── rebuild statements ────────────────────────────────────────────────────────────────
 resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) Stmt {
     st.match ({
-        .Let(l)    => slet(l.name, a.resolve_expr(env, l.value)),
-        .Assign(x) => sassign(x.name, a.resolve_expr(env, x.value)),
-        .Return(r) => sret(a.resolve_expr(env, r)),
-        .ExprStmt(e) => sexpr(a.resolve_expr(env, e)),
-        .If(f)     => sif(a.resolve_expr(env, f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
-        .While(w)  => swhile(a.resolve_expr(env, w.c), a.resolve_body(env, w.body)),
-        .IndexSet(x) => sidxset(a.resolve_expr(env, x.seq), a.resolve_expr(env, x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env, x.value))
+        .Let(l)    => slet(l.name, a.resolve_expr(env.clr_exp(), l.value)),
+        .Assign(x) => sassign(x.name, a.resolve_expr(env.clr_exp(), x.value)),
+        .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
+        .ExprStmt(e) => sexpr(a.resolve_expr(env.clr_exp(), e)),
+        .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
+        .While(w)  => swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body)),
+        .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env.clr_exp(), x.value))
     })
 }
 // resolve a statement sequence, THREADING the environment: a `let` adds its binding (the
@@ -220,14 +238,14 @@ fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
 }
 extend_env = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
-        .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls },
+        .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp },
         _       => env
     })
 }
 
 // ── rebuild decls: a function's body is resolved against its params + the module's enums ──
 resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
-    env := Env { vars: a.params_env(f.params), decls: decls }
+    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret }
     Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(env, f.body) }
 }
 resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
@@ -348,7 +366,7 @@ check_body = (env: Env, body: [Stmt]) i32 {
     acc
 }
 check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env { vars: a.params_env(f.params), decls: decls }
+    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret }
     env.check_body(f.body)
 }
 check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
