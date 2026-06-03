@@ -68,3 +68,40 @@ def test_self_hosted_frontend_reads_stdlib_file(tmp_path, path):
     # file like iter.zen, just the header — templates inline at use, nothing standalone).
     assert out.startswith("typedef struct { void* ptr; int64_t len; } zslice; ")
     assert len(out) >= 50
+
+
+# The CHECK dimension: the self-hosted VALIDATING checker (check_module) over each stdlib file,
+# returning its error count as the process exit code. 9/10 are accepted with ZERO errors —
+# including files with generics (iter, vec), traits (alloc), closures. parse.zen (the largest,
+# most call-dense file) still trips 17 arg-type FALSE POSITIVES — it self-compiles and Python
+# accepts it, so these are a checker-precision parity gap (infer/fits not yet exact on every
+# UFCS/call pattern), not real type errors. Tracked as xfail until the checker tightens.
+_CHECK_DRIVER = """
+{ Malloc } = std.alloc
+{ parse_module } = std.parse
+{ resolve_module, check_module } = std.check
+main* = () i32 {
+    m := Malloc { _: 0 }
+    addr(m).check_module(addr(m).resolve_module(addr(m).parse_module("%s")))
+}
+"""
+
+
+def _check_errors(tmp_path, src):
+    (tmp_path / "main.zen").write_text(_CHECK_DRIVER % _zlit(src))
+    files = load(tmp_path); ns = build_namespace(files)
+    build_scopes(files); resolve(files, ns)
+    fold_comptime(files, ns); run_emits(files, ns)
+    _, passing = check(files, ns)
+    c = emit_c(files, passing, ns, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                          capture_output=True, text=True).returncode == 0
+    return subprocess.run([str(tmp_path / "o")]).returncode
+
+
+@pytest.mark.parametrize("path", STD_FILES, ids=[p.split("/")[-1] for p in STD_FILES])
+def test_self_hosted_checker_accepts_stdlib_file(tmp_path, path):
+    if path.endswith("parse.zen"):
+        pytest.xfail("17 arg-type false positives — checker-precision parity gap (parse.zen self-compiles)")
+    assert _check_errors(tmp_path, _strip_imports(path)) == 0
