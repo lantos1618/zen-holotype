@@ -503,24 +503,27 @@ is_idxset_here = (src: str, pos: i32) bool {
     })
 }
 
-// parse statements [pos..] into a cons-list: `name := expr` is a Let, `name = expr` an
-// Assign, `name[i] = expr` an IndexSet; the first token that's none begins the return expr.
+// what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
+// predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
+SKind*: SLet | SIdx | SSet | SWhile | SIf | SExpr
+stmt_kind = (src: str, pos: i32) SKind {
+    src.is_let_here(pos).match ({ true => .SLet(), false =>
+    src.is_idxset_here(pos).match ({ true => .SIdx(), false =>
+    src.is_set_here(pos).match ({ true => .SSet(), false =>
+    src.is_while_here(pos).match ({ true => .SWhile(), false =>
+    src.is_if_here(pos).match ({ true => .SIf(), false => .SExpr() }) }) }) }) })
+}
+
+// parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
+// the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
 parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
-    src.is_let_here(pos).match ({
-        true  => a.parse_let_stmt(src, pos),
-        false => src.is_idxset_here(pos).match ({
-            true  => a.parse_idxset_stmt(src, pos),
-            false => src.is_set_here(pos).match ({
-                true  => a.parse_set_stmt(src, pos),
-                false => src.is_while_here(pos).match ({
-                    true  => a.parse_while_stmt(src, pos),
-                    false => src.is_if_here(pos).match ({
-                        true  => a.parse_if_stmt(src, pos),
-                        false => a.parse_ret_stmt(src, pos)
-                    })
-                })
-            })
-        })
+    src.stmt_kind(pos).match ({
+        .SLet   => a.parse_let_stmt(src, pos),
+        .SIdx   => a.parse_idxset_stmt(src, pos),
+        .SSet   => a.parse_set_stmt(src, pos),
+        .SWhile => a.parse_while_stmt(src, pos),
+        .SIf    => a.parse_if_stmt(src, pos),
+        .SExpr  => a.parse_ret_stmt(src, pos)
     })
 }
 // `name[i] = value` — an index assignment. The element type is left void; std.check fills it.
@@ -644,22 +647,15 @@ parse_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
         false => a.block_stmt(src, pos)
     })
 }
+// same flat dispatch as parse_stmts, but a body has no return — `SExpr` is a bare statement.
 block_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
-    src.is_let_here(pos).match ({
-        true  => a.block_let(src, pos),
-        false => src.is_idxset_here(pos).match ({
-            true  => a.block_idxset(src, pos),       // buf[i] = v  inside a loop/if body
-            false => src.is_set_here(pos).match ({
-                true  => a.block_set(src, pos),
-                false => src.is_while_here(pos).match ({
-                    true  => a.block_while(src, pos),
-                    false => src.is_if_here(pos).match ({
-                        true  => a.block_if(src, pos),
-                        false => a.block_expr(src, pos)   // a bare expression statement (e.g. putchar(b))
-                    })
-                })
-            })
-        })
+    src.stmt_kind(pos).match ({
+        .SLet   => a.block_let(src, pos),
+        .SIdx   => a.block_idxset(src, pos),         // buf[i] = v  inside a loop/if body
+        .SSet   => a.block_set(src, pos),
+        .SWhile => a.block_while(src, pos),
+        .SIf    => a.block_if(src, pos),
+        .SExpr  => a.block_expr(src, pos)            // a bare expression statement (e.g. putchar(b))
     })
 }
 block_idxset<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
