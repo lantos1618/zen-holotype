@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tu8, tbool, tstr, tnamed, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -120,19 +120,20 @@ struct_field = (decls: [Decl], sname: str, fname: str) Ty {
     decls.loop((h, i, d) { found = d.match ({ .DStruct(sd) => eq(sd.name, sname).match ({ true => sd.field_ty(fname), false => found }), _ => found }) })
     found
 }
-// a comparison / logical operator yields bool; an arithmetic one yields its operand type
-bin_ty = (op: str, lt: Ty) Ty {
+// a comparison / logical operator (== < > <= >= && || !=) yields bool; an arithmetic one its operand
+is_cmp_op = (op: str) bool {
     b := op.byte_at(0)
-    cmp := (b == '=') || (b == '<') || (b == '>') || (b == '&') || (b == '|') || (b == '!')
-    cmp.match ({ true => tbool(), false => lt })
+    (b == '=') || (b == '<') || (b == '>') || (b == '&') || (b == '|') || (b == '!')
 }
+bin_ty = (op: str, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
 // is `e` a purely-LITERAL numeric expression? Such a value is polymorphic — it fits any numeric
-// type (`10` is a valid u8 / i32 / i64) — so the checker must not read it as a narrowing.
+// type (`10` is a valid u8 / i32 / i64) — so the checker must not read it as a narrowing. An
+// ARITHMETIC bin of literals stays numeric; a COMPARISON of literals (`3 < 4`) is a bool, not this.
 is_lit_numeric = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Int(n)  => true,
         .Byte(n) => true,
-        .Bin(b)  => b.lhs.is_lit_numeric() && b.rhs.is_lit_numeric(),
+        .Bin(b)  => b.op.is_cmp_op().match ({ true => false, false => b.lhs.is_lit_numeric() && b.rhs.is_lit_numeric() }),
         .Cond(c) => c.t.is_lit_numeric() && c.e.is_lit_numeric(),
         _        => false
     })
@@ -552,25 +553,42 @@ ret_err = (env: Env, r: Ptr<Expr>) i32 {
         false => fits(rt, env.exp).match ({ true => 0, false => 1 })
     })
 }
-check_stmt = (env: Env, st: Stmt) i32 {
+// an assignment `x = v` must fit x's type (the type its `let` inferred). Sound-leaning, same shape
+// as ret_err: skip when either side is uninferable, or a polymorphic literal goes to a numeric x.
+assign_err = (env: Env, x: AssignData) i32 {
+    vt := env.vars.lookup_var(x.name)
+    rt := env.infer_expr(x.value)
+    lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0)
+    (vt.is_uninferable() || rt.is_uninferable() || lit_to_num).match ({
+        true  => 0,
+        false => fits(rt, vt).match ({ true => 0, false => 1 })
+    })
+}
+check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)    => env.check_expr(l.value),
-        .Assign(x) => env.check_expr(x.value),
+        .Assign(x) => env.check_expr(x.value) + env.assign_err(x),
         .Return(r) => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
-        .If(f)     => env.check_expr(f.c) + env.check_body(f.then) + env.check_body(f.els),
-        .While(w)  => env.check_expr(w.c) + env.check_body(w.body),
+        .If(f)     => env.check_expr(f.c) + a.check_body(env, f.then) + a.check_body(env, f.els),
+        .While(w)  => env.check_expr(w.c) + a.check_body(env, w.body),
         .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value)
     })
 }
-check_body = (env: Env, body: [Stmt]) i32 {
+// thread the env: each `let` adds its (name, inferred type) for the statements that follow, so a
+// later `x = v` knows x's type. (The same fold resolve_body does, here for the validating pass.)
+check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
-    body.loop((h, i, st) { acc = acc + env.check_stmt(st) })
+    e   := env
+    body.loop((h, i, st) {
+        acc = acc + a.check_stmt(e, st)
+        e   = a.extend_env(e, st)
+    })
     acc
 }
 check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret }
-    env.check_body(f.body)
+    a.check_body(env, f.body)
 }
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares. The Trait is
 // a struct whose FnT fields are the method signatures; im.methods is the set this impl actually
