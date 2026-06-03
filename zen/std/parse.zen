@@ -74,13 +74,21 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
         .Char  => PExpr { expr: a.enode(lit(src.char_val(sc.tok.start))), next: sc.next },   // a char -> its byte
         .Str   => PExpr { expr: a.enode(strlit(a.str_val(src, sc.tok))), next: sc.next },    // a string -> StrLit
         .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
-        _      => src.is_dot(sc.tok).match ({
-            true  => a.parse_ctor(src, sc),          // `.Variant` / `.Variant(arg)` — an enum constructor
+        _      => a.parse_other(src, sc)
+    })
+}
+// the non-literal, non-identifier atoms, by leading token: `.Variant` ctor, prefix `!`/`-`,
+// a `[…]` slice literal, a `(names){…}` lambda, or a parenthesized expression.
+parse_other = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
+    src.is_dot(sc.tok).match ({
+        true  => a.parse_ctor(src, sc),
+        false => src.is_not(sc.tok).match ({
+            true  => a.parse_not(src, sc),               // prefix `!x` -> (x ? false : true)
             false => src.is_minus(sc.tok).match ({
-                true  => a.parse_neg(src, sc),       // prefix `-x` -> (0 - x)
+                true  => a.parse_neg(src, sc),           // prefix `-x` -> (0 - x)
                 false => src.is_lbracket(sc.tok).match ({
                     true  => a.parse_slicelit(src, sc),  // `[a, b, c]` — a slice literal
-                    false => src.lam_open(sc).match ({   // '(' — either a lambda `(names){…}` or a paren'd expr
+                    false => src.lam_open(sc).match ({   // '(' — a lambda `(names){…}` or a paren'd expr
                         true  => a.parse_lambda(src, sc),
                         false => a.parse_paren(src, sc)
                     })
@@ -417,6 +425,13 @@ is_minus = (src: str, t: Token) bool { src.is_op(t, '-') }
 parse_neg = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {     // sc = the '-'
     inner := a.parse_atom(src, sc.next)
     PExpr { expr: a.enode(bin("-", a.enode(lit(0)), inner.expr)), next: inner.next }
+}
+// prefix `!x` (logical not) -> `(x ? false : true)` — a Cond, no Unary node. The one-byte `!`
+// (not the two-byte `!=`); `true`/`false` lower to C's stdbool literals.
+is_not = (src: str, t: Token) bool { t.kind.match ({ .Sym => (src.byte_at(t.start) == '!') && (t.len == 1), _ => false }) }
+parse_not = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {     // sc = the '!'
+    inner := a.parse_atom(src, sc.next)
+    PExpr { expr: a.enode(cond(inner.expr, a.enode(vref("false")), a.enode(vref("true")))), next: inner.next }
 }
 // `[a, b, c]` — a slice literal: comma-separated expressions to `]`. The element type is left
 // void; std.check fills it from the first item's inferred type (like an index's element type).
