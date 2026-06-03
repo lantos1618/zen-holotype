@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -311,7 +311,7 @@ extend_env = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
 // ── rebuild decls: a function's body is resolved against its params + the module's enums ──
 resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
     env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
-    Func { name: f.name, params: f.params, ret: f.ret, body: a.resolve_body(env, f.body) }
+    Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) }
 }
 resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d })
@@ -333,11 +333,11 @@ pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
 }
 param_index = (params: [Param], name: str) i32 { params.pidx(name, 0 - 1, 0) }
 the_func = (decls: [Decl], name: str) Func {
-    found := Func { name: "", params: empty_params(), ret: tvoid(), body: no_stmts() }
+    found := Func { name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() }
     decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => f, false => found }), .DForeign(f) => eq(f.name, name).match ({ true => f, false => found }), _ => found }) })
     found
 }
-is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).params.has_fnt_param() }
+is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).is_generic_fn() }
 // the substituted argument for a Var, or the Var unchanged if it isn't one of `params`
 subst_var = (a: Ptr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
@@ -442,7 +442,7 @@ xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], farg
 }
 inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({
-        .DFunc(f) => dfunc(Func { name: f.name, params: f.params, ret: f.ret, body: a.xform_body(decls, f.body, empty_params(), empty_args()) }),
+        .DFunc(f) => dfunc(Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args()) }),
         _         => d
     })
 }
@@ -768,7 +768,7 @@ check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
 // re-checked (check_module only descends DFunc bodies). A name imported but absent from the header
 // stays known-but-unchecked (the #204 DImport path), so partial headers never false-reject.
 as_sig = (a: Ptr<Malloc>, d: Decl) Decl {
-    d.match ({ .DFunc(f) => dforeign(Func { name: f.name, params: f.params, ret: f.ret, body: no_stmts() }), _ => d })
+    d.match ({ .DFunc(f) => dforeign(Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: no_stmts() }), _ => d })
 }
 module_header* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
     buf := a.dbuf(decls.len)

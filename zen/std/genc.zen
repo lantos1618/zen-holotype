@@ -72,7 +72,7 @@ GenericData*: { name: str, args: [Ty], mangled: str }
 Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)   // scalar/struct/void/str, T*, [T], (A)R, or N<T>
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
-Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
+Func*: { name: str, params: [Param], ret: Ty, tparams: [Param], body: [Stmt] }   // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
 Field*: { name: str, ty: Ty }
 StructDecl*: { name: str, fields: [Field] }             // typedef struct { fields } name;
@@ -130,7 +130,8 @@ has_fnt_param* = (ps: [Param]) bool {
     ps.loop((h, i, p) { found = p.ty.is_fnt().match ({ true => true, false => found }) })
     found
 }
-is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.params.has_fnt_param(), _ => false }) }
+is_generic_fn* = (f: Func) bool { f.params.has_fnt_param() || (f.tparams.len > 0) }
+is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.is_generic_fn(), _ => false }) }
 // a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no
 // runtime representation in the monomorphic/inline model — the impl methods are plain functions —
 // so genModule skips it, exactly like a template function.
@@ -681,7 +682,7 @@ collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
     d.match ({
         .DStruct(sd) => buf.collect_flds(cnt, sd.fields),
         .DEnum(ed)   => buf.collect_pays(cnt, ed.variants),   // a generic instance can hide in a variant payload
-        .DFunc(f)    => buf.collect_func(cnt, f),
+        .DFunc(f)    => f.is_generic_fn().match ({ true => cnt, false => buf.collect_func(cnt, f) }),   // a generic fn is inlined; skip its T-params
         _            => cnt
     })
 }
