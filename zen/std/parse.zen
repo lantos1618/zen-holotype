@@ -14,14 +14,14 @@
 
 { Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
-{ Allocator } = std.alloc
+{ Malloc, heap } = std.alloc
 
 // a parse step: the expression built, and the position just past it (mirrors lex's Scan)
 PExpr*: { expr: Ptr<Expr>, next: i32 }
 
 // ── heap-allocate one Expr node, return a pointer to it ──────────────────────────
-ebuf<A: Allocator>  = (a: Ptr<A>) [Expr] { slice(a.acquire(sizeof(Expr)), 1) }
-enode<A: Allocator> = (a: Ptr<A>, v: Expr) Ptr<Expr> {
+ebuf = (a: Ptr<Malloc>) [Expr] { slice(heap(sizeof(Expr)), 1) }
+enode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.ebuf()
     buf[0] = v
     buf[0].addr()
@@ -38,8 +38,8 @@ copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
         i = i + 1
     }
 }
-lexeme<A: Allocator> = (a: Ptr<A>, src: str, t: Token) str {
-    p := a.acquire(t.len + 1)
+lexeme = (a: Ptr<Malloc>, src: str, t: Token) str {
+    p := heap(t.len + 1)
     src.copy_span(t.start, p, t.len)
     store(offset(p, t.len), 0)              // NUL terminator
     cstr(p)
@@ -66,8 +66,8 @@ to_int = (src: str, t: Token) i32 { src.to_int_from(t.start, t.start + t.len, 0)
 
 // ── atom := base postfixed by an optional `.match { true => X, false => Y }` ───────
 // base := integer | call | identifier | '(' expr ')'
-parse_atom<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.parse_postfix(src, a.parse_base(src, pos)) }
-parse_base<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {
+parse_atom = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.parse_postfix(src, a.parse_base(src, pos)) }
+parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Int   => PExpr { expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next },
@@ -96,8 +96,8 @@ char_val = (src: str, start: i32) i32 {
 // a string literal's value: copy the bytes between the quotes into a fresh NUL-terminated
 // buffer, RESOLVING backslash escapes (genc's gen_strlit re-escapes them on emit). The token
 // spans `"…"`, so the content is [start+1 .. start+len-1).
-str_val<A: Allocator> = (a: Ptr<A>, src: str, t: Token) str {
-    p := a.acquire(t.len)                            // upper bound: content (<= len-2) + NUL
+str_val = (a: Ptr<Malloc>, src: str, t: Token) str {
+    p := heap(t.len)                            // upper bound: content (<= len-2) + NUL
     n := src.unescape(t.start + 1, t.start + t.len - 1, p, 0)
     store(offset(p, n), 0)                           // NUL terminator
     cstr(p)
@@ -121,7 +121,7 @@ unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
 }
 // a leading-dot enum constructor `.Variant` (a Tag) or `.Variant(payload)` (a MakeEnum). The
 // enum TYPE is left "" — std.check fills it by looking the variant up among the enum decls.
-parse_ctor<A: Allocator> = (a: Ptr<A>, src: str, dot: Scan) PExpr {
+parse_ctor = (a: Ptr<Malloc>, src: str, dot: Scan) PExpr {
     vt := src.scan(dot.next)                         // the variant name
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)                          // '(' (payload) or anything else (a bare tag)
@@ -133,11 +133,11 @@ parse_ctor<A: Allocator> = (a: Ptr<A>, src: str, dot: Scan) PExpr {
         false => PExpr { expr: a.enode(mktag("", vn)), next: vt.next }   // `.Variant` -> Tag
     })
 }
-parse_ctor_empty<A: Allocator> = (a: Ptr<A>, src: str, vn: str, lp: Scan) PExpr {
+parse_ctor_empty = (a: Ptr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
     rp := src.scan(lp.next)                          // ')'
     PExpr { expr: a.enode(mktag("", vn)), next: rp.next }
 }
-parse_ctor_payload<A: Allocator> = (a: Ptr<A>, src: str, vn: str, lp: Scan) PExpr {
+parse_ctor_payload = (a: Ptr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
     arg := a.parse_or(src, lp.next)                  // the single payload expression
     rp  := src.scan(arg.next)                        // ')'
     PExpr { expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next }     // `.Variant(arg)` -> MakeEnum
@@ -162,7 +162,7 @@ is_loop_at = (src: str, pos: i32) bool {
     dot := src.scan(pos)
     src.is_dot(dot.tok).match ({ true => src.is_loop_kw(src.scan(dot.next).tok), false => false })
 }
-parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+parse_postfix = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     src.is_match_at(base.next).match ({
         true  => a.parse_match(src, base),
         false => src.is_loop_at(base.next).match ({
@@ -180,7 +180,7 @@ parse_postfix<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
 // `recv.loop((h, i, x) { body })` — a foreach over recv: h is the (ignored) loop handle, i the
 // index, x the element. The body is a no-return statement block (it mutates captured locals).
 // The element type is left void; std.check fills it from recv's inferred slice type.
-parse_loop<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+parse_loop = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     dot   := src.scan(base.next)                         // '.'
     kw    := src.scan(dot.next)                          // 'loop'
     lp    := src.scan(kw.next)                           // '(' the loop call
@@ -198,7 +198,7 @@ parse_loop<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
     rp    := src.scan(blk.next)                          // ')' closing the loop call
     a.parse_postfix(src, PExpr { expr: a.enode(eloop(base.expr, iname, xname, tvoid(), a.materialize(blk.list))), next: rp.next })
 }
-parse_index<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+parse_index = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     lb := src.scan(base.next)                            // '['
     ie := a.parse_or(src, lb.next)                       // the index expression
     rb := src.scan(ie.next)                              // ']'
@@ -207,7 +207,7 @@ parse_index<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
 // `recv.name` is field access (genc Member); `recv.name(args)` is a UFCS method call, which
 // DESUGARS to `name(recv, args)` — a plain Call with the receiver as the first argument
 // (`b.is_alpha()` -> `is_alpha(b)`, `x.f(a, b)` -> `f(x, a, b)`). Both chain.
-parse_field<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
+parse_field = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     dot  := src.scan(base.next)                                    // '.'
     fld  := src.scan(dot.next)                                     // the field / method name
     name := a.lexeme(src, fld.tok)
@@ -217,13 +217,13 @@ parse_field<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr) PExpr {
         false => a.parse_postfix(src, PExpr { expr: a.enode(member(base.expr, name)), next: fld.next })  // field, chain
     })
 }
-parse_method<A: Allocator> = (a: Ptr<A>, src: str, base: PExpr, name: str, lp: Scan) PExpr {
+parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan) PExpr {
     buf    := a.arg_buf()
     buf[0] = load(base.expr)                                       // receiver becomes the first arg
     ae     := a.fill_args(src, lp.next, buf, 1)                    // the rest of the args follow it
     a.parse_postfix(src, PExpr { expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next })   // chain
 }
-parse_arm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then an expr
+parse_arm = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then an expr
     pat   := src.scan(pos)                                          // the pattern (true / false)
     arrow := src.scan(pat.next)                                     // '=>'
     a.parse_or(src, arrow.next)
@@ -241,7 +241,7 @@ skip_rparen = (src: str, pos: i32) i32 {
 close_match = (src: str, e: PExpr) PExpr {
     PExpr { expr: e.expr, next: src.skip_rparen(e.next) }           // drop the mandatory ')'
 }
-parse_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr) PExpr {
+parse_match = (a: Ptr<Malloc>, src: str, subj: PExpr) PExpr {
     dot   := src.scan(subj.next)                                    // '.'
     kw    := src.scan(dot.next)                                     // 'match'
     lp    := src.scan(kw.next)                                      // '(' (required)
@@ -252,7 +252,7 @@ parse_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr) PExpr {
     })
     src.close_match(body)                                           // drop the trailing ')'
 }
-parse_bool_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr, open: Scan) PExpr {
+parse_bool_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
     ta    := a.parse_arm(src, open.next)                            // true  => X
     comma := src.scan(ta.next)                                      // ','
     fa    := a.parse_arm(src, comma.next)                           // false => Y
@@ -265,27 +265,27 @@ subj_name = (e: Ptr<Expr>) str { load(e).match ({ .Var(v) => v.name, _ => "" }) 
 // `.Variant(bind) => body` / `.Variant => body` arms, comma-separated, into a heap [ArmData].
 // ename is left "" here — std.check fills it once the subject's enum type is known.
 BindEnd*: { bind: str, next: i32 }
-arm_buf<A: Allocator> = (a: Ptr<A>) [ArmData] { slice(a.acquire(64 * sizeof(ArmData)), 64) }   // cap 64
+arm_buf = (a: Ptr<Malloc>) [ArmData] { slice(heap(64 * sizeof(ArmData)), 64) }   // cap 64
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }                            // exact length
-arm_bind<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BindEnd {     // pos just past '('
+arm_bind = (a: Ptr<Malloc>, src: str, pos: i32) BindEnd {     // pos just past '('
     bt := src.scan(pos)                                              // the payload binding name
     bn := a.lexeme(src, bt.tok)
     rp := src.scan(bt.next)                                          // ')'
     BindEnd { bind: bn, next: rp.next }
 }
-fill_arms<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_arms = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_marm(src, pos, buf, i) })
 }
 // an arm is `.Variant(bind) => body` or a wildcard `_ => body` (the catch-all default, which
 // genc emits as the last arm with no tag test). The leading token tells them apart.
-fill_marm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_marm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     src.is_dot(src.scan(pos).tok).match ({
         true  => a.fill_varm(src, pos, buf, i),
         false => a.fill_wild(src, pos, buf, i)                       // `_ => body`
     })
 }
-fill_varm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_varm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     dot := src.scan(pos)                                             // '.'
     vt  := src.scan(dot.next)                                        // variant name
     vn  := a.lexeme(src, vt.tok)
@@ -296,7 +296,7 @@ fill_varm<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32
     buf[i] = arm(vn, be.bind, body.expr)
     a.arm_tail(src, body.next, buf, i)
 }
-fill_wild<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_wild = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     us    := src.scan(pos)                                           // '_'
     arrow := src.scan(us.next)                                       // '=>'
     body  := a.parse_or(src, arrow.next)
@@ -304,21 +304,21 @@ fill_wild<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32
     a.arm_tail(src, body.next, buf, i)
 }
 // after an arm body: a ',' continues the list, else the '}' ends it
-arm_tail<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+arm_tail = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     after := src.scan(pos)
     src.is_comma(after.tok).match ({
         true  => a.fill_arms(src, after.next, buf, i + 1),
         false => PEnd { count: i + 1, next: after.next }              // '}'
     })
 }
-parse_variant_match<A: Allocator> = (a: Ptr<A>, src: str, subj: PExpr, open: Scan) PExpr {
+parse_variant_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
     buf := a.arm_buf()
     ae  := a.fill_arms(src, open.next, buf, 0)                       // arms + pos just past '}'
     PExpr { expr: a.enode(ematch(subj.expr, "", buf.take_arms(ae.count))), next: ae.next }
 }
 // an Ident is a variable — unless the very next token is `(`, making it a one-arg call
 is_lparen = (src: str, t: Token) bool { src.is_op(t, '(') }
-parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
+parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     src.is_lparen(nx.tok).match ({
@@ -331,18 +331,18 @@ parse_ident<A: Allocator> = (a: Ptr<A>, src: str, sc: Scan) PExpr {
 }
 // `Name { field: value, … }` — the `field: value` inits parse into a heap [FieldInit], then
 // the struct literal is built. open is the Scan of the opening '{'.
-finit_buf<A: Allocator> = (a: Ptr<A>) [FieldInit] { slice(a.acquire(64 * sizeof(FieldInit)), 64) }   // cap 64
+finit_buf = (a: Ptr<Malloc>) [FieldInit] { slice(heap(64 * sizeof(FieldInit)), 64) }   // cap 64
 take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }                            // exact length
-parse_struct_lit<A: Allocator> = (a: Ptr<A>, src: str, name: str, open: Scan) PExpr {
+parse_struct_lit = (a: Ptr<Malloc>, src: str, name: str, open: Scan) PExpr {
     buf := a.finit_buf()
     fe  := a.fill_inits(src, open.next, buf, 0)                    // inits + pos just past '}'
     PExpr { expr: a.enode(mkstruct(name, buf.take_inits(fe.count))), next: fe.next }
 }
-fill_inits<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_inits = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_init(src, pos, buf, i) })
 }
-fill_init<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_init = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     nt    := src.scan(pos)                               // field name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
@@ -356,18 +356,18 @@ fill_init<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [FieldInit], i: i
 }
 // `name(a, b, …)` — parse the comma-separated arguments into a heap [Expr] (each arg's
 // VALUE), then build the call. lp is the Scan of the opening '('.
-arg_buf<A: Allocator> = (a: Ptr<A>) [Expr] { slice(a.acquire(64 * sizeof(Expr)), 64) }   // cap 64 args
+arg_buf = (a: Ptr<Malloc>) [Expr] { slice(heap(64 * sizeof(Expr)), 64) }   // cap 64 args
 take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }                           // exact length
-parse_call<A: Allocator> = (a: Ptr<A>, src: str, name: str, lp: Scan) PExpr {
+parse_call = (a: Ptr<Malloc>, src: str, name: str, lp: Scan) PExpr {
     buf := a.arg_buf()
     ae  := a.fill_args(src, lp.next, buf, 0)         // args + pos just past ')'
     PExpr { expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next }
 }
-fill_args<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+fill_args = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_arg(src, pos, buf, i) })
 }
-fill_arg<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+fill_arg = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     arg   := a.parse_or(src, pos)                   // one argument
     buf[i] = load(arg.expr)                          // store its Expr value
     after := src.scan(arg.next)                      // ',' or ')'
@@ -376,30 +376,30 @@ fill_arg<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Expr], i: i32) PE
         false => PEnd { count: i + 1, next: after.next }   // ')'
     })
 }
-parse_paren<A: Allocator> = (a: Ptr<A>, src: str, open: Scan) PExpr {
+parse_paren = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {
     inner := a.parse_or(src, open.next)             // parse past the '(' (full expr incl. compare)
     close := src.scan(inner.next)                    // consume the ')'
     PExpr { expr: inner.expr, next: close.next }
 }
 
 // ── term := atom (('*' | '/') atom)*   (left-associative) ─────────────────────────
-parse_term<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.term_rest(src, a.parse_atom(src, pos)) }
-term_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+parse_term = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.term_rest(src, a.parse_atom(src, pos)) }
+term_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_muldiv(sc.tok).match ({ false => lhs, true => a.term_more(src, lhs, sc) })
 }
-term_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+term_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_atom(src, sc.next)
     a.term_rest(src, PExpr { expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next })
 }
 
 // ── expr := term (('+' | '-') term)*   (left-associative) ─────────────────────────
-parse_expr<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
-expr_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+parse_expr = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
+expr_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_addsub(sc.tok).match ({ false => lhs, true => a.expr_more(src, lhs, sc) })
 }
-expr_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+expr_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_term(src, sc.next)
     a.expr_rest(src, PExpr { expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next })
 }
@@ -417,12 +417,12 @@ cmp_op_str = (src: str, t: Token) str {
         false => (t.len == 2).match ({ true => ">=", false => ">" })
     }) })
 }
-parse_cmp<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.cmp_rest(src, a.parse_expr(src, pos)) }
-cmp_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+parse_cmp = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.cmp_rest(src, a.parse_expr(src, pos)) }
+cmp_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_cmp(sc.tok).match ({ false => lhs, true => a.cmp_more(src, lhs, sc) })
 }
-cmp_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+cmp_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_expr(src, sc.next)
     a.cmp_rest(src, PExpr { expr: a.enode(bin(src.cmp_op_str(sc.tok), lhs.expr, rhs.expr)), next: rhs.next })
 }
@@ -432,27 +432,27 @@ cmp_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
 // `(a || (b && c))` (two levels), matching C.
 is_and = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '&'), _ => false }) }
 is_or  = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '|'), _ => false }) }
-parse_and<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.and_rest(src, a.parse_cmp(src, pos)) }
-and_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+parse_and = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.and_rest(src, a.parse_cmp(src, pos)) }
+and_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_and(sc.tok).match ({ false => lhs, true => a.and_more(src, lhs, sc) })
 }
-and_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+and_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_cmp(src, sc.next)
     a.and_rest(src, PExpr { expr: a.enode(bin("&&", lhs.expr, rhs.expr)), next: rhs.next })
 }
-parse_or<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) PExpr { a.or_rest(src, a.parse_and(src, pos)) }
-or_rest<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr) PExpr {
+parse_or = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.or_rest(src, a.parse_and(src, pos)) }
+or_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_or(sc.tok).match ({ false => lhs, true => a.or_more(src, lhs, sc) })
 }
-or_more<A: Allocator> = (a: Ptr<A>, src: str, lhs: PExpr, sc: Scan) PExpr {
+or_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_and(src, sc.next)
     a.or_rest(src, PExpr { expr: a.enode(bin("||", lhs.expr, rhs.expr)), next: rhs.next })
 }
 
 // parse a whole source string to an expression tree (the loosest level is `||`)
-parse*<A: Allocator> = (a: Ptr<A>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
+parse* = (a: Ptr<Malloc>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -464,14 +464,14 @@ SCell*: { head: Stmt, tail: Ptr<SList> }
 // ctor fns — a leading-dot enum can't infer its type passed straight into a generic call
 snil_val  = () SList { .SNil() }
 scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell { head: h, tail: t }) }
-slbuf<A: Allocator>  = (a: Ptr<A>) [SList] { slice(a.acquire(sizeof(SList)), 1) }
-slnode<A: Allocator> = (a: Ptr<A>, v: SList) Ptr<SList> {
+slbuf = (a: Ptr<Malloc>) [SList] { slice(heap(sizeof(SList)), 1) }
+slnode = (a: Ptr<Malloc>, v: SList) Ptr<SList> {
     buf := a.slbuf()
     buf[0] = v
     buf[0].addr()
 }
-snil<A: Allocator>   = (a: Ptr<A>) Ptr<SList> { a.slnode(snil_val()) }
-scons<A: Allocator>  = (a: Ptr<A>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
+snil   = (a: Ptr<Malloc>) Ptr<SList> { a.slnode(snil_val()) }
+scons = (a: Ptr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
 
 // is there a `name :=` at `pos`? (an Ident, then the two-byte ':=' symbol)
 is_assign = (src: str, t: Token) bool {
@@ -516,7 +516,7 @@ stmt_kind = (src: str, pos: i32) SKind {
 
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
-parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_stmts = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     src.at_body_end(pos).match ({
         true  => a.snil(),                          // an empty body `{ }` (a void no-op) — no statements
         false => src.stmt_kind(pos).match ({
@@ -530,7 +530,7 @@ parse_stmts<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     })
 }
 // `name[i] = value` — an index assignment. The element type is left void; std.check fills it.
-parse_idxset_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_idxset_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the array name
     name := a.lexeme(src, nt.tok)
     lb   := src.scan(nt.next)                // '['
@@ -540,14 +540,14 @@ parse_idxset_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     v    := a.parse_or(src, eq.next)         // the value
     a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), a.parse_stmts(src, v.next))
 }
-parse_set_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_set_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the assigned name
     name := a.lexeme(src, nt.tok)
     eq   := src.scan(nt.next)                // '='
     v    := a.parse_or(src, eq.next)        // value
     a.scons(sassign(name, v.expr), a.parse_stmts(src, v.next))
 }
-parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_let_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the bound name
     name := a.lexeme(src, nt.tok)
     at   := src.scan(nt.next)                // ':='
@@ -560,7 +560,7 @@ at_body_end = (src: str, pos: i32) bool {
     sc := src.scan(pos)
     sc.tok.kind.match ({ .Eof => true, _ => src.is_rbrace(sc.tok) })
 }
-parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_ret_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     r := a.parse_or(src, pos)
     src.at_body_end(r.next).match ({
         true  => a.scons(sret(r.expr), a.snil()),                      // final expression -> return
@@ -583,7 +583,7 @@ is_while_here = (src: str, pos: i32) bool {
 
 // a parsed `@while`: the While statement + where it ends (just past the closing `}`)
 WhileEnd*: { stmt: Stmt, next: i32 }
-parse_while<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) WhileEnd {
+parse_while = (a: Ptr<Malloc>, src: str, pos: i32) WhileEnd {
     at     := src.scan(pos)                        // '@'
     wk     := src.scan(at.next)                    // 'while'
     lp     := src.skip_to_lparen(wk.next)          // pos just past '('
@@ -594,7 +594,7 @@ parse_while<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) WhileEnd {
     WhileEnd { stmt: swhile(c.expr, a.materialize(blk.list)), next: blk.next }
 }
 // the top-level statement form: a While, then the rest of the function body
-parse_while_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_while_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     w := a.parse_while(src, pos)
     a.scons(w.stmt, a.parse_stmts(src, w.next))
 }
@@ -609,11 +609,11 @@ is_if_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
     src.is_if_kw(sc.tok).match ({ true => src.is_lparen(src.scan(sc.next).tok), false => false })
 }
-empty_stmts<A: Allocator> = (a: Ptr<A>) [Stmt] { a.materialize(a.snil()) }
+empty_stmts = (a: Ptr<Malloc>) [Stmt] { a.materialize(a.snil()) }
 
 IfEnd*:   { stmt: Stmt, next: i32 }
 ElseEnd*: { els: [Stmt], next: i32 }
-parse_if<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) IfEnd {
+parse_if = (a: Ptr<Malloc>, src: str, pos: i32) IfEnd {
     kw     := src.scan(pos)                        // 'if'
     lp     := src.skip_to_lparen(kw.next)          // pos just past '('
     c      := a.parse_or(src, lp)                  // condition (stops at ')')
@@ -623,27 +623,27 @@ parse_if<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) IfEnd {
     eb     := a.parse_else(src, tblk.next)         // optional else-block
     IfEnd { stmt: sif(c.expr, a.materialize(tblk.list), eb.els), next: eb.next }
 }
-parse_else<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) ElseEnd {
+parse_else = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {
     sc := src.scan(pos)
     src.is_else_kw(sc.tok).match ({
         true  => a.parse_else_block(src, sc.next),
         false => ElseEnd { els: a.empty_stmts(), next: pos }   // no else -> empty block
     })
 }
-parse_else_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) ElseEnd {   // pos just past 'else'
+parse_else_block = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {   // pos just past 'else'
     estart := src.skip_to_brace(pos)               // pos just past the else-'{'
     eblk   := a.parse_block(src, estart)
     ElseEnd { els: a.materialize(eblk.list), next: eblk.next }
 }
 // the top-level statement form: an If, then the rest of the function body
-parse_if_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
+parse_if_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     f := a.parse_if(src, pos)
     a.scons(f.stmt, a.parse_stmts(src, f.next))
 }
 
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
 BlockEnd*: { list: Ptr<SList>, next: i32 }
-parse_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+parse_block = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match ({
         true  => BlockEnd { list: a.snil(), next: sc.next },   // '}' — block done
@@ -651,7 +651,7 @@ parse_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     })
 }
 // same flat dispatch as parse_stmts, but a body has no return — `SExpr` is a bare statement.
-block_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_stmt = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     src.stmt_kind(pos).match ({
         .SLet   => a.block_let(src, pos),
         .SIdx   => a.block_idxset(src, pos),         // buf[i] = v  inside a loop/if body
@@ -661,7 +661,7 @@ block_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
         .SExpr  => a.block_expr(src, pos)            // a bare expression statement (e.g. putchar(b))
     })
 }
-block_idxset<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_idxset = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)                            // the array name
     name := a.lexeme(src, nt.tok)
     lb   := src.scan(nt.next)                        // '['
@@ -672,17 +672,17 @@ block_idxset<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     rest := a.parse_block(src, v.next)
     BlockEnd { list: a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), rest.list), next: rest.next }
 }
-block_expr<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_expr = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     e    := a.parse_or(src, pos)                     // a bare expression, evaluated for effect
     rest := a.parse_block(src, e.next)
     BlockEnd { list: a.scons(sexpr(e.expr), rest.list), next: rest.next }
 }
-block_if<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_if = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     f    := a.parse_if(src, pos)
     rest := a.parse_block(src, f.next)
     BlockEnd { list: a.scons(f.stmt, rest.list), next: rest.next }
 }
-block_let<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)
     name := a.lexeme(src, nt.tok)
     at   := src.scan(nt.next)                       // ':='
@@ -690,7 +690,7 @@ block_let<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     rest := a.parse_block(src, v.next)
     BlockEnd { list: a.scons(slet(name, v.expr), rest.list), next: rest.next }
 }
-block_set<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_set = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)
     name := a.lexeme(src, nt.tok)
     eq   := src.scan(nt.next)                       // '='
@@ -698,7 +698,7 @@ block_set<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     rest := a.parse_block(src, v.next)
     BlockEnd { list: a.scons(sassign(name, v.expr), rest.list), next: rest.next }
 }
-block_while<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+block_while = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     w    := a.parse_while(src, pos)
     rest := a.parse_block(src, w.next)
     BlockEnd { list: a.scons(w.stmt, rest.list), next: rest.next }
@@ -713,23 +713,23 @@ sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
 }
 
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
-stmt_buf<A: Allocator> = (a: Ptr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
+stmt_buf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(heap(n * sizeof(Stmt)), n) }
 
 // materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
-materialize<A: Allocator> = (a: Ptr<A>, stmts: Ptr<SList>) [Stmt] {
+materialize = (a: Ptr<Malloc>, stmts: Ptr<SList>) [Stmt] {
     body := a.stmt_buf(stmts.scount())
     body.sfill(stmts, 0)
     body
 }
 
 // parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
-build_body<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) [Stmt] {
+build_body = (a: Ptr<Malloc>, src: str, pos: i32) [Stmt] {
     a.materialize(a.parse_stmts(src, pos))
 }
 
 // ── a function BODY under a caller-chosen name (the source is just the statements) ──
 // `x := 1 + 2\n y := x * 2\n y - 1`  ->  int32_t f(){ int32_t x=…; int32_t y=…; return …; }
-parse_fn*<A: Allocator> = (a: Ptr<A>, src: str, fname: str) Func {
+parse_fn* = (a: Ptr<Malloc>, src: str, fname: str) Func {
     Func { name: fname, params: [], ret: ti32(), body: a.build_body(src, 0) }
 }
 
@@ -749,7 +749,7 @@ span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
 }
 tok_eq = (src: str, t: Token, kw: str) bool { src.span_eq(t.start, t.len, kw, 0) }
 // a single type token -> genc's Ty: a primitive keyword, else a Named type (the lexeme).
-ty_of<A: Allocator> = (a: Ptr<A>, src: str, t: Token) Ty {
+ty_of = (a: Ptr<Malloc>, src: str, t: Token) Ty {
     src.tok_eq(t, "i32").match ({ true => ti32(), false =>
     src.tok_eq(t, "i64").match ({ true => ti64(), false =>
     src.tok_eq(t, "u8").match ({ true => tu8(), false =>
@@ -762,15 +762,15 @@ ty_of<A: Allocator> = (a: Ptr<A>, src: str, t: Token) Ty {
 // `Ptr<Inner>` -> genc's Ptr(Inner) (heap Ptr<Ty>, recursive so `Ptr<Ptr<T>>` works); any
 // other token is a leaf type via ty_of. This is what lets params/fields/returns be pointers.
 TyEnd*: { ty: Ty, next: i32 }
-tybuf<A: Allocator> = (a: Ptr<A>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
-tynode<A: Allocator> = (a: Ptr<A>, t: Ty) Ptr<Ty> {
+tybuf = (a: Ptr<Malloc>) [Ty] { slice(heap(sizeof(Ty)), 1) }
+tynode = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tybuf()
     buf[0] = t
     buf[0].addr()
 }
 is_lbracket = (src: str, t: Token) bool { src.is_op(t, '[') }
 is_rbracket = (src: str, t: Token) bool { src.is_op(t, ']') }
-parse_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {
+parse_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
     src.is_lbracket(tt.tok).match ({
         true  => a.parse_slice_ty(src, tt.next),         // [ T ]
@@ -780,12 +780,12 @@ parse_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {
         })
     })
 }
-parse_slice_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {   // pos just past '['
+parse_slice_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
     inner := a.parse_ty(src, pos)                        // the element type
     rb    := src.scan(inner.next)                        // ']'
     TyEnd { ty: tslice(a.tynode(inner.ty)), next: rb.next }
 }
-parse_ptr_ty<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
+parse_ptr_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
     lt    := src.scan(pos)                               // '<'
     inner := a.parse_ty(src, lt.next)                    // the pointee (recursive)
     gt    := src.scan(inner.next)                        // '>'
@@ -800,13 +800,13 @@ skip_to_lparen = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_lparen(sc.tok).match ({ true => sc.next, false => src.skip_to_lparen(sc.next) })
 }
-param_buf<A: Allocator> = (a: Ptr<A>) [Param] { slice(a.acquire(64 * sizeof(Param)), 64) }   // cap 64
+param_buf = (a: Ptr<Malloc>) [Param] { slice(heap(64 * sizeof(Param)), 64) }   // cap 64
 take_params = (buf: [Param], n: i32) [Param] { slice(buf.ptr, n) }                            // exact length
-fill_params<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+fill_params = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_one(src, pos, buf, i) })
 }
-fill_one<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+fill_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     nt    := src.scan(pos)                               // param name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
@@ -843,7 +843,7 @@ skip_block_d = (src: str, pos: i32, depth: i32) i32 {
 // return-type token (after `)`) maps via ty_of; the brace body is parsed. parse_decl_at
 // also reports where the decl ENDS (past `}`), so a module can parse the next one.
 DeclEnd*: { func: Func, next: i32 }
-parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
+parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)                              // the function name
     name   := a.lexeme(src, nt.tok)
     buf    := a.param_buf()
@@ -853,20 +853,20 @@ parse_decl_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) DeclEnd {
                      body: a.build_body(src, bstart) }
     DeclEnd { func: func, next: src.skip_block(bstart) }
 }
-parse_decl*<A: Allocator> = (a: Ptr<A>, src: str) Func { a.parse_decl_at(src, 0).func }
+parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 
 // ── a STRUCT declaration — `name*: { field: Type, … }` ──────────────────────────────
 // The field list is `name: Type` pairs (the same shape as a parameter list) terminated by
 // `}` instead of `)`. Lowers to genc's StructDecl (typedef struct). parse_struct_at also
 // reports where the decl ENDS (past `}`), so a module can parse the next one.
 StructEnd*: { sd: StructDecl, next: i32 }
-field_buf<A: Allocator> = (a: Ptr<A>) [Field] { slice(a.acquire(64 * sizeof(Field)), 64) }   // cap 64
+field_buf = (a: Ptr<Malloc>) [Field] { slice(heap(64 * sizeof(Field)), 64) }   // cap 64
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
-fill_fields<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_field(src, pos, buf, i) })
 }
-fill_field<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     nt    := src.scan(pos)                               // field name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
@@ -878,7 +878,7 @@ fill_field<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Field], i: i32)
         false => PEnd { count: i + 1, next: after.next }  // '}'
     })
 }
-parse_struct_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) StructEnd {
+parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
     nt     := src.scan(pos)                              // the struct name
     name   := a.lexeme(src, nt.tok)
     bstart := src.skip_to_brace(nt.next)                // pos just past '{' (skips `* :`)
@@ -886,7 +886,7 @@ parse_struct_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) StructEnd {
     fe     := a.fill_fields(src, bstart, buf, 0)        // fields + pos just past '}'
     StructEnd { sd: sdef(name, buf.take_fields(fe.count)), next: fe.next }
 }
-parse_struct*<A: Allocator> = (a: Ptr<A>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
+parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
 // ── an ENUM declaration — `name*: Red | Green | Blue` or `Circle(i32) | Square(i32)` ──
 // A `|`-separated variant list after `:`. Each variant is a bare name (Void payload) or
@@ -895,15 +895,15 @@ parse_struct*<A: Allocator> = (a: Ptr<A>, src: str) StructDecl { a.parse_struct_
 EnumEnd*: { ed: EnumDecl, next: i32 }
 VPay*:    { ty: Ty, next: i32 }                          // a variant's payload Ty + pos past it
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false }) }
-variant_buf<A: Allocator> = (a: Ptr<A>) [VariantDef] { slice(a.acquire(64 * sizeof(VariantDef)), 64) }   // cap 64
+variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(heap(64 * sizeof(VariantDef)), 64) }   // cap 64
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }                            // exact length
 // `(Type)` after a variant name -> the payload Ty; pos is just past the '('
-variant_payload<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) VPay {
+variant_payload = (a: Ptr<Malloc>, src: str, pos: i32) VPay {
     te := a.parse_ty(src, pos)                           // the payload type (may be Ptr<…>)
     rp := src.scan(te.next)                              // ')'
     VPay { ty: te.ty, next: rp.next }
 }
-fill_variants<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
+fill_variants = (a: Ptr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
     nt   := src.scan(pos)                                // variant name
     nm   := a.lexeme(src, nt.tok)
     pk   := src.scan(nt.next)                            // '(' (payload), '|', or the next decl
@@ -919,7 +919,7 @@ skip_to_colon = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_colon(sc.tok).match ({ true => sc.next, false => src.skip_to_colon(sc.next) })
 }
-parse_enum_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) EnumEnd {
+parse_enum_at = (a: Ptr<Malloc>, src: str, pos: i32) EnumEnd {
     nt   := src.scan(pos)                                // the enum name
     name := a.lexeme(src, nt.tok)
     cpos := src.skip_to_colon(nt.next)                   // pos just past ':' (skips `*`)
@@ -927,7 +927,7 @@ parse_enum_at<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) EnumEnd {
     ve   := a.fill_variants(src, cpos, buf, 0)           // variants + pos after the last one
     EnumEnd { ed: edef(name, buf.take_variants(ve.count)), next: ve.next }
 }
-parse_enum*<A: Allocator> = (a: Ptr<A>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
+parse_enum* = (a: Ptr<Malloc>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
 
 // after the decl name (and an optional `*` public marker) comes `=` for a function or `:`
 // for a type declaration; `: {` is a struct, `: Variant…` is an enum.
@@ -950,7 +950,7 @@ decl_is_enum = (src: str, pos: i32) bool {              // `:` but NOT `{` -> an
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
 // `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
 // which genModule lowers to a translation unit. Parses decls until Eof.
-decl_buf<A: Allocator> = (a: Ptr<A>) [Decl] { slice(a.acquire(1024 * sizeof(Decl)), 1024) }   // cap 1024
+decl_buf = (a: Ptr<Malloc>) [Decl] { slice(heap(1024 * sizeof(Decl)), 1024) }   // cap 1024
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── imports ──────────────────────────────────────────────────────────────────────
 // `{ A, B } = std.x` — a destructuring import. It carries no code (modules resolve at
@@ -973,7 +973,7 @@ skip_import = (src: str, pos: i32) i32 {                // pos at '{'
     src.skip_path(eq.next)                              // past the module path
 }
 
-fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,
@@ -984,7 +984,7 @@ fill_decls<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) 
     })
 }
 // a top-level decl is a struct (`name: { … }`), an enum (`name: A | B`), or a function
-fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     src.decl_is_struct(pos).match ({
         true  => a.fill_struct(src, pos, buf, i),
         false => src.decl_is_enum(pos).match ({
@@ -993,22 +993,22 @@ fill_decl<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i
         })
     })
 }
-fill_enum<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)
     buf[i] = denum(ee.ed)
     a.fill_decls(src, ee.next, buf, i + 1)
 }
-fill_func<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+fill_func = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     de := a.parse_decl_at(src, pos)
     buf[i] = dfunc(de.func)
     a.fill_decls(src, de.next, buf, i + 1)
 }
-fill_struct<A: Allocator> = (a: Ptr<A>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
     buf[i] = dstruct(se.sd)
     a.fill_decls(src, se.next, buf, i + 1)
 }
-parse_module*<A: Allocator> = (a: Ptr<A>, src: str) [Decl] {
+parse_module* = (a: Ptr<Malloc>, src: str) [Decl] {
     buf := a.decl_buf()
     buf.take_decls(a.fill_decls(src, 0, buf, 0))
 }
@@ -1023,4 +1023,4 @@ eval_bin = (b: BinData) i32 {
     (o == '*').match ({ true => l * r, false => l / r }) }) })
 }
 eval* = (e: Ptr<Expr>) i32 { e.match ({ .Int(n) => n, .Bin(b) => b.eval_bin(), _ => 0 }) }
-eval_str*<A: Allocator> = (a: Ptr<A>, src: str) i32 { a.parse(src).eval() }
+eval_str* = (a: Ptr<Malloc>, src: str) i32 { a.parse(src).eval() }
