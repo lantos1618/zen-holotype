@@ -73,3 +73,29 @@ def test_generated_getters_compile_and_run(tmp_path):
     assert subprocess.run(["cc", "-std=gnu11", "-w", str(tmp_path / "g.c"), "-o", str(tmp_path / "g")],
                           capture_output=True, text=True).returncode == 0
     assert subprocess.run([str(tmp_path / "g")]).returncode == 0
+
+
+# a real `#[derive]`: one call generates an accessor for EVERY field, each with its own type.
+_DERIVE_ALL = r'''
+{ Malloc } = std.alloc
+{ String, new, bytes } = std.genc
+{ String, new, bytes } = std.string
+{ genModule, field, dstruct, StructDecl, ti32, ti64 } = std.genc
+{ resolve_module } = std.check
+{ derive_accessors, fields, decls, concat } = std.ast
+putchar = (c: i32) i32
+emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
+main* = () i32 {
+    a  := Malloc { _: 0 }
+    sd := StructDecl { name: "Pt", fields: addr(a).fields([field("x", ti32()), field("y", ti64())]) }
+    mod := addr(a).concat(addr(a).decls([dstruct(sd)]), addr(a).derive_accessors(sd))
+    emit(genModule(addr(a).resolve_module(mod)))
+    0
+}
+'''.replace("{ String, new, bytes } = std.genc\n", "")
+
+
+def test_derive_accessors_covers_every_field_with_its_type(tmp_path):
+    out = _run(tmp_path, _DERIVE_ALL)
+    assert "int32_t x(Pt* s) { return s->x; }" in out   # i32 field
+    assert "int64_t y(Pt* s) { return s->y; }" in out   # i64 field — the derive respects the type
