@@ -318,7 +318,7 @@ def emit_c(files, passing, namespace, extra="", roots=None):
         if cn in placed or cn not in deps_of:
             return
         placed.add(cn)
-        for dep in deps_of[cn]:
+        for dep in sorted(deps_of[cn]):                  # sorted: a deterministic order (deps is a set)
             _emit_type(dep)
         order.append(cn)
     for cn, _, _ in entries:

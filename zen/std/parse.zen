@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, gsdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, mkstructg, tgeneric, mangle_str, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
 { Malloc, heap } = std.alloc
 
@@ -379,9 +379,43 @@ parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
         true  => a.parse_call(src, name, nx),                      // `name(args)` — a call
         false => src.is_lbrace(nx.tok).match ({
             true  => a.parse_struct_lit(src, name, nx),            // `Name { f: v, … }` — a struct literal
-            false => PExpr { expr: a.enode(vref(name)), next: sc.next }   // a bare variable
+            false => src.is_langle(nx.tok).match ({
+                true  => src.looks_generic_lit(nx.next).match ({   // `Name<…>{` -> a generic struct literal
+                    true  => a.parse_generic_struct_lit(src, name, nx.next),
+                    false => PExpr { expr: a.enode(vref(name)), next: sc.next }   // `name < …` is a comparison
+                }),
+                false => PExpr { expr: a.enode(vref(name)), next: sc.next }   // a bare variable
+            })
         })
     })
+}
+// is this `<…>` a generic struct literal's type args (followed by `{`), not a comparison like `a < b`?
+// `pos` is just past the '<'. Conservatively scan only TYPE-ARG tokens (idents, commas, `[ ]`, nested
+// `< >`); the moment a non-type token appears (a number, `)`, an operator) it's a comparison — bail.
+// So `Box<i32>{` is a literal, but `i < cnt)` / `(x < 9).match` are comparisons.
+looks_generic_lit = (src: str, pos: i32) bool {
+    after := src.tyargs_end(pos, 1)
+    (after < 0).match ({ true => false, false => src.is_lbrace(src.scan(after).tok) })
+}
+tyargs_end = (src: str, pos: i32, depth: i32) i32 {      // pos past matching '>', or -1 if not type args
+    sc := src.scan(pos)
+    src.is_langle(sc.tok).match ({
+        true  => src.tyargs_end(sc.next, depth + 1),
+        false => src.is_rangle(sc.tok).match ({
+            true  => (depth == 1).match ({ true => sc.next, false => src.tyargs_end(sc.next, depth - 1) }),
+            false => src.is_tyarg_tok(sc.tok).match ({ true => src.tyargs_end(sc.next, depth), false => 0 - 1 })
+        })
+    })
+}
+is_tyarg_tok = (src: str, t: Token) bool {              // a token that may appear inside `<…>` type args
+    is_ident_tok(t) || src.is_comma(t) || src.is_lbracket(t) || src.is_rbracket(t)
+}
+parse_generic_struct_lit = (a: Ptr<Malloc>, src: str, name: str, pos: i32) PExpr {   // pos just past '<'
+    ta   := a.parse_tyargs(src, pos)                              // the `<i32>` type args, pos past '>'
+    open := src.scan(ta.next)                                     // '{'
+    buf  := a.finit_buf()
+    fe   := a.fill_inits(src, open.next, buf, 0)
+    PExpr { expr: a.enode(mkstructg(name, mangle_str(name, ta.args), ta.args, buf.take_inits(fe.count))), next: fe.next }
 }
 // `Name { field: value, … }` — the `field: value` inits parse into a heap [FieldInit], then
 // the struct literal is built. open is the Scan of the opening '{'.
@@ -916,10 +950,38 @@ parse_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {
             true  => a.parse_fn_ty(src, tt.next),        // ( A, T ) R -> FnT (a closure/template param)
             false => src.is_ptr_kw(tt.tok).match ({
                 true  => a.parse_ptr_ty(src, tt.next),   // Ptr<inner> / RawPtr<inner> -> inner*
-                false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+                false => a.parse_leaf_ty(src, tt)        // a leaf type, maybe a generic instance N<…>
             })
         })
     })
+}
+// a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name.
+parse_leaf_ty = (a: Ptr<Malloc>, src: str, tt: Scan) TyEnd {
+    nx := src.scan(tt.next)
+    src.is_langle(nx.tok).match ({
+        true  => a.parse_generic_ty(src, tt, nx.next),
+        false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+    })
+}
+TyArgs*: { args: [Ty], next: i32 }
+parse_tyargs = (a: Ptr<Malloc>, src: str, pos: i32) TyArgs {   // pos just past '<'
+    buf := a.ty_buf()
+    ae  := a.fill_tyargs(src, pos, buf, 0)
+    TyArgs { args: buf.take_tys(ae.count), next: ae.next }
+}
+fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   // `>`-terminated type list
+    te    := a.parse_ty(src, pos)
+    buf[i] = te.ty
+    after := src.scan(te.next)                           // ',' or '>'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_tyargs(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // '>'
+    })
+}
+parse_generic_ty = (a: Ptr<Malloc>, src: str, nameTok: Scan, pos: i32) TyEnd {   // pos just past '<'
+    name := a.lexeme(src, nameTok.tok)
+    ta   := a.parse_tyargs(src, pos)
+    TyEnd { ty: tgeneric(name, ta.args, mangle_str(name, ta.args)), next: ta.next }
 }
 // a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
@@ -1036,7 +1098,42 @@ parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 // The field list is `name: Type` pairs (the same shape as a parameter list) terminated by
 // `}` instead of `)`. Lowers to genc's StructDecl (typedef struct). parse_struct_at also
 // reports where the decl ENDS (past `}`), so a module can parse the next one.
-StructEnd*: { sd: StructDecl, next: i32 }
+StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32 }   // ntp>0 -> a generic struct
+// type parameters `<T, U>` after a struct name — collected as name-only Params (no sizeof(str)), the
+// same idiom imports/impl-methods use. `<` skipped by the caller's skip_to_brace; here they're captured.
+no_tparams = (a: Ptr<Malloc>) [Param] { slice(heap(0), 0) }
+skip_name_star = (src: str, pos: i32) i32 {              // pos at the name; returns pos past name + optional '*'
+    nt := src.scan(pos)
+    a1 := src.scan(nt.next)
+    src.is_star(a1.tok).match ({ true => a1.next, false => nt.next })
+}
+TParamEnd*: { names: [Param], count: i32, next: i32 }
+parse_tparams = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {
+    sc := src.scan(pos)
+    src.is_langle(sc.tok).match ({
+        true  => a.parse_tparam_list(src, sc.next),
+        false => TParamEnd { names: a.no_tparams(), count: 0, next: pos }
+    })
+}
+parse_tparam_list = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {   // pos just past '<'
+    buf := a.param_buf()
+    te  := a.fill_tparams(src, pos, buf, 0)
+    TParamEnd { names: buf.take_params(te.count), count: te.count, next: te.next }
+}
+record_tparam = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd {
+    buf[i] = param(a.lexeme(src, sc.tok), tvoid())
+    a.fill_tparams(src, sc.next, buf, i + 1)
+}
+fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rangle(sc.tok).match ({
+        true  => PEnd { count: i, next: sc.next },
+        false => is_ident_tok(sc.tok).match ({          // an ident is a tparam; commas are skipped
+            true  => a.record_tparam(src, sc, buf, i),
+            false => a.fill_tparams(src, sc.next, buf, i)
+        })
+    })
+}
 field_buf = (a: Ptr<Malloc>) [Field] { slice(heap(64 * sizeof(Field)), 64) }   // cap 64
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
@@ -1058,10 +1155,11 @@ fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
 parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
     nt     := src.scan(pos)                              // the struct name
     name   := a.lexeme(src, nt.tok)
-    bstart := src.skip_to_brace(nt.next)                // pos just past '{' (skips `* :`)
+    tp     := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (empty for a plain struct)
+    bstart := src.skip_to_brace(nt.next)                // pos just past '{' (skips `* <…> :`)
     buf    := a.field_buf()
     fe     := a.fill_fields(src, bstart, buf, 0)        // fields + pos just past '}'
-    StructEnd { sd: sdef(name, buf.take_fields(fe.count)), next: fe.next }
+    StructEnd { sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next }
 }
 parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
@@ -1110,10 +1208,13 @@ parse_enum* = (a: Ptr<Malloc>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
 // for a type declaration; `: {` is a struct, `: Variant…` is an enum.
 is_star = (src: str, t: Token) bool { src.is_op(t, '*') }
 is_colon = (src: str, t: Token) bool { src.is_op(t, ':') }
-decl_marker = (src: str, pos: i32) Scan {               // the Scan of `=` or `:` (skips name + `*`)
+is_langle = (src: str, t: Token) bool { src.is_op(t, '<') }
+is_rangle = (src: str, t: Token) bool { src.is_op(t, '>') }
+decl_marker = (src: str, pos: i32) Scan {               // the Scan of `=` or `:` (skips name, `*`, `<T…>`)
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
-    src.is_star(a1.tok).match ({ true => src.scan(a1.next), false => a1 })
+    a2 := src.is_star(a1.tok).match ({ true => src.scan(a1.next), false => a1 })
+    src.is_langle(a2.tok).match ({ true => src.scan(src.tyargs_end(a2.next, 1)), false => a2 })   // skip `<T…>`
 }
 decl_is_struct = (src: str, pos: i32) bool {
     m := src.decl_marker(pos)
@@ -1235,7 +1336,10 @@ fill_func = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 }
 fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
-    buf[i] = dstruct(se.sd)
+    buf[i] = (se.ntp > 0).match ({                       // tparams present -> a generic struct template
+        true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
+        false => dstruct(se.sd)
+    })
     a.fill_decls(src, se.next, buf, i + 1)
 }
 // record `{ names } = std.mod` as a DImport (the names, for the checker), then resume past the path.

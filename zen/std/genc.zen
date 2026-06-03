@@ -10,8 +10,9 @@
 // `append(append(s, a), b)`, and `s.gen_expr(e)` is `gen_expr(s, e)` — String flows
 // left-to-right through the chain.
 
-{ String, new, append, push } = std.string
+{ String, new, append, push, finish } = std.string
 { view, is_empty, eq } = std.str
+{ heap } = std.alloc
 
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
@@ -28,7 +29,10 @@ ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => bod
 MatchData*: { subj: Ptr<Expr>, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
 StrData*: { value: str }                                // a C string literal "…" (escaped on emit)
 FieldInit*: { name: str, value: Ptr<Expr> }             // .name = value  (one struct-literal initializer)
-MakeStructData*: { ty: str, inits: [FieldInit] }        // (T){ .a = …, .b = … }  — a struct literal
+// `ty` is the base type name, `mty` the C name to emit (= ty for a plain struct, or the monomorphized
+// name `Box_i32` for a generic literal), and `targs` the type args of a generic literal (empty otherwise
+// — they let the monomorphize pass discover `Box<i32>` from a literal that has no typed signature).
+MakeStructData*: { ty: str, mty: str, targs: [Ty], inits: [FieldInit] }   // (mty){ .a = …, .b = … }
 // a slice [T] is a fat pointer { void* ptr; int64_t len; } (the `zslice` typedef). The element
 // type T is recovered at the literal (array type) and at indexing (the cast) — carried in the AST.
 SliceData*: { elem: Ty, items: [Expr] }                 // [a, b, c]  ->  (zslice){ .ptr = (T[]){…}, .len = N }
@@ -60,13 +64,22 @@ Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | Whil
 // a function type `(A, T) R` — ONLY a parameter type. A function that takes one is an inline
 // template (spliced per call site), never a C function pointer, so FnT has no standalone C type.
 FnTData*: { params: [Ty], ret: Ptr<Ty> }
-Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData)   // scalar/struct/void/str, T*, [T], or (A)R
+// a GENERIC INSTANCE type `Box<i32>` — a named type applied to concrete type args. `name` is the
+// generic's base ("Box"), `args` the concrete type arguments (for field substitution), and `mangled`
+// the monomorphized C name ("Box_i32"), precomputed by the parser so gen_ty emits it with no runtime
+// string-building. The monomorphize pass turns each instance into a concrete StructDecl named `mangled`.
+GenericData*: { name: str, args: [Ty], mangled: str }
+Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)   // scalar/struct/void/str, T*, [T], (A)R, or N<T>
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
 Field*: { name: str, ty: Ty }
 StructDecl*: { name: str, fields: [Field] }             // typedef struct { fields } name;
+// a GENERIC struct declaration `Box<T>: { v: T }` — a template over type params `tparams` (["T"]).
+// It emits no C of its own; the monomorphize pass instantiates one concrete StructDecl per distinct
+// `Box<concrete>` used, substituting tparam→arg in the field types. genModule drops the DGenStruct.
+GenStructDecl*: { name: str, tparams: [Param], fields: [Field] }   // tparams = name-only Params (no sizeof(str))
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
 VariantDef*: { name: str, payload: Ty }
 EnumDecl*: { name: str, variants: [VariantDef] }
@@ -84,7 +97,7 @@ ImplData*: { ty: str, trname: str, methods: [Param] }
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
 ImportData*: { names: [Param] }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData)   // DRaw = verbatim C escape
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -98,7 +111,9 @@ member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData { obj: o, field: f })
 arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData { obj: o, field: f }) }
 mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, variant: v, payload: p }) }
 finit* = (nm: str, v: Ptr<Expr>) FieldInit { FieldInit { name: nm, value: v } }
-mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, inits: inits }) }
+mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, mty: ty, targs: no_tys(), inits: inits }) }
+mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, mty: mty, targs: targs, inits: inits }) }
+no_tys* = () [Ty] { slice(heap(0), 0) }                  // an empty [Ty] (non-generic literal's targs)
 slit* = (elem: Ty, items: [Expr]) Expr { .SliceLit(SliceData { elem: elem, items: items }) }
 eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr { .Index(IndexData { seq: seq, idx: i, elem: elem }) }
 eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt]) Expr { .Loop(LoopData { seq: seq, idx: idx, elem: elem, elemTy: elemTy, body: body }) }
@@ -141,11 +156,31 @@ ti64* = () Ty { .I64() }
 tu8* = () Ty { .U8() }
 tbool* = () Ty { .Bool() }
 tnamed* = (n: str) Ty { .Named(n) }
+tgeneric* = (nm: str, args: [Ty], mangled: str) Ty { .Generic(GenericData { name: nm, args: args, mangled: mangled }) }
+// the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` -> `Vec_ptr_u8`.
+// A C identifier fragment per arg (prims by name, a nested generic by its own mangled name).
+mangle_ty = (s: String, t: Ty) String {
+    t.match ({
+        .I32 => s.append("i32"), .I64 => s.append("i64"), .U8 => s.append("u8"),
+        .Bool => s.append("bool"), .Str => s.append("str"), .Void => s.append("void"),
+        .Named(n)   => s.append(n),
+        .Generic(g) => s.append(g.mangled),
+        .Ptr(p)     => s.append("ptr_").mangle_ty(load(p)),
+        .Slice(e)   => s.append("slice_").mangle_ty(load(e)),
+        .FnT(ft)    => s.append("fn")
+    })
+}
+mangle_str* = (base: str, args: [Ty]) str {
+    out := new().append(base)
+    args.loop((h, i, t) { out = out.append("_").mangle_ty(t) })
+    out.finish()
+}
 tptr* = (t: Ptr<Ty>) Ty { .Ptr(t) }
 tslice* = (e: Ptr<Ty>) Ty { .Slice(e) }
 param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
 field* = (nm: str, t: Ty) Field { Field { name: nm, ty: t } }
 sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl { name: nm, fields: fs } }
+gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl { GenStructDecl { name: nm, tparams: tps, fields: fs } }
 tvoid* = () Ty { .Void() }
 vdef* = (nm: str, p: Ty) VariantDef { VariantDef { name: nm, payload: p } }
 edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl { name: nm, variants: vs } }
@@ -154,6 +189,7 @@ dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
 dimport* = (names: [Param]) Decl { .DImport(ImportData { names: names }) }
+dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
@@ -175,7 +211,8 @@ gen_ty = (s: String, t: Ptr<Ty>) String {
         .Bool => s.append("bool"), .Void => s.append("void"), .Str => s.append("const char*"),
         .Named(n) => s.append(n), .Ptr(p) => s.gen_ty(p).append("*"),
         .Slice(e) => s.append("zslice"),                // [T] is the fat-pointer struct (T recovered at use)
-        .FnT(ft)  => s.append("void")                   // unreachable: a template's FnT param is never emitted
+        .FnT(ft)  => s.append("void"),                  // unreachable: a template's FnT param is never emitted
+        .Generic(g) => s.append(g.mangled)              // a generic instance → its monomorphized C name
     })
 }
 
@@ -339,7 +376,7 @@ gen_mkenum = (s: String, m: MakeEnumData) String {
 
 // a struct literal: `(T){ .a = …, .b = … }` (a C compound literal, designated initializers)
 gen_mkstruct = (s: String, m: MakeStructData) String {
-    out := s.append("(").append(m.ty).append("){ ")
+    out := s.append("(").append(m.mty).append("){ ")    // mty = the monomorphized name for a generic literal
     m.inits.loop((h, i, fi) {
         out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
         out = out.append(".").append(fi.name).append(" = ").gen_expr(fi.value)
@@ -463,7 +500,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DRaw(c)     => s,
         .DImpl(im)   => s,
         .DForeign(f) => s,
-        .DImport(im) => s
+        .DImport(im) => s,
+        .DGenStruct(g) => s                             // a generic template — only its instances emit
     }) })
 }
 
@@ -476,7 +514,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DRaw(c)     => s.append(c),                    // verbatim — SIMD attrs/pragmas/intrinsics
         .DImpl(im)   => s,                              // an impl record — no runtime form (methods are DFuncs)
         .DForeign(f) => s,                              // a foreign decl — only a prototype (gen_proto), no body
-        .DImport(im) => s                               // an import — modules link separately, emits nothing
+        .DImport(im) => s,                              // an import — modules link separately, emits nothing
+        .DGenStruct(g) => s                             // a generic template — monomorphize replaced it
     })
 }
 
@@ -543,8 +582,107 @@ gen_funcs = (s: String, decls: [Decl]) String {
     out
 }
 
+// ── monomorphization: instantiate generic structs per concrete use (Goal Arc 3) ─────────
+// genModule's pass 0. A `Box<T>: {…}` decl (DGenStruct) emits no C; instead, for every distinct
+// `Box<concrete>` the module uses, we emit one concrete StructDecl `Box_i32` with tparam→arg
+// substituted in the field types. Instances are DISCOVERED from typed positions — function params,
+// returns, and struct fields (so a generic used through a typed API is found); a generic struct
+// LITERAL already carries its monomorphized name (MakeStruct.mty), so it just references the result.
+mono_gbuf = (n: i64) [GenericData] { slice(heap(n * sizeof(GenericData)), n) }
+mono_fbuf = (n: i64) [Field] { slice(heap(n * sizeof(Field)), n) }
+mono_dbuf = (n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
+mono_tybuf = (n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
+mono_tynode = (t: Ty) Ptr<Ty> {
+    buf := mono_tybuf(1)
+    buf[0] = t
+    buf[0].addr()
+}
+// substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
+tparam_arg = (tparams: [Param], args: [Ty], n: str, dflt: Ty) Ty {
+    found := dflt
+    tparams.loop((h, i, tp) { found = eq(tp.name, n).match ({ true => args[i], false => found }) })
+    found
+}
+subst_ty = (tparams: [Param], args: [Ty], t: Ty) Ty {
+    t.match ({
+        .Named(n)  => tparams.tparam_arg(args, n, t),
+        .Ptr(p)    => tptr(mono_tynode(tparams.subst_ty(args, load(p)))),
+        .Slice(e)  => tslice(mono_tynode(tparams.subst_ty(args, load(e)))),
+        _          => t
+    })
+}
+// the concrete StructDecl for one instance: the matching DGenStruct's fields, tparam→arg substituted.
+mono_struct = (decls: [Decl], g: GenericData) Decl {
+    gsd := decls.find_genstruct(g.name)
+    buf := mono_fbuf(gsd.fields.len)
+    gsd.fields.loop((h, i, f) { buf[i] = field(f.name, gsd.tparams.subst_ty(g.args, f.ty)) })
+    dstruct(StructDecl { name: g.mangled, fields: buf })
+}
+find_genstruct = (decls: [Decl], name: str) GenStructDecl {
+    found := GenStructDecl { name: "", tparams: slice(heap(0), 0), fields: slice(heap(0), 0) }
+    decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
+    found
+}
+// discovery: scan all typed positions for generic instances, deduped by mangled name.
+has_mangled = (buf: [GenericData], cnt: i32, m: str) bool {
+    found := false
+    buf.loop((h, i, e) { found = (i < cnt).match ({ true => eq(e.mangled, m).match ({ true => true, false => found }), false => found }) })
+    found
+}
+add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+    buf[cnt] = g
+    cnt + 1
+}
+collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
+    t.match ({
+        .Generic(g) => buf.has_mangled(cnt, g.mangled).match ({ true => cnt, false => buf.add_inst(cnt, g) }),
+        .Ptr(p)     => buf.collect_ty(cnt, load(p)),
+        .Slice(e)   => buf.collect_ty(cnt, load(e)),
+        _           => cnt
+    })
+}
+collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
+    d.match ({
+        .DStruct(sd) => buf.collect_flds(cnt, sd.fields),
+        .DFunc(f)    => buf.collect_func(cnt, f),
+        _            => cnt
+    })
+}
+collect_flds = (buf: [GenericData], cnt: i32, fields: [Field]) i32 {
+    c := cnt
+    fields.loop((h, i, f) { c = buf.collect_ty(c, f.ty) })
+    c
+}
+collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
+    c := cnt
+    f.params.loop((h, i, p) { c = buf.collect_ty(c, p.ty) })
+    buf.collect_ty(c, f.ret)
+}
+GBufEnd*: { buf: [GenericData], count: i32 }
+collect_insts = (decls: [Decl]) GBufEnd {
+    buf := mono_gbuf(256)
+    cnt := 0
+    decls.loop((h, i, d) { cnt = buf.collect_decl(cnt, d) })
+    GBufEnd { buf: buf, count: cnt }
+}
+is_gen_struct = (d: Decl) bool { d.match ({ .DGenStruct(g) => true, _ => false }) }
+// monomorphize: drop the DGenStruct templates, append one concrete StructDecl per discovered instance.
+monomorphize* = (decls: [Decl]) [Decl] {
+    ce  := decls.collect_insts()
+    out := mono_dbuf(decls.len + ce.count)
+    k   := 0
+    decls.loop((h, i, d) { k = d.is_gen_struct().match ({ true => k, false => out.put_decl(k, d) }) })
+    ce.buf.loop((h, i, g) { k = (i < ce.count).match ({ true => out.put_decl(k, decls.mono_struct(g)), false => k }) })
+    slice(out.ptr, k)
+}
+put_decl = (out: [Decl], k: i32, d: Decl) i32 {
+    out[k] = d
+    k + 1
+}
+
 // genModule: a whole translation unit — a list of decls (structs + functions).
-genModule* = (decls: [Decl]) String {
+genModule* = (raw: [Decl]) String {
+    decls := raw.monomorphize()                         // pass 0: instantiate generic structs per use
     s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")   // the [T] fat pointer
     decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
     decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
