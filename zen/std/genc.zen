@@ -36,8 +36,12 @@ IndexData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty }  // seq[idx]  ->  ((T*)
 // a foreach loop `xs.loop((h, i, x) { body })` — i is the index, x the element. Lowers to a C
 // for-loop (the body runs for effect, capturing outer locals), as a void statement-expression.
 LoopData*: { seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt] }
+// a lambda value `(a, x) { body }` — params are NAMES only (their types come from the FnT it is
+// passed to, so the Param tys are Void placeholders). Like Python's Closure: only ever an argument
+// to a template's FnT parameter, and inlined at the call site, so its body reads captured locals.
+LambdaData*: { params: [Param], body: [Stmt] }
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
-     | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData)
+     | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -47,7 +51,10 @@ WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }  
 IndexSetData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty, value: Ptr<Expr> }  // seq[idx] = value;
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData) | IndexSet(IndexSetData) | ExprStmt(Ptr<Expr>)
 // types + typed parameters
-Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>)   // scalar/struct/void/str, T*, or [T]
+// a function type `(A, T) R` — ONLY a parameter type. A function that takes one is an inline
+// template (spliced per call site), never a C function pointer, so FnT has no standalone C type.
+FnTData*: { params: [Ty], ret: Ptr<Ty> }
+Ty*: I32 | I64 | U8 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData)   // scalar/struct/void/str, T*, [T], or (A)R
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, body: [Stmt] }   // ret name(params) { body }
@@ -74,6 +81,8 @@ mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty
 slit* = (elem: Ty, items: [Expr]) Expr { .SliceLit(SliceData { elem: elem, items: items }) }
 eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr { .Index(IndexData { seq: seq, idx: i, elem: elem }) }
 eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt]) Expr { .Loop(LoopData { seq: seq, idx: idx, elem: elem, elemTy: elemTy, body: body }) }
+lam* = (params: [Param], body: [Stmt]) Expr { .Lambda(LambdaData { params: params, body: body }) }
+fntype* = (params: [Ty], ret: Ptr<Ty>) Ty { .FnT(FnTData { params: params, ret: ret }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
 ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: false }) }
@@ -122,7 +131,8 @@ gen_ty = (s: String, t: Ptr<Ty>) String {
         .I32 => s.append("int32_t"), .I64 => s.append("int64_t"), .U8 => s.append("uint8_t"),
         .Bool => s.append("bool"), .Void => s.append("void"), .Str => s.append("const char*"),
         .Named(n) => s.append(n), .Ptr(p) => s.gen_ty(p).append("*"),
-        .Slice(e) => s.append("zslice")                 // [T] is the fat-pointer struct (T recovered at use)
+        .Slice(e) => s.append("zslice"),                // [T] is the fat-pointer struct (T recovered at use)
+        .FnT(ft)  => s.append("void")                   // unreachable: a template's FnT param is never emitted
     })
 }
 
@@ -150,7 +160,8 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .StrLit(sl) => s.gen_strlit(sl.value),
         .SliceLit(sd) => s.gen_slicelit(sd),
         .Index(ix) => s.gen_index(ix),
-        .Loop(l) => s.gen_loop(l)
+        .Loop(l) => s.gen_loop(l),
+        .Lambda(lm) => s.append("0")        // unreachable: a lambda is inlined where its FnT param is called
     })
 }
 // xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
@@ -224,8 +235,15 @@ gen_sexpr* = (s: String, e: Ptr<Expr>) String {
         .Var(v) => s.append(v.name),
         .Bin(b) => s.append("(").append(b.op).append(" ").gen_sexpr(b.lhs).append(" ").gen_sexpr(b.rhs).append(")"),
         .Call(c) => s.append("(").append(c.fn).gen_sargs(c.args).append(")"),
+        .Lambda(lm) => s.gen_lam_sexpr(lm),
         _ => s.append("?")
     })
+}
+// `(lambda a x)` — names only (enough to prove a lambda parsed; its body rides the run tests)
+gen_lam_sexpr = (s: String, lm: LambdaData) String {
+    out := s.append("(lambda")
+    lm.params.loop((h, i, p) { out = out.append(" ").append(p.name) })
+    out.append(")")
 }
 
 gen_cond = (s: String, d: CondData) String {
