@@ -40,8 +40,11 @@ LoopData*: { seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt] }
 // passed to, so the Param tys are Void placeholders). Like Python's Closure: only ever an argument
 // to a template's FnT parameter, and inlined at the call site, so its body reads captured locals.
 LambdaData*: { params: [Param], body: [Stmt] }
+// a statement-expression `({ s1; s2; … sN; })` — its value is the last statement's. Produced by
+// inlining a (multi-statement) template body at a call site; the trailing return becomes a bare expr.
+BlockData*: { stmts: [Stmt] }
 Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
-     | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData)
+     | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
@@ -82,6 +85,16 @@ slit* = (elem: Ty, items: [Expr]) Expr { .SliceLit(SliceData { elem: elem, items
 eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr { .Index(IndexData { seq: seq, idx: i, elem: elem }) }
 eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt]) Expr { .Loop(LoopData { seq: seq, idx: idx, elem: elem, elemTy: elemTy, body: body }) }
 lam* = (params: [Param], body: [Stmt]) Expr { .Lambda(LambdaData { params: params, body: body }) }
+block* = (stmts: [Stmt]) Expr { .Block(BlockData { stmts: stmts }) }
+// a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
+// (std.check splices it), never emitted as a C function — so genModule skips it.
+is_fnt* = (t: Ty) bool { t.match ({ .FnT(f) => true, _ => false }) }
+has_fnt_param* = (ps: [Param]) bool {
+    found := false
+    ps.loop((h, i, p) { found = p.ty.is_fnt().match ({ true => true, false => found }) })
+    found
+}
+is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.params.has_fnt_param(), _ => false }) }
 fntype* = (params: [Ty], ret: Ptr<Ty>) Ty { .FnT(FnTData { params: params, ret: ret }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
@@ -161,8 +174,15 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .SliceLit(sd) => s.gen_slicelit(sd),
         .Index(ix) => s.gen_index(ix),
         .Loop(l) => s.gen_loop(l),
-        .Lambda(lm) => s.append("0")        // unreachable: a lambda is inlined where its FnT param is called
+        .Lambda(lm) => s.append("0"),       // unreachable: a lambda is inlined where its FnT param is called
+        .Block(b) => s.gen_blockexpr(b)     // a statement-expression `({ … })` (an inlined template body)
     })
+}
+// `({ s1 s2 … })` — a GCC statement-expression; its value is the last statement's expression.
+gen_blockexpr = (s: String, b: BlockData) String {
+    out := s.append("({ ")
+    b.stmts.loop((h, i, st) { out = out.gen_stmt(st).append(" ") })
+    out.append("})")
 }
 // xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
 // sequence is bound once (_seq); i is the index, x the element (cast from the fat pointer).
@@ -356,7 +376,12 @@ gen_sig = (s: String, f: Func) String {
 }
 gen_func* = (s: String, f: Func) String { s.gen_sig(f).append(" ").gen_block(f.body) }
 // a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
-gen_proto = (s: String, d: Decl) String { d.match ({ .DFunc(f) => s.gen_sig(f).append("; "), _ => s }) }
+gen_proto = (s: String, d: Decl) String {
+    d.is_template().match ({                            // templates are inlined, never emitted
+        true  => s,
+        false => d.match ({ .DFunc(f) => s.gen_sig(f).append("; "), _ => s })
+    })
+}
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 gen_struct* = (s: String, sd: StructDecl) String {
@@ -465,7 +490,10 @@ gen_types_upto = (s: String, decls: [Decl], k: i32, n: i32) String {
 // then functions + verbatim raw, in original order (all types are now fully defined above)
 gen_funcs = (s: String, decls: [Decl]) String {
     out := s
-    decls.loop((h, i, d) { out = d.match ({ .DFunc(f) => out.gen_decl(d).append(" "), .DRaw(c) => out.gen_decl(d).append(" "), _ => out }) })
+    decls.loop((h, i, d) { out = d.is_template().match ({
+        true  => out,                                   // a template: inlined at call sites, not emitted
+        false => d.match ({ .DFunc(f) => out.gen_decl(d).append(" "), .DRaw(c) => out.gen_decl(d).append(" "), _ => out })
+    }) })
     out
 }
 
