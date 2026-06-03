@@ -26,18 +26,29 @@ is_alpha* = (b: u8) bool { ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z
 is_alnum* = (b: u8) bool { b.is_alpha() || b.is_digit() }
 is_space* = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r') }
 
-// ── skip whitespace and `//` line comments, returning the next significant pos ──
+// ── skip whitespace, `//` line comments, and `/* */` block comments → next significant pos ──
 is_comment = (src: str, pos: i32) bool { (src.byte_at(pos) == '/') && (src.byte_at(pos + 1) == '/') }
+is_block_open = (src: str, pos: i32) bool { (src.byte_at(pos) == '/') && (src.byte_at(pos + 1) == '*') }
 skip_line = (src: str, pos: i32) i32 {
     b := src.byte_at(pos)
     ((b == '\0') || (b == '\n')).match ({ true => pos, false => src.skip_line(pos + 1) })   // stop at NUL / newline
+}
+skip_block_comment = (src: str, pos: i32) i32 {        // pos just past `/*`; returns past `*/`
+    b := src.byte_at(pos)
+    (b == '\0').match ({
+        true  => pos,                                  // unterminated — stop at NUL
+        false => ((b == '*') && (src.byte_at(pos + 1) == '/')).match ({ true => pos + 2, false => src.skip_block_comment(pos + 1) })
+    })
 }
 skip = (src: str, pos: i32) i32 {
     src.byte_at(pos).is_space().match ({
         true  => src.skip(pos + 1),
         false => src.is_comment(pos).match ({
             true  => src.skip(src.skip_line(pos + 2)),
-            false => pos
+            false => src.is_block_open(pos).match ({
+                true  => src.skip(src.skip_block_comment(pos + 2)),
+                false => pos
+            })
         })
     })
 }
