@@ -106,8 +106,9 @@ denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 
-// ── int -> decimal digits (no cast: digit bytes come from a str view) ────────
-digit = (d: i32) u8 { view("0123456789")[d] }
+// ── int -> decimal digits (byte access, no view/slice — so genc.zen self-hosts) ────────
+sbyte = (v: str, i: i32) u8 { load(offset(v, i)) }
+digit = (d: i32) u8 { sbyte("0123456789", d) }
 gen_int = (s: String, n: i32) String {
     (n < 10).match {
         true  => s.push(digit(n)),
@@ -243,9 +244,15 @@ gen_escape_byte = (s: String, b: u8) String {
 }
 // a C string literal: `"` + each byte escaped + `"`
 gen_strlit = (s: String, v: str) String {
-    out := s.append("\"")
-    view(v).loop((h, i, b) { out = out.gen_escape_byte(b) })
-    out.append("\"")
+    s.append("\"").gen_escape_from(v, 0).append("\"")
+}
+// escape the str's bytes one by one (recursion to the NUL terminator) — no view/slice, so
+// genc.zen self-hosts (the self-hosted checker can't yet type an imported `view`'s result).
+gen_escape_from = (s: String, v: str, i: i32) String {
+    (sbyte(v, i) == 0).match {
+        true  => s,
+        false => s.gen_escape_byte(sbyte(v, i)).gen_escape_from(v, i + 1)
+    }
 }
 
 gen_mkenum = (s: String, m: MakeEnumData) String {
