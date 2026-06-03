@@ -112,3 +112,22 @@ derive_accessors* = (a: Ptr<Malloc>, sd: StructDecl) [Decl] {
     sd.fields.loop((h, i, f) { buf[i] = a.accessor(sd.name, f) })
     buf
 }
+
+// `derive_eq(name, sd)` — a structural equality `name(x, y) bool { x->f == y->f && … }` comparing
+// every field. The `&&`-chain is folded from a `true` seed (so an empty struct is trivially equal).
+field_eq = (a: Ptr<Malloc>, fname: str) Ptr<Expr> {
+    x := a.evar("x")
+    y := a.evar("y")
+    a.ebin("==", a.efield(x, fname), a.efield(y, fname))
+}
+and_fields = (a: Ptr<Malloc>, fields: [Field], i: i32, acc: Ptr<Expr>) Ptr<Expr> {
+    (i == fields.len).match ({
+        true  => acc,
+        false => a.and_fields(fields, i + 1, a.ebin("&&", acc, a.field_eq(fields[i].name)))
+    })
+}
+derive_eq* = (a: Ptr<Malloc>, name: str, sd: StructDecl) Decl {
+    pty  := a.ptrto(named(sd.name))                                   // Ptr<Struct>, for both params
+    body := a.and_fields(sd.fields, 0, a.evar("true"))
+    a.func(name, [param("x", pty), param("y", pty)], tbool(), [ret(body)])
+}
