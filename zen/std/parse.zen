@@ -252,12 +252,19 @@ parse_match = (a: Ptr<Malloc>, src: str, subj: PExpr) PExpr {
     })
     src.close_match(body)                                           // drop the trailing ')'
 }
+// arms come in EITHER order — `{ true => X, false => Y }` or `{ false => Y, true => X }`. Read
+// the first arm's label to map them: the `true` arm is the cond's then-branch, the `false` arm
+// its else-branch. (Assuming positional [true, false] order silently inverts a false-first match.)
 parse_bool_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
-    ta    := a.parse_arm(src, open.next)                            // true  => X
-    comma := src.scan(ta.next)                                      // ','
-    fa    := a.parse_arm(src, comma.next)                           // false => Y
-    close := src.scan(fa.next)                                      // '}'
-    PExpr { expr: a.enode(cond(subj.expr, ta.expr, fa.expr)), next: close.next }
+    first := src.scan(open.next)                                    // the first arm's label token
+    a0    := a.parse_arm(src, open.next)                            // first arm body
+    comma := src.scan(a0.next)                                      // ','
+    a1    := a.parse_arm(src, comma.next)                           // second arm body
+    close := src.scan(a1.next)                                      // '}'
+    src.tok_eq(first.tok, "true").match ({
+        true  => PExpr { expr: a.enode(cond(subj.expr, a0.expr, a1.expr)), next: close.next },
+        false => PExpr { expr: a.enode(cond(subj.expr, a1.expr, a0.expr)), next: close.next }
+    })
 }
 // the subject of an enum match must be a bare variable (genc's MatchData.subj is its NAME);
 // pull the name back out of the already-parsed Var node.
