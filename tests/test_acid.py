@@ -71,11 +71,9 @@ def test_self_hosted_frontend_reads_stdlib_file(tmp_path, path):
 
 
 # The CHECK dimension: the self-hosted VALIDATING checker (check_module) over each stdlib file,
-# returning its error count as the process exit code. 9/10 are accepted with ZERO errors —
-# including files with generics (iter, vec), traits (alloc), closures. parse.zen (the largest,
-# most call-dense file) still trips 17 arg-type FALSE POSITIVES — it self-compiles and Python
-# accepts it, so these are a checker-precision parity gap (infer/fits not yet exact on every
-# UFCS/call pattern), not real type errors. Tracked as xfail until the checker tightens.
+# returning its error count as the process exit code. ALL 10 are accepted with ZERO errors —
+# including files with generics (iter, vec), traits (alloc), and closures. So the self-hosted
+# FRONTEND parses AND type-checks the whole real stdlib, matching the Python frontend's verdict.
 _CHECK_DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
@@ -102,6 +100,4 @@ def _check_errors(tmp_path, src):
 
 @pytest.mark.parametrize("path", STD_FILES, ids=[p.split("/")[-1] for p in STD_FILES])
 def test_self_hosted_checker_accepts_stdlib_file(tmp_path, path):
-    if path.endswith("parse.zen"):
-        pytest.xfail("17 arg-type false positives — checker-precision parity gap (parse.zen self-compiles)")
     assert _check_errors(tmp_path, _strip_imports(path)) == 0

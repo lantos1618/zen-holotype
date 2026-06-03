@@ -43,7 +43,10 @@ LambdaData*: { params: [Param], body: [Stmt] }
 // a statement-expression `({ s1; s2; … sN; })` — its value is the last statement's. Produced by
 // inlining a (multi-statement) template body at a call site; the trailing return becomes a bare expr.
 BlockData*: { stmts: [Stmt] }
-Expr*: Int(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
+// `Byte` is an integer literal that came from a CHAR literal `'a'` — emitted exactly like Int
+// (its byte value), but typed `u8` by the checker (a char is a byte, so `is_op(t, '+')` passing
+// it to a u8 param doesn't read as an i32->u8 narrowing).
+Expr*: Int(i32) | Byte(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
      | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
@@ -72,6 +75,7 @@ Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str)   // DRaw
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
 lit* = (n: i32) Expr { .Int(n) }
+byte_lit* = (n: i32) Expr { .Byte(n) }   // a char literal's byte value (typed u8 by the checker)
 vref* = (nm: str) Expr { .Var(VarData { name: nm }) }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: l, rhs: r }) }
 call* = (fn: str, args: [Expr]) Expr { .Call(CallData { fn: fn, args: args }) }
@@ -169,6 +173,7 @@ any_payload = (vs: [VariantDef]) bool {
 gen_expr* = (s: String, e: Ptr<Expr>) String {
     e.match ({                                       // match auto-derefs the Ptr<Expr>
         .Int(n)  => s.gen_int(n),
+        .Byte(n) => s.gen_int(n),       // a char literal — the same C integer, just typed u8 in check
         .Var(v)  => s.append(v.name),
         .Bin(b)  => s.gen_bin(b),
         .Call(c) => s.gen_call(c),
@@ -268,6 +273,7 @@ gen_sargs = (s: String, args: [Expr]) String {
 gen_sexpr* = (s: String, e: Ptr<Expr>) String {
     e.match ({
         .Int(n) => s.gen_int(n),
+        .Byte(n) => s.gen_int(n),
         .Var(v) => s.append(v.name),
         .Bin(b) => s.append("(").append(b.op).append(" ").gen_sexpr(b.lhs).append(" ").gen_sexpr(b.rhs).append(")"),
         .Call(c) => s.append("(").append(c.fn).gen_sargs(c.args).append(")"),
