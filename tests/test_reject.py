@@ -67,3 +67,16 @@ def test_checker_rejects_index_store_mismatch(tmp_path, src):
 ])
 def test_checker_accepts_index_store(tmp_path, src):
     assert _errors(tmp_path, src) == 0
+
+
+# operand-type checking: arithmetic needs numeric operands, logical needs bool — matching the Python
+# frontend. Sound: an uninferable operand is skipped, comparisons accept any operands.
+@pytest.mark.parametrize("src,want", [
+    ("t* = (b: bool) i32 { (1 + b) }", 1),                                      # '+' on a bool
+    ("t* = () i32 { (true && 5).match({ true => 1, false => 0 }) }", 1),        # '&&' on an int
+    ("t* = () i32 { 1 + 2 * 3 }", 0),                                           # all numeric -> ok
+    ("t* = (a: bool, b: bool) i32 { (a && b).match({ true => 1, false => 0 }) }", 0),  # all bool -> ok
+    ("t* = () i32 { (3 < 5).match({ true => 1, false => 0 }) }", 0),            # comparison unchecked
+])
+def test_operand_type_checking(tmp_path, src, want):
+    assert _errors(tmp_path, src) == want

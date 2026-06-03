@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, BinData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -582,10 +582,37 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
     inits.loop((h, i, fi) { acc = acc + env.check_expr(fi.value) })
     acc
 }
+// operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
+// `&& ||` needs BOOL operands — matching the Python frontend ("'+' needs numeric operands"). Sound:
+// an UNINFERABLE operand (void — e.g. a match-arm binding the partial checker can't type) is skipped,
+// never false-rejected. Comparisons (`== != < > <= >=`) accept any operand types, so aren't checked.
+is_arith_op = (op: str) bool {
+    b := op.byte_at(0)
+    (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')   // distinct from &|=<>!
+}
+is_logic_op = (op: str) bool { eq(op, "&&") || eq(op, "||") }
+is_bool_ty = (t: Ty) bool { t.match ({ .Bool => true, _ => false }) }
+non_numeric = (env: Env, e: Ptr<Expr>) bool {
+    t := env.infer_expr(e)
+    t.is_uninferable().match ({ true => false, false => (t.ty_rank() >= 0).match ({ true => false, false => true }) })
+}
+non_bool = (env: Env, e: Ptr<Expr>) bool {
+    t := env.infer_expr(e)
+    t.is_uninferable().match ({ true => false, false => t.is_bool_ty().match ({ true => false, false => true }) })
+}
+operand_err = (env: Env, b: BinData) i32 {
+    b.op.is_logic_op().match ({
+        true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
+        false => b.op.is_arith_op().match ({
+            true  => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 }),
+            false => 0
+        })
+    })
+}
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.check_call(c) + env.check_args(c.args),
-        .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs),
+        .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
         .Member(m)      => env.check_expr(m.obj),
         .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms),
