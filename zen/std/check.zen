@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, GenericData, MakeStructData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -375,9 +375,124 @@ inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr]) Ptr<E
         _           => a.cenode(lamx)                     // not a lambda (shouldn't happen) — keep
     })
 }
+// ── generic CONSTRUCTORS (Slice 3b): infer the type args at the call site, then substitute them in
+//    the template body's TYPES before splicing — so `wrap<T> = (x: T) Box<T> { Box<T>{v:x} }` inlined
+//    at `wrap(42)` becomes `Box_i32{v:42}` (not the leaked `Box_T`). Inlining alone binds VALUE params;
+//    this also binds the TYPE param T = i32. ──
+// a light structural type of an argument expression — enough to unify a tparam (literals/ctors only).
+light_ty = (e: Ptr<Expr>) Ty {
+    load(e).match ({
+        .Int(n)        => ti32(),
+        .Byte(n)       => tu8(),
+        .StrLit(s)     => tstr(),
+        .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
+        .MakeEnum(mk)  => tnamed(mk.ty),
+        .Tag(t)        => tnamed(t.ty),
+        _              => tvoid()                         // Var/Call/… — can't light-infer; tparam stays open
+    })
+}
+// unify a PARAM type (which may mention tparam `tp`) against an ARG type to extract tp's binding.
+unify_ty = (pty: Ty, aty: Ty, tp: str) Ty {
+    pty.match ({
+        .Named(n)   => eq(n, tp).match ({ true => aty, false => tvoid() }),
+        .Generic(g) => aty.match ({ .Generic(ga) => g.args.unify_args(ga.args, tp), _ => tvoid() }),
+        .Ptr(p)     => aty.match ({ .Ptr(pa) => load(p).unify_ty(load(pa), tp), _ => tvoid() }),
+        .Slice(e)   => aty.match ({ .Slice(ea) => load(e).unify_ty(load(ea), tp), _ => tvoid() }),
+        _           => tvoid()
+    })
+}
+unify_args = (pargs: [Ty], aargs: [Ty], tp: str) Ty {
+    found := tvoid()
+    pargs.loop((h, i, pa) { found = found.is_void_ty().match ({ true => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }), false => found }) })
+    found
+}
+infer_one = (params: [Param], cargs: [Expr], tp: str) Ty {
+    found := tvoid()
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(), tp), false => found }), false => found }) })
+    found
+}
+infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], cargs: [Expr]) [Ty] {
+    buf := a.tbuf(tparams.len)
+    tparams.loop((h, i, tp) { buf[i] = params.infer_one(cargs, tp.name) })
+    buf
+}
+// substitute tparams→targs in the type-bearing nodes of a body (MakeStruct's targs/mty + Index/Slice/
+// Loop element types). Other nodes are rebuilt structurally so nested literals are reached.
+subst_targs = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
+    buf := a.tbuf(xs.len)
+    xs.loop((h, i, t) { buf[i] = tparams.subst_ty(targs, t) })
+    buf
+}
+subst_genlit_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+    nt := a.subst_targs(tparams, targs, m.targs)
+    mkstructg(m.ty, mangle_str(m.ty, nt), nt, a.subst_inits(tparams, targs, m.inits))
+}
+subst_genlit = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+    (m.targs.len > 0).match ({
+        true  => a.subst_genlit_g(tparams, targs, m),
+        false => mkstruct(m.ty, a.subst_inits(tparams, targs, m.inits))
+    })
+}
+subst_inits = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] {
+    buf := a.fbuf(inits.len)
+    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.subst_expr(tparams, targs, fi.value)) })
+    buf
+}
+subst_exprs = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
+    buf := a.cebuf(xs.len)
+    xs.loop((h, i, x) { buf[i] = load(a.subst_expr(tparams, targs, x.addr())) })
+    buf
+}
+subst_arms = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
+    buf := a.abuf(arms.len)
+    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.subst_expr(tparams, targs, ar.body)) })
+    buf
+}
+subst_match = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
+    subj := a.subst_expr(tparams, targs, m.subj)
+    arms := a.subst_arms(tparams, targs, m.arms)
+    m.ptr.match ({ true => a.cenode(ematchp(subj, m.ename, arms)), false => a.cenode(ematch(subj, m.ename, arms)) })
+}
+subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
+    load(e).match ({
+        .Bin(b)       => a.cenode(bin(b.op, a.subst_expr(tparams, targs, b.lhs), a.subst_expr(tparams, targs, b.rhs))),
+        .Cond(d)      => a.cenode(cond(a.subst_expr(tparams, targs, d.c), a.subst_expr(tparams, targs, d.t), a.subst_expr(tparams, targs, d.e))),
+        .Member(m)    => a.cenode(member(a.subst_expr(tparams, targs, m.obj), m.field)),
+        .Arrow(ar)    => a.cenode(arrow(a.subst_expr(tparams, targs, ar.obj), ar.field)),
+        .Call(c)      => a.cenode(call(c.fn, a.subst_exprs(tparams, targs, c.args))),
+        .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.subst_expr(tparams, targs, mk.payload))),
+        .MakeStruct(m)=> a.cenode(a.subst_genlit(tparams, targs, m)),
+        .Match(mm)    => a.subst_match(tparams, targs, mm),
+        .Index(ix)    => a.cenode(eindex(a.subst_expr(tparams, targs, ix.seq), a.subst_expr(tparams, targs, ix.idx), tparams.subst_ty(targs, ix.elem))),
+        .Loop(l)      => a.cenode(eloop(a.subst_expr(tparams, targs, l.seq), l.idx, l.elem, tparams.subst_ty(targs, l.elemTy), a.subst_body(tparams, targs, l.body))),
+        .SliceLit(sd) => a.cenode(slit(tparams.subst_ty(targs, sd.elem), a.subst_exprs(tparams, targs, sd.items))),
+        .Block(b)     => a.cenode(block(a.subst_body(tparams, targs, b.stmts))),
+        _             => e                                // Int/Byte/Var/StrLit/Tag/Lambda — no types to substitute
+    })
+}
+subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
+    st.match ({
+        .Let(l)      => slet(l.name, a.subst_expr(tparams, targs, l.value)),
+        .Assign(x)   => sassign(x.name, a.subst_expr(tparams, targs, x.value)),
+        .Return(r)   => sret(a.subst_expr(tparams, targs, r)),
+        .ExprStmt(e) => sexpr(a.subst_expr(tparams, targs, e)),
+        .If(f)       => sif(a.subst_expr(tparams, targs, f.c), a.subst_body(tparams, targs, f.then), a.subst_body(tparams, targs, f.els)),
+        .While(w)    => swhile(a.subst_expr(tparams, targs, w.c), a.subst_body(tparams, targs, w.body)),
+        .IndexSet(x) => sidxset(a.subst_expr(tparams, targs, x.seq), a.subst_expr(tparams, targs, x.idx), tparams.subst_ty(targs, x.elem), a.subst_expr(tparams, targs, x.value))
+    })
+}
+subst_body = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
+    buf := a.sbuf(body.len)
+    body.loop((h, i, st) { buf[i] = a.subst_stmt(tparams, targs, st) })
+    buf
+}
 inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr]) Ptr<Expr> {
-    tf := decls.the_func(name)
-    a.blockify(a.xform_body(decls, tf.body, tf.params, cargs))
+    tf   := decls.the_func(name)
+    body := (tf.tparams.len > 0).match ({           // a generic fn: substitute its type params in the body first
+        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs), tf.body),
+        false => tf.body
+    })
+    a.blockify(a.xform_body(decls, body, tf.params, cargs))
 }
 maybe_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr]) Ptr<Expr> {
     decls.is_template_call(name).match ({

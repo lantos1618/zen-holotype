@@ -184,3 +184,33 @@ def test_generic_fn_not_emitted_standalone(tmp_path):
     c = emit_c_for(tmp_path, "Box<T>: { v: T }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 { get(Box<i32>{ v: 1 }) }")
     assert "Box_T" not in c
     assert "get(" not in c
+
+
+# Generic CONSTRUCTORS (Slice 3b): a generic fn that builds a generic value `wrap<T> -> Box<T>` runs.
+# Inlining substitutes the type param T in the body's types (Box<T> -> Box_i32) using type args
+# inferred from the call's arguments. NOTE: T is pinned by a CONCRETE-typed arg (a struct, or a
+# numeric literal taken as i32) — a T determined solely by a polymorphic literal defaults to i32.
+def test_generic_constructor_runs(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>{ v: x } }\n"
+        "g* = (b: Box<i32>) i32 { b.v }\ntest* = () i32 { g(wrap(42)) }", 42)
+
+
+def test_generic_constructor_t_from_struct_arg(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nrewrap<T> = (b: Box<T>) Box<T> { Box<T>{ v: b.v } }\n"
+        "g* = (b: Box<i32>) i32 { b.v }\ntest* = () i32 { g(rewrap(Box<i32>{ v: 42 })) }", 42)
+
+
+def test_generic_constructor_two_type_params(tmp_path):
+    run_value(tmp_path,
+        "Pair<A, B>: { x: A, y: B }\nmk<A, B> = (p: A, q: B) Pair<A, B> { Pair<A, B>{ x: p, y: q } }\n"
+        "f* = (pr: Pair<i32, i32>) i32 { pr.x + pr.y }\ntest* = () i32 { f(mk(20, 22)) }", 42)
+
+
+def test_generic_constructor_substitutes_in_emitted_c(tmp_path):
+    c = emit_c_for(tmp_path,
+        "Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>{ v: x } }\n"
+        "g* = (b: Box<i32>) i32 { b.v }\ntest* = () i32 { g(wrap(7)) }")
+    assert "(Box_i32){" in c        # the body's Box<T> was substituted to Box_i32, not Box_T
+    assert "Box_T" not in c
