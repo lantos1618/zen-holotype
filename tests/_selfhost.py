@@ -20,7 +20,7 @@ HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
 _PRELUDE = """
 { Malloc } = std.alloc
 { parse, parse_module } = std.parse
-{ resolve_module, check_module } = std.check
+{ resolve_module, check_module, check_linked } = std.check
 { genModule, gen_sexpr } = std.genc
 { String, new, bytes } = std.string
 putchar = (c: i32) i32
@@ -37,6 +37,12 @@ _CHECK_MAIN = """main* = () i32 {
     addr(m).check_module(addr(m).resolve_module(addr(m).parse_module("%s")))
 }
 """
+# check the first source against the second as an imported module (cross-module signature linking)
+_LINK_MAIN = """main* = () i32 {
+    m := Malloc { _: 0 }
+    addr(m).check_linked(addr(m).parse_module("%s"), addr(m).parse_module("%s"))
+}
+"""
 _SEXPR_MAIN = """main* = () i32 {
     m := Malloc { _: 0 }
     emit(new().gen_sexpr(addr(m).parse("%s")))
@@ -49,10 +55,10 @@ def _zlit(s):
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def _drive(tmp_path, main, src):
-    """Compile the driver (PRELUDE + main, with `src` embedded as the source string) via the Python
-    host, then run it. Returns the CompletedProcess (stdout = emitted C, returncode = check count)."""
-    (tmp_path / "main.zen").write_text((_PRELUDE + main) % _zlit(src))
+def _run(tmp_path, filled_main):
+    """Compile the driver (PRELUDE + an already-source-embedded main) via the Python host, then run
+    it. Returns the CompletedProcess (stdout = emitted C, returncode = check count)."""
+    (tmp_path / "main.zen").write_text(_PRELUDE + filled_main)
     files = load(tmp_path); ns = build_namespace(files)
     build_scopes(files); resolve(files, ns)
     fold_comptime(files, ns); run_emits(files, ns)
@@ -64,6 +70,11 @@ def _drive(tmp_path, main, src):
     return subprocess.run([str(tmp_path / "o")], capture_output=True, text=True)
 
 
+def _drive(tmp_path, main, src):
+    """_run with a single `src` embedded into a one-`%s` main template."""
+    return _run(tmp_path, main % _zlit(src))
+
+
 def emit_c_for(tmp_path, src):
     """The C the self-hosted toolchain emits for `src`."""
     return _drive(tmp_path, _EMIT_MAIN, src).stdout
@@ -72,6 +83,12 @@ def emit_c_for(tmp_path, src):
 def check_errors(tmp_path, src):
     """check_module's error count for `src` (the process exit code)."""
     return _drive(tmp_path, _CHECK_MAIN, src).returncode
+
+
+def check_linked_errors(tmp_path, src, lib):
+    """check_module's error count for `src` linked against `lib` as an imported module — so a
+    cross-module call in `src` is checked against `lib`'s signatures (the process exit code)."""
+    return _run(tmp_path, _LINK_MAIN % (_zlit(src), _zlit(lib))).returncode
 
 
 def sexpr_of(tmp_path, expr):
