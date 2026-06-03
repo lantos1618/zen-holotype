@@ -130,3 +130,40 @@ def test_self_hosted_toolchain_compiles_genc_lex_parse(tmp_path):
     r = subprocess.run(["cc", "-fsyntax-only", "-std=gnu11", str(tmp_path / "glp.c")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr   # parser + lexer + backend, compiled by the compiler-in-itself
+
+
+def test_self_hosted_toolchain_compiles_WHOLE_compiler(tmp_path):
+    # Phase 4: the WHOLE compiler — genc (backend) + lex + parse + check — as ONE translation
+    # unit, parsed/checked/lowered by the Zen-written toolchain into valid C. Every top-level
+    # name across the four sources must be unique (no module namespacing in the self-hosted
+    # genc yet), which is why check's Expr-node helpers are cebuf/cenode, not ebuf/enode.
+    def strip(f):
+        return "\n".join(l for l in Path(f).read_text().splitlines()
+                         if not (l.strip().startswith("{ ") and "= std." in l))
+    src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/lex.zen",
+                                       "zen/std/parse.zen", "zen/std/check.zen"))
+    (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
+    files = load(tmp_path); ns = build_namespace(files)
+    build_scopes(files); resolve(files, ns)
+    fold_comptime(files, ns); run_emits(files, ns)
+    _, passing = check(files, ns)
+    assert "main.main" in passing
+    c = emit_c(files, passing, ns, roots={"main.main"})
+    (tmp_path / "o.c").write_text(c + "\nint main(void){ return main_main(); }\n")
+    assert subprocess.run(["cc", "-std=gnu11", str(tmp_path / "o.c"), "-o", str(tmp_path / "o")],
+                          capture_output=True, text=True).returncode == 0
+    out = subprocess.run([str(tmp_path / "o")], capture_output=True, text=True).stdout
+    assert len(out) > 90000   # ~106KB of C — the whole compiler
+    for fn in ("genModule", "parse_module", "resolve_module", "check_module", "scan", "fits"):
+        assert fn in out
+    head = "typedef struct { void* ptr; int64_t len; } zslice; "
+    prelude = ("#include <stdint.h>\n#include <stdbool.h>\n" + head + "\n"
+        "typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } String;\n"
+        "String new(void); String append(String s, const char* x); String push(String s, uint8_t b);\n"
+        "zslice view(const char* v); bool is_empty(const char* s); bool eq(const char* a, const char* b);\n"
+        "typedef struct { int32_t _; } Malloc;\n"
+        "void* heap(int64_t n); void* offset(const void* p, int32_t i); uint8_t load(const void* p);\n")
+    (tmp_path / "cc.c").write_text(prelude + out[len(head):])
+    r = subprocess.run(["cc", "-fsyntax-only", "-std=gnu11", str(tmp_path / "cc.c")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr   # the WHOLE compiler, compiled by the compiler-in-itself
