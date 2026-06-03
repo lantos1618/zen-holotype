@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, slet, sassign, sret, sif, swhile, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, slet, sassign, sret, sif, swhile, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
 { Allocator } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -244,66 +244,89 @@ fits* = (g: Ty, w: Ty) bool {
     }
 }
 
-// ── check_module: a VALIDATING pass (Goal C Phase 1) — count type errors ───────────────
-// Distinct from resolve_module (which rewrites the AST): this walks the module and reports
-// how many type errors it found. Today it checks CALL ARITY — every call to a known function
-// must pass the right number of arguments (a call to an unknown name is an intrinsic/extern,
-// not an error). Returns the error count; Phase 2 adds arg-type checks (via fits) + messages.
-call_err_pick = (f: Func, fn: str, nargs: i64, found: i32) i32 {
-    eq(f.name, fn).match {
-        true  => (f.params.len == nargs).match { true => 0, false => 1 },   // known fn: arity must match
-        false => found
-    }
-}
-call_arity_err = (decls: [Decl], fn: str, nargs: i64) i32 {
-    found := 0                                          // unknown fn -> 0 (intrinsic / external)
-    decls.loop((h, i, d) { found = d.match { .DFunc(f) => f.call_err_pick(fn, nargs, found), _ => found } })
+// ── check_module: a VALIDATING pass (Goal C Phases 1-2) — count type errors ────────────
+// Distinct from resolve_module (which rewrites the AST): this walks the module counting type
+// errors. It checks CALL ARITY (a known fn must get the right number of args; a call to an
+// unknown name is an intrinsic/external, not an error) and ARG TYPES (each arg's type must
+// `fit` the parameter — widening or structural). An arg whose type can't be inferred (void)
+// is SKIPPED, so a valid program never gets a false positive. The param env feeds infer_expr.
+empty_params = () [Param] { [] }
+is_known_fn = (decls: [Decl], fn: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match { .DFunc(f) => eq(f.name, fn).match { true => true, false => found }, _ => found } })
     found
 }
-check_args = (decls: [Decl], args: [Expr]) i32 {
+fn_params_pick = (f: Func, fn: str, found: [Param]) [Param] { eq(f.name, fn).match { true => f.params, false => found } }
+fn_params = (decls: [Decl], fn: str) [Param] {
+    found := empty_params()
+    decls.loop((h, i, d) { found = d.match { .DFunc(f) => f.fn_params_pick(fn, found), _ => found } })
+    found
+}
+// one argument fits its parameter? a void (uninferable) arg type is skipped (0), else fits()
+fit_err = (argty: Ty, pty: Ty) i32 { argty.match { .Void => 0, _ => fits(argty, pty).match { true => 0, false => 1 } } }
+arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
+    (i < params.len).match { true => fit_err(env.infer_expr(ar.addr()), params[i].ty), false => 0 }
+}
+arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
     acc := 0
-    args.loop((h, i, ar) { acc = acc + decls.check_expr(ar.addr()) })
+    args.loop((h, i, ar) { acc = acc + env.arg_err_at(params, i, ar) })
     acc
 }
-check_arms = (decls: [Decl], arms: [ArmData]) i32 {
+// a call: an unknown fn is fine; a known fn must match arity, then each arg must fit its param
+check_call = (env: Env, c: CallData) i32 {
+    env.decls.is_known_fn(c.fn).match { false => 0, true => env.call_errs(c) }
+}
+call_errs = (env: Env, c: CallData) i32 {
+    ps := env.decls.fn_params(c.fn)
+    (ps.len == c.args.len).match { true => env.arg_type_errs(ps, c.args), false => 1 }
+}
+check_args = (env: Env, args: [Expr]) i32 {
     acc := 0
-    arms.loop((h, i, ar) { acc = acc + decls.check_expr(ar.body) })
+    args.loop((h, i, ar) { acc = acc + env.check_expr(ar.addr()) })
     acc
 }
-check_inits = (decls: [Decl], inits: [FieldInit]) i32 {
+check_arms = (env: Env, arms: [ArmData]) i32 {
     acc := 0
-    inits.loop((h, i, fi) { acc = acc + decls.check_expr(fi.value) })
+    arms.loop((h, i, ar) { acc = acc + env.check_expr(ar.body) })
     acc
 }
-check_expr = (decls: [Decl], e: Ptr<Expr>) i32 {
+check_inits = (env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc + env.check_expr(fi.value) })
+    acc
+}
+check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match {
-        .Call(c)        => decls.call_arity_err(c.fn, c.args.len) + decls.check_args(c.args),
-        .Bin(b)         => decls.check_expr(b.lhs) + decls.check_expr(b.rhs),
-        .Cond(d)        => decls.check_expr(d.c) + decls.check_expr(d.t) + decls.check_expr(d.e),
-        .Member(m)      => decls.check_expr(m.obj),
-        .Match(m)       => decls.check_expr(m.subj) + decls.check_arms(m.arms),
-        .MakeEnum(mk)   => decls.check_expr(mk.payload),
-        .MakeStruct(sd) => decls.check_inits(sd.inits),
+        .Call(c)        => env.check_call(c) + env.check_args(c.args),
+        .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs),
+        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
+        .Member(m)      => env.check_expr(m.obj),
+        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms),
+        .MakeEnum(mk)   => env.check_expr(mk.payload),
+        .MakeStruct(sd) => env.check_inits(sd.inits),
         _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
     }
 }
-check_stmt = (decls: [Decl], st: Stmt) i32 {
+check_stmt = (env: Env, st: Stmt) i32 {
     st.match {
-        .Let(l)    => decls.check_expr(l.value),
-        .Assign(x) => decls.check_expr(x.value),
-        .Return(r) => decls.check_expr(r),
-        .If(f)     => decls.check_expr(f.c) + decls.check_body(f.then) + decls.check_body(f.els),
-        .While(w)  => decls.check_expr(w.c) + decls.check_body(w.body)
+        .Let(l)    => env.check_expr(l.value),
+        .Assign(x) => env.check_expr(x.value),
+        .Return(r) => env.check_expr(r),
+        .If(f)     => env.check_expr(f.c) + env.check_body(f.then) + env.check_body(f.els),
+        .While(w)  => env.check_expr(w.c) + env.check_body(w.body)
     }
 }
-check_body = (decls: [Decl], body: [Stmt]) i32 {
+check_body = (env: Env, body: [Stmt]) i32 {
     acc := 0
-    body.loop((h, i, st) { acc = acc + decls.check_stmt(st) })
+    body.loop((h, i, st) { acc = acc + env.check_stmt(st) })
     acc
 }
-check_func = (decls: [Decl], f: Func) i32 { decls.check_body(f.body) }
-check_module* = (decls: [Decl]) i32 {
+check_func<A: Allocator> = (a: Ptr<A>, decls: [Decl], f: Func) i32 {
+    env := Env { vars: a.params_env(f.params), decls: decls }
+    env.check_body(f.body)
+}
+check_module*<A: Allocator> = (a: Ptr<A>, decls: [Decl]) i32 {
     acc := 0
-    decls.loop((h, i, d) { acc = acc + d.match { .DFunc(f) => decls.check_func(f), _ => 0 } })
+    decls.loop((h, i, d) { acc = acc + d.match { .DFunc(f) => a.check_func(decls, f), _ => 0 } })
     acc
 }

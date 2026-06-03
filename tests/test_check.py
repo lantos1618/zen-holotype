@@ -54,7 +54,7 @@ ARITY_DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
 { check_module } = std.check
-main* = () i32 { m := Malloc { _: 0 }\n addr(m).parse_module("%s").check_module() }
+main* = () i32 { m := Malloc { _: 0 }\n addr(m).check_module(addr(m).parse_module("%s")) }
 """
 
 
@@ -83,3 +83,20 @@ def test_check_arity_flags_wrong_count(tmp_path):
     assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }") == 1
     assert _arity_errors(tmp_path, "add* = (a: i32, b: i32) i32 { a + b }\nf* = () i32 { add(1) }\ng* = () i32 { add(1, 2, 3) }") == 2
     assert _arity_errors(tmp_path, "f* = (x: i32) i32 { putchar(x) }") == 0   # putchar unknown -> not flagged
+
+
+def test_check_arg_type_widening_ok(tmp_path):
+    # u8 -> i64 is a valid widening; passing a u8 where i64 is wanted is NOT an error
+    assert _arity_errors(tmp_path, "f* = (n: i64) i32 { 0 }\ng* = (b: u8) i32 { f(b) }") == 0
+
+
+def test_check_arg_type_narrowing_flagged(tmp_path):
+    # i64 -> u8 narrows; flagged. And an int passed where a struct is wanted is flagged.
+    assert _arity_errors(tmp_path, "f* = (n: u8) i32 { 0 }\ng* = (m: i64) i32 { f(m) }") == 1
+    assert _arity_errors(tmp_path, "Pt*: { x: i32 }\nf* = (p: Pt) i32 { 0 }\nuse* = () i32 { f(42) }") == 1
+
+
+def test_check_arg_type_uninferable_arg_is_skipped(tmp_path):
+    # `true` parses as a Var whose type the checker can't infer (void) -> SKIPPED, no false
+    # positive. (Soundness: a valid program is never rejected.)
+    assert _arity_errors(tmp_path, "f* = (b: bool) i32 { 0 }\nuse* = () i32 { f(true) }") == 0
