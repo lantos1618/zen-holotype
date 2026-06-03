@@ -697,6 +697,52 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
     inits.loop((h, i, fi) { acc = acc + env.check_expr(fi.value) })
     acc
 }
+// struct-literal validation (reject-parity): every init field must EXIST on the struct ("no field 'z'")
+// and its value must FIT the field's type ("bool ⊀ i32"). Matching the Python frontend; missing fields
+// are allowed (partial init). Only runs for a KNOWN, non-generic DStruct — an imported/generic literal
+// is skipped (sound). A polymorphic numeric literal fits any numeric field; uninferable values skip.
+no_fields = () [Field] { slice(heap(0), 0) }
+is_struct = (decls: [Decl], name: str) bool {
+    f := false
+    decls.loop((h, i, d) { f = d.match ({ .DStruct(sd) => eq(sd.name, name).match ({ true => true, false => f }), _ => f }) })
+    f
+}
+struct_fields = (decls: [Decl], name: str) [Field] {
+    found := no_fields()
+    decls.loop((h, i, d) { found = d.match ({ .DStruct(sd) => eq(sd.name, name).match ({ true => sd.fields, false => found }), _ => found }) })
+    found
+}
+has_field = (fields: [Field], fname: str) bool {
+    f := false
+    fields.loop((h, i, fl) { f = eq(fl.name, fname).match ({ true => true, false => f }) })
+    f
+}
+field_in = (fields: [Field], fname: str) Ty {
+    found := tvoid()
+    fields.loop((h, i, fl) { found = eq(fl.name, fname).match ({ true => fl.ty, false => found }) })
+    found
+}
+field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
+    fty := fields.field_in(fi.name)
+    (fi.value.is_lit_numeric() && fty.ty_rank() >= 0).match ({       // polymorphic literal -> any numeric field
+        true  => 0,
+        false => fit_err(env.infer_expr(fi.value), fty)
+    })
+}
+init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
+    fields.has_field(fi.name).match ({ true => env.field_fit_err(fields, fi), false => 1 })   // unknown field -> 1
+}
+struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc + env.init_err(fields, fi) })
+    acc
+}
+makestruct_err = (env: Env, m: MakeStructData) i32 {
+    (m.targs.len > 0).match ({
+        true  => 0,                                                  // a generic literal -> skip (lenient)
+        false => env.decls.is_struct(m.ty).match ({ true => env.struct_init_errs(env.decls.struct_fields(m.ty), m.inits), false => 0 })
+    })
+}
 // operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
 // `&& ||` needs BOOL operands — matching the Python frontend ("'+' needs numeric operands"). Sound:
 // an UNINFERABLE operand (void — e.g. a match-arm binding the partial checker can't type) is skipped,
@@ -743,7 +789,7 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Member(m)      => env.check_expr(m.obj),
         .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
-        .MakeStruct(sd) => env.check_inits(sd.inits),
+        .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
     })
 }

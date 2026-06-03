@@ -91,3 +91,17 @@ def test_operand_type_checking(tmp_path, src, want):
 ])
 def test_index_validation(tmp_path, src, want):
     assert _errors(tmp_path, src) == want
+
+
+# struct-literal validation: every init field must exist on the struct and its value must fit the
+# field type. Matching the Python frontend; missing fields are allowed (partial init). Generic/
+# imported struct literals are skipped (sound).
+@pytest.mark.parametrize("src,want", [
+    ("P*: { x: i32 }\nt* = () i32 { P{ x: (3 < 4) }.x }", 1),       # bool value for an i32 field
+    ("P*: { x: i32 }\nt* = () i32 { P{ x: 1, z: 2 }.x }", 1),       # unknown field z
+    ("P*: { x: i32 }\nt* = () i32 { P{ x: 5 }.x }", 0),             # correct -> ok
+    ("P*: { x: i32, y: i32 }\nt* = () i32 { P{ x: 1 }.x }", 0),     # missing field allowed (partial init)
+    ("P*: { b: u8 }\nt* = () i32 { P{ b: 5 }.b }", 0),              # polymorphic literal fits a u8 field
+])
+def test_struct_literal_validation(tmp_path, src, want):
+    assert _errors(tmp_path, src) == want
