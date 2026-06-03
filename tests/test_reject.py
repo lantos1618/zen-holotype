@@ -34,3 +34,19 @@ def test_checker_accepts_valid(tmp_path, src):
 ])
 def test_checker_rejects_invalid(tmp_path, src):
     assert _errors(tmp_path, src) >= 1
+
+
+@pytest.mark.parametrize("src", [
+    "f* = () i32 { x := 5\n x = \"hi\"\n x }",       # str assigned to a numeric local
+    "f* = () i32 { x := 5\n x = (3 < 4)\n x }",     # bool assigned to a numeric local
+])
+def test_checker_rejects_assignment_mismatch(tmp_path, src):
+    assert _errors(tmp_path, src) >= 1
+
+
+@pytest.mark.parametrize("src", [
+    "f* = () i32 { x := 5\n x = 99\n x }",          # polymorphic int literal -> numeric local: fine
+    "f* = () i32 { x := 5\n x = x + 1\n x }",
+])
+def test_checker_accepts_valid_assignment(tmp_path, src):
+    assert _errors(tmp_path, src) == 0
