@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, MemberData, CallData, CondData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, dforeign, mkstructg, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -190,7 +190,7 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Cond(c)      => a.cenode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
         .Call(c)      => a.cenode(call(c.fn, a.resolve_args(env.clr_exp(), c.args))),
         .Member(mm)   => a.resolve_member(env, mm),
-        .MakeStruct(sd) => a.cenode(mkstruct(sd.ty, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse into field values
+        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse, preserving the monomorphized name + type args
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.infer_expr(ix.seq).elem_of())),
         .Loop(l)      => a.resolve_loop(env, l),
         .SliceLit(sd) => a.resolve_slicelit(env, sd),
@@ -395,7 +395,7 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
         .Member(m)    => a.cenode(member(a.xform_expr(decls, m.obj, params, fargs), m.field)),
         .Arrow(ar)    => a.cenode(arrow(a.xform_expr(decls, ar.obj, params, fargs), ar.field)),
         .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.xform_expr(decls, mk.payload, params, fargs))),
-        .MakeStruct(sd) => a.cenode(mkstruct(sd.ty, a.xform_inits(decls, sd.inits, params, fargs))),
+        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, sd.inits, params, fargs))),
         .Match(m)     => a.xform_match(decls, m, params, fargs),
         .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs), a.xform_expr(decls, ix.idx, params, fargs), ix.elem)),
         .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs))),
@@ -460,7 +460,8 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Named(a) => w.match ({ .Named(b) => eq(a, b), _ => false }),
         .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),  // pointee invariant
         .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }),
-        .FnT(fa)  => false                       // a function type is a template param — never equality-checked
+        .FnT(fa)  => false,                      // a function type is a template param — never equality-checked
+        .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), _ => false })   // same instance
     })
 }
 fits* = (g: Ty, w: Ty) bool {
@@ -492,7 +493,15 @@ fit_err = (argty: Ty, pty: Ty) i32 {
     argty.is_uninferable().match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
 }
 arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
-    (i < params.len).match ({ true => fit_err(env.infer_expr(ar.addr()), params[i].ty), false => 0 })
+    // a polymorphic numeric literal (`0`, `10`) fits ANY numeric param — `0` is a valid u8/i32/i64 —
+    // so skip the narrowing check for it, mirroring ret_err's lit_to_num (the return-position rule).
+    (i < params.len).match ({
+        true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0).match ({
+            true  => 0,
+            false => fit_err(env.infer_expr(ar.addr()), params[i].ty)
+        }),
+        false => 0
+    })
 }
 arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
     acc := 0
