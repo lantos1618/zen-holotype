@@ -648,14 +648,36 @@ parse_block<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
 block_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     src.is_let_here(pos).match {
         true  => a.block_let(src, pos),
-        false => src.is_set_here(pos).match {
-            true  => a.block_set(src, pos),
-            false => src.is_while_here(pos).match {
-                true  => a.block_while(src, pos),
-                false => a.block_if(src, pos)       // remaining: an if (or malformed)
+        false => src.is_idxset_here(pos).match {
+            true  => a.block_idxset(src, pos),       // buf[i] = v  inside a loop/if body
+            false => src.is_set_here(pos).match {
+                true  => a.block_set(src, pos),
+                false => src.is_while_here(pos).match {
+                    true  => a.block_while(src, pos),
+                    false => src.is_if_here(pos).match {
+                        true  => a.block_if(src, pos),
+                        false => a.block_expr(src, pos)   // a bare expression statement (e.g. putchar(b))
+                    }
+                }
             }
         }
     }
+}
+block_idxset<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    nt   := src.scan(pos)                            // the array name
+    name := a.lexeme(src, nt.tok)
+    lb   := src.scan(nt.next)                        // '['
+    ie   := a.parse_or(src, lb.next)                 // index
+    rb   := src.scan(ie.next)                        // ']'
+    eq   := src.scan(rb.next)                        // '='
+    v    := a.parse_or(src, eq.next)                 // value
+    rest := a.parse_block(src, v.next)
+    BlockEnd { list: a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), rest.list), next: rest.next }
+}
+block_expr<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
+    e    := a.parse_or(src, pos)                     // a bare expression, evaluated for effect
+    rest := a.parse_block(src, e.next)
+    BlockEnd { list: a.scons(sexpr(e.expr), rest.list), next: rest.next }
 }
 block_if<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) BlockEnd {
     f    := a.parse_if(src, pos)
