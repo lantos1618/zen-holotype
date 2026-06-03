@@ -105,3 +105,16 @@ def test_index_validation(tmp_path, src, want):
 ])
 def test_struct_literal_validation(tmp_path, src, want):
     assert _errors(tmp_path, src) == want
+
+
+# field-access validation: `obj.field` must name a real field of obj's struct — matching the Python
+# frontend ("no field 'nope' on P"). Handles value (Member) and Ptr (Arrow) receivers; sound (an
+# uninferable receiver / enum / generic instance is skipped).
+@pytest.mark.parametrize("src,want", [
+    ("P*: { x: i32 }\nf* = (p: P) i32 { p.nope }", 1),              # bad field, value receiver
+    ("P*: { x: i32 }\nf* = (p: Ptr<P>) i32 { p.nope }", 1),         # bad field, ptr receiver
+    ("P*: { x: i32 }\nf* = (p: P) i32 { p.x }", 0),                 # valid field
+    ("P*: { x: i32 }\nf* = (p: Ptr<P>) i32 { p.x }", 0),            # valid field through a ptr
+])
+def test_field_access_validation(tmp_path, src, want):
+    assert _errors(tmp_path, src) == want
