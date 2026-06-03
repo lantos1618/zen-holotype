@@ -89,3 +89,12 @@ def test_multi_statement_match_arm_runs(tmp_path, prog, want):
 ])
 def test_logical_not_runs(tmp_path, prog, want):
     _run(tmp_path, prog, want)
+
+
+@pytest.mark.parametrize("prog,want", [
+    # /* */ block comments (single and multi-line, inline)
+    ("test* = () i32 { /* a\n block comment */ 40 + 2 }", 42),
+    ("test* = () i32 { x := 10 /* inline */ + 5\n x /* trailing */ }", 15),
+])
+def test_block_comments(tmp_path, prog, want):
+    _run(tmp_path, prog, want)
