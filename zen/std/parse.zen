@@ -13,7 +13,7 @@
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
 { Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
-{ Token, Scan, scan, byte_at } = std.lex
+{ Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
 { Malloc, heap } = std.alloc
 
 // a parse step: the expression built, and the position just past it (mirrors lex's Scan)
@@ -62,7 +62,23 @@ digit_val = (b: u8) i32 { b - '0' }
 to_int_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
     (pos < end).match ({ true => src.to_int_from(pos + 1, end, acc * 10 + src.byte_at(pos).digit_val()), false => acc })
 }
-to_int = (src: str, t: Token) i32 { src.to_int_from(t.start, t.start + t.len, 0) }
+// a hex digit's value: 0-9 directly, a-f / A-F as 10..15
+hex_val = (b: u8) i32 {
+    b.is_digit().match ({
+        true  => b - '0',
+        false => ((b >= 'a') && (b <= 'f')).match ({ true => (b - 'a') + 10, false => (b - 'A') + 10 })
+    })
+}
+hex_from = (src: str, pos: i32, end: i32, acc: i32) i32 {
+    (pos < end).match ({ true => src.hex_from(pos + 1, end, acc * 16 + src.byte_at(pos).hex_val()), false => acc })
+}
+// `0x…` is parsed base-16 (past the `0x`), otherwise decimal
+to_int = (src: str, t: Token) i32 {
+    src.is_hex_prefix(t.start).match ({
+        true  => src.hex_from(t.start + 2, t.start + t.len, 0),
+        false => src.to_int_from(t.start, t.start + t.len, 0)
+    })
+}
 
 // ── atom := base postfixed by an optional `.match { true => X, false => Y }` ───────
 // base := integer | call | identifier | '(' expr ')'
