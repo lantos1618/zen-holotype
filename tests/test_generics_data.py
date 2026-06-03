@@ -102,3 +102,33 @@ def test_plain_enum_still_works(tmp_path):
         "Sh*: Circle(i32) | Square(i32)\n"
         "area* = (s: Sh) i32 { s.match({ .Circle(r) => r, .Square(w) => w * w }) }\n"
         "test* = () i32 { area(.Square(6)) + area(.Circle(6)) }", 42)
+
+
+# Nested generics: an instance's substituted fields/payloads may name FURTHER instances, which must
+# also be discovered + substituted (transitive monomorphization, with toposort accounting for a
+# by-value generic field).
+def test_nested_generic_field(tmp_path):
+    c = emit_c_for(tmp_path, "Inner<T>: { v: T }\nOuter<T>: { i: Inner<T> }\nf* = (o: Outer<i32>) i32 { o.i.v }")
+    assert "struct Inner_i32 { int32_t v; }" in c     # the nested instance is emitted
+    assert "Inner_i32 i;" in c                          # and the field type is substituted (not Inner_T)
+
+
+def test_nested_generic_runs(tmp_path):
+    run_value(tmp_path,
+        "Inner<T>: { v: T }\nOuter<T>: { i: Inner<T> }\n"
+        "get* = (o: Outer<i32>) i32 { o.i.v }\n"
+        "test* = () i32 { get(Outer<i32>{ i: Inner<i32>{ v: 42 } }) }", 42)
+
+
+def test_generic_enum_of_generic_struct_runs(tmp_path):
+    # Opt<Box<i32>> -> the enum AND the Box<i32> it wraps both monomorphize
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nOpt<T>: Some(T) | None\n"
+        "f* = (o: Opt<Box<i32>>) i32 { o.match({ .Some(b) => b.v, .None => 0 }) }\n"
+        "test* = () i32 { f(.Some(Box<i32>{ v: 42 })) }", 42)
+
+
+def test_generic_payload_in_plain_enum(tmp_path):
+    # a NON-generic enum whose variant payload is a generic instance — discovered via the payload scan
+    c = emit_c_for(tmp_path, "Box<T>: { v: T }\nWrap*: Has(Box<i32>) | Nil\nf* = (w: Wrap) i32 { w.match({ .Has(b) => b.v, .Nil => 0 }) }")
+    assert "struct Box_i32 { int32_t v; }" in c

@@ -545,7 +545,7 @@ is_type_named = (d: Decl, name: str) bool {
     d.match ({ .DStruct(sd) => eq(sd.name, name), .DEnum(ed) => eq(ed.name, name), _ => false })
 }
 // depth contribution of a by-value type slot: 1 + the named type's depth; 0 for Ptr/primitives
-slot_depth = (decls: [Decl], t: Ty) i32 { t.match ({ .Named(n) => 1 + decls.type_depth(n), _ => 0 }) }
+slot_depth = (decls: [Decl], t: Ty) i32 { t.match ({ .Named(n) => 1 + decls.type_depth(n), .Generic(g) => 1 + decls.type_depth(g.mangled), _ => 0 }) }
 struct_depth = (decls: [Decl], sd: StructDecl) i32 {
     d := 0
     sd.fields.loop((h, i, f) { d = maxi(d, decls.slot_depth(f.ty)) })
@@ -612,11 +612,18 @@ tparam_arg = (tparams: [Param], args: [Ty], n: str, dflt: Ty) Ty {
 }
 subst_ty = (tparams: [Param], args: [Ty], t: Ty) Ty {
     t.match ({
-        .Named(n)  => tparams.tparam_arg(args, n, t),
-        .Ptr(p)    => tptr(mono_tynode(tparams.subst_ty(args, load(p)))),
-        .Slice(e)  => tslice(mono_tynode(tparams.subst_ty(args, load(e)))),
-        _          => t
+        .Named(n)   => tparams.tparam_arg(args, n, t),
+        .Ptr(p)     => tptr(mono_tynode(tparams.subst_ty(args, load(p)))),
+        .Slice(e)   => tslice(mono_tynode(tparams.subst_ty(args, load(e)))),
+        .Generic(g) => tparams.subst_generic(args, g),   // a nested generic field: substitute its args, re-mangle
+        _           => t
     })
+}
+// substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
+subst_generic = (tparams: [Param], args: [Ty], g: GenericData) Ty {
+    buf := mono_tybuf(g.args.len)
+    g.args.loop((h, i, a) { buf[i] = tparams.subst_ty(args, a) })
+    tgeneric(g.name, buf, mangle_str(g.name, buf))
 }
 // the concrete StructDecl for one instance: the matching DGenStruct's fields, tparam→arg substituted.
 mono_struct = (decls: [Decl], g: GenericData) Decl {
@@ -673,6 +680,7 @@ collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
 collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
     d.match ({
         .DStruct(sd) => buf.collect_flds(cnt, sd.fields),
+        .DEnum(ed)   => buf.collect_pays(cnt, ed.variants),   // a generic instance can hide in a variant payload
         .DFunc(f)    => buf.collect_func(cnt, f),
         _            => cnt
     })
@@ -680,6 +688,11 @@ collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
 collect_flds = (buf: [GenericData], cnt: i32, fields: [Field]) i32 {
     c := cnt
     fields.loop((h, i, f) { c = buf.collect_ty(c, f.ty) })
+    c
+}
+collect_pays = (buf: [GenericData], cnt: i32, variants: [VariantDef]) i32 {
+    c := cnt
+    variants.loop((h, i, v) { c = buf.collect_ty(c, v.payload) })
     c
 }
 collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
@@ -697,13 +710,24 @@ collect_insts = (decls: [Decl]) GBufEnd {
 is_gen_struct = (d: Decl) bool { d.match ({ .DGenStruct(g) => true, _ => false }) }
 is_gen_enum = (d: Decl) bool { d.match ({ .DGenEnum(g) => true, _ => false }) }
 is_gen_template = (d: Decl) bool { d.is_gen_struct() || d.is_gen_enum() }
+// transitive discovery: an instance's CONCRETE form (substituted fields/payloads) may name FURTHER
+// instances (`Outer<i32>` has field `Inner<i32>`). Walk the growing list — for each, collect the
+// generics inside its monomorphized decl — until no new ones appear (collect_ty dedups by mangled).
+expand_one = (decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
+    nc := buf.collect_decl(count, decls.mono_inst(buf[i]))
+    decls.expand_insts(buf, nc, i + 1)
+}
+expand_insts = (decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
+    (i >= count).match ({ true => count, false => decls.expand_one(buf, count, i) })
+}
 // monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
 monomorphize* = (decls: [Decl]) [Decl] {
     ce  := decls.collect_insts()
-    out := mono_dbuf(decls.len + ce.count)
+    cnt := decls.expand_insts(ce.buf, ce.count, 0)   // transitively close over nested generic instances
+    out := mono_dbuf(decls.len + cnt)
     k   := 0
     decls.loop((h, i, d) { k = d.is_gen_template().match ({ true => k, false => out.put_decl(k, d) }) })
-    ce.buf.loop((h, i, g) { k = (i < ce.count).match ({ true => out.put_decl(k, decls.mono_inst(g)), false => k }) })
+    ce.buf.loop((h, i, g) { k = (i < cnt).match ({ true => out.put_decl(k, decls.mono_inst(g)), false => k }) })
     slice(out.ptr, k)
 }
 put_decl = (out: [Decl], k: i32, d: Decl) i32 {
