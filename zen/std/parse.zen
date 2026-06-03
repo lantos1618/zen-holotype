@@ -902,7 +902,7 @@ build_body = (a: Ptr<Malloc>, src: str, pos: i32) [Stmt] {
 // compiler's own source must avoid it (this file is read by the toolchain it describes).
 no_params = (a: Ptr<Malloc>) [Param] { slice(heap(0), 0) }
 parse_fn* = (a: Ptr<Malloc>, src: str, fname: str) Func {
-    Func { name: fname, params: a.no_params(), ret: ti32(), body: a.build_body(src, 0) }
+    Func { name: fname, params: a.no_params(), ret: ti32(), tparams: a.no_params(), body: a.build_body(src, 0) }
 }
 
 // ── type tokens ──────────────────────────────────────────────────────────────────
@@ -1078,18 +1078,19 @@ no_body = (a: Ptr<Malloc>) [Stmt] { slice(heap(0), 0) }   // an empty [Stmt] for
 parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)                              // the function name
     name   := a.lexeme(src, nt.tok)
+    tp     := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (a generic fn)
     buf    := a.param_buf()
     pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)   // params + pos past ')'
     rt     := a.parse_ty(src, pe.next)                  // return type + pos just past it
     params := buf.take_params(pe.count)
     src.is_lbrace(src.scan(rt.next).tok).match ({       // a '{' here → a body; otherwise foreign
-        true  => a.parse_fn_body(src, name, params, rt.ty, src.skip_to_brace(rt.next)),
-        false => DeclEnd { func: Func { name: name, params: params, ret: rt.ty, body: a.no_body() },
+        true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next)),
+        false => DeclEnd { func: Func { name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body() },
                            next: rt.next, foreign: true }
     })
 }
-parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], ret: Ty, bstart: i32) DeclEnd {
-    func := Func { name: name, params: params, ret: ret, body: a.build_body(src, bstart) }
+parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], tparams: [Param], ret: Ty, bstart: i32) DeclEnd {
+    func := Func { name: name, params: params, ret: ret, tparams: tparams, body: a.build_body(src, bstart) }
     DeclEnd { func: func, next: src.skip_block(bstart), foreign: false }
 }
 parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }

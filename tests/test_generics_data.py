@@ -150,3 +150,37 @@ def test_literal_only_inline(tmp_path):
 def test_literal_in_match_arm(tmp_path):
     run_value(tmp_path,
         "Box<T>: { v: T }\ntest* = () i32 { (3 < 4).match({ true => Box<i32>{ v: 42 }.v, false => 0 }) }", 42)
+
+
+# Generic FUNCTIONS (Slice 3, consumer subset): a function with type params `get<T>` is inlined at
+# each call (like an FnT template), so `T` erases — no standalone `get` emitted, no `Box_T` leak.
+# Handles functions that CONSUME generic values (read fields, return T, T-typed locals).
+def test_generic_consumer_fn_runs(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nget<T> = (b: Box<T>) i32 { b.v }\n"
+        "test* = () i32 { get(Box<i32>{ v: 42 }) }", 42)
+
+
+def test_generic_fn_at_two_types(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nget<T> = (b: Box<T>) i32 { b.v }\n"
+        "test* = () i32 { get(Box<i32>{ v: 40 }) + get(Box<u8>{ v: 2 }) }", 42)
+
+
+def test_generic_fn_returns_t(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nfetch<T> = (b: Box<T>) T { b.v }\n"
+        "test* = () i32 { fetch(Box<i32>{ v: 42 }) }", 42)
+
+
+def test_generic_fn_t_typed_local(tmp_path):
+    run_value(tmp_path,
+        "Box<T>: { v: T }\ndbl<T> = (b: Box<T>) i32 { x := b.v\n x + x }\n"
+        "test* = () i32 { dbl(Box<i32>{ v: 21 }) }", 42)
+
+
+def test_generic_fn_not_emitted_standalone(tmp_path):
+    # the template itself is inlined, never emitted -> no `int32_t get(` and no Box_T leak
+    c = emit_c_for(tmp_path, "Box<T>: { v: T }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 { get(Box<i32>{ v: 1 }) }")
+    assert "Box_T" not in c
+    assert "get(" not in c
