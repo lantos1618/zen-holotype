@@ -1139,28 +1139,15 @@ skip_import = (src: str, pos: i32) i32 {                // pos at '{'
     src.skip_path(eq.next)                              // past the module path
 }
 
-// `@emit(expr)` runs a comptime (Ast -> Ast) generator and splices the decl it returns. The
-// self-hosted frontend has no comptime evaluator, so it PARSES the form (over its parenthesized
-// expression) and skips it — reading the surface without producing the generated decl.
-decl_is_emit = (src: str, pos: i32) bool {
-    sc := src.scan(pos)
-    src.is_at(sc.tok).match ({ true => src.tok_eq(src.scan(sc.next).tok, "emit"), false => false })
-}
-skip_emit = (a: Ptr<Malloc>, src: str, pos: i32) i32 {
-    lp := src.skip_to_lparen(pos)                       // past `@emit (`
-    e  := a.parse_or(src, lp)                           // the comptime expression (parsed, discarded)
-    src.scan(e.next).next                               // past the closing `)`
-}
+// metaprogramming in Zen is done as ordinary VALUES, not a pragma: a generator is a function that
+// builds AST and returns it (see std.ast), emitted by genModule. (There is no `@emit` special form.)
 fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,
         _    => src.decl_is_import(pos).match ({
             true  => a.fill_decls(src, src.skip_import(pos), buf, i),   // skip an import, add no decl
-            false => src.decl_is_emit(pos).match ({
-                true  => a.fill_decls(src, a.skip_emit(src, pos), buf, i),  // skip an @emit (not evaluated)
-                false => a.fill_decl(src, pos, buf, i)
-            })
+            false => a.fill_decl(src, pos, buf, i)
         })
     })
 }

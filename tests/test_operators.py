@@ -64,13 +64,3 @@ def test_block_comments(tmp_path, prog, want):
 ])
 def test_hex_literals(tmp_path, prog, want):
     run_value(tmp_path, prog, want)
-
-
-@pytest.mark.parametrize("prog,want", [
-    # @emit(expr) is a comptime decl generator; the self-hosted frontend has no comptime
-    # evaluator, so it PARSES the form and skips it (surrounding decls are unaffected).
-    ("inc* = (n: i32) i32 { n + 1 }\n@emit(gen(reflect(Point)))\ntest* = () i32 { inc(41) }", 42),
-    ("@emit(foo(bar))\ntest* = () i32 { 7 }", 7),
-])
-def test_emit_form_parses_and_is_skipped(tmp_path, prog, want):
-    run_value(tmp_path, prog, want)
