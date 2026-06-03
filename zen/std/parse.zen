@@ -1133,15 +1133,44 @@ fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
-// a top-level decl is a struct (`name: { … }`), an enum (`name: A | B`), or a function
+// a top-level decl is an impl block (`Type.impl(Trait) { … }`), a struct (`name: { … }`),
+// an enum (`name: A | B`), or a function.
+decl_is_impl = (src: str, pos: i32) bool {              // `Name.impl(` — a method-providing block
+    nt  := src.scan(pos)                                // the type name
+    dot := src.scan(nt.next)                            // '.'
+    src.is_dot(dot.tok).match ({ true => src.tok_eq(src.scan(dot.next).tok, "impl"), false => false })
+}
 fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
-    src.decl_is_struct(pos).match ({
-        true  => a.fill_struct(src, pos, buf, i),
-        false => src.decl_is_enum(pos).match ({
-            true  => a.fill_enum(src, pos, buf, i),
-            false => a.fill_func(src, pos, buf, i)
+    src.decl_is_impl(pos).match ({
+        true  => a.fill_impl(src, pos, buf, i),
+        false => src.decl_is_struct(pos).match ({
+            true  => a.fill_struct(src, pos, buf, i),
+            false => src.decl_is_enum(pos).match ({
+                true  => a.fill_enum(src, pos, buf, i),
+                false => a.fill_func(src, pos, buf, i)
+            })
         })
     })
+}
+// `Type.impl(Trait) { m1 = (…){…}  m2 = (…){…} }` — the methods become ordinary top-level
+// functions (named by the method name), so a UFCS call `x.m1(a)` -> `m1(x, a)` resolves to one.
+// (Monomorphic static dispatch: one impl per method name. The `Type.impl(Trait)` header is skipped.)
+fill_impl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    bstart := src.skip_to_brace(pos)                    // past the impl block's opening '{'
+    pe := a.fill_impl_methods(src, bstart, buf, i)
+    a.fill_decls(src, pe.next, buf, pe.count)
+}
+fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match ({
+        true  => PEnd { count: i, next: sc.next },      // '}' ends the impl block
+        false => a.fill_impl_one(src, pos, buf, i)
+    })
+}
+fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) PEnd {
+    de := a.parse_decl_at(src, pos)                     // one method is just a function decl
+    buf[i] = dfunc(de.func)
+    a.fill_impl_methods(src, de.next, buf, i + 1)
 }
 fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)
