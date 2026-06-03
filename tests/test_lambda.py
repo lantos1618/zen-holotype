@@ -41,6 +41,15 @@ def _sexpr(tmp_path, expr):
 
 
 @pytest.mark.parametrize("expr,want", [
+    # slice literals `[a, b, c]` now parse in expression position (Phase 2)
+    ("[1, 2, 3]",              "?"),     # gen_sexpr renders a SliceLit as `?` (no dedicated form)
+    ("f([1, 2], x)",           "(f ? x)"),
+])
+def test_slice_literal_parses(tmp_path, expr, want):
+    assert _sexpr(tmp_path, expr) == want
+
+
+@pytest.mark.parametrize("expr,want", [
     ("(n) { n + 1 }",          "(lambda n)"),
     ("(acc, x) { acc + x }",   "(lambda acc x)"),
     ("(a, b, c) { a }",        "(lambda a b c)"),
@@ -121,6 +130,15 @@ def _compile_module(tmp_path, prog):
     # a multi-statement template body, with the lambda spliced inside it
     ("withtmp* = (f: (i32) i32, x: i32) i32 { y := x + 1\n f(y) }\n"
      "test* = () i32 { withtmp((n) { n * 10 }, 4) }", 50),
+    # the iconic one: fold over a slice literal with a closure (template body has a .loop
+    # that calls the FnT param; the lambda splices inside it)
+    ("fold* = (xs: [i32], init: i32, f: (i32, i32) i32) i32 {\n"
+     "    acc := init\n    xs.loop((h, i, x) { acc = f(acc, x) })\n    acc\n}\n"
+     "test* = () i32 { fold([1, 2, 3, 4], 0, (acc, x) { acc + x }) }", 10),
+    # fold with a different combiner (product)
+    ("fold* = (xs: [i32], init: i32, f: (i32, i32) i32) i32 {\n"
+     "    acc := init\n    xs.loop((h, i, x) { acc = f(acc, x) })\n    acc\n}\n"
+     "test* = () i32 { fold([1, 2, 3, 4], 1, (acc, x) { acc * x }) }", 24),
 ])
 def test_lambda_runs(tmp_path, prog, want):
     emitted = _compile_module(tmp_path, prog)

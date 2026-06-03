@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, block, is_fnt, has_fnt_param, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -171,8 +171,17 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .MakeStruct(sd) => a.cenode(mkstruct(sd.ty, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse into field values
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.infer_expr(ix.seq).elem_of())),
         .Loop(l)      => a.resolve_loop(env, l),
+        .SliceLit(sd) => a.resolve_slicelit(env, sd),
         _             => e                            // Int/Var/StrLit/Arrow: unchanged
     })
+}
+// `[a, b, c]` — fill the element type from the first item (the parser leaves it void), and
+// resolve each item. An empty literal `[]` keeps a void element (nothing to infer from).
+sl_elem = (env: Env, items: [Expr]) Ty {
+    (items.len == 0).match ({ true => tvoid(), false => env.infer_expr(items[0].addr()) })
+}
+resolve_slicelit = (a: Ptr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
+    a.cenode(slit(env.sl_elem(sd.items), a.resolve_args(env.clr_exp(), sd.items)))
 }
 // a foreach loop: infer the element type from the sequence, then resolve the body with the
 // loop variables (index i: i32, element x: elemTy) added to the environment.
@@ -348,7 +357,8 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
         .Match(m)     => a.xform_match(decls, m, params, fargs),
         .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs), a.xform_expr(decls, ix.idx, params, fargs), ix.elem)),
         .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs))),
-        _             => e                            // Int/StrLit/Tag/SliceLit/Lambda/Block: no params inside
+        .SliceLit(sd) => a.cenode(slit(sd.elem, a.xform_args(decls, sd.items, params, fargs))),
+        _             => e                            // Int/StrLit/Tag/Lambda/Block: no params inside
     })
 }
 xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr]) Stmt {
