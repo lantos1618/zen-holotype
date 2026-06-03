@@ -95,6 +95,15 @@ has_fnt_param* = (ps: [Param]) bool {
     found
 }
 is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.params.has_fnt_param(), _ => false }) }
+// a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no
+// runtime representation in the monomorphic/inline model — the impl methods are plain functions —
+// so genModule skips it, exactly like a template function.
+struct_is_trait = (sd: StructDecl) bool {
+    found := false
+    sd.fields.loop((h, i, f) { found = f.ty.is_fnt().match ({ true => true, false => found }) })
+    found
+}
+is_trait* = (d: Decl) bool { d.match ({ .DStruct(sd) => sd.struct_is_trait(), _ => false }) }
 fntype* = (params: [Ty], ret: Ptr<Ty>) Ty { .FnT(FnTData { params: params, ret: ret }) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
@@ -423,12 +432,13 @@ gen_enum* = (s: String, ed: EnumDecl) String {
 
 // forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
 gen_fwd = (s: String, d: Decl) String {
+    d.is_trait().match ({ true => s, false =>            // a trait struct has no runtime form — skip
     d.match ({
         .DStruct(sd) => s.append("typedef struct ").append(sd.name).append(" ").append(sd.name).append("; "),
         .DEnum(ed)   => s.append("typedef struct ").append(ed.name).append(" ").append(ed.name).append("; "),
         .DFunc(f)    => s,
         .DRaw(c)     => s
-    })
+    }) })
 }
 
 // emit a top-level declaration (a function, a struct, an enum, or verbatim C)
@@ -484,7 +494,7 @@ gen_types_at = (s: String, decls: [Decl], k: i32) String {
     out := s
     decls.loop((h, i, d) {
         out = d.match ({
-            .DStruct(sd) => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }),
+            .DStruct(sd) => d.is_trait().match ({ true => out, false => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }) }),
             .DEnum(ed)   => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }),
             _            => out
         })

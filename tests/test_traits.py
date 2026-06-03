@@ -67,3 +67,15 @@ def _run(tmp_path, prog, want):
 ])
 def test_impl_method_runs(tmp_path, prog, want):
     _run(tmp_path, prog, want)
+
+
+@pytest.mark.parametrize("prog,want", [
+    # a DECLARED trait (`Show*: { render: (Ptr<Self>) R }`) — parses but is skipped from codegen
+    # (no runtime form); the impl provides the method, called via UFCS.
+    ("Show*: { render: (Ptr<Self>) i32 }\n"
+     "Point*: { x: i32, y: i32 }\n"
+     "Point.impl(Show) { render = (p: Ptr<Point>) i32 { p.x * 10 + p.y } }\n"
+     "test* = () i32 { p := Point { x: 4, y: 2 }\n p.addr().render() }", 42),
+])
+def test_declared_trait_with_impl_runs(tmp_path, prog, want):
+    _run(tmp_path, prog, want)
