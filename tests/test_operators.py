@@ -98,3 +98,13 @@ def test_logical_not_runs(tmp_path, prog, want):
 ])
 def test_block_comments(tmp_path, prog, want):
     _run(tmp_path, prog, want)
+
+
+@pytest.mark.parametrize("prog,want", [
+    ("test* = () i32 { 0x2a }", 42),
+    ("test* = () i32 { 0xFF }", 255),
+    ("test* = () i32 { 0x10 + 0x0a }", 26),
+    ("test* = () i32 { 255 }", 255),     # decimal still works
+])
+def test_hex_literals(tmp_path, prog, want):
+    _run(tmp_path, prog, want)

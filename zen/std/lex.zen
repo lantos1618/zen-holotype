@@ -22,6 +22,7 @@ Scan*:  { tok: Token, next: i32 }                  // one scan step: the token +
 
 // ── byte classes ──────────────────────────────────────────────────────────────
 is_digit* = (b: u8) bool { (b >= '0') && (b <= '9') }
+is_hex*   = (b: u8) bool { b.is_digit() || ((b >= 'a') && (b <= 'f')) || ((b >= 'A') && (b <= 'F')) }
 is_alpha* = (b: u8) bool { ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_') }
 is_alnum* = (b: u8) bool { b.is_alpha() || b.is_digit() }
 is_space* = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r') }
@@ -56,6 +57,10 @@ skip = (src: str, pos: i32) i32 {
 // ── span ends: advance while the class holds ───────────────────────────────────
 ident_end = (src: str, pos: i32) i32 { src.byte_at(pos).is_alnum().match ({ true => src.ident_end(pos + 1), false => pos }) }
 int_end   = (src: str, pos: i32) i32 { src.byte_at(pos).is_digit().match ({ true => src.int_end(pos + 1), false => pos }) }
+hex_end   = (src: str, pos: i32) i32 { src.byte_at(pos).is_hex().match ({ true => src.hex_end(pos + 1), false => pos }) }
+// a number span from its first digit: `0x…` runs over hex digits, otherwise decimal digits.
+is_hex_prefix* = (src: str, pos: i32) bool { (src.byte_at(pos) == '0') && ((src.byte_at(pos + 1) == 'x') || (src.byte_at(pos + 1) == 'X')) }
+num_end   = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.hex_end(pos + 2), false => src.int_end(pos + 1) }) }
 str_end   = (src: str, pos: i32) i32 {                 // pos just past the opening quote
     b := src.byte_at(pos)
     (b == '\0').match ({
@@ -99,7 +104,7 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
     b.is_alpha().match ({
         true  => mk(.Ident(), pos, src.ident_end(pos + 1)),
         false => b.is_digit().match ({
-            true  => mk(.Int(), pos, src.int_end(pos + 1)),
+            true  => mk(.Int(), pos, src.num_end(pos)),
             false => (b == '"').match ({
                 true  => mk(.Str(), pos, src.str_end(pos + 1)),
                 false => (b == '\'').match ({
