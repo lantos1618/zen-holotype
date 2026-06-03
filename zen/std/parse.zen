@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, dimpl, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, fntype, block, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
 { Malloc, heap } = std.alloc
 
@@ -1008,16 +1008,27 @@ skip_block_d = (src: str, pos: i32, depth: i32) i32 {
 // The leading Ident is the name; the typed parameter list parses into a heap [Param]; the
 // return-type token (after `)`) maps via ty_of; the brace body is parsed. parse_decl_at
 // also reports where the decl ENDS (past `}`), so a module can parse the next one.
-DeclEnd*: { func: Func, next: i32 }
+// `foreign` is true when the decl has NO body — `name = (params) RetType` with no `{ … }` after
+// the return type, a foreign binding (libc etc.). It becomes a DForeign (a C prototype) instead
+// of a DFunc, and `next` resumes at the next decl (NOT past a brace it doesn't have).
+DeclEnd*: { func: Func, next: i32, foreign: bool }
+no_body = (a: Ptr<Malloc>) [Stmt] { slice(heap(0), 0) }   // an empty [Stmt] for a bodyless decl
 parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)                              // the function name
     name   := a.lexeme(src, nt.tok)
     buf    := a.param_buf()
     pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)   // params + pos past ')'
-    bstart := src.skip_to_brace(pe.next)                // pos just past '{'
-    func   := Func { name: name, params: buf.take_params(pe.count), ret: a.parse_ty(src, pe.next).ty,
-                     body: a.build_body(src, bstart) }
-    DeclEnd { func: func, next: src.skip_block(bstart) }
+    rt     := a.parse_ty(src, pe.next)                  // return type + pos just past it
+    params := buf.take_params(pe.count)
+    src.is_lbrace(src.scan(rt.next).tok).match ({       // a '{' here → a body; otherwise foreign
+        true  => a.parse_fn_body(src, name, params, rt.ty, src.skip_to_brace(rt.next)),
+        false => DeclEnd { func: Func { name: name, params: params, ret: rt.ty, body: a.no_body() },
+                           next: rt.next, foreign: true }
+    })
+}
+parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], ret: Ty, bstart: i32) DeclEnd {
+    func := Func { name: name, params: params, ret: ret, body: a.build_body(src, bstart) }
+    DeclEnd { func: func, next: src.skip_block(bstart), foreign: false }
 }
 parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 
@@ -1210,7 +1221,7 @@ fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 }
 fill_func = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     de := a.parse_decl_at(src, pos)
-    buf[i] = dfunc(de.func)
+    buf[i] = de.foreign.match ({ true => dforeign(de.func), false => dfunc(de.func) })
     a.fill_decls(src, de.next, buf, i + 1)
 }
 fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {

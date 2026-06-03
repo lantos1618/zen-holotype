@@ -75,7 +75,10 @@ EnumDecl*: { name: str, variants: [VariantDef] }
 // functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
 // verify conformance (every method the Trait declares is one this impl provides). genModule skips it.
 ImplData*: { ty: str, trname: str, methods: [Param] }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData)   // DRaw = verbatim C escape
+// DForeign is a function DECLARATION with no body — a foreign binding like `malloc = (n: i64) …`.
+// It's emitted as a C prototype `ret name(params);` (the definition comes from libc / another TU),
+// so genModule emits its signature but no body, and the checker knows its full signature.
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -143,6 +146,7 @@ edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl { name: nm, variants: vs
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
+dforeign* = (f: Func) Decl { .DForeign(f) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
@@ -407,7 +411,7 @@ gen_func* = (s: String, f: Func) String { s.gen_sig(f).append(" ").gen_block(f.b
 gen_proto = (s: String, d: Decl) String {
     d.is_template().match ({                            // templates are inlined, never emitted
         true  => s,
-        false => d.match ({ .DFunc(f) => s.gen_sig(f).append("; "), _ => s })
+        false => d.match ({ .DFunc(f) => s.gen_sig(f).append("; "), .DForeign(f) => s.gen_sig(f).append("; "), _ => s })
     })
 }
 
@@ -450,7 +454,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DEnum(ed)   => s.append("typedef struct ").append(ed.name).append(" ").append(ed.name).append("; "),
         .DFunc(f)    => s,
         .DRaw(c)     => s,
-        .DImpl(im)   => s
+        .DImpl(im)   => s,
+        .DForeign(f) => s
     }) })
 }
 
@@ -461,7 +466,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DStruct(sd) => s.gen_struct(sd),
         .DEnum(ed)   => s.gen_enum(ed),
         .DRaw(c)     => s.append(c),                    // verbatim — SIMD attrs/pragmas/intrinsics
-        .DImpl(im)   => s                               // an impl record — no runtime form (methods are DFuncs)
+        .DImpl(im)   => s,                              // an impl record — no runtime form (methods are DFuncs)
+        .DForeign(f) => s                               // a foreign decl — only a prototype (gen_proto), no body
     })
 }
 
