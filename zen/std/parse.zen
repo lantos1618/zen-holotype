@@ -12,7 +12,7 @@
 // receiver of the scan/byte helpers; the allocator as the receiver of the builders.
 //   addr(Malloc{_:0}).eval_str("(1+2)*3")  ==  9
 
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, index, slit, slet, sassign, sidxset, swhile, sif, sret, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, FieldInit, VariantDef, EnumDecl, ArmData, lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, index, slit, slet, sassign, sidxset, swhile, sif, sret, sexpr, param, field, sdef, vdef, edef, dfunc, dstruct, denum, ti32, ti64, tu8, tbool, tstr, tvoid, tnamed, tptr, tslice } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Allocator } = std.alloc
 
@@ -520,9 +520,18 @@ parse_let_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     v    := a.parse_or(src, at.next)        // value (full expression, incl. comparison)
     a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
 }
+// the final expression of a body is its return; a non-final expression (something else
+// follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
+at_body_end = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match { .Eof => true, _ => src.is_rbrace(sc.tok) }
+}
 parse_ret_stmt<A: Allocator> = (a: Ptr<A>, src: str, pos: i32) Ptr<SList> {
     r := a.parse_or(src, pos)
-    a.scons(sret(r.expr), a.snil())
+    src.at_body_end(r.next).match {
+        true  => a.scons(sret(r.expr), a.snil()),                      // final expression -> return
+        false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next))    // a bare expr statement
+    }
 }
 
 // ── @while loops ─────────────────────────────────────────────────────────────────

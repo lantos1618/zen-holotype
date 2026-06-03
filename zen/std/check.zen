@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, index, slet, sassign, sret, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, ArmData, MatchData, LetData, MemberData, CallData, bin, cond, call, member, ematch, ematchp, mkenum, mktag, arm, index, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, dfunc, ti32, tbool, tstr, tnamed, tvoid } = std.genc
 { Allocator } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -177,6 +177,7 @@ resolve_stmt<A: Allocator> = (a: Ptr<A>, env: Env, st: Stmt) Stmt {
         .Let(l)    => slet(l.name, a.resolve_expr(env, l.value)),
         .Assign(x) => sassign(x.name, a.resolve_expr(env, x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),
+        .ExprStmt(e) => sexpr(a.resolve_expr(env, e)),
         .If(f)     => sif(a.resolve_expr(env, f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env, w.c), a.resolve_body(env, w.body)),
         .IndexSet(x) => sidxset(a.resolve_expr(env, x.seq), a.resolve_expr(env, x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env, x.value))
@@ -317,6 +318,7 @@ check_stmt = (env: Env, st: Stmt) i32 {
         .Let(l)    => env.check_expr(l.value),
         .Assign(x) => env.check_expr(x.value),
         .Return(r) => env.check_expr(r),
+        .ExprStmt(e) => env.check_expr(e),
         .If(f)     => env.check_expr(f.c) + env.check_body(f.then) + env.check_body(f.els),
         .While(w)  => env.check_expr(w.c) + env.check_body(w.body),
         .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value)
