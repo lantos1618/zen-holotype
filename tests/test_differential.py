@@ -51,3 +51,17 @@ def test_no_divergence(src):
 def test_self_hosted_rejects(src):
     from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
+
+
+# Integer/literal match `(n).match({ 0 => …, 1 => …, _ => … })` — lowers to an equality-cond chain.
+# Was: 3+ arms crashed the parser, 2-arm non-zero labels were silently mis-evaluated.
+@pytest.mark.parametrize("src,want", [
+    ("test* = () i32 { (2).match({ 0 => 10, 1 => 11, 2 => 12, _ => 99 }) }", 12),   # 4 arms (was SIGSEGV)
+    ("test* = () i32 { (1).match({ 0 => 10, 1 => 11, _ => 20 }) }", 11),            # 3 arms (was rejected)
+    ("test* = () i32 { (1).match({ 1 => 100, _ => 200 }) }", 100),                  # 2-arm non-zero (was 200)
+    ("test* = () i32 { (9).match({ 0 => 10, 1 => 11, _ => 20 }) }", 20),            # default arm
+    ("test* = () i32 { (3).match({ 0=>0, 1=>10, 2=>20, 3=>30, _=>99 }) }", 30),     # 5 arms
+])
+def test_integer_match(src, want):
+    from _difftest import self_side
+    assert self_side(src)["value"] == want
