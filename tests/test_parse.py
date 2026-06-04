@@ -15,7 +15,7 @@ from zen.main import (load, build_namespace, build_scopes, resolve, fold_comptim
 
 def eval_str(tmp_path, expr):
     src = ('{ Malloc } = std.alloc\n{ eval_str } = std.parse\n'
-           'main* = () i32 { m := Malloc { _: 0 }\n addr(m).eval_str("%s") }\n' % expr)
+           'main* = () i64 { m := Malloc { _: 0 }\n addr(m).eval_str("%s") }\n' % expr)   # eval_str is i64 (i64 literals)
     (tmp_path / "main.zen").write_text(src)
     files = load(tmp_path)
     namespace = build_namespace(files)
