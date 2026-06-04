@@ -50,7 +50,7 @@ BlockData*: { stmts: [Stmt] }
 // `Byte` is an integer literal that came from a CHAR literal `'a'` — emitted exactly like Int
 // (its byte value), but typed `u8` by the checker (a char is a byte, so `is_op(t, '+')` passing
 // it to a u8 param doesn't read as an i32->u8 narrowing).
-Expr*: Int(i32) | Byte(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
+Expr*: Int(i64) | Byte(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
      | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
@@ -104,7 +104,7 @@ Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(I
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
-lit* = (n: i32) Expr { .Int(n) }
+lit* = (n: i64) Expr { .Int(n) }
 byte_lit* = (n: i32) Expr { .Byte(n) }   // a char literal's byte value (typed u8 by the checker)
 vref* = (nm: str) Expr { .Var(VarData { name: nm }) }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData { op: op, lhs: l, rhs: r }) }
@@ -201,9 +201,11 @@ draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an a
                                                         // pragma, intrinsic decl, anything
 
 // ── int -> decimal digits (byte access, no view/slice — so genc.zen self-hosts) ────────
-sbyte = (v: str, i: i32) u8 { load(offset(v, i)) }
-digit = (d: i32) u8 { sbyte("0123456789", d) }
-gen_int = (s: String, n: i32) String {
+sbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+digit = (d: i64) u8 { sbyte("0123456789", d) }
+gen_int = (s: String, n: i64) String {
+    (n < 0).match ({ true => s.append("-").gen_int(0 - n), false => s.gen_int_nat(n) }) }
+gen_int_nat = (s: String, n: i64) String {
     (n < 10).match ({
         true  => s.push(digit(n)),
         false => s.gen_int(n / 10).push(digit(n % 10))
