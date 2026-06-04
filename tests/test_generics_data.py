@@ -8,7 +8,7 @@ toolchain: source -> parse -> resolve -> genModule -> C -> compile -> run.
 """
 import pytest
 
-from _selfhost import run_value, emit_c_for
+from _selfhost import run_value, emit_c_for, check_errors
 
 
 def test_generic_struct_runs(tmp_path):
@@ -241,3 +241,16 @@ def test_nested_generic_literal_runs(tmp_path):
     run_value(tmp_path,
         "Box<T>: { v: T }\nf* = (b: Box<Box<i32>>) i32 { b.v.v }\n"
         "test* = () i32 { f(Box<Box<i32>>{ v: Box<i32>{ v: 42 } }) }", 42)
+
+
+# Checker correctness on generic args (bug-hunt #12/#13): the self-hosted checker must ACCEPT a
+# generic literal / bare constructor passed where a generic type is expected (its codegen runs it),
+# and still REJECT a mismatched instance. (check_errors == 0 means accepted.)
+def test_checker_accepts_generic_struct_literal_arg(tmp_path):
+    assert check_errors(tmp_path, "Box<T>: { v: T }\ng* = (b: Box<i32>) i32 { b.v }\ntest* = () i32 { g(Box<i32>{ v: 42 }) }") == 0
+
+def test_checker_accepts_bare_ctor_to_generic_enum(tmp_path):
+    assert check_errors(tmp_path, "E<T>: A(T)\nf* = (o: E<i32>) i32 { o.match({ .A(x)=>x }) }\ntest* = () i32 { f(.A(42)) }") == 0
+
+def test_checker_rejects_mismatched_generic_arg(tmp_path):
+    assert check_errors(tmp_path, "Box<T>: { v: T }\ng* = (b: Box<i32>) i32 { b.v }\ntest* = () i32 { g(Box<u8>{ v: 1 }) }") >= 1

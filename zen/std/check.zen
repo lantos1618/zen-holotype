@@ -156,6 +156,7 @@ is_lit_numeric = (e: Ptr<Expr>) bool {
 cond_ty = (env: Env, d: CondData) Ty {
     d.t.is_lit_numeric().match ({ true => env.infer_expr(d.e), false => env.infer_expr(d.t) })
 }
+ctor_ty = (env: Env, ename: str, variant: str) Ty { eq(ename, "").match ({ true => tnamed(env.decls.enum_of_variant(variant)), false => tnamed(ename) }) }
 infer_expr = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
@@ -165,9 +166,9 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),
-        .MakeEnum(mk)  => tnamed(env.decls.enum_of_variant(mk.variant)),
-        .Tag(t)        => tnamed(env.decls.enum_of_variant(t.variant)),
-        .MakeStruct(s) => tnamed(s.ty),
+        .MakeEnum(mk)  => env.ctor_ty(mk.ty, mk.variant),
+        .Tag(t)        => env.ctor_ty(t.ty, t.variant),
+        .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
@@ -592,11 +593,11 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Bool     => w.match ({ .Bool => true, _ => false }),
         .Void     => w.match ({ .Void => true, _ => false }),
         .Str      => w.match ({ .Str => true, _ => false }),
-        .Named(a) => w.match ({ .Named(b) => eq(a, b), _ => false }),
+        .Named(a) => w.match ({ .Named(b) => eq(a, b), .Generic(gb) => eq(a, gb.mangled), _ => false }),
         .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),  // pointee invariant
         .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }),
         .FnT(fa)  => false,                      // a function type is a template param — never equality-checked
-        .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), _ => false })   // same instance
+        .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), .Named(b) => eq(ga.mangled, b), _ => false })   // same instance
     })
 }
 fits* = (g: Ty, w: Ty) bool {
