@@ -189,7 +189,19 @@ is_field_at = (src: str, pos: i32) bool {
     dot := src.scan(pos)
     src.is_dot(dot.tok).match ({ true => is_ident_tok(src.scan(dot.next).tok), false => false })
 }
-is_index_at = (src: str, pos: i32) bool { src.is_lbracket(src.scan(pos).tok) }
+// A postfix index `base[i]` continues the expression ONLY if the `[` is on the SAME line as
+// `base`. A `[` that opens a new line is a slice-literal STATEMENT (`[1, 2, 3]`), not an index —
+// without this guard it glues onto the previous statement (`x := 7` ⨯ `[1]` → `x := 7[1]`).
+is_index_at = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_lbracket(sc.tok) && !src.nl_between(pos, sc.tok.start)
+}
+nl_between = (src: str, lo: i32, hi: i32) bool {       // a newline in the gap before the next token?
+    (lo >= hi).match ({
+        true  => false,
+        false => (src.byte_at(lo) == '\n').match ({ true => true, false => src.nl_between(lo + 1, hi) })
+    })
+}
 is_loop_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "loop"), _ => false }) }
 is_loop_at = (src: str, pos: i32) bool {
     dot := src.scan(pos)
