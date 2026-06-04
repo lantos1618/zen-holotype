@@ -33,6 +33,17 @@ from _difftest import self_side, compare
     # type (was → `Box_void` miscompile because light_ty couldn't type a Var without an env)
     ("Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>{ v: x } }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 {\n  n := 5\n  get(wrap(n))\n}", 5),
     ("Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>{ v: x } }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 {\n  n := 9\n  w := wrap(n)\n  get(w)\n}", 9),
+    # generic ENUMS (Opt<T>) — monomorphized by use like generic structs. Values + matching across
+    # the realistic patterns: direct ctor, let-bound, producer (Some/None/conditional), consumer.
+    ("Opt<T>: Some(T) | None\ntest* = () i32 { (.Some(5)).match({ .Some(x) => x, .None => 0 }) }", 5),
+    ("Opt<T>: Some(T) | None\ntest* = () i32 {\n  o := .Some(7)\n  o.match({ .Some(x) => x, .None => 0 })\n}", 7),
+    ("Opt<T>: Some(T) | None\nmk<T> = (x: T) Opt<T> { .Some(x) }\ntest* = () i32 { mk(8).match({ .Some(x) => x, .None => 0 }) }", 8),
+    ("Opt<T>: Some(T) | None\none<T> = (x: T) Opt<T> { .None }\ntest* = () i32 { one(5).match({ .Some(x) => x, .None => 3 }) }", 3),
+    ("Opt<T>: Some(T) | None\npick<T> = (x: T, b: i32) Opt<T> { (b == 1).match({ true => .Some(x), false => .None }) }\ntest* = () i32 { pick(9, 0).match({ .Some(x) => x, .None => 3 }) }", 3),
+    ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 {\n  o := .Some(7)\n  unwrap(o, 0)\n}", 7),
+    # bug-hunt #11: a bare ctor passed DIRECTLY as a generic-consumer arg (T inferred from the payload)
+    ("Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }", 1),
+    ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }", 7),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
