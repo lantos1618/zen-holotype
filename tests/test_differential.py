@@ -38,3 +38,16 @@ def test_no_divergence(src):
     d = compare(src)
     assert not d["verdict_div"], d["summary"]
     assert not d["value_div"], d["summary"]
+
+
+# Reject-parity: programs the Python frontend rejects that the self-hosted checker must also reject
+# (false-accepts that emit UB or wrong C). The self-hosted side must NOT accept these.
+@pytest.mark.parametrize("src", [
+    "test* = () i32 {  }",                         # empty body, non-void return -> no value (was accepted -> UB)
+    "test* = () i32 {\n  x := 5\n}",               # body ends in a let -> no value (was accepted -> UB)
+    "test* = () i32 {\n  x := 5\n  x = 6\n}",      # body ends in an assign -> no value
+    'test* = () i32 { "hi" }',                     # trailing value is str, not i32
+])
+def test_self_hosted_rejects(src):
+    from _difftest import self_side
+    assert self_side(src)["verdict"] == "reject", src

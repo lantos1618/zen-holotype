@@ -910,9 +910,30 @@ check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
     })
     acc
 }
+// a non-void function must YIELD a value: its body's last statement must be a value (a trailing
+// expression or an explicit return), and that value must fit the return type. A body that is empty,
+// or ends in a let/assign/loop (which yield no value), leaves the return indeterminate — Python
+// rejects it ("void ⊀ i32"). Sound: a void return type, or a trailing expr the checker can't infer,
+// is skipped (ret_err's own leniency).
+trailing_err = (env: Env, body: [Stmt]) i32 {
+    env.exp.is_void_ty().match ({
+        true  => 0,                                              // a void fn: any body is fine
+        false => (body.len == 0).match ({
+            true  => 1,                                          // empty body, non-void return -> no value
+            false => env.last_stmt_err(body[body.len - 1])
+        })
+    })
+}
+last_stmt_err = (env: Env, st: Stmt) i32 {
+    st.match ({
+        .ExprStmt(e) => env.ret_err(e),                          // a trailing expr must fit the return type
+        .Return(r)   => 0,                                       // an explicit return is checked in check_stmt
+        _            => 1                                        // let/assign/while/if/index-set yield no value
+    })
+}
 check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
-    a.check_body(env, f.body)
+    a.check_body(env, f.body) + env.trailing_err(f.body)
 }
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
 // MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
