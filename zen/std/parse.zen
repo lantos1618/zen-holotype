@@ -695,9 +695,13 @@ is_let_here = (src: str, pos: i32) bool {
 }
 // is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
 is_eq = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
+skip_dots = (src: str, pos: i32) i32 {                 // skip a `(. ident)*` lvalue field chain
+    sc := src.scan(pos)
+    src.is_dot(sc.tok).match ({ true => src.skip_dots(src.scan(sc.next).next), false => pos })
+}
 is_set_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
-    sc.tok.kind.match ({ .Ident => src.is_eq(src.scan(sc.next).tok), _ => false })
+    sc.tok.kind.match ({ .Ident => src.is_eq(src.scan(src.skip_dots(sc.next)).tok), _ => false })   // ident (.field)* '='
 }
 // is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
 skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'
@@ -753,11 +757,10 @@ parse_idxset_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), a.parse_stmts(src, v.next))
 }
 parse_set_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    nt   := src.scan(pos)                    // the assigned name
-    name := a.lexeme(src, nt.tok)
-    eq   := src.scan(nt.next)                // '='
+    lhs  := a.parse_atom(src, pos)           // the lvalue target: a Var `x` or a Member chain `p.x.y`
+    eq   := src.scan(lhs.next)               // '='
     v    := a.parse_or(src, eq.next)        // value
-    a.scons(sassign(name, v.expr), a.parse_stmts(src, v.next))
+    a.scons(sassign(lhs.expr, v.expr), a.parse_stmts(src, v.next))
 }
 parse_let_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt   := src.scan(pos)                    // the bound name
@@ -903,12 +906,11 @@ block_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     BlockEnd { list: a.scons(slet(name, v.expr), rest.list), next: rest.next }
 }
 block_set = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
-    nt   := src.scan(pos)
-    name := a.lexeme(src, nt.tok)
-    eq   := src.scan(nt.next)                       // '='
+    lhs  := a.parse_atom(src, pos)                   // the lvalue target (Var or Member chain)
+    eq   := src.scan(lhs.next)                       // '='
     v    := a.parse_or(src, eq.next)
     rest := a.parse_block(src, v.next)
-    BlockEnd { list: a.scons(sassign(name, v.expr), rest.list), next: rest.next }
+    BlockEnd { list: a.scons(sassign(lhs.expr, v.expr), rest.list), next: rest.next }
 }
 block_while = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     w    := a.parse_while(src, pos)

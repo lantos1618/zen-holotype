@@ -65,3 +65,23 @@ def test_self_hosted_rejects(src):
 def test_integer_match(src, want):
     from _difftest import self_side
     assert self_side(src)["value"] == want
+
+
+# Member-target assignment `p.x = v` — was dropped entirely (the `= v` glued onto the next line),
+# silently corrupting the return value. (Python's reference grammar lacks reassignment, so we assert
+# the self-hosted value directly.)
+@pytest.mark.parametrize("src,want", [
+    # the write is a dead store; trailing 5 is returned (was miscompiled to 99)
+    ("P*: { x: i32 }\nf* = (p: P) i32 {\n p.x = 99\n 5\n}\ntest* = () i32 { f(P{ x: 0 }) }", 5),
+    # the write happens, then read it back
+    ("P*: { x: i32 }\nf* = (p: P) i32 {\n p.x = 99\n p.x\n}\ntest* = () i32 { f(P{ x: 0 }) }", 99),
+    # bare-variable reassignment still works (regression)
+    ("test* = () i32 {\n x := 5\n x = 7\n x\n}", 7),
+    # write through a Ptr receiver (auto-deref -> p->x)
+    ("P*: { x: i32 }\nbump* = (p: Ptr<P>) i32 {\n p.x = 42\n p.x\n}\ntest* = () i32 { q := P{ x: 0 }\n bump(addr(q)) }", 42),
+    # nested field write a.b.c = v
+    ("I*: { n: i32 }\nO*: { i: I }\nf* = (o: O) i32 {\n o.i.n = 42\n o.i.n\n}\ntest* = () i32 { f(O{ i: I{ n: 0 } }) }", 42),
+])
+def test_member_assignment(src, want):
+    from _difftest import self_side
+    assert self_side(src)["value"] == want

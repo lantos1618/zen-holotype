@@ -232,7 +232,9 @@ def test_genc_emits_a_while_loop_that_runs(tmp_path):
     i3 := vref("i")
     one2 := lit(1)
     ip1 := bin("+", addr(i3), addr(one2))
-    loopbody := [sassign("acc", addr(accpi)), sassign("i", addr(ip1))]
+    acctgt := vref("acc")
+    itgt := vref("i")
+    loopbody := [sassign(addr(acctgt), addr(accpi)), sassign(addr(itgt), addr(ip1))]
     accret := vref("acc")
     stmts := [slet("acc", addr(zero)), slet("i", addr(one)), swhile(addr(c), loopbody), sret(addr(accret))]
     emit(genC(Func { name: "sum_to", params: [param("n", ti32())], ret: ti32(), body: stmts }))
