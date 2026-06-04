@@ -360,19 +360,19 @@ blockify = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
         false => a.block_of(stmts)
     })
 }
-xform_args = (a: Ptr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr]) [Expr] {
+xform_args = (a: Ptr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr], env: Ptr<VList>) [Expr] {
     buf := a.cebuf(args.len)
-    args.loop((h, i, ar) { buf[i] = load(a.xform_expr(decls, ar.addr(), params, fargs)) })
+    args.loop((h, i, ar) { buf[i] = load(a.xform_expr(decls, ar.addr(), params, fargs, env)) })
     buf
 }
-xform_arms = (a: Ptr<Malloc>, decls: [Decl], arms: [ArmData], params: [Param], fargs: [Expr]) [ArmData] {
+xform_arms = (a: Ptr<Malloc>, decls: [Decl], arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>) [ArmData] {
     buf := a.abuf(arms.len)
-    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.xform_expr(decls, ar.body, params, fargs)) })
+    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.xform_expr(decls, ar.body, params, fargs, env)) })
     buf
 }
-inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr]) Ptr<Expr> {
+inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
-        .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs)),
+        .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs, env)),
         _           => a.cenode(lamx)                     // not a lambda (shouldn't happen) — keep
     })
 }
@@ -380,8 +380,10 @@ inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr]) Ptr<E
 //    the template body's TYPES before splicing — so `wrap<T> = (x: T) Box<T> { Box<T>{v:x} }` inlined
 //    at `wrap(42)` becomes `Box_i32{v:42}` (not the leaked `Box_T`). Inlining alone binds VALUE params;
 //    this also binds the TYPE param T = i32. ──
-// a light structural type of an argument expression — enough to unify a tparam (literals/ctors only).
-light_ty = (e: Ptr<Expr>) Ty {
+// a light structural type of an argument expression — enough to unify a tparam. `env` carries the
+// types of in-scope locals so a `Var` arg resolves (e.g. `wrap(n)` with `n := 5` infers T=i32 —
+// without it the tparam stayed open → a `Box_void` miscompile).
+light_ty = (e: Ptr<Expr>, env: Ptr<VList>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Byte(n)       => tu8(),
@@ -389,7 +391,8 @@ light_ty = (e: Ptr<Expr>) Ty {
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
         .MakeEnum(mk)  => tnamed(mk.ty),
         .Tag(t)        => tnamed(t.ty),
-        _              => tvoid()                         // Var/Call/… — can't light-infer; tparam stays open
+        .Var(v)        => env.lookup_var(v.name),         // an in-scope local — its tracked type
+        _              => tvoid()                         // Call/… — can't light-infer; tparam stays open
     })
 }
 // unify a PARAM type (which may mention tparam `tp`) against an ARG type to extract tp's binding.
@@ -407,14 +410,14 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: str) Ty {
     pargs.loop((h, i, pa) { found = found.is_void_ty().match ({ true => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }), false => found }) })
     found
 }
-infer_one = (params: [Param], cargs: [Expr], tp: str) Ty {
+infer_one = (params: [Param], cargs: [Expr], tp: str, env: Ptr<VList>) Ty {
     found := tvoid()
-    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(), tp), false => found }), false => found }) })
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(env), tp), false => found }), false => found }) })
     found
 }
-infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], cargs: [Expr]) [Ty] {
+infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], cargs: [Expr], env: Ptr<VList>) [Ty] {
     buf := a.tbuf(tparams.len)
-    tparams.loop((h, i, tp) { buf[i] = params.infer_one(cargs, tp.name) })
+    tparams.loop((h, i, tp) { buf[i] = params.infer_one(cargs, tp.name, env) })
     buf
 }
 // substitute tparams→targs in the type-bearing nodes of a body (MakeStruct's targs/mty + Index/Slice/
@@ -487,78 +490,87 @@ subst_body = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt
     body.loop((h, i, st) { buf[i] = a.subst_stmt(tparams, targs, st) })
     buf
 }
-inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr]) Ptr<Expr> {
+inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     tf   := decls.the_func(name)
     body := (tf.tparams.len > 0).match ({           // a generic fn: substitute its type params in the body first
-        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs), tf.body),
+        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs, env), tf.body),
         false => tf.body
     })
-    a.blockify(a.xform_body(decls, body, tf.params, cargs))
+    a.blockify(a.xform_body(decls, body, tf.params, cargs, env))
 }
-maybe_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr]) Ptr<Expr> {
+maybe_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     decls.is_template_call(name).match ({
-        true  => a.inline_template(decls, name, cargs),
+        true  => a.inline_template(decls, name, cargs, env),
         false => a.cenode(call(name, cargs))
     })
 }
-xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr]) Ptr<Expr> {
-    cargs := a.xform_args(decls, c.args, params, fargs)
+xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+    cargs := a.xform_args(decls, c.args, params, fargs, env)
     fi    := params.param_index(c.fn)                     // is the callee one of this frame's FnT params?
     (fi < 0).match ({
-        true  => a.maybe_template(decls, c.fn, cargs),
+        true  => a.maybe_template(decls, c.fn, cargs, env),
         false => params[fi].ty.is_fnt().match ({
-            true  => a.inline_lambda(decls, fargs[fi], cargs),
-            false => a.maybe_template(decls, c.fn, cargs)
+            true  => a.inline_lambda(decls, fargs[fi], cargs, env),
+            false => a.maybe_template(decls, c.fn, cargs, env)
         })
     })
 }
-xform_match = (a: Ptr<Malloc>, decls: [Decl], m: MatchData, params: [Param], fargs: [Expr]) Ptr<Expr> {
-    subj := a.xform_expr(decls, m.subj, params, fargs)
-    arms := a.xform_arms(decls, m.arms, params, fargs)
+xform_match = (a: Ptr<Malloc>, decls: [Decl], m: MatchData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+    subj := a.xform_expr(decls, m.subj, params, fargs, env)
+    arms := a.xform_arms(decls, m.arms, params, fargs, env)
     m.ptr.match ({ true => a.cenode(ematchp(subj, m.ename, arms)), false => a.cenode(ematch(subj, m.ename, arms)) })
 }
-xform_inits = (a: Ptr<Malloc>, decls: [Decl], inits: [FieldInit], params: [Param], fargs: [Expr]) [FieldInit] {
+xform_inits = (a: Ptr<Malloc>, decls: [Decl], inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
     buf := a.fbuf(inits.len)
-    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.xform_expr(decls, fi.value, params, fargs)) })
+    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.xform_expr(decls, fi.value, params, fargs, env)) })
     buf
 }
-xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr]) Ptr<Expr> {
+xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     load(e).match ({
         .Var(v)       => a.subst_var(params, fargs, v.name, e),
-        .Call(c)      => a.xform_call(decls, c, params, fargs),
-        .Bin(b)       => a.cenode(bin(b.op, a.xform_expr(decls, b.lhs, params, fargs), a.xform_expr(decls, b.rhs, params, fargs))),
-        .Cond(d)      => a.cenode(cond(a.xform_expr(decls, d.c, params, fargs), a.xform_expr(decls, d.t, params, fargs), a.xform_expr(decls, d.e, params, fargs))),
-        .Member(m)    => a.cenode(member(a.xform_expr(decls, m.obj, params, fargs), m.field)),
-        .Arrow(ar)    => a.cenode(arrow(a.xform_expr(decls, ar.obj, params, fargs), ar.field)),
-        .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.xform_expr(decls, mk.payload, params, fargs))),
-        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, sd.inits, params, fargs))),
-        .Match(m)     => a.xform_match(decls, m, params, fargs),
-        .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs), a.xform_expr(decls, ix.idx, params, fargs), ix.elem)),
-        .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs))),
-        .SliceLit(sd) => a.cenode(slit(sd.elem, a.xform_args(decls, sd.items, params, fargs))),
-        .Block(b)     => a.cenode(block(a.xform_body(decls, b.stmts, params, fargs))),
+        .Call(c)      => a.xform_call(decls, c, params, fargs, env),
+        .Bin(b)       => a.cenode(bin(b.op, a.xform_expr(decls, b.lhs, params, fargs, env), a.xform_expr(decls, b.rhs, params, fargs, env))),
+        .Cond(d)      => a.cenode(cond(a.xform_expr(decls, d.c, params, fargs, env), a.xform_expr(decls, d.t, params, fargs, env), a.xform_expr(decls, d.e, params, fargs, env))),
+        .Member(m)    => a.cenode(member(a.xform_expr(decls, m.obj, params, fargs, env), m.field)),
+        .Arrow(ar)    => a.cenode(arrow(a.xform_expr(decls, ar.obj, params, fargs, env), ar.field)),
+        .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.xform_expr(decls, mk.payload, params, fargs, env))),
+        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, sd.inits, params, fargs, env))),
+        .Match(m)     => a.xform_match(decls, m, params, fargs, env),
+        .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs, env), a.xform_expr(decls, ix.idx, params, fargs, env), ix.elem)),
+        .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs, env), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs, env))),
+        .SliceLit(sd) => a.cenode(slit(sd.elem, a.xform_args(decls, sd.items, params, fargs, env))),
+        .Block(b)     => a.cenode(block(a.xform_body(decls, b.stmts, params, fargs, env))),
         _             => e                            // Int/StrLit/Tag/Lambda: no params inside
     })
 }
-xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr]) Stmt {
+xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>) Stmt {
     st.match ({
-        .Let(l)      => slet(l.name, a.xform_expr(decls, l.value, params, fargs)),
-        .Assign(x)   => sassign(a.xform_expr(decls, x.target, params, fargs), a.xform_expr(decls, x.value, params, fargs)),
-        .Return(r)   => sret(a.xform_expr(decls, r, params, fargs)),
-        .ExprStmt(e) => sexpr(a.xform_expr(decls, e, params, fargs)),
-        .If(f)       => sif(a.xform_expr(decls, f.c, params, fargs), a.xform_body(decls, f.then, params, fargs), a.xform_body(decls, f.els, params, fargs)),
-        .While(w)    => swhile(a.xform_expr(decls, w.c, params, fargs), a.xform_body(decls, w.body, params, fargs)),
-        .IndexSet(x) => sidxset(a.xform_expr(decls, x.seq, params, fargs), a.xform_expr(decls, x.idx, params, fargs), x.elem, a.xform_expr(decls, x.value, params, fargs))
+        .Let(l)      => slet(l.name, a.xform_expr(decls, l.value, params, fargs, env)),
+        .Assign(x)   => sassign(a.xform_expr(decls, x.target, params, fargs, env), a.xform_expr(decls, x.value, params, fargs, env)),
+        .Return(r)   => sret(a.xform_expr(decls, r, params, fargs, env)),
+        .ExprStmt(e) => sexpr(a.xform_expr(decls, e, params, fargs, env)),
+        .If(f)       => sif(a.xform_expr(decls, f.c, params, fargs, env), a.xform_body(decls, f.then, params, fargs, env), a.xform_body(decls, f.els, params, fargs, env)),
+        .While(w)    => swhile(a.xform_expr(decls, w.c, params, fargs, env), a.xform_body(decls, w.body, params, fargs, env)),
+        .IndexSet(x) => sidxset(a.xform_expr(decls, x.seq, params, fargs, env), a.xform_expr(decls, x.idx, params, fargs, env), x.elem, a.xform_expr(decls, x.value, params, fargs, env))
     })
 }
-xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr]) [Stmt] {
+// thread an env of local types through the body, so a `Var` arg to a generic call resolves. A `let`
+// binding is in scope for the statements that FOLLOW it (its light type seeds the env).
+xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt) Ptr<VList> {
+    st.match ({ .Let(l) => a.vcons(l.name, l.value.light_ty(env), env), _ => env })
+}
+xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>) [Stmt] {
     buf := a.sbuf(body.len)
-    body.loop((h, i, st) { buf[i] = a.xform_stmt(decls, st, params, fargs) })
+    e   := env
+    body.loop((h, i, st) {
+        buf[i] = a.xform_stmt(decls, st, params, fargs, e)
+        e = a.xform_let_ext(e, st)
+    })
     buf
 }
 inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({
-        .DFunc(f) => dfunc(Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args()) }),
+        .DFunc(f) => dfunc(Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args(), a.params_env(f.params)) }),
         _         => d
     })
 }

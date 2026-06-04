@@ -29,6 +29,10 @@ from _difftest import self_side, compare
     ("test* = () i32 {\n  [9, 9]\n  1 + 2\n}", 3),
     # same-line indexing must still work (regression guard for the newline-aware fix)
     ("test* = () i32 {\n  s := [10, 20, 30]\n  s[2]\n}", 30),
+    # generic CONSTRUCTOR called with a non-literal (Var) arg: T must be inferred from the local's
+    # type (was → `Box_void` miscompile because light_ty couldn't type a Var without an env)
+    ("Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>{ v: x } }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 {\n  n := 5\n  get(wrap(n))\n}", 5),
+    ("Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>{ v: x } }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 {\n  n := 9\n  w := wrap(n)\n  get(w)\n}", 9),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
