@@ -24,6 +24,11 @@ from _difftest import self_side, compare
     # char literals must not desync the token stream — a malformed 'ab' used to corrupt the NEXT decl
     ("bad* = () i32 { 'ab' }\ntest* = () i32 { 5 }", 5),
     ("test* = () i32 { 'A' }", 65),
+    # slice-literal STATEMENT must not glue onto the previous statement as an index (`x := 7` ⨯ `[1]`)
+    ("test* = () i32 {\n  x := 7\n  [1]\n  x\n}", 7),
+    ("test* = () i32 {\n  [9, 9]\n  1 + 2\n}", 3),
+    # same-line indexing must still work (regression guard for the newline-aware fix)
+    ("test* = () i32 {\n  s := [10, 20, 30]\n  s[2]\n}", 30),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
