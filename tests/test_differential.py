@@ -85,3 +85,24 @@ def test_integer_match(src, want):
 def test_member_assignment(src, want):
     from _difftest import self_side
     assert self_side(src)["value"] == want
+
+
+# Large constructs (bug-hunt #15/#16): parser buffers were fixed at cap 64 (params/fields/arms/
+# variants) and cap 16 (type args) and overflowed the heap with no bounds check. Caps are now
+# generous (1024 / 256) so any plausible program fits safely.
+def test_many_params():
+    from _difftest import self_side
+    ps = ", ".join(f"p{i}: i32" for i in range(80))
+    args = ", ".join(str(i) for i in range(80))
+    assert self_side(f"f* = ({ps}) i32 {{ p79 }}\ntest* = () i32 {{ f({args}) }}")["value"] == 79
+
+def test_many_fields():
+    from _difftest import self_side
+    fs = ", ".join(f"x{i}: i32" for i in range(80))
+    inits = ", ".join(f"x{i}: {i}" for i in range(80))
+    assert self_side(f"S*: {{ {fs} }}\ntest* = () i32 {{ S{{ {inits} }}.x79 }}")["value"] == 79
+
+def test_many_match_arms():
+    from _difftest import self_side
+    arms = ", ".join(f"{i} => {i*2}" for i in range(80)) + ", _ => 999"
+    assert self_side(f"test* = () i32 {{ (50).match({{ {arms} }}) }}")["value"] == 100
