@@ -229,3 +229,15 @@ def test_generic_pipeline_end_to_end(tmp_path):
            "test* = () i32 { useSwap(swap(mkpair(2, 4))) }")     # swap(2,4)->(4,2) -> 4*10+2 = 42
     assert "struct Pair_i32_i32" in emit_c_for(tmp_path, src)
     run_value(tmp_path, src, 42)
+
+
+# Nested generic LITERALS `Box<Box<i32>>` — both as a type and a literal. (An earlier audit flagged
+# the `>>` token as a possible gap; it isn't — the parser handles the doubled angle bracket.)
+def test_nested_generic_literal_runs(tmp_path):
+    c = emit_c_for(tmp_path,
+        "Box<T>: { v: T }\nf* = (b: Box<Box<i32>>) i32 { b.v.v }\n"
+        "test* = () i32 { f(Box<Box<i32>>{ v: Box<i32>{ v: 42 } }) }")
+    assert "struct Box_Box_i32" in c and "struct Box_i32" in c
+    run_value(tmp_path,
+        "Box<T>: { v: T }\nf* = (b: Box<Box<i32>>) i32 { b.v.v }\n"
+        "test* = () i32 { f(Box<Box<i32>>{ v: Box<i32>{ v: 42 } }) }", 42)
