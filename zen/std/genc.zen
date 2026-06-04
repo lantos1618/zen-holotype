@@ -55,7 +55,7 @@ Expr*: Int(i64) | Byte(i32) | Var(VarData) | Bin(BinData) | Call(CallData) | Con
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, value: Ptr<Expr> }
-AssignData*: { name: str, value: Ptr<Expr> }              // name = expr;
+AssignData*: { target: Ptr<Expr>, value: Ptr<Expr> }       // <lvalue> = expr;  (target: a Var/Member/Arrow)
 IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } else { els }
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
 IndexSetData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty, value: Ptr<Expr> }  // seq[idx] = value;
@@ -151,7 +151,7 @@ tstr* = () Ty { .Str() }
 slet* = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData { name: nm, value: v }) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }                  // a bare expression evaluated for effect
-sassign* = (nm: str, v: Ptr<Expr>) Stmt { .Assign(AssignData { name: nm, value: v }) }
+sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt { .Assign(AssignData { target: tgt, value: v }) }
 sidxset* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>) Stmt { .IndexSet(IndexSetData { seq: seq, idx: i, elem: elem, value: v }) }
 sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt { .If(IfData { c: c, then: t, els: e }) }
 swhile* = (c: Ptr<Expr>, b: [Stmt]) Stmt { .While(WhileData { c: c, body: b }) }
@@ -424,7 +424,7 @@ gen_match = (s: String, m: MatchData) String {
 gen_stmt = (s: String, st: Stmt) String {
     st.match ({
         .Let(l)    => s.append("__auto_type ").append(l.name).append(" = ").gen_expr(l.value).append(";"),
-        .Assign(a) => s.append(a.name).append(" = ").gen_expr(a.value).append(";"),
+        .Assign(a) => s.gen_expr(a.target).append(" = ").gen_expr(a.value).append(";"),   // <lvalue> = value;
         .Return(e) => s.append("return ").gen_expr(e).append(";"),
         .ExprStmt(e) => s.gen_expr(e).append(";"),
         .If(f)     => s.gen_if(f),
@@ -749,7 +749,7 @@ collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
 collect_stmt = (buf: [GenericData], cnt: i32, st: Stmt) i32 {
     st.match ({
         .Let(l)      => buf.collect_expr(cnt, load(l.value)),
-        .Assign(x)   => buf.collect_expr(cnt, load(x.value)),
+        .Assign(x)   => buf.collect_expr(buf.collect_expr(cnt, load(x.target)), load(x.value)),
         .Return(r)   => buf.collect_expr(cnt, load(r)),
         .ExprStmt(e) => buf.collect_expr(cnt, load(e)),
         .If(f)       => buf.collect_body(buf.collect_body(buf.collect_expr(cnt, load(f.c)), f.then), f.els),

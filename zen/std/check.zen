@@ -276,7 +276,7 @@ resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
 resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) Stmt {
     st.match ({
         .Let(l)    => slet(l.name, a.resolve_expr(env.clr_exp(), l.value)),
-        .Assign(x) => sassign(x.name, a.resolve_expr(env.clr_exp(), x.value)),
+        .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
         .ExprStmt(e) => sexpr(a.resolve_expr(env.clr_exp(), e)),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
@@ -473,7 +473,7 @@ subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<E
 subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slet(l.name, a.subst_expr(tparams, targs, l.value)),
-        .Assign(x)   => sassign(x.name, a.subst_expr(tparams, targs, x.value)),
+        .Assign(x)   => sassign(a.subst_expr(tparams, targs, x.target), a.subst_expr(tparams, targs, x.value)),
         .Return(r)   => sret(a.subst_expr(tparams, targs, r)),
         .ExprStmt(e) => sexpr(a.subst_expr(tparams, targs, e)),
         .If(f)       => sif(a.subst_expr(tparams, targs, f.c), a.subst_body(tparams, targs, f.then), a.subst_body(tparams, targs, f.els)),
@@ -542,7 +542,7 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
 xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr]) Stmt {
     st.match ({
         .Let(l)      => slet(l.name, a.xform_expr(decls, l.value, params, fargs)),
-        .Assign(x)   => sassign(x.name, a.xform_expr(decls, x.value, params, fargs)),
+        .Assign(x)   => sassign(a.xform_expr(decls, x.target, params, fargs), a.xform_expr(decls, x.value, params, fargs)),
         .Return(r)   => sret(a.xform_expr(decls, r, params, fargs)),
         .ExprStmt(e) => sexpr(a.xform_expr(decls, e, params, fargs)),
         .If(f)       => sif(a.xform_expr(decls, f.c, params, fargs), a.xform_body(decls, f.then, params, fargs), a.xform_body(decls, f.els, params, fargs)),
@@ -870,7 +870,7 @@ ret_err = (env: Env, r: Ptr<Expr>) i32 {
 // an assignment `x = v` must fit x's type (the type its `let` inferred). Sound-leaning, same shape
 // as ret_err: skip when either side is uninferable, or a polymorphic literal goes to a numeric x.
 assign_err = (env: Env, x: AssignData) i32 {
-    vt := env.vars.lookup_var(x.name)
+    vt := env.infer_expr(x.target)
     rt := env.infer_expr(x.value)
     lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0)
     (vt.is_uninferable() || rt.is_uninferable() || lit_to_num).match ({
@@ -891,7 +891,7 @@ idxset_err = (env: Env, x: IndexSetData) i32 {
 check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)    => env.check_expr(l.value),
-        .Assign(x) => env.check_expr(x.value) + env.assign_err(x),
+        .Assign(x) => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
         .Return(r) => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
         .If(f)     => env.check_expr(f.c) + a.check_body(env, f.then) + a.check_body(env, f.els),
