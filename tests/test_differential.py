@@ -18,6 +18,12 @@ from _difftest import self_side, compare
     ("test* = () i64 { 10000000000 / 10 }", 1000000000),     # was 141006540
     ("test* = () i64 { 9999999999 - 9999999990 }", 9),
     ("test* = () i64 { 5000000000 + 5000000000 }", 10000000000),
+    # NESTED block comments: the inner `*/` must NOT close the outer comment (was stopping early → 1)
+    ("test* = () i32 {\n  1 + /* outer /* inner */ still-comment */ 41\n}", 42),
+    ("test* = () i32 { 3 + /* plain */ 4 }", 7),
+    # char literals must not desync the token stream — a malformed 'ab' used to corrupt the NEXT decl
+    ("bad* = () i32 { 'ab' }\ntest* = () i32 { 5 }", 5),
+    ("test* = () i32 { 'A' }", 65),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want

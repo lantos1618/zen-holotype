@@ -34,11 +34,19 @@ skip_line = (src: str, pos: i32) i32 {
     b := src.byte_at(pos)
     ((b == '\0') || (b == '\n')).match ({ true => pos, false => src.skip_line(pos + 1) })   // stop at NUL / newline
 }
-skip_block_comment = (src: str, pos: i32) i32 {        // pos just past `/*`; returns past `*/`
+skip_block_comment = (src: str, pos: i32) i32 { src.skip_bc_d(pos, 1) }   // pos just past `/*`
+// NESTED block comments: track depth so `/* /* */ */` closes at the OUTER `*/`, not the first one.
+skip_bc_d = (src: str, pos: i32, depth: i32) i32 {
     b := src.byte_at(pos)
     (b == '\0').match ({
         true  => pos,                                  // unterminated — stop at NUL
-        false => ((b == '*') && (src.byte_at(pos + 1) == '/')).match ({ true => pos + 2, false => src.skip_block_comment(pos + 1) })
+        false => ((b == '/') && (src.byte_at(pos + 1) == '*')).match ({
+            true  => src.skip_bc_d(pos + 2, depth + 1),   // a nested `/*`
+            false => ((b == '*') && (src.byte_at(pos + 1) == '/')).match ({
+                true  => (depth == 1).match ({ true => pos + 2, false => src.skip_bc_d(pos + 2, depth - 1) }),
+                false => src.skip_bc_d(pos + 1, depth)
+            })
+        })
     })
 }
 skip = (src: str, pos: i32) i32 {
@@ -77,8 +85,19 @@ str_end   = (src: str, pos: i32) i32 {                 // pos just past the open
 
 // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
 // position just past the closing quote. One char, or a `\.` escape.
-char_end = (src: str, pos: i32) i32 {
-    (src.byte_at(pos) == '\\').match ({ true => pos + 3, false => pos + 2 })   // '\x'  vs  'x'
+char_end = (src: str, pos: i32) i32 {                                          // pos = first byte inside the quotes
+    b := src.byte_at(pos)
+    (b == '\'').match ({                                                        // empty ''  → consume just the two quotes
+        true  => pos + 1,
+        false => (b == '\\').match ({ true  => src.scan_quote_end(pos + 2),     // '\x'  — skip the escaped byte
+                                      false => src.scan_quote_end(pos + 1) })   // 'x'   — skip the one byte
+    })
+}
+// Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
+// DESYNCING the token stream — it consumes the whole literal instead of leaving a stray quote.
+scan_quote_end = (src: str, pos: i32) i32 {
+    b := src.byte_at(pos)
+    ((b == '\'') || (b == '\0')).match ({ true => pos + 1, false => src.scan_quote_end(pos + 1) })
 }
 
 // ── symbols ──────────────────────────────────────────────────────────────────
