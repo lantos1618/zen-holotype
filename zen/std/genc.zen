@@ -23,8 +23,8 @@ CallData*: { fn: str, args: [Expr] }                    // fn(a, b, …) — a c
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
 ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
-MakeEnumData*: { ty: str, variant: str, payload: Ptr<Expr> }  // (E){ .tag=E_V, .u.V=payload }
-TagData*: { ty: str, variant: str }                     // (E){ .tag=E_V }  (no payload)
+MakeEnumData*: { ty: str, mty: str, variant: str, targs: [Ty], payload: Ptr<Expr> }  // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
+TagData*: { ty: str, mty: str, variant: str, targs: [Ty] }                     // (mty){ .tag=mty_V }  (no payload)
 ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
 MatchData*: { subj: Ptr<Expr>, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
 StrData*: { value: str }                                // a C string literal "…" (escaped on emit)
@@ -112,7 +112,8 @@ call* = (fn: str, args: [Expr]) Expr { .Call(CallData { fn: fn, args: args }) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData { c: c, t: t, e: e }) }
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData { obj: o, field: f }) }
 arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData { obj: o, field: f }) }
-mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, variant: v, payload: p }) }
+mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, mty: ty, variant: v, targs: no_tys(), payload: p }) }
+mkenumg* = (ty: str, mty: str, targs: [Ty], v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData { ty: ty, mty: mty, variant: v, targs: targs, payload: p }) }
 finit* = (nm: str, v: Ptr<Expr>) FieldInit { FieldInit { name: nm, value: v } }
 mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, mty: ty, targs: no_tys(), inits: inits }) }
 mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, mty: mty, targs: targs, inits: inits }) }
@@ -142,7 +143,8 @@ struct_is_trait = (sd: StructDecl) bool {
 }
 is_trait* = (d: Decl) bool { d.match ({ .DStruct(sd) => sd.struct_is_trait(), _ => false }) }
 fntype* = (params: [Ty], ret: Ptr<Ty>) Ty { .FnT(FnTData { params: params, ret: ret }) }
-mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, variant: v }) }
+mktag* = (ty: str, v: str) Expr { .Tag(TagData { ty: ty, mty: ty, variant: v, targs: no_tys() }) }
+mktagg* = (ty: str, mty: str, targs: [Ty], v: str) Expr { .Tag(TagData { ty: ty, mty: mty, variant: v, targs: targs }) }
 arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData { variant: v, bind: bind, body: body } }
 ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: false }) }
 ematchp* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData { subj: subj, ename: ename, arms: arms, ptr: true }) }
@@ -244,7 +246,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Arrow(a) => s.gen_expr(a.obj).append("->").append(a.field),
         .MakeEnum(m) => s.gen_mkenum(m),
         .MakeStruct(m) => s.gen_mkstruct(m),
-        .Tag(t) => s.append("(").append(t.ty).append("){ .tag = ").append(t.ty).append("_").append(t.variant).append(" }"),
+        .Tag(t) => s.append("(").append(t.mty).append("){ .tag = ").append(t.mty).append("_").append(t.variant).append(" }"),
         .Match(m) => s.gen_match(m),
         .StrLit(sl) => s.gen_strlit(sl.value),
         .SliceLit(sd) => s.gen_slicelit(sd),
@@ -378,7 +380,7 @@ gen_escape_from = (s: String, v: str, i: i32) String {
 }
 
 gen_mkenum = (s: String, m: MakeEnumData) String {
-    head := s.append("(").append(m.ty).append("){ .tag = ").append(m.ty).append("_").append(m.variant)
+    head := s.append("(").append(m.mty).append("){ .tag = ").append(m.mty).append("_").append(m.variant)
     head.append(", .u.").append(m.variant).append(" = ").gen_expr(m.payload).append(" }")
 }
 
@@ -648,7 +650,7 @@ mono_enum = (decls: [Decl], g: GenericData) Decl {
     ged.variants.loop((h, i, v) { buf[i] = VariantDef { name: v.name, payload: ged.tparams.subst_ty(g.args, v.payload) } })
     denum(EnumDecl { name: g.mangled, variants: buf })
 }
-find_genenum = (decls: [Decl], name: str) GenEnumDecl {
+find_genenum* = (decls: [Decl], name: str) GenEnumDecl {
     found := GenEnumDecl { name: "", tparams: slice(heap(0), 0), variants: slice(heap(0), 0) }
     decls.loop((h, i, d) { found = d.match ({ .DGenEnum(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
     found
@@ -728,6 +730,14 @@ collect_makestruct = (buf: [GenericData], cnt: i32, m: MakeStructData) i32 {
     c := (m.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData { name: m.ty, args: m.targs, mangled: m.mty }), false => cnt })
     buf.collect_inits2(c, m.inits)
 }
+// a generic enum CONSTRUCTOR carries its instance the same way a struct literal does (ty + targs + mty)
+collect_mkenum = (buf: [GenericData], cnt: i32, m: MakeEnumData) i32 {
+    c := (m.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData { name: m.ty, args: m.targs, mangled: m.mty }), false => cnt })
+    buf.collect_expr(c, load(m.payload))
+}
+collect_tag = (buf: [GenericData], cnt: i32, t: TagData) i32 {
+    (t.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData { name: t.ty, args: t.targs, mangled: t.mty }), false => cnt })
+}
 collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
     e.match ({
         .MakeStruct(m) => buf.collect_makestruct(cnt, m),
@@ -736,7 +746,8 @@ collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
         .Cond(d)       => buf.collect_expr(buf.collect_expr(buf.collect_expr(cnt, load(d.c)), load(d.t)), load(d.e)),
         .Member(m)     => buf.collect_expr(cnt, load(m.obj)),
         .Arrow(m)      => buf.collect_expr(cnt, load(m.obj)),
-        .MakeEnum(mk)  => buf.collect_expr(cnt, load(mk.payload)),
+        .MakeEnum(mk)  => buf.collect_mkenum(cnt, mk),
+        .Tag(t)        => buf.collect_tag(cnt, t),
         .Match(m)      => buf.collect_arms(buf.collect_expr(cnt, load(m.subj)), m.arms),
         .Index(ix)     => buf.collect_expr(buf.collect_expr(cnt, load(ix.seq)), load(ix.idx)),
         .SliceLit(sd)  => buf.collect_exprs(cnt, sd.items),

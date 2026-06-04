@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, GenericData, MakeStructData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, GenericData, MakeStructData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -89,9 +89,20 @@ enum_has = (ed: EnumDecl, vn: str) bool {
     f
 }
 pick_enum = (ed: EnumDecl, vn: str, found: str) str { ed.enum_has(vn).match ({ true => ed.name, false => found }) }
+gen_enum_has = (g: GenEnumDecl, vn: str) bool {
+    f := false
+    g.variants.loop((h, i, v) { f = eq(v.name, vn).match ({ true => true, false => f }) })
+    f
+}
+// the enum a variant `.vn` belongs to — scans BOTH concrete and generic enums (a generic `Opt<T>`
+// is a DGenEnum, so `.Some` must find its base name "Opt" before the concrete Opt_i32 is emitted).
 enum_of_variant = (decls: [Decl], vn: str) str {
     found := ""
-    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.pick_enum(vn, found), _ => found }) })
+    decls.loop((h, i, d) { found = d.match ({
+        .DEnum(ed)   => ed.pick_enum(vn, found),
+        .DGenEnum(g) => g.gen_enum_has(vn).match ({ true => g.name, false => found }),
+        _            => found
+    }) })
     found
 }
 // does the enum named `ename` declare variant `vn`?
@@ -102,16 +113,9 @@ named_has = (decls: [Decl], ename: str, vn: str) bool {
 }
 // the enum for constructor `.vn(…)`: prefer the EXPECTED type (env.exp) when it has the variant,
 // else scan by name. This is what disambiguates Expr.Int from TokKind.Int in a combined module.
-// the enum name to stamp on a constructor `.Some(5)`. A generic enum is monomorphized, so when the
-// EXPECTED type is a generic instance (`Opt<i32>`), use its mangled name directly — the concrete
-// `Opt_i32` enum doesn't exist yet at resolve time (monomorphize emits it later), so named_has can't
-// find it. Otherwise: the expected enum if it has the variant, else a by-variant scan.
-ctor_enum = (env: Env, vn: str) str {
-    env.exp.match ({
-        .Generic(g) => g.mangled,
-        _           => env.ctor_enum_plain(vn)
-    })
-}
+// The base enum a constructor `.vn` belongs to: the expected enum if it has the variant, else a
+// by-variant scan (which now also covers generic enums). `enum_inst_*` then layers on the generic
+// monomorphization (type args from the expected type or the payload).
 ctor_enum_plain = (env: Env, vn: str) str {
     en := env.exp.enum_name()
     env.decls.named_has(en, vn).match ({ true => en, false => env.decls.enum_of_variant(vn) })
@@ -156,7 +160,42 @@ is_lit_numeric = (e: Ptr<Expr>) bool {
 cond_ty = (env: Env, d: CondData) Ty {
     d.t.is_lit_numeric().match ({ true => env.infer_expr(d.e), false => env.infer_expr(d.t) })
 }
-ctor_ty = (env: Env, ename: str, variant: str) Ty { eq(ename, "").match ({ true => tnamed(env.decls.enum_of_variant(variant)), false => tnamed(ename) }) }
+// ── generic-enum constructors: monomorphize a `.Some(5)` of a generic `Opt<T>` like a struct literal.
+//    Compute (base enum, type args, mangled name): the args come from the EXPECTED generic type if one
+//    is threaded, else are inferred by unifying the variant's declared payload type against the actual
+//    payload type (so `.Some(5)` → Opt<i32>). A non-generic enum keeps its plain name + empty args. ──
+EnumInst*: { base: str, mty: str, targs: [Ty] }
+gen_variant_payload = (g: GenEnumDecl, vname: str) Ty {
+    found := tvoid()
+    g.variants.loop((h, i, v) { found = eq(v.name, vname).match ({ true => v.payload, false => found }) })
+    found
+}
+einst_tybuf = (n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
+infer_enum_targs = (env: Env, g: GenEnumDecl, variant: str, pty: Ty) [Ty] {
+    vpt := g.gen_variant_payload(variant)
+    buf := einst_tybuf(g.tparams.len)
+    g.tparams.loop((h, i, tp) { buf[i] = vpt.unify_ty(pty, tp.name) })
+    buf
+}
+enum_inst_payload = (env: Env, g: GenEnumDecl, base: str, variant: str, pty: Ty) EnumInst {
+    ta := env.infer_enum_targs(g, variant, pty)
+    EnumInst { base: base, mty: mangle_str(base, ta), targs: ta }
+}
+enum_inst_gen = (env: Env, g: GenEnumDecl, base: str, variant: str, pty: Ty) EnumInst {
+    env.exp.match ({
+        .Generic(ge) => eq(ge.name, base).match ({ true => EnumInst { base: base, mty: ge.mangled, targs: ge.args }, false => env.enum_inst_payload(g, base, variant, pty) }),
+        _            => env.enum_inst_payload(g, base, variant, pty)
+    })
+}
+enum_inst_of = (env: Env, base: str, variant: str, pty: Ty) EnumInst {
+    g := env.decls.find_genenum(base)
+    eq(g.name, "").match ({
+        true  => EnumInst { base: base, mty: base, targs: no_tys() },     // a non-generic enum
+        false => env.enum_inst_gen(g, base, variant, pty)
+    })
+}
+enum_inst_mk = (env: Env, variant: str, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
+enum_inst_tag = (env: Env, variant: str) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
 infer_expr = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
@@ -166,8 +205,8 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),
-        .MakeEnum(mk)  => env.ctor_ty(mk.ty, mk.variant),
-        .Tag(t)        => env.ctor_ty(t.ty, t.variant),
+        .MakeEnum(mk)  => eq(mk.mty, "").match ({ true => tnamed(env.enum_inst_mk(mk.variant, mk.payload).mty), false => tnamed(mk.mty) }),   // trust a resolved ctor's monomorphized name
+        .Tag(t)        => eq(t.mty, "").match ({ true => tnamed(env.enum_inst_tag(t.variant).mty), false => tnamed(t.mty) }),
         .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
@@ -191,12 +230,37 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
     (m.arms.len > 0).match ({ true => env.infer_expr(m.arms[0].body), false => tvoid() })
 }
 
+// stamp a ctor with its monomorphized enum: a `.Some(5)` of generic `Opt<T>` becomes a MakeEnum
+// carrying mty=`Opt_i32` + targs=[i32], so genc emits `(Opt_i32){…}` and collect emits the instance.
+// A node that ALREADY carries targs is monomorphized (subst made it concrete, or a prior pass did) —
+// preserve it. The re-resolve pass runs with no expected type, so recomputing would lose `.None`'s T.
+resolve_mkenum = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str, payload: Ptr<Expr>) Ptr<Expr> {
+    p := a.resolve_expr(env.clr_exp(), payload)
+    (etargs.len > 0).match ({
+        true  => a.cenode(mkenumg(ety, emty, etargs, variant, p)),
+        false => a.resolve_mkenum_fresh(env, variant, p)
+    })
+}
+resolve_mkenum_fresh = (a: Ptr<Malloc>, env: Env, variant: str, p: Ptr<Expr>) Ptr<Expr> {
+    inst := env.enum_inst_mk(variant, p)
+    a.cenode(mkenumg(inst.base, inst.mty, inst.targs, variant, p))
+}
+resolve_mktag = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str) Ptr<Expr> {
+    (etargs.len > 0).match ({
+        true  => a.cenode(mktagg(ety, emty, etargs, variant)),
+        false => a.resolve_mktag_fresh(env, variant)
+    })
+}
+resolve_mktag_fresh = (a: Ptr<Malloc>, env: Env, variant: str) Ptr<Expr> {
+    inst := env.enum_inst_tag(variant)
+    a.cenode(mktagg(inst.base, inst.mty, inst.targs, variant))
+}
 // ── rebuild an expression, filling enum match enames + constructor types ───────────────
 resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)     => a.resolve_match(env, m),
-        .MakeEnum(mk) => a.cenode(mkenum(env.ctor_enum(mk.variant), mk.variant, a.resolve_expr(env.clr_exp(), mk.payload))),
-        .Tag(t)       => a.cenode(mktag(env.ctor_enum(t.variant), t.variant)),
+        .MakeEnum(mk) => a.resolve_mkenum(env, mk.ty, mk.mty, mk.targs, mk.variant, mk.payload),
+        .Tag(t)       => a.resolve_mktag(env, t.ty, t.mty, t.targs, t.variant),
         .Bin(b)       => a.cenode(bin(b.op, a.resolve_expr(env.clr_exp(), b.lhs), a.resolve_expr(env.clr_exp(), b.rhs))),
         .Cond(c)      => a.cenode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
         .Call(c)      => a.resolve_call(env, c),
@@ -243,9 +307,9 @@ resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
 // fill an enum match's ename from the subject's declared type. If the subject is a POINTER
 // (`Ptr<Enum>`), emit genc's ematchp so the tag test is `subj->tag` (not `subj.tag`).
 resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
-    t     := env.infer_expr(m.subj)            // the subject is any expression — infer its type
+    subj2 := a.resolve_expr(env.clr_exp(), m.subj)  // resolve the subject FIRST — stamps mty on a ctor subject
+    t     := env.infer_expr(subj2)             // infer from the RESOLVED subject → the monomorphized enum name
     en    := t.enum_name()
-    subj2 := a.resolve_expr(env.clr_exp(), m.subj)  // resolve nested ctors/matches in the subject too
     arms  := a.resolve_arms(env, m.arms)
     t.ty_is_ptr().match ({
         true  => a.cenode(ematchp(subj2, en, arms)),
@@ -262,9 +326,13 @@ resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
 // stamped with the right (monomorphized) enum name. An unknown fn has no params -> no expectation.
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
 resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
-    ps  := env.decls.fn_params(c.fn)
-    buf := a.cebuf(c.args.len)
-    c.args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env.with_exp(ps.arg_exp(i)), ar.addr())) })
+    ps   := env.decls.fn_params(c.fn)
+    tmpl := env.decls.is_template_call(c.fn)   // a generic fn's param types carry UNBOUND tparams (Opt<T>);
+    buf  := a.cebuf(c.args.len)                // stamping a bare-ctor arg with them yields Opt_T, not the
+    c.args.loop((h, i, ar) {                   // payload-inferred Opt_i32 — so let template args self-resolve.
+        ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
+        buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
+    })
     a.cenode(call(c.fn, buf))
 }
 resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
@@ -274,12 +342,15 @@ resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
 }
 
 // ── rebuild statements ────────────────────────────────────────────────────────────────
-resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) Stmt {
+// `last` = this is the final statement of the body, i.e. the value it yields. A trailing ExprStmt is
+// the return value, so it KEEPS the expected type (a bare `.None` then sees its `Opt<T>` context); a
+// non-final expr-statement is discarded, so its expectation is cleared.
+resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     st.match ({
         .Let(l)    => slet(l.name, a.resolve_expr(env.clr_exp(), l.value)),
         .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
-        .ExprStmt(e) => sexpr(a.resolve_expr(env.clr_exp(), e)),
+        .ExprStmt(e) => sexpr(a.resolve_expr(last.match ({ true => env, false => env.clr_exp() }), e)),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body)),
         .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env.clr_exp(), x.value))
@@ -299,7 +370,7 @@ fill_stmts = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void 
 }
 fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     st     := body[i]
-    buf[i] = a.resolve_stmt(env, st)
+    buf[i] = a.resolve_stmt(env, st, i == body.len - 1)
     a.fill_stmts(a.extend_env(env, st), body, buf, i + 1)
 }
 extend_env = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
@@ -389,8 +460,8 @@ light_ty = (e: Ptr<Expr>, env: Ptr<VList>) Ty {
         .Byte(n)       => tu8(),
         .StrLit(s)     => tstr(),
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
-        .MakeEnum(mk)  => tnamed(mk.ty),
-        .Tag(t)        => tnamed(t.ty),
+        .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),   // a generic-enum ctor unifies a tparam (`Opt<i32>` → T)
+        .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
         .Var(v)        => env.lookup_var(v.name),         // an in-scope local — its tracked type
         _              => tvoid()                         // Call/… — can't light-infer; tparam stays open
     })
@@ -457,6 +528,28 @@ subst_match = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MatchData) Ptr<
     arms := a.subst_arms(tparams, targs, m.arms)
     m.ptr.match ({ true => a.cenode(ematchp(subj, m.ename, arms)), false => a.cenode(ematch(subj, m.ename, arms)) })
 }
+// a generic-enum ctor/tag inside a template body carries targs that mention the template's tparams
+// (`.Some(x): Opt_T`); substitute them and re-mangle so the spliced copy is concrete (`Opt_i32`).
+subst_mkenum = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Ptr<Expr> {
+    (etargs.len > 0).match ({
+        true  => a.cenode(a.subst_mkenum_g(tparams, targs, ety, etargs, variant, p)),
+        false => a.cenode(mkenum(ety, variant, p))
+    })
+}
+subst_mkenum_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Expr {
+    nt := a.subst_targs(tparams, targs, etargs)
+    mkenumg(ety, mangle_str(ety, nt), nt, variant, p)
+}
+subst_tag = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str) Ptr<Expr> {
+    (etargs.len > 0).match ({
+        true  => a.cenode(a.subst_tag_g(tparams, targs, ety, etargs, variant)),
+        false => a.cenode(mktag(ety, variant))
+    })
+}
+subst_tag_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str) Expr {
+    nt := a.subst_targs(tparams, targs, etargs)
+    mktagg(ety, mangle_str(ety, nt), nt, variant)
+}
 subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Bin(b)       => a.cenode(bin(b.op, a.subst_expr(tparams, targs, b.lhs), a.subst_expr(tparams, targs, b.rhs))),
@@ -464,14 +557,15 @@ subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<E
         .Member(m)    => a.cenode(member(a.subst_expr(tparams, targs, m.obj), m.field)),
         .Arrow(ar)    => a.cenode(arrow(a.subst_expr(tparams, targs, ar.obj), ar.field)),
         .Call(c)      => a.cenode(call(c.fn, a.subst_exprs(tparams, targs, c.args))),
-        .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.subst_expr(tparams, targs, mk.payload))),
+        .MakeEnum(mk) => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(tparams, targs, mk.payload)),
+        .Tag(t)       => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant),
         .MakeStruct(m)=> a.cenode(a.subst_genlit(tparams, targs, m)),
         .Match(mm)    => a.subst_match(tparams, targs, mm),
         .Index(ix)    => a.cenode(eindex(a.subst_expr(tparams, targs, ix.seq), a.subst_expr(tparams, targs, ix.idx), tparams.subst_ty(targs, ix.elem))),
         .Loop(l)      => a.cenode(eloop(a.subst_expr(tparams, targs, l.seq), l.idx, l.elem, tparams.subst_ty(targs, l.elemTy), a.subst_body(tparams, targs, l.body))),
         .SliceLit(sd) => a.cenode(slit(tparams.subst_ty(targs, sd.elem), a.subst_exprs(tparams, targs, sd.items))),
         .Block(b)     => a.cenode(block(a.subst_body(tparams, targs, b.stmts))),
-        _             => e                                // Int/Byte/Var/StrLit/Tag/Lambda — no types to substitute
+        _             => e                                // Int/Byte/Var/StrLit/Lambda — no types to substitute
     })
 }
 subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
@@ -533,7 +627,7 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
         .Cond(d)      => a.cenode(cond(a.xform_expr(decls, d.c, params, fargs, env), a.xform_expr(decls, d.t, params, fargs, env), a.xform_expr(decls, d.e, params, fargs, env))),
         .Member(m)    => a.cenode(member(a.xform_expr(decls, m.obj, params, fargs, env), m.field)),
         .Arrow(ar)    => a.cenode(arrow(a.xform_expr(decls, ar.obj, params, fargs, env), ar.field)),
-        .MakeEnum(mk) => a.cenode(mkenum(mk.ty, mk.variant, a.xform_expr(decls, mk.payload, params, fargs, env))),
+        .MakeEnum(mk) => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, mk.payload, params, fargs, env))),
         .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, sd.inits, params, fargs, env))),
         .Match(m)     => a.xform_match(decls, m, params, fargs, env),
         .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs, env), a.xform_expr(decls, ix.idx, params, fargs, env), ix.elem)),
