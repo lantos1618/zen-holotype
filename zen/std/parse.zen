@@ -293,12 +293,18 @@ parse_match = (a: Ptr<Malloc>, src: str, subj: PExpr) PExpr {
     kw    := src.scan(dot.next)                                     // 'match'
     lp    := src.scan(kw.next)                                      // '(' (required)
     open  := src.scan(lp.next)                                      // the '{'
-    body  := src.is_dot(src.scan(open.next).tok).match ({
-        true  => a.parse_variant_match(src, subj, open),           // .Variant => …  -> Match
-        false => a.parse_bool_match(src, subj, open)               // true/false => …  -> Cond
+    first := src.scan(open.next)                                    // the first arm's leading token
+    body  := src.is_dot(first.tok).match ({
+        true  => a.parse_variant_match(src, subj, open),           // .Variant => …            -> Match
+        false => src.is_bool_label(first.tok).match ({
+            true  => a.parse_bool_match(src, subj, open),          // true/false => …          -> Cond
+            false => a.parse_lit_match(src, subj, open)            // 0 => …, 1 => …, _ => …   -> equality conds
+        })
     })
     src.close_match(body)                                           // drop the trailing ')'
 }
+is_bool_label = (src: str, t: Token) bool { src.tok_eq(t, "true") || src.tok_eq(t, "false") }
+is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
 // arms come in EITHER order — `{ true => X, false => Y }` or `{ false => Y, true => X }`. Read
 // the first arm's label to map them: the `true` arm is the cond's then-branch, the `false` arm
 // its else-branch. (Assuming positional [true, false] order silently inverts a false-first match.)
@@ -312,6 +318,43 @@ parse_bool_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
         true  => PExpr { expr: a.enode(cond(subj.expr, a0.expr, a1.expr)), next: close.next },
         false => PExpr { expr: a.enode(cond(subj.expr, a1.expr, a0.expr)), next: close.next }
     })
+}
+// a NON-bool, non-variant match `(n).match({ 0 => A, 1 => B, _ => C })` — an integer/literal match.
+// It lowers to a nested equality ternary `n == 0 ? A : (n == 1 ? B : C)`: each non-final arm tests the
+// subject against its literal label; the FINAL arm (followed by `}`) is the default with no test (a
+// `_` wildcard, or just the last label). Fixes the old parse_bool_match, which only ever read TWO arms
+// and bool-coerced the subject — crashing on 3+ arms and silently mis-evaluating non-zero labels.
+LitArmEnd*: { test: Ptr<Expr>, body: Ptr<Expr>, next: i32 }
+parse_lit_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr { a.parse_lit_arms(src, subj, open.next) }
+parse_lit_arms = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
+    arm   := a.parse_lit_arm(src, subj, pos)
+    after := src.scan(arm.next)                                     // ',' (more arms) or '}' (last = default)
+    src.is_rbrace(after.tok).match ({
+        true  => PExpr { expr: arm.body, next: after.next },        // the final arm is the default — no test
+        false => a.cons_lit_arm(src, subj, arm, after)
+    })
+}
+cons_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
+    rest := a.parse_lit_arms(src, subj, after.next)                 // the arms after the ','
+    PExpr { expr: a.enode(cond(arm.test, arm.body, rest.expr)), next: rest.next }
+}
+parse_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
+    sc := src.scan(pos)
+    src.is_wild_label(sc.tok).match ({
+        true  => a.parse_lit_arm_wild(src, sc),                     // `_ => body` — an always-true catch-all
+        false => a.parse_lit_arm_val(src, subj, pos)                // `lit => body` — a `subj == lit` test
+    })
+}
+parse_lit_arm_wild = (a: Ptr<Malloc>, src: str, us: Scan) LitArmEnd {
+    arrow := src.scan(us.next)                                      // '=>'
+    body  := a.parse_arm_body(src, arrow.next)
+    LitArmEnd { test: a.enode(lit(1)), body: body.expr, next: body.next }   // `1` -> always taken
+}
+parse_lit_arm_val = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
+    le    := a.parse_atom(src, pos)                                 // the literal label (0, 'a', -5, …)
+    arrow := src.scan(le.next)                                      // '=>'
+    body  := a.parse_arm_body(src, arrow.next)
+    LitArmEnd { test: a.enode(bin("==", subj.expr, le.expr)), body: body.expr, next: body.next }
 }
 // the subject of an enum match must be a bare variable (genc's MatchData.subj is its NAME);
 // pull the name back out of the already-parsed Var node.
