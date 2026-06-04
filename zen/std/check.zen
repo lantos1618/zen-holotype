@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, GenericData, MakeStructData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, GenericData, MakeStructData, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
 { byte_at } = std.lex
@@ -754,6 +754,54 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
         false => 0
     })
 }
+// match validation (reject-parity): an enum match must be EXHAUSTIVE — cover every variant, or have a
+// wildcard `_` — and must not DUPLICATE an arm. Matching the Python frontend ("non-exhaustive match:
+// missing .C" / "duplicate match arm '.A'"). Bool/integer matches lower to Cond (not Match), so only
+// enum matches reach here. SOUND — an unknown enum name (a generic instance / unfilled "") -> skip.
+no_variants = () [VariantDef] { slice(heap(0), 0) }
+enum_variants = (decls: [Decl], ename: str) [VariantDef] {
+    found := no_variants()
+    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants, false => found }), _ => found }) })
+    found
+}
+has_wildcard = (arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, a) { f = eq(a.variant, "_").match ({ true => true, false => f }) })
+    f
+}
+arm_covers = (arms: [ArmData], vname: str) bool {
+    f := false
+    arms.loop((h, i, a) { f = eq(a.variant, vname).match ({ true => true, false => f }) })
+    f
+}
+missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
+    n := 0
+    variants.loop((h, i, v) { n = arms.arm_covers(v.name).match ({ true => n, false => n + 1 }) })
+    n
+}
+exhaustive_err = (env: Env, m: MatchData) i32 {
+    vs := env.decls.enum_variants(m.ename)
+    (vs.len == 0).match ({                                          // unknown enum (generic / "") -> skip
+        true  => 0,
+        false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 })
+    })
+}
+dup_before = (arms: [ArmData], vname: str, upto: i32) bool {
+    f := false
+    arms.loop((h, i, a) { f = (i < upto).match ({ true => eq(a.variant, vname).match ({ true => true, false => f }), false => f }) })
+    f
+}
+dup_arm_errs = (arms: [ArmData]) i32 {
+    n := 0
+    arms.loop((h, i, a) { n = n + eq(a.variant, "_").match ({ true => 0, false => arms.dup_before(a.variant, i).match ({ true => 1, false => 0 }) }) })
+    n
+}
+match_err = (env: Env, m: MatchData) i32 {
+    m.arms.has_wildcard().match ({
+        true  => m.arms.dup_arm_errs(),                            // a wildcard makes it exhaustive
+        false => env.exhaustive_err(m) + m.arms.dup_arm_errs()
+    })
+}
 // operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
 // `&& ||` needs BOOL operands — matching the Python frontend ("'+' needs numeric operands"). Sound:
 // an UNINFERABLE operand (void — e.g. a match-arm binding the partial checker can't type) is skipped,
@@ -799,7 +847,7 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms),
+        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside

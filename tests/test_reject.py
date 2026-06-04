@@ -118,3 +118,17 @@ def test_struct_literal_validation(tmp_path, src, want):
 ])
 def test_field_access_validation(tmp_path, src, want):
     assert _errors(tmp_path, src) == want
+
+
+# match exhaustiveness + duplicate arms: an enum match must cover every variant (or have a `_`
+# wildcard) and not repeat an arm — matching the Python frontend. Bool/integer matches are Conds, so
+# unaffected; an unknown/generic enum name is skipped (sound).
+@pytest.mark.parametrize("src,want", [
+    ("E*: A(i32) | B(i32) | C(i32)\nf* = (e: E) i32 { e.match({ .A(x) => x, .B(x) => x }) }", 1),        # missing .C
+    ("E*: A(i32) | B(i32)\nf* = (e: E) i32 { e.match({ .A(x) => x, .A(y) => y, .B(z) => z }) }", 1),     # duplicate .A
+    ("E*: A(i32) | B(i32)\nf* = (e: E) i32 { e.match({ .A(x) => x, .B(x) => x }) }", 0),                 # all covered
+    ("E*: A(i32) | B(i32) | C(i32)\nf* = (e: E) i32 { e.match({ .A(x) => x, _ => 0 }) }", 0),            # wildcard -> exhaustive
+    ("test* = () i32 { (3 < 4).match({ true => 1, false => 0 }) }", 0),                                  # bool match (a Cond) unaffected
+])
+def test_match_exhaustiveness(tmp_path, src, want):
+    assert _errors(tmp_path, src) == want
