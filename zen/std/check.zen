@@ -219,10 +219,30 @@ infer_expr = (env: Env, e: Ptr<Expr>) Ty {
 // a call's result type: the `load(p)` intrinsic yields the pointee (so `load(e).match` resolves);
 // any other call yields the callee's declared return type.
 pointee_of = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => tvoid() }) }
+// the type of a call: for a GENERIC callee, infer its type args from the arguments (unify each
+// param type against the arg's inferred type) and substitute them into the declared return type —
+// so `vec_of([10,20]) : Vec<i32>` (not the leaked `Vec<T>`), which a downstream `v.vget(0)` needs.
+targ_of = (env: Env, params: [Param], args: [Expr], tp: str) Ty {
+    found := tvoid()
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(env.infer_expr(args[i].addr()), tp), false => found }), false => found }) })
+    found
+}
+call_targs = (env: Env, f: Func, args: [Expr]) [Ty] {
+    buf := einst_tybuf(f.tparams.len)
+    f.tparams.loop((h, i, tp) { buf[i] = env.targ_of(f.params, args, tp.name) })
+    buf
+}
+gen_call_ret = (env: Env, c: CallData) Ty {
+    f := env.decls.the_func(c.fn)
+    (f.tparams.len > 0).match ({
+        true  => f.tparams.subst_ty(env.call_targs(f, c.args), f.ret),
+        false => f.ret
+    })
+}
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "load").match ({
         true  => env.infer_expr(c.args[0].addr()).pointee_of(),
-        false => env.decls.fn_ret(c.fn)
+        false => env.gen_call_ret(c)
     })
 }
 infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
@@ -255,6 +275,12 @@ resolve_mktag_fresh = (a: Ptr<Malloc>, env: Env, variant: str) Ptr<Expr> {
     inst := env.enum_inst_tag(variant)
     a.cenode(mktagg(inst.base, inst.mty, inst.targs, variant))
 }
+// a slice index's element type: keep an already-concrete one (set in pass 1 / substituted at inline),
+// else infer it from the sequence. The re-resolve pass would otherwise recompute it from a let like
+// `b := slice(…)` whose builtin-call type is void — clobbering the concrete element a generic inline produced.
+keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty {
+    existing.is_void_ty().match ({ true => env.infer_expr(seq).elem_of(), false => existing })
+}
 // ── rebuild an expression, filling enum match enames + constructor types ───────────────
 resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
@@ -266,7 +292,7 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Call(c)      => a.resolve_call(env, c),
         .Member(mm)   => a.resolve_member(env, mm),
         .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse, preserving the monomorphized name + type args
-        .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.infer_expr(ix.seq).elem_of())),
+        .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.keep_elem(ix.elem, ix.seq))),
         .Loop(l)      => a.resolve_loop(env, l),
         .SliceLit(sd) => a.resolve_slicelit(env, sd),
         .Block(b)     => a.cenode(block(a.resolve_body(env, b.stmts))),   // a multi-statement arm body
@@ -294,7 +320,7 @@ resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
 // a foreach loop: infer the element type from the sequence, then resolve the body with the
 // loop variables (index i: i32, element x: elemTy) added to the environment.
 resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
-    et   := env.infer_expr(l.seq).elem_of()
+    et   := env.keep_elem(l.elemTy, l.seq)   // keep a concrete element type (a generic inline substituted it)
     env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a }
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
@@ -353,7 +379,7 @@ resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
         .ExprStmt(e) => sexpr(a.resolve_expr(last.match ({ true => env, false => env.clr_exp() }), e)),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body)),
-        .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.infer_expr(x.seq).elem_of(), a.resolve_expr(env.clr_exp(), x.value))
+        .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.keep_elem(x.elem, x.seq), a.resolve_expr(env.clr_exp(), x.value))
     })
 }
 // resolve a statement sequence, THREADING the environment: a `let` adds its binding (the
@@ -459,7 +485,27 @@ lty_node = (t: Ty) Ptr<Ty> {                          // a heap Ptr<Ty> (no allo
     buf[0] = t
     buf[0].addr()
 }
-light_ty = (e: Ptr<Expr>, env: Ptr<VList>) Ty {
+// a call's light type: a GENERIC callee's return type with its type args inferred from the call's
+// args (mirrors infer_call, but in the template-splice phase). So `b := v.vbuf()` and a let bound to
+// `vec_of([10,20])` carry their concrete element/instance type, which a downstream generic call needs.
+light_one = (params: [Param], args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+    found := tvoid()
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(env, decls), tp), false => found }), false => found }) })
+    found
+}
+light_targs = (f: Func, args: [Expr], env: Ptr<VList>, decls: [Decl]) [Ty] {
+    buf := einst_tybuf(f.tparams.len)
+    f.tparams.loop((h, i, tp) { buf[i] = f.params.light_one(args, tp.name, env, decls) })
+    buf
+}
+light_call_ty = (decls: [Decl], c: CallData, env: Ptr<VList>) Ty {
+    f := decls.the_func(c.fn)
+    (f.tparams.len > 0).match ({
+        true  => f.tparams.subst_ty(f.light_targs(c.args, env, decls), f.ret),
+        false => f.ret
+    })
+}
+light_ty = (e: Ptr<Expr>, env: Ptr<VList>, decls: [Decl]) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Byte(n)       => tu8(),
@@ -469,7 +515,8 @@ light_ty = (e: Ptr<Expr>, env: Ptr<VList>) Ty {
         .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
         .SliceLit(sd)  => tslice(lty_node(sd.elem)),      // `[10, 20]` of element E -> [E], so a `[T]` param unifies T
         .Var(v)        => env.lookup_var(v.name),         // an in-scope local — its tracked type
-        _              => tvoid()                         // Call/… — can't light-infer; tparam stays open
+        .Call(c)       => decls.light_call_ty(c, env),    // a generic call's return type, type-args inferred
+        _              => tvoid()
     })
 }
 // unify a PARAM type (which may mention tparam `tp`) against an ARG type to extract tp's binding.
@@ -487,14 +534,14 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: str) Ty {
     pargs.loop((h, i, pa) { found = found.is_void_ty().match ({ true => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }), false => found }) })
     found
 }
-infer_one = (params: [Param], cargs: [Expr], tp: str, env: Ptr<VList>) Ty {
+infer_one = (params: [Param], cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     found := tvoid()
-    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(env), tp), false => found }), false => found }) })
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(env, decls), tp), false => found }), false => found }) })
     found
 }
-infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], cargs: [Expr], env: Ptr<VList>) [Ty] {
+infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], cargs: [Expr], env: Ptr<VList>, decls: [Decl]) [Ty] {
     buf := a.tbuf(tparams.len)
-    tparams.loop((h, i, tp) { buf[i] = params.infer_one(cargs, tp.name, env) })
+    tparams.loop((h, i, tp) { buf[i] = params.infer_one(cargs, tp.name, env, decls) })
     buf
 }
 // substitute tparams→targs in the type-bearing nodes of a body (MakeStruct's targs/mty + Index/Slice/
@@ -601,7 +648,7 @@ subst_body = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt
 inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     tf   := decls.the_func(name)
     body := (tf.tparams.len > 0).match ({           // a generic fn: substitute its type params in the body first
-        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs, env), tf.body),
+        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs, env, decls), tf.body),
         false => tf.body
     })
     a.blockify(a.xform_body(decls, body, tf.params, cargs, env))
@@ -664,15 +711,15 @@ xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [
 }
 // thread an env of local types through the body, so a `Var` arg to a generic call resolves. A `let`
 // binding is in scope for the statements that FOLLOW it (its light type seeds the env).
-xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt) Ptr<VList> {
-    st.match ({ .Let(l) => a.vcons(l.name, l.value.light_ty(env), env), _ => env })
+xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
+    st.match ({ .Let(l) => a.vcons(l.name, l.value.light_ty(env, decls), env), _ => env })
 }
 xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>) [Stmt] {
     buf := a.sbuf(body.len)
     e   := env
     body.loop((h, i, st) {
         buf[i] = a.xform_stmt(decls, st, params, fargs, e)
-        e = a.xform_let_ext(e, st)
+        e = a.xform_let_ext(e, st, decls)
     })
     buf
 }
