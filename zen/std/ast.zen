@@ -16,14 +16,12 @@
   slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
   tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 
-// ── typed heap buffers: a `[T]`-return slot gives `slice()` the element type genc needs ──
-ebuf = (a: Ptr<Malloc>, n: i64) [Expr]      { slice(heap(n * sizeof(Expr)), n) }
-tbuf = (a: Ptr<Malloc>, n: i64) [Ty]        { slice(heap(n * sizeof(Ty)), n) }
-pbuf = (a: Ptr<Malloc>, n: i64) [Param]     { slice(heap(n * sizeof(Param)), n) }
-sbuf = (a: Ptr<Malloc>, n: i64) [Stmt]      { slice(heap(n * sizeof(Stmt)), n) }
-fbuf = (a: Ptr<Malloc>, n: i64) [Field]     { slice(heap(n * sizeof(Field)), n) }
-ibuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(heap(n * sizeof(FieldInit)), n) }
-dbuf = (a: Ptr<Malloc>, n: i64) [Decl]      { slice(heap(n * sizeof(Decl)), n) }
+// ── typed heap buffers: a `[T]`-return slot gives `slice()` the element type genc needs.
+//    The bulk slice copies now go through the generic `dup<T>`/`buf_like<T>` below; these remain
+//    for the single-node allocators (enode/tnode) and the two-slice `concat`. ──
+ebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(heap(n * sizeof(Expr)), n) }
+tbuf = (a: Ptr<Malloc>, n: i64) [Ty]   { slice(heap(n * sizeof(Ty)), n) }
+dbuf = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
 
 // ── heap nodes: a child that outlives its builder (the keystone — the parser's `enode`) ──
 enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
@@ -38,36 +36,20 @@ tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
 }
 
 // ── heap-backed slice copies: a stack `[a, b]` literal copied onto the heap so it can be returned ──
-exprs* = (a: Ptr<Malloc>, xs: [Expr]) [Expr] {
-    buf := a.ebuf(xs.len)
+// dup<T> is the generic core (DOGFOOD: one monomorphized-by-use copier replaces N per-type ones).
+// buf_like allocates an [T] of xs's length — its [T] return type gives `slice` the element type.
+buf_like*<T> = (xs: [T]) [T] { slice(heap(xs.len * sizeof(T)), xs.len) }
+dup*<T> = (xs: [T]) [T] {
+    buf := xs.buf_like()
     xs.loop((h, i, x) { buf[i] = x })
     buf
 }
-params* = (a: Ptr<Malloc>, ps: [Param]) [Param] {
-    buf := a.pbuf(ps.len)
-    ps.loop((h, i, p) { buf[i] = p })
-    buf
-}
-stmts* = (a: Ptr<Malloc>, ss: [Stmt]) [Stmt] {
-    buf := a.sbuf(ss.len)
-    ss.loop((h, i, s) { buf[i] = s })
-    buf
-}
-fields* = (a: Ptr<Malloc>, fs: [Field]) [Field] {
-    buf := a.fbuf(fs.len)
-    fs.loop((h, i, f) { buf[i] = f })
-    buf
-}
-inits* = (a: Ptr<Malloc>, xs: [FieldInit]) [FieldInit] {
-    buf := a.ibuf(xs.len)
-    xs.loop((h, i, x) { buf[i] = x })
-    buf
-}
-decls* = (a: Ptr<Malloc>, ds: [Decl]) [Decl] {
-    buf := a.dbuf(ds.len)
-    ds.loop((h, i, d) { buf[i] = d })
-    buf
-}
+exprs*  = (a: Ptr<Malloc>, xs: [Expr]) [Expr]      { xs.dup() }
+params* = (a: Ptr<Malloc>, ps: [Param]) [Param]    { ps.dup() }
+stmts*  = (a: Ptr<Malloc>, ss: [Stmt]) [Stmt]      { ss.dup() }
+fields* = (a: Ptr<Malloc>, fs: [Field]) [Field]    { fs.dup() }
+inits*  = (a: Ptr<Malloc>, xs: [FieldInit]) [FieldInit] { xs.dup() }
+decls*  = (a: Ptr<Malloc>, ds: [Decl]) [Decl]      { ds.dup() }
 // assemble a module: hand-written decls ++ generated decls (the core build operation)
 concat* = (a: Ptr<Malloc>, xs: [Decl], ys: [Decl]) [Decl] {
     buf := a.dbuf(xs.len + ys.len)

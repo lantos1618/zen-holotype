@@ -203,8 +203,9 @@ def collect_instances(files, passing, namespace, roots=None):
         if (qual, targs) in insts:
             return
         fn = namespace.walk(qual).value
-        sc = trait_methods_scope(fn, decl_scope[qual], namespace)
-        spec = specialize(fn, dict(zip(fn.tparams, targs)))
+        sub = dict(zip(fn.tparams, targs))
+        sc = {**trait_methods_scope(fn, decl_scope[qual], namespace), **sub}   # bind tparams so `sizeof(T)` lowers
+        spec = specialize(fn, sub)
         insts[(qual, targs)] = (spec, sc)
         work.append((spec, sc))
 
