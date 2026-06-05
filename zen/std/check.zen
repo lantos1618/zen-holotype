@@ -10,9 +10,10 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq } = std.str
+{ String, new, append, finish } = std.string
 { byte_at } = std.lex
 
 // the variable environment: a cons-list of (name, type) bindings — the function's params,
@@ -367,16 +368,137 @@ resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
     buf
 }
 
+// ── statement-position match → `if` lowering (the early-return CRUX) ────────────────────
+// genc emits a `.Return` as a real `return e;` ONLY at statement level; inside a value-position
+// match (a ternary / `({ … })` block-expr) a `return` would become a bare `e;`. So a match whose
+// value is DISCARDED (a non-final ExprStmt) is lowered here into `if` STATEMENTS, where genc's
+// gen_if emits real `return`s. A VALUE-position match (the body's trailing expr, or a let/return
+// value, or a sub-expression) is left as the exhaustive ternary/Match — its value is used.
+//
+// The lowering is uniform over the two parsed shapes a match takes: an ENUM match is a Match node
+// (tag tests + payload binds); a BOOL/LITERAL match is a (possibly nested) Cond `c ? t : e`. Both
+// become if/else; a terminal `_` arm — parsed as an empty `Block` — becomes an empty branch.
+
+// ── exhaustiveness gate: only an EXHAUSTIVE (or `_`-closed) enum match is lowered to `if`. A
+//    partial match WITHOUT `_` is LEFT as a Match node, so check_validate's exhaustiveness pass
+//    still sees it and rejects it (exhaustiveness stays enforced — no implicit fall-through). ──
+match_has_wild = (m: MatchData) bool {
+    f := false
+    m.arms.loop((h, i, ar) { f = eq(ar.variant, "_").match ({ true => true, false => f }) })
+    f
+}
+// the enum named `ename`'s variants are all covered by the match's arms?
+arm_covers_v = (m: MatchData, vn: str) bool {
+    f := false
+    m.arms.loop((h, i, ar) { f = eq(ar.variant, vn).match ({ true => true, false => f }) })
+    f
+}
+ed_covered = (ed: EnumDecl, m: MatchData) bool {
+    all := true
+    ed.variants.loop((h, i, v) { all = m.arm_covers_v(v.name).match ({ true => all, false => false }) })
+    all
+}
+enum_exhaustive = (decls: [Decl], m: MatchData) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, m.ename).match ({ true => ed.ed_covered(m), false => found }), _ => found }) })
+    found
+}
+// lowerable iff a `_` closes it, OR every variant is covered. An unknown ename (generic / "") is
+// NOT lowered (left as a Match) — sound: the existing ternary path keeps working for those.
+match_lowerable = (decls: [Decl], m: MatchData) bool {
+    match_has_wild(m).match ({ true => true, false => decls.enum_exhaustive(m) })
+}
+
+// an arm/branch body Expr as [Stmt]: a Block contributes its statements (so a trailing `return`
+// stays a real Return); any other expr is wrapped as a single ExprStmt (a discarded value).
+one_stmt = (a: Ptr<Malloc>, st: Stmt) [Stmt] {
+    buf := a.sbuf(1)
+    buf[0] = st
+    buf
+}
+branch_stmts = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
+    load(e).match ({
+        .Block(b) => b.stmts,                            // `{ … }` arm — its own statements
+        _         => a.one_stmt(sexpr(e))                // a bare expr arm — a discarded value
+    })
+}
+// the C tag constant `Ename_Variant` for a tag test (`subj.tag == R_Err`)
+tag_const = (ename: str, variant: str) str { new().append(ename).append("_").append(variant).finish() }
+// `subj.tag` / `subj->tag`  (ptr -> arrow)
+subj_tag = (a: Ptr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
+    ptr.match ({ true => a.cenode(arrow(subj, "tag")), false => a.cenode(member(subj, "tag")) })
+}
+// `subj.u.V` / `subj->u.V` — the payload of variant V (the first hop is `->` for a ptr subject)
+subj_payload = (a: Ptr<Malloc>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr<Expr> {
+    u := ptr.match ({ true => a.cenode(arrow(subj, "u")), false => a.cenode(member(subj, "u")) })
+    a.cenode(member(u, variant))
+}
+// prepend the payload bind `__auto_type bind = subj.u.V;` to an arm's statements (when it binds one)
+arm_then = (a: Ptr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
+    body := a.branch_stmts(ar.body)
+    eq(ar.bind, "").match ({
+        true  => body,
+        false => a.cons_stmt(slet(ar.bind, a.subj_payload(m.subj, ar.variant, m.ptr)), body)
+    })
+}
+cons_stmt = (a: Ptr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
+    buf := a.sbuf(rest.len + 1)
+    buf[0] = head
+    rest.loop((h, i, st) { buf[i + 1] = st })
+    buf
+}
+// the if-chain over arms[i:]: each non-`_` arm tests its tag; the `_` arm (or running off the end)
+// is the final else. A bare `_` arm's empty Block contributes no statements -> an empty else.
+lower_match_arms = (a: Ptr<Malloc>, m: MatchData, i: i32) [Stmt] {
+    (i >= m.arms.len).match ({
+        true  => no_stmts(),                                                     // no `_` -> empty else (rejected upstream)
+        false => eq(m.arms[i].variant, "_").match ({
+            true  => a.branch_stmts(m.arms[i].body),                             // the catch-all -> the final else
+            false => a.one_stmt(sif(a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(tag_const(m.ename, m.arms[i].variant))))), a.arm_then(m, m.arms[i]), a.lower_match_arms(m, i + 1)))
+        })
+    })
+}
+lower_match_stmt = (a: Ptr<Malloc>, m: MatchData) Stmt {
+    stmts := a.lower_match_arms(m, 0)
+    (stmts.len == 1).match ({ true => stmts[0], false => sexpr(a.cenode(block(stmts))) })   // the chain is one If
+}
+// a bool/literal match in statement position: `c ? t : e` -> `if (c) { t } else { e }`. A nested
+// Cond in the else (a multi-arm literal match) recurses, building the if-chain; an empty-Block
+// branch (a terminal `_`) becomes an empty branch.
+lower_cond_stmt = (a: Ptr<Malloc>, d: CondData) Stmt {
+    sif(d.c, a.branch_stmts(d.t), a.cond_else(d.e))
+}
+cond_else = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
+    load(e).match ({
+        .Cond(d) => a.one_stmt(a.lower_cond_stmt(d)),    // a nested arm -> a nested if (the if-chain)
+        _        => a.branch_stmts(e)                    // the final else branch
+    })
+}
+// lower a resolved statement-position expr (its value discarded) to a statement: an EXHAUSTIVE-or-
+// `_`-closed Match becomes an if-chain; a Cond becomes if/else; anything else (incl. a non-exhaustive
+// Match, left for check_validate to reject) stays a bare ExprStmt.
+lower_stmt_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
+    load(e).match ({
+        .Match(m) => env.decls.match_lowerable(m).match ({ true => a.lower_match_stmt(m), false => sexpr(e) }),
+        .Cond(d)  => a.lower_cond_stmt(d),
+        _         => sexpr(e)
+    })
+}
+
 // ── rebuild statements ────────────────────────────────────────────────────────────────
 // `last` = this is the final statement of the body, i.e. the value it yields. A trailing ExprStmt is
 // the return value, so it KEEPS the expected type (a bare `.None` then sees its `Opt<T>` context); a
-// non-final expr-statement is discarded, so its expectation is cleared.
+// non-final expr-statement is discarded, so its expectation is cleared. A non-final (value-discarded)
+// match/cond is lowered to `if` STATEMENTS so an arm's `return` actually leaves the function.
 resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     st.match ({
         .Let(l)    => slet(l.name, a.resolve_expr(env.clr_exp(), l.value)),
         .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
-        .ExprStmt(e) => sexpr(a.resolve_expr(last.match ({ true => env, false => env.clr_exp() }), e)),
+        .ExprStmt(e) => last.match ({
+            true  => sexpr(a.resolve_expr(env, e)),                          // value position — keep the ternary/Match
+            false => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))   // statement position — lower to `if`
+        }),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body)),
         .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.keep_elem(x.elem, x.seq), a.resolve_expr(env.clr_exp(), x.value))

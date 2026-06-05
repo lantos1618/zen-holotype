@@ -5,7 +5,7 @@
 // std.parse (god-file split); parse_module still lives in std.parse and drives these.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, ArmData, FieldInit, Param, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = std.genc
+{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = std.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
 { Malloc, heap } = std.alloc
 { is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, parse_tyargs, param_buf, take_params, skip_block, PEnd } = std.parse_type
@@ -314,15 +314,35 @@ is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
 // arms come in EITHER order — `{ true => X, false => Y }` or `{ false => Y, true => X }`. Read
 // the first arm's label to map them: the `true` arm is the cond's then-branch, the `false` arm
 // its else-branch. (Assuming positional [true, false] order silently inverts a false-first match.)
+// The SECOND arm may instead be a terminal bare `_` (a partial guard, `{ false => X, _ }`): it is
+// the catch-all for the bool value the first arm DIDN'T name, lowered to a void no-op (empty block).
 parse_bool_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
     first := src.scan(open.next)                                    // the first arm's label token
     a0    := a.parse_arm(src, open.next)                            // first arm body
     comma := src.scan(a0.next)                                      // ','
+    second := src.scan(comma.next)                                  // the second arm's leading token
+    src.is_wild_label(second.tok).match ({
+        true  => a.parse_bool_wild(src, subj, first, a0, second),   // `_` — a partial bool guard
+        false => a.parse_bool_pair(src, subj, first, a0, comma)     // the complementary bool arm
+    })
+}
+// the full two-arm form — `{ true => X, false => Y }` (either order)
+parse_bool_pair = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, comma: Scan) PExpr {
     a1    := a.parse_arm(src, comma.next)                           // second arm body
     close := src.scan(a1.next)                                      // '}'
     src.tok_eq(first.tok, "true").match ({
         true  => PExpr { expr: a.enode(cond(subj.expr, a0.expr, a1.expr)), next: close.next },
         false => PExpr { expr: a.enode(cond(subj.expr, a1.expr, a0.expr)), next: close.next }
+    })
+}
+// the partial form — `{ false => X, _ }` / `{ true => X, _ }`. The `_` arm is an empty-block no-op;
+// it goes opposite the first arm (the first arm's bool value gets X, the other gets the no-op).
+parse_bool_wild = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, wild: Scan) PExpr {
+    close := src.scan(wild.next)                                    // '}' (the `_` has no `=> body`)
+    noop  := a.enode(block(a.no_arm_stmts()))
+    src.tok_eq(first.tok, "true").match ({
+        true  => PExpr { expr: a.enode(cond(subj.expr, a0.expr, noop)), next: close.next },   // true => X, _  -> subj ? X : {}
+        false => PExpr { expr: a.enode(cond(subj.expr, noop, a0.expr)), next: close.next }    // false => X, _ -> subj ? {} : X
     })
 }
 // a NON-bool, non-variant match `(n).match({ 0 => A, 1 => B, _ => C })` — an integer/literal match.
@@ -351,7 +371,16 @@ parse_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
         false => a.parse_lit_arm_val(src, subj, pos)                // `lit => body` — a `subj == lit` test
     })
 }
+// `_ => body` (an explicit catch-all) OR a terminal bare `_` (a partial guard, `≡ _ => {}`). The
+// `=>` after `_` tells them apart; a bare `_` gets a void no-op (empty Block) body. Either way the
+// test is `1` (always taken), so the `_` is the final default arm.
 parse_lit_arm_wild = (a: Ptr<Malloc>, src: str, us: Scan) LitArmEnd {
+    src.is_fat_arrow(src.scan(us.next).tok).match ({
+        true  => a.parse_lit_arm_wild_body(src, us),
+        false => LitArmEnd { test: a.enode(lit(1)), body: a.enode(block(a.no_arm_stmts())), next: us.next }
+    })
+}
+parse_lit_arm_wild_body = (a: Ptr<Malloc>, src: str, us: Scan) LitArmEnd {
     arrow := src.scan(us.next)                                      // '=>'
     body  := a.parse_arm_body(src, arrow.next)
     LitArmEnd { test: a.enode(lit(1)), body: body.expr, next: body.next }   // `1` -> always taken
@@ -399,12 +428,30 @@ fill_varm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     buf[i] = arm(vn, be.bind, body.expr)
     a.arm_tail(src, body.next, buf, i)
 }
+// is `t` the fat-arrow `=>` (a 2-byte Sym)? Distinguishes `_ => body` from a terminal bare `_`.
+is_fat_arrow = (src: str, t: Token) bool {
+    t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '=') && (src.byte_at(t.start + 1) == '>'), _ => false })
+}
+no_arm_stmts = (a: Ptr<Malloc>) [Stmt] { slice(heap(0), 0) }        // an empty [Stmt] for `_`'s no-op body
 fill_wild = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
-    us    := src.scan(pos)                                           // '_'
+    us := src.scan(pos)                                              // '_'
+    src.is_fat_arrow(src.scan(us.next).tok).match ({
+        true  => a.fill_wild_body(src, us, buf, i),                  // `_ => body` — an explicit catch-all
+        false => a.fill_wild_bare(src, us, buf, i)                   // a terminal bare `_`  ≡  `_ => {}`
+    })
+}
+fill_wild_body = (a: Ptr<Malloc>, src: str, us: Scan, buf: [ArmData], i: i32) PEnd {
     arrow := src.scan(us.next)                                       // '=>'
     body  := a.parse_arm_body(src, arrow.next)
     buf[i] = arm("_", "", body.expr)                                 // a no-bind catch-all
     a.arm_tail(src, body.next, buf, i)
+}
+// a terminal bare `_` (no `=> body`) — closes a partial STATEMENT match with a void no-op (an empty
+// `({ })` block). It makes the match exhaustive for the validator; in statement position the resolver
+// lowers it to "no else". us.next sits at the following `,` or `}`.
+fill_wild_bare = (a: Ptr<Malloc>, src: str, us: Scan, buf: [ArmData], i: i32) PEnd {
+    buf[i] = arm("_", "", a.enode(block(a.no_arm_stmts())))
+    a.arm_tail(src, us.next, buf, i)
 }
 // after an arm body: a ',' continues the list, else the '}' ends it
 arm_tail = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
