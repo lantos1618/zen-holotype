@@ -1,0 +1,670 @@
+// std.parse_expr — the expression parser: atoms, postfix (.match/.field/[index]/.loop),
+// match-expression lowering (bool/enum/literal arms), and the binary/logical precedence
+// ladder (term → expr → cmp → and → or), plus the lexeme/token-classification utilities
+// (is_op, to_int, char_val, …) and the PExpr/ebuf/enode heap-node plumbing. Split out of
+// std.parse (god-file split); parse_module still lives in std.parse and drives these.
+//
+// Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
+{ Expr, ArmData, FieldInit, Param, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = std.genc
+{ Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
+{ Malloc, heap } = std.alloc
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, parse_tyargs, param_buf, take_params, skip_block, PEnd } = std.parse_type
+{ build_body, parse_block, materialize } = std.parse_stmt
+
+PExpr*: { expr: Ptr<Expr>, next: i32 }
+
+// ── heap-allocate one Expr node, return a pointer to it ──────────────────────────
+ebuf = (a: Ptr<Malloc>) [Expr] { slice(heap(sizeof(Expr)), 1) }
+enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
+    buf := a.ebuf()
+    buf[0] = v
+    buf[0].addr()
+}
+
+// ── materialize a token's span as an owned, NUL-terminated str ───────────────────
+// genc's names are `str` (const char*), but a token is a span {start,len} into the
+// source — so an identifier's lexeme must be copied out and NUL-terminated, then viewed
+// as a str (cstr reinterprets the byte pointer). This is the runtime-string step.
+copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
+    i := 0
+    @while(i < n) {
+        store(offset(dst, i), src.byte_at(start + i))
+        i = i + 1
+    }
+}
+lexeme* = (a: Ptr<Malloc>, src: str, t: Token) str {
+    p := heap(t.len + 1)
+    src.copy_span(t.start, p, t.len)
+    store(offset(p, t.len), 0)              // NUL terminator
+    cstr(p)
+}
+
+// ── token helpers ────────────────────────────────────────────────────────────────
+// a Sym token whose (single) byte is `c`
+is_op* = (src: str, t: Token, c: u8) bool { t.kind.match ({ .Sym => src.byte_at(t.start) == c, _ => false }) }
+is_addsub = (src: str, t: Token) bool { src.is_op(t, '+') || src.is_op(t, '-') }
+is_muldiv = (src: str, t: Token) bool { src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%') }
+// the operator byte as the str genc wants
+op_str = (b: u8) str {
+    (b == '+').match ({ true => "+", false =>
+    (b == '-').match ({ true => "-", false =>
+    (b == '*').match ({ true => "*", false =>
+    (b == '%').match ({ true => "%", false => "/" }) }) }) })
+}
+// parse an Int token's decimal digits
+digit_val = (b: u8) i32 { b - '0' }
+to_int_from = (src: str, pos: i32, end: i32, acc: i64) i64 {
+    (pos < end).match ({ true => src.to_int_from(pos + 1, end, acc * 10 + src.byte_at(pos).digit_val()), false => acc })
+}
+// a hex digit's value: 0-9 directly, a-f / A-F as 10..15
+hex_val = (b: u8) i32 {
+    b.is_digit().match ({
+        true  => b - '0',
+        false => ((b >= 'a') && (b <= 'f')).match ({ true => (b - 'a') + 10, false => (b - 'A') + 10 })
+    })
+}
+hex_from = (src: str, pos: i32, end: i32, acc: i64) i64 {
+    (pos < end).match ({ true => src.hex_from(pos + 1, end, acc * 16 + src.byte_at(pos).hex_val()), false => acc })
+}
+// `0x…` is parsed base-16 (past the `0x`), otherwise decimal
+to_int = (src: str, t: Token) i64 {
+    src.is_hex_prefix(t.start).match ({
+        true  => src.hex_from(t.start + 2, t.start + t.len, 0),
+        false => src.to_int_from(t.start, t.start + t.len, 0)
+    })
+}
+
+// ── atom := base postfixed by an optional `.match { true => X, false => Y }` ───────
+// base := integer | call | identifier | '(' expr ')'
+parse_atom* = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.parse_postfix(src, a.parse_base(src, pos)) }
+parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Int   => PExpr { expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next },
+        .Char  => PExpr { expr: a.enode(byte_lit(src.char_val(sc.tok.start))), next: sc.next },   // a char -> its byte (u8)
+        .Str   => PExpr { expr: a.enode(strlit(a.str_val(src, sc.tok))), next: sc.next },    // a string -> StrLit
+        .Ident => a.parse_ident(src, sc),            // a bare name, or a `name(arg)` call
+        _      => a.parse_other(src, sc)
+    })
+}
+// the non-literal, non-identifier atoms, by leading token: `.Variant` ctor, prefix `!`/`-`,
+// a `[…]` slice literal, a `(names){…}` lambda, or a parenthesized expression.
+parse_other = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
+    src.is_dot(sc.tok).match ({
+        true  => a.parse_ctor(src, sc),
+        false => src.is_not(sc.tok).match ({
+            true  => a.parse_not(src, sc),               // prefix `!x` -> (x ? false : true)
+            false => src.is_minus(sc.tok).match ({
+                true  => a.parse_neg(src, sc),           // prefix `-x` -> (0 - x)
+                false => src.is_lbracket(sc.tok).match ({
+                    true  => a.parse_slicelit(src, sc),  // `[a, b, c]` — a slice literal
+                    false => src.lam_open(sc).match ({   // '(' — a lambda `(names){…}` or a paren'd expr
+                        true  => a.parse_lambda(src, sc),
+                        false => a.parse_paren(src, sc)
+                    })
+                })
+            })
+        })
+    })
+}
+// the byte a backslash escape denotes: n -> 10, t -> 9, r -> 13, 0 -> 0; any other escaped
+// char (a backslash, a quote) maps to itself.
+esc_byte = (e: u8) u8 {
+    (e == 'n').match ({ true => 10, false =>
+    (e == 't').match ({ true => 9, false =>
+    (e == 'r').match ({ true => 13, false =>
+    (e == '0').match ({ true => 0, false => e }) }) }) })
+}
+// a char literal is an integer — its byte value. start is the opening quote.
+char_val = (src: str, start: i32) i32 {
+    b := src.byte_at(start + 1)
+    (b == '\\').match ({ true => esc_byte(src.byte_at(start + 2)), false => b })
+}
+// a string literal's value: copy the bytes between the quotes into a fresh NUL-terminated
+// buffer, RESOLVING backslash escapes (genc's gen_strlit re-escapes them on emit). The token
+// spans `"…"`, so the content is [start+1 .. start+len-1).
+str_val = (a: Ptr<Malloc>, src: str, t: Token) str {
+    p := heap(t.len)                            // upper bound: content (<= len-2) + NUL
+    n := src.unescape(t.start + 1, t.start + t.len - 1, p, 0)
+    store(offset(p, n), 0)                           // NUL terminator
+    cstr(p)
+}
+unescape = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    (pos < end).match ({ true => src.unescape_one(pos, end, dst, di), false => di })
+}
+unescape_one = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    (src.byte_at(pos) == '\\').match ({
+        true  => src.unescape_esc(pos, end, dst, di),
+        false => src.unescape_plain(pos, end, dst, di)
+    })
+}
+unescape_esc = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    store(offset(dst, di), esc_byte(src.byte_at(pos + 1)))   // `\x` -> one byte
+    src.unescape(pos + 2, end, dst, di + 1)
+}
+unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    store(offset(dst, di), src.byte_at(pos))
+    src.unescape(pos + 1, end, dst, di + 1)
+}
+// a leading-dot enum constructor `.Variant` (a Tag) or `.Variant(payload)` (a MakeEnum). The
+// enum TYPE is left "" — std.check fills it by looking the variant up among the enum decls.
+parse_ctor = (a: Ptr<Malloc>, src: str, dot: Scan) PExpr {
+    vt := src.scan(dot.next)                         // the variant name
+    vn := a.lexeme(src, vt.tok)
+    nx := src.scan(vt.next)                          // '(' (payload) or anything else (a bare tag)
+    src.is_lparen(nx.tok).match ({
+        true  => src.is_rparen(src.scan(nx.next).tok).match ({
+            true  => a.parse_ctor_empty(src, vn, nx),     // `.Variant()` -> Tag (empty payload)
+            false => a.parse_ctor_payload(src, vn, nx)    // `.Variant(arg)` -> MakeEnum
+        }),
+        false => PExpr { expr: a.enode(mktag("", vn)), next: vt.next }   // `.Variant` -> Tag
+    })
+}
+parse_ctor_empty = (a: Ptr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
+    rp := src.scan(lp.next)                          // ')'
+    PExpr { expr: a.enode(mktag("", vn)), next: rp.next }
+}
+parse_ctor_payload = (a: Ptr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
+    arg := a.parse_or(src, lp.next)                  // the single payload expression
+    rp  := src.scan(arg.next)                        // ')'
+    PExpr { expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next }     // `.Variant(arg)` -> MakeEnum
+}
+// a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
+is_dot*      = (src: str, t: Token) bool { src.is_op(t, '.') }
+is_match_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "match"), _ => false }) }
+is_match_at = (src: str, pos: i32) bool {
+    dot := src.scan(pos)                                            // a '.' followed by `match`?
+    src.is_dot(dot.tok).match ({ true => src.is_match_kw(src.scan(dot.next).tok), false => false })
+}
+// `.field` is field access (genc Member, chainable: `a.b.c`); `.match` is the ternary above.
+// match is checked first, so a `.match` is never mistaken for a field named `match`.
+is_ident_tok* = (t: Token) bool { t.kind.match ({ .Ident => true, _ => false }) }
+is_field_at = (src: str, pos: i32) bool {
+    dot := src.scan(pos)
+    src.is_dot(dot.tok).match ({ true => is_ident_tok(src.scan(dot.next).tok), false => false })
+}
+// A postfix index `base[i]` continues the expression ONLY if the `[` is on the SAME line as
+// `base`. A `[` that opens a new line is a slice-literal STATEMENT (`[1, 2, 3]`), not an index —
+// without this guard it glues onto the previous statement (`x := 7` ⨯ `[1]` → `x := 7[1]`).
+is_index_at = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_lbracket(sc.tok) && !src.nl_between(pos, sc.tok.start)
+}
+nl_between = (src: str, lo: i32, hi: i32) bool {       // a newline in the gap before the next token?
+    (lo >= hi).match ({
+        true  => false,
+        false => (src.byte_at(lo) == '\n').match ({ true => true, false => src.nl_between(lo + 1, hi) })
+    })
+}
+is_loop_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "loop"), _ => false }) }
+is_loop_at = (src: str, pos: i32) bool {
+    dot := src.scan(pos)
+    src.is_dot(dot.tok).match ({ true => src.is_loop_kw(src.scan(dot.next).tok), false => false })
+}
+parse_postfix = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
+    src.is_match_at(base.next).match ({
+        true  => a.parse_match(src, base),
+        false => src.is_loop_at(base.next).match ({
+            true  => a.parse_loop(src, base),            // recv.loop((h, i, x) { … }) — a foreach
+            false => src.is_field_at(base.next).match ({
+                true  => a.parse_field(src, base),
+                false => src.is_index_at(base.next).match ({
+                    true  => a.parse_index(src, base),   // seq[i] — element type filled by std.check
+                    false => base
+                })
+            })
+        })
+    })
+}
+// `recv.loop((h, i, x) { body })` — a foreach over recv: h is the (ignored) loop handle, i the
+// index, x the element. The body is a no-return statement block (it mutates captured locals).
+// The element type is left void; std.check fills it from recv's inferred slice type.
+parse_loop = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
+    dot   := src.scan(base.next)                         // '.'
+    kw    := src.scan(dot.next)                          // 'loop'
+    lp    := src.scan(kw.next)                           // '(' the loop call
+    op    := src.scan(lp.next)                           // '(' the closure params
+    ht    := src.scan(op.next)                           // h (handle, ignored)
+    c1    := src.scan(ht.next)                           // ','
+    it    := src.scan(c1.next)                           // i (index name)
+    iname := a.lexeme(src, it.tok)
+    c2    := src.scan(it.next)                           // ','
+    xt    := src.scan(c2.next)                           // x (element name)
+    xname := a.lexeme(src, xt.tok)
+    cl    := src.scan(xt.next)                           // ')' closing the params
+    ob    := src.scan(cl.next)                           // '{' the body
+    blk   := a.parse_block(src, ob.next)                 // body statements (no return), to '}'
+    rp    := src.scan(blk.next)                          // ')' closing the loop call
+    a.parse_postfix(src, PExpr { expr: a.enode(eloop(base.expr, iname, xname, tvoid(), a.materialize(blk.list))), next: rp.next })
+}
+parse_index = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
+    lb := src.scan(base.next)                            // '['
+    ie := a.parse_or(src, lb.next)                       // the index expression
+    rb := src.scan(ie.next)                              // ']'
+    a.parse_postfix(src, PExpr { expr: a.enode(eindex(base.expr, ie.expr, tvoid())), next: rb.next })   // chain
+}
+// `recv.name` is field access (genc Member); `recv.name(args)` is a UFCS method call, which
+// DESUGARS to `name(recv, args)` — a plain Call with the receiver as the first argument
+// (`b.is_alpha()` -> `is_alpha(b)`, `x.f(a, b)` -> `f(x, a, b)`). Both chain.
+parse_field = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
+    dot  := src.scan(base.next)                                    // '.'
+    fld  := src.scan(dot.next)                                     // the field / method name
+    name := a.lexeme(src, fld.tok)
+    nx   := src.scan(fld.next)                                     // '(' (method call) or not (field)
+    src.is_lparen(nx.tok).match ({
+        true  => a.parse_method(src, base, name, nx),
+        false => a.parse_postfix(src, PExpr { expr: a.enode(member(base.expr, name)), next: fld.next })  // field, chain
+    })
+}
+parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan) PExpr {
+    buf    := a.arg_buf()
+    buf[0] = load(base.expr)                                       // receiver becomes the first arg
+    ae     := a.fill_args(src, lp.next, buf, 1)                    // the rest of the args follow it
+    a.parse_postfix(src, PExpr { expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next })   // chain
+}
+parse_arm = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then a body
+    pat   := src.scan(pos)                                          // the pattern (true / false)
+    arrow := src.scan(pat.next)                                     // '=>'
+    a.parse_arm_body(src, arrow.next)
+}
+// an arm body: a brace block `{ stmts }` (multi-statement, value = the trailing expression, a
+// genc Block / statement-expression) or a single expression.
+parse_arm_body = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
+    sc := src.scan(pos)
+    src.is_lbrace(sc.tok).match ({
+        true  => a.parse_arm_block(src, sc),
+        false => a.parse_or(src, pos)
+    })
+}
+parse_arm_block = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {    // open = '{'
+    body := a.build_body(src, open.next)                            // statements (trailing expr = value)
+    endp := src.skip_block(open.next)                               // pos just past the matching '}'
+    PExpr { expr: a.enode(block(body)), next: endp }
+}
+// `.match ({` either has boolean arms (`true => X, false => Y`, -> Cond) or enum-variant arms
+// (`.Circle(r) => …, .Square(w) => …`, -> genc Match). The first arm's leading token tells
+// them apart: a `.` starts a variant pattern, anything else is the boolean form.
+// `match` REQUIRES the arm-record to be paren-wrapped: `subj.match ({…})`. The parens are
+// pure punctuation — a mandatory `(` before the `{` and a mandatory `)` after the `}` — so
+// match reads as "a function taking a `{}`". The bare brace form `subj.match {…}` is rejected.
+skip_rparen = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({ true => sc.next, false => pos })
+}
+close_match = (src: str, e: PExpr) PExpr {
+    PExpr { expr: e.expr, next: src.skip_rparen(e.next) }           // drop the mandatory ')'
+}
+parse_match = (a: Ptr<Malloc>, src: str, subj: PExpr) PExpr {
+    dot   := src.scan(subj.next)                                    // '.'
+    kw    := src.scan(dot.next)                                     // 'match'
+    lp    := src.scan(kw.next)                                      // '(' (required)
+    open  := src.scan(lp.next)                                      // the '{'
+    first := src.scan(open.next)                                    // the first arm's leading token
+    body  := src.is_dot(first.tok).match ({
+        true  => a.parse_variant_match(src, subj, open),           // .Variant => …            -> Match
+        false => src.is_bool_label(first.tok).match ({
+            true  => a.parse_bool_match(src, subj, open),          // true/false => …          -> Cond
+            false => a.parse_lit_match(src, subj, open)            // 0 => …, 1 => …, _ => …   -> equality conds
+        })
+    })
+    src.close_match(body)                                           // drop the trailing ')'
+}
+is_bool_label = (src: str, t: Token) bool { src.tok_eq(t, "true") || src.tok_eq(t, "false") }
+is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
+// arms come in EITHER order — `{ true => X, false => Y }` or `{ false => Y, true => X }`. Read
+// the first arm's label to map them: the `true` arm is the cond's then-branch, the `false` arm
+// its else-branch. (Assuming positional [true, false] order silently inverts a false-first match.)
+parse_bool_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
+    first := src.scan(open.next)                                    // the first arm's label token
+    a0    := a.parse_arm(src, open.next)                            // first arm body
+    comma := src.scan(a0.next)                                      // ','
+    a1    := a.parse_arm(src, comma.next)                           // second arm body
+    close := src.scan(a1.next)                                      // '}'
+    src.tok_eq(first.tok, "true").match ({
+        true  => PExpr { expr: a.enode(cond(subj.expr, a0.expr, a1.expr)), next: close.next },
+        false => PExpr { expr: a.enode(cond(subj.expr, a1.expr, a0.expr)), next: close.next }
+    })
+}
+// a NON-bool, non-variant match `(n).match({ 0 => A, 1 => B, _ => C })` — an integer/literal match.
+// It lowers to a nested equality ternary `n == 0 ? A : (n == 1 ? B : C)`: each non-final arm tests the
+// subject against its literal label; the FINAL arm (followed by `}`) is the default with no test (a
+// `_` wildcard, or just the last label). Fixes the old parse_bool_match, which only ever read TWO arms
+// and bool-coerced the subject — crashing on 3+ arms and silently mis-evaluating non-zero labels.
+LitArmEnd*: { test: Ptr<Expr>, body: Ptr<Expr>, next: i32 }
+parse_lit_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr { a.parse_lit_arms(src, subj, open.next) }
+parse_lit_arms = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
+    arm   := a.parse_lit_arm(src, subj, pos)
+    after := src.scan(arm.next)                                     // ',' (more arms) or '}' (last = default)
+    src.is_rbrace(after.tok).match ({
+        true  => PExpr { expr: arm.body, next: after.next },        // the final arm is the default — no test
+        false => a.cons_lit_arm(src, subj, arm, after)
+    })
+}
+cons_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
+    rest := a.parse_lit_arms(src, subj, after.next)                 // the arms after the ','
+    PExpr { expr: a.enode(cond(arm.test, arm.body, rest.expr)), next: rest.next }
+}
+parse_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
+    sc := src.scan(pos)
+    src.is_wild_label(sc.tok).match ({
+        true  => a.parse_lit_arm_wild(src, sc),                     // `_ => body` — an always-true catch-all
+        false => a.parse_lit_arm_val(src, subj, pos)                // `lit => body` — a `subj == lit` test
+    })
+}
+parse_lit_arm_wild = (a: Ptr<Malloc>, src: str, us: Scan) LitArmEnd {
+    arrow := src.scan(us.next)                                      // '=>'
+    body  := a.parse_arm_body(src, arrow.next)
+    LitArmEnd { test: a.enode(lit(1)), body: body.expr, next: body.next }   // `1` -> always taken
+}
+parse_lit_arm_val = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
+    le    := a.parse_atom(src, pos)                                 // the literal label (0, 'a', -5, …)
+    arrow := src.scan(le.next)                                      // '=>'
+    body  := a.parse_arm_body(src, arrow.next)
+    LitArmEnd { test: a.enode(bin("==", subj.expr, le.expr)), body: body.expr, next: body.next }
+}
+// the subject of an enum match must be a bare variable (genc's MatchData.subj is its NAME);
+// pull the name back out of the already-parsed Var node.
+subj_name = (e: Ptr<Expr>) str { load(e).match ({ .Var(v) => v.name, _ => "" }) }
+// `.Variant(bind) => body` / `.Variant => body` arms, comma-separated, into a heap [ArmData].
+// ename is left "" here — std.check fills it once the subject's enum type is known.
+BindEnd*: { bind: str, next: i32 }
+arm_buf = (a: Ptr<Malloc>) [ArmData] { slice(heap(1024 * sizeof(ArmData)), 1024) }   // cap 1024
+take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }                            // exact length
+arm_bind = (a: Ptr<Malloc>, src: str, pos: i32) BindEnd {     // pos just past '('
+    bt := src.scan(pos)                                              // the payload binding name
+    bn := a.lexeme(src, bt.tok)
+    rp := src.scan(bt.next)                                          // ')'
+    BindEnd { bind: bn, next: rp.next }
+}
+fill_arms = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_marm(src, pos, buf, i) })
+}
+// an arm is `.Variant(bind) => body` or a wildcard `_ => body` (the catch-all default, which
+// genc emits as the last arm with no tag test). The leading token tells them apart.
+fill_marm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    src.is_dot(src.scan(pos).tok).match ({
+        true  => a.fill_varm(src, pos, buf, i),
+        false => a.fill_wild(src, pos, buf, i)                       // `_ => body`
+    })
+}
+fill_varm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    dot := src.scan(pos)                                             // '.'
+    vt  := src.scan(dot.next)                                        // variant name
+    vn  := a.lexeme(src, vt.tok)
+    pk  := src.scan(vt.next)                                         // '(' (a binding) or '=>'
+    be  := src.is_lparen(pk.tok).match ({ true => a.arm_bind(src, pk.next), false => BindEnd { bind: "", next: vt.next } })
+    arrow := src.scan(be.next)                                       // '=>'
+    body  := a.parse_arm_body(src, arrow.next)                       // the arm body (expr or `{ … }`)
+    buf[i] = arm(vn, be.bind, body.expr)
+    a.arm_tail(src, body.next, buf, i)
+}
+fill_wild = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    us    := src.scan(pos)                                           // '_'
+    arrow := src.scan(us.next)                                       // '=>'
+    body  := a.parse_arm_body(src, arrow.next)
+    buf[i] = arm("_", "", body.expr)                                 // a no-bind catch-all
+    a.arm_tail(src, body.next, buf, i)
+}
+// after an arm body: a ',' continues the list, else the '}' ends it
+arm_tail = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    after := src.scan(pos)
+    src.is_comma(after.tok).match ({
+        true  => a.fill_arms(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }              // '}'
+    })
+}
+parse_variant_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
+    buf := a.arm_buf()
+    ae  := a.fill_arms(src, open.next, buf, 0)                       // arms + pos just past '}'
+    PExpr { expr: a.enode(ematch(subj.expr, "", buf.take_arms(ae.count))), next: ae.next }
+}
+// an Ident is a variable — unless the very next token is `(`, making it a one-arg call
+is_lparen* = (src: str, t: Token) bool { src.is_op(t, '(') }
+parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
+    name := a.lexeme(src, sc.tok)
+    nx := src.scan(sc.next)
+    src.is_lparen(nx.tok).match ({
+        true  => a.parse_call(src, name, nx),                      // `name(args)` — a call
+        false => src.is_lbrace(nx.tok).match ({
+            true  => a.parse_struct_lit(src, name, nx),            // `Name { f: v, … }` — a struct literal
+            false => src.is_langle(nx.tok).match ({
+                true  => src.looks_generic_lit(nx.next).match ({   // `Name<…>{` -> a generic struct literal
+                    true  => a.parse_generic_struct_lit(src, name, nx.next),
+                    false => PExpr { expr: a.enode(vref(name)), next: sc.next }   // `name < …` is a comparison
+                }),
+                false => PExpr { expr: a.enode(vref(name)), next: sc.next }   // a bare variable
+            })
+        })
+    })
+}
+// is this `<…>` a generic struct literal's type args (followed by `{`), not a comparison like `a < b`?
+// `pos` is just past the '<'. Conservatively scan only TYPE-ARG tokens (idents, commas, `[ ]`, nested
+// `< >`); the moment a non-type token appears (a number, `)`, an operator) it's a comparison — bail.
+// So `Box<i32>{` is a literal, but `i < cnt)` / `(x < 9).match` are comparisons.
+looks_generic_lit = (src: str, pos: i32) bool {
+    after := src.tyargs_end(pos, 1)
+    (after < 0).match ({ true => false, false => src.is_lbrace(src.scan(after).tok) })
+}
+tyargs_end* = (src: str, pos: i32, depth: i32) i32 {      // pos past matching '>', or -1 if not type args
+    sc := src.scan(pos)
+    src.is_langle(sc.tok).match ({
+        true  => src.tyargs_end(sc.next, depth + 1),
+        false => src.is_rangle(sc.tok).match ({
+            true  => (depth == 1).match ({ true => sc.next, false => src.tyargs_end(sc.next, depth - 1) }),
+            false => src.is_tyarg_tok(sc.tok).match ({ true => src.tyargs_end(sc.next, depth), false => 0 - 1 })
+        })
+    })
+}
+is_tyarg_tok = (src: str, t: Token) bool {              // a token that may appear inside `<…>` type args
+    is_ident_tok(t) || src.is_comma(t) || src.is_lbracket(t) || src.is_rbracket(t)
+}
+parse_generic_struct_lit = (a: Ptr<Malloc>, src: str, name: str, pos: i32) PExpr {   // pos just past '<'
+    ta   := a.parse_tyargs(src, pos)                              // the `<i32>` type args, pos past '>'
+    open := src.scan(ta.next)                                     // '{'
+    buf  := a.finit_buf()
+    fe   := a.fill_inits(src, open.next, buf, 0)
+    PExpr { expr: a.enode(mkstructg(name, mangle_str(name, ta.args), ta.args, buf.take_inits(fe.count))), next: fe.next }
+}
+// `Name { field: value, … }` — the `field: value` inits parse into a heap [FieldInit], then
+// the struct literal is built. open is the Scan of the opening '{'.
+finit_buf = (a: Ptr<Malloc>) [FieldInit] { slice(heap(1024 * sizeof(FieldInit)), 1024) }   // cap 1024
+take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }                            // exact length
+parse_struct_lit = (a: Ptr<Malloc>, src: str, name: str, open: Scan) PExpr {
+    buf := a.finit_buf()
+    fe  := a.fill_inits(src, open.next, buf, 0)                    // inits + pos just past '}'
+    PExpr { expr: a.enode(mkstruct(name, buf.take_inits(fe.count))), next: fe.next }
+}
+fill_inits = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_init(src, pos, buf, i) })
+}
+fill_init = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    nt    := src.scan(pos)                               // field name
+    nm    := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)                           // ':'
+    v     := a.parse_or(src, colon.next)                 // the value (a full expression)
+    buf[i] = finit(nm, v.expr)
+    after := src.scan(v.next)                            // ',' or '}'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_inits(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // '}'
+    })
+}
+// `name(a, b, …)` — parse the comma-separated arguments into a heap [Expr] (each arg's
+// VALUE), then build the call. lp is the Scan of the opening '('.
+arg_buf = (a: Ptr<Malloc>) [Expr] { slice(heap(64 * sizeof(Expr)), 64) }   // cap 64 args
+take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }                           // exact length
+parse_call = (a: Ptr<Malloc>, src: str, name: str, lp: Scan) PExpr {
+    buf := a.arg_buf()
+    ae  := a.fill_args(src, lp.next, buf, 0)         // args + pos just past ')'
+    PExpr { expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next }
+}
+fill_args = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_arg(src, pos, buf, i) })
+}
+fill_arg = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    arg   := a.parse_or(src, pos)                   // one argument
+    buf[i] = load(arg.expr)                          // store its Expr value
+    after := src.scan(arg.next)                      // ',' or ')'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_args(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }   // ')'
+    })
+}
+parse_paren = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {
+    inner := a.parse_or(src, open.next)             // parse past the '(' (full expr incl. compare)
+    close := src.scan(inner.next)                    // consume the ')'
+    PExpr { expr: inner.expr, next: close.next }
+}
+// prefix `-x` -> `(0 - x)` (no Unary node needed). The operand is a full atom so `-a.f` and
+// `-f(x)` negate the postfixed value, and `-a * b` is `(0 - a) * b` (binds tighter than `*`).
+is_minus = (src: str, t: Token) bool { src.is_op(t, '-') }
+parse_neg = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {     // sc = the '-'
+    inner := a.parse_atom(src, sc.next)
+    PExpr { expr: a.enode(bin("-", a.enode(lit(0)), inner.expr)), next: inner.next }
+}
+// prefix `!x` (logical not) -> `(x ? false : true)` — a Cond, no Unary node. The one-byte `!`
+// (not the two-byte `!=`); `true`/`false` lower to C's stdbool literals.
+is_not = (src: str, t: Token) bool { t.kind.match ({ .Sym => (src.byte_at(t.start) == '!') && (t.len == 1), _ => false }) }
+parse_not = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {     // sc = the '!'
+    inner := a.parse_atom(src, sc.next)
+    PExpr { expr: a.enode(cond(inner.expr, a.enode(vref("false")), a.enode(vref("true")))), next: inner.next }
+}
+// `[a, b, c]` — a slice literal: comma-separated expressions to `]`. The element type is left
+// void; std.check fills it from the first item's inferred type (like an index's element type).
+fill_sitems = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rbracket(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_sitem(src, pos, buf, i) })
+}
+fill_sitem = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
+    it    := a.parse_or(src, pos)                    // one item
+    buf[i] = load(it.expr)
+    after := src.scan(it.next)                       // ',' or ']'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_sitems(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }   // ']'
+    })
+}
+parse_slicelit = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {   // open = the '['
+    buf := a.arg_buf()
+    ae  := a.fill_sitems(src, open.next, buf, 0)
+    a.parse_postfix(src, PExpr { expr: a.enode(slit(tvoid(), buf.take_args(ae.count))), next: ae.next })
+}
+// is the `(` (scanned as `open`) the start of a lambda `(names){…}`, not a parenthesized expr?
+// A lambda's parens hold only a (possibly empty) comma-list of identifiers, closed by `)` then
+// `{`. Anything else (an operator, a literal, no trailing brace) is a parenthesized expression.
+lam_brace = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }   // '{' right after ')'?
+lam_open = (src: str, open: Scan) bool { src.lam_params_ok(open.next) }
+lam_params_ok = (src: str, pos: i32) bool {         // pos just past '(' — idents/commas then ')'{
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({
+        true  => src.lam_brace(sc.next),             // '()' is a lambda iff '{' follows
+        false => sc.tok.kind.match ({
+            .Ident => src.lam_after_name(sc.next),
+            _      => false                          // first token not an ident -> a paren'd expr
+        })
+    })
+}
+lam_after_name = (src: str, pos: i32) bool {         // after a name: ',' (more) or ')' then '{'
+    sc := src.scan(pos)
+    src.is_comma(sc.tok).match ({
+        true  => src.lam_params_ok(sc.next),
+        false => src.is_rparen(sc.tok).match ({ true => src.lam_brace(sc.next), false => false })
+    })
+}
+// a lambda value `(a, x) { body }` — names only (each becomes a Param with a Void placeholder type;
+// the real types come from the FnT it is passed to). The body is a function-style block (a trailing
+// expression is its result), inlined where its FnT parameter is called.
+fill_lnames = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+    sc := src.scan(pos)
+    src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_lname(src, pos, buf, i) })
+}
+fill_lname = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+    nt    := src.scan(pos)                               // the parameter name
+    buf[i] = param(a.lexeme(src, nt.tok), tvoid())
+    after := src.scan(nt.next)                           // ',' or ')'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_lnames(src, after.next, buf, i + 1),
+        false => PEnd { count: i + 1, next: after.next }  // ')'
+    })
+}
+parse_lambda = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {   // open = the '(' scan
+    buf  := a.param_buf()
+    pe   := a.fill_lnames(src, open.next, buf, 0)        // param names, pos just past ')'
+    ob   := src.scan(pe.next)                            // '{'
+    body := a.build_body(src, ob.next)                   // statements (trailing expr = the value)
+    endp := src.skip_block(ob.next)                      // pos just past the matching '}'
+    a.parse_postfix(src, PExpr { expr: a.enode(lam(buf.take_params(pe.count), body)), next: endp })
+}
+
+// ── term := atom (('*' | '/') atom)*   (left-associative) ─────────────────────────
+parse_term = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.term_rest(src, a.parse_atom(src, pos)) }
+term_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_muldiv(sc.tok).match ({ false => lhs, true => a.term_more(src, lhs, sc) })
+}
+term_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_atom(src, sc.next)
+    a.term_rest(src, PExpr { expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// ── expr := term (('+' | '-') term)*   (left-associative) ─────────────────────────
+parse_expr = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
+expr_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_addsub(sc.tok).match ({ false => lhs, true => a.expr_more(src, lhs, sc) })
+}
+expr_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_term(src, sc.next)
+    a.expr_rest(src, PExpr { expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// ── compare := expr (('==' | '<' | '>' | '<=' | '>=') expr)*  (loosest, left-assoc) ──
+// A single `=` is assignment, not comparison, so `==` must be the two-byte symbol; `<`/`>`
+// are comparisons at either length (`<` or `<=`).
+is_cmp_byte = (b: u8, len: i32) bool { ((b == '=') && (len == 2)) || ((b == '!') && (len == 2)) || (b == '<') || (b == '>') }
+is_cmp = (src: str, t: Token) bool { t.kind.match ({ .Sym => src.byte_at(t.start).is_cmp_byte(t.len), _ => false }) }
+cmp_op_str = (src: str, t: Token) str {
+    b0 := src.byte_at(t.start)
+    (b0 == '=').match ({ true => "==", false =>
+    (b0 == '!').match ({ true => "!=", false =>
+    (b0 == '<').match ({
+        true  => (t.len == 2).match ({ true => "<=", false => "<" }),
+        false => (t.len == 2).match ({ true => ">=", false => ">" })
+    }) }) })
+}
+parse_cmp = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.cmp_rest(src, a.parse_expr(src, pos)) }
+cmp_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_cmp(sc.tok).match ({ false => lhs, true => a.cmp_more(src, lhs, sc) })
+}
+cmp_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_expr(src, sc.next)
+    a.cmp_rest(src, PExpr { expr: a.enode(bin(src.cmp_op_str(sc.tok), lhs.expr, rhs.expr)), next: rhs.next })
+}
+
+// ── logic := and ('||' and)* ;  and := compare ('&&' compare)*   (left-assoc) ────────
+// `&&` binds tighter than `||`, both looser than comparison — so `a || b && c` parses as
+// `(a || (b && c))` (two levels), matching C.
+is_and = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '&'), _ => false }) }
+is_or  = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '|'), _ => false }) }
+parse_and = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.and_rest(src, a.parse_cmp(src, pos)) }
+and_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_and(sc.tok).match ({ false => lhs, true => a.and_more(src, lhs, sc) })
+}
+and_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_cmp(src, sc.next)
+    a.and_rest(src, PExpr { expr: a.enode(bin("&&", lhs.expr, rhs.expr)), next: rhs.next })
+}
+parse_or* = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.or_rest(src, a.parse_and(src, pos)) }
+or_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
+    sc := src.scan(lhs.next)
+    src.is_or(sc.tok).match ({ false => lhs, true => a.or_more(src, lhs, sc) })
+}
+or_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
+    rhs := a.parse_and(src, sc.next)
+    a.or_rest(src, PExpr { expr: a.enode(bin("||", lhs.expr, rhs.expr)), next: rhs.next })
+}

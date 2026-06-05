@@ -24,7 +24,9 @@ from zen.main import (load, build_namespace, build_scopes, resolve,
 
 # the compiler IS these four files, in dependency order (genc defines the AST + backend,
 # lex the tokens, parse the parser, check the resolver/validator).
-SOURCES = ["zen/std/genc.zen", "zen/std/lex.zen", "zen/std/parse.zen", "zen/std/check.zen"]
+SOURCES = ["zen/std/genc.zen", "zen/std/lex.zen",
+           "zen/std/parse_expr.zen", "zen/std/parse_type.zen", "zen/std/parse_stmt.zen",
+           "zen/std/parse.zen", "zen/std/check.zen"]
 
 # genc emits this zslice typedef at the head; zenrt.h provides it instead, so we strip it.
 HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
