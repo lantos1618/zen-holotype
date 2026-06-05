@@ -39,7 +39,7 @@ def python_parser_sexpr(expr):
 _DRIVER = """
 { Malloc } = std.alloc
 { parse } = std.parse
-{ gen_sexpr } = std.genc
+{ gen_sexpr } = std.genc_emit
 { String, new, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }

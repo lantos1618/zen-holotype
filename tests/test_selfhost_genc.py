@@ -1,9 +1,9 @@
 """The fixpoint milestone: the self-hosted toolchain (std.lex -> std.parse -> std.check ->
-std.genc, all written IN Zen) compiles genc.zen — the C BACKEND ITSELF — into valid C.
+std.genc{,_mono,_emit}, all written IN Zen) compiles the C BACKEND ITSELF into valid C.
 
-We feed std/genc.zen through the Zen-written toolchain and assert the emitted C compiles
-(cc -c) given the external decls genc.zen imports (String + std.str). A real compiler source
-file compiled by the compiler-in-itself.
+We feed the backend sources (genc.zen + genc_mono.zen + genc_emit.zen) through the Zen-written
+toolchain and assert the emitted C compiles (cc -c) given the external decls they import (String
++ std.str). A real compiler source file compiled by the compiler-in-itself.
 """
 import subprocess
 from pathlib import Path
@@ -15,7 +15,7 @@ _DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
 { resolve_module } = std.check
-{ genModule } = std.genc
+{ genModule } = std.genc_emit
 { String, new, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -33,9 +33,13 @@ def _zen_lit(s):
 
 
 def test_self_hosted_toolchain_compiles_genc_zen(tmp_path):
-    full = Path("zen/std/genc.zen").read_text()
+    # the C backend is now three files: genc (AST base + type helpers), genc_mono (monomorphize),
+    # genc_emit (the gen_* emitters + genModule). Concatenate all three as one module.
+    def strip(f):
+        return "\n".join(l for l in Path(f).read_text().splitlines()
+                         if not (l.strip().startswith("{ ") and "= std." in l))
     # the self-hosted parser skips imports; std.string / std.str are provided as externs below.
-    src = "\n".join(l for l in full.splitlines() if not (l.strip().startswith("{ ") and "= std." in l))
+    src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen"))
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
     build_scopes(files); resolve(files, ns)
@@ -71,7 +75,8 @@ def test_self_hosted_toolchain_compiles_genc_AND_check(tmp_path):
     def strip(f):
         return "\n".join(l for l in Path(f).read_text().splitlines()
                          if not (l.strip().startswith("{ ") and "= std." in l))
-    src = strip("zen/std/genc.zen") + "\n" + strip("zen/std/check.zen")
+    src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/genc_mono.zen",
+                                       "zen/std/genc_emit.zen", "zen/std/check.zen"))
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
     build_scopes(files); resolve(files, ns)
@@ -105,7 +110,8 @@ def test_self_hosted_toolchain_compiles_genc_lex_parse(tmp_path):
     def strip(f):
         return "\n".join(l for l in Path(f).read_text().splitlines()
                          if not (l.strip().startswith("{ ") and "= std." in l))
-    src = strip("zen/std/genc.zen") + "\n" + strip("zen/std/lex.zen") + "\n" + strip("zen/std/parse.zen")
+    src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/genc_mono.zen",
+                                       "zen/std/genc_emit.zen", "zen/std/lex.zen", "zen/std/parse.zen"))
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
     build_scopes(files); resolve(files, ns)
@@ -140,7 +146,8 @@ def test_self_hosted_toolchain_compiles_WHOLE_compiler(tmp_path):
     def strip(f):
         return "\n".join(l for l in Path(f).read_text().splitlines()
                          if not (l.strip().startswith("{ ") and "= std." in l))
-    src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/lex.zen",
+    src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/genc_mono.zen",
+                                       "zen/std/genc_emit.zen", "zen/std/lex.zen",
                                        "zen/std/parse.zen", "zen/std/check.zen"))
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
