@@ -22,11 +22,13 @@ sys.path.insert(0, str(ROOT))
 from zen.main import (load, build_namespace, build_scopes, resolve,
                       fold_comptime, run_emits, check, emit_c)
 
-# the compiler IS these source files, in dependency order (genc defines the AST base + type
-# helpers, genc_mono the monomorphize pass, genc_emit the C backend, lex the tokens, parse the
-# parser, check the resolver/validator).
+# the compiler IS these source files, in dependency order: genc (AST base + type helpers),
+# genc_mono (monomorphize), genc_emit (C backend), lex (tokens), parse_expr/parse_type/parse_stmt
+# + parse (the parser), check (resolver/validator). The validator check_validate.zen is NOT here
+# (the bootstrap binary only emits C — it doesn't type-check — so it stays out of the binary).
 SOURCES = ["zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
-           "zen/std/lex.zen", "zen/std/parse.zen", "zen/std/check.zen"]
+           "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
+           "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen"]
 
 # genc emits this zslice typedef at the head; zenrt.h provides it instead, so we strip it.
 HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
