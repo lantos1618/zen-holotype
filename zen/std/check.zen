@@ -454,6 +454,11 @@ inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: 
 // a light structural type of an argument expression — enough to unify a tparam. `env` carries the
 // types of in-scope locals so a `Var` arg resolves (e.g. `wrap(n)` with `n := 5` infers T=i32 —
 // without it the tparam stayed open → a `Box_void` miscompile).
+lty_node = (t: Ty) Ptr<Ty> {                          // a heap Ptr<Ty> (no allocator needed)
+    buf := einst_tybuf(1)
+    buf[0] = t
+    buf[0].addr()
+}
 light_ty = (e: Ptr<Expr>, env: Ptr<VList>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
@@ -462,6 +467,7 @@ light_ty = (e: Ptr<Expr>, env: Ptr<VList>) Ty {
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
         .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),   // a generic-enum ctor unifies a tparam (`Opt<i32>` → T)
         .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
+        .SliceLit(sd)  => tslice(lty_node(sd.elem)),      // `[10, 20]` of element E -> [E], so a `[T]` param unifies T
         .Var(v)        => env.lookup_var(v.name),         // an in-scope local — its tracked type
         _              => tvoid()                         // Call/… — can't light-infer; tparam stays open
     })

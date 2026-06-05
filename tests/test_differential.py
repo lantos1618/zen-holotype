@@ -41,6 +41,10 @@ from _difftest import self_side, compare
     ("Opt<T>: Some(T) | None\none<T> = (x: T) Opt<T> { .None }\ntest* = () i32 { one(5).match({ .Some(x) => x, .None => 3 }) }", 3),
     ("Opt<T>: Some(T) | None\npick<T> = (x: T, b: i32) Opt<T> { (b == 1).match({ true => .Some(x), false => .None }) }\ntest* = () i32 { pick(9, 0).match({ .Some(x) => x, .None => 3 }) }", 3),
     ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 {\n  o := .Some(7)\n  unwrap(o, 0)\n}", 7),
+    # a generic fn's tparam inferred from a SLICE-LITERAL argument (`[T]` param vs `[i32]` arg → T=i32);
+    # without it light_ty returned void → a `void`-element miscompile
+    ("first<T> = (xs: [T]) T { xs[0] }\ntest* = () i32 { first([7, 8]) }", 7),
+    ("pick2<T> = (xs: [T], a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }", 9),
     # bug-hunt #11: a bare ctor passed DIRECTLY as a generic-consumer arg (T inferred from the payload)
     ("Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }", 1),
     ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }", 7),
