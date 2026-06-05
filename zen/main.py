@@ -12,7 +12,7 @@ re-exports the public surface so `from zen.main import …` keeps working.
 """
 from __future__ import annotations
 import sys, pathlib, subprocess
-from .ast import Fn, Impl, Emit, NameT, PrimT, Prim
+from .ast import Fn, Impl, Emit, NameT, PrimT, Prim, TVar
 from .types import (fits, infer_block, ret_type, show, scope_with_bounds, subst,
                     TypeErr, Private, Unresolved, Located)        # Private/Unresolved re-exported
 from .lower import c_name
@@ -101,7 +101,9 @@ def _check_fn(qual, ns, d, namespace, results, passing):
     locals_ = {p.name: p.type for p in d.params}
     try:
         want = d.ret if d.ret is not None else ret_type(qual, namespace)   # declared or inferred
-        bt = infer_block(d.body, locals_, namespace, scope_with_bounds(d.scope, d.bounds), want)
+        # tparams are TVars in the body scope, so `sizeof(T)` (a value-position type name) resolves
+        bscope = {**scope_with_bounds(d.scope, d.bounds), **{tp: TVar(tp) for tp in d.tparams}}
+        bt = infer_block(d.body, locals_, namespace, bscope, want)
         void = isinstance(want, PrimT) and want.prim is Prim.VOID
         if want is not None and not void and not fits(bt, want):        # void discards the body value
             raise TypeErr("return type", bt, want)

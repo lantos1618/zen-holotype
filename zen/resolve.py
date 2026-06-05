@@ -69,6 +69,9 @@ def resolve_type(t, scope, namespace, tparams=()):
     if isinstance(t, NameT):
         if t.path in tparams:                    # a bare name in scope as a type param
             return TVar(t.path)
+        bound = scope.get(t.path)                # a tparam bound to a concrete type at instantiation
+        if isinstance(bound, (PrimT, NameT, PtrT, SliceT, FnT, TVar)):   # (e.g. `sizeof(T)` in an instance)
+            return bound
         args = tuple(resolve_type(a, scope, namespace, tparams) for a in t.args)
         if t.path in BUILTIN:
             return NameT(t.path, args)
