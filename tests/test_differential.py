@@ -45,6 +45,12 @@ from _difftest import self_side, compare
     # without it light_ty returned void → a `void`-element miscompile
     ("first<T> = (xs: [T]) T { xs[0] }\ntest* = () i32 { first([7, 8]) }", 7),
     ("pick2<T> = (xs: [T], a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }", 9),
+    # a generic CALL's return type is inferred + substituted, so a let bound to it (and a downstream
+    # generic call on it) carries the concrete instance — `mk(...)` returns Box<i32>, not the leaked Box<T>
+    ("Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>{ v: x } }\nget<T> = (b: Box<T>) T { b.v }\ntest* = () i32 {\n  b := mk(42)\n  b.get()\n}", 42),
+    # a generic container round-trip (the Vec<T> substrate): build from a slice, read back through a
+    # second generic call — exercises generic-call return inference + element-type preservation on inline
+    ("Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>{ ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len }\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}", 40),
     # bug-hunt #11: a bare ctor passed DIRECTLY as a generic-consumer arg (T inferred from the payload)
     ("Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }", 1),
     ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }", 7),
