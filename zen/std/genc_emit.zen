@@ -1,0 +1,407 @@
+// std.genc_emit — the C backend: gen_* emitters + the public entry points (genC, genModule,
+// gen_sexpr), split out of std.genc.
+//
+// It walks an AST (ordinary lowered structs + enums — runtime values) and emits C source into a
+// heap String. The emitters are written in fluent UFCS style: `s.append(a).append(b)` is just
+// `append(append(s, a), b)`, and `s.gen_expr(e)` is `gen_expr(s, e)` — String flows left-to-right.
+//
+// The AST types + constructors + type helpers (gen_ty, ty_cname, …) live in the base std.genc;
+// genModule's monomorphize pass lives in std.genc_mono. So: genc ← genc_mono ← genc_emit.
+
+{ String, new, append, push, finish } = std.string
+{ view, is_empty, eq } = std.str
+{ heap } = std.alloc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
+  BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData,
+  gen_ty, is_template, is_trait, call, arm, block, param, field } = std.genc
+{ monomorphize } = std.genc_mono
+
+// ── int -> decimal digits (byte access, no view/slice — so genc.zen self-hosts) ────────
+sbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+digit = (d: i64) u8 { sbyte("0123456789", d) }
+gen_int = (s: String, n: i64) String {
+    (n < 0).match ({ true => s.append("-").gen_int(0 - n), false => s.gen_int_nat(n) }) }
+gen_int_nat = (s: String, n: i64) String {
+    (n < 10).match ({
+        true  => s.push(digit(n)),
+        false => s.gen_int(n / 10).push(digit(n % 10))
+    })
+}
+
+// does any variant carry a payload? (no payloads -> emit no union, like lower.py)
+any_payload = (vs: [VariantDef]) bool {
+    found := false
+    vs.loop((h, i, v) { found = v.payload.match ({ .Void => found, _ => true }) })
+    found
+}
+
+// ── emit an expression (recursive) ──────────────────────────────────────────
+gen_expr* = (s: String, e: Ptr<Expr>) String {
+    e.match ({                                       // match auto-derefs the Ptr<Expr>
+        .Int(n)  => s.gen_int(n),
+        .Byte(n) => s.gen_int(n),       // a char literal — the same C integer, just typed u8 in check
+        .Var(v)  => s.append(v.name),
+        .Bin(b)  => s.gen_bin(b),
+        .Call(c) => s.gen_call(c),
+        .Cond(d) => s.gen_cond(d),
+        .Member(m) => s.gen_expr(m.obj).append(".").append(m.field),
+        .Arrow(a) => s.gen_expr(a.obj).append("->").append(a.field),
+        .MakeEnum(m) => s.gen_mkenum(m),
+        .MakeStruct(m) => s.gen_mkstruct(m),
+        .Tag(t) => s.append("(").append(t.mty).append("){ .tag = ").append(t.mty).append("_").append(t.variant).append(" }"),
+        .Match(m) => s.gen_match(m),
+        .StrLit(sl) => s.gen_strlit(sl.value),
+        .SliceLit(sd) => s.gen_slicelit(sd),
+        .Index(ix) => s.gen_index(ix),
+        .Loop(l) => s.gen_loop(l),
+        .Lambda(lm) => s.append("0"),       // unreachable: a lambda is inlined where its FnT param is called
+        .Block(b) => s.gen_blockexpr(b)     // a statement-expression `({ … })` (an inlined template body)
+    })
+}
+// `({ s1 s2 … })` — a GCC statement-expression; its value is the last statement's. A trailing
+// `return e;` is emitted as a bare `e;` (a `return` would escape the enclosing function, not yield).
+gen_blockexpr = (s: String, b: BlockData) String {
+    out := s.append("({ ")
+    b.stmts.loop((h, i, st) { out = out.gen_block_one(st, i == b.stmts.len - 1).append(" ") })
+    out.append("})")
+}
+gen_block_one = (s: String, st: Stmt, last: bool) String {
+    last.match ({
+        true  => st.match ({ .Return(e) => s.gen_expr(e).append(";"), _ => s.gen_stmt(st) }),
+        false => s.gen_stmt(st)
+    })
+}
+// xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
+// sequence is bound once (_seq); i is the index, x the element (cast from the fat pointer).
+gen_loop = (s: String, l: LoopData) String {
+    head := s.append("({ __auto_type _seq = ").gen_expr(l.seq).append("; for (int64_t ").append(l.idx).append(" = 0; ").append(l.idx).append(" < _seq.len; ").append(l.idx).append(" = ").append(l.idx).append(" + 1) { __auto_type ").append(l.elem).append(" = ((").gen_ty(l.elemTy.addr()).append("*)_seq.ptr)[").append(l.idx).append("]; ")
+    body := head.gen_loop_body(l.body)
+    body.append(" } })")
+}
+gen_loop_body = (s: String, body: [Stmt]) String {
+    out := s
+    body.loop((h, i, st) { out = out.gen_stmt(st).append(" ") })
+    out
+}
+// [a, b, c] of element T  ->  (zslice){ .ptr = (T[]){ a, b, c }, .len = N }
+gen_slicelit = (s: String, sd: SliceData) String {
+    head := s.append("(zslice){ .ptr = (").gen_ty(sd.elem.addr()).append("[]){ ").gen_args(sd.items).append(" }, .len = ")
+    head.gen_int(slice_count(sd.items)).append(" }")
+}
+slice_count = (items: [Expr]) i32 {
+    n := 0
+    items.loop((h, i, it) { n = n + 1 })
+    n
+}
+// seq[idx] of element T  ->  ((T*)(seq).ptr)[idx]   (cast the fat pointer's void* ptr)
+gen_index = (s: String, ix: IndexData) String {
+    s.append("((").gen_ty(ix.elem.addr()).append("*)(").gen_expr(ix.seq).append(").ptr)[").gen_expr(ix.idx).append("]")
+}
+
+gen_bin = (s: String, b: BinData) String {
+    s.append("(").gen_expr(b.lhs).append(" ").append(b.op).append(" ").gen_expr(b.rhs).append(")")
+}
+
+// a call. The memory INTRINSICS (load/store/offset/addr/cstr) are not real C functions —
+// they erase to raw pointer ops, exactly as the Python lowerer does. Everything else is an
+// ordinary `fn(args)`. (sizeof/slice need a type argument and are left for the slice/generic
+// work — they don't appear in the scanner core.)
+arg0 = (c: CallData) Ptr<Expr> { c.args[0].addr() }
+arg1 = (c: CallData) Ptr<Expr> { c.args[1].addr() }
+gen_call = (s: String, c: CallData) String {
+    eq(c.fn, "load").match   ({ true => s.append("(*(").gen_expr(c.arg0()).append("))"), false =>
+    eq(c.fn, "offset").match ({ true => s.append("((uint8_t*)(").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"), false =>
+    eq(c.fn, "store").match  ({ true => s.append("(*(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"), false =>
+    eq(c.fn, "addr").match   ({ true => s.append("(&(").gen_expr(c.arg0()).append("))"), false =>
+    eq(c.fn, "cstr").match   ({ true => s.append("((const char*)(").gen_expr(c.arg0()).append("))"), false =>
+    eq(c.fn, "slice").match  ({ true => s.append("(zslice){ .ptr = (void*)(").gen_expr(c.arg0()).append("), .len = (").gen_expr(c.arg1()).append(") }"), false =>
+    s.append(c.fn).append("(").gen_args(c.args).append(")") }) }) }) }) }) })
+}
+
+// a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
+gen_args = (s: String, args: [Expr]) String {
+    out := s
+    args.loop((h, i, arg) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
+        out = out.gen_expr(arg.addr())
+    })
+    out
+}
+// the same args as space-separated s-expr operands: ` a b c`
+gen_sargs = (s: String, args: [Expr]) String {
+    out := s
+    args.loop((h, i, arg) { out = out.append(" ").gen_sexpr(arg.addr()) })
+    out
+}
+
+// render an expression as a PREFIX s-expression — `(* (+ 1 2) 3)` — a backend-neutral,
+// structural form, so a parser's tree can be diffed against another parser's (parity).
+gen_sexpr* = (s: String, e: Ptr<Expr>) String {
+    e.match ({
+        .Int(n) => s.gen_int(n),
+        .Byte(n) => s.gen_int(n),
+        .Var(v) => s.append(v.name),
+        .Bin(b) => s.append("(").append(b.op).append(" ").gen_sexpr(b.lhs).append(" ").gen_sexpr(b.rhs).append(")"),
+        .Call(c) => s.append("(").append(c.fn).gen_sargs(c.args).append(")"),
+        .Lambda(lm) => s.gen_lam_sexpr(lm),
+        _ => s.append("?")
+    })
+}
+// `(lambda a x)` — names only (enough to prove a lambda parsed; its body rides the run tests)
+gen_lam_sexpr = (s: String, lm: LambdaData) String {
+    out := s.append("(lambda")
+    lm.params.loop((h, i, p) { out = out.append(" ").append(p.name) })
+    out.append(")")
+}
+
+gen_cond = (s: String, d: CondData) String {
+    s.append("(").gen_expr(d.c).append(" ? ").gen_expr(d.t).append(" : ").gen_expr(d.e).append(")")
+}
+
+// escape one byte for a C string literal: " -> \" , \ -> \\ , newline -> \n , else itself
+gen_escape_byte = (s: String, b: u8) String {
+    (b == 34).match ({
+        true  => s.append("\\\""),
+        false => (b == 92).match ({
+            true  => s.append("\\\\"),
+            false => (b == 10).match ({ true => s.append("\\n"), false => s.push(b) })
+        })
+    })
+}
+// a C string literal: `"` + each byte escaped + `"`
+gen_strlit = (s: String, v: str) String {
+    s.append("\"").gen_escape_from(v, 0).append("\"")
+}
+// escape the str's bytes one by one (recursion to the NUL terminator) — no view/slice, so
+// genc.zen self-hosts (the self-hosted checker can't yet type an imported `view`'s result).
+gen_escape_from = (s: String, v: str, i: i32) String {
+    (sbyte(v, i) == 0).match ({
+        true  => s,
+        false => s.gen_escape_byte(sbyte(v, i)).gen_escape_from(v, i + 1)
+    })
+}
+
+gen_mkenum = (s: String, m: MakeEnumData) String {
+    head := s.append("(").append(m.mty).append("){ .tag = ").append(m.mty).append("_").append(m.variant)
+    head.append(", .u.").append(m.variant).append(" = ").gen_expr(m.payload).append(" }")
+}
+
+// a struct literal: `(T){ .a = …, .b = … }` (a C compound literal, designated initializers)
+gen_mkstruct = (s: String, m: MakeStructData) String {
+    out := s.append("(").append(m.mty).append("){ ")    // mty = the monomorphized name for a generic literal
+    m.inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
+        out = out.append(".").append(fi.name).append(" = ").gen_expr(fi.value)
+    })
+    out.append(" }")
+}
+
+// an arm's body: bind the payload (GCC __auto_type, so no payload type needed here), then the body
+gen_armbind = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("({ __auto_type ").append(a.bind).append(" = ").append(subj).append(sep).append("u.").append(a.variant).append("; ").gen_expr(a.body).append("; })")
+}
+gen_armbody = (s: String, subj: str, sep: str, a: ArmData) String {
+    (is_empty(a.bind)).match ({
+        true  => s.append("(").gen_expr(a.body).append(")"),
+        false => s.gen_armbind(subj, sep, a)
+    })
+}
+// one tag test:  `(subj.tag == E_V ? <body> : `   (the chain closes its `)` after the rest)
+gen_test = (s: String, subj: str, sep: str, ename: str, a: ArmData) String {
+    s.append("(").append(subj).append(sep).append("tag == ").append(ename).append("_").append(a.variant).append(" ? ").gen_armbody(subj, sep, a).append(" : ")
+}
+// emit arms[i:] as a nested ternary; the last arm is the default (no test)
+gen_arms = (s: String, subj: str, sep: str, ename: str, arms: [ArmData], i: i64) String {
+    (i == arms.len - 1).match ({
+        true  => s.gen_armbody(subj, sep, arms[i]),
+        false => s.gen_test(subj, sep, ename, arms[i]).gen_arms(subj, sep, ename, arms, i + 1).append(")")
+    })
+}
+// the subject can be any expression, so bind it once to a temp (a GCC statement-expression),
+// then the tag-test chain reads that temp — no re-evaluation, and `sc.tok.kind.match {…}` works.
+gen_match = (s: String, m: MatchData) String {
+    sep := m.ptr.match ({ true => "->", false => "." })
+    s.append("({ __auto_type _subj = ").gen_expr(m.subj).append("; ").gen_arms("_subj", sep, m.ename, m.arms, 0).append("; })")
+}
+
+// ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
+gen_stmt = (s: String, st: Stmt) String {
+    st.match ({
+        .Let(l)    => s.append("__auto_type ").append(l.name).append(" = ").gen_expr(l.value).append(";"),
+        .Assign(a) => s.gen_expr(a.target).append(" = ").gen_expr(a.value).append(";"),   // <lvalue> = value;
+        .Return(e) => s.append("return ").gen_expr(e).append(";"),
+        .ExprStmt(e) => s.gen_expr(e).append(";"),
+        .If(f)     => s.gen_if(f),
+        .While(w)  => s.append("while (").gen_expr(w.c).append(") ").gen_block(w.body),
+        .IndexSet(x) => s.append("((").gen_ty(x.elem.addr()).append("*)(").gen_expr(x.seq).append(").ptr)[").gen_expr(x.idx).append("] = ").gen_expr(x.value).append(";")
+    })
+}
+
+// emit a brace-wrapped block: `{ s1; s2; … }`
+gen_block = (s: String, body: [Stmt]) String {
+    open := s.append("{ ")
+    body.loop((h, i, st) { open = open.gen_stmt(st).append(" ") })
+    open.append("}")
+}
+
+gen_if = (s: String, f: IfData) String {
+    s.append("if (").gen_expr(f.c).append(") ").gen_block(f.then).append(" else ").gen_block(f.els)
+}
+
+gen_params = (s: String, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
+        out = out.gen_ty(p.ty.addr()).append(" ").append(p.name)
+    })
+    out
+}
+
+// emit one function, appending to `s` (so a module can stream several into one buffer)
+// a function signature `ret name(params)` — shared by the definition and the forward proto
+gen_sig = (s: String, f: Func) String {
+    s.gen_ty(f.ret.addr()).append(" ").append(f.name).append("(").gen_params(f.params).append(")")
+}
+gen_func* = (s: String, f: Func) String { s.gen_sig(f).append(" ").gen_block(f.body) }
+// a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
+gen_proto = (s: String, d: Decl) String {
+    d.is_template().match ({                            // templates are inlined, never emitted
+        true  => s,
+        false => d.match ({ .DFunc(f) => s.gen_sig(f).append("; "), .DForeign(f) => s.gen_sig(f).append("; "), _ => s })
+    })
+}
+
+// emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
+gen_struct* = (s: String, sd: StructDecl) String {
+    open := s.append("struct ").append(sd.name).append(" { ")
+    sd.fields.loop((h, i, fld) { open = open.gen_ty(fld.ty.addr()).append(" ").append(fld.name).append("; ") })
+    open.append("};")
+}
+
+// emit an enum's union members (the payload-carrying variants) and tag constants
+gen_union = (s: String, vs: [VariantDef]) String {
+    u := s.append(" union { ")
+    vs.loop((h, i, v) {
+        u = v.payload.match ({ .Void => u, _ => u.gen_ty(v.payload.addr()).append(" ").append(v.name).append("; ") })
+    })
+    u.append("} u;")
+}
+gen_tags = (s: String, ename: str, vs: [VariantDef]) String {
+    e := s.append(" enum { ")
+    vs.loop((h, i, v) {
+        e = (i == 0).match ({ true => e, false => e.append(", ") })
+        e = e.append(ename).append("_").append(v.name)
+    })
+    e.append(" };")
+}
+
+// emit an enum (tagged union): `typedef struct { int32_t tag; union { … } u; } E; enum { E_A, … };`
+gen_enum* = (s: String, ed: EnumDecl) String {
+    head := s.append("struct ").append(ed.name).append(" { int32_t tag;")
+    body := (any_payload(ed.variants)).match ({ true => head.gen_union(ed.variants), false => head })
+    body.append(" };").gen_tags(ed.name, ed.variants)
+}
+
+// forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
+gen_fwd = (s: String, d: Decl) String {
+    d.is_trait().match ({ true => s, false =>            // a trait struct has no runtime form — skip
+    d.match ({
+        .DStruct(sd) => s.append("typedef struct ").append(sd.name).append(" ").append(sd.name).append("; "),
+        .DEnum(ed)   => s.append("typedef struct ").append(ed.name).append(" ").append(ed.name).append("; "),
+        .DFunc(f)    => s,
+        .DRaw(c)     => s,
+        .DImpl(im)   => s,
+        .DForeign(f) => s,
+        .DImport(im) => s,
+        .DGenStruct(g) => s,                            // a generic template — only its instances emit
+        .DGenEnum(g)   => s
+    }) })
+}
+
+// emit a top-level declaration (a function, a struct, an enum, or verbatim C)
+gen_decl* = (s: String, d: Decl) String {
+    d.match ({
+        .DFunc(f)    => s.gen_func(f),
+        .DStruct(sd) => s.gen_struct(sd),
+        .DEnum(ed)   => s.gen_enum(ed),
+        .DRaw(c)     => s.append(c),                    // verbatim — SIMD attrs/pragmas/intrinsics
+        .DImpl(im)   => s,                              // an impl record — no runtime form (methods are DFuncs)
+        .DForeign(f) => s,                              // a foreign decl — only a prototype (gen_proto), no body
+        .DImport(im) => s,                              // an import — modules link separately, emits nothing
+        .DGenStruct(g) => s,                            // a generic template — monomorphize replaced it
+        .DGenEnum(g)   => s
+    })
+}
+
+// genC: an AST in, C source out — at runtime.
+genC* = (f: Func) String { new().gen_func(f) }
+
+// ── type dependency ordering (topo-sort by depth) ──────────────────────────────────────
+// A struct/enum that holds another type BY VALUE must be defined AFTER it (a Ptr<T> field
+// needs only the forward decl). Define a type's DEPTH = 0 if it has no by-value type deps,
+// else 1 + the max depth of its deps; emitting types in increasing depth order is a valid
+// topological order. Depth is a pure function of the decls (the by-value graph is a DAG —
+// Ptr breaks every cycle), so no mutable visited set is needed.
+maxi = (a: i32, b: i32) i32 { (a >= b).match ({ true => a, false => b }) }
+slen = (decls: [Decl]) i32 {                       // decl count (an i32 upper bound on type depth)
+    n := 0
+    decls.loop((h, i, d) { n = n + 1 })
+    n
+}
+is_type_named = (d: Decl, name: str) bool {
+    d.match ({ .DStruct(sd) => eq(sd.name, name), .DEnum(ed) => eq(ed.name, name), _ => false })
+}
+// depth contribution of a by-value type slot: 1 + the named type's depth; 0 for Ptr/primitives
+slot_depth = (decls: [Decl], t: Ty) i32 { t.match ({ .Named(n) => 1 + decls.type_depth(n), .Generic(g) => 1 + decls.type_depth(g.mangled), _ => 0 }) }
+struct_depth = (decls: [Decl], sd: StructDecl) i32 {
+    d := 0
+    sd.fields.loop((h, i, f) { d = maxi(d, decls.slot_depth(f.ty)) })
+    d
+}
+enum_depth = (decls: [Decl], ed: EnumDecl) i32 {
+    d := 0
+    ed.variants.loop((h, i, v) { d = maxi(d, decls.slot_depth(v.payload)) })
+    d
+}
+decl_depth = (decls: [Decl], d: Decl) i32 {
+    d.match ({ .DStruct(sd) => decls.struct_depth(sd), .DEnum(ed) => decls.enum_depth(ed), _ => 0 })
+}
+type_depth = (decls: [Decl], name: str) i32 {                    // depth of the type NAMED `name`
+    found := 0
+    decls.loop((h, i, d) { found = is_type_named(d, name).match ({ true => decls.decl_depth(d), false => found }) })
+    found
+}
+// emit the TYPE definitions whose depth == k (in their original relative order)
+gen_types_at = (s: String, decls: [Decl], k: i32) String {
+    out := s
+    decls.loop((h, i, d) {
+        out = d.match ({
+            .DStruct(sd) => d.is_trait().match ({ true => out, false => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }) }),
+            .DEnum(ed)   => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }),
+            _            => out
+        })
+    })
+    out
+}
+gen_types_upto = (s: String, decls: [Decl], k: i32, n: i32) String {
+    (k < n).match ({ true => s.gen_types_at(decls, k).gen_types_upto(decls, k + 1, n), false => s })
+}
+// then functions + verbatim raw, in original order (all types are now fully defined above)
+gen_funcs = (s: String, decls: [Decl]) String {
+    out := s
+    decls.loop((h, i, d) { out = d.is_template().match ({
+        true  => out,                                   // a template: inlined at call sites, not emitted
+        false => d.match ({ .DFunc(f) => out.gen_decl(d).append(" "), .DRaw(c) => out.gen_decl(d).append(" "), _ => out })
+    }) })
+    out
+}
+
+// genModule: a whole translation unit — a list of decls (structs + functions).
+genModule* = (raw: [Decl]) String {
+    decls := raw.monomorphize()                         // pass 0: instantiate generic structs per use
+    s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")   // the [T] fat pointer
+    decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
+    decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
+    s = s.gen_types_upto(decls, 0, slen(decls))         // pass 3: type defs in dependency order
+    s.gen_funcs(decls)                                  // pass 4: functions + raw
+}

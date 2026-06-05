@@ -51,7 +51,8 @@ def test_eval_arithmetic(tmp_path, expr, want):
 LOOP_DRIVER = """
 { Malloc } = std.alloc
 { parse } = std.parse
-{ Func, genC, sret, ti32 } = std.genc
+{ Func, sret, ti32 } = std.genc
+{ genC } = std.genc_emit
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -113,7 +114,7 @@ def test_source_to_c_respects_precedence(tmp_path):
 FN_DRIVER = """
 { Malloc } = std.alloc
 { parse_fn } = std.parse
-{ genC } = std.genc
+{ genC } = std.genc_emit
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -184,7 +185,7 @@ def test_parse_fn_assignment_statement(tmp_path):
 DECL_DRIVER = """
 { Malloc } = std.alloc
 { parse_decl } = std.parse
-{ genC } = std.genc
+{ genC } = std.genc_emit
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -241,7 +242,7 @@ def test_parse_decl_return_type(tmp_path):
 MODULE_DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
-{ genModule } = std.genc
+{ genModule } = std.genc_emit
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -275,7 +276,7 @@ CHECKED_DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
 { resolve_module } = std.check
-{ genModule } = std.genc
+{ genModule } = std.genc_emit
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }

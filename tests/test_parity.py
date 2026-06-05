@@ -55,7 +55,7 @@ def python_pipeline(tmp_path, expr):
 _ZEN_DRIVER = """
 { Malloc } = std.alloc
 { parse_fn } = std.parse
-{ genC } = std.genc
+{ genC } = std.genc_emit
 { String, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
