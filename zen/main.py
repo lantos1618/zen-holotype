@@ -42,8 +42,12 @@ def load_std():
     emitted unless a program imports AND uses them — the stdlib is zero-cost ambient."""
     if not _STD_DIR.exists():
         return {}
-    return {f"std.{p.stem}": parse(p.read_text(), f"std.{p.stem}")
-            for p in sorted(_STD_DIR.glob("*.zen"))}
+    # `@self-hosted-only` modules use features only the self-hosted frontend parses (e.g. generic
+    # struct literals); the Python reference can't load them, so skip them here. They are compiled
+    # by the self-hosted toolchain only (and self-tested via self-contained programs).
+    return {f"std.{p.stem}": parse(src, f"std.{p.stem}")
+            for p in sorted(_STD_DIR.glob("*.zen"))
+            for src in [p.read_text()] if "@self-hosted-only" not in src}
 
 
 def load(root, skip=()):

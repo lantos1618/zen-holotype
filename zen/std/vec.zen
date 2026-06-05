@@ -1,39 +1,48 @@
-// std.vec — a growable array backed by an EXPLICIT allocator (std.alloc). Nothing
-// here allocates without one: every op that may grow takes `a: Ptr<A>`. (A generic
-// Vec<T> awaits a type-parameter `sizeof`; this is the i32 instance, enough to show
-// the allocator threading cleanly through a container.)
+// @self-hosted-only — uses generic struct literals (`Vec<T>{…}`), which only the SELF-HOSTED
+// frontend parses; the Python reference loader (std.load_std + the acid/_selfhost harness) SKIPS
+// this file on the `@self-hosted-only` marker. Direct import-testing awaits the self-hosted module
+// resolver; until then its mechanics are validated by an equivalent self-contained test (test_alloc).
 //
-//   m := Malloc { _: 0 }
-//   v := addr(m).vec(2)            // capacity 2, from `m`
-//   v = v.push(addr(m), 10)        // grows via `m` when full
-//   addr(v).items().loop((h, i, x) { … })
-//   v.vfree(addr(m))
+// std.vec — a growable GENERIC vector `Vec<T>`, monomorphized by use. `Vec<i32>` and `Vec<Ptr<u8>>`
+// are distinct C types sharing this one source. Allocation goes through `heap` (the libc-malloc
+// allocator the self-hosted compiler itself uses) so the source stays single-import; an explicit
+// `<A: Allocator>`-threaded form follows once default type-arguments + the module resolver land.
+//
+//   v := vec_of([10, 20])     // a Vec<i32>, T inferred from the slice
+//   v = v.push(30)            // grows (double+1) when full
+//   total := v.get(0) + v.get(2)
 
-{ Allocator, acquire, resize, release } = std.alloc
+{ heap } = std.alloc
 
-Vec*: { ptr: RawPtr<u8>, len: i64, cap: i64 }    // ptr -> a buffer of `cap` i32s
+Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }    // ptr -> a buffer of `cap` T's; len = live count
 
-// an empty Vec with room for `cap` i32s, allocated from `a`
-vec*<A: Allocator> = (a: Ptr<A>, cap: i64) Vec { Vec { ptr: a.acquire(cap * 4), len: 0, cap: cap } }
+// the whole backing buffer as a [T] (cap elements) — for indexed writes
+buf*<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }
+// the live count, and one element by index
+len*<T> = (v: Vec<T>) i64 { v.len }
+get*<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }
 
-// the whole backing buffer as a [i32] (cap elements) — for indexed writes
-buffer = (v: Vec) [i32] { slice(v.ptr, v.cap) }
-// the live elements as a read [i32] view (len elements) — borrows the buffer
-items* = (v: Ptr<Vec>) [i32] { slice(v.ptr, v.len) }
+// a `Vec<T>` seeded from a slice (copies `xs`); T inferred from `xs`.
+vec_of*<T> = (xs: [T]) Vec<T> {
+    v := Vec<T>{ ptr: heap(xs.len * sizeof(T)), len: xs.len, cap: xs.len }
+    b := v.buf()
+    xs.loop((h, i, x) { b[i] = x })
+    v
+}
 
-// grow (double + 1) the buffer through `a`
-grow*<A: Allocator> = (v: Vec, a: Ptr<A>) Vec {
+// grow (double + 1) into a fresh buffer, copying the live elements
+grow*<T> = (v: Vec<T>) Vec<T> {
     ncap := (v.cap * 2) + 1
-    Vec { ptr: a.resize(v.ptr, ncap * 4), len: v.len, cap: ncap }
+    nv   := Vec<T>{ ptr: heap(ncap * sizeof(T)), len: v.len, cap: ncap }
+    nb   := nv.buf()
+    v.buf().loop((h, i, x) { nb[i] = x })
+    nv
 }
 
-// push x, growing through `a` if full; returns the updated Vec
-push*<A: Allocator> = (v: Vec, a: Ptr<A>, x: i32) Vec {
-    r := (v.len < v.cap).match ({ true => v, false => v.grow(a) })
-    b := r.buffer()
+// push x, growing if full; returns the updated Vec
+push*<T> = (v: Vec<T>, x: T) Vec<T> {
+    r := (v.len < v.cap).match ({ true => v, false => v.grow() })
+    b := r.buf()
     b[r.len] = x
-    Vec { ptr: r.ptr, len: r.len + 1, cap: r.cap }
+    Vec<T>{ ptr: r.ptr, len: r.len + 1, cap: r.cap }
 }
-
-// hand the buffer back to `a`
-vfree*<A: Allocator> = (v: Vec, a: Ptr<A>) void { a.release(v.ptr) }
