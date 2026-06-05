@@ -41,11 +41,11 @@ cenode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
 }
 abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(heap(n * sizeof(ArmData)), n) }
 sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(heap(n * sizeof(Stmt)), n) }
-dbuf = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
+dbuf* = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
 tbuf = (a: Ptr<Malloc>, n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
 // a heap Ptr<Ty> — so a Ty a function builds (e.g. a slice's element type in infer_expr) outlives
 // the frame, instead of dangling via `&(localTy)` (which silently corrupts fits/ty_eq downstream).
-tnode = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
+tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tbuf(1)
     buf[0] = t
     buf[0].addr()
@@ -65,7 +65,7 @@ vcons_val = (nm: str, t: Ty, tail: Ptr<VList>) VList { .VCons(VCell { name: nm, 
 vnil = (a: Ptr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
 vcons = (a: Ptr<Malloc>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
 // the initial environment: each parameter consed onto an empty list
-params_env = (a: Ptr<Malloc>, ps: [Param]) Ptr<VList> {
+params_env* = (a: Ptr<Malloc>, ps: [Param]) Ptr<VList> {
     e := a.vnil()
     ps.loop((h, i, p) { e = a.vcons(p.name, p.ty, e) })
     e
@@ -79,7 +79,7 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
 }
 // the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
-enum_name = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }   // a generic enum instance -> its monomorphized name
+enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }   // a generic enum instance -> its monomorphized name
 ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
 elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }   // the element type of a [T]
 // the enum that declares variant `vn` (scan every enum decl) — "" if none
@@ -146,7 +146,7 @@ bin_ty = (op: str, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false =
 // is `e` a purely-LITERAL numeric expression? Such a value is polymorphic — it fits any numeric
 // type (`10` is a valid u8 / i32 / i64) — so the checker must not read it as a narrowing. An
 // ARITHMETIC bin of literals stays numeric; a COMPARISON of literals (`3 < 4`) is a bool, not this.
-is_lit_numeric = (e: Ptr<Expr>) bool {
+is_lit_numeric* = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Int(n)  => true,
         .Byte(n) => true,
@@ -196,7 +196,7 @@ enum_inst_of = (env: Env, base: str, variant: str, pty: Ty) EnumInst {
 }
 enum_inst_mk = (env: Env, variant: str, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
 enum_inst_tag = (env: Env, variant: str) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
-infer_expr = (env: Env, e: Ptr<Expr>) Ty {
+infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Byte(n)       => tu8(),                             // a char literal is a byte
@@ -399,7 +399,7 @@ fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     buf[i] = a.resolve_stmt(env, st, i == body.len - 1)
     a.fill_stmts(a.extend_env(env, st), body, buf, i + 1)
 }
-extend_env = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
+extend_env* = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
         .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp, a: env.a },
         _       => env
@@ -421,7 +421,7 @@ resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
 // the lambda passed for it (its params bound to the call args). A template's own locals and a
 // lambda's captures just resolve at the splice site — the inlined body is a GCC statement-
 // expression `({ … })` nested in the caller's scope. (Mirrors lower.py's _c_inline_template.)
-no_stmts = () [Stmt] { slice(heap(0), 0) }
+no_stmts* = () [Stmt] { slice(heap(0), 0) }
 empty_args = () [Expr] { slice(heap(0), 0) }
 pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
     (i == params.len).match ({
@@ -430,7 +430,7 @@ pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
     })
 }
 param_index = (params: [Param], name: str) i32 { params.pidx(name, 0 - 1, 0) }
-the_func = (decls: [Decl], name: str) Func {
+the_func* = (decls: [Decl], name: str) Func {
     found := Func { name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() }
     decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => f, false => found }), .DForeign(f) => eq(f.name, name).match ({ true => f, false => found }), _ => found }) })
     found
@@ -751,7 +751,7 @@ resolve_module* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
 // so the lattice is just: numeric WIDENING (u8 <= i32 <= i64) for the scalar ranks, and
 // structural EQUALITY otherwise (Named by name, Ptr by pointee, Bool/Str/Void exact). This
 // is the `fits` a self-hosted checker calls at every assignment / argument / return slot.
-ty_rank = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }   // -1 = non-numeric
+ty_rank* = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }   // -1 = non-numeric
 ty_eq* = (g: Ty, w: Ty) bool {
     g.match ({
         .I32      => w.match ({ .I32 => true, _ => false }),
@@ -775,423 +775,10 @@ fits* = (g: Ty, w: Ty) bool {
     })
 }
 
-// ── check_module: a VALIDATING pass (Goal C Phases 1-2) — count type errors ────────────
-// Distinct from resolve_module (which rewrites the AST): this walks the module counting type
-// errors. It checks CALL ARITY (a known fn must get the right number of args; a call to an
-// unknown name is an intrinsic/external, not an error) and ARG TYPES (each arg's type must
-// `fit` the parameter — widening or structural). An arg whose type can't be inferred (void)
-// is SKIPPED, so a valid program never gets a false positive. The param env feeds infer_expr.
-empty_params = () [Param] { slice(heap(0), 0) }    // an empty [Param] without a `[]` literal (self-hostable)
-// a LOCAL fn (DFunc or DForeign) is known iff the_func finds it by name (sentinel name is "").
-is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
-fn_params = (decls: [Decl], fn: str) [Param] { decls.the_func(fn).params }   // sentinel.params is empty
-// one argument fits its parameter? an UNINFERABLE arg type is skipped (sound: never false-reject)
-// — that's a bare void OR a slice/pointer whose element/pointee is void (the checker couldn't type
-// it, e.g. it came through an imported fn). Otherwise fits().
-is_uninferable = (t: Ty) bool {
-    t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(p) => load(p).is_void_ty(), _ => false })
-}
-is_void_ty = (t: Ty) bool { t.match ({ .Void => true, _ => false }) }
-fit_err = (argty: Ty, pty: Ty) i32 {
-    argty.is_uninferable().match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
-}
-arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
-    // a polymorphic numeric literal (`0`, `10`) fits ANY numeric param — `0` is a valid u8/i32/i64 —
-    // so skip the narrowing check for it, mirroring ret_err's lit_to_num (the return-position rule).
-    (i < params.len).match ({
-        true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0).match ({
-            true  => 0,
-            false => fit_err(env.infer_expr(ar.addr()), params[i].ty)
-        }),
-        false => 0
-    })
-}
-arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) { acc = acc + env.arg_err_at(params, i, ar) })
-    acc
-}
-// a name is RESOLVABLE without a local signature if it's imported (`{ f } = std.x`) or a compiler
-// intrinsic (lowered specially by genc — see gen_call). Such a call is KNOWN but UNCHECKED (we have
-// no signature to check arity/types against), so it's accepted as-is — never false-rejected.
-names_has = (names: [Param], fn: str) bool {
-    found := false
-    names.loop((h, i, n) { found = eq(n.name, fn).match ({ true => true, false => found }) })
-    found
-}
-is_imported = (decls: [Decl], fn: str) bool {
-    found := false
-    decls.loop((h, i, d) { found = d.match ({ .DImport(im) => im.names.names_has(fn).match ({ true => true, false => found }), _ => found }) })
-    found
-}
-// the genc intrinsics (gen_call) + `heap`/`sizeof` (runtime/builtin) — names with no Zen decl.
-is_intrinsic = (fn: str) bool {
-    eq(fn, "load").match   ({ true => true, false =>
-    eq(fn, "store").match  ({ true => true, false =>
-    eq(fn, "addr").match   ({ true => true, false =>
-    eq(fn, "offset").match ({ true => true, false =>
-    eq(fn, "cstr").match   ({ true => true, false =>
-    eq(fn, "slice").match  ({ true => true, false =>
-    eq(fn, "heap").match   ({ true => true, false =>
-    eq(fn, "sizeof").match ({ true => true, false => false }) }) }) }) }) }) }) })
-}
-is_resolvable = (decls: [Decl], fn: str) bool {
-    decls.is_imported(fn).match ({ true => true, false => fn.is_intrinsic() })
-}
-// a call: a LOCAL fn must match arity + arg types; an imported/intrinsic name is known-but-unchecked;
-// anything else is UNDEFINED — a typo or a missing import — and is rejected (1 error).
-check_call = (env: Env, c: CallData) i32 {
-    env.decls.is_known_fn(c.fn).match ({
-        true  => env.call_errs(c),
-        false => env.decls.is_resolvable(c.fn).match ({ true => 0, false => 1 })
-    })
-}
-call_errs = (env: Env, c: CallData) i32 {
-    ps := env.decls.fn_params(c.fn)
-    (ps.len == c.args.len).match ({ true => env.arg_type_errs(ps, c.args), false => 1 })
-}
-check_args = (env: Env, args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) { acc = acc + env.check_expr(ar.addr()) })
-    acc
-}
-check_arms = (env: Env, arms: [ArmData]) i32 {
-    acc := 0
-    arms.loop((h, i, ar) { acc = acc + env.check_expr(ar.body) })
-    acc
-}
-check_inits = (env: Env, inits: [FieldInit]) i32 {
-    acc := 0
-    inits.loop((h, i, fi) { acc = acc + env.check_expr(fi.value) })
-    acc
-}
-// struct-literal validation (reject-parity): every init field must EXIST on the struct ("no field 'z'")
-// and its value must FIT the field's type ("bool ⊀ i32"). Matching the Python frontend; missing fields
-// are allowed (partial init). Only runs for a KNOWN, non-generic DStruct — an imported/generic literal
-// is skipped (sound). A polymorphic numeric literal fits any numeric field; uninferable values skip.
-no_fields = () [Field] { slice(heap(0), 0) }
-is_struct = (decls: [Decl], name: str) bool {
-    f := false
-    decls.loop((h, i, d) { f = d.match ({ .DStruct(sd) => eq(sd.name, name).match ({ true => true, false => f }), _ => f }) })
-    f
-}
-struct_fields = (decls: [Decl], name: str) [Field] {
-    found := no_fields()
-    decls.loop((h, i, d) { found = d.match ({ .DStruct(sd) => eq(sd.name, name).match ({ true => sd.fields, false => found }), _ => found }) })
-    found
-}
-has_field = (fields: [Field], fname: str) bool {
-    f := false
-    fields.loop((h, i, fl) { f = eq(fl.name, fname).match ({ true => true, false => f }) })
-    f
-}
-field_in = (fields: [Field], fname: str) Ty {
-    found := tvoid()
-    fields.loop((h, i, fl) { found = eq(fl.name, fname).match ({ true => fl.ty, false => found }) })
-    found
-}
-field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
-    fty := fields.field_in(fi.name)
-    (fi.value.is_lit_numeric() && fty.ty_rank() >= 0).match ({       // polymorphic literal -> any numeric field
-        true  => 0,
-        false => fit_err(env.infer_expr(fi.value), fty)
-    })
-}
-init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
-    fields.has_field(fi.name).match ({ true => env.field_fit_err(fields, fi), false => 1 })   // unknown field -> 1
-}
-struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
-    acc := 0
-    inits.loop((h, i, fi) { acc = acc + env.init_err(fields, fi) })
-    acc
-}
-makestruct_err = (env: Env, m: MakeStructData) i32 {
-    (m.targs.len > 0).match ({
-        true  => 0,                                                  // a generic literal -> skip (lenient)
-        false => env.decls.is_struct(m.ty).match ({ true => env.struct_init_errs(env.decls.struct_fields(m.ty), m.inits), false => 0 })
-    })
-}
-// field-access validation (reject-parity): `obj.field` must name a real field of obj's struct ("no
-// field 'nope' on P") — matching the Python frontend. Handles a value receiver (Member) and a Ptr
-// receiver (Arrow, after resolve auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is
-// checked; an uninferable receiver, an enum, or a monomorphized-only generic name is skipped.
-member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
-    sname := env.infer_expr(obj).enum_name()                        // struct name (sees through a Ptr)
-    env.decls.is_struct(sname).match ({
-        true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
-        false => 0
-    })
-}
-// match validation (reject-parity): an enum match must be EXHAUSTIVE — cover every variant, or have a
-// wildcard `_` — and must not DUPLICATE an arm. Matching the Python frontend ("non-exhaustive match:
-// missing .C" / "duplicate match arm '.A'"). Bool/integer matches lower to Cond (not Match), so only
-// enum matches reach here. SOUND — an unknown enum name (a generic instance / unfilled "") -> skip.
-no_variants = () [VariantDef] { slice(heap(0), 0) }
-enum_variants = (decls: [Decl], ename: str) [VariantDef] {
-    found := no_variants()
-    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants, false => found }), _ => found }) })
-    found
-}
-has_wildcard = (arms: [ArmData]) bool {
-    f := false
-    arms.loop((h, i, a) { f = eq(a.variant, "_").match ({ true => true, false => f }) })
-    f
-}
-arm_covers = (arms: [ArmData], vname: str) bool {
-    f := false
-    arms.loop((h, i, a) { f = eq(a.variant, vname).match ({ true => true, false => f }) })
-    f
-}
-missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
-    n := 0
-    variants.loop((h, i, v) { n = arms.arm_covers(v.name).match ({ true => n, false => n + 1 }) })
-    n
-}
-exhaustive_err = (env: Env, m: MatchData) i32 {
-    vs := env.decls.enum_variants(m.ename)
-    (vs.len == 0).match ({                                          // unknown enum (generic / "") -> skip
-        true  => 0,
-        false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 })
-    })
-}
-dup_before = (arms: [ArmData], vname: str, upto: i32) bool {
-    f := false
-    arms.loop((h, i, a) { f = (i < upto).match ({ true => eq(a.variant, vname).match ({ true => true, false => f }), false => f }) })
-    f
-}
-dup_arm_errs = (arms: [ArmData]) i32 {
-    n := 0
-    arms.loop((h, i, a) { n = n + eq(a.variant, "_").match ({ true => 0, false => arms.dup_before(a.variant, i).match ({ true => 1, false => 0 }) }) })
-    n
-}
-match_err = (env: Env, m: MatchData) i32 {
-    m.arms.has_wildcard().match ({
-        true  => m.arms.dup_arm_errs(),                            // a wildcard makes it exhaustive
-        false => env.exhaustive_err(m) + m.arms.dup_arm_errs()
-    })
-}
-// operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
-// `&& ||` needs BOOL operands — matching the Python frontend ("'+' needs numeric operands"). Sound:
-// an UNINFERABLE operand (void — e.g. a match-arm binding the partial checker can't type) is skipped,
-// never false-rejected. Comparisons (`== != < > <= >=`) accept any operand types, so aren't checked.
-is_arith_op = (op: str) bool {
-    b := op.byte_at(0)
-    (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')   // distinct from &|=<>!
-}
-is_logic_op = (op: str) bool { eq(op, "&&") || eq(op, "||") }
-is_bool_ty = (t: Ty) bool { t.match ({ .Bool => true, _ => false }) }
-non_numeric = (env: Env, e: Ptr<Expr>) bool {
-    t := env.infer_expr(e)
-    t.is_uninferable().match ({ true => false, false => (t.ty_rank() >= 0).match ({ true => false, false => true }) })
-}
-non_bool = (env: Env, e: Ptr<Expr>) bool {
-    t := env.infer_expr(e)
-    t.is_uninferable().match ({ true => false, false => t.is_bool_ty().match ({ true => false, false => true }) })
-}
-operand_err = (env: Env, b: BinData) i32 {
-    b.op.is_logic_op().match ({
-        true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
-        false => b.op.is_arith_op().match ({
-            true  => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 }),
-            false => 0
-        })
-    })
-}
-// index validation (reject-parity): `seq[idx]` needs a SLICE `seq` and a NUMERIC `idx` — matching the
-// Python frontend ("indexing a non-slice value" / "a slice index must be numeric"). Uninferable -> skip.
-is_slice_ty = (t: Ty) bool { t.match ({ .Slice(e) => true, _ => false }) }
-non_slice = (env: Env, e: Ptr<Expr>) bool {
-    t := env.infer_expr(e)
-    t.is_uninferable().match ({ true => false, false => t.is_slice_ty().match ({ true => false, false => true }) })
-}
-index_err = (env: Env, ix: IndexData) i32 {
-    (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
-}
-check_expr = (env: Env, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Call(c)        => env.check_call(c) + env.check_args(c.args),
-        .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
-        .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
-        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
-        .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
-        .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m),
-        .MakeEnum(mk)   => env.check_expr(mk.payload),
-        .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
-        _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
-    })
-}
-// a returned value must fit the function's declared return type (env.exp). Sound-leaning: skip
-// when the value's type OR the return type is uninferable (void / slice·ptr-of-void) — only a
-// concrete mismatch is an error. This is what catches `(…) i32 { someStr }`-style return bugs.
-ret_err = (env: Env, r: Ptr<Expr>) i32 {
-    rt := env.infer_expr(r)
-    // skip when uninferable, OR when a polymorphic literal is returned to a numeric type (`10` as
-    // u8 is fine). Otherwise fits() — which catches BOTH a category mismatch (str/bool/struct where
-    // another is declared) AND a computed numeric narrowing (an i64-returning call declared i32).
-    lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0)
-    (rt.is_uninferable() || env.exp.is_uninferable() || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, env.exp).match ({ true => 0, false => 1 })
-    })
-}
-// an assignment `x = v` must fit x's type (the type its `let` inferred). Sound-leaning, same shape
-// as ret_err: skip when either side is uninferable, or a polymorphic literal goes to a numeric x.
-assign_err = (env: Env, x: AssignData) i32 {
-    vt := env.infer_expr(x.target)
-    rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0)
-    (vt.is_uninferable() || rt.is_uninferable() || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, vt).match ({ true => 0, false => 1 })
-    })
-}
-// `xs[i] = v` must store a value that fits the slice's element type. Same sound-leaning shape as
-// ret_err/assign_err (skip uninferable + a polymorphic literal to a numeric element).
-idxset_err = (env: Env, x: IndexSetData) i32 {
-    rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0)
-    (rt.is_uninferable() || x.elem.is_uninferable() || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, x.elem).match ({ true => 0, false => 1 })
-    })
-}
-check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
-    st.match ({
-        .Let(l)    => env.check_expr(l.value),
-        .Assign(x) => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
-        .Return(r) => env.check_expr(r) + env.ret_err(r),
-        .ExprStmt(e) => env.check_expr(e),
-        .If(f)     => env.check_expr(f.c) + a.check_body(env, f.then) + a.check_body(env, f.els),
-        .While(w)  => env.check_expr(w.c) + a.check_body(env, w.body),
-        .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value) + env.idxset_err(x)
-    })
-}
-// thread the env: each `let` adds its (name, inferred type) for the statements that follow, so a
-// later `x = v` knows x's type. (The same fold resolve_body does, here for the validating pass.)
-check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
-    acc := 0
-    e   := env
-    body.loop((h, i, st) {
-        acc = acc + a.check_stmt(e, st)
-        e   = a.extend_env(e, st)
-    })
-    acc
-}
-// a non-void function must YIELD a value: its body's last statement must be a value (a trailing
-// expression or an explicit return), and that value must fit the return type. A body that is empty,
-// or ends in a let/assign/loop (which yield no value), leaves the return indeterminate — Python
-// rejects it ("void ⊀ i32"). Sound: a void return type, or a trailing expr the checker can't infer,
-// is skipped (ret_err's own leniency).
-trailing_err = (env: Env, body: [Stmt]) i32 {
-    env.exp.is_void_ty().match ({
-        true  => 0,                                              // a void fn: any body is fine
-        false => (body.len == 0).match ({
-            true  => 1,                                          // empty body, non-void return -> no value
-            false => env.last_stmt_err(body[body.len - 1])
-        })
-    })
-}
-last_stmt_err = (env: Env, st: Stmt) i32 {
-    st.match ({
-        .ExprStmt(e) => env.ret_err(e),                          // a trailing expr must fit the return type
-        .Return(r)   => 0,                                       // an explicit return is checked in check_stmt
-        _            => 1                                        // let/assign/while/if/index-set yield no value
-    })
-}
-check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
-    a.check_body(env, f.body) + env.trailing_err(f.body)
-}
-// trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
-// MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
-// for the implementing type); im.methods is the names this impl provides, and the impl's actual
-// method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
-// present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
-// impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
-has_method = (methods: [Param], name: str) bool {
-    found := false
-    methods.loop((h, i, p) { found = eq(p.name, name).match ({ true => true, false => found }) })
-    found
-}
-// rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
-subst_self = (a: Ptr<Malloc>, t: Ty, tyname: str) Ty {
-    t.match ({
-        .Named(n)  => eq(n, "Self").match ({ true => tnamed(tyname), false => t }),
-        .Ptr(p)    => tptr(a.tnode(a.subst_self(load(p), tyname))),
-        .Slice(p)  => tslice(a.tnode(a.subst_self(load(p), tyname))),
-        _          => t
-    })
-}
-// each declared param type (Self→tyname) must equal the impl method's, left to right.
-params_match = (a: Ptr<Malloc>, tps: [Ty], ips: [Param], tyname: str, i: i32) bool {
-    (i == tps.len).match ({
-        true  => true,
-        false => a.subst_self(tps[i], tyname).ty_eq(ips[i].ty).match ({
-            true  => a.params_match(tps, ips, tyname, i + 1),
-            false => false
-        })
-    })
-}
-// the impl method `f` matches the trait's FnT field `fd` (Self→tyname): same arity, param types, ret.
-sig_matches = (a: Ptr<Malloc>, fd: FnTData, f: Func, tyname: str) bool {
-    (fd.params.len == f.params.len).match ({
-        false => false,
-        true  => a.params_match(fd.params, f.params, tyname, 0).match ({
-            true  => a.subst_self(load(fd.ret), tyname).ty_eq(f.ret),
-            false => false
-        })
-    })
-}
-// one declared trait field: 0 if it's not a method, or it's provided with a matching signature; 1 if
-// the method is missing or its signature differs.
-method_err = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
-    f.ty.match ({
-        .FnT(fd) => im.methods.has_method(f.name).match ({
-            false => 1,                                                        // missing
-            true  => a.sig_matches(fd, decls.the_func(f.name), im.ty).match ({ true => 0, false => 1 })
-        }),
-        _ => 0
-    })
-}
-trait_conformance = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
-    acc := 0
-    sd.fields.loop((h, i, f) { acc = acc + a.method_err(decls, im, f) })
-    acc
-}
-impl_errs = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
-    acc := 0
-    decls.loop((h, i, d) { acc = acc + d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => a.trait_conformance(decls, im, sd), false => 0 }), _ => 0 }) })
-    acc
-}
-check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
-    acc := 0
-    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => a.impl_errs(decls, im), _ => 0 }) })
-    acc
-}
-
-// ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
-// The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
-// every function becomes a bodyless DForeign (structs/enums pass through). Checking a file against
-// another module's header puts the imported names in `the_func`'s reach, so a cross-module call is
-// arity/arg-type-checked exactly like a local one — while the header's bodyless sigs are never
-// re-checked (check_module only descends DFunc bodies). A name imported but absent from the header
-// stays known-but-unchecked (the #204 DImport path), so partial headers never false-reject.
-as_sig = (a: Ptr<Malloc>, d: Decl) Decl {
-    d.match ({ .DFunc(f) => dforeign(Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: no_stmts() }), _ => d })
-}
-module_header* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
-    buf := a.dbuf(decls.len)
-    decls.loop((h, i, d) { buf[i] = a.as_sig(d) })
-    buf
-}
-// check `decls` (one file) against an imported module's `lib` decls: the file is resolved as usual,
-// then checked in a WORLD that prepends lib's header, so its imported calls resolve to real sigs.
-check_linked* = (a: Ptr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
-    hdr   := a.module_header(lib)
-    rfile := a.resolve_module(decls)
-    world := a.dbuf(hdr.len + rfile.len)
-    hdr.loop((h, i, d) { world[i] = d })
-    rfile.loop((h, i, d) { world[hdr.len + i] = d })
-    a.check_module(world)
-}
+// ── shared helpers used by BOTH resolve_module (above) and check_module (in std.check_validate) ──
+// `empty_params` builds the_func's sentinel + an inline_decl's empty param list; `fn_params` reads a
+// callee's params at a call site; `is_void_ty` is the void test threaded through inference + the
+// validator. They live here because the resolver needs them, and check_validate imports them.
+empty_params* = () [Param] { slice(heap(0), 0) }    // an empty [Param] without a `[]` literal (self-hostable)
+fn_params* = (decls: [Decl], fn: str) [Param] { decls.the_func(fn).params }   // sentinel.params is empty
+is_void_ty* = (t: Ty) bool { t.match ({ .Void => true, _ => false }) }

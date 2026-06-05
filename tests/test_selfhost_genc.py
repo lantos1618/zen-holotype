@@ -71,7 +71,7 @@ def test_self_hosted_toolchain_compiles_genc_AND_check(tmp_path):
     def strip(f):
         return "\n".join(l for l in Path(f).read_text().splitlines()
                          if not (l.strip().startswith("{ ") and "= std." in l))
-    src = strip("zen/std/genc.zen") + "\n" + strip("zen/std/check.zen")
+    src = strip("zen/std/genc.zen") + "\n" + strip("zen/std/check.zen") + "\n" + strip("zen/std/check_validate.zen")
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
     build_scopes(files); resolve(files, ns)
@@ -141,7 +141,8 @@ def test_self_hosted_toolchain_compiles_WHOLE_compiler(tmp_path):
         return "\n".join(l for l in Path(f).read_text().splitlines()
                          if not (l.strip().startswith("{ ") and "= std." in l))
     src = "\n".join(strip(f) for f in ("zen/std/genc.zen", "zen/std/lex.zen",
-                                       "zen/std/parse.zen", "zen/std/check.zen"))
+                                       "zen/std/parse.zen", "zen/std/check.zen",
+                                       "zen/std/check_validate.zen"))
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
     build_scopes(files); resolve(files, ns)
