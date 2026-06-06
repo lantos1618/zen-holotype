@@ -100,7 +100,12 @@ ImplData*: { ty: str, trname: str, methods: [Param] }
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
 ImportData*: { names: [Param] }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl)   // DRaw = verbatim C escape
+// DGlobal is a module-level MUTABLE global `name := init` (Goal Z E1 — scheduler/runtime state).
+// It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
+// `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
+// the init's inferred type.
+GlobalData*: { name: str, ty: Ty, init: Ptr<Expr> }
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -205,6 +210,7 @@ dimport* = (names: [Param]) Decl { .DImport(ImportData { names: names }) }
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
+dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData { name: name, ty: ty, init: init }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 

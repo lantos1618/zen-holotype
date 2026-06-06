@@ -314,7 +314,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DForeign(f) => s,
         .DImport(im) => s,
         .DGenStruct(g) => s,                            // a generic template — only its instances emit
-        .DGenEnum(g)   => s
+        .DGenEnum(g)   => s,
+        .DGlobal(g)    => s                             // a module global — no type fwd-decl
     }) })
 }
 
@@ -329,7 +330,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DForeign(f) => s,                              // a foreign decl — only a prototype (gen_proto), no body
         .DImport(im) => s,                              // an import — modules link separately, emits nothing
         .DGenStruct(g) => s,                            // a generic template — monomorphize replaced it
-        .DGenEnum(g)   => s
+        .DGenEnum(g)   => s,
+        .DGlobal(g)    => s                             // a module global — emitted by gen_global, not here
     })
 }
 
@@ -396,12 +398,20 @@ gen_funcs = (s: String, decls: [Decl]) String {
     out
 }
 
-// genModule: a whole translation unit — a list of decls (structs + functions).
+// a module-level mutable global: `static <ty> name = <init>;` (init must be a C-constant). [Goal Z E1]
+gen_global = (s: String, d: Decl) String {
+    d.match ({
+        .DGlobal(g) => s.append("static ").gen_ty(g.ty.addr()).append(" ").append(g.name).append(" = ").gen_expr(g.init).append("; "),
+        _ => s
+    })
+}
+// genModule: a whole translation unit — a list of decls (structs + globals + functions).
 genModule* = (raw: [Decl]) String {
     decls := raw.monomorphize()                         // pass 0: instantiate generic structs per use
     s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")   // the [T] fat pointer
     decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
     decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
     s = s.gen_types_upto(decls, 0, slen(decls))         // pass 3: type defs in dependency order
+    decls.loop((h, i, d) { s = s.gen_global(d) })       // pass 3.5: module globals (after their type, before fns)
     s.gen_funcs(decls)                                  // pass 4: functions + raw
 }

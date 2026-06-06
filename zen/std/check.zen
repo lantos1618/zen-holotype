@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -77,6 +77,18 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
         .VNil     => tvoid(),
         .VCons(c) => eq(c.name, name).match ({ true => c.ty, false => c.tail.lookup_var(name) })
     })
+}
+// a module-level global's type — inferred from its init (Goal Z E1). The fallback when a bare Var
+// is not a local. Returns void if there's no such global.
+global_ty = (env: Env, name: str) Ty {
+    found := tvoid()
+    env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_expr(g.init), false => found }), _ => found }) })
+    found
+}
+// a bare Var's type: an in-scope local, else a module-level global, else void.
+var_or_global = (env: Env, name: str) Ty {
+    lv := env.vars.lookup_var(name)
+    lv.is_void_ty().match ({ true => env.global_ty(name), false => lv })
 }
 // the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
@@ -201,7 +213,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Byte(n)       => tu8(),                             // a char literal is a byte
-        .Var(v)        => env.vars.lookup_var(v.name),
+        .Var(v)        => env.var_or_global(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
@@ -564,8 +576,14 @@ resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
     env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
     Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) }
 }
+// a module-level global: infer its init's type (the parser left it void) and resolve the init, so
+// genc emits `static <real ty> name = <init>;`. [Goal Z E1]
+resolve_global = (a: Ptr<Malloc>, decls: [Decl], g: GlobalData) Decl {
+    env := Env { vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a }
+    dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init))
+}
 resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
-    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d })
+    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), .DGlobal(g) => a.resolve_global(decls, g), _ => d })
 }
 
 // ── inline templates: a function with an FnT parameter is spliced at each call site ──────

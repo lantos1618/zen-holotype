@@ -7,7 +7,7 @@
 // stays here, importable from std.parse.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, impl_cname, ti32, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, impl_cname, ti32, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Malloc, heap } = std.alloc
 { parse_or, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = std.parse_expr
@@ -175,6 +175,12 @@ decl_is_enum = (src: str, pos: i32) bool {              // `:` but NOT `{` -> an
     m := src.decl_marker(pos)
     src.is_colon(m.tok).match ({ true => src.is_lbrace(src.scan(m.next).tok).match ({ true => false, false => true }), false => false })
 }
+// `name := init` — a module-level mutable GLOBAL (Goal Z E1). The marker is the two-byte `:=` symbol
+// (is_colon also matches it via the leading ':', so decl_is_global MUST be checked before struct/enum).
+is_walrus = (src: str, t: Token) bool {
+    t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == ':') && (src.byte_at(t.start + 1) == '='), _ => false })
+}
+decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).tok) }
 
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
 // `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
@@ -236,14 +242,28 @@ decl_is_impl = (src: str, pos: i32) bool {              // `Name.impl(` — a me
 fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     src.decl_is_impl(pos).match ({
         true  => a.fill_impl(src, pos, buf, i),
-        false => src.decl_is_struct(pos).match ({
-            true  => a.fill_struct(src, pos, buf, i),
-            false => src.decl_is_enum(pos).match ({
-                true  => a.fill_enum(src, pos, buf, i),
-                false => a.fill_func(src, pos, buf, i)
+        false => src.decl_is_global(pos).match ({           // `name := init` — a module-level global
+            true  => a.fill_global(src, pos, buf, i),
+            false => src.decl_is_struct(pos).match ({
+                true  => a.fill_struct(src, pos, buf, i),
+                false => src.decl_is_enum(pos).match ({
+                    true  => a.fill_enum(src, pos, buf, i),
+                    false => a.fill_func(src, pos, buf, i)
+                })
             })
         })
     })
+}
+// `name := init` -> a DGlobal (mutable module-level global). The init is parsed as a full expression;
+// its TYPE is left void here and filled by resolve from the inferred init type. Emitted as a C
+// `static <ty> name = <init>;` (init must be a C-constant). [Goal Z E1]
+fill_global = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    nt := src.scan(pos)                                     // the global's name
+    nm := a.lexeme(src, nt.tok)
+    mk := src.decl_marker(pos)                              // the `:=` (skips name, `*`, `<…>`)
+    pe := a.parse_or(src, mk.next)                          // the init expression
+    buf[i] = dglobal(nm, tvoid(), pe.expr)
+    a.fill_decls(src, pe.next, buf, i + 1)
 }
 // `Type.impl(Trait, { m1 = (…){…}  m2 = (…){…} })` — each method becomes an ordinary top-level
 // function (named by the method), so a UFCS call `x.m1(a)` -> `m1(x, a)` resolves to one
