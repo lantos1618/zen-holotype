@@ -67,6 +67,10 @@ from _difftest import self_side, compare
     # store_i64/load_i64 intrinsics (Goal Z 2b): a typed 8-byte write/read at a byte ptr (arena cursors,
     # Rc/ARC headers) — `store(offset(p,8),x)` would write only 1 byte (uint8_t* cast); these write 8.
     ("Cell*: { x: i64 }\ntest* = () i64 { c := Cell { x: 0 }  store_i64(addr(c), 42)  load_i64(addr(c)) }", 42),
+    # ARENA bump allocator (Goal Z 4): two bump allocations from one buffer, each written/read via the
+    # cursor — proves pointer-add allocation + field mutation through MutPtr<Arena>. (std.arena, here
+    # inlined since run_value has no module resolver yet; arena.zen itself is acid-checked.)
+    ("Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nan* = (cap: i64) Arena { Arena { buf: malloc(cap), off: 0, cap: cap } }\nbump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> { p := a.buf.offset(a.off)  a.off = a.off + n  p }\ntest* = () i64 {\n  a := an(64)\n  p := addr(a).bump(8)\n  store_i64(p, 99)\n  q := addr(a).bump(8)\n  store_i64(q, 1)\n  load_i64(p) + load_i64(q)\n}", 100),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want

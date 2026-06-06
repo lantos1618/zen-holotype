@@ -1,0 +1,28 @@
+// std.arena — a BUMP (arena) allocator: hand out memory from one fixed buffer by advancing a cursor.
+// Allocation is a pointer add; there is no per-object free — you free the WHOLE arena at once with
+// `reset` (O(1)). This is Goal Z's scoped memory strategy: a whole compile / request / actor turn
+// allocates into one arena and is reclaimed in a single stroke, instead of N libc frees.
+//
+//   a := arena_new(4096)
+//   p := addr(a).bump(64)        // 64 bytes, just a cursor advance
+//   addr(a).reset()              // reclaim everything at once
+//
+// Goal Z 4. Built on the `heap` backing + the `offset` intrinsic; the 8-byte `store_i64`/`load_i64`
+// intrinsics give safe typed access to the bytes it hands out (a plain `store` would write 1 byte).
+{ heap } = std.alloc
+
+// buf: the backing block; off: bytes handed out so far (the cursor); cap: the block's size.
+Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }
+
+arena_new* = (cap: i64) Arena { Arena { buf: heap(cap), off: 0, cap: cap } }
+
+// bump: return the current cursor, then advance it by n bytes. (No bounds check yet — the caller
+// sizes the arena; a checked/growing variant comes with the Allocator-trait integration.) The
+// mutating methods take MutPtr — they write the cursor `a.off`, which a read-only Ptr forbids.
+bump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> {
+    p := a.buf.offset(a.off)
+    a.off = a.off + n
+    p
+}
+reset* = (a: MutPtr<Arena>) void { a.off = 0 }       // reclaim every allocation at once (O(1))
+used*  = (a: Ptr<Arena>) i64 { a.off }               // bytes handed out since the last reset (read-only)
