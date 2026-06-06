@@ -10,9 +10,9 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
-{ eq } = std.str
+{ eq, is_empty } = std.str
 { String, new, append, finish } = std.string
 { byte_at } = std.lex
 
@@ -233,8 +233,35 @@ call_targs = (env: Env, f: Func, args: [Expr]) [Ty] {
     f.tparams.loop((h, i, tp) { buf[i] = env.targ_of(f.params, args, tp.name) })
     buf
 }
+// ── UFCS trait-method dispatch: `x.m()` desugars to `m(x, …)`. If `m` is a method provided by an
+//    impl on x's TYPE, route the call to that impl's mangled C name (impl_<Trait>_<Type>_m), so two
+//    types can implement the same trait method. A plain fn (no matching impl) keeps its name. ──
+method_in = (methods: [Param], fn: str) bool {
+    f := false
+    methods.loop((h, i, n) { f = eq(n.name, fn).match ({ true => true, false => f }) })
+    f
+}
+dispatch_recv = (decls: [Decl], fn: str, tyname: str) str {
+    found := ""
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im) => eq(im.ty, tyname).match ({
+                true  => im.methods.method_in(fn).match ({ true => impl_cname(im.trname, im.ty, fn), false => found }),
+                false => found
+            }),
+            _ => found
+        })
+    })
+    is_empty(found).match ({ true => fn, false => found })
+}
+dispatch_name = (env: Env, c: CallData) str {
+    (c.args.len > 0).match ({
+        true  => env.decls.dispatch_recv(c.fn, env.infer_expr(c.args[0].addr()).enum_name()),
+        false => c.fn
+    })
+}
 gen_call_ret = (env: Env, c: CallData) Ty {
-    f := env.decls.the_func(c.fn)
+    f := env.decls.the_func(env.dispatch_name(c))
     (f.tparams.len > 0).match ({
         true  => f.tparams.subst_ty(env.call_targs(f, c.args), f.ret),
         false => f.ret
@@ -243,7 +270,10 @@ gen_call_ret = (env: Env, c: CallData) Ty {
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "load").match ({
         true  => env.infer_expr(c.args[0].addr()).pointee_of(),
-        false => env.gen_call_ret(c)
+        false => eq(c.fn, "addr").match ({
+            true  => tptr(env.a.tnode(env.infer_expr(c.args[0].addr()))),   // addr(x): Ptr<typeof(x)>, so x.m() can dispatch on x's type
+            false => env.gen_call_ret(c)
+        })
     })
 }
 infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
@@ -353,14 +383,15 @@ resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
 // stamped with the right (monomorphized) enum name. An unknown fn has no params -> no expectation.
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
 resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
-    ps   := env.decls.fn_params(c.fn)
-    tmpl := env.decls.is_template_call(c.fn)   // a generic fn's param types carry UNBOUND tparams (Opt<T>);
+    dn   := env.dispatch_name(c)               // a UFCS trait-method call routes to the impl for the receiver's type
+    ps   := env.decls.fn_params(dn)
+    tmpl := env.decls.is_template_call(dn)      // a generic fn's param types carry UNBOUND tparams (Opt<T>);
     buf  := a.cebuf(c.args.len)                // stamping a bare-ctor arg with them yields Opt_T, not the
     c.args.loop((h, i, ar) {                   // payload-inferred Opt_i32 — so let template args self-resolve.
         ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    a.cenode(call(c.fn, buf))
+    a.cenode(call(dn, buf))
 }
 resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
