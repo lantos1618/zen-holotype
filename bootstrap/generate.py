@@ -18,9 +18,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+BOOT = Path(__file__).resolve().parent
 
-from zen.main import (load, build_namespace, build_scopes, resolve,
-                      fold_comptime, run_emits, check, emit_c)
+# NB: the Python compiler (zen.main) is imported LAZILY, inside generate_c(), so the SELF-HOSTED
+# path (generate_c_selfhosted, below) needs no Python compiler at all — only `cc` + the `zenc`
+# binary. That is the point: zenc.gen.c can be regenerated with zero Python toolchain.
 
 # the compiler IS these source files, in dependency order: genc (AST base + type helpers),
 # genc_mono (monomorphize), genc_emit (C backend), lex (tokens), parse_expr/parse_type/parse_stmt
@@ -65,9 +67,27 @@ def _zen_lit(s):
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def generate_c(tmp_path):
-    """Run the toolchain on the sources; return the emitted compiler-library C (head kept)."""
+def generate_c_selfhosted(tmp_path):
+    """Regenerate via the `zenc` BINARY (built from the COMMITTED zenc.gen.c) — NO Python compiler,
+    only `cc` + `zenc`. This is the self-hosted bootstrap loop: committed C -> zenc -> the same C.
+    The fixpoint (tests/test_bootstrap.py) guarantees this equals the Python path's output."""
     import subprocess
+    exe = tmp_path / "zenc"
+    subprocess.run(["cc", "-std=gnu11", "-w", str(BOOT / "zenc.gen.c"), str(BOOT / "zenrt.c"),
+                    str(BOOT / "main.c"), "-o", str(exe)], check=True)
+    (tmp_path / "compiler.zen").write_text(compiler_source())
+    out = subprocess.run([str(exe), str(tmp_path / "compiler.zen")],
+                         capture_output=True, text=True).stdout
+    assert out.startswith(HEAD), out[:80]
+    return out
+
+
+def generate_c(tmp_path):
+    """Run the toolchain on the sources via the PYTHON compiler; return the emitted C (head kept).
+    Used as the reference path (and to bootstrap a brand-new language feature the old zenc can't parse)."""
+    import subprocess
+    from zen.main import (load, build_namespace, build_scopes, resolve,
+                          fold_comptime, run_emits, check, emit_c)
     src = compiler_source()
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
     files = load(tmp_path); ns = build_namespace(files)
@@ -90,7 +110,10 @@ def gen_c_file(out):
 
 if __name__ == "__main__":
     import tempfile
+    self_hosted = "--self-hosted" in sys.argv
+    gen = generate_c_selfhosted if self_hosted else generate_c
     with tempfile.TemporaryDirectory() as td:
-        out = generate_c(Path(td))
-    (Path(__file__).parent / "zenc.gen.c").write_text(gen_c_file(out))
-    print(f"wrote bootstrap/zenc.gen.c ({len(out)} bytes of emitted C)")
+        out = gen(Path(td))
+    (BOOT / "zenc.gen.c").write_text(gen_c_file(out))
+    how = "zenc binary (self-hosted, no Python compiler)" if self_hosted else "the Python compiler"
+    print(f"wrote bootstrap/zenc.gen.c ({len(out)} bytes of emitted C) via {how}")
