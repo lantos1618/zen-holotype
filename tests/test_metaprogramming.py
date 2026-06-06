@@ -22,23 +22,23 @@ _DERIVE = r'''
 { field, param, ti32, Decl } = std.genc
 { genModule } = std.genc_emit
 { resolve_module } = std.check
-{ evar, efield, ret, func, struct, named, ptrto, decls } = std.ast
+{ var, dot, ret, func, struct, named, ptrto, dup } = std.ast
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
 
-// `derive(getters)` — a generator that BUILDS AND RETURNS a Decl (the case that dangles without
-// std.ast's heap builders). `p.<field>` auto-derefs to `p-><field>` once resolve_module runs.
-derive_getter = (a: Ptr<Malloc>, sname: str, fname: str) Decl {
-    p := a.evar("p")
-    a.func(fname, [param("p", a.ptrto(named(sname)))], ti32(), [ret(a.efield(p, fname))])
+// `derive_getter` — a generator that BUILDS AND RETURNS a Decl (the case that dangles without
+// std.ast's heap builders). It reads as the Zen it generates: a function whose body is
+// `return s.<field>`. `s.<field>` auto-derefs to `s-><field>` once resolve_module runs.
+derive_getter = (sname: str, fname: str) Decl {
+    func(fname, [param("p", named(sname).ptrto())], ti32(), [var("p").dot(fname).ret()])
 }
 
 main* = () i32 {
     a    := Malloc { _: 0 }
-    pt   := addr(a).struct("Pt", [field("x", ti32()), field("y", ti32())])
-    getx := addr(a).derive_getter("Pt", "x")
-    gety := addr(a).derive_getter("Pt", "y")
-    emit(genModule(addr(a).resolve_module(addr(a).decls([pt, getx, gety]))))
+    pt   := struct("Pt", [field("x", ti32()), field("y", ti32())])
+    getx := derive_getter("Pt", "x")
+    gety := derive_getter("Pt", "y")
+    emit(genModule(addr(a).resolve_module(dup([pt, getx, gety]))))
     0
 }
 '''
@@ -79,22 +79,21 @@ def test_generated_getters_compile_and_run(tmp_path):
 # a real `#[derive]`: one call generates an accessor for EVERY field, each with its own type.
 _DERIVE_ALL = r'''
 { Malloc } = std.alloc
-{ String, new, bytes } = std.genc
 { String, new, bytes } = std.string
 { field, dstruct, StructDecl, ti32, ti64 } = std.genc
 { genModule } = std.genc_emit
 { resolve_module } = std.check
-{ derive_accessors, fields, decls, concat } = std.ast
+{ derive_accessors, dup, concat } = std.ast
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
 main* = () i32 {
     a  := Malloc { _: 0 }
-    sd := StructDecl { name: "Pt", fields: addr(a).fields([field("x", ti32()), field("y", ti64())]) }
-    mod := addr(a).concat(addr(a).decls([dstruct(sd)]), addr(a).derive_accessors(sd))
+    sd := StructDecl { name: "Pt", fields: dup([field("x", ti32()), field("y", ti64())]) }
+    mod := concat(dup([dstruct(sd)]), derive_accessors(sd))
     emit(genModule(addr(a).resolve_module(mod)))
     0
 }
-'''.replace("{ String, new, bytes } = std.genc\n", "")
+'''
 
 
 def test_derive_accessors_covers_every_field_with_its_type(tmp_path):
@@ -107,16 +106,16 @@ def test_derive_accessors_covers_every_field_with_its_type(tmp_path):
 _DERIVE_EQ = r'''
 { Malloc } = std.alloc
 { String, new, bytes } = std.string
-{ field, dstruct, StructDecl, ti32, Decl } = std.genc
+{ field, dstruct, StructDecl, ti32 } = std.genc
 { genModule } = std.genc_emit
 { resolve_module } = std.check
-{ derive_eq, fields, decls, concat } = std.ast
+{ derive_eq, dup, concat } = std.ast
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
 main* = () i32 {
     a  := Malloc { _: 0 }
-    sd := StructDecl { name: "Pt", fields: addr(a).fields([field("x", ti32()), field("y", ti32())]) }
-    mod := addr(a).concat(addr(a).decls([dstruct(sd)]), addr(a).decls([addr(a).derive_eq("pt_eq", sd)]))
+    sd := StructDecl { name: "Pt", fields: dup([field("x", ti32()), field("y", ti32())]) }
+    mod := concat(dup([dstruct(sd)]), dup([derive_eq("pt_eq", sd)]))
     emit(genModule(addr(a).resolve_module(mod)))
     0
 }

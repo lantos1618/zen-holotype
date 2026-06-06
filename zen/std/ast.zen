@@ -1,115 +1,92 @@
-// std.ast — ergonomic, heap-allocating builders over std.genc's reified AST.
+// std.ast — ergonomic, heap-allocating builders over std.genc's reified AST, in fluent UFCS style.
 //
-// THIS is how you metaprogram in Zen: an ordinary function that builds AST values and returns
-// them, emitted at runtime by std.genc.genModule. No `@emit` pragma, no comptime evaluator — a
-// generator is just a function, a `derive` is just a function over a StructDecl, a build is just
-// a program that assembles decls (hand-written + generated) and calls genModule.
+// THIS is how you metaprogram in Zen: an ordinary function that builds AST values and returns them,
+// emitted at runtime by std.genc.genModule. No `@emit` pragma, no comptime evaluator — a generator
+// is just a function, a `derive` is just a function over a StructDecl. The builders read left-to-
+// right as method chains, so the code looks like the Zen it generates:
 //
-// Why a builder and not genc's raw ctors? genc's ctors return VALUES whose slice/pointer children
-// (`Bin.lhs: Ptr<Expr>`, `Func.body: [Stmt]`) are STACK-allocated by `addr()` / `[a, b]` literals.
-// That's fine within one frame, but a generator that RETURNS the AST it built dangles — the
-// children die with its frame. These wrappers HEAP-allocate every node and copy every slice, so
-// generated AST safely outlives the function that built it, and you never write `addr()`.
-{ Malloc, heap } = std.alloc
+//     var("x").dot("a").eq(var("y").dot("a"))          // builds the AST for `x.a == y.a`
+//
+// Why builders and not genc's raw ctors? genc's ctors return VALUES whose slice/pointer children
+// (`Bin.lhs: Ptr<Expr>`, `Func.body: [Stmt]`) are STACK-allocated by `addr()` / `[a, b]` literals —
+// fine within one frame, but a generator that RETURNS the AST it built would dangle. `node`/`dup`/
+// `concat` HEAP-allocate every node and copy every slice (one generic copier each, monomorphized by
+// use), so generated AST safely outlives the function that built it and you never write `addr()`.
+
+{ heap } = std.alloc
 { Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl,
   vref, lit, bin, call, member, mkstruct, finit, FieldInit,
   slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
   tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = std.genc
 
-// ── typed heap buffers: a `[T]`-return slot gives `slice()` the element type genc needs.
-//    The bulk slice copies now go through the generic `dup<T>`/`buf_like<T>` below; these remain
-//    for the single-node allocators (enode/tnode) and the two-slice `concat`. ──
-ebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(heap(n * sizeof(Expr)), n) }
-tbuf = (a: Ptr<Malloc>, n: i64) [Ty]   { slice(heap(n * sizeof(Ty)), n) }
-dbuf = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
-
-// ── heap nodes: a child that outlives its builder (the keystone — the parser's `enode`) ──
-enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
-    buf := a.ebuf(1)
-    buf[0] = v
-    buf[0].addr()
-}
-tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
-    buf := a.tbuf(1)
-    buf[0] = t
-    buf[0].addr()
-}
-
-// ── heap-backed slice copies: a stack `[a, b]` literal copied onto the heap so it can be returned ──
-// dup<T> is the generic core (DOGFOOD: one monomorphized-by-use copier replaces N per-type ones).
-// buf_like allocates an [T] of xs's length — its [T] return type gives `slice` the element type.
-buf_like*<T> = (xs: [T]) [T] { slice(heap(xs.len * sizeof(T)), xs.len) }
-dup*<T> = (xs: [T]) [T] {
-    buf := xs.buf_like()
+// ── heap copies (the keystone): generic over the node type, so ONE of each replaces the old
+//    per-type ebuf/tnode/… zoo. The `[T]` return slot is what tells `slice` its element type, so
+//    every raw alloc goes through `nbuf` (the `like` witness only binds T to the caller's type). ──
+nbuf*<T> = (n: i64, like: [T]) [T] { slice(heap(n * sizeof(T)), n) }   // a fresh, uninit heap [T] of length n
+node*<T>   = (v: T) Ptr<T> { dup([v])[0].addr() }                      // box one value: a heap Ptr<T> holding v
+dup*<T>    = (xs: [T]) [T] {                                           // a heap copy of a (stack) slice, safe to return
+    buf := nbuf(xs.len, xs)
     xs.loop((h, i, x) { buf[i] = x })
     buf
 }
-exprs*  = (a: Ptr<Malloc>, xs: [Expr]) [Expr]      { xs.dup() }
-params* = (a: Ptr<Malloc>, ps: [Param]) [Param]    { ps.dup() }
-stmts*  = (a: Ptr<Malloc>, ss: [Stmt]) [Stmt]      { ss.dup() }
-fields* = (a: Ptr<Malloc>, fs: [Field]) [Field]    { fs.dup() }
-inits*  = (a: Ptr<Malloc>, xs: [FieldInit]) [FieldInit] { xs.dup() }
-decls*  = (a: Ptr<Malloc>, ds: [Decl]) [Decl]      { ds.dup() }
-// assemble a module: hand-written decls ++ generated decls (the core build operation)
-concat* = (a: Ptr<Malloc>, xs: [Decl], ys: [Decl]) [Decl] {
-    buf := a.dbuf(xs.len + ys.len)
-    xs.loop((h, i, d) { buf[i] = d })
-    ys.loop((h, i, d) { buf[xs.len + i] = d })
+concat*<T> = (xs: [T], ys: [T]) [T] {               // xs ++ ys (assemble a module: handwritten ++ generated)
+    buf := nbuf(xs.len + ys.len, xs)
+    xs.loop((h, i, x) { buf[i] = x })
+    ys.loop((h, i, y) { buf[xs.len + i] = y })
     buf
 }
 
-// ── expressions (return Ptr<Expr>, so they compose directly — `a.add(a.var("n"), a.int(1))`) ──
-evar*   = (a: Ptr<Malloc>, name: str) Ptr<Expr> { a.enode(vref(name)) }
-eint*   = (a: Ptr<Malloc>, n: i32) Ptr<Expr>    { a.enode(lit(n)) }
-ebin*   = (a: Ptr<Malloc>, op: str, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.enode(bin(op, l, r)) }
-ecall*  = (a: Ptr<Malloc>, fn: str, args: [Expr]) Ptr<Expr> { a.enode(call(fn, a.exprs(args))) }
-efield* = (a: Ptr<Malloc>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.enode(member(o, f)) }
-estruct* = (a: Ptr<Malloc>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.enode(mkstruct(ty, a.inits(fi))) }
+// ── expressions: fluent builders returning Ptr<Expr>, so they chain — `var("n").add(int(1))` ──
+var*    = (name: str) Ptr<Expr>          { vref(name).node() }                  // a variable reference
+int*    = (n: i32) Ptr<Expr>             { lit(n).node() }                      // an integer literal
+dot*    = (o: Ptr<Expr>, f: str) Ptr<Expr> { member(o, f).node() }             // o.f  (member access)
+binop*  = (l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { bin(op, l, r).node() }
+add*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("+", r) }            // l + r
+eq*     = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("==", r) }           // l == r
+and*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("&&", r) }           // l && r
+callx*  = (fn: str, args: [Expr]) Ptr<Expr> { call(fn, args.dup()).node() }     // fn(args…)
+estruct* = (ty: str, fi: [FieldInit]) Ptr<Expr> { mkstruct(ty, fi.dup()).node() } // T{ … }
 
-// ── types (named / pointer-to-named; the primitives re-exported for one import) ──
-named* = (name: str) Ty { tnamed(name) }
-ptrto* = (a: Ptr<Malloc>, inner: Ty) Ty { tptr(a.tnode(inner)) }
-i32t*  = () Ty { ti32() }
+// ── types: `named("Foo").ptrto()` reads as `Ptr<Foo>` ──
+named*  = (name: str) Ty { tnamed(name) }
+ptrto*  = (inner: Ty) Ty { tptr(inner.node()) }
+i32t*   = () Ty { ti32() }
 
-// ── statements (a body is built from these, then heap-copied by `func`) ──
-ret*   = (e: Ptr<Expr>) Stmt { sret(e) }
-letb*  = (name: str, v: Ptr<Expr>) Stmt { slet(name, v) }
-set*   = (a: Ptr<Malloc>, name: str, v: Ptr<Expr>) Stmt { sassign(a.evar(name), v) }   // `name = v` (target is a Var)
-expr*  = (e: Ptr<Expr>) Stmt { sexpr(e) }
+// ── statements: `expr.ret()` / `expr.asstmt()` read as the statement they build ──
+ret*    = (e: Ptr<Expr>) Stmt { sret(e) }                                       // return e
+asstmt* = (e: Ptr<Expr>) Stmt { sexpr(e) }                                      // e;  (evaluated for effect)
+letb*   = (name: str, v: Ptr<Expr>) Stmt { slet(name, v) }                      // name := v
+set*    = (name: str, v: Ptr<Expr>) Stmt { sassign(var(name), v) }              // name = v
 
-// ── declarations (the slices are heap-copied here, so the result is safe to return) ──
-func*   = (a: Ptr<Malloc>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
-    dfunc(Func { name: name, params: a.params(ps), ret: ret, body: a.stmts(body) })
+// ── declarations: slices are heap-copied here, so the result is safe to return ──
+func*   = (name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
+    dfunc(Func { name: name, params: ps.dup(), ret: ret, body: body.dup() })
 }
-struct* = (a: Ptr<Malloc>, name: str, fs: [Field]) Decl { dstruct(StructDecl { name: name, fields: a.fields(fs) }) }
+struct* = (name: str, fs: [Field]) Decl { dstruct(StructDecl { name: name, fields: fs.dup() }) }
 
-// ── derive: generate code from a struct's SHAPE — metaprogramming as ordinary functions, the
-//    Zen answer to a `#[derive]` attribute. `derive_accessors(sd)` returns a getter per field. ──
-accessor = (a: Ptr<Malloc>, sname: str, f: Field) Decl {
-    s := a.evar("s")                                                       // the Ptr<Struct> receiver
-    a.func(f.name, [param("s", a.ptrto(named(sname)))], f.ty, [ret(a.efield(s, f.name))])
+// ── derive: generate code from a struct's SHAPE — the Zen answer to a `#[derive]` attribute, as an
+//    ordinary function over a StructDecl. `derive_accessors(sd)` returns a getter per field. ──
+accessor = (sname: str, f: Field) Decl {
+    func(f.name, [param("s", named(sname).ptrto())], f.ty, [var("s").dot(f.name).ret()])
 }
-derive_accessors* = (a: Ptr<Malloc>, sd: StructDecl) [Decl] {
-    buf := a.dbuf(sd.fields.len)
-    sd.fields.loop((h, i, f) { buf[i] = a.accessor(sd.name, f) })
+dbuf = (n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }   // a [Decl] buffer (no value witness handy here)
+derive_accessors* = (sd: StructDecl) [Decl] {
+    buf := dbuf(sd.fields.len)
+    sd.fields.loop((h, i, f) { buf[i] = accessor(sd.name, f) })
     buf
 }
 
-// `derive_eq(name, sd)` — a structural equality `name(x, y) bool { x->f == y->f && … }` comparing
-// every field. The `&&`-chain is folded from a `true` seed (so an empty struct is trivially equal).
-field_eq = (a: Ptr<Malloc>, fname: str) Ptr<Expr> {
-    x := a.evar("x")
-    y := a.evar("y")
-    a.ebin("==", a.efield(x, fname), a.efield(y, fname))
-}
-and_fields = (a: Ptr<Malloc>, fields: [Field], i: i32, acc: Ptr<Expr>) Ptr<Expr> {
+// `derive_eq(name, sd)` — a structural equality `name(x, y) bool { x->a == y->a && … }` over every
+// field. The `&&`-chain folds from a `true` seed, so an empty struct is trivially equal.
+field_eq = (fname: str) Ptr<Expr> { var("x").dot(fname).eq(var("y").dot(fname)) }
+and_fields = (fields: [Field], i: i32, acc: Ptr<Expr>) Ptr<Expr> {
     (i == fields.len).match ({
         true  => acc,
-        false => a.and_fields(fields, i + 1, a.ebin("&&", acc, a.field_eq(fields[i].name)))
+        false => and_fields(fields, i + 1, acc.and(field_eq(fields[i].name)))
     })
 }
-derive_eq* = (a: Ptr<Malloc>, name: str, sd: StructDecl) Decl {
-    pty  := a.ptrto(named(sd.name))                                   // Ptr<Struct>, for both params
-    body := a.and_fields(sd.fields, 0, a.evar("true"))
-    a.func(name, [param("x", pty), param("y", pty)], tbool(), [ret(body)])
+derive_eq* = (name: str, sd: StructDecl) Decl {
+    pty  := named(sd.name).ptrto()                                  // Ptr<Struct>, for both params
+    body := and_fields(sd.fields, 0, var("true"))
+    func(name, [param("x", pty), param("y", pty)], tbool(), [body.ret()])
 }
