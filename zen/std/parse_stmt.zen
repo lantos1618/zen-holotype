@@ -1,0 +1,325 @@
+// std.parse_stmt — statement parsing: the SList cons-list, statement-kind classification,
+// let/set/idxset/return/while/if/block statements, build_body + materialize. Split out of
+// std.parse (god-file split). Statements pull the expression parser (parse_or/parse_atom)
+// from std.parse_expr and the type/brace helpers from std.parse_type.
+//
+// Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
+{ Stmt, slet, sassign, sidxset, swhile, sif, sret, sexpr, vref, tvoid } = std.genc
+{ Token, scan, byte_at } = std.lex
+{ Malloc, heap } = std.alloc
+{ enode, lexeme, is_op, is_dot, is_lparen, parse_atom, parse_or } = std.parse_expr
+{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq } = std.parse_type
+
+// ── statement sequence: zero or more `name := expr` lines, then a final expression ──
+// The count is unknown while parsing, so statements accumulate into a cons-list, then
+// get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
+// dangles the moment the Func is returned (genc would then walk freed memory).
+SList*: SNil | SCons(SCell)
+SCell*: { head: Stmt, tail: Ptr<SList> }
+
+// ctor fns — a leading-dot enum can't infer its type passed straight into a generic call
+snil_val  = () SList { .SNil() }
+scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell { head: h, tail: t }) }
+slbuf = (a: Ptr<Malloc>) [SList] { slice(heap(sizeof(SList)), 1) }
+slnode = (a: Ptr<Malloc>, v: SList) Ptr<SList> {
+    buf := a.slbuf()
+    buf[0] = v
+    buf[0].addr()
+}
+snil   = (a: Ptr<Malloc>) Ptr<SList> { a.slnode(snil_val()) }
+scons = (a: Ptr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
+
+// is there a `name :=` at `pos`? (an Ident, then the two-byte ':=' symbol)
+is_assign = (src: str, t: Token) bool {
+    t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == ':') && (src.byte_at(t.start + 1) == '='), _ => false })
+}
+is_let_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({ .Ident => src.is_assign(src.scan(sc.next).tok), _ => false })
+}
+// is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
+is_eq = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
+skip_dots = (src: str, pos: i32) i32 {                 // skip a `(. ident)*` lvalue field chain
+    sc := src.scan(pos)
+    src.is_dot(sc.tok).match ({ true => src.skip_dots(src.scan(sc.next).next), false => pos })
+}
+is_set_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({ .Ident => src.is_eq(src.scan(src.skip_dots(sc.next)).tok), _ => false })   // ident (.field)* '='
+}
+// is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
+skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'
+    sc := src.scan(pos)
+    src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) })
+}
+is_idxset_here = (src: str, pos: i32) bool {
+    nt := src.scan(pos)
+    nt.tok.kind.match ({
+        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
+            true  => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
+            false => false
+        }),
+        _ => false
+    })
+}
+
+// is there a `return` keyword at `pos`? (the Ident "return", NOT followed by ':=' or '=' — those
+// make `return` an ordinary variable name being bound/assigned, not the early-return keyword).
+is_return_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "return"), _ => false }) }
+is_return_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_return_kw(sc.tok).match ({
+        true  => src.is_assign(src.scan(sc.next).tok).match ({ true => false, false => !src.is_eq(src.scan(sc.next).tok) }),
+        false => false
+    })
+}
+
+// what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
+// predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
+SKind*: SLet | SIdx | SSet | SWhile | SIf | SRet | SExpr
+stmt_kind = (src: str, pos: i32) SKind {
+    src.is_let_here(pos).match ({
+        true  => .SLet(),
+        false => src.is_idxset_here(pos).match ({
+            true  => .SIdx(),
+            false => src.is_set_here(pos).match ({
+                true  => .SSet(),
+                false => src.is_while_here(pos).match ({
+                    true  => .SWhile(),
+                    false => src.is_if_here(pos).match ({
+                        true  => .SIf(),
+                        false => src.is_return_here(pos).match ({ true => .SRet(), false => .SExpr() })
+                    })
+                })
+            })
+        })
+    })
+}
+
+// parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
+// the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
+parse_stmts = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    src.at_body_end(pos).match ({
+        true  => a.snil(),                          // an empty body `{ }` (a void no-op) — no statements
+        false => src.stmt_kind(pos).match ({
+            .SLet   => a.parse_let_stmt(src, pos),
+            .SIdx   => a.parse_idxset_stmt(src, pos),
+            .SSet   => a.parse_set_stmt(src, pos),
+            .SWhile => a.parse_while_stmt(src, pos),
+            .SIf    => a.parse_if_stmt(src, pos),
+            .SRet   => a.parse_return_stmt(src, pos),
+            .SExpr  => a.parse_ret_stmt(src, pos)
+        })
+    })
+}
+// `name[i] = value` — an index assignment. The element type is left void; std.check fills it.
+parse_idxset_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    nt   := src.scan(pos)                    // the array name
+    name := a.lexeme(src, nt.tok)
+    lb   := src.scan(nt.next)                // '['
+    ie   := a.parse_or(src, lb.next)         // the index
+    rb   := src.scan(ie.next)                // ']'
+    eq   := src.scan(rb.next)                // '='
+    v    := a.parse_or(src, eq.next)         // the value
+    a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), a.parse_stmts(src, v.next))
+}
+parse_set_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    lhs  := a.parse_atom(src, pos)           // the lvalue target: a Var `x` or a Member chain `p.x.y`
+    eq   := src.scan(lhs.next)               // '='
+    v    := a.parse_or(src, eq.next)        // value
+    a.scons(sassign(lhs.expr, v.expr), a.parse_stmts(src, v.next))
+}
+parse_let_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    nt   := src.scan(pos)                    // the bound name
+    name := a.lexeme(src, nt.tok)
+    at   := src.scan(nt.next)                // ':='
+    v    := a.parse_or(src, at.next)        // value (full expression, incl. comparison)
+    a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
+}
+// the final expression of a body is its return; a non-final expression (something else
+// follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
+at_body_end = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({ .Eof => true, _ => src.is_rbrace(sc.tok) })
+}
+parse_ret_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    r := a.parse_or(src, pos)
+    src.at_body_end(r.next).match ({
+        true  => a.scons(sret(r.expr), a.snil()),                      // final expression -> return
+        false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next))    // a bare expr statement
+    })
+}
+// an EARLY `return <expr>` statement: the `return` keyword, then a value, then the rest of the body.
+// Produces the same Return Stmt as a trailing expression, but here it can sit mid-body (e.g. inside
+// a guard's match arm) — genc emits `return expr;`, which actually leaves the enclosing function.
+parse_return_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    kw := src.scan(pos)                                                 // the 'return' keyword
+    r  := a.parse_or(src, kw.next)                                      // the returned value
+    a.scons(sret(r.expr), a.parse_stmts(src, r.next))
+}
+
+// ── @while loops ─────────────────────────────────────────────────────────────────
+// `@while(cond) { stmts }` — a `@` Sym, the `while` Ident, a parenthesized condition,
+// then a brace block of statements (let / assign / nested-while; NO trailing return — a
+// loop body yields no value, unlike a function body). Lowers to genc's While. The block
+// reuses the SList cons-list (materialized into a heap [Stmt]), terminated by `}` rather
+// than by a final expression.
+is_at         = (src: str, t: Token) bool { src.is_op(t, '@') }
+is_while_kw   = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "while"), _ => false }) }
+is_while_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_at(sc.tok).match ({ true => src.is_while_kw(src.scan(sc.next).tok), false => false })
+}
+
+// a parsed `@while`: the While statement + where it ends (just past the closing `}`)
+WhileEnd*: { stmt: Stmt, next: i32 }
+parse_while = (a: Ptr<Malloc>, src: str, pos: i32) WhileEnd {
+    at     := src.scan(pos)                        // '@'
+    wk     := src.scan(at.next)                    // 'while'
+    lp     := src.skip_to_lparen(wk.next)          // pos just past '('
+    c      := a.parse_or(src, lp)                  // condition (stops at ')')
+    rp     := src.scan(c.next)                      // ')'
+    bstart := src.skip_to_brace(rp.next)           // pos just past '{'
+    blk    := a.parse_block(src, bstart)           // statements until '}'
+    WhileEnd { stmt: swhile(c.expr, a.materialize(blk.list)), next: blk.next }
+}
+// the top-level statement form: a While, then the rest of the function body
+parse_while_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    w := a.parse_while(src, pos)
+    a.scons(w.stmt, a.parse_stmts(src, w.next))
+}
+
+// ── if statements ────────────────────────────────────────────────────────────────
+// `if (cond) { then } else { els }` (the else is optional) — both arms are no-return
+// statement blocks (like a loop body). Lowers to genc's If. Detected by the `if` Ident
+// followed by `(`. Sibling to @while.
+is_if_kw   = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "if"), _ => false }) }
+is_else_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "else"), _ => false }) }
+is_if_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_if_kw(sc.tok).match ({ true => src.is_lparen(src.scan(sc.next).tok), false => false })
+}
+empty_stmts = (a: Ptr<Malloc>) [Stmt] { a.materialize(a.snil()) }
+
+IfEnd*:   { stmt: Stmt, next: i32 }
+ElseEnd*: { els: [Stmt], next: i32 }
+parse_if = (a: Ptr<Malloc>, src: str, pos: i32) IfEnd {
+    kw     := src.scan(pos)                        // 'if'
+    lp     := src.skip_to_lparen(kw.next)          // pos just past '('
+    c      := a.parse_or(src, lp)                  // condition (stops at ')')
+    rp     := src.scan(c.next)                      // ')'
+    tstart := src.skip_to_brace(rp.next)           // pos just past the then-'{'
+    tblk   := a.parse_block(src, tstart)           // then-block statements
+    eb     := a.parse_else(src, tblk.next)         // optional else-block
+    IfEnd { stmt: sif(c.expr, a.materialize(tblk.list), eb.els), next: eb.next }
+}
+parse_else = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {
+    sc := src.scan(pos)
+    src.is_else_kw(sc.tok).match ({
+        true  => a.parse_else_block(src, sc.next),
+        false => ElseEnd { els: a.empty_stmts(), next: pos }   // no else -> empty block
+    })
+}
+parse_else_block = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {   // pos just past 'else'
+    estart := src.skip_to_brace(pos)               // pos just past the else-'{'
+    eblk   := a.parse_block(src, estart)
+    ElseEnd { els: a.materialize(eblk.list), next: eblk.next }
+}
+// the top-level statement form: an If, then the rest of the function body
+parse_if_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    f := a.parse_if(src, pos)
+    a.scons(f.stmt, a.parse_stmts(src, f.next))
+}
+
+// a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
+BlockEnd*: { list: Ptr<SList>, next: i32 }
+parse_block* = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    sc := src.scan(pos)
+    src.is_rbrace(sc.tok).match ({
+        true  => BlockEnd { list: a.snil(), next: sc.next },   // '}' — block done
+        false => a.block_stmt(src, pos)
+    })
+}
+// same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare
+// statement. An explicit `return <expr>` (SRet) IS allowed inside a block (a guard arm's body).
+block_stmt = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    src.stmt_kind(pos).match ({
+        .SLet   => a.block_let(src, pos),
+        .SIdx   => a.block_idxset(src, pos),         // buf[i] = v  inside a loop/if body
+        .SSet   => a.block_set(src, pos),
+        .SWhile => a.block_while(src, pos),
+        .SIf    => a.block_if(src, pos),
+        .SRet   => a.block_return(src, pos),         // an early `return <expr>` inside a block
+        .SExpr  => a.block_expr(src, pos)            // a bare expression statement (e.g. putchar(b))
+    })
+}
+block_return = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    kw   := src.scan(pos)                            // 'return'
+    r    := a.parse_or(src, kw.next)                 // the returned value
+    rest := a.parse_block(src, r.next)
+    BlockEnd { list: a.scons(sret(r.expr), rest.list), next: rest.next }
+}
+block_idxset = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    nt   := src.scan(pos)                            // the array name
+    name := a.lexeme(src, nt.tok)
+    lb   := src.scan(nt.next)                        // '['
+    ie   := a.parse_or(src, lb.next)                 // index
+    rb   := src.scan(ie.next)                        // ']'
+    eq   := src.scan(rb.next)                        // '='
+    v    := a.parse_or(src, eq.next)                 // value
+    rest := a.parse_block(src, v.next)
+    BlockEnd { list: a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), rest.list), next: rest.next }
+}
+block_expr = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    e    := a.parse_or(src, pos)                     // a bare expression, evaluated for effect
+    rest := a.parse_block(src, e.next)
+    BlockEnd { list: a.scons(sexpr(e.expr), rest.list), next: rest.next }
+}
+block_if = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    f    := a.parse_if(src, pos)
+    rest := a.parse_block(src, f.next)
+    BlockEnd { list: a.scons(f.stmt, rest.list), next: rest.next }
+}
+block_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    nt   := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    at   := src.scan(nt.next)                       // ':='
+    v    := a.parse_or(src, at.next)
+    rest := a.parse_block(src, v.next)
+    BlockEnd { list: a.scons(slet(name, v.expr), rest.list), next: rest.next }
+}
+block_set = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    lhs  := a.parse_atom(src, pos)                   // the lvalue target (Var or Member chain)
+    eq   := src.scan(lhs.next)                       // '='
+    v    := a.parse_or(src, eq.next)
+    rest := a.parse_block(src, v.next)
+    BlockEnd { list: a.scons(sassign(lhs.expr, v.expr), rest.list), next: rest.next }
+}
+block_while = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    w    := a.parse_while(src, pos)
+    rest := a.parse_block(src, w.next)
+    BlockEnd { list: a.scons(w.stmt, rest.list), next: rest.next }
+}
+
+// count the statements, then fill a heap [Stmt] from the list (return the next index)
+scount = (l: Ptr<SList>) i32 { l.match ({ .SNil => 0, .SCons(c) => 1 + c.tail.scount() }) }
+sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 { l.match ({ .SNil => i, .SCons(c) => buf.sfill_cons(c, i) }) }
+sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
+    buf[i] = c.head
+    buf.sfill(c.tail, i + 1)
+}
+
+// a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
+stmt_buf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(heap(n * sizeof(Stmt)), n) }
+
+// materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
+materialize* = (a: Ptr<Malloc>, stmts: Ptr<SList>) [Stmt] {
+    body := a.stmt_buf(stmts.scount())
+    body.sfill(stmts, 0)
+    body
+}
+
+// parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
+build_body* = (a: Ptr<Malloc>, src: str, pos: i32) [Stmt] {
+    a.materialize(a.parse_stmts(src, pos))
+}

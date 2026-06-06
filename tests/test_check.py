@@ -53,7 +53,7 @@ def test_fits_lattice(tmp_path):
 ARITY_DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
-{ check_module } = std.check
+{ check_module } = std.check_validate
 main* = () i32 { m := Malloc { _: 0 }\n addr(m).check_module(addr(m).parse_module("%s")) }
 """
 

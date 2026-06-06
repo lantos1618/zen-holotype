@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Regenerate bootstrap/zenc.gen.c — the C source of the self-hosted Zen compiler.
 
-The Zen compiler is written in Zen (std/lex.zen, std/parse.zen, std/check.zen,
-std/genc.zen). This script runs the toolchain ON those four files and writes the
-emitted C to zenc.gen.c, which — with zenrt.c (a tiny runtime) and main.c (a CLI
-entry) — builds a standalone `zenc` binary that needs no Python:
+The Zen compiler is written in Zen (std/genc.zen + std/genc_mono.zen + std/genc_emit.zen,
+std/lex.zen, std/parse.zen, std/check.zen). This script runs the toolchain ON those source
+files and writes the emitted C to zenc.gen.c, which — with zenrt.c (a tiny runtime) and
+main.c (a CLI entry) — builds a standalone `zenc` binary that needs no Python:
 
     python3 bootstrap/generate.py      # regenerate zenc.gen.c (after editing std/*.zen)
     cc -std=gnu11 -w bootstrap/*.c -o zenc
     ./zenc some.zen                    # Zen source on stdin/argv -> C on stdout
 
-The binary REPRODUCES this file: `./zenc <the four sources concatenated>` emits
+The binary REPRODUCES this file: `./zenc <the sources concatenated>` emits
 exactly zenc.gen.c's body. That fixpoint is checked by tests/test_bootstrap.py.
 """
 import sys
@@ -22,9 +22,13 @@ sys.path.insert(0, str(ROOT))
 from zen.main import (load, build_namespace, build_scopes, resolve,
                       fold_comptime, run_emits, check, emit_c)
 
-# the compiler IS these four files, in dependency order (genc defines the AST + backend,
-# lex the tokens, parse the parser, check the resolver/validator).
-SOURCES = ["zen/std/genc.zen", "zen/std/lex.zen", "zen/std/parse.zen", "zen/std/check.zen"]
+# the compiler IS these source files, in dependency order: genc (AST base + type helpers),
+# genc_mono (monomorphize), genc_emit (C backend), lex (tokens), parse_expr/parse_type/parse_stmt
+# + parse (the parser), check (resolver/validator). The validator check_validate.zen is NOT here
+# (the bootstrap binary only emits C — it doesn't type-check — so it stays out of the binary).
+SOURCES = ["zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
+           "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
+           "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen"]
 
 # genc emits this zslice typedef at the head; zenrt.h provides it instead, so we strip it.
 HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
@@ -35,7 +39,7 @@ _DRIVER = """
 { Malloc } = std.alloc
 { parse_module } = std.parse
 { resolve_module } = std.check
-{ genModule } = std.genc
+{ genModule } = std.genc_emit
 { String, new, bytes } = std.string
 putchar = (c: i32) i32
 emit = (s: String) void { bytes(s).loop((h, i, b) { putchar(b) }) }
@@ -53,7 +57,7 @@ def strip_imports(path):
 
 
 def compiler_source():
-    """The four compiler files concatenated, imports stripped — the toolchain's own input."""
+    """The compiler source files concatenated, imports stripped — the toolchain's own input."""
     return "\n".join(strip_imports(p) for p in SOURCES)
 
 
@@ -62,7 +66,7 @@ def _zen_lit(s):
 
 
 def generate_c(tmp_path):
-    """Run the toolchain on the four sources; return the emitted compiler-library C (head kept)."""
+    """Run the toolchain on the sources; return the emitted compiler-library C (head kept)."""
     import subprocess
     src = compiler_source()
     (tmp_path / "main.zen").write_text(_DRIVER % _zen_lit(src))
