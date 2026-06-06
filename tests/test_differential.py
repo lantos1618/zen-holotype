@@ -182,3 +182,28 @@ def test_guard_early_return(src, want):
 def test_partial_match_without_wildcard_rejected(src):
     from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
+
+
+# A VALUE-position match arm with an early `return` is rejected. A value-position match lowers to a
+# `({…})`/ternary, where the emitter turns a trailing `return e` into a bare `e;` — the return is
+# silently dropped (wrong value). Guard returns must be STATEMENT-position (those lower to real `if`,
+# tested above). So reject value-position returns, matching the Python frontend. (C-audit #7.)
+@pytest.mark.parametrize("src", [
+    "R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }",
+    "f* = (b: bool) i32 {\n v := b.match({ true => { return 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }",
+])
+def test_value_position_return_rejected(src):
+    from _difftest import self_side
+    assert self_side(src)["verdict"] == "reject", src
+
+
+# Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /
+# "conflicting types"). The self-hosted backend doesn't mangle plain fn names, so the checker must
+# reject a duplicate, matching the Python frontend's Namespace Conflict. Zen has no overloading. (#5.)
+@pytest.mark.parametrize("src", [
+    "foo* = () i32 { 1 }\nfoo* = () i32 { 2 }\ntest* = () i32 { foo() }",
+    "a* = () i32 { 1 }\ndup* = () i32 { 2 }\ndup* = () i32 { 3 }\ntest* = () i32 { a() }",
+])
+def test_duplicate_function_name_rejected(src):
+    from _difftest import self_side
+    assert self_side(src)["verdict"] == "reject", src

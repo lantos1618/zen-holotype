@@ -5,11 +5,11 @@
 // and trait conformance. check_linked layers a cross-module header on so an imported call is checked
 // against real signatures. It depends ONE-WAY on std.check (inference + the type lattice + the env);
 // std.check never imports this module back.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, call, arm, dforeign, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, call, arm, dforeign, tnamed, tptr, tslice, tvoid } = std.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, no_stmts, resolve_module, dbuf, tnode } = std.check
 { Malloc, heap } = std.alloc
 { byte_at } = std.lex
-{ eq } = std.str
+{ eq, is_empty } = std.str
 
 // ── check_module: a VALIDATING pass (Goal C Phases 1-2) — count type errors ────────────
 // Distinct from resolve_module (which rewrites the AST): this walks the module counting type
@@ -100,6 +100,30 @@ check_args = (env: Env, args: [Expr]) i32 {
 check_arms = (env: Env, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) { acc = acc + env.check_expr(ar.body) })
+    acc
+}
+// A value-position match arm whose body contains an early `return` is INVALID. By the time the
+// validator runs, statement-position matches have been lowered to real `if`s (where a guard-clause
+// `return` correctly fires); a match still in EXPRESSION position lowers to a `({…})`/ternary, where
+// the emitter turns a trailing `return e` into a bare `e;` — the return is silently dropped. So an
+// early return only belongs in a statement-position guard. Reject it here, matching the Python
+// frontend (which won't even parse `return` inside a value-position arm).
+stmts_have_return = (stmts: [Stmt]) bool {
+    found := false
+    stmts.loop((h, i, st) { found = st.match ({ .Return(r) => true, _ => found }) })
+    found
+}
+// 1 if `e` is a value-position branch/arm body whose Block contains a `return` (which the emitter
+// would silently drop). Used for both enum-match arms and bool/literal-match (Cond) branches.
+expr_drops_return = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b) => stmts_have_return(b.stmts).match ({ true => 1, false => 0 }),
+        _         => 0
+    })
+}
+arm_return_errs = (arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc + ar.body.expr_drops_return() })
     acc
 }
 check_inits = (env: Env, inits: [FieldInit]) i32 {
@@ -254,10 +278,10 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Call(c)        => env.check_call(c) + env.check_args(c.args),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
-        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
+        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m),
+        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m) + arm_return_errs(m.arms),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
@@ -406,8 +430,34 @@ impl_errs = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
     decls.loop((h, i, d) { acc = acc + d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => a.trait_conformance(decls, im, sd), false => 0 }), _ => 0 }) })
     acc
 }
+// Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /
+// "conflicting types") — the self-hosted backend mangles only generic-type instances, not plain fns,
+// so two `f`s (or two trait impls of one method) both emit `… f(…)`. Reject the second, matching the
+// Python frontend (Namespace raises Conflict on a duplicate path). Zen has no overloading.
+fn_name_of = (d: Decl) str { d.match ({ .DFunc(f) => f.name, _ => "" }) }
+fn_dup_before = (decls: [Decl], name: str, upto: i64) bool {
+    f := false
+    decls.loop((h, i, d) {
+        f = (i < upto).match ({
+            true  => eq(d.fn_name_of(), name).match ({ true => true, false => f }),
+            false => f
+        })
+    })
+    f
+}
+dup_name_errs = (decls: [Decl]) i32 {
+    n := 0
+    decls.loop((h, i, d) {
+        nm := d.fn_name_of()
+        n = is_empty(nm).match ({
+            true  => n,
+            false => decls.fn_dup_before(nm, i).match ({ true => n + 1, false => n })
+        })
+    })
+    n
+}
 check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
-    acc := 0
+    acc := decls.dup_name_errs()
     decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => a.impl_errs(decls, im), _ => 0 }) })
     acc
 }
