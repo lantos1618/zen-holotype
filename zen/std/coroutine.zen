@@ -1,0 +1,52 @@
+// @self-hosted-only — uses the `null_ptr` intrinsic and a function-pointer extern (makecontext),
+// neither of which the Python reference frontend models, so load_std / acid SKIP this file on the
+// marker. Its mechanics are validated by an equivalent self-contained test (test_differential);
+// direct import awaits the self-hosted module resolver.
+//
+// std.coroutine — stackful coroutines (fibers) over libc ucontext, THE one irreducible primitive for
+// Goal Z's no-color async. A coroutine runs on its own allocator-placed stack; yield() suspends it
+// back to whoever resumed it, and resume() continues it (returning 0 once its work fn returns). The
+// COMPILER has zero async machinery — "sync vs async" is purely a stdlib choice of Runtime (std.runtime
+// picks suspend = noop vs = yield over this). x86-64 Linux ucontext_t field offsets, poked directly
+// since the struct is opaque here: uc_link @8, uc_stack.ss_sp @16, uc_stack.ss_size @32.
+{ heap } = std.alloc
+
+getcontext  = (ctx: RawPtr<u8>) i32
+makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void   // fn becomes a real C `void(*)()`
+swapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32
+
+// The running coroutine's context, the resumer's context, and a yield flag. yield() runs INSIDE the
+// work fn (no args), so it finds the contexts here; resume() reads the flag to tell a yield from a
+// final return. Module-mutable globals (E1); the RawPtr ones start null via the null_ptr() constant.
+cur  := null_ptr()
+back := null_ptr()
+flag := 0
+
+Coro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
+
+// spawn `work` on a fresh 64 KiB stack. When work returns, uc_link (= the saved resumer context)
+// brings control back with the flag clear, so resume reports completion.
+spawn* = (work: () void) Coro {
+    stack := heap(65536)
+    ctx := heap(1024)
+    lnk := heap(1024)
+    getcontext(ctx)
+    store_i64(ctx.offset(16), stack)     // uc_stack.ss_sp  = the new stack
+    store_i64(ctx.offset(32), 65536)     // uc_stack.ss_size
+    store_i64(ctx.offset(8), lnk)        // uc_link -> the resumer's context
+    makecontext(ctx, work, 0)
+    Coro { ctx: ctx, link: lnk, stack: stack }
+}
+// resume (or start) the coroutine; returns 1 if it yielded (alive), 0 once work() has returned.
+resume* = (c: Coro) i32 {
+    cur = c.ctx
+    back = c.link
+    flag = 0
+    swapcontext(c.link, c.ctx)
+    flag
+}
+// suspend the current coroutine back to whoever resumed it; execution continues here on next resume.
+yield* = () void {
+    flag = 1
+    swapcontext(cur, back)
+}

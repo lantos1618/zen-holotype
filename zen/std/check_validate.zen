@@ -5,7 +5,7 @@
 // and trait conformance. check_linked layers a cross-module header on so an imported call is checked
 // against real signatures. It depends ONE-WAY on std.check (inference + the type lattice + the env);
 // std.check never imports this module back.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = std.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, no_stmts, resolve_module, dbuf, tnode } = std.check
 { Malloc, heap } = std.alloc
 { byte_at } = std.lex
@@ -26,7 +26,10 @@ is_uninferable = (t: Ty) bool {
     t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(p) => load(p).is_void_ty(), _ => false })
 }
 fit_err = (argty: Ty, pty: Ty) i32 {
-    argty.is_uninferable().match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
+    // a function-POINTER parameter (an extern callback like makecontext's `void(*)()`) accepts a
+    // function/lambda arg; the validator doesn't model FnT compatibility structurally, so skip it
+    // (sound — never false-reject; a gross mismatch is caught by the C compiler).
+    (argty.is_uninferable() || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
 }
 arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
     // a polymorphic numeric literal (`0`, `10`) fits ANY numeric param — `0` is a valid u8/i32/i64 —
@@ -68,7 +71,8 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "heap").match   ({ true => true, false =>
     eq(fn, "sizeof").match ({ true => true, false =>
     eq(fn, "load_i64").match  ({ true => true, false =>
-    eq(fn, "store_i64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) })
+    eq(fn, "store_i64").match ({ true => true, false =>
+    eq(fn, "null_ptr").match  ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) })
 }
 // each intrinsic's fixed arity — store/offset/slice take 2 operands (gen_call reads arg1), the rest
 // (load/addr/cstr/heap/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
@@ -77,7 +81,8 @@ intrinsic_arity = (fn: str) i32 {
     eq(fn, "store").match     ({ true => 2, false =>
     eq(fn, "offset").match    ({ true => 2, false =>
     eq(fn, "slice").match     ({ true => 2, false =>
-    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) })   // load_i64/load/addr/cstr/heap/sizeof = 1
+    eq(fn, "null_ptr").match  ({ true => 0, false =>                 // null_ptr() takes no operands
+    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) })   // load_i64/load/addr/cstr/heap/sizeof = 1
 }
 // a call: a LOCAL fn must match arity + arg types; an INTRINSIC has a fixed arity (checked above);
 // an IMPORTED name is known-but-unchecked (no signature here); anything else is UNDEFINED — a typo

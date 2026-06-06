@@ -1,0 +1,30 @@
+// @self-hosted-only — uses trait impls + generic-over-trait dispatch + a coroutine import (from the
+// self-hosted-only std.coroutine), none of which the Python reference frontend models; load_std / acid
+// SKIP this file on the marker. Validated by an equivalent self-contained test (test_differential).
+//
+// std.runtime — the COLORLESS sync/async abstraction, the heart of Goal Z. A Runtime decides what
+// `suspend` means, and that is the ONLY difference between synchronous and asynchronous execution:
+//
+//   • SyncRuntime.suspend  = a no-op            → generic code runs straight through, blocking.
+//   • AsyncRuntime.suspend = a coroutine yield  → the same code cooperatively yields to a scheduler.
+//
+// Generic code written over `<R: Runtime>` (it calls `r.suspend()` at await points) is authored ONCE
+// and runs either way purely by the Runtime value handed to it. There is no function coloring, no
+// async/await keywords, and ZERO async machinery in the compiler — async is a library, built on
+// std.coroutine (the one irreducible primitive) + trait dispatch + module-mutable globals.
+//
+//   step* = <R: Runtime>(r: Ptr<R>, ...) ... { ...work...  r.suspend()  ...more work... }
+//   step(addr(sync_runtime()), ...)     // blocks
+//   step(addr(async_runtime()), ...)    // yields — same `step`
+{ yield } = std.coroutine
+
+Runtime*: { suspend: (Ptr<Self>) void }
+
+SyncRuntime*:  { _: i32 }
+AsyncRuntime*: { _: i32 }
+
+SyncRuntime.impl(Runtime,  { suspend = (s: Ptr<SyncRuntime>) void { } })          // blocking: no-op
+AsyncRuntime.impl(Runtime, { suspend = (a: Ptr<AsyncRuntime>) void { yield() } })  // cooperative: yield
+
+sync_runtime*  = () SyncRuntime  { SyncRuntime { _: 0 } }
+async_runtime* = () AsyncRuntime { AsyncRuntime { _: 0 } }
