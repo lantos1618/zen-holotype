@@ -104,6 +104,11 @@ from _difftest import self_side, compare
     # INSIDE the dispatched impl method). The same generic fill<A> allocates two i64s from either — 42
     # from each → 84. This is the unified memory abstraction the colorless Runtime builds on.
     ("Alloc*: { acquire: (MutPtr<Self>, i64) RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nHeap*: { _: i32 }\nBump*: { buf: RawPtr<u8>, off: i64 }\nHeap.impl(Alloc, { acquire = (s: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) } })\nBump.impl(Alloc, { acquire = (s: MutPtr<Bump>, n: i64) RawPtr<u8> { p := s.buf.offset(s.off)  s.off = s.off + n  p } })\nfill<A> = (a: MutPtr<A>) i64 { p := a.acquire(8)  store_i64(p, 21)  q := a.acquire(8)  store_i64(q, 21)  load_i64(p) + load_i64(q) }\ntest* = () i32 {\n  h := Heap { _: 0 }\n  b := Bump { buf: malloc(64), off: 0 }\n  fill(addr(h)) + fill(addr(b))\n}", 84),
+    # Arc<T> ATOMIC reference counting (Goal Z, the ARC in ARC/ORC): same layout/API as Rc<T> but
+    # clone/drop adjust the refcount with the atomic_add_i64 intrinsic (a SEQ_CST fetch-add → GCC
+    # __atomic_add_fetch) so concurrent threads can share it race-free. clone→2, drop→1, value 42 → 252.
+    # (std.arc, inlined; the `0 - 1` decrement avoids a prefix-minus literal.)
+    ("Arc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\narc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }\narc_new<T> = (x: T) Arc<T> { base := malloc(8 + sizeof(T))  store_i64(base, 1)  r := Arc<T>{ base: base }  sl := r.arc_val()  sl[0] = x  r }\narc_get<T> = (r: Arc<T>) T { r.arc_val()[0] }\narc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }\narc_clone<T> = (r: Arc<T>) Arc<T> { atomic_add_i64(r.base, 1)  Arc<T>{ base: r.base } }\narc_drop<T> = (r: Arc<T>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} }) }\ntest* = () i64 {\n  r := arc_new(42)\n  r2 := r.arc_clone()\n  a := r.arc_count()\n  r.arc_drop()\n  b := r.arc_count()\n  v := r.arc_get()\n  a * 100 + b * 10 + v\n}", 252),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
