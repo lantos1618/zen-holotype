@@ -1,0 +1,45 @@
+// @self-hosted-only — imports the self-hosted-only std.coroutine; load_std / acid SKIP this file on the
+// marker. Its mechanics are validated by an equivalent self-contained test (test_differential).
+//
+// std.sched — a cooperative round-robin SCHEDULER over std.coroutine. Given a set of coroutines, it
+// resumes each still-running one in turn, pass after pass, until all have returned. This is the whole
+// of "an executor" in Goal Z: no threads, no preemption, no compiler support — coroutines voluntarily
+// yield (e.g. via AsyncRuntime.suspend), and the scheduler simply keeps resuming the live ones. Two
+// coroutines that each yield between steps come out interleaved (A,B,A,B,…), which is concurrency.
+//
+// (Multi-statement work is factored into helper fns rather than `{ … }` match arms — the validator
+// only fully checks single-expression arms; a helper keeps each arm one call. Same code, cleaner.)
+{ heap } = std.alloc
+{ Coro, resume } = std.coroutine
+
+// per-coroutine alive flags, in a heap i64 array (1 = still running, 0 = returned).
+mark_alive = (flags: RawPtr<u8>, i: i32, n: i32) void {
+    store_i64(flags.offset(i * 8), 1)
+    init_flags(flags, i + 1, n)
+}
+init_flags = (flags: RawPtr<u8>, i: i32, n: i32) void {
+    (i < n).match({ true => mark_alive(flags, i, n), false => {} })
+}
+// resume coroutine i (known alive); store + return its new alive bit (1 yielded / 0 returned).
+do_tick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 {
+    r := coros[i].resume()
+    store_i64(flags.offset(i * 8), r)
+    r
+}
+tick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 {
+    (load_i64(flags.offset(i * 8)) == 1).match({ true => do_tick(coros, flags, i), false => 0 })
+}
+// one full pass over every coroutine; returns how many are still alive afterwards.
+pass = (coros: [Coro], flags: RawPtr<u8>, i: i32, n: i32) i32 {
+    (i < n).match({ true => tick(coros, flags, i) + pass(coros, flags, i + 1, n), false => 0 })
+}
+drive = (coros: [Coro], flags: RawPtr<u8>, n: i32) void {
+    (pass(coros, flags, 0, n) > 0).match({ true => drive(coros, flags, n), false => {} })
+}
+// run a set of coroutines cooperatively to completion (round-robin).
+run* = (coros: [Coro]) void {
+    n := coros.len
+    flags := heap(n * 8)
+    init_flags(flags, 0, n)
+    drive(coros, flags, n)
+}

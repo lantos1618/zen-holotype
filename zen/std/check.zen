@@ -209,9 +209,22 @@ enum_inst_of = (env: Env, base: str, variant: str, pty: Ty) EnumInst {
 }
 enum_inst_mk = (env: Env, variant: str, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
 enum_inst_tag = (env: Env, variant: str) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
+// a block expression `({ … ; tail })` (e.g. a multi-statement template inlined at a call site) has
+// the type of its tail expression — so `a := coro_new(…)` (which inlines to a block ending in a
+// `Coro{…}`) types `a` as Coro, not void. Inner lets aren't threaded, so a tail that is itself an
+// inner local stays void (rare); a tail expr/struct/call — the common template shape — types fine.
+last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
+    stmts[stmts.len - 1].match ({ .ExprStmt(e) => env.infer_expr(e), .Return(r) => env.infer_expr(r), _ => tvoid() })
+}
+block_ty = (env: Env, b: BlockData) Ty {
+    // NB: kept as a single expression (no `n := b.stmts.len` then a `(`-leading line) — the Python
+    // frontend's statement-glue bug would parse `.len` + the next `(…)` as a call. [[leading-dot-statement-glue]]
+    (b.stmts.len == 0).match ({ true => tvoid(), false => env.last_stmt_ty(b.stmts) })
+}
 infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
+        .Block(b)      => env.block_ty(b),
         .Byte(n)       => tu8(),                             // a char literal is a byte
         .Var(v)        => env.var_or_global(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
