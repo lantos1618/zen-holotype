@@ -75,11 +75,14 @@ record_tparam = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd 
 }
 fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rangle(sc.tok).match ({
-        true  => PEnd { count: i, next: sc.next },
-        false => is_ident_tok(sc.tok).match ({          // an ident is a tparam; commas are skipped
-            true  => a.record_tparam(src, sc, buf, i),
-            false => a.fill_tparams(src, sc.next, buf, i)
+    sc.tok.kind.match ({
+        .Eof => PEnd { count: i, next: sc.next },        // unterminated `<…`: stop at EOF, don't recurse forever
+        _    => src.is_rangle(sc.tok).match ({
+            true  => PEnd { count: i, next: sc.next },
+            false => is_ident_tok(sc.tok).match ({       // an ident is a tparam; commas are skipped
+                true  => a.record_tparam(src, sc, buf, i),
+                false => a.fill_tparams(src, sc.next, buf, i)
+            })
         })
     })
 }
@@ -199,11 +202,14 @@ record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportE
 }
 fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) ImportEnd {
     sc := src.scan(pos)
-    src.is_rbrace(sc.tok).match ({                      // '}' ends the import list
-        true  => ImportEnd { count: i, next: sc.next },
-        false => is_ident_tok(sc.tok).match ({          // an ident is a name; commas are skipped
-            true  => a.record_name(src, sc, buf, i),
-            false => a.fill_import_names(src, sc.next, buf, i)
+    sc.tok.kind.match ({
+        .Eof => ImportEnd { count: i, next: sc.next },  // unterminated `{ … `: stop at EOF, don't recurse forever
+        _    => src.is_rbrace(sc.tok).match ({           // '}' ends the import list
+            true  => ImportEnd { count: i, next: sc.next },
+            false => is_ident_tok(sc.tok).match ({       // an ident is a name; commas are skipped
+                true  => a.record_name(src, sc, buf, i),
+                false => a.fill_import_names(src, sc.next, buf, i)
+            })
         })
     })
 }

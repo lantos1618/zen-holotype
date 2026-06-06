@@ -105,3 +105,35 @@ def test_bootstrap_binary_runs_program(bootstrap_exe, tmp_path, name, src, check
                        capture_output=True, text=True)
     assert r.returncode == 0, f"{name}: emitted C did not compile\n{r.stderr}"
     assert subprocess.run([str(tmp_path / "p")]).returncode == 0, f"{name}: wrong runtime answer"
+
+
+# Robustness: malformed / truncated / edge input must never CRASH the compiler — it should emit
+# something or stop cleanly, never segfault. Each of these stack-overflowed (SIGSEGV) before the
+# parser grew EOF base cases: skip_to_lparen / skip_to_brace recursed past EOF (scan returns
+# next==pos there), and the Pratt atom ring re-entered without consuming a token. (C-audit #2–#4.)
+MALFORMED = [
+    ("no_colon_param",      "f* = (p i32) i32 { 1 }"),   # space-separated param: skip_to_lparen ran off EOF
+    ("colon_payload_enum",  "E: A | Some: T"),            # ':'-payload variant: dispatched to skip_to_lparen
+    ("truncated_binop",     "g* = () i32 { 6 *"),         # operator with no RHS at EOF: Pratt ring looped
+    ("unterminated_block",  "h* = () i32 { 1"),
+    ("unterminated_import",  "{ a, b"),                   # fill_import_names ran off EOF
+    ("unterminated_tparams", "f<T"),                      # fill_tparams ran off EOF
+    ("empty",               ""),
+    ("lone_brace",          "{"),
+    ("lone_ident",          "x"),
+]
+
+
+@pytest.mark.parametrize("name,src", MALFORMED, ids=[m[0] for m in MALFORMED])
+def test_bootstrap_binary_survives_malformed_input(bootstrap_exe, name, src):
+    # must terminate via a normal exit code, never be killed by a signal (negative rc = SIGSEGV/abort).
+    # timeout guards against a regressed fix turning the crash into an infinite loop instead.
+    r = subprocess.run([str(bootstrap_exe)], input=src, capture_output=True, text=True, timeout=15)
+    assert r.returncode >= 0, f"{name}: compiler killed by signal {-r.returncode} on malformed input"
+
+
+def test_bootstrap_binary_reports_missing_file(bootstrap_exe):
+    # a mistyped filename must give a clean diagnostic, not a NULL FILE* -> fgetc(NULL) segfault. (C-audit #1.)
+    r = subprocess.run([str(bootstrap_exe), "/nonexistent/zzz.zen"], capture_output=True, text=True, timeout=15)
+    assert r.returncode == 1, "missing file should exit 1, not crash or succeed"
+    assert "cannot open" in r.stderr
