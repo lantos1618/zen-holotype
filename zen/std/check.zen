@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -282,9 +282,12 @@ gen_call_ret = (env: Env, c: CallData) Ty {
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "load").match ({
         true  => env.infer_expr(c.args[0].addr()).pointee_of(),
-        false => eq(c.fn, "addr").match ({
-            true  => tptr(env.a.tnode(env.infer_expr(c.args[0].addr()))),   // addr(x): Ptr<typeof(x)>, so x.m() can dispatch on x's type
-            false => env.gen_call_ret(c)
+        false => eq(c.fn, "load_i64").match ({
+            true  => ti64(),                                            // load_i64(p): an i64 read at a byte ptr
+            false => eq(c.fn, "addr").match ({
+                true  => tptr(env.a.tnode(env.infer_expr(c.args[0].addr()))),   // addr(x): Ptr<typeof(x)>, so x.m() dispatches on x's type
+                false => env.gen_call_ret(c)
+            })
         })
     })
 }

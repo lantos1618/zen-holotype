@@ -64,6 +64,9 @@ from _difftest import self_side, compare
     # and a function reads/assigns it across calls (state persists). Was: mis-parsed as an enum.
     ("counter := 0\nbump* = () i32 { counter = counter + 1  counter }\ntest* = () i32 { bump() + bump() }", 3),
     ("total := 100\nadd* = (n: i32) i32 { total = total + n  total }\ntest* = () i32 { add(5)  add(20) }", 125),
+    # store_i64/load_i64 intrinsics (Goal Z 2b): a typed 8-byte write/read at a byte ptr (arena cursors,
+    # Rc/ARC headers) — `store(offset(p,8),x)` would write only 1 byte (uint8_t* cast); these write 8.
+    ("Cell*: { x: i64 }\ntest* = () i64 { c := Cell { x: 0 }  store_i64(addr(c), 42)  load_i64(addr(c)) }", 42),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
