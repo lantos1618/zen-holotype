@@ -54,6 +54,12 @@ from _difftest import self_side, compare
     # bug-hunt #11: a bare ctor passed DIRECTLY as a generic-consumer arg (T inferred from the payload)
     ("Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }", 1),
     ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }", 7),
+    # MULTI-IMPLEMENTOR traits (#5-full): two types implementing the same trait method now emit
+    # DISTINCT C functions (impl_<Trait>_<Type>_<m>) and `x.m()` dispatches on x's type — previously
+    # both emitted `int32_t area(...)` and cc rejected with "conflicting types".
+    ("A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show) { area = (a: Ptr<A>) i32 { a.v } }\nB.impl(Show) { area = (b: Ptr<B>) i32 { b.v * b.v } }\ntest* = () i32 {\n  a := A { v: 5 }\n  b := B { v: 6 }\n  addr(a).area() + addr(b).area()\n}", 41),
+    # a single trait method with two implementors taking an extra arg, both reached + dispatched
+    ("P*: { x: i32 }\nQ*: { x: i32 }\nDbl*: { f: (Ptr<Self>, i32) i32 }\nP.impl(Dbl) { f = (p: Ptr<P>, k: i32) i32 { p.x + k } }\nQ.impl(Dbl) { f = (q: Ptr<Q>, k: i32) i32 { q.x * k } }\ntest* = () i32 {\n  p := P { x: 10 }\n  q := Q { x: 3 }\n  addr(p).f(2) + addr(q).f(4)\n}", 24),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
