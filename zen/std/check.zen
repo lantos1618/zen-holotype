@@ -542,7 +542,13 @@ resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
         .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
         .ExprStmt(e) => last.match ({
-            true  => sexpr(a.resolve_expr(env, e)),                          // value position — keep the ternary/Match
+            // a value-yielding tail keeps the ternary/Match; but a tail in VOID return position yields
+            // nothing, so a void Cond/Match (e.g. a conditional `free`) must lower to an `if` statement —
+            // a C ternary over void operands is invalid. Statement-position (non-last) always lowers.
+            true  => env.exp.is_void_ty().match ({
+                true  => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)),  // void tail — lower to `if`
+                false => sexpr(a.resolve_expr(env, e))                             // value tail — keep ternary/Match
+            }),
             false => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))   // statement position — lower to `if`
         }),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),

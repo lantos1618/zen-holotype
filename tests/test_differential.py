@@ -71,6 +71,14 @@ from _difftest import self_side, compare
     # cursor — proves pointer-add allocation + field mutation through MutPtr<Arena>. (std.arena, here
     # inlined since run_value has no module resolver yet; arena.zen itself is acid-checked.)
     ("Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nan* = (cap: i64) Arena { Arena { buf: malloc(cap), off: 0, cap: cap } }\nbump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> { p := a.buf.offset(a.off)  a.off = a.off + n  p }\ntest* = () i64 {\n  a := an(64)\n  p := addr(a).bump(8)\n  store_i64(p, 99)\n  q := addr(a).bump(8)\n  store_i64(q, 1)\n  load_i64(p) + load_i64(q)\n}", 100),
+    # a VOID-tail bool match (a conditional side-effect, e.g. a guarded store/free) must lower to an
+    # `if` STATEMENT, not a C ternary — `(c ? void : void)` is invalid C. Here set() stores only when
+    # n != 0; the tail match yields nothing. (Regression guard for the void-Cond → if fix.)
+    ("Cell*: { x: i64 }\nset = (c: MutPtr<Cell>, n: i64) void { (n == 0).match({ true => {}, false => store_i64(c, n) }) }\ntest* = () i64 {\n  c := Cell { x: 1 }\n  set(addr(c), 0)\n  set(addr(c), 9)\n  load_i64(addr(c))\n}", 9),
+    # Rc<T> reference counting (Goal Z 5, the RC in ARC/ORC): shared heap value with a refcount header
+    # [count|value]; clone bumps the count, drop decrements + frees at zero (a void-tail conditional
+    # free). Asserts clone→2, drop→1, value 42 preserved. (std.rc, inlined; rc.zen is self-hosted-only.)
+    ("Rc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\nrc_val<T> = (r: Rc<T>) [T] { slice(r.base.offset(8), 1) }\nrc_new<T> = (x: T) Rc<T> { base := malloc(8 + sizeof(T))  store_i64(base, 1)  r := Rc<T>{ base: base }  s := r.rc_val()  s[0] = x  r }\nrc_get<T> = (r: Rc<T>) T { r.rc_val()[0] }\nrc_clone<T> = (r: Rc<T>) Rc<T> { store_i64(r.base, load_i64(r.base) + 1)  Rc<T>{ base: r.base } }\nrc_drop<T> = (r: Rc<T>) void { n := load_i64(r.base) - 1  store_i64(r.base, n)  (n == 0).match({ true => free(r.base), false => {} }) }\nrc_count<T> = (r: Rc<T>) i64 { load_i64(r.base) }\ntest* = () i64 {\n  r := rc_new(42)\n  r2 := r.rc_clone()\n  a := r.rc_count()\n  r.rc_drop()\n  b := r.rc_count()\n  v := r.rc_get()\n  a * 100 + b * 10 + v\n}", 252),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
