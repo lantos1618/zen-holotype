@@ -44,9 +44,9 @@ skip_bc_d = (src: str, pos: i32, depth: i32) i32 {
             true  => src.skip_bc_d(pos + 2, depth + 1),   // a nested `/*`
             false => ((b == '*') && (src.byte_at(pos + 1) == '/')).match ({
                 true  => (depth == 1).match ({ true => pos + 2, false => src.skip_bc_d(pos + 2, depth - 1) }),
-                false => src.skip_bc_d(pos + 1, depth)
-            })
-        })
+                false => src.skip_bc_d(pos + 1, depth),
+            }),
+        }),
     })
 }
 skip = (src: str, pos: i32) i32 {
@@ -56,9 +56,9 @@ skip = (src: str, pos: i32) i32 {
             true  => src.skip(src.skip_line(pos + 2)),
             false => src.is_block_open(pos).match ({
                 true  => src.skip(src.skip_block_comment(pos + 2)),
-                false => pos
-            })
-        })
+                false => pos,
+            }),
+        }),
     })
 }
 
@@ -77,9 +77,9 @@ str_end   = (src: str, pos: i32) i32 {                 // pos just past the open
             true  => pos + 1,
             false => (b == '\\').match ({               // backslash: skip the escaped char
                 true  => src.str_end(pos + 2),
-                false => src.str_end(pos + 1)
-            })
-        })
+                false => src.str_end(pos + 1),
+            }),
+        }),
     })
 }
 
@@ -90,7 +90,7 @@ char_end = (src: str, pos: i32) i32 {                                          /
     (b == '\'').match ({                                                        // empty ''  → consume just the two quotes
         true  => pos + 1,
         false => (b == '\\').match ({ true  => src.scan_quote_end(pos + 2),     // '\x'  — skip the escaped byte
-                                      false => src.scan_quote_end(pos + 1) })   // 'x'   — skip the one byte
+                                      false => src.scan_quote_end(pos + 1), }),   // 'x'   — skip the one byte
     })
 }
 // Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
@@ -128,10 +128,10 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
                 true  => mk(.Str(), pos, src.str_end(pos + 1)),
                 false => (b == '\'').match ({
                     true  => mk(.Char(), pos, src.char_end(pos + 1)),
-                    false => mk(.Sym(), pos, src.sym_end(pos))
-                })
-            })
-        })
+                    false => mk(.Sym(), pos, src.sym_end(pos)),
+                }),
+            }),
+        }),
     })
 }
 scan* = (src: str, pos0: i32) Scan {
@@ -139,7 +139,7 @@ scan* = (src: str, pos0: i32) Scan {
     b := src.byte_at(pos)
     (b == '\0').match ({
         true  => Scan { tok: Token { kind: .Eof(), start: pos, len: 0 }, next: pos },
-        false => src.scan_one(pos, b)
+        false => src.scan_one(pos, b),
     })
 }
 
@@ -185,7 +185,7 @@ build = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<TokList> {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => a.node(nil_node()),
-        _    => a.node(cons_node(sc.tok, a.build(src, sc.next)))
+        _    => a.node(cons_node(sc.tok, a.build(src, sc.next))),
     })
 }
 tokenize* = (a: Ptr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }

@@ -34,7 +34,7 @@ parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     src.is_lbrace(src.scan(rt.next).tok).match ({       // a '{' here → a body; otherwise foreign
         true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next)),
         false => DeclEnd { func: Func { name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body() },
-                           next: rt.next, foreign: true }
+                           next: rt.next, foreign: true },
     })
 }
 parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], tparams: [Param], ret: Ty, bstart: i32) DeclEnd {
@@ -61,7 +61,7 @@ parse_tparams = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {
     sc := src.scan(pos)
     src.is_langle(sc.tok).match ({
         true  => a.parse_tparam_list(src, sc.next),
-        false => TParamEnd { names: a.no_tparams(), count: 0, next: pos }
+        false => TParamEnd { names: a.no_tparams(), count: 0, next: pos },
     })
 }
 parse_tparam_list = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {   // pos just past '<'
@@ -81,9 +81,9 @@ fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
             true  => PEnd { count: i, next: sc.next },
             false => is_ident_tok(sc.tok).match ({       // an ident is a tparam; commas are skipped
                 true  => a.record_tparam(src, sc, buf, i),
-                false => a.fill_tparams(src, sc.next, buf, i)
-            })
-        })
+                false => a.fill_tparams(src, sc.next, buf, i),
+            }),
+        }),
     })
 }
 field_buf = (a: Ptr<Malloc>) [Field] { slice(heap(1024 * sizeof(Field)), 1024) }   // cap 1024
@@ -101,7 +101,7 @@ fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     after := src.scan(te.next)                           // ',' or '}'
     src.is_comma(after.tok).match ({
         true  => a.fill_fields(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: after.next }  // '}'
+        false => PEnd { count: i + 1, next: after.next },  // '}'
     })
 }
 parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
@@ -139,7 +139,7 @@ fill_variants = (a: Ptr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i32) 
     after := src.scan(vp.next)                           // '|' continues the list, else it ends
     src.is_bar(after.tok).match ({
         true  => a.fill_variants(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: vp.next }     // enum done; resume after the last variant
+        false => PEnd { count: i + 1, next: vp.next },     // enum done; resume after the last variant
     })
 }
 skip_to_colon = (src: str, pos: i32) i32 {
@@ -208,9 +208,9 @@ fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) I
             true  => ImportEnd { count: i, next: sc.next },
             false => is_ident_tok(sc.tok).match ({       // an ident is a name; commas are skipped
                 true  => a.record_name(src, sc, buf, i),
-                false => a.fill_import_names(src, sc.next, buf, i)
-            })
-        })
+                false => a.fill_import_names(src, sc.next, buf, i),
+            }),
+        }),
     })
 }
 
@@ -222,8 +222,8 @@ fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         .Eof => i,
         _    => src.decl_is_import(pos).match ({
             true  => a.fill_import(src, pos, buf, i),    // record an import's names as a DImport
-            false => a.fill_decl(src, pos, buf, i)
-        })
+            false => a.fill_decl(src, pos, buf, i),
+        }),
     })
 }
 // a top-level decl is an impl block (`Type.impl(Trait) { … }`), a struct (`name: { … }`),
@@ -240,9 +240,9 @@ fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
             true  => a.fill_struct(src, pos, buf, i),
             false => src.decl_is_enum(pos).match ({
                 true  => a.fill_enum(src, pos, buf, i),
-                false => a.fill_func(src, pos, buf, i)
-            })
-        })
+                false => a.fill_func(src, pos, buf, i),
+            }),
+        }),
     })
 }
 // `Type.impl(Trait) { m1 = (…){…}  m2 = (…){…} }` — each method becomes an ordinary top-level
@@ -269,7 +269,7 @@ fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mb
     sc := src.scan(pos)
     src.is_rbrace(sc.tok).match ({
         true  => ImplEnd { decls: i, methods: m, next: sc.next },   // '}' ends the impl block
-        false => a.fill_impl_one(src, pos, buf, i, mbuf, m)
+        false => a.fill_impl_one(src, pos, buf, i, mbuf, m),
     })
 }
 fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32) ImplEnd {
@@ -282,7 +282,7 @@ fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)
     buf[i] = (ee.ntp > 0).match ({                       // tparams present -> a generic enum template
         true  => dgenenum(genumdef(ee.ed.name, ee.tparams, ee.ed.variants)),
-        false => denum(ee.ed)
+        false => denum(ee.ed),
     })
     a.fill_decls(src, ee.next, buf, i + 1)
 }
@@ -295,7 +295,7 @@ fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
     buf[i] = (se.ntp > 0).match ({                       // tparams present -> a generic struct template
         true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
-        false => dstruct(se.sd)
+        false => dstruct(se.sd),
     })
     a.fill_decls(src, se.next, buf, i + 1)
 }
@@ -333,7 +333,7 @@ eval_bin = (b: BinData) i64 {
     r := b.rhs.eval()
     (o == '+').match ({ true => l + r, false =>
     (o == '-').match ({ true => l - r, false =>
-    (o == '*').match ({ true => l * r, false => l / r }) }) })
+    (o == '*').match ({ true => l * r, false => l / r }), }), })
 }
 eval* = (e: Ptr<Expr>) i64 { e.match ({ .Int(n) => n, .Bin(b) => b.eval_bin(), _ => 0 }) }
 eval_str* = (a: Ptr<Malloc>, src: str) i64 { a.parse(src).eval() }
