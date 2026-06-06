@@ -5,7 +5,7 @@
 // and trait conformance. check_linked layers a cross-module header on so an imported call is checked
 // against real signatures. It depends ONE-WAY on std.check (inference + the type lattice + the env);
 // std.check never imports this module back.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, call, arm, dforeign, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, call, arm, dforeign, tnamed, tptr, tslice, tvoid } = std.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, no_stmts, resolve_module, dbuf, tnode } = std.check
 { Malloc, heap } = std.alloc
 { byte_at } = std.lex
@@ -100,6 +100,27 @@ check_args = (env: Env, args: [Expr]) i32 {
 check_arms = (env: Env, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) { acc = acc + env.check_expr(ar.body) })
+    acc
+}
+// A value-position match arm whose body contains an early `return` is INVALID. By the time the
+// validator runs, statement-position matches have been lowered to real `if`s (where a guard-clause
+// `return` correctly fires); a match still in EXPRESSION position lowers to a `({…})`/ternary, where
+// the emitter turns a trailing `return e` into a bare `e;` — the return is silently dropped. So an
+// early return only belongs in a statement-position guard. Reject it here, matching the Python
+// frontend (which won't even parse `return` inside a value-position arm).
+stmts_have_return = (stmts: [Stmt]) bool {
+    found := false
+    stmts.loop((h, i, st) { found = st.match ({ .Return(r) => true, _ => found }) })
+    found
+}
+arm_return_errs = (arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc + load(ar.body).match ({
+            .Block(b) => stmts_have_return(b.stmts).match ({ true => 1, false => 0 }),
+            _         => 0,
+        })
+    })
     acc
 }
 check_inits = (env: Env, inits: [FieldInit]) i32 {
@@ -257,7 +278,7 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m),
+        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m) + arm_return_errs(m.arms),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         _               => 0,                            // Int/Var/Tag/StrLit/Arrow: no call inside
