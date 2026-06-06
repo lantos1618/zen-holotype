@@ -53,7 +53,7 @@ def test_ufcs_dispatches_a_bound_trait_method(tmp_path):
     _, passing, ns, files = build(tmp_path, """
 P*: { x: i32, y: i32 }
 Scale*: { scale: (Ptr<Self>, i32) i32 }
-P.impl(Scale) { scale = (p: Ptr<P>, k: i32) i32 { (p.x + p.y) * k } }
+P.impl(Scale, { scale = (p: Ptr<P>, k: i32) i32 { (p.x + p.y) * k } })
 go*<T: Scale> = (t: Ptr<T>) i32 { t.scale(2) }
 main* = () i32 { q := P { x: 3, y: 4 }\n go(addr(q)) }
 """)

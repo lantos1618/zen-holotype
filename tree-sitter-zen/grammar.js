@@ -47,11 +47,12 @@ module.exports = grammar({
     // It shares the `struct` rule (a field type may be a fn_type); the parser tells a
     // trait from a struct by that all-function-typed shape.
 
-    // Vec.impl(Area) { area = (v: Ptr<Vec>) i32 { ... } }   — no `impl`/`for` keywords
-    // leading the line; the implementing type owns it via a postfix `.impl(Trait)`.
+    // Vec.impl(Area, { area = (v: Ptr<Vec>) i32 { ... } })   — no `impl`/`for` keywords leading
+    // the line; the implementing type owns it via a postfix `.impl(Trait, { methods })`. The methods
+    // block is an ARGUMENT (inside the parens), consistent with `recv.match({ … })` / `.loop((…){…})`.
     impl: $ => seq(field('type', $.identifier), '.', 'impl',
-                   '(', field('trait', $.identifier), ')',
-                   '{', repeat($.function), '}'),
+                   '(', field('trait', $.identifier), ',',
+                   '{', repeat($.function), '}', ')'),
 
     // Vec*: { len: i32, cap: i32 }   /   Box*<T>: { val: T }   (the glued `*` = public)
     struct: $ => seq(field('name', $.identifier), optional(field('vis', token.immediate('*'))),

@@ -226,7 +226,7 @@ fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
-// a top-level decl is an impl block (`Type.impl(Trait) { … }`), a struct (`name: { … }`),
+// a top-level decl is an impl block (`Type.impl(Trait, { … })`), a struct (`name: { … }`),
 // an enum (`name: A | B`), or a function.
 decl_is_impl = (src: str, pos: i32) bool {              // `Name.impl(` — a method-providing block
     nt  := src.scan(pos)                                // the type name
@@ -245,7 +245,7 @@ fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
-// `Type.impl(Trait) { m1 = (…){…}  m2 = (…){…} }` — each method becomes an ordinary top-level
+// `Type.impl(Trait, { m1 = (…){…}  m2 = (…){…} })` — each method becomes an ordinary top-level
 // function (named by the method), so a UFCS call `x.m1(a)` -> `m1(x, a)` resolves to one
 // (monomorphic static dispatch). A DImpl record (the Type, the Trait, and the names of the methods
 // THIS impl defines) is emitted after them, so the checker can verify the impl provides every method
@@ -259,11 +259,12 @@ fill_impl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     lp     := src.scan(kw.next)                              // '('
     trt    := src.scan(lp.next)                              // the Trait name
     trname := a.lexeme(src, trt.tok)
-    bstart := src.skip_to_brace(pos)                         // past the impl block's opening '{'
+    bstart := src.skip_to_brace(pos)                         // past the '{' of `impl(Trait, { … })` (now inside the parens)
     mbuf   := a.param_buf()                                  // the impl's method names (name-only Params)
     ie     := a.fill_impl_methods(src, bstart, buf, i, mbuf, 0)
     buf[ie.decls] = dimpl(tyname, trname, mbuf.take_params(ie.methods))   // the record, after its methods
-    a.fill_decls(src, ie.next, buf, ie.decls + 1)
+    rp     := src.scan(ie.next)                              // the ')' closing `impl(Trait, { … })`
+    a.fill_decls(src, rp.next, buf, ie.decls + 1)
 }
 fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32) ImplEnd {
     sc := src.scan(pos)

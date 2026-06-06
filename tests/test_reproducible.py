@@ -75,10 +75,10 @@ Rect*: { w: i32 }
 Circle*: { r: i32 }
 Tri*: { b: i32 }
 Area: { area: (Ptr<Self>) i32 }
-Sq.impl(Area) { area = (x: Ptr<Sq>) i32 { x.s } }
-Rect.impl(Area) { area = (x: Ptr<Rect>) i32 { x.w } }
-Circle.impl(Area) { area = (x: Ptr<Circle>) i32 { x.r } }
-Tri.impl(Area) { area = (x: Ptr<Tri>) i32 { x.b } }
+Sq.impl(Area, { area = (x: Ptr<Sq>) i32 { x.s } })
+Rect.impl(Area, { area = (x: Ptr<Rect>) i32 { x.w } })
+Circle.impl(Area, { area = (x: Ptr<Circle>) i32 { x.r } })
+Tri.impl(Area, { area = (x: Ptr<Tri>) i32 { x.b } })
 go*<T: Area> = (x: Ptr<T>) i32 { area(x) }
 sum* = (a: Ptr<Sq>, b: Ptr<Rect>, c: Ptr<Circle>, d: Ptr<Tri>) i32 {
     go(a) + go(b) + go(c) + go(d)
