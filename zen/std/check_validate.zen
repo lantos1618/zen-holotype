@@ -68,15 +68,24 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "heap").match   ({ true => true, false =>
     eq(fn, "sizeof").match ({ true => true, false => false }) }) }) }) }) }) }) })
 }
-is_resolvable = (decls: [Decl], fn: str) bool {
-    decls.is_imported(fn).match ({ true => true, false => fn.is_intrinsic() })
+// each intrinsic's fixed arity — store/offset/slice take 2 operands (gen_call reads arg1), the rest
+// (load/addr/cstr/heap/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
+// `c.args[1]` unconditionally for the 2-arg ops, so `store(p)` would otherwise read a garbage Expr.
+intrinsic_arity = (fn: str) i32 {
+    eq(fn, "store").match  ({ true => 2, false =>
+    eq(fn, "offset").match ({ true => 2, false =>
+    eq(fn, "slice").match  ({ true => 2, false => 1 }) }) })
 }
-// a call: a LOCAL fn must match arity + arg types; an imported/intrinsic name is known-but-unchecked;
-// anything else is UNDEFINED — a typo or a missing import — and is rejected (1 error).
+// a call: a LOCAL fn must match arity + arg types; an INTRINSIC has a fixed arity (checked above);
+// an IMPORTED name is known-but-unchecked (no signature here); anything else is UNDEFINED — a typo
+// or a missing import — and is rejected (1 error).
 check_call = (env: Env, c: CallData) i32 {
     env.decls.is_known_fn(c.fn).match ({
         true  => env.call_errs(c),
-        false => env.decls.is_resolvable(c.fn).match ({ true => 0, false => 1 })
+        false => c.fn.is_intrinsic().match ({
+            true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),  // known arity → check it
+            false => env.decls.is_imported(c.fn).match ({ true => 0, false => 1 })              // imported: no signature
+        })
     })
 }
 call_errs = (env: Env, c: CallData) i32 {
