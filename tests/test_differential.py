@@ -1,15 +1,16 @@
 """Differential regression tests — guard against bugs found by the bug-hunt (the self-hosted
-toolchain miscompiling or mis-checking vs the Python reference). Each entry is a minimal program
-that previously diverged; we assert the self-hosted side now computes the right value / verdict.
+toolchain miscompiling or mis-checking). Each entry is a minimal program that previously diverged;
+we assert the self-hosted side now computes the right value / verdict.
 
-`self_side(src)` runs the program through the self-hosted toolchain and returns
-{verdict: accept|reject, value: int|None}. The Python reference (`py_side`) is a useful oracle but
-its grammar lags on a few constructs (hex literals, prefix `-`, `!=`), so for those we assert the
-self-hosted *value* directly rather than cross-frontend agreement.
+`self_side(src)` runs the program through the self-hosted BINARY oracle (`_oracle.self_side`) and
+returns {verdict: accept|reject, value: int|None}. NO Python frontend is in the loop — the EMIT +
+CHECK binaries (built from the committed bootstrap C by `cc` alone) are the sole correctness
+reference. (The old cross-frontend `py_side` agreement check, test_no_divergence, was deleted with
+the Python reference in Stage D — the oracle's golden values stand in for it.)
 """
 import pytest
 
-from _difftest import self_side, compare
+from _oracle import self_side
 
 
 # Value-correctness: the self-hosted toolchain must compute these exactly (silent-miscompile guards).
@@ -203,25 +204,8 @@ def test_block_arm_validation(src, verdict):
     assert self_side(src)["verdict"] == verdict, src
 
 
-# Cross-frontend agreement on a corpus where the Python reference is a valid oracle (no hex / prefix
-# `-` / `!=`, which its grammar lacks). Catches accept/reject and value divergences broadly.
-@pytest.mark.parametrize("src", [
-    "test* = () i32 { 1 + 2 * 3 - 4 }",
-    "test* = () i32 { (17 / 5) + (17 % 5) }",
-    "test* = () i32 { (3 < 5).match({ true => 7, false => 0 }) }",
-    "fib* = (n: i32) i32 { (n < 2).match({ true => n, false => fib(n - 1) + fib(n - 2) }) }\ntest* = () i32 { fib(12) }",
-    "P*: { x: i32, y: i32 }\ntest* = () i32 { P{ x: 19, y: 23 }.x + P{ x: 19, y: 23 }.y }",
-    "E*: A(i32) | B(i32)\nf* = (e: E) i32 { e.match({ .A(x) => x, .B(x) => x * x }) }\ntest* = () i32 { f(.B(6)) + f(.A(6)) }",
-    "Box<T>: { v: T }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 { get(Box<i32>{ v: 42 }) }",
-])
-def test_no_divergence(src):
-    d = compare(src)
-    assert not d["verdict_div"], d["summary"]
-    assert not d["value_div"], d["summary"]
-
-
-# Reject-parity: programs the Python frontend rejects that the self-hosted checker must also reject
-# (false-accepts that emit UB or wrong C). The self-hosted side must NOT accept these.
+# Reject-parity: programs that emit UB or wrong C (false-accepts the checker must reject). The
+# self-hosted CHECK binary must NOT accept these.
 @pytest.mark.parametrize("src", [
     "test* = () i32 {  }",                         # empty body, non-void return -> no value (was accepted -> UB)
     "test* = () i32 {\n  x := 5\n}",               # body ends in a let -> no value (was accepted -> UB)
@@ -229,7 +213,6 @@ def test_no_divergence(src):
     'test* = () i32 { "hi" }',                     # trailing value is str, not i32
 ])
 def test_self_hosted_rejects(src):
-    from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
 
 
@@ -243,7 +226,6 @@ def test_self_hosted_rejects(src):
     ("test* = () i32 { (3).match({ 0=>0, 1=>10, 2=>20, 3=>30, _=>99 }) }", 30),     # 5 arms
 ])
 def test_integer_match(src, want):
-    from _difftest import self_side
     assert self_side(src)["value"] == want
 
 
@@ -263,7 +245,6 @@ def test_integer_match(src, want):
     ("I*: { n: i32 }\nO*: { i: I }\nf* = (o: O) i32 {\n o.i.n = 42\n o.i.n\n}\ntest* = () i32 { f(O{ i: I{ n: 0 } }) }", 42),
 ])
 def test_member_assignment(src, want):
-    from _difftest import self_side
     assert self_side(src)["value"] == want
 
 
@@ -271,19 +252,16 @@ def test_member_assignment(src, want):
 # variants) and cap 16 (type args) and overflowed the heap with no bounds check. Caps are now
 # generous (1024 / 256) so any plausible program fits safely.
 def test_many_params():
-    from _difftest import self_side
     ps = ", ".join(f"p{i}: i32" for i in range(80))
     args = ", ".join(str(i) for i in range(80))
     assert self_side(f"f* = ({ps}) i32 {{ p79 }}\ntest* = () i32 {{ f({args}) }}")["value"] == 79
 
 def test_many_fields():
-    from _difftest import self_side
     fs = ", ".join(f"x{i}: i32" for i in range(80))
     inits = ", ".join(f"x{i}: {i}" for i in range(80))
     assert self_side(f"S*: {{ {fs} }}\ntest* = () i32 {{ S{{ {inits} }}.x79 }}")["value"] == 79
 
 def test_many_match_arms():
-    from _difftest import self_side
     arms = ", ".join(f"{i} => {i*2}" for i in range(80)) + ", _ => 999"
     assert self_side(f"test* = () i32 {{ (50).match({{ {arms} }}) }}")["value"] == 100
 
@@ -311,7 +289,6 @@ def test_many_match_arms():
     ("R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Ok(v) => { return v }, .Err => { return 9 } })\n 0\n}\ntest* = () i32 { f(.Ok(5)) + f(.Err()) }", 14),
 ])
 def test_guard_early_return(src, want):
-    from _difftest import self_side
     assert self_side(src)["value"] == want, src
 
 
@@ -324,7 +301,6 @@ def test_guard_early_return(src, want):
     "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }",
 ])
 def test_partial_match_without_wildcard_rejected(src):
-    from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
 
 
@@ -339,7 +315,6 @@ def test_partial_match_without_wildcard_rejected(src):
     "f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }",
 ])
 def test_value_position_return_rejected(src):
-    from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
 
 
@@ -352,7 +327,6 @@ def test_value_position_return_rejected(src):
     ("f* = (b: bool) i32 {\n v := b.match({ true => { 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }", 7),
 ])
 def test_value_position_trailing_yield_accepted(src, want):
-    from _difftest import self_side
     d = self_side(src)
     assert d["verdict"] == "accept" and d["value"] == want, (src, d)
 
@@ -365,5 +339,4 @@ def test_value_position_trailing_yield_accepted(src, want):
     "a* = () i32 { 1 }\ndup* = () i32 { 2 }\ndup* = () i32 { 3 }\ntest* = () i32 { a() }",
 ])
 def test_duplicate_function_name_rejected(src):
-    from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src

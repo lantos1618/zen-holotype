@@ -2,21 +2,19 @@
 
 `cc bootstrap/*.c -o zenc` builds a standalone binary from the COMMITTED C (bootstrap/
 zenc.gen.c + a tiny runtime). That binary reads Zen source and emits C. Fed its OWN four
-source files, it emits byte-for-byte the C it was built from — the fixpoint.
+source files (via the binary's `--build-self` mode, which strips imports + concatenates the
+compiler SOURCES and emits C), it produces byte-for-byte the C it was built from — the fixpoint.
 
-If these fail after editing std/{genc,lex,parse,check}.zen, regenerate the committed C:
-    python3 bootstrap/generate.py
+ZERO Python participates: `cc` builds the binary, the binary regenerates its own source. If these
+fail after editing std/{genc,lex,parse,check}.zen, regenerate the committed C with the binary:
+    make -f bootstrap/Makefile regen
 """
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "bootstrap"))
-import generate  # noqa: E402
-
 BOOT = ROOT / "bootstrap"
 
 
@@ -45,22 +43,16 @@ def test_bootstrap_binary_compiles_zen(tmp_path):
     assert subprocess.run([str(tmp_path / "g")]).returncode == 0
 
 
-def test_bootstrap_committed_c_matches_sources(tmp_path):
-    # the committed bootstrap/zenc.gen.c is what the toolchain emits for std/*.zen RIGHT NOW.
-    # (catches an edit to a .zen source without re-running bootstrap/generate.py)
-    out = generate.generate_c(tmp_path)
-    expected = generate.gen_c_file(out)
-    committed = (BOOT / "zenc.gen.c").read_text()
-    assert committed == expected, "bootstrap/zenc.gen.c is stale — run `python3 bootstrap/generate.py`"
-
-
 def test_bootstrap_fixpoint(tmp_path):
-    # 🏁 the binary, fed the compiler's own four source files, reproduces the C it was built from.
+    # 🏁 the binary, fed the compiler's own source files (via --build-self), reproduces the C it was
+    # built from BYTE-FOR-BYTE. No Python: the binary itself reads/strips/concats the SOURCES and emits.
     exe = _build(tmp_path)
-    (tmp_path / "compiler.zen").write_text(generate.compiler_source())
-    repro = subprocess.run([str(exe), str(tmp_path / "compiler.zen")],
-                           capture_output=True, text=True).stdout
-    assert generate.gen_c_file(repro) == (BOOT / "zenc.gen.c").read_text()
+    out_c = tmp_path / "repro.gen.c"
+    r = subprocess.run([str(exe), "--build-self", str(out_c), str(ROOT)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert out_c.read_bytes() == (BOOT / "zenc.gen.c").read_bytes(), \
+        "bootstrap/zenc.gen.c is stale — run `make -f bootstrap/Makefile regen`"
 
 
 # A battery proving the binary is CORRECT on real programs, not just self-consistent: each Zen

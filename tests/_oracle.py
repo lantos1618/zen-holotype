@@ -27,9 +27,9 @@ HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
 _CC = ["cc", "-std=gnu11", "-w"]
 _RUNNER = "\n#include <stdio.h>\nint main(void){ printf(\"%%lld\", (long long)(test())); return 0; }\n"
 
-# the compiler IS these files (generate.py SOURCES); check_validate.zen adds the VALIDATING pass
-# (check_module) the emit-only binary omits. Imports (`{…} = std.x`) are stripped — runtime types
-# come from zenrt.{h,c}. (This list mirrors bootstrap/generate.py.SOURCES + check_validate.zen.)
+# the compiler IS these files (the SOURCES list in bootstrap/main.c's --build-self mode);
+# check_validate.zen adds the VALIDATING pass (check_module) the emit-only binary omits. Imports
+# (`{…} = std.x`) are stripped — runtime types come from zenrt.{h,c}. (Mirrors main.c's SOURCES.)
 _EMIT_SOURCES = ["zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
                  "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
                  "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen"]
