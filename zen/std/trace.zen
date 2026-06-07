@@ -1,0 +1,199 @@
+// @self-hosted-only — the TRACING half of ORC (Goal Z's "ARC/ORC" memory family). std.drop gives
+// DETERMINISTIC destruction (Own<T>/Rc<T> fire a payload's Drop at refcount zero); but two refcounted
+// nodes that point at each other never reach zero — a CYCLE leaks. This module collects those cycles
+// with a synchronous Bacon–Rajan trial-deletion (the classic "Recycler" algorithm), built entirely in
+// stdlib: a Trace trait (a type visits its child Rc references), a module-mutable ROOT registry, and a
+// mark/scan/collect pass over it. Uses generic struct literals, trait dispatch, store_i64/load_i64
+// pointer-poking and module-mutable globals — none of which the Python reference frontend models — so
+// load_std / acid SKIP this file on the marker. Its end-to-end behaviour (build a cycle, collect it,
+// observe BOTH nodes finalized) is proven by a self-contained run_value in tests/test_differential.py.
+//
+// THE GENERIC-DISPATCH KEYSTONE, again. A node's children are reached through `trace`, dispatched to the
+// payload type's `impl_Trace_<T>_trace` — the SAME monomorphize-then-re-dispatch machinery that lets
+// std.drop's Own<T> route a generic `.drop()` to the concrete impl. Here `do_trace<T>`/`do_drop<T>` are
+// the generic shims: T flows in from the `Rc<T>` argument, and the bare `.trace()`/`.drop()` re-resolves
+// to the concrete impl after Rc<T> is monomorphized. So a GENERIC refcounted pointer routes BOTH halves
+// of ORC — destruction (Drop) and cycle tracing (Trace) — to a concrete payload with zero per-type code.
+//
+//   the algorithm (Bacon & Rajan 2001, synchronous variant):
+//     a node's true refcount = external refs + internal (cycle) refs. For each candidate root we
+//     (1) MARK GRAY  : trial-delete — walk children via trace, DECREMENT each child's count, color gray;
+//     (2) SCAN       : a node still with count > 0 is externally reachable → SCAN-BLACK it (restore the
+//                      counts we removed); a node that hit 0 is reachable ONLY through the cycle → white;
+//     (3) COLLECT    : every white node is pure garbage — finalize (Drop) + free it.
+//   the decrement/restore is what distinguishes a self-sustaining cycle (all-internal refs → white) from
+//   a live subgraph (some external ref keeps a count > 0 → black).
+{ malloc, realloc, free } = std.alloc
+
+// trial-deletion colors. BLACK = in use / done, GRAY = trial-deleted (being examined), WHITE = garbage.
+BLACK := 0
+GRAY  := 1
+WHITE := 2
+
+// ── pointer slots in a raw byte block: store a pointer as an i64 cell, load it back RE-TYPED. The
+// loaded i64 is re-pointered by `.offset(0)` (a no-op address-of-byte) so the checker types it as a
+// RawPtr rather than an i64 — the same store_i64/load_i64-as-pointer idiom std.coroutine uses for ucontext.
+store_ptr* = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }
+load_ptr*  = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
+
+// ── Rc<T> block header accessors. block = [ count:i64 | color:i64 | value:T ] (count at 0, color at 8). ──
+hcount*     = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }
+hset_count* = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(0), v) }
+hcolor*     = (b: RawPtr<u8>) i64 { load_i64(b.offset(8)) }
+hset_color* = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(8), v) }
+
+// ── a growable list of node-block pointers (a vec.zen-style [len:i64 | cap:i64 | slots…] heap block),
+// used for BOTH the global root registry and the per-collection white set. Stores pointers as i64 cells. ──
+list_new* = () RawPtr<u8> { l := malloc(16 + 64)  store_i64(l.offset(0), 0)  store_i64(l.offset(8), 8)  l }
+list_len* = (l: RawPtr<u8>) i64 { load_i64(l.offset(0)) }
+list_get* = (l: RawPtr<u8>, i: i64) RawPtr<u8> { load_ptr(l.offset(16 + i * 8)) }
+// push p, doubling the backing block when full; returns the (possibly realloc'd) list pointer.
+list_push* = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
+    n := list_len(l)
+    r := (n == load_i64(l.offset(8))).match({ true => { nc := load_i64(l.offset(8)) * 2  g := realloc(l, 16 + nc * 8)  store_i64(g.offset(8), nc)  g }, false => l })
+    store_ptr(r.offset(16 + n * 8), p)
+    store_i64(r.offset(0), n + 1)
+    r
+}
+
+// ── the global ROOT REGISTRY: candidate cycle roots (refcounted nodes that might close a cycle). A real
+// Rc would buffer itself here on a decrement-not-to-zero; the demo registers its nodes explicitly. ──
+roots := null_ptr()
+roots_list* = () RawPtr<u8> { (roots == null_ptr()).match({ true => { roots = list_new()  roots }, false => roots }) }
+roots_add*   = (b: RawPtr<u8>) void { roots = roots_list().list_push(b) }
+roots_clear* = () void { store_i64(roots_list().offset(0), 0) }
+
+// the white set built during a collection (block pointers found to be pure cycle garbage).
+white := null_ptr()
+
+// ── the two ORC traits. Trace visits each child Rc, Drop finalizes a dying value (see std.drop). ──
+Tracer*: { op: i32 }                                  // which sub-pass to apply per visited child
+Trace*:  { trace: (Ptr<Self>, MutPtr<Tracer>) void }  // a type visits each child Rc it holds
+Drop*:   { drop: (MutPtr<Self>) void }                // a destructor, run once at reclaim
+
+// trial-deletion sub-passes, carried by the Tracer.op a node's `trace` receives.
+OP_MARK       := 0   // decrement child count, recurse mark-gray
+OP_SCAN       := 1   // recurse scan
+OP_SCAN_BLACK := 2   // increment child count (restore), recurse scan-black
+OP_GATHER     := 3   // recurse gather into the white set
+
+// ── a generic refcounted pointer. block = [ count:i64 | color:i64 | value:T ]. ──
+Rc*<T>: { base: RawPtr<u8> }
+rc_val<T>   = (r: Rc<T>) [T] { slice(r.base.offset(16), 1) }   // the value slot as a 1-element [T]
+rc_get*<T>  = (r: Rc<T>) T { r.rc_val()[0] }
+rc_base*<T> = (r: Rc<T>) RawPtr<u8> { r.base }
+rc_new*<T> = (x: T) Rc<T> {
+    base := malloc(16 + sizeof(T))
+    store_i64(base.offset(0), 0)                              // count starts at 0 (no references yet)
+    store_i64(base.offset(8), 0)                              // color BLACK
+    r := Rc<T>{ base: base }
+    s := r.rc_val()
+    s[0] = x
+    r
+}
+rc_inc*<T> = (r: Rc<T>) void { store_i64(r.base.offset(0), load_i64(r.base.offset(0)) + 1) }
+
+// THE KEYSTONE shims (T inferred from the Rc<T> argument; the bare `.trace()`/`.drop()` re-dispatches to
+// impl_Trace_<T>_trace / impl_Drop_<T>_drop after Rc<T> is monomorphized). Called in TAIL position.
+do_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void { s := r.rc_val()  addr(s[0]).trace(t) }
+do_drop<T>  = (r: Rc<T>) void { s := r.rc_val()  addr(s[0]).drop() }
+
+// ── the collector passes. These run on TYPE-ERASED node blocks (RawPtr<u8>) and are deliberately NOT
+// generic: a real (non-template) function is emitted once and never inlined, so the deep mutual recursion
+// (pass → trace → visit_child → pass) stays flat C. The ONE typed step — reading the payload and
+// dispatching its trace/drop — is the generic shim above, reached through blk_trace / blk_drop. ──
+
+// applied to each CHILD a node's trace reports: do the pass's count-edit on the child, then recurse it.
+visit_child* = (cb: RawPtr<u8>, t: MutPtr<Tracer>) void {
+    (t.op == OP_MARK).match({ true => { hset_count(cb, hcount(cb) - 1)  cc_mark(cb) }, false =>
+    (t.op == OP_SCAN).match({ true => { cc_scan(cb) }, false =>
+    (t.op == OP_SCAN_BLACK).match({ true => { hset_count(cb, hcount(cb) + 1)  cc_scan_black(cb) }, false =>
+    { cc_gather(cb) } }) }) })
+}
+
+// MARK GRAY: trial-delete the subgraph — color gray, then trace (which decrements each child + recurses).
+cc_mark* = (b: RawPtr<u8>) void {
+    (hcolor(b) == GRAY).match({ true => {}, false => {
+        hset_color(b, GRAY)
+        mt := Tracer { op: 0 }
+        blk_trace(b, addr(mt))
+    } })
+}
+// SCAN: count>0 ⇒ externally reachable ⇒ restore (scan-black); count==0 ⇒ cycle-only garbage ⇒ white.
+cc_scan* = (b: RawPtr<u8>) void {
+    (hcolor(b) == GRAY).match({ true => {
+        (hcount(b) > 0).match({ true => { cc_scan_black(b) }, false => {
+            hset_color(b, WHITE)
+            st := Tracer { op: 1 }
+            blk_trace(b, addr(st))
+        } })
+    }, false => {} })
+}
+// SCAN-BLACK: this node is live — undo its trial-deletion, restoring the counts on its children.
+cc_scan_black* = (b: RawPtr<u8>) void {
+    hset_color(b, BLACK)
+    bt := Tracer { op: 2 }
+    blk_trace(b, addr(bt))
+}
+// GATHER: collect every still-white node into the white set (coloring it black so a re-visit stops). We
+// gather first and free SEPARATELY (free_white) so a free never reads a block still being traversed.
+cc_gather* = (b: RawPtr<u8>) void {
+    (hcolor(b) == WHITE).match({ true => {
+        hset_color(b, BLACK)
+        white = white.list_push(b)
+        gt := Tracer { op: 3 }
+        blk_trace(b, addr(gt))
+    }, false => {} })
+}
+
+// ── an EXAMPLE traced+dropped payload, so the file emits real impl_Trace_Node_trace / impl_Drop_Node_drop
+// and so Rc<Node> / do_trace<Node> / do_drop<Node> have a concrete instance (the differential test drives
+// it into a cycle). A Node holds at most one child Rc<Node> (`has` = present flag, `kid` = its block). ──
+Node*: { has: i32, kid: RawPtr<u8> }
+// Node's destructor: a real impl reclaims the child handle / closes a resource; the test observes it ran.
+Node.impl(Drop, { drop = (s: MutPtr<Node>) void { } })
+// Node's tracer: visit the one child (if present). visit_child applies the current pass to the child block.
+Node.impl(Trace, { trace = (s: Ptr<Node>, t: MutPtr<Tracer>) void {
+    (s.has == 0).match({ true => {}, false => { visit_child(s.kid, t) } })
+} })
+
+// the concrete bridges the type-erased collector uses to reach a Node block's trace/drop (the keystone).
+blk_trace* = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Rc<Node>{ base: b }, t) }
+blk_drop*  = (b: RawPtr<u8>) void { do_drop(Rc<Node>{ base: b }) }
+
+// point `parent` at `child`: store the edge and bump the child's (internal) refcount.
+node_set_kid* = (parent: Rc<Node>, child: Rc<Node>) void {
+    p := parent.rc_val()
+    p[0] = Node { has: 1, kid: child.base }
+    child.rc_inc()
+}
+
+// run one collector pass (op) over every registered root.
+drive* = (op: i32, i: i64) void {
+    (i < roots_list().list_len()).match({ true => {
+        b := roots_list().list_get(i)
+        (op == OP_MARK).match({ true => { cc_mark(b) }, false =>
+        (op == OP_SCAN).match({ true => { cc_scan(b) }, false =>
+        { cc_gather(b) } }) })
+        drive(op, i + 1)
+    }, false => {} })
+}
+// finalize (Drop) then free every node in the white set — the actual reclaim.
+free_white* = (i: i64) void {
+    (i < white.list_len()).match({ true => {
+        b := white.list_get(i)
+        blk_drop(b)
+        free(b)
+        free_white(i + 1)
+    }, false => {} })
+}
+
+// THE COLLECTOR: the three Bacon–Rajan phases over the root set, then reclaim, then reset the registry.
+collect* = () void {
+    white = list_new()
+    drive(0, 0)       // mark gray (trial-delete)
+    drive(1, 0)       // scan (find externally-live vs cycle-only)
+    drive(2, 0)       // gather the white (cycle-only) nodes
+    free_white(0)     // finalize + free them
+    roots_clear()
+}
