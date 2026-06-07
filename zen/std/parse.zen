@@ -9,7 +9,7 @@
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
 { Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, impl_cname, ti32, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
-{ Malloc, heap } = std.alloc
+{ Malloc, malloc } = std.alloc
 { parse_or, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = std.parse_expr
 { build_body } = std.parse_stmt
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd } = std.parse_type
@@ -22,7 +22,7 @@
 // the return type, a foreign binding (libc etc.). It becomes a DForeign (a C prototype) instead
 // of a DFunc, and `next` resumes at the next decl (NOT past a brace it doesn't have).
 DeclEnd*: { func: Func, next: i32, foreign: bool }
-no_body = (a: Ptr<Malloc>) [Stmt] { slice(heap(0), 0) }   // an empty [Stmt] for a bodyless decl
+no_body = (a: Ptr<Malloc>) [Stmt] { slice(malloc(0), 0) }   // an empty [Stmt] for a bodyless decl
 parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)                              // the function name
     name   := a.lexeme(src, nt.tok)
@@ -50,7 +50,7 @@ parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32 }   // ntp>0 -> a generic struct
 // type parameters `<T, U>` after a struct name — collected as name-only Params (no sizeof(str)), the
 // same idiom imports/impl-methods use. `<` skipped by the caller's skip_to_brace; here they're captured.
-no_tparams = (a: Ptr<Malloc>) [Param] { slice(heap(0), 0) }
+no_tparams = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
 skip_name_star = (src: str, pos: i32) i32 {              // pos at the name; returns pos past name + optional '*'
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
@@ -86,7 +86,7 @@ fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
         })
     })
 }
-field_buf = (a: Ptr<Malloc>) [Field] { slice(heap(1024 * sizeof(Field)), 1024) }   // cap 1024
+field_buf = (a: Ptr<Malloc>) [Field] { slice(malloc(1024 * sizeof(Field)), 1024) }   // cap 1024
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     sc := src.scan(pos)
@@ -122,7 +122,7 @@ parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0
 EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }   // ntp>0 -> a generic enum
 VPay*:    { ty: Ty, next: i32 }                          // a variant's payload Ty + pos past it
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false }) }
-variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(heap(1024 * sizeof(VariantDef)), 1024) }   // cap 1024
+variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(malloc(1024 * sizeof(VariantDef)), 1024) }   // cap 1024
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }                            // exact length
 // `(Type)` after a variant name -> the payload Ty; pos is just past the '('
 variant_payload = (a: Ptr<Malloc>, src: str, pos: i32) VPay {
@@ -185,7 +185,7 @@ decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
 // `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
 // which genModule lowers to a translation unit. Parses decls until Eof.
-decl_buf = (a: Ptr<Malloc>) [Decl] { slice(heap(1024 * sizeof(Decl)), 1024) }   // cap 1024
+decl_buf = (a: Ptr<Malloc>) [Decl] { slice(malloc(1024 * sizeof(Decl)), 1024) }   // cap 1024
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── imports ──────────────────────────────────────────────────────────────────────
 // `{ A, B } = std.x` — a destructuring import. It carries no code (modules resolve at link time,
@@ -200,7 +200,7 @@ skip_path = (src: str, pos: i32) i32 {                  // a dotted path `std.ge
 }
 // imported names are stored as name-only Params (matching genc's ImportData) in a dedicated buffer
 // (cap 256 — an import list can be long, e.g. parse's own 60-name `std.genc` import).
-import_buf = (a: Ptr<Malloc>) [Param] { slice(heap(256 * sizeof(Param)), 256) }
+import_buf = (a: Ptr<Malloc>) [Param] { slice(malloc(256 * sizeof(Param)), 256) }
 ImportEnd*: { count: i32, next: i32 }                   // how many names collected, and pos past '}'
 record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportEnd {
     buf[i] = param(a.lexeme(src, sc.tok), tvoid())      // name-only (type Void = an unknown signature)
@@ -346,7 +346,7 @@ parse* = (a: Ptr<Malloc>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
 // `x := 1 + 2\n y := x * 2\n y - 1`  ->  int32_t f(){ int32_t x=…; int32_t y=…; return …; }
 // an empty [Param] without a `[]` literal — the self-hosted parser can't yet parse `[]`, so the
 // compiler's own source must avoid it (this file is read by the toolchain it describes).
-no_params = (a: Ptr<Malloc>) [Param] { slice(heap(0), 0) }
+no_params = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
 parse_fn* = (a: Ptr<Malloc>, src: str, fname: str) Func {
     Func { name: fname, params: a.no_params(), ret: ti32(), tparams: a.no_params(), body: a.build_body(src, 0) }
 }

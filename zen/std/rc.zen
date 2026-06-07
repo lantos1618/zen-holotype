@@ -12,7 +12,7 @@
 // value follows. `clone` bumps the count, `drop` decrements it and frees the block at zero. The count
 // is read/written with the store_i64/load_i64 intrinsics; the value through a `[T]` slice over its slot
 // (the element type T flows in from the Rc<T> receiver, the way std.vec threads it through `buf`).
-{ heap, dispose } = std.alloc
+{ malloc, free } = std.alloc
 
 Rc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T ]
 
@@ -20,7 +20,7 @@ Rc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T
 rc_val<T> = (r: Rc<T>) [T] { slice(r.base.offset(8), 1) }
 
 new<T> = (x: T) Rc<T> {
-    base := heap(8 + sizeof(T))
+    base := malloc(8 + sizeof(T))
     store_i64(base, 1)                               // count starts at 1 (this reference)
     r := Rc<T>{ base: base }
     s := r.rc_val()
@@ -39,5 +39,5 @@ clone<T> = (r: Rc<T>) Rc<T> {
 drop<T> = (r: Rc<T>) void {
     n := load_i64(r.base) - 1
     store_i64(r.base, n)
-    (n == 0).match({ true => dispose(r.base), false => {} })
+    (n == 0).match({ true => free(r.base), false => {} })
 }

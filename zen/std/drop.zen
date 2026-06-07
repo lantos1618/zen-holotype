@@ -22,7 +22,7 @@
 // to an unresolved `drop`. Closing that gap needs per-instantiation re-dispatch in genc_mono (a compiler
 // change, deliberately out of scope). The concrete form below is the verifiable, zero-compiler-change
 // proof that drop-at-zero works.
-{ heap, dispose } = std.alloc
+{ malloc, free } = std.alloc
 
 // the trait every destructible type implements: a single `drop` taking a mutable pointer to the dying
 // value. `Self` is the implementing type; an impl emits `impl_Drop_<Type>_drop`.
@@ -47,7 +47,7 @@ own_ptr* = (o: Own) MutPtr<Resource> { addr(o.own_val()[0]) }   // a mutable poi
 count*   = (o: Own) i64 { load_i64(o.base) }          // current reference count
 
 new* = (x: Resource) Own {
-    base := heap(8 + sizeof(Resource))
+    base := malloc(8 + sizeof(Resource))
     store_i64(base, 1)                                // count starts at 1 (this reference)
     o := Own { base: base }
     s := o.own_val()
@@ -71,5 +71,5 @@ release* = (o: Own) void {
 // the at-zero path, factored out so `release` stays a single tail expression: destruct-then-free.
 finalize* = (o: Own) void {
     o.own_ptr().drop()                                // payload destructor runs while the block is still live
-    dispose(o.base)                                   // then reclaim the block
+    free(o.base)                                   // then reclaim the block
 }

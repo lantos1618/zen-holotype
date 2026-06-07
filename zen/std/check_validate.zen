@@ -7,7 +7,7 @@
 // std.check never imports this module back.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = std.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, no_stmts, resolve_module, dbuf, tnode } = std.check
-{ Malloc, heap } = std.alloc
+{ Malloc, malloc } = std.alloc
 { byte_at } = std.lex
 { eq, is_empty } = std.str
 
@@ -60,7 +60,7 @@ is_imported = (decls: [Decl], fn: str) bool {
     decls.loop((h, i, d) { found = d.match ({ .DImport(im) => im.names.names_has(fn).match ({ true => true, false => found }), _ => found }) })
     found
 }
-// the genc intrinsics (gen_call) + `heap`/`sizeof` (runtime/builtin) — names with no Zen decl.
+// the genc intrinsics (gen_call) + `malloc`/`sizeof` (runtime/builtin) — names with no Zen decl.
 is_intrinsic = (fn: str) bool {
     eq(fn, "load").match   ({ true => true, false =>
     eq(fn, "store").match  ({ true => true, false =>
@@ -68,7 +68,7 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "offset").match ({ true => true, false =>
     eq(fn, "cstr").match   ({ true => true, false =>
     eq(fn, "slice").match  ({ true => true, false =>
-    eq(fn, "heap").match   ({ true => true, false =>
+    eq(fn, "malloc").match ({ true => true, false =>
     eq(fn, "sizeof").match ({ true => true, false =>
     eq(fn, "load_i64").match  ({ true => true, false =>
     eq(fn, "store_i64").match ({ true => true, false =>
@@ -76,7 +76,7 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "null_ptr").match  ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) })
 }
 // each intrinsic's fixed arity — store/offset/slice take 2 operands (gen_call reads arg1), the rest
-// (load/addr/cstr/heap/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
+// (load/addr/cstr/malloc/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
 // `c.args[1]` unconditionally for the 2-arg ops, so `store(p)` would otherwise read a garbage Expr.
 intrinsic_arity = (fn: str) i32 {
     eq(fn, "store").match     ({ true => 2, false =>
@@ -84,7 +84,7 @@ intrinsic_arity = (fn: str) i32 {
     eq(fn, "slice").match     ({ true => 2, false =>
     eq(fn, "null_ptr").match  ({ true => 0, false =>                 // null_ptr() takes no operands
     eq(fn, "atomic_add_i64").match ({ true => 2, false =>            // atomic_add_i64(p, delta) -> new value
-    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) })   // load_i64/load/addr/cstr/heap/sizeof = 1
+    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof = 1
 }
 // a call: a LOCAL fn must match arity + arg types; an INTRINSIC has a fixed arity (checked above);
 // an IMPORTED name is known-but-unchecked (no signature here); anything else is UNDEFINED — a typo
@@ -151,7 +151,7 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
 // and its value must FIT the field's type ("bool ⊀ i32"). Matching the Python frontend; missing fields
 // are allowed (partial init). Only runs for a KNOWN, non-generic DStruct — an imported/generic literal
 // is skipped (sound). A polymorphic numeric literal fits any numeric field; uninferable values skip.
-no_fields = () [Field] { slice(heap(0), 0) }
+no_fields = () [Field] { slice(malloc(0), 0) }
 is_struct = (decls: [Decl], name: str) bool {
     f := false
     decls.loop((h, i, d) { f = d.match ({ .DStruct(sd) => eq(sd.name, name).match ({ true => true, false => f }), _ => f }) })
@@ -208,7 +208,7 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
 // wildcard `_` — and must not DUPLICATE an arm. Matching the Python frontend ("non-exhaustive match:
 // missing .C" / "duplicate match arm '.A'"). Bool/integer matches lower to Cond (not Match), so only
 // enum matches reach here. SOUND — an unknown enum name (a generic instance / unfilled "") -> skip.
-no_variants = () [VariantDef] { slice(heap(0), 0) }
+no_variants = () [VariantDef] { slice(malloc(0), 0) }
 enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     found := no_variants()
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants, false => found }), _ => found }) })
