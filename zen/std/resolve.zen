@@ -20,6 +20,7 @@
 // (std templates aren't emitted into a stand-alone test binary). acid checks THIS file as-is.
 
 { byte_at } = std.lex
+{ String, push, append } = std.string
 
 // space or tab — the whitespace lstrip skips (Python str.strip() also drops \r/\n, but those
 // terminate a line, so on a single line only space/tab matter here).
@@ -78,3 +79,50 @@ strip_count* = (s: str, p: i32, n: i32) i32 {
         false => s.strip_count(s.next_line(p), s.is_import_line(p).match ({ true => n, false => n + 1 }))
     })
 }
+
+// ── THE STRIP ITSELF: bytes, not a count ────────────────────────────────────────────────────────
+// strip_count proves the classifier; these produce the actual flat source bytes, reproducing
+// Python's strip_imports / compiler_source. Built on std.string's growable String so a kept line's
+// bytes are appended directly (no per-line allocation), mirroring how genc emits C as a value.
+
+// the end of the line starting at p — the position of its terminating '\n', or of the NUL at EOF.
+// (next_line lands PAST the '\n'; this lands ON it, so [p, line_end) is the line's bytes sans '\n'.)
+line_end = (s: str, p: i32) i32 {
+    b := s.byte_at(p)
+    ((b == 0) || (b == 10)).match ({ true => p, false => s.line_end(p + 1) })
+}
+
+// append the bytes [p, e) of `s` to the builder `out` (one line, the '\n' excluded). Byte-by-byte:
+// the builder owns its buffer, so this is just String.push over the line's span.
+append_span = (out: String, s: str, p: i32, e: i32) String {
+    (p == e).match ({ true => out, false => out.push(s.byte_at(p)).append_span(s, p + 1, e) })
+}
+
+// strip ONE file's imports into `out`, reproducing Python's strip_imports = "\n".join(kept lines):
+// kept (non-import) lines are appended with a '\n' SEPARATOR before every kept line after the first
+// (so no leading/trailing newline within a file). `first` threads "have we emitted a kept line yet".
+// Walks to the NUL; a trailing '\n' in the file leaves p AT the NUL with no spurious empty line,
+// matching str.splitlines() (which drops the empty element after a final newline).
+strip_into = (out: String, s: str, p: i32, first: bool) String {
+    (s.byte_at(p) == 0).match ({
+        true  => out,
+        false => s.is_import_line(p).match ({
+            true  => out.strip_into(s, s.next_line(p), first),
+            false => first.match ({
+                true  => out.append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false),
+                false => out.push(10).append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false)
+            })
+        })
+    })
+}
+
+// strip_imports(file_src): a fresh flat String of `s` with its import lines dropped — the Zen twin of
+// generate.py's strip_imports(path) (the read happens in the driver; this is the pure transform).
+strip_imports* = (out: String, s: str) String { out.strip_into(s, 0, true) }
+
+// concatenate two already-stripped file bodies with a single '\n' between them — the per-file join in
+// compiler_source = "\n".join(...). A driver folds the SOURCES through this: start with file 0's strip,
+// then for each later file push '\n' and append its stripped body. (append takes a str; the driver
+// finishes each file's String to a str, or — as the prototype test does — inlines the fold over a
+// single growing String, emitting the '\n' separator between files itself.)
+concat_files* = (out: String, a: str, b: str) String { out.append(a).push(10).append(b) }
