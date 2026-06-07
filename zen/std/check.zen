@@ -11,7 +11,7 @@
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
-{ Malloc, heap } = std.alloc
+{ Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
 { byte_at } = std.lex
@@ -34,16 +34,16 @@ clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 // ebuf/enode) so they don't collide with parse.zen's identically-purposed helpers when the
 // whole compiler is compiled as one TU — until genc namespaces functions by module, every
 // top-level name across the compiler's sources must be unique.
-cebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(heap(n * sizeof(Expr)), n) }
+cebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(malloc(n * sizeof(Expr)), n) }
 cenode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.cebuf(1)
     buf[0] = v
     buf[0].addr()
 }
-abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(heap(n * sizeof(ArmData)), n) }
-sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(heap(n * sizeof(Stmt)), n) }
-dbuf* = (a: Ptr<Malloc>, n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }
-tbuf = (a: Ptr<Malloc>, n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
+abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(malloc(n * sizeof(ArmData)), n) }
+sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(malloc(n * sizeof(Stmt)), n) }
+dbuf* = (a: Ptr<Malloc>, n: i64) [Decl] { slice(malloc(n * sizeof(Decl)), n) }
+tbuf = (a: Ptr<Malloc>, n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
 // a heap Ptr<Ty> — so a Ty a function builds (e.g. a slice's element type in infer_expr) outlives
 // the frame, instead of dangling via `&(localTy)` (which silently corrupts fits/ty_eq downstream).
 tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
@@ -53,7 +53,7 @@ tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
 }
 
 // ── the variable environment (a cons-list) ────────────────────────────────────────────
-vlbuf = (a: Ptr<Malloc>) [VList] { slice(heap(sizeof(VList)), 1) }
+vlbuf = (a: Ptr<Malloc>) [VList] { slice(malloc(sizeof(VList)), 1) }
 vlnode = (a: Ptr<Malloc>, v: VList) Ptr<VList> {
     buf := a.vlbuf()
     buf[0] = v
@@ -183,7 +183,7 @@ gen_variant_payload = (g: GenEnumDecl, vname: str) Ty {
     g.variants.loop((h, i, v) { found = eq(v.name, vname).match ({ true => v.payload, false => found }) })
     found
 }
-einst_tybuf = (n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
+einst_tybuf = (n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
 infer_enum_targs = (env: Env, g: GenEnumDecl, variant: str, pty: Ty) [Ty] {
     vpt := g.gen_variant_payload(variant)
     buf := einst_tybuf(g.tparams.len)
@@ -221,6 +221,15 @@ block_ty = (env: Env, b: BlockData) Ty {
     // frontend's statement-glue bug would parse `.len` + the next `(…)` as a call. [[leading-dot-statement-glue]]
     (b.stmts.len == 0).match ({ true => tvoid(), false => env.last_stmt_ty(b.stmts) })
 }
+// the element type of `seq[i]`: prefer the Index's STORED elem when it is concrete — a generic
+// template's `[T]` index has its elem substituted to the concrete T at inline time (subst_targs),
+// whereas re-inferring `seq` after inlining can lose it (the seq became a `slice(…)` builtin call /
+// statement-expr whose type is void). Re-inferring only when the stored elem is void preserves the
+// original behaviour for un-substituted indices. This is what lets a generic `Own<T>`'s spliced
+// `addr(own_val(o)[0]).drop()` infer the receiver as `MutPtr<Res>` and re-dispatch to T's Drop impl.
+index_elem = (env: Env, ix: IndexData) Ty {
+    ix.elem.is_void_ty().match ({ true => env.infer_expr(ix.seq).elem_of(), false => ix.elem })
+}
 infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
@@ -236,7 +245,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
-        .Index(ix)     => env.infer_expr(ix.seq).elem_of(),   // T of a [T] index
+        .Index(ix)     => env.index_elem(ix),                // T of a [T] index — the stored elem if concrete, else re-infer the seq
         .Loop(l)       => tvoid(),                            // a loop is a void statement
         .SliceLit(sd)  => tslice(env.a.tnode(sd.elem)),       // `[a, b, c]` of element E -> [E] (elem heap-alloc'd)
         _              => tvoid()
@@ -389,7 +398,7 @@ resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a }
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
-fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(heap(n * sizeof(FieldInit)), n) }
+fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(malloc(n * sizeof(FieldInit)), n) }
 resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.resolve_expr(env, fi.value)) })
@@ -620,8 +629,8 @@ resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
 // the lambda passed for it (its params bound to the call args). A template's own locals and a
 // lambda's captures just resolve at the splice site — the inlined body is a GCC statement-
 // expression `({ … })` nested in the caller's scope. (Mirrors lower.py's _c_inline_template.)
-no_stmts* = () [Stmt] { slice(heap(0), 0) }
-empty_args = () [Expr] { slice(heap(0), 0) }
+no_stmts* = () [Stmt] { slice(malloc(0), 0) }
+empty_args = () [Expr] { slice(malloc(0), 0) }
 pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
     (i == params.len).match ({
         true  => found,
@@ -803,7 +812,7 @@ subst_tag_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: 
     mktagg(ety, mangle_str(ety, nt), nt, variant)
 }
 // a tparam name appearing as a VALUE — only `sizeof(T)` — becomes the concrete type's C name, so a
-// generic allocator's `slice(heap(n * sizeof(T)), n)` monomorphizes to `sizeof(Expr)`. Other Vars
+// generic allocator's `slice(malloc(n * sizeof(T)), n)` monomorphizes to `sizeof(Expr)`. Other Vars
 // (params, locals) are never named like a tparam, so they pass through unchanged.
 subst_tparam_var = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], name: str, e: Ptr<Expr>) Ptr<Expr> {
     i := tparams.param_index(name)
@@ -978,6 +987,6 @@ fits* = (g: Ty, w: Ty) bool {
 // `empty_params` builds the_func's sentinel + an inline_decl's empty param list; `fn_params` reads a
 // callee's params at a call site; `is_void_ty` is the void test threaded through inference + the
 // validator. They live here because the resolver needs them, and check_validate imports them.
-empty_params* = () [Param] { slice(heap(0), 0) }    // an empty [Param] without a `[]` literal (self-hostable)
+empty_params* = () [Param] { slice(malloc(0), 0) }    // an empty [Param] without a `[]` literal (self-hostable)
 fn_params* = (decls: [Decl], fn: str) [Param] { decls.the_func(fn).params }   // sentinel.params is empty
 is_void_ty* = (t: Ty) bool { t.match ({ .Void => true, _ => false }) }

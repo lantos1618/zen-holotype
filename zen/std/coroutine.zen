@@ -10,7 +10,7 @@
 // picks suspend = noop vs = yield over this). The struct is opaque here, so we poke its fields by
 // raw byte offset — but those offsets are NOT magic numbers: they are the documented glibc
 // x86-64 ucontext_t ABI, named below (UC_LINK_OFF / UC_SS_SP_OFF / UC_SS_SIZE_OFF / UC_CTX_SIZE).
-{ heap } = std.alloc
+{ malloc } = std.alloc
 
 getcontext  = (ctx: RawPtr<u8>) i32
 makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void   // fn becomes a real C `void(*)()`
@@ -42,9 +42,9 @@ Coro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
 // spawn `work` on a fresh 64 KiB stack. When work returns, uc_link (= the saved resumer context)
 // brings control back with the flag clear, so resume reports completion.
 spawn* = (work: () void) Coro {
-    stack := heap(CORO_STACK)
-    ctx := heap(UC_CTX_SIZE)
-    lnk := heap(UC_CTX_SIZE)
+    stack := malloc(CORO_STACK)
+    ctx := malloc(UC_CTX_SIZE)
+    lnk := malloc(UC_CTX_SIZE)
     getcontext(ctx)
     store_i64(ctx.offset(UC_SS_SP_OFF), stack)        // uc_stack.ss_sp  = the new stack
     store_i64(ctx.offset(UC_SS_SIZE_OFF), CORO_STACK) // uc_stack.ss_size

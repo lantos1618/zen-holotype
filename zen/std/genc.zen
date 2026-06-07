@@ -12,7 +12,7 @@
 
 { String, new, append, push, finish } = std.string
 { view, is_empty, eq } = std.str
-{ heap } = std.alloc
+{ malloc } = std.alloc
 
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
@@ -122,7 +122,7 @@ mkenumg* = (ty: str, mty: str, targs: [Ty], v: str, p: Ptr<Expr>) Expr { .MakeEn
 finit* = (nm: str, v: Ptr<Expr>) FieldInit { FieldInit { name: nm, value: v } }
 mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, mty: ty, targs: no_tys(), inits: inits }) }
 mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr { .MakeStruct(MakeStructData { ty: ty, mty: mty, targs: targs, inits: inits }) }
-no_tys* = () [Ty] { slice(heap(0), 0) }                  // an empty [Ty] (non-generic literal's targs)
+no_tys* = () [Ty] { slice(malloc(0), 0) }                  // an empty [Ty] (non-generic literal's targs)
 slit* = (elem: Ty, items: [Expr]) Expr { .SliceLit(SliceData { elem: elem, items: items }) }
 eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr { .Index(IndexData { seq: seq, idx: i, elem: elem }) }
 eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt]) Expr { .Loop(LoopData { seq: seq, idx: idx, elem: elem, elemTy: elemTy, body: body }) }
@@ -236,7 +236,7 @@ ty_cname* = (t: Ty) str { new().gen_ty(t.addr()).finish() }
 // ── type substitution (tparam→arg): shared by std.check (subst_ty/find_genenum) and the
 //    monomorphize pass (std.genc_mono). A tiny stack of [Ty] buffer helpers + the recursive
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
-mono_tybuf = (n: i64) [Ty] { slice(heap(n * sizeof(Ty)), n) }
+mono_tybuf = (n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
 mono_tynode = (t: Ty) Ptr<Ty> {
     buf := mono_tybuf(1)
     buf[0] = t
@@ -264,7 +264,7 @@ subst_generic = (tparams: [Param], args: [Ty], g: GenericData) Ty {
     tgeneric(g.name, buf, mangle_str(g.name, buf))
 }
 find_genenum* = (decls: [Decl], name: str) GenEnumDecl {
-    found := GenEnumDecl { name: "", tparams: slice(heap(0), 0), variants: slice(heap(0), 0) }
+    found := GenEnumDecl { name: "", tparams: slice(malloc(0), 0), variants: slice(malloc(0), 0) }
     decls.loop((h, i, d) { found = d.match ({ .DGenEnum(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
     found
 }
