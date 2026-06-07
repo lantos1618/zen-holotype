@@ -16,12 +16,14 @@ Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }
 
 arena_new* = (cap: i64) Arena { Arena { buf: heap(cap), off: 0, cap: cap } }
 
-// bump: return the current cursor, then advance it by n bytes. (No bounds check yet — the caller
-// sizes the arena; a checked/growing variant comes with the Allocator-trait integration.) The
-// mutating methods take MutPtr — they write the cursor `a.off`, which a read-only Ptr forbids.
+// bump: return the current cursor (8-byte aligned, since malloc returns an aligned base and every
+// advance is rounded UP to a multiple of 8), then advance past n bytes. So every pointer handed out is
+// safe for store_i64/load_i64 even on alignment-strict targets (ARM). (No bounds check yet — the caller
+// sizes the arena; a checked/growing variant comes with the Allocator-trait integration.) The mutating
+// methods take MutPtr — they write the cursor `a.off`, which a read-only Ptr forbids.
 bump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> {
     p := a.buf.offset(a.off)
-    a.off = a.off + n
+    a.off = a.off + ((n + 7) / 8) * 8   // round the advance up to the next 8-byte boundary
     p
 }
 reset* = (a: MutPtr<Arena>) void { a.off = 0 }       // reclaim every allocation at once (O(1))
