@@ -53,6 +53,41 @@ int main(int argc, char** argv){
 }
 """
 
+# ── S1 CROSS-MODULE TYPE-CHECK driver (check_validate.check_linked) ─────────────────────────────
+# The CHECK binary above type-checks ONE flat module and treats every `{…} = std.x` import as an
+# undefined-but-tolerated name (the DImport "known-but-unchecked" path) — so it gates parse+resolve
+# +typing of LOCAL code, but an imported call's arity/arg-types are NEVER verified. That was the
+# proof deleting the Python frontend lost: that the stdlib type-checks as an inter-module WHOLE.
+#
+# check_linked recovers it. For a TARGET module, we gather the EXPORTED signatures of every std.x it
+# imports (parse those modules; module_header reduces each `name* = (params) ret { … }` to a bodyless
+# DForeign sig), prepend that header, and run check_module. Now an imported call resolves to the REAL
+# signature in `the_func`, so check_call -> call_errs verifies arity AND arg types exactly like a
+# local call — while the header's bodyless sigs are never re-checked (check_module only descends
+# function BODIES). This main reads the target file + a concatenated lib file and exits with the
+# cross-module error count. NO Python compiler — only the committed `zenc` binary + cc, as ever.
+_CHECK_LINKED_MAIN = r"""#include "zenrt.h"
+#include <stdio.h>
+#include <stdlib.h>
+zslice parse_module(Malloc* a, const char* src);
+int32_t check_linked(Malloc* a, zslice decls, zslice lib);
+static char* slurp(const char* path){
+    FILE* in = fopen(path, "r"); if (!in){ fprintf(stderr, "cannot open %s\n", path); exit(2); }
+    size_t cap = 1<<20, len = 0; char* buf = malloc(cap); int c;
+    while ((c = fgetc(in)) != EOF){ if (len + 1 >= cap){ cap *= 2; buf = realloc(buf, cap); } buf[len++] = (char)c; }
+    buf[len] = 0; fclose(in); return buf;
+}
+int main(int argc, char** argv){
+    if (argc < 3){ fprintf(stderr, "usage: %s <target.zen> <lib.zen>\n", argv[0]); return 2; }
+    char* tgt = slurp(argv[1]);
+    char* lib = slurp(argv[2]);
+    Malloc m = { 0 };
+    zslice td = parse_module(&m, tgt);
+    zslice ld = parse_module(&m, lib);
+    return check_linked(&m, td, ld);
+}
+"""
+
 # Runtime/compiler symbols the _selfhost driver's _PRELUDE makes visible to a checked program
 # (Malloc, heap, slice, putchar, …). The check binary's flat source has no module resolver, so a
 # program that uses these names would otherwise count them as undefined. We prepend bodyless
@@ -65,6 +100,7 @@ _PRELUDE = (
 
 _emit_exe = None
 _check_exe = None
+_check_linked_exe = None
 
 
 def _strip_imports(path):
@@ -105,6 +141,75 @@ def _build_check():
         assert r.returncode == 0, r.stderr
         _check_exe = exe
     return _check_exe
+
+
+def _build_check_linked():
+    """The CHECK_LINKED binary: same check-mode C as _build_check (it already contains check_linked +
+    module_header from check_validate.zen), but linked with _CHECK_LINKED_MAIN — a `(target, lib) ->
+    cross-module error count` entry. Only the committed `zenc` binary + cc are used; NO Python."""
+    global _check_linked_exe
+    if _check_linked_exe is None:
+        emit = _build_emit()
+        d = Path(tempfile.mkdtemp())
+        (d / "checksrc.zen").write_text("\n".join(_strip_imports(p) for p in _CHECK_SOURCES))
+        c = subprocess.run([str(emit), str(d / "checksrc.zen")], capture_output=True, text=True).stdout
+        assert c.startswith(HEAD), c[:80]
+        (d / "checkc.gen.c").write_text('#include "zenrt.h"\n' + c[len(HEAD):])
+        (d / "check_linked_main.c").write_text(_CHECK_LINKED_MAIN)
+        exe = d / "zenc-check-linked"
+        r = subprocess.run(_CC + ["-I", str(BOOT), str(d / "checkc.gen.c"), str(BOOT / "zenrt.c"),
+                                  str(d / "check_linked_main.c"), "-o", str(exe)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        _check_linked_exe = exe
+    return _check_linked_exe
+
+
+def imports_of(path):
+    """The std modules `path` imports — every `{ … } = std.X` head's X. This is exactly the import
+    classification std.resolve.is_import_line makes (`{ ` prefix + `= std.`), read here to assemble
+    the lib header. Returns module names in first-seen order, de-duplicated."""
+    seen, out = set(), []
+    for l in (ROOT / path).read_text().splitlines():
+        s = l.strip()
+        if s.startswith("{ ") and "= std." in s:
+            mod = s.split("= std.", 1)[1].strip().split()[0].rstrip()
+            mod = "".join(ch for ch in mod if ch.isalnum() or ch == "_")
+            if mod and mod not in seen:
+                seen.add(mod)
+                out.append(mod)
+    return out
+
+
+def check_linked_count(target, libs=None):
+    """Cross-module error count for std module `target` checked against the REAL signatures of the
+    std modules it imports (auto-discovered via imports_of, or override with `libs`). The target's own
+    import lines are stripped (the layered header — not the DImport fallback — supplies the sigs), and
+    every imported module's body is concatenated (also import-stripped) into the lib parsed for its
+    header. 0 == the module type-checks as an inter-module whole."""
+    exe = _build_check_linked()
+    if libs is None:
+        libs = imports_of(target)
+    d = Path(tempfile.mkdtemp())
+    tgt = d / "target.zen"
+    tgt.write_text("\n".join(_strip_imports(target).splitlines()))
+    lib = d / "lib.zen"
+    lib.write_text("\n".join("\n".join(_strip_imports("zen/std/" + m + ".zen").splitlines())
+                             for m in libs if (ROOT / "zen/std" / (m + ".zen")).exists()))
+    return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
+                          text=True, timeout=60).returncode
+
+
+def check_linked_count_src(target_src, lib_src):
+    """check_linked over raw SOURCE strings (no files on disk besides the temp pair). Used by the
+    NEGATIVE test: a synthesized `lib_src` exports a signature, `target_src` calls it wrong, and the
+    nonzero return proves the cross-module check actually verifies imported arity/arg-types."""
+    exe = _build_check_linked()
+    d = Path(tempfile.mkdtemp())
+    (d / "t.zen").write_text(target_src)
+    (d / "l.zen").write_text(lib_src)
+    return subprocess.run([str(exe), str(d / "t.zen"), str(d / "l.zen")], capture_output=True,
+                          text=True, timeout=60).returncode
 
 
 def emit_c_for(src):
