@@ -200,6 +200,47 @@ def check_linked_count(target, libs=None):
                           text=True, timeout=60).returncode
 
 
+def check_namespaced_count(target, modules=None):
+    """FULL S1 RESOLVER cross-module error count: like check_linked_count, but the lib is built by the
+    real module RESOLVER (tests/_resolver.resolve) — the transitive import closure of `target`,
+    deduplicated per-NAME so each top-level name resolves to its defining module exactly once (the
+    per-module namespace). Where check_linked_count flat-concats `target`'s DIRECT imports (and would
+    false-positive on a genuine cross-module name clash), this resolves names through the whole graph
+    with no clash. 0 == `target` type-checks against its REAL transitive imports as a namespaced unit."""
+    import _resolver
+    exe = _build_check_linked()
+    d = Path(tempfile.mkdtemp())
+    tgt = d / "target.zen"
+    tgt.write_text("\n".join(_strip_imports("zen/std/" + target + ".zen").splitlines()))
+    lib = d / "lib.zen"
+    lib.write_text(_resolver.resolve(target, modules))
+    return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
+                          text=True, timeout=60).returncode
+
+
+def check_namespaced_count_src(target, mods):
+    """FULL RESOLVER over a SYNTHETIC module map `mods` = {name: source}. The resolver computes
+    `target`'s transitive, per-name-deduped (namespaced) lib from `mods`, then check_linked verifies
+    `target`'s imported calls against it. Used by the clash + transitive + wrong-call proof cases:
+    construct modules with a deliberate cross-module name clash / re-export chain and assert the
+    resolver namespaces / resolves it (no false positive; a real wrong call still caught)."""
+    import _resolver
+    exe = _build_check_linked()
+    d = Path(tempfile.mkdtemp())
+    tgt = d / "target.zen"
+    tgt.write_text("\n".join(_strip_imports_text(mods[target]).splitlines()))
+    lib = d / "lib.zen"
+    lib.write_text(_resolver.resolve_src(target, mods))
+    return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
+                          text=True, timeout=60).returncode
+
+
+def _strip_imports_text(text):
+    """_strip_imports, but over an in-memory source string (the same `{ ` + `= std.` classifier)."""
+    return "\n".join(l for l in text.splitlines()
+                     if not (l.strip().startswith("{ ") and "= std." in l))
+
+
 def check_linked_count_src(target_src, lib_src):
     """check_linked over raw SOURCE strings (no files on disk besides the temp pair). Used by the
     NEGATIVE test: a synthesized `lib_src` exports a signature, `target_src` calls it wrong, and the
