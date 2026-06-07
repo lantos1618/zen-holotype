@@ -6,6 +6,8 @@ dependency. When Stage D deletes zen/*.py, these golden expectations are what ke
 
   VALUE_CASES   : [(src, want_int)]   — the self-hosted binary must COMPUTE want
   VERDICT_CASES : [(src, "accept"|"reject")] — the check binary must produce that verdict
+  VERDICT_KIND_CASES : [(src, kind)]  — a REJECT pinned by its first-error KIND (not just "reject"),
+                                        so a reject-for-the-wrong-reason is caught (Diagnostics arc).
 """
 
 # (src, want) the self-hosted toolchain must compute exactly (silent-miscompile guards).
@@ -248,4 +250,100 @@ VERDICT_CASES = [
 
     # --- BARE bool literal `true`/`false` parses as a Var -> uninferable -> the lenient (accept) path ---
     ('test* = () i32 { true }', 'accept'),
+]
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# REJECT KINDS — each reject pinned by its FIRST-error KIND (check_validate.check_module_kind), so a
+# reject-for-the-wrong-reason no longer slips through. Every (src, kind) here was VERIFIED against the
+# real CHECK-KIND binary on the goalz-diagnostics branch — `_oracle.verdict_kind(src) == kind`, AND
+# `_oracle.verdict(src) == 'reject'` (kind != 'none'). The kind labels are check_validate.zen's K*
+# table: arity / arg-type / undefined-name / struct-field / exhaustiveness / dup-variant /
+# operand-type / index / return-fit / assign-fit / conformance / dup-fn / value-pos-return. The same
+# srcs already appear in VERDICT_CASES as 'reject'; here their REASON is fixed too. Grouped by kind.
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+VERDICT_KIND_CASES = [
+    # --- arity: a call's arg COUNT must equal the declared param count (local fn OR fixed-arity intrinsic) ---
+    ('g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }', 'arity'),
+    ('f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }', 'arity'),
+    ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1) }', 'arity'),
+    ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1, 2, 3) }', 'arity'),
+    ('zero* = () i32 { 0 }\ntest* = () i32 { zero(1) }', 'arity'),
+    ('one* = (a: i32) i32 { a }\ntest* = () i32 { one() }', 'arity'),
+    ('test* = () i64 { p := malloc(8)  store_i64(p)  0 }', 'arity'),
+    ('test* = () i64 { p := malloc(8)  store_i64(p, 1, 2)  0 }', 'arity'),
+    ('test* = () i64 { p := malloc(8)  q := offset(p)  0 }', 'arity'),
+    ('test* = () i64 { p := null_ptr(7)  0 }', 'arity'),
+    ('g* = (a: i32) i32 { a }\nf* = (b: bool) i32 { b.match({ true => { g(1, 2)  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }', 'arity'),   # mis-arity inside a block arm
+
+    # --- arg-type: right arity, but an arg's type doesn't `fit` its parameter ---
+    ('takes_u8* = (b: u8) i32 { 0 }\nbig* = () i64 { 9999999999 }\ntest* = () i32 { takes_u8(big()) }', 'arg-type'),     # i64 ⊀ u8
+    ('P*: { x: i32 }\nneeds_p* = (p: P) i32 { p.x }\nmk* = () i64 { 5 }\ntest* = () i32 { needs_p(mk()) }', 'arg-type'),  # i64 where P wanted
+    ('A*: { v: i32 }\nB*: { v: i32 }\nneeds_a* = (a: A) i32 { a.v }\ntest* = () i32 { needs_a(B { v: 5 }) }', 'arg-type'), # B ⊀ A
+    ('scalar* = (n: i32) i32 { n }\ntest* = () i32 { s := [1, 2]\n scalar(s) }', 'arg-type'),                            # slice ⊀ scalar
+
+    # --- undefined-name: a call to a non-local, non-intrinsic, non-imported, non-trait name ---
+    ('test* = () i32 { nope() }', 'undefined-name'),
+    ('test* = () i32 { foo(1) + bar(2) }', 'undefined-name'),
+    ('use* = (n: i32) i32 { n }\ntest* = () i32 { use(missing()) }', 'undefined-name'),                                  # nested in an arg
+    ('test* = () i32 { 1 + gone() }', 'undefined-name'),                                                                 # nested in an operand
+    ('f* = (b: bool) i32 { b.match({ true => { ghost()  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }', 'undefined-name'),  # inside a block arm
+
+    # --- struct-field: a struct-literal init field / a member access that names no real field, or a mistyped init ---
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 0, y: 1 }  p.x }', 'struct-field'),                                   # unknown init field y
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { z: 0 }  0 }', 'struct-field'),                                           # unknown init field z
+    ('P*: { x: i32, flag: bool }\nmk* = () i64 { 5 }\ntest* = () i32 { p := P { x: mk() }  p.x }', 'struct-field'),       # i64 ⊀ i32 field
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 5 }  p.nope }', 'struct-field'),                                      # member access
+    ('P*: { x: i32 }\nget* = (p: Ptr<P>) i32 { p.bad }\ntest* = () i32 { q := P { x: 1 }  get(addr(q)) }', 'struct-field'),  # Ptr receiver
+
+    # --- exhaustiveness: a non-wildcard enum match must cover every variant ---
+    ('R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 } })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }', 'exhaustiveness'),  # missing .Ok
+    ('C*: A | B | Cc\nf* = (c: C) i32 { c.match({ .A => 1, .B => 2 }) }\ntest* = () i32 { f(.A()) }', 'exhaustiveness'),  # missing .Cc
+    ('R*: Ok(i32) | Err\nf* = (r: R) i32 { r.match({ .Ok(v) => v }) }\ntest* = () i32 { f(.Ok(5)) }', 'exhaustiveness'), # missing .Err
+
+    # --- dup-variant: a match arm repeats a variant ---
+    ('C*: A | B\nf* = (c: C) i32 { c.match({ .A => 1, .A => 2, .B => 3 }) }\ntest* = () i32 { f(.A()) }', 'dup-variant'),
+    ('R*: Ok(i32) | Err\nf* = (r: R) i32 { r.match({ .Ok(v) => v, .Ok(w) => w, .Err => 0 }) }\ntest* = () i32 { f(.Ok(5)) }', 'dup-variant'),
+
+    # --- operand-type: arith on non-numeric / logic on non-bool (a partial bool match lowers to an
+    #     uninferable Cond branch, which the operand check flags — so it pins here, not exhaustiveness) ---
+    ('f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }', 'operand-type'),
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 1 }  q := P { x: 2 }  (p + q).x }', 'operand-type'),                  # struct + struct
+    ('test* = () i32 { ("hi" + "bye")  0 }', 'operand-type'),                                                            # str + str
+    ('test* = () bool { 1 && 2 }', 'operand-type'),                                                                      # && on numbers
+
+    # --- index: seq[idx] with a non-slice seq or a non-numeric idx ---
+    ('test* = () i32 { x := 5  x[0] }', 'index'),                                                                        # non-slice seq
+    ('P*: { x: i32 }\ntest* = () i32 { s := [1, 2, 3]  p := P { x: 0 }  s[p] }', 'index'),                               # non-numeric idx
+
+    # --- return-fit: a returned / trailing value doesn't fit (or is absent for) the declared return type ---
+    ('test* = () i32 {  }', 'return-fit'),                                                                               # empty body
+    ('test* = () i32 {\n  x := 5\n}', 'return-fit'),                                                                     # ends in a let
+    ('test* = () i32 {\n  x := 5\n  x = 6\n}', 'return-fit'),                                                            # ends in an assign
+    ('test* = () i32 { "hi" }', 'return-fit'),                                                                           # str ⊀ i32
+    ('test* = () i32 { 1 < 2 }', 'return-fit'),                                                                          # bool ⊀ i32
+    ('big* = () i64 { 9999999999 }\ntest* = () i32 { big() }', 'return-fit'),                                            # i64 ⊀ i32
+    ('test* = () bool { 5 }', 'return-fit'),                                                                             # numeric ⊀ bool
+    ('P*: { x: i32 }\ntest* = () i32 { P { x: 5 } }', 'return-fit'),                                                     # struct ⊀ i32
+    ('test* = () i32 { x := 5 }', 'return-fit'),                                                                         # trailing let, no value
+
+    # --- assign-fit: x = v (or xs[i] = v) where v doesn't fit x's / the element's type ---
+    ('test* = () i32 { x := 5\n y := (1 < 2)\n x = y\n x }', 'assign-fit'),                                              # bool into i32 local
+    ('big* = () i64 { 9999999999 }\ntest* = () i32 { x := 1\n x = big()\n x }', 'assign-fit'),                           # i64 into i32 local
+    ('test* = () i32 { s := [1, 2, 3]\n s[0] = (1 < 2)\n s[0] }', 'assign-fit'),                                         # bool into i32 slice elem
+
+    # --- conformance: a Type.impl(Trait) misses a method or its signature differs ---
+    ('Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }', 'conformance'),                                  # missing method
+    ('Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i64 { 0 } })\ntest* = () i32 { 0 }', 'conformance'),       # wrong return type
+    ('Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }', 'conformance'),         # wrong arity
+    ('Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }', 'conformance'), # wrong param type
+
+    # --- dup-fn: two top-level fns share a name (Zen has no overloading) ---
+    ('foo* = () i32 { 1 }\nfoo* = () i32 { 2 }\ntest* = () i32 { foo() }', 'dup-fn'),
+    ('a* = () i32 { 1 }\ndup* = () i32 { 2 }\ndup* = () i32 { 3 }\ntest* = () i32 { a() }', 'dup-fn'),
+    ('f* = (a: i32) i32 { a }\nf* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { f(1) }', 'dup-fn'),                  # even differing arity
+
+    # --- value-pos-return: an early (dropped) `return` in a value-position block arm ---
+    ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 'value-pos-return'),
+    ('f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 'value-pos-return'),
+    ('f* = (n: i32) i32 {\n v := n.match({ 0 => { return 1  2 }, _ => 9 })\n v\n}\ntest* = () i32 { f(0) }', 'value-pos-return'),
 ]
