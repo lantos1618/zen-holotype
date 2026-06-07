@@ -5,7 +5,7 @@
 // and trait conformance. check_linked layers a cross-module header on so an imported call is checked
 // against real signatures. It depends ONE-WAY on std.check (inference + the type lattice + the env);
 // std.check never imports this module back.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = std.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, no_stmts, resolve_module, dbuf, tnode } = std.check
 { Malloc, malloc } = std.alloc
 { byte_at } = std.lex
@@ -69,7 +69,10 @@ is_imported = (decls: [Decl], fn: str) bool {
 // so the validator treats it as known-but-unchecked, exactly as it does an imported name.
 is_trait_method = (decls: [Decl], fn: str) bool {
     found := false
-    decls.loop((h, i, d) { found = d.match ({ .DImpl(im) => im.methods.names_has(fn).match ({ true => true, false => found }), _ => found }) })
+    decls.loop((h, i, d) { found = d.match ({
+        .DImpl(im) => im.methods.names_has(fn).match ({ true => true, false => found }),
+        .DTraitDefault(td) => eq(td.fn.name, fn).match ({ true => true, false => found }),   // a defaulted method an impl may OMIT
+        _ => found }) })
     found
 }
 // the genc intrinsics (gen_call) + `malloc`/`sizeof` (runtime/builtin) — names with no Zen decl.
@@ -461,12 +464,20 @@ sig_matches = (a: Ptr<Malloc>, fd: FnTData, f: Func, tyname: str) bool {
         })
     })
 }
-// one declared trait field: 0 if it's not a method, or it's provided with a matching signature; 1 if
-// the method is missing or its signature differs.
+// does the trait `trname` declare a DEFAULT body for method `m`? (then an impl may OMIT it.)
+trait_has_default = (decls: [Decl], trname: str, m: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({
+        .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, m)).match ({ true => true, false => found }),
+        _ => found }) })
+    found
+}
+// one declared trait field: 0 if it's not a method, or it's provided with a matching signature, or it
+// is OMITTED but the trait supplies a default body; 1 if the method is missing (no default) or differs.
 method_err = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
     f.ty.match ({
         .FnT(fd) => im.methods.has_method(f.name).match ({
-            false => 1,                                                        // missing
+            false => decls.trait_has_default(im.trname, f.name).match ({ true => 0, false => 1 }),   // omitted: OK iff defaulted
             true  => a.sig_matches(fd, decls.the_func(impl_cname(im.trname, im.ty, f.name)), im.ty).match ({ true => 0, false => 1 })
         }),
         _ => 0
