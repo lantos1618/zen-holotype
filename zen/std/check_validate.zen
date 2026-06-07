@@ -112,22 +112,28 @@ check_arms = (env: Env, arms: [ArmData]) i32 {
     arms.loop((h, i, ar) { acc = acc + env.check_expr(ar.body) })
     acc
 }
-// A value-position match arm whose body contains an early `return` is INVALID. By the time the
-// validator runs, statement-position matches have been lowered to real `if`s (where a guard-clause
-// `return` correctly fires); a match still in EXPRESSION position lowers to a `({…})`/ternary, where
-// the emitter turns a trailing `return e` into a bare `e;` — the return is silently dropped. So an
-// early return only belongs in a statement-position guard. Reject it here, matching the Python
-// frontend (which won't even parse `return` inside a value-position arm).
-stmts_have_return = (stmts: [Stmt]) bool {
+// A value-position match arm whose body contains an EARLY (non-trailing) `return` is INVALID. By the
+// time the validator runs, statement-position matches have been lowered to real `if`s (where a
+// guard-clause `return` correctly fires); a match still in EXPRESSION position lowers to a `({…})`/
+// ternary, where the emitter (genc's ret_to_expr) turns the block's TRAILING statement into the
+// yielded value — but an EARLY `return` mid-block becomes a bare `e;` and is silently dropped, so
+// control never leaves the function. The parser makes a block's FINAL expression a `.Return` too
+// (that IS the yielded value — `{ store(p) }` parses to `[Return(store(p))]`), and genc emits it
+// correctly; so the trailing return is fine. Only a return BEFORE the last statement is the bug.
+// Reject those, matching the Python frontend (which won't parse a mid-arm `return` in value position).
+early_returns = (stmts: [Stmt]) bool {
     found := false
-    stmts.loop((h, i, st) { found = st.match ({ .Return(r) => true, _ => found }) })
+    stmts.loop((h, i, st) { found = (i < stmts.len - 1).match ({
+        true  => st.match ({ .Return(r) => true, _ => found }),       // a return that is NOT the last stmt
+        false => found                                                // the trailing stmt = the yielded value
+    }) })
     found
 }
-// 1 if `e` is a value-position branch/arm body whose Block contains a `return` (which the emitter
-// would silently drop). Used for both enum-match arms and bool/literal-match (Cond) branches.
+// 1 if `e` is a value-position branch/arm body whose Block contains an EARLY (dropped) `return`.
+// Used for both enum-match arms and bool/literal-match (Cond) branches.
 expr_drops_return = (e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Block(b) => stmts_have_return(b.stmts).match ({ true => 1, false => 0 }),
+        .Block(b) => b.stmts.early_returns().match ({ true => 1, false => 0 }),
         _         => 0
     })
 }
@@ -283,6 +289,29 @@ non_slice = (env: Env, e: Ptr<Expr>) bool {
 index_err = (env: Env, ix: IndexData) i32 {
     (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
 }
+// A value-position block arm `{ s1  s2 }` carries real statements (its trailing one is the yielded
+// value). check_expr lands on the Block; recurse into each statement's EXPRESSIONS so a genuinely-bad
+// call/operand/field inside a block arm is still caught (e.g. a mis-arity'd `g(1,2,3)` or an undefined
+// `nope()`). We check sub-expressions only — not the full statement-position env-threading (that needs
+// the allocator, which check_expr lacks) — so a later `x = v` after a `let` inside the block isn't
+// type-fit-checked; that's sound-leaning (never a false positive). A nested if/while body is skipped
+// the same way (its condition IS checked). The early-`return` case is handled by expr_drops_return.
+check_block_stmt = (env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.check_expr(l.value),
+        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value),
+        .Return(r)   => env.check_expr(r),
+        .ExprStmt(e) => env.check_expr(e),
+        .If(f)       => env.check_expr(f.c),
+        .While(w)    => env.check_expr(w.c),
+        .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value)
+    })
+}
+check_block = (env: Env, stmts: [Stmt]) i32 {
+    acc := 0
+    stmts.loop((h, i, st) { acc = acc + env.check_block_stmt(st) })
+    acc
+}
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.check_call(c) + env.check_args(c.args),
@@ -294,7 +323,8 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m) + arm_return_errs(m.arms),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
-        _               => 0                            // Int/Var/Tag/StrLit/Arrow: no call inside
+        .Block(b)       => env.check_block(b.stmts),    // a value-position block arm: recurse its statements
+        _               => 0                            // Int/Var/Tag/StrLit: no call inside
     })
 }
 // a returned value must fit the function's declared return type (env.exp). Sound-leaning: skip
