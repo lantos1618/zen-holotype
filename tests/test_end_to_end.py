@@ -37,9 +37,9 @@ def test_expected_pass_fail_set(checked):
         "main.main": True,
         "main.bad": False,      # nullable into nonnull
         "main.dirbad": False,   # read-only into mut-required
-        "ops.len": True,
-        "ops.cap": True,
-        "ops.bump": True,
+        "ops.width": True,
+        "ops.height": True,
+        "ops.grow": True,
     }
     assert "main.bad" not in passing and "main.dirbad" not in passing
 
@@ -47,8 +47,8 @@ def test_expected_pass_fail_set(checked):
 def test_failure_reasons_name_the_lattice_violation(checked):
     _, _, results, _ = checked
     why = {qual: reason for qual, ok, reason in results if not ok}
-    assert "Option<Ptr<Vec>>" in why["main.bad"] and "⊀" in why["main.bad"]
-    assert "MutPtr<Vec>" in why["main.dirbad"]
+    assert "Option<Ptr<Rect>>" in why["main.bad"] and "⊀" in why["main.bad"]
+    assert "MutPtr<Rect>" in why["main.dirbad"]
 
 
 def test_type_errors_carry_a_source_location(checked):
@@ -63,10 +63,10 @@ def test_type_errors_carry_a_source_location(checked):
 def test_codegen_is_const_correct(checked):
     files, namespace, _, passing = checked
     c = emit_c(files, passing, namespace)
-    # Ptr<Vec> -> const *, MutPtr<Vec> -> plain *
-    assert "ops_len(core_vec_Vec const * v)" in c
-    assert "ops_bump(core_vec_Vec * v)" in c
-    assert "struct core_vec_Vec { int32_t len; int32_t cap; };" in c
+    # Ptr<Rect> -> const *, MutPtr<Rect> -> plain *
+    assert "ops_width(core_rect_Rect const * r)" in c
+    assert "ops_grow(core_rect_Rect * r)" in c
+    assert "struct core_rect_Rect { int32_t w; int32_t h; };" in c
 
 
 def test_codegen_excludes_failing_functions(checked):

@@ -33,9 +33,9 @@ def test_full_build_runs_and_prints_12():
     out = subprocess.run([sys.executable, "-m", "zen", "build", str(EXAMPLES)],
                          capture_output=True, text=True, cwd=str(EXAMPLES.parent))
     assert out.returncode == 0, out.stderr
-    assert "vecdemo -> 12" in out.stdout
+    assert "rectdemo -> 12" in out.stdout
     assert "tests: test.zen" in out.stdout
-    assert "PASS ✓  test.test_len" in out.stdout
+    assert "PASS ✓  test.test_width" in out.stdout
 
 
 def test_test_runner_reports_pass_fail_skip(tmp_path, capsys):
