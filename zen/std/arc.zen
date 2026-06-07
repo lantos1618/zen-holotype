@@ -8,14 +8,14 @@
 // "ARC/ORC" family; ORC (cycle collection) additionally needs a Drop/Trace trait, still to come.
 // (Arc is only USEFUL once threads exist — zenc has no thread spawn yet — but the atomic primitive
 // it is built on is the foundation every lock-free structure needs.)
-{ heap, dispose } = std.alloc
+{ malloc, free } = std.alloc
 
 Arc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T ]
 
 arc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }
 
 new<T> = (x: T) Arc<T> {
-    base := heap(8 + sizeof(T))
+    base := malloc(8 + sizeof(T))
     store_i64(base, 1)                                // initial count — no other thread sees it yet
     r := Arc<T>{ base: base }
     s := r.arc_val()
@@ -32,5 +32,5 @@ clone<T> = (r: Arc<T>) Arc<T> {
 }
 drop<T> = (r: Arc<T>) void {
     // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
-    (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => dispose(r.base), false => {} })
+    (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} })
 }

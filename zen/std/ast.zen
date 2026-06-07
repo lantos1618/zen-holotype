@@ -13,7 +13,7 @@
 // `concat` HEAP-allocate every node and copy every slice (one generic copier each, monomorphized by
 // use), so generated AST safely outlives the function that built it and you never write `addr()`.
 
-{ heap } = std.alloc
+{ malloc } = std.alloc
 { Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl,
   vref, lit, bin, call, member, mkstruct, finit, FieldInit,
   slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
@@ -22,7 +22,7 @@
 // ── heap copies (the keystone): generic over the node type, so ONE of each replaces the old
 //    per-type ebuf/tnode/… zoo. The `[T]` return slot is what tells `slice` its element type, so
 //    every raw alloc goes through `nbuf` (the `like` witness only binds T to the caller's type). ──
-nbuf*<T> = (n: i64, like: [T]) [T] { slice(heap(n * sizeof(T)), n) }   // a fresh, uninit heap [T] of length n
+nbuf*<T> = (n: i64, like: [T]) [T] { slice(malloc(n * sizeof(T)), n) }   // a fresh, uninit heap [T] of length n
 node*<T>   = (v: T) Ptr<T> { dup([v])[0].addr() }                      // box one value: a heap Ptr<T> holding v
 dup*<T>    = (xs: [T]) [T] {                                           // a heap copy of a (stack) slice, safe to return
     buf := nbuf(xs.len, xs)
@@ -69,7 +69,7 @@ struct* = (name: str, fs: [Field]) Decl { dstruct(StructDecl { name: name, field
 accessor = (sname: str, f: Field) Decl {
     func(f.name, [param("s", named(sname).ptrto())], f.ty, [var("s").dot(f.name).ret()])
 }
-dbuf = (n: i64) [Decl] { slice(heap(n * sizeof(Decl)), n) }   // a [Decl] buffer (no value witness handy here)
+dbuf = (n: i64) [Decl] { slice(malloc(n * sizeof(Decl)), n) }   // a [Decl] buffer (no value witness handy here)
 derive_accessors* = (sd: StructDecl) [Decl] {
     buf := dbuf(sd.fields.len)
     sd.fields.loop((h, i, f) { buf[i] = accessor(sd.name, f) })

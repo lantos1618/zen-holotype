@@ -18,7 +18,7 @@
 //   step* = <R: Runtime>(r: MutPtr<R>, …) … { p := r.alloc(64) … r.suspend() … }
 //   step(addr(sync_runtime()), …)        // blocks, heap-allocates
 //   step(addr(async_runtime(4096)), …)   // yields, arena-allocates — same `step`
-{ heap } = std.alloc
+{ malloc } = std.alloc
 { yield } = std.coroutine
 
 Runtime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void }
@@ -26,10 +26,10 @@ Runtime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void 
 SyncRuntime*:  { _: i32 }
 AsyncRuntime*: { buf: RawPtr<u8>, off: i64 }          // bump-allocates from its own arena
 
-SyncRuntime.impl(Runtime, { alloc = (s: MutPtr<SyncRuntime>, n: i64) RawPtr<u8> { heap(n) }
+SyncRuntime.impl(Runtime, { alloc = (s: MutPtr<SyncRuntime>, n: i64) RawPtr<u8> { malloc(n) }
 suspend = (s: MutPtr<SyncRuntime>) void { } })
 AsyncRuntime.impl(Runtime, { alloc = (s: MutPtr<AsyncRuntime>, n: i64) RawPtr<u8> { p := s.buf.offset(s.off)  s.off = s.off + n  p }
 suspend = (s: MutPtr<AsyncRuntime>) void { yield() } })
 
 sync_runtime*  = () SyncRuntime  { SyncRuntime { _: 0 } }
-async_runtime* = (cap: i64) AsyncRuntime { AsyncRuntime { buf: heap(cap), off: 0 } }
+async_runtime* = (cap: i64) AsyncRuntime { AsyncRuntime { buf: malloc(cap), off: 0 } }
