@@ -1,0 +1,240 @@
+// std.genjs — a JavaScript backend written IN Zen, the sibling of std.genc_emit.  @self-hosted-only
+//
+// @self-hosted-only: it imports the shared AST from std.genc and the builder from std.string, so it
+// is checked cross-module (tests/test_genjs.py + the acid pass) and is NOT in the bootstrap SOURCES,
+// so adding it does not touch the self-host fixpoint.
+//
+// It walks the SAME shared AST (std.genc: Expr/Stmt/Decl/Func/…) that the C
+// backend walks, but emits JavaScript instead of C. The two backends prove the AST is a genuine
+// backend-neutral IR: `zen generates its own C AND JS`.
+//
+// Emitters are the same fluent UFCS String style as genc_emit: `s.append(a).js_expr(e)` is just
+// `js_expr(append(s, a), e)` — the String flows left-to-right through the chain.
+//
+// SCOPE (v1): the COMPUTATIONAL subset — arithmetic, calls, conditionals, structs (structural JS
+// objects), enums (tagged objects `{tag, _0}`), match (ternary chain on `.tag`), recursion, and
+// the imperative statements (let/assign/return/if/while). This is exactly genc's early-milestone
+// surface, mapped to a language with no manual memory.
+//
+// OUT OF SCOPE (documented, not faked — they assume a C memory model JS does not share):
+//   • the memory INTRINSICS load/store/offset/addr/cstr/store_i64/load_i64/atomic_add_i64/null_ptr
+//     (raw pointer ops) — emitted as a `/* unsupported-in-js: <name> */` marker, never a silent lie;
+//   • slices [T]/SliceLit/Index/Loop/IndexSet — a fat pointer over a flat buffer, no JS analogue here;
+//   • Lambda/Block — only ever produced by template inlining, which the C path handles; v1 targets
+//     monomorphic value code, so they fall through to the same marker.
+// A program that stays inside the value subset round-trips through node and computes the same number
+// the C backend would.
+
+{ String, new, append, push, finish } = std.string
+{ view, is_empty, eq } = std.str
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
+  BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData } = std.genc
+
+// ── int -> decimal digits (byte access only, mirroring genc_emit so genjs self-hosts) ───────
+jsbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+jsdigit = (d: i64) u8 { jsbyte("0123456789", d) }
+js_int* = (s: String, n: i64) String {
+    (n < 0).match ({ true => s.append("-").js_int(0 - n), false => s.js_int_nat(n) }) }
+js_int_nat = (s: String, n: i64) String {
+    (n < 10).match ({
+        true  => s.push(jsdigit(n)),
+        false => s.js_int(n / 10).push(jsdigit(n % 10))
+    })
+}
+
+// ── emit an expression (recursive) ──────────────────────────────────────────
+js_expr* = (s: String, e: Ptr<Expr>) String {
+    e.match ({                                       // match auto-derefs the Ptr<Expr>
+        .Int(n)  => s.js_int(n),
+        .Byte(n) => s.js_int(n),       // a char literal — the same integer, just typed u8 in check
+        .Var(v)  => s.append(v.name),
+        .Bin(b)  => s.js_bin(b),
+        .Call(c) => s.js_call(c),
+        .Cond(d) => s.js_cond(d),
+        .Member(m) => s.js_expr(m.obj).append(".").append(m.field),  // JS objects are structural — p.x
+        .Arrow(a)  => s.js_expr(a.obj).append(".").append(a.field),  // no pointers in JS — also p.x
+        .MakeEnum(m)   => s.js_mkenum(m),
+        .MakeStruct(m) => s.js_mkstruct(m),
+        .Tag(t)   => s.append("({tag: \"").append(t.variant).append("\"})"),    // a payloadless variant
+        .Match(m) => s.js_match(m),
+        .StrLit(sl) => s.js_strlit(sl.value),
+        // ── out of scope for v1 (see header): no JS memory model ──
+        .SliceLit(sd) => s.append("/* unsupported-in-js: slice-literal */"),
+        .Index(ix)    => s.append("/* unsupported-in-js: index */"),
+        .Loop(l)      => s.append("/* unsupported-in-js: loop */"),
+        .Lambda(lm)   => s.append("/* unsupported-in-js: lambda */"),
+        .Block(b)     => s.append("/* unsupported-in-js: block-expr */")
+    })
+}
+
+// a binary op. Integer division must TRUNCATE toward zero in JS (Math.trunc), since JS `/` is float;
+// '%' is JS's own remainder (truncating, matching C for these values); everything else is the same token.
+js_bin = (s: String, b: BinData) String {
+    eq(b.op, "/").match ({
+        true  => s.append("Math.trunc(").js_expr(b.lhs).append(" / ").js_expr(b.rhs).append(")"),
+        false => s.append("(").js_expr(b.lhs).append(" ").append(b.op).append(" ").js_expr(b.rhs).append(")")
+    })
+}
+
+// a call. The memory INTRINSICS have no JS form (raw pointers) — emit a clear marker, never a fake
+// function. Everything else is an ordinary `fn(args)`.
+is_intrinsic = (fn: str) bool {
+    eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "addr") || eq(fn, "cstr") ||
+    eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") ||
+    eq(fn, "slice") || eq(fn, "null_ptr") || eq(fn, "heap") || eq(fn, "malloc")
+}
+js_call = (s: String, c: CallData) String {
+    is_intrinsic(c.fn).match ({
+        true  => s.append("/* unsupported-in-js: intrinsic ").append(c.fn).append(" */"),
+        false => s.append(c.fn).append("(").js_args(c.args).append(")")
+    })
+}
+
+// a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
+js_args = (s: String, args: [Expr]) String {
+    out := s
+    args.loop((h, i, arg) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
+        out = out.js_expr(arg.addr())
+    })
+    out
+}
+
+js_cond = (s: String, d: CondData) String {
+    s.append("(").js_expr(d.c).append(" ? ").js_expr(d.t).append(" : ").js_expr(d.e).append(")")
+}
+
+// escape one byte for a JS string literal: " -> \" , \ -> \\ , newline -> \n , else itself
+js_escape_byte = (s: String, b: u8) String {
+    (b == '"').match ({
+        true  => s.append("\\\""),
+        false => (b == '\\').match ({
+            true  => s.append("\\\\"),
+            false => (b == '\n').match ({ true => s.append("\\n"), false => s.push(b) })
+        })
+    })
+}
+js_strlit = (s: String, v: str) String {
+    s.append("\"").js_escape_from(v, 0).append("\"")
+}
+js_escape_from = (s: String, v: str, i: i32) String {
+    (jsbyte(v, i) == 0).match ({
+        true  => s,
+        false => s.js_escape_byte(jsbyte(v, i)).js_escape_from(v, i + 1)
+    })
+}
+
+// a payload-carrying enum value `.Some(v)` -> `({tag: "Some", _0: v})` (one payload slot, named _0).
+js_mkenum = (s: String, m: MakeEnumData) String {
+    s.append("({tag: \"").append(m.variant).append("\", _0: ").js_expr(m.payload).append("})")
+}
+
+// a struct literal `Pt { x: a, y: b }` -> `({x: a, y: b})` (a structural JS object).
+js_mkstruct = (s: String, m: MakeStructData) String {
+    out := s.append("({")
+    m.inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
+        out = out.append(fi.name).append(": ").js_expr(fi.value)
+    })
+    out.append("})")
+}
+
+// ── match -> a ternary chain on the subject's `.tag`, binding the payload `_0` ───────────────
+// An arm with a payload binds via an arrow-IIFE: `((bind) => body)(_subj._0)`; a bare/payloadless
+// arm is just `body`. The last arm is the default (no tag test), matching genc's `_`/last-arm rule.
+js_armbody = (s: String, subj: str, a: ArmData) String {
+    is_empty(a.bind).match ({
+        true  => s.append("(").js_expr(a.body).append(")"),
+        false => s.append("((").append(a.bind).append(") => ").js_expr(a.body).append(")(").append(subj).append("._0)")
+    })
+}
+js_test = (s: String, subj: str, ename: str, a: ArmData) String {
+    s.append("(").append(subj).append(".tag === \"").append(a.variant).append("\" ? ").js_armbody(subj, a).append(" : ")
+}
+js_arms = (s: String, subj: str, ename: str, arms: [ArmData], i: i64) String {
+    (i == arms.len - 1).match ({
+        true  => s.js_armbody(subj, arms[i]),
+        false => s.js_test(subj, ename, arms[i]).js_arms(subj, ename, arms, i + 1).append(")")
+    })
+}
+// bind the subject once to a temp (an arrow-IIFE), then the tag-test chain reads that temp — no
+// re-evaluation, exactly like genc's `({ __auto_type _subj = …; … })`.
+js_match = (s: String, m: MatchData) String {
+    s.append("((_subj) => ").js_arms("_subj", m.ename, m.arms, 0).append(")(").js_expr(m.subj).append(")")
+}
+
+// ── statements ──────────────────────────────────────────────────────────────
+js_stmt = (s: String, st: Stmt) String {
+    st.match ({
+        .Let(l)    => s.append("let ").append(l.name).append(" = ").js_expr(l.value).append(";"),
+        .Assign(a) => s.js_expr(a.target).append(" = ").js_expr(a.value).append(";"),
+        .Return(e) => s.append("return ").js_expr(e).append(";"),
+        .ExprStmt(e) => s.js_expr(e).append(";"),
+        .If(f)     => s.js_if(f),
+        .While(w)  => s.append("while (").js_expr(w.c).append(") ").js_block(w.body),
+        // out of scope: a slice-element store has no JS memory model
+        .IndexSet(x) => s.append("/* unsupported-in-js: index-set */;")
+    })
+}
+
+js_block = (s: String, body: [Stmt]) String {
+    open := s.append("{ ")
+    body.loop((h, i, st) { open = open.js_stmt(st).append(" ") })
+    open.append("}")
+}
+
+js_if = (s: String, f: IfData) String {
+    s.append("if (").js_expr(f.c).append(") ").js_block(f.then).append(" else ").js_block(f.els)
+}
+
+// ── a function: `function name(params) { body }` ────────────────────────────
+js_params = (s: String, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })
+        out = out.append(p.name)                  // JS is untyped — names only
+    })
+    out
+}
+js_func* = (s: String, f: Func) String {
+    s.append("function ").append(f.name).append("(").js_params(f.params).append(") ").js_block(f.body)
+}
+
+// a template (an FnT param or type params with a body) is inlined at call sites in the C model and
+// has no standalone form — skip it, exactly as genc_emit does.
+is_fnt_ty = (t: Ty) bool { t.match ({ .FnT(ft) => true, _ => false }) }
+fn_has_fnt = (ps: [Param]) bool {
+    found := false
+    ps.loop((h, i, p) { found = is_fnt_ty(p.ty).match ({ true => true, false => found }) })
+    found
+}
+fn_is_template = (f: Func) bool { (f.params.fn_has_fnt() || (f.tparams.len > 0)) && (f.body.len > 0) }
+
+// ── a top-level declaration ─────────────────────────────────────────────────
+// Structs/enums emit NOTHING (JS objects are structural — `{x, y}` / `{tag, _0}` need no decl); we
+// drop a one-line comment so the module reads as a record of what was elided. Functions emit a def;
+// a template/foreign/import/raw/global emits nothing (no JS analogue in the value subset).
+js_decl* = (s: String, d: Decl) String {
+    d.match ({
+        .DFunc(f)    => fn_is_template(f).match ({ true => s, false => s.js_func(f) }),
+        .DStruct(sd) => s.append("// struct ").append(sd.name).append(" — structural in JS"),
+        .DEnum(ed)   => s.append("// enum ").append(ed.name).append(" — tagged object in JS"),
+        .DRaw(c)     => s,                  // verbatim C has no JS meaning
+        .DImpl(im)   => s,                  // impl record — methods are DFuncs
+        .DForeign(f) => s,                  // foreign decl — no JS body
+        .DImport(im) => s,                  // import — JS modules link separately
+        .DGenStruct(g) => s,               // generic template — only instances would emit
+        .DGenEnum(g)   => s,
+        .DGlobal(g)    => s                 // module global — not in the value subset
+    })
+}
+
+// genJs: a single function -> JS (the runtime-codegen seed, sibling of genC).
+genJs* = (f: Func) String { new().js_func(f) }
+
+// genModuleJs: a whole translation unit -> a JS module. Each decl on its own line, '\n'-separated.
+genModuleJs* = (decls: [Decl]) String {
+    s := new()
+    decls.loop((h, i, d) { s = s.js_decl(d).append("\n") })
+    s
+}
