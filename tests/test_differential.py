@@ -136,9 +136,34 @@ from _difftest import self_side, compare
     ("malloc = (n: i64) RawPtr<u8>\nRuntime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void }\nSync*: { _: i32 }\nSync.impl(Runtime, { alloc = (s: MutPtr<Sync>, n: i64) RawPtr<u8> { malloc(n) }, suspend = (s: MutPtr<Sync>) void { } })\ntask<R> = (r: MutPtr<R>) i64 { p := r.alloc(8)  store_i64(p, 5)  r.suspend()  store_i64(p, load_i64(p) + 100)  load_i64(p) }\ntest* = () i64 {\n  sy := Sync { _: 0 }\n  task(addr(sy))\n}", 105),
     # the SAME impl with NEWLINE separators must still work (don't regress the existing convention).
     ("malloc = (n: i64) RawPtr<u8>\nRuntime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void }\nSync*: { _: i32 }\nSync.impl(Runtime, { alloc = (s: MutPtr<Sync>, n: i64) RawPtr<u8> { malloc(n) }\nsuspend = (s: MutPtr<Sync>) void { } })\ntask<R> = (r: MutPtr<R>) i64 { p := r.alloc(8)  store_i64(p, 5)  r.suspend()  store_i64(p, load_i64(p) + 100)  load_i64(p) }\ntest* = () i64 {\n  sy := Sync { _: 0 }\n  task(addr(sy))\n}", 105),
+    # MULTI-STATEMENT BLOCK ARM (block-arm validator harden): a match arm body `{ s1  s2 }` runs BOTH
+    # statements. The validator used to flag the parser's synthesized trailing-return on the block's
+    # final expr as a "dropped return"; the emit was always correct. Here the `go == 1` true arm writes
+    # two distinct slots (7 and 35); reading both back proves both statements executed. 7 + 35 = 42.
+    ("malloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, go: i32) void { (go == 1).match({ true => { store_i64(p.offset(0), 7)  store_i64(p.offset(8), 35) }, false => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, 1)\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 42),
+    # the no-op (false) arm path: the SAME function with go != 1 leaves the slots at their primed 0s.
+    ("malloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, go: i32) void { (go == 1).match({ true => { store_i64(p.offset(0), 7)  store_i64(p.offset(8), 35) }, false => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, 0)\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 0),
+    # an ENUM match with a multi-statement block arm (same harden, enum-with-payload form, so the lowering
+    # uses a real tag test). .Ok(7) takes the first arm, writing 3 then 39 to the two slots; 3 + 39 = 42.
+    ("R*: Ok(i32) | Err\nmalloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, r: R) void { r.match({ .Ok(v) => { store_i64(p.offset(0), 3)  store_i64(p.offset(8), 39) }, .Err => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, .Ok(7))\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 42),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
+
+
+# Block-arm validator harden (reject-parity side): a well-typed multi-statement block arm validates with
+# ZERO errors (the false positive), but a genuinely-bad call INSIDE a block arm is still caught — the
+# validator now recurses a value-position block arm's statements. self_side returns reject for these.
+@pytest.mark.parametrize("src,verdict", [
+    # well-typed multi-statement block arm -> accepted
+    ("f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags, 1)  store_i64(flags, 2) }, false => {} }) }\ntest* = () i32 { 0 }", "accept"),
+    # wrong-arity local call inside a block arm -> rejected
+    ("g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", "reject"),
+    # mis-arity'd intrinsic inside a block arm -> rejected (store_i64 needs 2 args)
+    ("f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", "reject"),
+])
+def test_block_arm_validation(src, verdict):
+    assert self_side(src)["verdict"] == verdict, src
 
 
 # Cross-frontend agreement on a corpus where the Python reference is a valid oracle (no hex / prefix
@@ -266,17 +291,33 @@ def test_partial_match_without_wildcard_rejected(src):
     assert self_side(src)["verdict"] == "reject", src
 
 
-# A VALUE-position match arm with an early `return` is rejected. A value-position match lowers to a
-# `({…})`/ternary, where the emitter turns a trailing `return e` into a bare `e;` — the return is
-# silently dropped (wrong value). Guard returns must be STATEMENT-position (those lower to real `if`,
-# tested above). So reject value-position returns, matching the Python frontend. (C-audit #7.)
+# A VALUE-position match arm with an EARLY (non-trailing) `return` is rejected. A value-position match
+# lowers to a `({…})`/ternary; the emitter (genc's ret_to_expr) makes the block's TRAILING statement the
+# yielded value, but an EARLY `return` mid-block is turned into a bare `e;` and silently dropped — so
+# control never leaves the function and the WRONG (later) expr is yielded. Here `{ return x  x + 1 }`
+# would drop `return x` and yield `x + 1`. Guard returns must be STATEMENT-position (those lower to real
+# `if`, tested above). So reject early value-position returns. (C-audit #7; block-arm harden.)
 @pytest.mark.parametrize("src", [
-    "R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }",
-    "f* = (b: bool) i32 {\n v := b.match({ true => { return 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }",
+    "R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }",
+    "f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }",
 ])
 def test_value_position_return_rejected(src):
     from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
+
+
+# The dual of the above: a value-position arm whose block ends in a TRAILING `return` (or a bare trailing
+# expr) is the block's yielded value — genc emits it correctly, so it is ACCEPTED and computes the right
+# value. `{ return x }` and `{ x }` are AST-identical (the parser wraps a block's final expr in a Return);
+# only an EARLY return is the dropped-guard bug. This is the false-positive the block-arm harden removed.
+@pytest.mark.parametrize("src,want", [
+    ("R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }", 6),
+    ("f* = (b: bool) i32 {\n v := b.match({ true => { 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }", 7),
+])
+def test_value_position_trailing_yield_accepted(src, want):
+    from _difftest import self_side
+    d = self_side(src)
+    assert d["verdict"] == "accept" and d["value"] == want, (src, d)
 
 
 # Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /
