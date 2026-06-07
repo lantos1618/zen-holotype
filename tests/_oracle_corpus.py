@@ -40,6 +40,16 @@ VALUE_CASES = [
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
     ('A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A { v: 5 }\n  b := B { v: 6 }\n  addr(a).area() + addr(b).area()\n}', 41),
     ('P*: { x: i32 }\nQ*: { x: i32 }\nDbl*: { f: (Ptr<Self>, i32) i32 }\nP.impl(Dbl, { f = (p: Ptr<P>, k: i32) i32 { p.x + k } })\nQ.impl(Dbl, { f = (q: Ptr<Q>, k: i32) i32 { q.x * k } })\ntest* = () i32 {\n  p := P { x: 10 }\n  q := Q { x: 3 }\n  addr(p).f(2) + addr(q).f(4)\n}', 24),
+    # --- TRAIT DEFAULT METHODS: a trait method with a body; one type inherits it, another overrides it ---
+    ('Show*: { area = (s: Ptr<Self>) i32 { 100 } }\nA*: { v: i32 }\nB*: { v: i32 }\nA.impl(Show, { })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A { v: 5 }\n  b := B { v: 6 }\n  addr(a).area() + addr(b).area()\n}', 136),
+    # default body reads a field on the concrete receiver (Self -> A, member auto-derefs to ->)
+    ('Show*: { area = (s: Ptr<Self>) i32 { s.v + 1 } }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { a := A { v: 41 }  addr(a).area() }', 42),
+    # one trait, two defaults, an override of just one; the other default still dispatches
+    ('T*: { a = (s: Ptr<Self>) i32 { 1 }, b = (s: Ptr<Self>) i32 { 2 } }\nN*: { v: i32 }\nN.impl(T, { b = (s: Ptr<N>) i32 { 20 } })\ntest* = () i32 { n := N { v: 0 }  addr(n).a() * 100 + addr(n).b() }', 120),
+    # NEWLINE-separated defaults; a default body that CALLS another (omitted) defaulted method on Self
+    ('Greet*: {\n  name = (s: Ptr<Self>) i32 { 7 }\n  greet = (s: Ptr<Self>) i32 { s.name() + 1 }\n}\nP*: { v: i32 }\nP.impl(Greet, { })\ntest* = () i32 { p := P { v: 0 }  addr(p).greet() }', 8),
+    # a default dispatched through a GENERIC receiver, monomorphized per concrete type (Heap default, Bump override)
+    ('malloc = (n: i64) RawPtr<u8>\nAlloc*: { acquire = (s: MutPtr<Self>, n: i64) RawPtr<u8> { malloc(n) } }\nHeap*: { _: i32 }\nBump*: { buf: RawPtr<u8>, off: i64 }\nHeap.impl(Alloc, { })\nBump.impl(Alloc, { acquire = (s: MutPtr<Bump>, n: i64) RawPtr<u8> { p := s.buf.offset(s.off)  s.off = s.off + n  p } })\nfill<A> = (a: MutPtr<A>) i64 { p := a.acquire(8)  store_i64(p, 21)  q := a.acquire(8)  store_i64(q, 21)  load_i64(p) + load_i64(q) }\ntest* = () i32 {\n  h := Heap { _: 0 }\n  b := Bump { buf: malloc(64), off: 0 }\n  fill(addr(h)) + fill(addr(b)) + b.off\n}', 100),
     ('counter := 0\nbump* = () i32 { counter = counter + 1  counter }\ntest* = () i32 { bump() + bump() }', 3),
     ('total := 100\nadd* = (n: i32) i32 { total = total + n  total }\ntest* = () i32 { add(5)  add(20) }', 125),
     ('Cell*: { x: i64 }\ntest* = () i64 { c := Cell { x: 0 }  store_i64(addr(c), 42)  load_i64(addr(c)) }', 42),
@@ -234,6 +244,11 @@ VERDICT_CASES = [
     ('Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }', 'reject'),  # wrong param type
     ('Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }', 'accept'),
     ('Eq*: { eq: (Ptr<Self>, Ptr<Self>) bool }\nA*: { v: i32 }\nA.impl(Eq, { eq = (a: Ptr<A>, b: Ptr<A>) bool { 1 < 2 } })\ntest* = () i32 { 0 }', 'accept'),  # Self in two params
+    # --- TRAIT DEFAULT METHODS: an omitted method is OK iff the trait gives it a default body ---
+    ('Show*: { area = (s: Ptr<Self>) i32 { 1 } }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }', 'accept'),                              # omit a DEFAULTED method
+    ('Show*: { area = (s: Ptr<Self>) i32 { 1 } }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }', 'accept'), # override a defaulted method
+    ('T*: { a = (s: Ptr<Self>) i32 { 1 }, b: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(T, { })\ntest* = () i32 { 0 }', 'reject'),                    # b has NO default and is omitted
+    ('T*: { a = (s: Ptr<Self>) i32 { 1 }, b: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(T, { b = (s: Ptr<A>) i32 { 2 } })\ntest* = () i32 { 0 }', 'accept'),  # b provided, a defaulted
 
     # --- DUPLICATE FUNCTION NAMES: two top-level fns of one name collide (Zen has no overloading) ---
     ('f* = (a: i32) i32 { a }\nf* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { f(1) }', 'reject'),  # even differing arity

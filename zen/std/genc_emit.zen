@@ -335,7 +335,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DImport(im) => s,
         .DGenStruct(g) => s,                            // a generic template — only its instances emit
         .DGenEnum(g)   => s,
-        .DGlobal(g)    => s                             // a module global — no type fwd-decl
+        .DGlobal(g)    => s,                            // a module global — no type fwd-decl
+        .DTraitDefault(td) => s                         // a trait default body — no type fwd-decl
     }) })
 }
 
@@ -351,7 +352,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DImport(im) => s,                              // an import — modules link separately, emits nothing
         .DGenStruct(g) => s,                            // a generic template — monomorphize replaced it
         .DGenEnum(g)   => s,
-        .DGlobal(g)    => s                             // a module global — emitted by gen_global, not here
+        .DGlobal(g)    => s,                            // a module global — emitted by gen_global, not here
+        .DTraitDefault(td) => s                         // a trait default — resolve_module made it into impl DFuncs
     })
 }
 
@@ -425,6 +427,9 @@ gen_global = (s: String, d: Decl) String {
         _ => s
     })
 }
+// NB trait default-method bodies (DTraitDefault) are instantiated into concrete `impl_<Trait>_<Type>_m`
+// DFuncs by std.check.resolve_module BEFORE genModule runs — so here they are ordinary DFuncs, and a
+// DTraitDefault itself emits nothing (the resolver substitutes Self→Type and resolves member/arrow).
 // genModule: a whole translation unit — a list of decls (structs + globals + functions).
 genModule* = (raw: [Decl]) String {
     decls := raw.monomorphize()                         // pass 0: instantiate generic structs per use

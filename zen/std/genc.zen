@@ -105,7 +105,13 @@ ImportData*: { names: [Param] }
 // `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
 // the init's inferred type.
 GlobalData*: { name: str, ty: Ty, init: Ptr<Expr> }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData)   // DRaw = verbatim C escape
+// DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
+// `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
+// no C of its own: std.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
+// instantiates `impl_<Trait>_<Type>_<m>` from this body with `Self` → the concrete type, as an ordinary
+// DFunc. The checker treats a method with a default as satisfied even when an impl doesn't provide it.
+TraitDefData*: { trname: str, fn: Func }
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -214,6 +220,16 @@ dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
 dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData { name: name, ty: ty, init: init }) }
+dtraitdef* = (trname: str, fn: Func) Decl { .DTraitDefault(TraitDefData { trname: trname, fn: fn }) }
+// the FnT SIGNATURE of a function (its param types + ret) — used to give a default-bodied trait method
+// a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
+fnt_param_tys = (ps: [Param]) [Ty] {
+    buf := mono_tybuf(ps.len)
+    ps.loop((h, i, p) { buf[i] = p.ty })
+    buf
+}
+ty_node = (t: Ty) Ptr<Ty> { mono_tynode(t) }
+fnt_from_func* = (f: Func) Ty { fntype(fnt_param_tys(f.params), ty_node(f.ret)) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 

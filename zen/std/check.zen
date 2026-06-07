@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -275,12 +275,24 @@ method_in = (methods: [Param], fn: str) bool {
     methods.loop((h, i, n) { f = eq(n.name, fn).match ({ true => true, false => f }) })
     f
 }
+// does trait `trname` declare a default body for method `m`? (then an impl that omits `m` still
+// dispatches via the default's instantiated `impl_<trname>_<Type>_m`.)
+trait_default_exists = (decls: [Decl], trname: str, m: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({
+        .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, m)).match ({ true => true, false => found }),
+        _ => found }) })
+    found
+}
+// `x.m()` on a value of `tyname` routes to the impl method: m is either LISTED by the impl, or OMITTED
+// but supplied by the trait's default (both emit `impl_<Trait>_<Type>_m`, the latter via resolve_module's
+// default instantiation).
 dispatch_recv = (decls: [Decl], fn: str, tyname: str) str {
     found := ""
     decls.loop((h, i, d) {
         found = d.match ({
             .DImpl(im) => eq(im.ty, tyname).match ({
-                true  => im.methods.method_in(fn).match ({ true => impl_cname(im.trname, im.ty, fn), false => found }),
+                true  => (im.methods.method_in(fn) || decls.trait_default_exists(im.trname, fn)).match ({ true => impl_cname(im.trname, im.ty, fn), false => found }),
                 false => found
             }),
             _ => found
@@ -938,13 +950,81 @@ inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     })
 }
 
-// resolve a whole module, then splice every template call. Pass 1 fills enum match enames +
-// constructor types; pass 2 inlines templates (using their now-resolved bodies). The template
-// decls stay in the list but genModule skips them (genc.is_template).
+// ── trait DEFAULT-METHOD instantiation ──────────────────────────────────────────────────────────
+// A `Trait*: { m = (params) ret { … } }` parses to a DTraitDefault(trname, fn). Before resolving, we
+// materialize, for every `Type.impl(Trait, {…})` that OMITS m, a concrete DFunc `impl_<Trait>_<Type>_m`
+// whose param/ret types have Self→Type (reusing subst_ty with the single tparam `Self`) and whose body
+// is the default's. The normal resolve passes then lower member/arrow + UFCS in that body against the
+// concrete receiver — so the default dispatches exactly like a hand-written impl. The DTraitDefault is
+// KEPT in the list (genModule ignores it; the validator reads it to know the default exists).
+pbuf = (a: Ptr<Malloc>, n: i64) [Param] { slice(malloc(n * sizeof(Param) + sizeof(Param)), n) }
+tybuf1 = (a: Ptr<Malloc>) [Ty] { slice(malloc(sizeof(Ty)), 1) }
+self_param = (a: Ptr<Malloc>) [Param] { buf := a.pbuf(1)  buf[0] = param("Self", tvoid())  buf }
+self_arg = (a: Ptr<Malloc>, tyname: str) [Ty] { buf := a.tybuf1()  buf[0] = tnamed(tyname)  buf }
+// the default Func specialized to `tyname`: name mangled to the impl C name, Self substituted away.
+default_for_type = (a: Ptr<Malloc>, td: TraitDefData, tyname: str) Func {
+    sp := a.self_param()
+    ag := a.self_arg(tyname)
+    ps := a.pbuf(td.fn.params.len)
+    td.fn.params.loop((h, i, p) { ps[i] = param(p.name, sp.subst_ty(ag, p.ty)) })
+    Func { name: impl_cname(td.trname, tyname, td.fn.name), params: ps,
+           ret: sp.subst_ty(ag, td.fn.ret), tparams: td.fn.tparams, body: td.fn.body }
+}
+// is method name `m` among a [Param] of bare method names?
+param_names_have = (names: [Param], m: str) bool {
+    found := false
+    names.loop((h, i, p) { found = eq(p.name, m).match ({ true => true, false => found }) })
+    found
+}
+// does a `Type.impl(Trait, {…})` for (tyname,trname) already PROVIDE method m? (then no default for it)
+def_provided = (decls: [Decl], tyname: str, trname: str, m: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({
+        .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, trname)).match ({
+            true  => im.methods.param_names_have(m).match ({ true => true, false => found }),
+            false => found }),
+        _ => found }) })
+    found
+}
+// number of (impl-that-omits-this-default) pairs across all DTraitDefaults — the expansion's growth.
+default_expansion_count = (decls: [Decl]) i64 {
+    n := 0
+    decls.loop((h, i, d) { d.match ({ .DTraitDefault(td) => decls.loop((h2, j, e) { e.match ({
+        .DImpl(im) => (eq(im.trname, td.trname) && (decls.def_provided(im.ty, td.trname, td.fn.name) == false)).match ({ true => { n = n + 1 }, false => {} }),
+        _ => {} }) }), _ => {} }) })
+    n
+}
+// append, after `j`, one DFunc per impl of td.trname that omits td.fn.name. Returns the next free slot.
+emit_defaults_for = (a: Ptr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
+    k := j
+    decls.loop((h, i, d) { d.match ({
+        .DImpl(im) => (eq(im.trname, td.trname) && (decls.def_provided(im.ty, td.trname, td.fn.name) == false)).match ({
+            true  => { buf[k] = dfunc(a.default_for_type(td, im.ty))  k = k + 1 },
+            false => {} }),
+        _ => {} }) })
+    k
+}
+expand_defaults = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
+    extra := decls.default_expansion_count()
+    (extra == 0).match ({
+        true  => decls,
+        false => {
+            buf := a.dbuf(decls.len + extra)
+            decls.loop((h, i, d) { buf[i] = d })                       // keep every original decl (incl. DTraitDefault)
+            k := decls.len
+            decls.loop((h, i, d) { d.match ({ .DTraitDefault(td) => { k = a.emit_defaults_for(decls, td, buf, k) }, _ => {} }) })
+            buf
+        }
+    })
+}
+// resolve a whole module, then splice every template call. Pass 0 instantiates trait default bodies.
+// Pass 1 fills enum match enames + constructor types; pass 2 inlines templates (using their now-resolved
+// bodies). The template decls stay in the list but genModule skips them (genc.is_template).
 // pass 3 re-resolves AFTER inlining so that types which were generic in a template body
 // (a `.loop` over `[T]`, an index) re-infer against the now-CONCRETE arguments spliced in at the
 // call site — that's what lets a generic template like `fold<T>` run once monomorphized by use.
-resolve_module* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
+resolve_module* = (a: Ptr<Malloc>, raw: [Decl]) [Decl] {
+    decls := a.expand_defaults(raw)                       // pass 0: materialize trait-default impl funcs
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
     inl := a.dbuf(buf.len)
