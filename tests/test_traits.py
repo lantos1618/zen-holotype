@@ -1,12 +1,17 @@
-"""Phase 4 — impl blocks (and pointer field auto-deref), through the self-hosted toolchain.
+"""Phase 4 — impl blocks (and pointer field auto-deref), through the self-hosted BINARY oracle.
 
 `Type.impl(Trait, { m = (s: Ptr<Type>, …) R { … } })` — the methods become ordinary top-level
 functions named by the method, so a UFCS call `x.m(a)` (which the parser desugars to `m(x, a)`)
 resolves to one. A method's `s.field` on a `Ptr<Type>` receiver auto-derefs to `s->field`.
+
+Driven entirely by `_oracle` (the EMIT + CHECK binaries built from the committed bootstrap C by
+`cc` — zero Python): `self_side(src)["value"]` runs the emitted program; `check_count(src)` is the
+CHECK binary's trait-conformance error count. (Replaces the old `_selfhost.run_value` / `check_errors`
+that drove the Python host.)
 """
 import pytest
 
-from _selfhost import run_value, check_errors
+from _oracle import self_side, check_count
 
 
 @pytest.mark.parametrize("prog,want", [
@@ -23,8 +28,8 @@ from _selfhost import run_value, check_errors
      "Box.impl(B, { val = (b: Ptr<Box>) i32 { b.v }  twice = (b: Ptr<Box>) i32 { b.val() + b.val() } })\n"
      "test* = () i32 { b := Box { v: 21 }\n b.addr().twice() }", 42),
 ])
-def test_impl_method_runs(tmp_path, prog, want):
-    run_value(tmp_path, prog, want)
+def test_impl_method_runs(prog, want):
+    assert self_side(prog)["value"] == want, prog
 
 
 @pytest.mark.parametrize("prog,want", [
@@ -35,60 +40,59 @@ def test_impl_method_runs(tmp_path, prog, want):
      "Point.impl(Show, { render = (p: Ptr<Point>) i32 { p.x * 10 + p.y } })\n"
      "test* = () i32 { p := Point { x: 4, y: 2 }\n p.addr().render() }", 42),
 ])
-def test_declared_trait_with_impl_runs(tmp_path, prog, want):
-    run_value(tmp_path, prog, want)
+def test_declared_trait_with_impl_runs(prog, want):
+    assert self_side(prog)["value"] == want, prog
 
 
 # Trait conformance: an impl must DEFINE every method its trait declares. The check is tied to the
 # impl's OWN methods (recorded in DImpl), not a global function search — so an unrelated same-named
 # function elsewhere does NOT make a deficient impl conform.
-def test_conformance_accepts_complete_impl(tmp_path):
-    assert check_errors(tmp_path,
+def test_conformance_accepts_complete_impl():
+    assert check_count(
         "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>) i32 { p.x }  area = (p: Ptr<Point>) i32 { p.x } })") == 0
 
 
-def test_conformance_rejects_missing_method(tmp_path):
-    assert check_errors(tmp_path,
+def test_conformance_rejects_missing_method():
+    assert check_count(
         "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>) i32 { p.x } })") == 1
 
 
-def test_conformance_unrelated_global_does_not_satisfy(tmp_path):
+def test_conformance_unrelated_global_does_not_satisfy():
     # a top-level `area` exists, but Point's impl doesn't DEFINE area -> still non-conforming
-    assert check_errors(tmp_path,
+    assert check_count(
         "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
         "area* = (n: i32) i32 { n }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>) i32 { p.x } })") == 1
 
 
 # Signature conformance (Goal Arc 2): an impl method must match the trait's declared signature, with
-# `Self` read as the implementing type — not just exist by name. Verdicts match the Python frontend
-# ("signature does not match the trait").
-def test_conformance_accepts_matching_signature(tmp_path):
+# `Self` read as the implementing type — not just exist by name.
+def test_conformance_accepts_matching_signature():
     # Self -> Point: the impl's `Ptr<Point>` matches the trait's `Ptr<Self>`, ret i32 == i32.
     # (an FnT param list is bare TYPES: `(Ptr<Self>, i32)`; the impl's params may be named.)
-    assert check_errors(tmp_path,
+    assert check_count(
         "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>, k: i32) i32 { p.x + k } })") == 0
 
 
-def test_conformance_rejects_arity_mismatch(tmp_path):
+def test_conformance_rejects_arity_mismatch():
     # trait declares one param (the Self receiver); impl takes an extra -> non-conforming
-    assert check_errors(tmp_path,
+    assert check_count(
         "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>, k: i32) i32 { p.x } })") == 1
 
 
-def test_conformance_rejects_return_mismatch(tmp_path):
+def test_conformance_rejects_return_mismatch():
     # trait declares ret i32; impl returns bool -> non-conforming
-    assert check_errors(tmp_path,
+    assert check_count(
         "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>) bool { p.x < 1 } })") == 1
 
 
-def test_conformance_rejects_param_type_mismatch(tmp_path):
+def test_conformance_rejects_param_type_mismatch():
     # trait declares the second param i32; impl takes u8 -> non-conforming (not the Self param)
-    assert check_errors(tmp_path,
+    assert check_count(
         "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\n"
         "Point.impl(Show, { render = (p: Ptr<Point>, k: u8) i32 { p.x } })") == 1
