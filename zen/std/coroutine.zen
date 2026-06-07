@@ -7,13 +7,28 @@
 // Goal Z's no-color async. A coroutine runs on its own allocator-placed stack; yield() suspends it
 // back to whoever resumed it, and resume() continues it (returning 0 once its work fn returns). The
 // COMPILER has zero async machinery — "sync vs async" is purely a stdlib choice of Runtime (std.runtime
-// picks suspend = noop vs = yield over this). x86-64 Linux ucontext_t field offsets, poked directly
-// since the struct is opaque here: uc_link @8, uc_stack.ss_sp @16, uc_stack.ss_size @32.
+// picks suspend = noop vs = yield over this). The struct is opaque here, so we poke its fields by
+// raw byte offset — but those offsets are NOT magic numbers: they are the documented glibc
+// x86-64 ucontext_t ABI, named below (UC_LINK_OFF / UC_SS_SP_OFF / UC_SS_SIZE_OFF / UC_CTX_SIZE).
 { heap } = std.alloc
 
 getcontext  = (ctx: RawPtr<u8>) i32
 makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void   // fn becomes a real C `void(*)()`
 swapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32
+
+// ── glibc x86-64 ucontext_t ABI (the de-magicked offsets) ─────────────────────────────────────
+// ucontext_t opens with `unsigned long uc_flags; ucontext_t *uc_link; stack_t uc_stack; ...`, and
+// stack_t is `void *ss_sp; int ss_flags; size_t ss_size`. On the LP64 x86-64 ABI that lays out as:
+//   uc_flags @0 (8) · uc_link @8 (8) · uc_stack.ss_sp @16 (8) · ss_flags @24 (4,+4 pad) · ss_size @32 (8)
+// These are fixed by the platform ABI (see <ucontext.h>/<bits/types/struct_ucontext.h>); a real
+// sizeof/offsetof path would need translate-c to pull in that header (see this commit's risk note),
+// so until then we name the constants instead of scattering bare 8/16/32. UC_CTX_SIZE bounds the
+// whole struct: real glibc sizeof(ucontext_t) is 968, rounded up to 1024 with headroom.
+UC_LINK_OFF    := 8       // offsetof(ucontext_t, uc_link)
+UC_SS_SP_OFF   := 16      // offsetof(ucontext_t, uc_stack.ss_sp)
+UC_SS_SIZE_OFF := 32      // offsetof(ucontext_t, uc_stack.ss_size)
+UC_CTX_SIZE    := 1024    // >= glibc-x86-64 sizeof(ucontext_t) (968), rounded up
+CORO_STACK     := 65536   // per-coroutine stack: 64 KiB
 
 // The running coroutine's context, the resumer's context, and a yield flag. yield() runs INSIDE the
 // work fn (no args), so it finds the contexts here; resume() reads the flag to tell a yield from a
@@ -27,13 +42,13 @@ Coro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
 // spawn `work` on a fresh 64 KiB stack. When work returns, uc_link (= the saved resumer context)
 // brings control back with the flag clear, so resume reports completion.
 spawn* = (work: () void) Coro {
-    stack := heap(65536)
-    ctx := heap(1024)
-    lnk := heap(1024)
+    stack := heap(CORO_STACK)
+    ctx := heap(UC_CTX_SIZE)
+    lnk := heap(UC_CTX_SIZE)
     getcontext(ctx)
-    store_i64(ctx.offset(16), stack)     // uc_stack.ss_sp  = the new stack
-    store_i64(ctx.offset(32), 65536)     // uc_stack.ss_size
-    store_i64(ctx.offset(8), lnk)        // uc_link -> the resumer's context
+    store_i64(ctx.offset(UC_SS_SP_OFF), stack)        // uc_stack.ss_sp  = the new stack
+    store_i64(ctx.offset(UC_SS_SIZE_OFF), CORO_STACK) // uc_stack.ss_size
+    store_i64(ctx.offset(UC_LINK_OFF), lnk)           // uc_link -> the resumer's context
     makecontext(ctx, work, 0)
     Coro { ctx: ctx, link: lnk, stack: stack }
 }
