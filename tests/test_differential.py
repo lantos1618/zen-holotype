@@ -119,9 +119,19 @@ from _difftest import self_side, compare
     # dispatch → impl_Drop_Resource_drop) BEFORE freeing — deterministic destruction. We clone (count 2),
     # release once (count 1 → drop must NOT fire: mid stays 0), release again (count 0 → drop fires EXACTLY
     # once: g_dropped → 1). mid*10 + g_dropped = 0*10 + 1 = 1. (std.drop, inlined; drop.zen is the canonical
-    # @self-hosted-only form, acid-checked. A fully GENERIC Own<T> can't yet route addr(slot:T).drop() to
-    # T's impl — dispatch names resolve BEFORE monomorphization — so the owning pointer is concrete here.)
+    # @self-hosted-only form, acid-checked. Concrete Own here; a fully GENERIC Own<T> is the next case.)
     ("malloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped := 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn*: { base: RawPtr<u8> }\nown_val = (o: Own) [Resource] { slice(o.base.offset(8), 1) }\nown_new = (x: Resource) Own { base := malloc(8 + sizeof(Resource))  store_i64(base, 1)  o := Own { base: base }  s := o.own_val()  s[0] = x  o }\nown_clone = (o: Own) Own { store_i64(o.base, load_i64(o.base) + 1)  Own { base: o.base } }\nown_ptr = (o: Own) MutPtr<Resource> { addr(o.own_val()[0]) }\nown_release = (o: Own) void { n := load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin = (o: Own) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o := own_new(Resource { id: 5 })\n  o2 := o.own_clone()\n  o.own_release()\n  mid := g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}", 1),
+    # GENERIC OWNING POINTER + DROP-AT-ZERO (THE generic-dispatch keystone — unblocks generic Drop/ORC):
+    # a fully GENERIC Own<T> over ANY T that impls Drop. own_fin<T>'s body does `o.own_ptr().drop()` where
+    # own_ptr<T> returns MutPtr<T> — a UFCS trait call whose receiver is the bare tparam in the template.
+    # It re-dispatches to the CONCRETE impl only after Own<T> is monomorphized into Own<Resource>: (1)
+    # check.index_elem infers the spliced `own_val(o)[0]` element from the substituted Index.elem (=Resource,
+    # not the void-typed inlined slice), so the receiver infers as MutPtr<Resource> and the post-inline
+    # re-resolve pass routes `.drop()` → impl_Drop_Resource_drop; (2) check_validate.is_trait_method keeps the
+    # un-monomorphized template's bare `drop` from being false-rejected. Same clone→2, release×2 dance as the
+    # concrete case: drop fires EXACTLY once at count zero → mid*10 + g_dropped = 1. This is the canonical
+    # std.drop Own<T> proof (drop.zen now holds the generic form, acid-checked).
+    ("malloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped := 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }\nown_new<T> = (x: T) Own<T> { base := malloc(8 + sizeof(T))  store_i64(base, 1)  o := Own<T> { base: base }  s := o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T> { base: o.base } }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { addr(o.own_val()[0]) }\nown_release<T> = (o: Own<T>) void { n := load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o := own_new(Resource { id: 5 })\n  o2 := o.own_clone()\n  o.own_release()\n  mid := g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}", 1),
     # CAPSTONE (Goal Z, the whole thesis in one program): ONE Runtime trait unifies allocation AND
     # suspension { alloc, suspend }. The SAME generic task<R> — allocate a cell from R, fill it across a
     # suspend point — runs SYNC (Sync: alloc=malloc, suspend=no-op; straight through) and ASYNC (Async:
