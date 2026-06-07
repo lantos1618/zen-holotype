@@ -109,6 +109,19 @@ from _difftest import self_side, compare
     # __atomic_add_fetch) so concurrent threads can share it race-free. clone→2, drop→1, value 42 → 252.
     # (std.arc, inlined; the `0 - 1` decrement avoids a prefix-minus literal.)
     ("Arc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\narc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }\narc_new<T> = (x: T) Arc<T> { base := malloc(8 + sizeof(T))  store_i64(base, 1)  r := Arc<T>{ base: base }  sl := r.arc_val()  sl[0] = x  r }\narc_get<T> = (r: Arc<T>) T { r.arc_val()[0] }\narc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }\narc_clone<T> = (r: Arc<T>) Arc<T> { atomic_add_i64(r.base, 1)  Arc<T>{ base: r.base } }\narc_drop<T> = (r: Arc<T>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} }) }\ntest* = () i64 {\n  r := arc_new(42)\n  r2 := r.arc_clone()\n  a := r.arc_count()\n  r.arc_drop()\n  b := r.arc_count()\n  v := r.arc_get()\n  a * 100 + b * 10 + v\n}", 252),
+    # DROP DISPATCH (Goal Z ORC, the deterministic-destruction primitive): a concrete type that implements
+    # the Drop trait has its destructor reached as `addr(value).drop()` → impl_Drop_Resource_drop, the same
+    # UFCS trait dispatch std.runtime/std.alloc use. Proves a destructor runs side effects (g += id) on the
+    # value via a MutPtr<Self> receiver, with ZERO compiler support beyond multi-implementor traits.
+    ("g_dropped := 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + s.id } })\ntest* = () i32 {\n  r := Resource { id: 7 }\n  addr(r).drop()\n  g_dropped\n}", 7),
+    # OWNING Rc + DROP-AT-ZERO (Goal Z ORC, the whole point): an owning refcounted pointer over a Resource
+    # that implements Drop. release() decrements; at count ZERO it calls the payload's Drop (concrete
+    # dispatch → impl_Drop_Resource_drop) BEFORE freeing — deterministic destruction. We clone (count 2),
+    # release once (count 1 → drop must NOT fire: mid stays 0), release again (count 0 → drop fires EXACTLY
+    # once: g_dropped → 1). mid*10 + g_dropped = 0*10 + 1 = 1. (std.drop, inlined; drop.zen is the canonical
+    # @self-hosted-only form, acid-checked. A fully GENERIC Own<T> can't yet route addr(slot:T).drop() to
+    # T's impl — dispatch names resolve BEFORE monomorphization — so the owning pointer is concrete here.)
+    ("malloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped := 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn*: { base: RawPtr<u8> }\nown_val = (o: Own) [Resource] { slice(o.base.offset(8), 1) }\nown_new = (x: Resource) Own { base := malloc(8 + sizeof(Resource))  store_i64(base, 1)  o := Own { base: base }  s := o.own_val()  s[0] = x  o }\nown_clone = (o: Own) Own { store_i64(o.base, load_i64(o.base) + 1)  Own { base: o.base } }\nown_ptr = (o: Own) MutPtr<Resource> { addr(o.own_val()[0]) }\nown_release = (o: Own) void { n := load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin = (o: Own) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o := own_new(Resource { id: 5 })\n  o2 := o.own_clone()\n  o.own_release()\n  mid := g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}", 1),
     # CAPSTONE (Goal Z, the whole thesis in one program): ONE Runtime trait unifies allocation AND
     # suspension { alloc, suspend }. The SAME generic task<R> — allocate a cell from R, fill it across a
     # suspend point — runs SYNC (Sync: alloc=malloc, suspend=no-op; straight through) and ASYNC (Async:
