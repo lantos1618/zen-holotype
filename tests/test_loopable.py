@@ -31,7 +31,7 @@ def run(tmp_path, files, passing, namespace):
 _BUF = """
 Buf*: { data: [i32], len: i32 }
 At*: { at: (Ptr<Self>, i64) i32 }
-Buf.impl(At) { at = (b: Ptr<Buf>, i: i64) i32 { b.data[i] } }
+Buf.impl(At, { at = (b: Ptr<Buf>, i: i64) i32 { b.data[i] } })
 """
 
 

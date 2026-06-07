@@ -12,7 +12,7 @@
 { view, is_empty, eq } = std.str
 { heap } = std.alloc
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
-  BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData,
+  BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
   gen_ty, is_template, is_trait, call, arm, block, param, field } = std.genc
 { monomorphize } = std.genc_mono
 
@@ -112,10 +112,14 @@ gen_call = (s: String, c: CallData) String {
     eq(c.fn, "load").match   ({ true => s.append("(*(").gen_expr(c.arg0()).append("))"), false =>
     eq(c.fn, "offset").match ({ true => s.append("((uint8_t*)(").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"), false =>
     eq(c.fn, "store").match  ({ true => s.append("(*(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"), false =>
+    eq(c.fn, "load_i64").match  ({ true => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append("))"), false =>        // typed i64 read at a byte ptr
+    eq(c.fn, "store_i64").match ({ true => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"), false =>   // typed i64 write
+    eq(c.fn, "atomic_add_i64").match ({ true => s.append("__atomic_add_fetch((int64_t*)(").gen_expr(c.arg0()).append("), (").gen_expr(c.arg1()).append("), 5)"), false =>   // atomic add, returns new value (5 = __ATOMIC_SEQ_CST)
     eq(c.fn, "addr").match   ({ true => s.append("(&(").gen_expr(c.arg0()).append("))"), false =>
     eq(c.fn, "cstr").match   ({ true => s.append("((const char*)(").gen_expr(c.arg0()).append("))"), false =>
     eq(c.fn, "slice").match  ({ true => s.append("(zslice){ .ptr = (void*)(").gen_expr(c.arg0()).append("), .len = (").gen_expr(c.arg1()).append(") }"), false =>
-    s.append(c.fn).append("(").gen_args(c.args).append(")") }) }) }) }) }) })
+    eq(c.fn, "null_ptr").match ({ true => s.append("0"), false =>      // a null pointer constant (valid in a static initializer)
+    s.append(c.fn).append("(").gen_args(c.args).append(")") }) }) }) }) }) }) }) }) }) })
 }
 
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
@@ -160,11 +164,11 @@ gen_cond = (s: String, d: CondData) String {
 
 // escape one byte for a C string literal: " -> \" , \ -> \\ , newline -> \n , else itself
 gen_escape_byte = (s: String, b: u8) String {
-    (b == 34).match ({
+    (b == '"').match ({
         true  => s.append("\\\""),
-        false => (b == 92).match ({
+        false => (b == '\\').match ({
             true  => s.append("\\\\"),
-            false => (b == 10).match ({ true => s.append("\\n"), false => s.push(b) })
+            false => (b == '\n').match ({ true => s.append("\\n"), false => s.push(b) })
         })
     })
 }
@@ -248,11 +252,28 @@ gen_if = (s: String, f: IfData) String {
     s.append("if (").gen_expr(f.c).append(") ").gen_block(f.then).append(" else ").gen_block(f.els)
 }
 
+gen_ty_list = (s: String, ts: [Ty]) String {                  // comma-separated bare types: `A, B, C`
+    out := s
+    ts.loop((h, i, t) {
+        out = (i == 0).match ({ true => out, false => out.append(", ") })
+        out = out.gen_ty(t.addr())
+    })
+    out
+}
+// a function-pointer parameter `RET (*name)(ARG, …)`. Most FnT params are a template's lambda (inlined
+// at the call site, never emitted); but an FnT param that survives into a REAL C signature — an extern
+// callback like makecontext's `void(*func)()` — must render as an actual function pointer here.
+gen_fnptr_param = (s: String, ft: FnTData, name: str) String {
+    s.gen_ty(ft.ret).append("(*").append(name).append(")(").gen_ty_list(ft.params).append(")")
+}
 gen_params = (s: String, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.append(", ") })   // comma between, not before
-        out = out.gen_ty(p.ty.addr()).append(" ").append(p.name)
+        out = p.ty.match ({
+            .FnT(ft) => out.gen_fnptr_param(ft, p.name),
+            _        => out.gen_ty(p.ty.addr()).append(" ").append(p.name)
+        })
     })
     out
 }
@@ -314,7 +335,8 @@ gen_fwd = (s: String, d: Decl) String {
         .DForeign(f) => s,
         .DImport(im) => s,
         .DGenStruct(g) => s,                            // a generic template — only its instances emit
-        .DGenEnum(g)   => s
+        .DGenEnum(g)   => s,
+        .DGlobal(g)    => s                             // a module global — no type fwd-decl
     }) })
 }
 
@@ -329,7 +351,8 @@ gen_decl* = (s: String, d: Decl) String {
         .DForeign(f) => s,                              // a foreign decl — only a prototype (gen_proto), no body
         .DImport(im) => s,                              // an import — modules link separately, emits nothing
         .DGenStruct(g) => s,                            // a generic template — monomorphize replaced it
-        .DGenEnum(g)   => s
+        .DGenEnum(g)   => s,
+        .DGlobal(g)    => s                             // a module global — emitted by gen_global, not here
     })
 }
 
@@ -396,12 +419,20 @@ gen_funcs = (s: String, decls: [Decl]) String {
     out
 }
 
-// genModule: a whole translation unit — a list of decls (structs + functions).
+// a module-level mutable global: `static <ty> name = <init>;` (init must be a C-constant). [Goal Z E1]
+gen_global = (s: String, d: Decl) String {
+    d.match ({
+        .DGlobal(g) => s.append("static ").gen_ty(g.ty.addr()).append(" ").append(g.name).append(" = ").gen_expr(g.init).append("; "),
+        _ => s
+    })
+}
+// genModule: a whole translation unit — a list of decls (structs + globals + functions).
 genModule* = (raw: [Decl]) String {
     decls := raw.monomorphize()                         // pass 0: instantiate generic structs per use
     s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")   // the [T] fat pointer
     decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
     decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
     s = s.gen_types_upto(decls, 0, slen(decls))         // pass 3: type defs in dependency order
+    decls.loop((h, i, d) { s = s.gen_global(d) })       // pass 3.5: module globals (after their type, before fns)
     s.gen_funcs(decls)                                  // pass 4: functions + raw
 }

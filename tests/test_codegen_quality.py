@@ -13,7 +13,7 @@ _PROGRAMS = [
     "apply* = (f: (i32) i32, x: i32) i32 { f(x) }\ntest* = () i32 { apply((n) { n + 1 }, 5) }",
     "fold*<T> = (xs: [T], init: T, f: (T, T) T) T {\n acc := init\n xs.loop((h, i, x) { acc = f(acc, x) })\n acc\n}\n"
     "test* = () i32 { fold([3, 4, 5], 0, (a, x) { a + x }) }",
-    "Counter*: { n: i32 }\nCounter.impl(Inc) { bump = (c: Ptr<Counter>) i32 { c.n + 1 } }\n"
+    "Counter*: { n: i32 }\nCounter.impl(Inc, { bump = (c: Ptr<Counter>) i32 { c.n + 1 } })\n"
     "test* = () i32 { c := Counter { n: 41 }\n c.addr().bump() }",
 ]
 

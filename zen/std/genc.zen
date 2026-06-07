@@ -86,7 +86,7 @@ EnumDecl*: { name: str, variants: [VariantDef] }
 // a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
 // The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
 GenEnumDecl*: { name: str, tparams: [Param], variants: [VariantDef] }
-// records a `Type.impl(Trait) { … }` block: the type, the trait, and the method names THIS impl
+// records a `Type.impl(Trait, { … })` block: the type, the trait, and the method names THIS impl
 // actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
 // functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
 // verify conformance (every method the Trait declares is one this impl provides). genModule skips it.
@@ -100,7 +100,12 @@ ImplData*: { ty: str, trname: str, methods: [Param] }
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
 ImportData*: { names: [Param] }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl)   // DRaw = verbatim C escape
+// DGlobal is a module-level MUTABLE global `name := init` (Goal Z E1 — scheduler/runtime state).
+// It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
+// `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
+// the init's inferred type.
+GlobalData*: { name: str, ty: Ty, init: Ptr<Expr> }
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData)   // DRaw = verbatim C escape
 
 // constructors — return a value; the caller addr()s an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
@@ -131,7 +136,10 @@ has_fnt_param* = (ps: [Param]) bool {
     ps.loop((h, i, p) { found = p.ty.is_fnt().match ({ true => true, false => found }) })
     found
 }
-is_generic_fn* = (f: Func) bool { f.params.has_fnt_param() || (f.tparams.len > 0) }
+// a TEMPLATE: a fn inlined/monomorphized per call site — has an FnT param (a lambda to splice) or type
+// params (to substitute). It must have a BODY to inline; a BODYLESS fn (an extern like makecontext, with
+// an FnT param for a real C function-pointer arg) is a normal callable, NOT a template to inline away.
+is_generic_fn* = (f: Func) bool { (f.params.has_fnt_param() || (f.tparams.len > 0)) && (f.body.len > 0) }
 is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.is_generic_fn(), _ => false }) }
 // a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no
 // runtime representation in the monomorphic/inline model — the impl methods are plain functions —
@@ -181,6 +189,12 @@ mangle_str* = (base: str, args: [Ty]) str {
     args.loop((h, i, t) { out = out.append("_").mangle_ty(t) })
     out.finish()
 }
+// the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
+// types implementing the same trait method emit DISTINCT C functions (matching the Python frontend's
+// impl_cname). UFCS dispatch routes `x.m()` to the impl for x's type (std.check dispatch_name).
+impl_cname* = (trname: str, ty: str, method: str) str {
+    new().append("impl_").append(trname).append("_").append(ty).append("_").append(method).finish()
+}
 tptr* = (t: Ptr<Ty>) Ty { .Ptr(t) }
 tslice* = (e: Ptr<Ty>) Ty { .Slice(e) }
 param* = (nm: str, t: Ty) Param { Param { name: nm, ty: t } }
@@ -199,6 +213,7 @@ dimport* = (names: [Param]) Decl { .DImport(ImportData { names: names }) }
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData { ty: ty, trname: trname, methods: methods }) }
+dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData { name: name, ty: ty, init: init }) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 

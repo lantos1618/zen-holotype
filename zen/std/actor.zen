@@ -1,0 +1,21 @@
+// @self-hosted-only — imports the self-hosted-only std.coroutine; load_std / acid SKIP this file on the
+// marker. Its mechanics are validated by an equivalent self-contained test (test_differential).
+//
+// std.actor — the ACTOR substrate: a Mailbox, a bounded FIFO of i64 messages, plus the convention that
+// an actor is a coroutine that loops { recv a message; act on it; yield when empty }. Combined with
+// std.sched, independent actors run cooperatively and communicate ONLY by sending messages — no shared
+// mutable state, no locks. (Messages are i64 here — a tag or a pointer-as-i64 to a heap payload; a
+// generic Mailbox<T> awaits the module resolver. The actor's run-loop is user code, wired via the
+// scheduler; this module provides the queue it talks through.)
+{ heap } = std.alloc
+
+Mailbox*: { buf: RawPtr<u8>, head: i64, tail: i64, cap: i64 }   // ring of `cap` i64 slots; head consumes, tail produces
+
+mailbox* = (cap: i64) Mailbox { Mailbox { buf: heap(cap * 8), head: 0, tail: 0, cap: cap } }
+
+// send/recv mutate the cursors (so they take MutPtr); the SLOT index wraps at cap (`% cap`) so the
+// cursors can grow unbounded as i64 while the buffer access stays in [0, cap) — a true ring, never OOB.
+// A bounded queue: keep pending() <= cap (else a send overwrites the oldest unconsumed slot).
+send* = (m: MutPtr<Mailbox>, v: i64) void { store_i64(m.buf.offset((m.tail % m.cap) * 8), v)  m.tail = m.tail + 1 }
+recv* = (m: MutPtr<Mailbox>) i64 { v := load_i64(m.buf.offset((m.head % m.cap) * 8))  m.head = m.head + 1  v }
+pending* = (m: Ptr<Mailbox>) i64 { m.tail - m.head }   // messages waiting to be received

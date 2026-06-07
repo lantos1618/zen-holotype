@@ -54,9 +54,116 @@ from _difftest import self_side, compare
     # bug-hunt #11: a bare ctor passed DIRECTLY as a generic-consumer arg (T inferred from the payload)
     ("Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }", 1),
     ("Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }", 7),
+    # MULTI-IMPLEMENTOR traits (#5-full): two types implementing the same trait method now emit
+    # DISTINCT C functions (impl_<Trait>_<Type>_<m>) and `x.m()` dispatches on x's type — previously
+    # both emitted `int32_t area(...)` and cc rejected with "conflicting types".
+    ("A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A { v: 5 }\n  b := B { v: 6 }\n  addr(a).area() + addr(b).area()\n}", 41),
+    # a single trait method with two implementors taking an extra arg, both reached + dispatched
+    ("P*: { x: i32 }\nQ*: { x: i32 }\nDbl*: { f: (Ptr<Self>, i32) i32 }\nP.impl(Dbl, { f = (p: Ptr<P>, k: i32) i32 { p.x + k } })\nQ.impl(Dbl, { f = (q: Ptr<Q>, k: i32) i32 { q.x * k } })\ntest* = () i32 {\n  p := P { x: 10 }\n  q := Q { x: 3 }\n  addr(p).f(2) + addr(q).f(4)\n}", 24),
+    # MODULE-LEVEL MUTABLE GLOBALS (Goal Z E1): `counter := 0` emits `static int32_t counter = 0;`
+    # and a function reads/assigns it across calls (state persists). Was: mis-parsed as an enum.
+    ("counter := 0\nbump* = () i32 { counter = counter + 1  counter }\ntest* = () i32 { bump() + bump() }", 3),
+    ("total := 100\nadd* = (n: i32) i32 { total = total + n  total }\ntest* = () i32 { add(5)  add(20) }", 125),
+    # store_i64/load_i64 intrinsics (Goal Z 2b): a typed 8-byte write/read at a byte ptr (arena cursors,
+    # Rc/ARC headers) — `store(offset(p,8),x)` would write only 1 byte (uint8_t* cast); these write 8.
+    ("Cell*: { x: i64 }\ntest* = () i64 { c := Cell { x: 0 }  store_i64(addr(c), 42)  load_i64(addr(c)) }", 42),
+    # ARENA bump allocator (Goal Z 4): two bump allocations from one buffer, each written/read via the
+    # cursor — proves pointer-add allocation + field mutation through MutPtr<Arena>. (std.arena, here
+    # inlined since run_value has no module resolver yet; arena.zen itself is acid-checked.)
+    ("Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nan* = (cap: i64) Arena { Arena { buf: malloc(cap), off: 0, cap: cap } }\nbump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> { p := a.buf.offset(a.off)  a.off = a.off + n  p }\ntest* = () i64 {\n  a := an(64)\n  p := addr(a).bump(8)\n  store_i64(p, 99)\n  q := addr(a).bump(8)\n  store_i64(q, 1)\n  load_i64(p) + load_i64(q)\n}", 100),
+    # a VOID-tail bool match (a conditional side-effect, e.g. a guarded store/free) must lower to an
+    # `if` STATEMENT, not a C ternary — `(c ? void : void)` is invalid C. Here set() stores only when
+    # n != 0; the tail match yields nothing. (Regression guard for the void-Cond → if fix.)
+    ("Cell*: { x: i64 }\nset = (c: MutPtr<Cell>, n: i64) void { (n == 0).match({ true => {}, false => store_i64(c, n) }) }\ntest* = () i64 {\n  c := Cell { x: 1 }\n  set(addr(c), 0)\n  set(addr(c), 9)\n  load_i64(addr(c))\n}", 9),
+    # Rc<T> reference counting (Goal Z 5, the RC in ARC/ORC): shared heap value with a refcount header
+    # [count|value]; clone bumps the count, drop decrements + frees at zero (a void-tail conditional
+    # free). Asserts clone→2, drop→1, value 42 preserved. (std.rc, inlined; rc.zen is self-hosted-only.)
+    ("Rc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\nrc_val<T> = (r: Rc<T>) [T] { slice(r.base.offset(8), 1) }\nrc_new<T> = (x: T) Rc<T> { base := malloc(8 + sizeof(T))  store_i64(base, 1)  r := Rc<T>{ base: base }  s := r.rc_val()  s[0] = x  r }\nrc_get<T> = (r: Rc<T>) T { r.rc_val()[0] }\nrc_clone<T> = (r: Rc<T>) Rc<T> { store_i64(r.base, load_i64(r.base) + 1)  Rc<T>{ base: r.base } }\nrc_drop<T> = (r: Rc<T>) void { n := load_i64(r.base) - 1  store_i64(r.base, n)  (n == 0).match({ true => free(r.base), false => {} }) }\nrc_count<T> = (r: Rc<T>) i64 { load_i64(r.base) }\ntest* = () i64 {\n  r := rc_new(42)\n  r2 := r.rc_clone()\n  a := r.rc_count()\n  r.rc_drop()\n  b := r.rc_count()\n  v := r.rc_get()\n  a * 100 + b * 10 + v\n}", 252),
+    # STACKFUL COROUTINE over libc ucontext (Goal Z 6, the no-color async primitive): a fiber on its
+    # own stack yields back to the resumer and is resumed again. work() yields twice (g_n 1→11→111),
+    # resume reports 1,1 (alive) then 0 (returned) → 111*10 + 1+1+0 = 1112. Exercises: a function-
+    # pointer extern param (makecontext's `void(*)()`), null_ptr globals, store_i64 into a raw context
+    # buffer, and bodyless-extern-with-FnT not being inlined. (std.coroutine, inlined here.)
+    ("getcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur := null_ptr()\ng_link := null_ptr()\ng_yielded := 0\ng_n := 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro {\n  stack := malloc(65536)\n  ctx := malloc(1024)\n  link := malloc(1024)\n  getcontext(ctx)\n  store_i64(ctx.offset(16), stack)\n  store_i64(ctx.offset(32), 65536)\n  store_i64(ctx.offset(8), link)\n  makecontext(ctx, work, 0)\n  Coro { ctx: ctx, link: link, stack: stack }\n}\ncoro_resume = (c: Coro) i32 { g_cur = c.ctx  g_link = c.link  g_yielded = 0  swapcontext(c.link, c.ctx)  g_yielded }\ncoro_yield = () void { g_yielded = 1  swapcontext(g_cur, g_link) }\nwork = () void { g_n = g_n + 1  coro_yield()  g_n = g_n + 10  coro_yield()  g_n = g_n + 100 }\ntest* = () i32 { c := coro_new(work)  r1 := coro_resume(c)  r2 := coro_resume(c)  r3 := coro_resume(c)  g_n * 10 + r1 + r2 + r3 }", 1112),
+    # COLORLESS RUNTIME (Goal Z 7 — the thesis): ONE generic worker<R> calls r.suspend(); with Sync
+    # it's a no-op (runs straight through, 111); with Async it's a coroutine yield (driven by 3 resumes,
+    # also 111). Same source, sync or async chosen by the Runtime type — zero function coloring, the
+    # compiler has no async machinery. 111*1000 + 111 = 111111. (std.runtime + std.coroutine, inlined.)
+    ("getcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur := null_ptr()\ng_back := null_ptr()\ng_flag := 0\ng_n := 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro {\n  stack := malloc(65536)\n  ctx := malloc(1024)\n  link := malloc(1024)\n  getcontext(ctx)\n  store_i64(ctx.offset(16), stack)\n  store_i64(ctx.offset(32), 65536)\n  store_i64(ctx.offset(8), link)\n  makecontext(ctx, work, 0)\n  Coro { ctx: ctx, link: link, stack: stack }\n}\ncoro_resume = (c: Coro) i32 { g_cur = c.ctx  g_back = c.link  g_flag = 0  swapcontext(c.link, c.ctx)  g_flag }\ncoro_yield = () void { g_flag = 1  swapcontext(g_cur, g_back) }\nRuntime*: { suspend: (Ptr<Self>) void }\nSync*: { _: i32 }\nAsync*: { _: i32 }\nSync.impl(Runtime, { suspend = (s: Ptr<Sync>) void { } })\nAsync.impl(Runtime, { suspend = (a: Ptr<Async>) void { coro_yield() } })\nworker<R> = (r: Ptr<R>) void { g_n = g_n + 1  r.suspend()  g_n = g_n + 10  r.suspend()  g_n = g_n + 100 }\nawork = () void { a := Async { _: 0 }  worker(addr(a)) }\ntest* = () i32 {\n  s := Sync { _: 0 }\n  worker(addr(s))\n  sync_n := g_n\n  g_n = 0\n  c := coro_new(awork)\n  coro_resume(c)\n  coro_resume(c)\n  coro_resume(c)\n  sync_n * 1000 + g_n\n}", 111111),
+    # COOPERATIVE SCHEDULER (Goal Z 9): a general round-robin run([Coro]) drives two coroutines to
+    # completion. Each appends its id to a shared log between yields (A:1,1,1  B:2,2); interleaved
+    # execution gives 12121 (sequential would be 11122). Exercises a slice-of-struct literal [a,b]
+    # whose elements come from template-call locals (the Block-type-inference fix). (std.sched, inlined.)
+    ("getcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur := null_ptr()\ng_back := null_ptr()\ng_flag := 0\ng_log := 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro { stack := malloc(65536)  ctx := malloc(1024)  link := malloc(1024)  getcontext(ctx)  store_i64(ctx.offset(16), stack)  store_i64(ctx.offset(32), 65536)  store_i64(ctx.offset(8), link)  makecontext(ctx, work, 0)  Coro { ctx: ctx, link: link, stack: stack } }\nresume = (c: Coro) i32 { g_cur = c.ctx  g_back = c.link  g_flag = 0  swapcontext(c.link, c.ctx)  g_flag }\ncoro_yield = () void { g_flag = 1  swapcontext(g_cur, g_back) }\nawork = () void { g_log = g_log * 10 + 1  coro_yield()  g_log = g_log * 10 + 1  coro_yield()  g_log = g_log * 10 + 1 }\nbwork = () void { g_log = g_log * 10 + 2  coro_yield()  g_log = g_log * 10 + 2 }\nmark_alive = (flags: RawPtr<u8>, i: i32, n: i32) void { store_i64(flags.offset(i * 8), 1)  init_flags(flags, i + 1, n) }\ninit_flags = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => mark_alive(flags, i, n), false => {} }) }\ndo_tick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 { r := coros[i].resume()  store_i64(flags.offset(i * 8), r)  r }\ntick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 { (load_i64(flags.offset(i * 8)) == 1).match({ true => do_tick(coros, flags, i), false => 0 }) }\npass = (coros: [Coro], flags: RawPtr<u8>, i: i32, n: i32) i32 { (i < n).match({ true => tick(coros, flags, i) + pass(coros, flags, i + 1, n), false => 0 }) }\ndrive = (coros: [Coro], flags: RawPtr<u8>, n: i32) void { (pass(coros, flags, 0, n) > 0).match({ true => drive(coros, flags, n), false => {} }) }\nrun = (coros: [Coro]) void { n := coros.len  flags := malloc(n * 8)  init_flags(flags, 0, n)  drive(coros, flags, n) }\ntest* = () i32 { a := coro_new(awork)  b := coro_new(bwork)  run([a, b])  g_log }", 12121),
+    # ACTORS over a mailbox (Goal Z 9): a producer and consumer coroutine, scheduled cooperatively,
+    # communicate ONLY through a heap FIFO. Producer sends 1,2,3 (yielding between); consumer folds
+    # g_acc = g_acc*10 + recv(), yielding when empty. Ordered hand-off → 123. (std.actor, inlined.)
+    ("getcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur := null_ptr()\ng_back := null_ptr()\ng_flag := 0\ng_mbox := null_ptr()\ng_head := 0\ng_tail := 0\ng_acc := 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro { stack := malloc(65536)  ctx := malloc(1024)  link := malloc(1024)  getcontext(ctx)  store_i64(ctx.offset(16), stack)  store_i64(ctx.offset(32), 65536)  store_i64(ctx.offset(8), link)  makecontext(ctx, work, 0)  Coro { ctx: ctx, link: link, stack: stack } }\ncoro_resume = (c: Coro) i32 { g_cur = c.ctx  g_back = c.link  g_flag = 0  swapcontext(c.link, c.ctx)  g_flag }\ncoro_yield = () void { g_flag = 1  swapcontext(g_cur, g_back) }\nsend = (m: i64) void { store_i64(g_mbox.offset(g_tail * 8), m)  g_tail = g_tail + 1 }\nrecv = () i64 { m := load_i64(g_mbox.offset(g_head * 8))  g_head = g_head + 1  m }\nhas_msg = () i32 { (g_head < g_tail).match({ true => 1, false => 0 }) }\nproducer = () void { send(1)  coro_yield()  send(2)  coro_yield()  send(3) }\ntake = () void { g_acc = g_acc * 10 + recv() }\nconsume = (remaining: i32) void { (remaining == 0).match({ true => {}, false => (has_msg() == 1).match({ true => after_take(remaining), false => after_wait(remaining) }) }) }\nafter_take = (remaining: i32) void { take()  consume(remaining - 1) }\nafter_wait = (remaining: i32) void { coro_yield()  consume(remaining) }\nconsumer = () void { consume(3) }\nstep = (c: Coro, alive: i32) i32 { (alive == 1).match({ true => coro_resume(c), false => 0 }) }\nrun2 = (a: Coro, b: Coro, aa: i32, bb: i32) void { na := step(a, aa)  nb := step(b, bb)  ((na + nb) > 0).match({ true => run2(a, b, na, nb), false => {} }) }\ntest* = () i32 { g_mbox = malloc(128)  p := coro_new(producer)  c := coro_new(consumer)  run2(p, c, 1, 1)  g_acc }", 123),
+    # ONE ALLOCATOR ABSTRACTION over HEAP + ARENA (Goal Z): a single Alloc trait, implemented by Heap
+    # (malloc-backed, stateless) and Bump (a stateful arena that advances its cursor through MutPtr<Self>
+    # INSIDE the dispatched impl method). The same generic fill<A> allocates two i64s from either — 42
+    # from each → 84. This is the unified memory abstraction the colorless Runtime builds on.
+    ("Alloc*: { acquire: (MutPtr<Self>, i64) RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nHeap*: { _: i32 }\nBump*: { buf: RawPtr<u8>, off: i64 }\nHeap.impl(Alloc, { acquire = (s: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) } })\nBump.impl(Alloc, { acquire = (s: MutPtr<Bump>, n: i64) RawPtr<u8> { p := s.buf.offset(s.off)  s.off = s.off + n  p } })\nfill<A> = (a: MutPtr<A>) i64 { p := a.acquire(8)  store_i64(p, 21)  q := a.acquire(8)  store_i64(q, 21)  load_i64(p) + load_i64(q) }\ntest* = () i32 {\n  h := Heap { _: 0 }\n  b := Bump { buf: malloc(64), off: 0 }\n  fill(addr(h)) + fill(addr(b)) + b.off\n}", 100),
+    # Arc<T> ATOMIC reference counting (Goal Z, the ARC in ARC/ORC): same layout/API as Rc<T> but
+    # clone/drop adjust the refcount with the atomic_add_i64 intrinsic (a SEQ_CST fetch-add → GCC
+    # __atomic_add_fetch) so concurrent threads can share it race-free. clone→2, drop→1, value 42 → 252.
+    # (std.arc, inlined; the `0 - 1` decrement avoids a prefix-minus literal.)
+    ("Arc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\narc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }\narc_new<T> = (x: T) Arc<T> { base := malloc(8 + sizeof(T))  store_i64(base, 1)  r := Arc<T>{ base: base }  sl := r.arc_val()  sl[0] = x  r }\narc_get<T> = (r: Arc<T>) T { r.arc_val()[0] }\narc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }\narc_clone<T> = (r: Arc<T>) Arc<T> { atomic_add_i64(r.base, 1)  Arc<T>{ base: r.base } }\narc_drop<T> = (r: Arc<T>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} }) }\ntest* = () i64 {\n  r := arc_new(42)\n  r2 := r.arc_clone()\n  a := r.arc_count()\n  r.arc_drop()\n  b := r.arc_count()\n  v := r.arc_get()\n  a * 100 + b * 10 + v\n}", 252),
+    # DROP DISPATCH (Goal Z ORC, the deterministic-destruction primitive): a concrete type that implements
+    # the Drop trait has its destructor reached as `addr(value).drop()` → impl_Drop_Resource_drop, the same
+    # UFCS trait dispatch std.runtime/std.alloc use. Proves a destructor runs side effects (g += id) on the
+    # value via a MutPtr<Self> receiver, with ZERO compiler support beyond multi-implementor traits.
+    ("g_dropped := 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + s.id } })\ntest* = () i32 {\n  r := Resource { id: 7 }\n  addr(r).drop()\n  g_dropped\n}", 7),
+    # OWNING Rc + DROP-AT-ZERO (Goal Z ORC, the whole point): an owning refcounted pointer over a Resource
+    # that implements Drop. release() decrements; at count ZERO it calls the payload's Drop (concrete
+    # dispatch → impl_Drop_Resource_drop) BEFORE freeing — deterministic destruction. We clone (count 2),
+    # release once (count 1 → drop must NOT fire: mid stays 0), release again (count 0 → drop fires EXACTLY
+    # once: g_dropped → 1). mid*10 + g_dropped = 0*10 + 1 = 1. (std.drop, inlined; drop.zen is the canonical
+    # @self-hosted-only form, acid-checked. A fully GENERIC Own<T> can't yet route addr(slot:T).drop() to
+    # T's impl — dispatch names resolve BEFORE monomorphization — so the owning pointer is concrete here.)
+    ("malloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped := 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn*: { base: RawPtr<u8> }\nown_val = (o: Own) [Resource] { slice(o.base.offset(8), 1) }\nown_new = (x: Resource) Own { base := malloc(8 + sizeof(Resource))  store_i64(base, 1)  o := Own { base: base }  s := o.own_val()  s[0] = x  o }\nown_clone = (o: Own) Own { store_i64(o.base, load_i64(o.base) + 1)  Own { base: o.base } }\nown_ptr = (o: Own) MutPtr<Resource> { addr(o.own_val()[0]) }\nown_release = (o: Own) void { n := load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin = (o: Own) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o := own_new(Resource { id: 5 })\n  o2 := o.own_clone()\n  o.own_release()\n  mid := g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}", 1),
+    # CAPSTONE (Goal Z, the whole thesis in one program): ONE Runtime trait unifies allocation AND
+    # suspension { alloc, suspend }. The SAME generic task<R> — allocate a cell from R, fill it across a
+    # suspend point — runs SYNC (Sync: alloc=malloc, suspend=no-op; straight through) and ASYNC (Async:
+    # alloc=arena, suspend=coroutine-yield; driven by two resumes). Zero function coloring, one source,
+    # memory + scheduling both chosen by the Runtime. 105 (sync) + 105 (async) = 210.
+    ("getcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur := null_ptr()\ng_back := null_ptr()\ng_flag := 0\ng_result := 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro { stack := malloc(65536)  ctx := malloc(1024)  link := malloc(1024)  getcontext(ctx)  store_i64(ctx.offset(16), stack)  store_i64(ctx.offset(32), 65536)  store_i64(ctx.offset(8), link)  makecontext(ctx, work, 0)  Coro { ctx: ctx, link: link, stack: stack } }\ncoro_resume = (c: Coro) i32 { g_cur = c.ctx  g_back = c.link  g_flag = 0  swapcontext(c.link, c.ctx)  g_flag }\ncoro_yield = () void { g_flag = 1  swapcontext(g_cur, g_back) }\nRuntime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void }\nSync*: { _: i32 }\nAsync*: { buf: RawPtr<u8>, off: i64 }\nSync.impl(Runtime, { alloc = (s: MutPtr<Sync>, n: i64) RawPtr<u8> { malloc(n) }\nsuspend = (s: MutPtr<Sync>) void { } })\nAsync.impl(Runtime, { alloc = (s: MutPtr<Async>, n: i64) RawPtr<u8> { p := s.buf.offset(s.off)  s.off = s.off + n  p }\nsuspend = (s: MutPtr<Async>) void { coro_yield() } })\ntask<R> = (r: MutPtr<R>) void { p := r.alloc(8)  store_i64(p, 5)  r.suspend()  store_i64(p, load_i64(p) + 100)  g_result = g_result + load_i64(p) }\nawork = () void { a := Async { buf: malloc(64), off: 0 }  task(addr(a)) }\ntest* = () i32 {\n  sy := Sync { _: 0 }\n  task(addr(sy))\n  c := coro_new(awork)\n  coro_resume(c)\n  coro_resume(c)\n  g_result\n}", 210),
+    # COMMA-SEPARATED multi-method impl (harden): methods in `Type.impl(Trait, { m1 = f1, m2 = f2 })`
+    # may be separated by a COMMA (like struct-literal fields), not only a newline. Before the fix the
+    # second method's name became `,` (it emitted `impl_Runtime_Sync_,` and dispatch broke). Here a
+    # two-method Runtime{alloc,suspend} is written with comma separators and BOTH methods dispatch:
+    # alloc stores 5, suspend is a no-op, then 5+100=105. (Pairs with the newline-separated capstone.)
+    ("malloc = (n: i64) RawPtr<u8>\nRuntime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void }\nSync*: { _: i32 }\nSync.impl(Runtime, { alloc = (s: MutPtr<Sync>, n: i64) RawPtr<u8> { malloc(n) }, suspend = (s: MutPtr<Sync>) void { } })\ntask<R> = (r: MutPtr<R>) i64 { p := r.alloc(8)  store_i64(p, 5)  r.suspend()  store_i64(p, load_i64(p) + 100)  load_i64(p) }\ntest* = () i64 {\n  sy := Sync { _: 0 }\n  task(addr(sy))\n}", 105),
+    # the SAME impl with NEWLINE separators must still work (don't regress the existing convention).
+    ("malloc = (n: i64) RawPtr<u8>\nRuntime*: { alloc: (MutPtr<Self>, i64) RawPtr<u8>, suspend: (MutPtr<Self>) void }\nSync*: { _: i32 }\nSync.impl(Runtime, { alloc = (s: MutPtr<Sync>, n: i64) RawPtr<u8> { malloc(n) }\nsuspend = (s: MutPtr<Sync>) void { } })\ntask<R> = (r: MutPtr<R>) i64 { p := r.alloc(8)  store_i64(p, 5)  r.suspend()  store_i64(p, load_i64(p) + 100)  load_i64(p) }\ntest* = () i64 {\n  sy := Sync { _: 0 }\n  task(addr(sy))\n}", 105),
+    # MULTI-STATEMENT BLOCK ARM (block-arm validator harden): a match arm body `{ s1  s2 }` runs BOTH
+    # statements. The validator used to flag the parser's synthesized trailing-return on the block's
+    # final expr as a "dropped return"; the emit was always correct. Here the `go == 1` true arm writes
+    # two distinct slots (7 and 35); reading both back proves both statements executed. 7 + 35 = 42.
+    ("malloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, go: i32) void { (go == 1).match({ true => { store_i64(p.offset(0), 7)  store_i64(p.offset(8), 35) }, false => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, 1)\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 42),
+    # the no-op (false) arm path: the SAME function with go != 1 leaves the slots at their primed 0s.
+    ("malloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, go: i32) void { (go == 1).match({ true => { store_i64(p.offset(0), 7)  store_i64(p.offset(8), 35) }, false => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, 0)\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 0),
+    # an ENUM match with a multi-statement block arm (same harden, enum-with-payload form, so the lowering
+    # uses a real tag test). .Ok(7) takes the first arm, writing 3 then 39 to the two slots; 3 + 39 = 42.
+    ("R*: Ok(i32) | Err\nmalloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, r: R) void { r.match({ .Ok(v) => { store_i64(p.offset(0), 3)  store_i64(p.offset(8), 39) }, .Err => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, .Ok(7))\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 42),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
+
+
+# Block-arm validator harden (reject-parity side): a well-typed multi-statement block arm validates with
+# ZERO errors (the false positive), but a genuinely-bad call INSIDE a block arm is still caught — the
+# validator now recurses a value-position block arm's statements. self_side returns reject for these.
+@pytest.mark.parametrize("src,verdict", [
+    # well-typed multi-statement block arm -> accepted
+    ("f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags, 1)  store_i64(flags, 2) }, false => {} }) }\ntest* = () i32 { 0 }", "accept"),
+    # wrong-arity local call inside a block arm -> rejected
+    ("g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", "reject"),
+    # mis-arity'd intrinsic inside a block arm -> rejected (store_i64 needs 2 args)
+    ("f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", "reject"),
+])
+def test_block_arm_validation(src, verdict):
+    assert self_side(src)["verdict"] == verdict, src
 
 
 # Cross-frontend agreement on a corpus where the Python reference is a valid oracle (no hex / prefix
@@ -184,17 +291,33 @@ def test_partial_match_without_wildcard_rejected(src):
     assert self_side(src)["verdict"] == "reject", src
 
 
-# A VALUE-position match arm with an early `return` is rejected. A value-position match lowers to a
-# `({…})`/ternary, where the emitter turns a trailing `return e` into a bare `e;` — the return is
-# silently dropped (wrong value). Guard returns must be STATEMENT-position (those lower to real `if`,
-# tested above). So reject value-position returns, matching the Python frontend. (C-audit #7.)
+# A VALUE-position match arm with an EARLY (non-trailing) `return` is rejected. A value-position match
+# lowers to a `({…})`/ternary; the emitter (genc's ret_to_expr) makes the block's TRAILING statement the
+# yielded value, but an EARLY `return` mid-block is turned into a bare `e;` and silently dropped — so
+# control never leaves the function and the WRONG (later) expr is yielded. Here `{ return x  x + 1 }`
+# would drop `return x` and yield `x + 1`. Guard returns must be STATEMENT-position (those lower to real
+# `if`, tested above). So reject early value-position returns. (C-audit #7; block-arm harden.)
 @pytest.mark.parametrize("src", [
-    "R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }",
-    "f* = (b: bool) i32 {\n v := b.match({ true => { return 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }",
+    "R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }",
+    "f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }",
 ])
 def test_value_position_return_rejected(src):
     from _difftest import self_side
     assert self_side(src)["verdict"] == "reject", src
+
+
+# The dual of the above: a value-position arm whose block ends in a TRAILING `return` (or a bare trailing
+# expr) is the block's yielded value — genc emits it correctly, so it is ACCEPTED and computes the right
+# value. `{ return x }` and `{ x }` are AST-identical (the parser wraps a block's final expr in a Return);
+# only an EARLY return is the dropped-guard bug. This is the false-positive the block-arm harden removed.
+@pytest.mark.parametrize("src,want", [
+    ("R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }", 6),
+    ("f* = (b: bool) i32 {\n v := b.match({ true => { 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }", 7),
+])
+def test_value_position_trailing_yield_accepted(src, want):
+    from _difftest import self_side
+    d = self_side(src)
+    assert d["verdict"] == "accept" and d["value"] == want, (src, d)
 
 
 # Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /

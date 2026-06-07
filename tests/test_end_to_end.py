@@ -209,7 +209,7 @@ def test_used_illtyped_impl_refused(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Box*<T>: { val: T }\n"
         "Score: { score: (Ptr<Self>) i32 }\n"
-        "Box.impl(Score) { score = (b: Ptr<Box>) i32 { b.val } }\n"   # b.val : T ⊀ i32
+        "Box.impl(Score, { score = (b: Ptr<Box>) i32 { b.val } })\n"   # b.val : T ⊀ i32
         "total*<T: Score> = (x: Ptr<T>) i32 { score(x) }\n"
         "main* = () i32 { total(addr(Box { val: 9 })) }\n")
     files = load(tmp_path)
@@ -227,7 +227,7 @@ def test_unused_illtyped_impl_still_builds(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Box*<T>: { val: T }\n"
         "Score: { score: (Ptr<Self>) i32 }\n"
-        "Box.impl(Score) { score = (b: Ptr<Box>) i32 { b.val } }\n"
+        "Box.impl(Score, { score = (b: Ptr<Box>) i32 { b.val } })\n"
         "main* = () i32 { 42 }\n")
     files = load(tmp_path)
     namespace = build_namespace(files)
@@ -242,7 +242,7 @@ def test_trait_dispatch_runs(tmp_path):
     (tmp_path / "main.zen").write_text(
         "Vec*: { len: i32, cap: i32 }\n"
         "Area: { area: (Ptr<Self>) i32 }\n"
-        "Vec.impl(Area) { area = (v: Ptr<Vec>) i32 { v.len * v.cap } }\n"
+        "Vec.impl(Area, { area = (v: Ptr<Vec>) i32 { v.len * v.cap } })\n"
         "total*<T: Area> = (x: Ptr<T>) i32 { area(x) }\n"
         "main* = () i32 { total(addr(Vec { len: 5, cap: 4 })) }\n")
     files = load(tmp_path)

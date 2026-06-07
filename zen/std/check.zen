@@ -10,9 +10,9 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, dfunc, dforeign, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, heap } = std.alloc
-{ eq } = std.str
+{ eq, is_empty } = std.str
 { String, new, append, finish } = std.string
 { byte_at } = std.lex
 
@@ -77,6 +77,18 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
         .VNil     => tvoid(),
         .VCons(c) => eq(c.name, name).match ({ true => c.ty, false => c.tail.lookup_var(name) })
     })
+}
+// a module-level global's type — inferred from its init (Goal Z E1). The fallback when a bare Var
+// is not a local. Returns void if there's no such global.
+global_ty = (env: Env, name: str) Ty {
+    found := tvoid()
+    env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_expr(g.init), false => found }), _ => found }) })
+    found
+}
+// a bare Var's type: an in-scope local, else a module-level global, else void.
+var_or_global = (env: Env, name: str) Ty {
+    lv := env.vars.lookup_var(name)
+    lv.is_void_ty().match ({ true => env.global_ty(name), false => lv })
 }
 // the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
@@ -197,11 +209,24 @@ enum_inst_of = (env: Env, base: str, variant: str, pty: Ty) EnumInst {
 }
 enum_inst_mk = (env: Env, variant: str, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
 enum_inst_tag = (env: Env, variant: str) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
+// a block expression `({ … ; tail })` (e.g. a multi-statement template inlined at a call site) has
+// the type of its tail expression — so `a := coro_new(…)` (which inlines to a block ending in a
+// `Coro{…}`) types `a` as Coro, not void. Inner lets aren't threaded, so a tail that is itself an
+// inner local stays void (rare); a tail expr/struct/call — the common template shape — types fine.
+last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
+    stmts[stmts.len - 1].match ({ .ExprStmt(e) => env.infer_expr(e), .Return(r) => env.infer_expr(r), _ => tvoid() })
+}
+block_ty = (env: Env, b: BlockData) Ty {
+    // NB: kept as a single expression (no `n := b.stmts.len` then a `(`-leading line) — the Python
+    // frontend's statement-glue bug would parse `.len` + the next `(…)` as a call. [[leading-dot-statement-glue]]
+    (b.stmts.len == 0).match ({ true => tvoid(), false => env.last_stmt_ty(b.stmts) })
+}
 infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
+        .Block(b)      => env.block_ty(b),
         .Byte(n)       => tu8(),                             // a char literal is a byte
-        .Var(v)        => env.vars.lookup_var(v.name),
+        .Var(v)        => env.var_or_global(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
@@ -233,8 +258,35 @@ call_targs = (env: Env, f: Func, args: [Expr]) [Ty] {
     f.tparams.loop((h, i, tp) { buf[i] = env.targ_of(f.params, args, tp.name) })
     buf
 }
+// ── UFCS trait-method dispatch: `x.m()` desugars to `m(x, …)`. If `m` is a method provided by an
+//    impl on x's TYPE, route the call to that impl's mangled C name (impl_<Trait>_<Type>_m), so two
+//    types can implement the same trait method. A plain fn (no matching impl) keeps its name. ──
+method_in = (methods: [Param], fn: str) bool {
+    f := false
+    methods.loop((h, i, n) { f = eq(n.name, fn).match ({ true => true, false => f }) })
+    f
+}
+dispatch_recv = (decls: [Decl], fn: str, tyname: str) str {
+    found := ""
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im) => eq(im.ty, tyname).match ({
+                true  => im.methods.method_in(fn).match ({ true => impl_cname(im.trname, im.ty, fn), false => found }),
+                false => found
+            }),
+            _ => found
+        })
+    })
+    is_empty(found).match ({ true => fn, false => found })
+}
+dispatch_name = (env: Env, c: CallData) str {
+    (c.args.len > 0).match ({
+        true  => env.decls.dispatch_recv(c.fn, env.infer_expr(c.args[0].addr()).enum_name()),
+        false => c.fn
+    })
+}
 gen_call_ret = (env: Env, c: CallData) Ty {
-    f := env.decls.the_func(c.fn)
+    f := env.decls.the_func(env.dispatch_name(c))
     (f.tparams.len > 0).match ({
         true  => f.tparams.subst_ty(env.call_targs(f, c.args), f.ret),
         false => f.ret
@@ -243,7 +295,19 @@ gen_call_ret = (env: Env, c: CallData) Ty {
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "load").match ({
         true  => env.infer_expr(c.args[0].addr()).pointee_of(),
-        false => env.gen_call_ret(c)
+        false => eq(c.fn, "load_i64").match ({
+            true  => ti64(),                                            // load_i64(p): an i64 read at a byte ptr
+            false => eq(c.fn, "atomic_add_i64").match ({
+            true  => ti64(),                                            // atomic_add_i64(p, d): the new i64 value
+            false => eq(c.fn, "null_ptr").match ({
+                true  => tptr(env.a.tnode(tu8())),                      // null_ptr(): a null RawPtr<u8> (a constant 0)
+                false => eq(c.fn, "addr").match ({
+                    true  => tptr(env.a.tnode(env.infer_expr(c.args[0].addr()))),   // addr(x): Ptr<typeof(x)>, so x.m() dispatches on x's type
+                    false => env.gen_call_ret(c)
+                })
+            })
+            })
+        })
     })
 }
 infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
@@ -353,14 +417,15 @@ resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
 // stamped with the right (monomorphized) enum name. An unknown fn has no params -> no expectation.
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
 resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
-    ps   := env.decls.fn_params(c.fn)
-    tmpl := env.decls.is_template_call(c.fn)   // a generic fn's param types carry UNBOUND tparams (Opt<T>);
+    dn   := env.dispatch_name(c)               // a UFCS trait-method call routes to the impl for the receiver's type
+    ps   := env.decls.fn_params(dn)
+    tmpl := env.decls.is_template_call(dn)      // a generic fn's param types carry UNBOUND tparams (Opt<T>);
     buf  := a.cebuf(c.args.len)                // stamping a bare-ctor arg with them yields Opt_T, not the
     c.args.loop((h, i, ar) {                   // payload-inferred Opt_i32 — so let template args self-resolve.
         ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    a.cenode(call(c.fn, buf))
+    a.cenode(call(dn, buf))
 }
 resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
@@ -496,7 +561,13 @@ resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
         .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
         .ExprStmt(e) => last.match ({
-            true  => sexpr(a.resolve_expr(env, e)),                          // value position — keep the ternary/Match
+            // a value-yielding tail keeps the ternary/Match; but a tail in VOID return position yields
+            // nothing, so a void Cond/Match (e.g. a conditional `free`) must lower to an `if` statement —
+            // a C ternary over void operands is invalid. Statement-position (non-last) always lowers.
+            true  => env.exp.is_void_ty().match ({
+                true  => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)),  // void tail — lower to `if`
+                false => sexpr(a.resolve_expr(env, e))                             // value tail — keep ternary/Match
+            }),
             false => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))   // statement position — lower to `if`
         }),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
@@ -533,8 +604,14 @@ resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
     env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
     Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) }
 }
+// a module-level global: infer its init's type (the parser left it void) and resolve the init, so
+// genc emits `static <real ty> name = <init>;`. [Goal Z E1]
+resolve_global = (a: Ptr<Malloc>, decls: [Decl], g: GlobalData) Decl {
+    env := Env { vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a }
+    dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init))
+}
 resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
-    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), _ => d })
+    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), .DGlobal(g) => a.resolve_global(decls, g), _ => d })
 }
 
 // ── inline templates: a function with an FnT parameter is spliced at each call site ──────
