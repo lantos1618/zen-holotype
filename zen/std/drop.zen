@@ -1,0 +1,75 @@
+// @self-hosted-only — defines a Drop trait + a concrete owning smart pointer that fires a payload's
+// destructor at refcount zero; uses trait impls + a refcount header laid out with store_i64/load_i64,
+// none of which the Python reference frontend models verbatim, so load_std / acid SKIP this file on the
+// '@self-hosted-only' marker. Its mechanics are validated by an equivalent self-contained run_value in
+// tests/test_differential.py.
+//
+// std.drop — DETERMINISTIC DESTRUCTION, the O in Goal Z's "ARC/ORC". A value of a concrete type T can
+// implement the Drop trait; an OWNING reference-counted pointer over T then calls T's `drop` exactly
+// once, the instant the LAST reference goes away — BEFORE the block is freed. This is the deterministic
+// (non-tracing) half of ORC: the cycle-collecting half additionally needs a Trace trait + a collector
+// root set (see the feasibility note at the bottom).
+//
+//   Drop convention:  Type.drop(MutPtr<Self>) void   — a destructor that runs side effects (close a
+//                     file, release a child handle, decrement a counter) on the value about to die.
+//
+// Dispatch is PURE STDLIB: `addr(value).drop()` where `value: Resource` routes through the existing UFCS
+// trait dispatch (std.check dispatch_name) to `impl_Drop_Resource_drop` — no compiler support beyond the
+// multi-implementor trait machinery that already powers std.runtime / std.alloc. The owning pointer here
+// is specialized to a CONCRETE payload type (Resource) because a fully GENERIC `Own<T>` cannot yet route
+// `addr(slot:T).drop()` to T's impl — dispatch names are resolved BEFORE monomorphization, so inside a
+// `<T>` body the receiver type is the bare param `T` (no impl named `T` exists) and the call falls back
+// to an unresolved `drop`. Closing that gap needs per-instantiation re-dispatch in genc_mono (a compiler
+// change, deliberately out of scope). The concrete form below is the verifiable, zero-compiler-change
+// proof that drop-at-zero works.
+{ heap, dispose } = std.alloc
+
+// the trait every destructible type implements: a single `drop` taking a mutable pointer to the dying
+// value. `Self` is the implementing type; an impl emits `impl_Drop_<Type>_drop`.
+Drop*: { drop: (MutPtr<Self>) void }
+
+// ── a CONCRETE owning, reference-counted pointer over a Resource that implements Drop ──
+// Layout mirrors std.rc: one heap block [ count:i64 | value:Resource ]. The distinguishing feature is
+// `release`: at count zero it calls the payload's destructor (via concrete Drop dispatch) BEFORE freeing.
+Resource*: { id: i32, slot: i32 }                     // a stand-in resource: `id` identifies it, `slot` is a payload cell
+
+// Resource's destructor: the body would close/free whatever the resource owns. Here it stamps `slot`
+// so a test can observe that destruction ran (in the differential test it bumps a module global). It is
+// reached as `addr(value).drop()` → impl_Drop_Resource_drop via the same dispatch std.runtime uses.
+Resource.impl(Drop, { drop = (s: MutPtr<Resource>) void { s.slot = s.id } })
+
+Own*: { base: RawPtr<u8> }                            // -> [ count:i64 | value:Resource ]
+
+// the value slot as a 1-element [Resource] over the bytes after the 8-byte count.
+own_val* = (o: Own) [Resource] { slice(o.base.offset(8), 1) }
+own_get* = (o: Own) Resource { o.own_val()[0] }       // borrow the owned value
+own_ptr* = (o: Own) MutPtr<Resource> { addr(o.own_val()[0]) }   // a mutable pointer to the owned value (drop receiver)
+count*   = (o: Own) i64 { load_i64(o.base) }          // current reference count
+
+new* = (x: Resource) Own {
+    base := heap(8 + sizeof(Resource))
+    store_i64(base, 1)                                // count starts at 1 (this reference)
+    o := Own { base: base }
+    s := o.own_val()
+    s[0] = x                                          // move the value into the slot
+    o
+}
+
+// clone: take another reference to the SAME block — bump the count, hand back a second owning handle.
+clone* = (o: Own) Own {
+    store_i64(o.base, load_i64(o.base) + 1)
+    Own { base: o.base }
+}
+
+// release: drop THIS reference. Decrement the count; at zero, run the payload's destructor (concrete
+// Drop dispatch → impl_Drop_Resource_drop) and only THEN free the block — deterministic destruction.
+release* = (o: Own) void {
+    n := load_i64(o.base) - 1
+    store_i64(o.base, n)
+    (n == 0).match({ true => finalize(o), false => {} })
+}
+// the at-zero path, factored out so `release` stays a single tail expression: destruct-then-free.
+finalize* = (o: Own) void {
+    o.own_ptr().drop()                                // payload destructor runs while the block is still live
+    dispose(o.base)                                   // then reclaim the block
+}
