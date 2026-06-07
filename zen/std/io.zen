@@ -1,0 +1,72 @@
+// @self-hosted-only — the FOUNDATION of a Python-free Zen build driver. Today bootstrap/main.c
+// reads argv[1] → runs the compiler → writes the C to stdout; this module pulls that file + process
+// I/O into Zen so the driver can eventually be written in Zen too. It is marked @self-hosted-only
+// because the Python reference loader (std.load_std + the acid/_selfhost harness) SKIPS it on this
+// marker; its mechanics are validated by the self-hosted checker (acid) and by run_value round-trip
+// cases in tests/test_differential.py (write a file, read it back, run a command).
+//
+//   src := read_file(cstr("build.zen"))   // the whole file as a NUL-terminated str (caller owns the buffer)
+//   rc  := run_cmd(cstr("cc out.c -o a"))  // invoke a subprocess; rc = its exit status
+//
+// The libc bindings below are bodyless externs (like std.mem's malloc): they lower to bare calls the
+// linker binds to libc. Nothing re-prototypes them — no system header is included — so the loose
+// pointer head `RawPtr<u8>` standing in for a byte buffer is fine at link time. We use the unbuffered
+// POSIX descriptor calls (open/read/write/close/lseek) rather than the stdio FILE* family on purpose:
+// they take a plain `i32` fd (no opaque FILE* to model) and don't collide with <stdio.h>.
+
+{ alloc } = std.mem
+{ view } = std.str
+
+// ── libc/POSIX FFI: file descriptors ──────────────────────────────────────────────────────────
+open  = (path: str, flags: i32, mode: i32) i32         // open `path`; returns a fd (>=0) or -1 on error
+read  = (fd: i32, buf: RawPtr<u8>, n: i64) i64         // read up to n bytes into buf; returns bytes read
+write = (fd: i32, buf: RawPtr<u8>, n: i64) i64         // write n bytes from buf; returns bytes written
+close = (fd: i32) i32                                  // close the descriptor
+lseek = (fd: i32, off: i64, whence: i32) i64           // reposition the cursor; returns the new offset
+
+// ── libc FFI: process ─────────────────────────────────────────────────────────────────────────
+system = (cmd: str) i32                                // run `cmd` via /bin/sh; returns its exit status
+
+// open() flags + lseek() whence — the documented POSIX constants (NOT magic numbers: fcntl.h's
+// O_* and unistd.h's SEEK_*). Linux x86-64 values; named so read_file/write_file read clearly.
+O_RDONLY := 0       // open for reading
+O_WRTRUNC := 577    // O_WRONLY(1) | O_CREAT(64) | O_TRUNC(512) — create/truncate for writing
+MODE_644 := 420     // 0o644 file mode for a freshly created file
+SEEK_SET := 0       // offset from the start of the file
+SEEK_END := 2       // offset from the end of the file (used to size a file)
+
+// ── build helpers ───────────────────────────────────────────────────────────────────────────────
+
+// the number of bytes in an open file: seek to the end (the returned offset is the size), then rewind.
+// Pulled out so read_file stays flat. The caller opens the fd; this leaves the cursor at the start.
+file_size = (fd: i32) i64 {
+    n := lseek(fd, 0, SEEK_END)
+    lseek(fd, 0, SEEK_SET)
+    n
+}
+
+// read a whole file into a fresh heap buffer and return it as a NUL-terminated `str`. The caller owns
+// the buffer (free it via std.mem.release once a length-aware owner isn't needed). `cstr` reinterprets
+// the byte pointer as a C string — the bytes are already NUL-terminated at index `n`.
+read_file* = (path: str) str {
+    fd  := open(path, O_RDONLY, 0)
+    n   := file_size(fd)
+    buf := alloc(n + 1)
+    read(fd, buf, n)
+    store(offset(buf, n), 0)     // NUL-terminate so cstr/strlen see a proper C string
+    close(fd)
+    cstr(buf)
+}
+
+// write a str's bytes (without the trailing NUL) to a file, creating/truncating it. Returns the number
+// of bytes written — the output side of the build driver (emit the generated C to disk before cc'ing).
+write_file* = (path: str, data: str, n: i64) i64 {
+    fd := open(path, O_WRTRUNC, MODE_644)
+    w  := write(fd, view(data).ptr, n)
+    close(fd)
+    w
+}
+
+// run a shell command (e.g. invoke `cc` to compile emitted C) and return its exit status (0 = success).
+// This is the process side of the build driver — the eventual replacement for generate.py's cc step.
+run_cmd* = (cmd: str) i32 { system(cmd) }

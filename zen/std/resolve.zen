@@ -1,0 +1,80 @@
+// std.resolve — the MODULE RESOLVER (S1 prototype).  @self-hosted-only
+//
+// THE GOAL (Goal Z / S1): today bootstrap/generate.py flat-concatenates the std SOURCES with
+// imports STRIPPED (compiler_source/strip_imports in Python) and feeds ONE flat file to the
+// binary. The binary cannot resolve `{ a, b } = std.x` imports itself. This module is the
+// self-hosted replacement for that Python pre-processing: it lets zenc read the REAL multi-module
+// stdlib and resolve imports natively — the gate to deleting bootstrap/generate.py's Python.
+//
+// THE RESOLUTION ALGORITHM (full design — see the module-level design note at the bottom of the
+// file and the task report). The prototype here proves the load-bearing primitive: the SAME
+// line-classification that Python's strip_imports does, in pure Zen. With this + a file reader
+// (Move-to-Zen Phase A) and a per-module parse, a driver can: parse each module -> read its
+// DImport edges -> topologically order the modules -> concat-in-dependency-order with import lines
+// dropped, reproducing compiler_source() byte-for-byte with no Python.
+//
+//   { is_import_line, strip_count } = std.resolve
+//
+// NB self-contained-test note: this module imports std.lex's byte_at (the canonical byte
+// accessor). The run_value PROTOTYPE TEST inlines the same logic so it links without std.lex
+// (std templates aren't emitted into a stand-alone test binary). acid checks THIS file as-is.
+
+{ byte_at } = std.lex
+
+// space or tab — the whitespace lstrip skips (Python str.strip() also drops \r/\n, but those
+// terminate a line, so on a single line only space/tab matter here).
+is_ws = (b: u8) bool { (b == ' ') || (b == 9) }
+
+// pos of the first non-whitespace byte of the line starting at p (an lstrip, line-local).
+lstrip = (s: str, p: i32) i32 {
+    byte_at(s, p).is_ws().match ({ true => s.lstrip(p + 1), false => p })
+}
+
+// after lstrip, does the line begin with the two bytes `{ ` (open-brace then space)? — the
+// shape of a destructuring import head `{ A, B } = std.x`.
+opens_import = (s: str, p: i32) bool {
+    (s.byte_at(p) == '{') && (s.byte_at(p + 1) == ' ')
+}
+
+// does the line starting at p contain the marker `= std.` before its newline / EOF? Scans
+// bytes; stops at line end so it never reads into the next line. Matches Python's `"= std." in l`
+// (l is one line), combined with the `{ ` prefix below this is EXACTLY strip_imports' predicate.
+has_std_marker = (s: str, p: i32) bool {
+    b := s.byte_at(p)
+    ((b == 0) || (b == 10)).match ({
+        true  => false,
+        false => s.is_marker_at(p).match ({ true => true, false => s.has_std_marker(p + 1) })
+    })
+}
+// is the 6-byte window at p exactly `= std.`?
+is_marker_at = (s: str, p: i32) bool {
+    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && (s.byte_at(p + 2) == 's')
+        && (s.byte_at(p + 3) == 't') && (s.byte_at(p + 4) == 'd') && (s.byte_at(p + 5) == '.')
+}
+
+// THE CLASSIFIER — is the line starting at p an import line (to be stripped)? Equivalent to
+// Python: `l.strip().startswith("{ ") and "= std." in l`. This is the one decision generate.py's
+// strip_imports makes per line; everything else (concat in dependency order) is plumbing.
+is_import_line* = (s: str, p: i32) bool {
+    ls := s.lstrip(p)
+    s.opens_import(ls).match ({ true => s.has_std_marker(ls), false => false })
+}
+
+// advance p to the first byte of the NEXT line (just past the next '\n'), or to EOF (the NUL).
+next_line = (s: str, p: i32) i32 {
+    b := s.byte_at(p)
+    (b == 0).match ({
+        true  => p,
+        false => (b == 10).match ({ true => p + 1, false => s.next_line(p + 1) })
+    })
+}
+
+// count the lines that strip_imports would KEEP (non-import lines) — a verifiable digest of the
+// classifier over a whole source. The real resolver concatenates those kept lines instead of
+// counting them; counting is what the prototype test asserts against the Python reference.
+strip_count* = (s: str, p: i32, n: i32) i32 {
+    (s.byte_at(p) == 0).match ({
+        true  => n,
+        false => s.strip_count(s.next_line(p), s.is_import_line(p).match ({ true => n, false => n + 1 }))
+    })
+}
