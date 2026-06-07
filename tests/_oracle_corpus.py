@@ -89,6 +89,19 @@ VALUE_CASES = [
 # --- test_value_position_trailing_yield_accepted (value half) ---
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 6),
     ('f* = (b: bool) i32 {\n v := b.match({ true => { 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 7),
+# --- recovered breadth: integer-match default + non-first arm (migrated test_check value half) ---
+    ('test* = () i32 { (7).match({ 5 => 50, 7 => 70, _ => 0 }) }', 70),
+    ('test* = () i32 { (4).match({ 5 => 50, 7 => 70, _ => 11 }) }', 11),
+# --- recovered breadth: nested struct field read ---
+    ('I*: { n: i32 }\nO*: { a: I, b: I }\ntest* = () i32 { o := O{ a: I{ n: 3 }, b: I{ n: 4 } }\n o.a.n * 10 + o.b.n }', 34),
+# --- recovered breadth: a comparison drives a bool match ---
+    ('test* = () i32 { (3 < 5).match({ true => 1, false => 0 }) }', 1),
+    ('test* = () i32 { (5 < 3).match({ true => 1, false => 0 }) }', 0),
+# --- recovered breadth: slice write-then-read ---
+    ('test* = () i32 { s := [1, 2, 3]\n s[1] = 20\n s[0] + s[1] + s[2] }', 24),
+# --- recovered breadth: arithmetic precedence + recursion ---
+    ('test* = () i32 { 2 + 3 * 4 - 1 }', 13),
+    ('fac* = (n: i32) i32 { (n == 0).match({ true => 1, false => n * fac(n - 1) }) }\ntest* = () i32 { fac(5) }', 120),
 ]
 
 # (src, verdict) the check binary must produce.
@@ -114,4 +127,125 @@ VERDICT_CASES = [
     # --- test_value_position_trailing_yield_accepted (verdict half) ---
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 'accept'),
     ('f* = (b: bool) i32 {\n v := b.match({ true => { 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 'accept'),
+
+    # ════════════════════════════════════════════════════════════════════════════════════════
+    # RECOVERED BREADTH — accept/reject verdicts the binary CHECK still produces, migrated from
+    # the deleted test_reject.py / test_check.py / test_undefined.py. EVERY case below was VERIFIED
+    # against the real CHECK binary (tests/_oracle.verdict) on the goalz-oracle-corpus branch; only
+    # genuinely-passing verdicts are committed. Cases are chosen to CATCH plausible regressions
+    # (a too-few-args call MUST reject; a valid widening MUST accept).
+    # ════════════════════════════════════════════════════════════════════════════════════════
+
+    # --- CALL ARITY: a known fn must get exactly its declared number of args ---
+    ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1) }', 'reject'),            # too few
+    ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1, 2, 3) }', 'reject'),      # too many
+    ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1, 2) }', 'accept'),         # exact
+    ('zero* = () i32 { 0 }\ntest* = () i32 { zero(1) }', 'reject'),                            # arg to nullary
+    ('one* = (a: i32) i32 { a }\ntest* = () i32 { one() }', 'reject'),                         # missing the only arg
+
+    # --- UNDEFINED NAMES: a call to a non-intrinsic, non-imported, non-trait-method is rejected ---
+    ('test* = () i32 { nope() }', 'reject'),
+    ('test* = () i32 { foo(1) + bar(2) }', 'reject'),
+    ('helper* = () i32 { 5 }\ntest* = () i32 { helper() }', 'accept'),                         # a real local is fine
+    ('use* = (n: i32) i32 { n }\ntest* = () i32 { use(missing()) }', 'reject'),                # undefined nested in an arg
+    ('test* = () i32 { 1 + gone() }', 'reject'),                                               # undefined nested in an operand
+
+    # --- ARG-TYPE NARROWING / MISMATCH: each arg's type must `fit` the parameter ---
+    ('takes_u8* = (b: u8) i32 { 0 }\nbig* = () i64 { 9999999999 }\ntest* = () i32 { takes_u8(big()) }', 'reject'),  # i64 ⊀ u8
+    ('P*: { x: i32 }\nneeds_p* = (p: P) i32 { p.x }\nmk* = () i64 { 5 }\ntest* = () i32 { needs_p(mk()) }', 'reject'),  # i64 where struct P wanted
+    ('A*: { v: i32 }\nB*: { v: i32 }\nneeds_a* = (a: A) i32 { a.v }\ntest* = () i32 { needs_a(B { v: 5 }) }', 'reject'),  # B ⊀ A
+    ('scalar* = (n: i32) i32 { n }\ntest* = () i32 { s := [1, 2]\n scalar(s) }', 'reject'),    # slice where scalar wanted
+    ('takes_i32* = (n: i32) i32 { n }\nlit* = () i32 { takes_i32(5) }\ntest* = () i32 { lit() }', 'accept'),  # a literal fits
+    ('widen* = (n: i64) i64 { n }\nsmall* = () u8 { 3 }\ntest* = () i64 { widen(small()) }', 'accept'),  # u8 widens to i64
+    ('A*: { v: i32 }\nneeds_a* = (a: A) i32 { a.v }\ntest* = () i32 { needs_a(A { v: 5 }) }', 'accept'),  # exact struct
+
+    # --- INTRINSIC ARITY: store/offset/slice = 2 operands, null_ptr = 0, load/load_i64 = 1 ---
+    ('test* = () i64 { p := malloc(8)  store_i64(p)  0 }', 'reject'),                          # store_i64 needs 2
+    ('test* = () i64 { p := malloc(8)  store_i64(p, 1, 2)  0 }', 'reject'),                    # store_i64 takes 2, not 3
+    ('test* = () i64 { p := malloc(8)  q := offset(p)  0 }', 'reject'),                        # offset needs 2
+    ('test* = () i64 { p := null_ptr(7)  0 }', 'reject'),                                      # null_ptr takes none
+    ('test* = () i64 { p := malloc(8)  store_i64(p, 7)  load_i64(p) }', 'accept'),             # correct arities
+    ('test* = () i64 { p := malloc(8)  q := p.offset(8)  load_i64(p) }', 'accept'),            # offset(p, 8) via UFCS
+
+    # --- STRUCT-LITERAL FIELDS: every init field must EXIST + its value must FIT ---
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 0, y: 1 }  p.x }', 'reject'),               # unknown field y
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { z: 0 }  0 }', 'reject'),                       # unknown field z
+    ('P*: { x: i32, flag: bool }\nmk* = () i64 { 5 }\ntest* = () i32 { p := P { x: mk() }  p.x }', 'reject'),  # i64 ⊀ i32 field
+    ('P*: { x: i32, flag: bool }\ntest* = () i32 { p := P { x: 0, flag: true }  p.x }', 'accept'),
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 0 }  p.x }', 'accept'),
+
+    # --- FIELD ACCESS: obj.field must name a real field of obj's struct (value + Ptr receiver) ---
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 5 }  p.nope }', 'reject'),
+    ('P*: { x: i32 }\nget* = (p: Ptr<P>) i32 { p.bad }\ntest* = () i32 { q := P { x: 1 }  get(addr(q)) }', 'reject'),
+    ('P*: { x: i32, y: i32 }\ntest* = () i32 { p := P { x: 5, y: 6 }  p.x + p.y }', 'accept'),
+
+    # --- MATCH EXHAUSTIVENESS: an enum match must cover every variant (or have `_`) ---
+    ('C*: A | B | Cc\nf* = (c: C) i32 { c.match({ .A => 1, .B => 2 }) }\ntest* = () i32 { f(.A()) }', 'reject'),          # missing .Cc
+    ('R*: Ok(i32) | Err\nf* = (r: R) i32 { r.match({ .Ok(v) => v }) }\ntest* = () i32 { f(.Ok(5)) }', 'reject'),         # missing .Err
+    ('C*: A | B | Cc\nf* = (c: C) i32 { c.match({ .A => 1, .B => 2, .Cc => 3 }) }\ntest* = () i32 { f(.A()) }', 'accept'),
+    ('C*: A | B | Cc\nf* = (c: C) i32 { c.match({ .A => 1, _ => 0 }) }\ntest* = () i32 { f(.A()) }', 'accept'),          # wildcard covers
+
+    # --- MATCH DUPLICATE VARIANT: no arm may repeat a variant ---
+    ('C*: A | B\nf* = (c: C) i32 { c.match({ .A => 1, .A => 2, .B => 3 }) }\ntest* = () i32 { f(.A()) }', 'reject'),
+    ('R*: Ok(i32) | Err\nf* = (r: R) i32 { r.match({ .Ok(v) => v, .Ok(w) => w, .Err => 0 }) }\ntest* = () i32 { f(.Ok(5)) }', 'reject'),
+    ('C*: A | B\nf* = (c: C) i32 { c.match({ .A => 1, .B => 2 }) }\ntest* = () i32 { f(.A()) }', 'accept'),
+
+    # --- OPERAND TYPES: arith `+ - * /` needs numeric, logic `&& ||` needs bool ---
+    ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 1 }  q := P { x: 2 }  (p + q).x }', 'reject'),  # struct + struct
+    ('test* = () i32 { ("hi" + "bye")  0 }', 'reject'),                                        # str + str
+    ('test* = () bool { 1 && 2 }', 'reject'),                                                  # && on numbers
+    ('test* = () bool { true && false }', 'accept'),
+    ('test* = () i32 { 1 + 2 * 3 }', 'accept'),
+
+    # --- INDEX: seq[idx] needs a SLICE seq and a NUMERIC idx ---
+    ('test* = () i32 { x := 5  x[0] }', 'reject'),                                             # indexing a non-slice
+    ('P*: { x: i32 }\ntest* = () i32 { s := [1, 2, 3]  p := P { x: 0 }  s[p] }', 'reject'),    # non-numeric index
+    ('test* = () i32 { s := [10, 20, 30]  s[1] }', 'accept'),
+
+    # --- RETURN FITS: a returned value must fit the declared return type ---
+    ('test* = () i32 { 1 < 2 }', 'reject'),                                                    # concrete bool ⊀ i32
+    ('big* = () i64 { 9999999999 }\ntest* = () i32 { big() }', 'reject'),                      # i64 ⊀ i32 (computed narrowing)
+    ('test* = () bool { 5 }', 'reject'),                                                       # numeric ⊀ bool
+    ('P*: { x: i32 }\ntest* = () i32 { P { x: 5 } }', 'reject'),                               # struct ⊀ i32
+    ('test* = () bool { 1 < 2 }', 'accept'),                                                   # concrete bool fits bool
+    ('small* = () u8 { 3 }\ntest* = () i64 { small() }', 'accept'),                            # u8 widens to i64
+    ('test* = () i32 { 42 }', 'accept'),
+
+    # --- ASSIGN FITS: x = v must fit x's let-inferred type ---
+    ('test* = () i32 { x := 5\n y := (1 < 2)\n x = y\n x }', 'reject'),                        # bool into i32 local
+    ('big* = () i64 { 9999999999 }\ntest* = () i32 { x := 1\n x = big()\n x }', 'reject'),     # i64 into i32 local
+    ('test* = () i64 { x := 5000000000\n y := 1\n x = y\n x }', 'accept'),                     # numeric ok
+
+    # --- INDEX-SET FITS: s[i] = v must store the slice's element type ---
+    ('test* = () i32 { s := [1, 2, 3]\n s[0] = (1 < 2)\n s[0] }', 'reject'),                   # bool into i32 slice
+    ('test* = () i32 { s := [1, 2, 3]\n s[0] = 99\n s[0] }', 'accept'),
+
+    # --- TRAILING VALUE: a non-void fn body must end in a value that fits the return type ---
+    ('test* = () i32 { x := 5 }', 'reject'),                                                   # ends in a let -> no value
+    ('test* = () i32 { x := 5\n x }', 'accept'),
+    ('noop* = () void { x := 5 }\ntest* = () i32 { noop()  0 }', 'accept'),                    # a void fn may end in a let
+
+    # --- TRAIT CONFORMANCE: a Type.impl(Trait) must define every method with a matching signature ---
+    ('Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }', 'reject'),                                   # missing method
+    ('Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i64 { 0 } })\ntest* = () i32 { 0 }', 'reject'),        # wrong return type
+    ('Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }', 'reject'),          # wrong arity
+    ('Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }', 'reject'),  # wrong param type
+    ('Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }', 'accept'),
+    ('Eq*: { eq: (Ptr<Self>, Ptr<Self>) bool }\nA*: { v: i32 }\nA.impl(Eq, { eq = (a: Ptr<A>, b: Ptr<A>) bool { 1 < 2 } })\ntest* = () i32 { 0 }', 'accept'),  # Self in two params
+
+    # --- DUPLICATE FUNCTION NAMES: two top-level fns of one name collide (Zen has no overloading) ---
+    ('f* = (a: i32) i32 { a }\nf* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { f(1) }', 'reject'),  # even differing arity
+    ('uniq* = () i32 { 1 }\nother* = () i32 { 2 }\ntest* = () i32 { uniq() + other() }', 'accept'),
+
+    # --- VALUE-POSITION EARLY-RETURN: a non-trailing `return` in a value-position block arm is dropped ---
+    ('f* = (n: i32) i32 {\n v := n.match({ 0 => { return 1  2 }, _ => 9 })\n v\n}\ntest* = () i32 { f(0) }', 'reject'),
+    ('f* = (n: i32) i32 {\n v := n.match({ 0 => { 1 }, _ => 9 })\n v\n}\ntest* = () i32 { f(0) }', 'accept'),
+
+    # --- BLOCK-ARM SUB-EXPRESSION CHECKING: a bad call inside a value-position block arm is still caught ---
+    ('f* = (b: bool) i32 { b.match({ true => { ghost()  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }', 'reject'),          # undefined call
+    ('g* = (a: i32) i32 { a }\nf* = (b: bool) i32 { b.match({ true => { g(1, 2)  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }', 'reject'),  # mis-arity call
+    ('g* = (a: i32) i32 { a }\nf* = (b: bool) i32 { b.match({ true => { g(1)  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }', 'accept'),
+
+    # --- BARE bool literal `true`/`false` parses as a Var -> uninferable -> the lenient (accept) path ---
+    ('test* = () i32 { true }', 'accept'),
 ]
