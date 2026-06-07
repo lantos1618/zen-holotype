@@ -7,7 +7,7 @@
 // stays here, importable from std.parse.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, impl_cname, ti32, tvoid } = std.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, ti32, tvoid } = std.genc
 { Token, Scan, scan, byte_at } = std.lex
 { Malloc, malloc } = std.alloc
 { parse_or, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = std.parse_expr
@@ -47,7 +47,7 @@ parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 // The field list is `name: Type` pairs (the same shape as a parameter list) terminated by
 // `}` instead of `)`. Lowers to genc's StructDecl (typedef struct). parse_struct_at also
 // reports where the decl ENDS (past `}`), so a module can parse the next one.
-StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32 }   // ntp>0 -> a generic struct
+StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32, defaults: [Func] }   // ntp>0 -> generic; defaults = default-bodied trait methods
 // type parameters `<T, U>` after a struct name — collected as name-only Params (no sizeof(str)), the
 // same idiom imports/impl-methods use. `<` skipped by the caller's skip_to_brace; here they're captured.
 no_tparams = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
@@ -88,20 +88,45 @@ fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
 }
 field_buf = (a: Ptr<Malloc>) [Field] { slice(malloc(1024 * sizeof(Field)), 1024) }   // cap 1024
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
-fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+dfn_buf = (a: Ptr<Malloc>) [Func] { slice(malloc(256 * sizeof(Func)), 256) }   // default-bodied trait methods, cap 256
+take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
+// a single '=' after a field name -> the field carries a DEFAULT method body (`m = (…) ret {…}`)
+// vs the usual `m: type`. NB '==' / '=>' never appear in a field-marker slot, so a leading '=' here
+// is always the default marker.
+is_eq_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
+// fields + any default method bodies. `dbuf`/`dn` accumulate the default Funcs in parallel; a struct
+// with dn>0 is a trait declaring defaults (its DStruct is followed by one DTraitDefault per default).
+FieldsEnd*: { count: i32, ndef: i32, next: i32 }
+fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     sc := src.scan(pos)
-    src.is_rbrace(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_field(src, pos, buf, i) })
+    src.is_rbrace(sc.tok).match ({ true => FieldsEnd { count: i, ndef: dn, next: sc.next }, false => a.fill_field(src, pos, buf, i, dbuf, dn) })
 }
-fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+// a DEFAULT-bodied trait method `m = (params) ret { body }`: parse it as a whole function decl, store
+// the Func (for instantiation per impl), and give the field the method's FnT signature (so conformance
+// reads it like a normal `m: (params) ret` declaration). Resumes after the body's '}'.
+fill_field_default = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32, nm: str) FieldsEnd {
+    de := a.parse_decl_at(src, pos)                      // parses `m = (params) ret { body }`
+    buf[i]  = field(nm, fnt_from_func(de.func))          // the FnT signature, for conformance
+    dbuf[dn] = de.func                                   // the default body, instantiated per impl
+    after := src.scan(de.next)                           // ',' (optional) OR the next method / '}'
+    nxt := src.is_comma(after.tok).match ({ true => after.next, false => de.next })   // methods are comma- OR newline-separated
+    a.fill_fields(src, nxt, buf, i + 1, dbuf, dn + 1)    // fill_fields handles '}' or the next field/method
+}
+fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     nt    := src.scan(pos)                               // field name
     nm    := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)                           // ':'
-    te    := a.parse_ty(src, colon.next)                 // the type (may be Ptr<…>)
-    buf[i] = field(nm, te.ty)
-    after := src.scan(te.next)                           // ',' or '}'
-    src.is_comma(after.tok).match ({
-        true  => a.fill_fields(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: after.next }  // '}'
+    mk    := src.scan(nt.next)                           // ':' (signature) or '=' (default body)
+    src.is_eq_tok(mk.tok).match ({
+        true  => a.fill_field_default(src, pos, buf, i, dbuf, dn, nm),   // `m = (…) ret {…}`
+        false => {
+            te    := a.parse_ty(src, mk.next)            // the type (may be Ptr<…>)
+            buf[i] = field(nm, te.ty)
+            after := src.scan(te.next)                   // ',' or '}'
+            src.is_comma(after.tok).match ({
+                true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
+                false => FieldsEnd { count: i + 1, ndef: dn, next: after.next }  // '}'
+            })
+        }
     })
 }
 parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
@@ -110,8 +135,9 @@ parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
     tp     := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (empty for a plain struct)
     bstart := src.skip_to_brace(nt.next)                // pos just past '{' (skips `* <…> :`)
     buf    := a.field_buf()
-    fe     := a.fill_fields(src, bstart, buf, 0)        // fields + pos just past '}'
-    StructEnd { sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next }
+    dbuf   := a.dfn_buf()
+    fe     := a.fill_fields(src, bstart, buf, 0, dbuf, 0)   // fields (+ any default bodies) + pos past '}'
+    StructEnd { sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) }
 }
 parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
@@ -316,13 +342,22 @@ fill_func = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     buf[i] = de.foreign.match ({ true => dforeign(de.func), false => dfunc(de.func) })
     a.fill_decls(src, de.next, buf, i + 1)
 }
+// append one DTraitDefault per default-bodied method onto the decl buffer (after the trait's DStruct),
+// each tagged with the trait name so codegen can instantiate it for the implementing types.
+fill_defaults = (a: Ptr<Malloc>, trname: str, defaults: [Func], buf: [Decl], i: i32, j: i32) i32 {
+    (j == defaults.len).match ({
+        true  => i,
+        false => { buf[i] = dtraitdef(trname, defaults[j])  a.fill_defaults(trname, defaults, buf, i + 1, j + 1) }
+    })
+}
 fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
     buf[i] = (se.ntp > 0).match ({                       // tparams present -> a generic struct template
         true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
         false => dstruct(se.sd)
     })
-    a.fill_decls(src, se.next, buf, i + 1)
+    ni := a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)   // emit DTraitDefault per default body
+    a.fill_decls(src, se.next, buf, ni)
 }
 // record `{ names } = std.mod` as a DImport (the names, for the checker), then resume past the path.
 fill_import = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
