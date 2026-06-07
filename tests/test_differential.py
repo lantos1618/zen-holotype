@@ -146,6 +146,23 @@ from _difftest import self_side, compare
     # an ENUM match with a multi-statement block arm (same harden, enum-with-payload form, so the lowering
     # uses a real tag test). .Ok(7) takes the first arm, writing 3 then 39 to the two slots; 3 + 39 = 42.
     ("R*: Ok(i32) | Err\nmalloc = (n: i64) RawPtr<u8>\nfill = (p: RawPtr<u8>, r: R) void { r.match({ .Ok(v) => { store_i64(p.offset(0), 3)  store_i64(p.offset(8), 39) }, .Err => {} }) }\ntest* = () i64 {\n  p := malloc(64)\n  store_i64(p.offset(0), 0)\n  store_i64(p.offset(8), 0)\n  fill(p, .Ok(7))\n  load_i64(p.offset(0)) + load_i64(p.offset(8))\n}", 42),
+    # FILE + PROCESS I/O in Zen (std.io, Move-to-Zen Phase A) — the capability gap to a Python-free
+    # build driver. These inline std.io's POSIX externs (open/read/write/close/lseek/system) + its
+    # read_file/write_file/run_cmd mechanics, since run_value has no module resolver yet; io.zen itself
+    # is acid-checked. The harness compiles+RUNS the emitted C against libc, so the FFI executes for
+    # real — a file is written and read back. (POSIX fd calls, not the stdio FILE* family, so the
+    # foreign prototypes don't collide with the <stdio.h> the value-printing harness includes.)
+    #
+    # 1) run_cmd("true") -> 0: `system` invokes a subprocess and returns its exit status.
+    ("system = (cmd: str) i32\ntest* = () i32 { system(cstr(\"true\")) }", 0),
+    # 2) write "ABC" with open/write, then read the first byte back -> 65 ('A'). The round-trip proves
+    #    open(O_WRTRUNC)/write/close + open(O_RDONLY)/read/close all bind to libc and the bytes survive.
+    #    577 = O_WRONLY|O_CREAT|O_TRUNC, 420 = 0o644 (io.zen's O_WRTRUNC / MODE_644).
+    ("malloc = (n: i64) RawPtr<u8>\nopen = (path: str, flags: i32, mode: i32) i32\nwrite = (fd: i32, buf: RawPtr<u8>, n: i64) i64\nread = (fd: i32, buf: RawPtr<u8>, n: i64) i64\nclose = (fd: i32) i32\ntest* = () i32 {\n  wbuf := malloc(8)\n  store(offset(wbuf, 0), 'A')\n  store(offset(wbuf, 1), 'B')\n  store(offset(wbuf, 2), 'C')\n  wfd := open(cstr(\"/tmp/zen_io_diff_rt.txt\"), 577, 420)\n  write(wfd, wbuf, 3)\n  close(wfd)\n  rbuf := malloc(8)\n  rfd := open(cstr(\"/tmp/zen_io_diff_rt.txt\"), 0, 0)\n  read(rfd, rbuf, 3)\n  close(rfd)\n  load(offset(rbuf, 0))\n}", 65),
+    # 3) read_file-style length: `system` creates a 3-byte file, then the file_size (lseek SEEK_END +
+    #    rewind) + read + NUL-terminate path from io.zen's read_file reports length 3. `test` returns
+    #    i64 (the length is an i64) so there's no narrowing — the harness reads it just the same.
+    ("malloc = (n: i64) RawPtr<u8>\nsystem = (cmd: str) i32\nopen = (path: str, flags: i32, mode: i32) i32\nread = (fd: i32, buf: RawPtr<u8>, n: i64) i64\nclose = (fd: i32) i32\nlseek = (fd: i32, off: i64, whence: i32) i64\nread_len = (path: str) i64 {\n  fd := open(path, 0, 0)\n  n := lseek(fd, 0, 2)\n  lseek(fd, 0, 0)\n  buf := malloc(n + 1)\n  read(fd, buf, n)\n  store(offset(buf, n), 0)\n  close(fd)\n  n\n}\ntest* = () i64 {\n  system(cstr(\"printf ABC > /tmp/zen_io_diff_len.txt\"))\n  read_len(cstr(\"/tmp/zen_io_diff_len.txt\"))\n}", 3),
 ])
 def test_self_hosted_computes_value(src, want):
     assert self_side(src)["value"] == want
