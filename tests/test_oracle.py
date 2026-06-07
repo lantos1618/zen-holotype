@@ -16,8 +16,8 @@ import sys
 import pytest
 
 import _oracle
-from _oracle import self_side
-from _oracle_corpus import VALUE_CASES, VERDICT_CASES
+from _oracle import self_side, verdict_kind, verdict
+from _oracle_corpus import VALUE_CASES, VERDICT_CASES, VERDICT_KIND_CASES
 
 
 @pytest.mark.parametrize("src,want", VALUE_CASES)
@@ -30,6 +30,36 @@ def test_oracle_value(src, want):
 def test_oracle_verdict(src, verdict):
     # the check binary's exit code drives accept/reject (reject-parity guard) — no Python in the loop.
     assert self_side(src)["verdict"] == verdict, src
+
+
+@pytest.mark.parametrize("src,kind", VERDICT_KIND_CASES)
+def test_oracle_verdict_kind(src, kind):
+    # Stronger than reject-parity: the CHECK-KIND binary must reject for the RIGHT REASON. Both
+    # invariants are asserted — the module REJECTS (kind != 'none'), AND its first-error KIND is the
+    # expected one — so a reject-for-the-wrong-reason (e.g. an arity bug masquerading as a struct-field
+    # error) is now a test failure, not a silent corpus pass. No Python in the loop.
+    assert verdict(src) == "reject", src
+    assert verdict_kind(src) == kind, src
+
+
+def test_oracle_kind_agrees_with_count():
+    # SOUNDNESS of the new layer: across the WHOLE corpus, the kind probe and the count probe agree on
+    # accept-vs-reject — kind != 'none' iff the count is nonzero. (check_module_kind re-walks the same
+    # AST in the same order as check_module, so it must never disagree on WHETHER there's an error.)
+    for src, _ in VERDICT_CASES + [(s, None) for s, _ in VALUE_CASES]:
+        rejected = _oracle.check_count(src) > 0
+        has_kind = verdict_kind(src) != "none"
+        assert rejected == has_kind, (src, rejected, has_kind)
+
+
+def test_oracle_catches_wrong_kind():
+    # The KIND net is not hollow: an arity reject must NOT be mislabelled, and a real reject is never
+    # 'none'. Feeding the wrong kind label makes the assertion fail.
+    assert verdict_kind("add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1) }") == "arity"
+    with pytest.raises(AssertionError):
+        assert verdict_kind("test* = () i32 { nope() }") == "arity"   # really undefined-name
+    with pytest.raises(AssertionError):
+        assert verdict_kind("test* = () i32 { 42 }") != "none"        # really accepts (no error)
 
 
 def test_oracle_catches_regression():

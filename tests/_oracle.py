@@ -53,6 +53,39 @@ int main(int argc, char** argv){
 }
 """
 
+# ── DIAGNOSTIC ERROR-KIND driver (check_validate.check_module_kind) ──────────────────────────────
+# The CHECK binary above pins WHETHER a module is rejected (exit = error COUNT) but not WHY. This
+# CHECK-KIND binary calls check_module_kind, which re-walks the SAME resolved AST in the SAME order
+# and exits with the KIND code of the FIRST error (0 = accept, else 1..13 per the K* table in
+# check_validate.zen). It lets a reject be asserted by REASON — so "rejected for the wrong reason"
+# (e.g. an undefined-name reject that the corpus expected to be an arity reject) is now catchable.
+# NO Python compiler — built from the same check-mode gen.c (which already contains check_module_kind
+# from check_validate.zen) linked with this main. The COUNT path (check_module) is untouched.
+_CHECK_KIND_MAIN = r"""#include "zenrt.h"
+#include <stdio.h>
+#include <stdlib.h>
+zslice parse_module(Malloc* a, const char* src);
+zslice resolve_module(Malloc* a, zslice decls);
+int32_t check_module_kind(Malloc* a, zslice decls);
+int main(int argc, char** argv){
+    size_t cap = 1<<20, len = 0; char* buf = malloc(cap);
+    FILE* in = stdin;
+    if (argc > 1){ in = fopen(argv[1], "r"); if (!in){ fprintf(stderr, "cannot open %s\n", argv[1]); return 2; } }
+    int c; while ((c = fgetc(in)) != EOF){ if (len + 1 >= cap){ cap *= 2; buf = realloc(buf, cap); } buf[len++] = (char)c; }
+    buf[len] = 0;
+    Malloc m = { 0 };
+    return check_module_kind(&m, resolve_module(&m, parse_module(&m, buf)));
+}
+"""
+
+# the KIND codes, mirroring check_validate.zen's K* table. KIND_NAME maps a probe exit code to a label
+# so a test can assert verdict_kind(src) == "arity" rather than a bare integer.
+KIND_NAME = {
+    0: "none", 1: "arity", 2: "arg-type", 3: "undefined-name", 4: "struct-field",
+    5: "exhaustiveness", 6: "dup-variant", 7: "operand-type", 8: "index", 9: "return-fit",
+    10: "assign-fit", 11: "conformance", 12: "dup-fn", 13: "value-pos-return",
+}
+
 # ── S1 CROSS-MODULE TYPE-CHECK driver (check_validate.check_linked) ─────────────────────────────
 # The CHECK binary above type-checks ONE flat module and treats every `{…} = std.x` import as an
 # undefined-but-tolerated name (the DImport "known-but-unchecked" path) — so it gates parse+resolve
@@ -101,6 +134,7 @@ _PRELUDE = (
 _emit_exe = None
 _check_exe = None
 _check_linked_exe = None
+_check_kind_exe = None
 
 
 def _strip_imports(path):
@@ -141,6 +175,28 @@ def _build_check():
         assert r.returncode == 0, r.stderr
         _check_exe = exe
     return _check_exe
+
+
+def _build_check_kind():
+    """The CHECK-KIND binary: same check-mode gen.c as _build_check (it already contains
+    check_module_kind from check_validate.zen), linked with _CHECK_KIND_MAIN — a `src -> first-error
+    KIND code` entry. Only the committed `zenc` binary + cc are used; NO Python compiler."""
+    global _check_kind_exe
+    if _check_kind_exe is None:
+        emit = _build_emit()
+        d = Path(tempfile.mkdtemp())
+        (d / "checksrc.zen").write_text("\n".join(_strip_imports(p) for p in _CHECK_SOURCES))
+        c = subprocess.run([str(emit), str(d / "checksrc.zen")], capture_output=True, text=True).stdout
+        assert c.startswith(HEAD), c[:80]
+        (d / "checkc.gen.c").write_text('#include "zenrt.h"\n' + c[len(HEAD):])
+        (d / "check_kind_main.c").write_text(_CHECK_KIND_MAIN)
+        exe = d / "zenc-check-kind"
+        r = subprocess.run(_CC + ["-I", str(BOOT), str(d / "checkc.gen.c"), str(BOOT / "zenrt.c"),
+                                  str(d / "check_kind_main.c"), "-o", str(exe)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        _check_kind_exe = exe
+    return _check_kind_exe
 
 
 def _build_check_linked():
@@ -200,6 +256,47 @@ def check_linked_count(target, libs=None):
                           text=True, timeout=60).returncode
 
 
+def check_namespaced_count(target, modules=None):
+    """FULL S1 RESOLVER cross-module error count: like check_linked_count, but the lib is built by the
+    real module RESOLVER (tests/_resolver.resolve) — the transitive import closure of `target`,
+    deduplicated per-NAME so each top-level name resolves to its defining module exactly once (the
+    per-module namespace). Where check_linked_count flat-concats `target`'s DIRECT imports (and would
+    false-positive on a genuine cross-module name clash), this resolves names through the whole graph
+    with no clash. 0 == `target` type-checks against its REAL transitive imports as a namespaced unit."""
+    import _resolver
+    exe = _build_check_linked()
+    d = Path(tempfile.mkdtemp())
+    tgt = d / "target.zen"
+    tgt.write_text("\n".join(_strip_imports("zen/std/" + target + ".zen").splitlines()))
+    lib = d / "lib.zen"
+    lib.write_text(_resolver.resolve(target, modules))
+    return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
+                          text=True, timeout=60).returncode
+
+
+def check_namespaced_count_src(target, mods):
+    """FULL RESOLVER over a SYNTHETIC module map `mods` = {name: source}. The resolver computes
+    `target`'s transitive, per-name-deduped (namespaced) lib from `mods`, then check_linked verifies
+    `target`'s imported calls against it. Used by the clash + transitive + wrong-call proof cases:
+    construct modules with a deliberate cross-module name clash / re-export chain and assert the
+    resolver namespaces / resolves it (no false positive; a real wrong call still caught)."""
+    import _resolver
+    exe = _build_check_linked()
+    d = Path(tempfile.mkdtemp())
+    tgt = d / "target.zen"
+    tgt.write_text("\n".join(_strip_imports_text(mods[target]).splitlines()))
+    lib = d / "lib.zen"
+    lib.write_text(_resolver.resolve_src(target, mods))
+    return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
+                          text=True, timeout=60).returncode
+
+
+def _strip_imports_text(text):
+    """_strip_imports, but over an in-memory source string (the same `{ ` + `= std.` classifier)."""
+    return "\n".join(l for l in text.splitlines()
+                     if not (l.strip().startswith("{ ") and "= std." in l))
+
+
 def check_linked_count_src(target_src, lib_src):
     """check_linked over raw SOURCE strings (no files on disk besides the temp pair). Used by the
     NEGATIVE test: a synthesized `lib_src` exports a signature, `target_src` calls it wrong, and the
@@ -227,6 +324,20 @@ def check_count(src):
 def verdict(src):
     """'accept' iff the CHECK binary reports zero errors, else 'reject'."""
     return "accept" if check_count(src) == 0 else "reject"
+
+
+def check_kind(src):
+    """The CHECK-KIND binary's first-error KIND code (process exit code): 0 == accept, 1..13 == the
+    kind of the first error in check_module's traversal order (see KIND_NAME). The runtime _PRELUDE
+    makes imported runtime symbols known, exactly as check_count does, so the two agree on accept."""
+    return subprocess.run([str(_build_check_kind())], input=_PRELUDE + src, capture_output=True,
+                          text=True, timeout=30).returncode
+
+
+def verdict_kind(src):
+    """The first-error KIND as a label ('arity', 'undefined-name', …); 'none' for an accepted module.
+    A reject can now be asserted by REASON, not just by the binary accept/reject verdict."""
+    return KIND_NAME.get(check_kind(src), "kind-%d" % check_kind(src))
 
 
 def emit_value(src):

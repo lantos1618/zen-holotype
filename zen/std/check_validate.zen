@@ -514,6 +514,204 @@ check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════
+// ── DIAGNOSTIC ERROR KINDS (Diagnostics arc) ────────────────────────────────────────────
+// check_module returns an error COUNT; a reject pins WHETHER but not WHY. This parallel layer
+// re-walks the same resolved AST in the same traversal order and reports the KIND code of the
+// FIRST error — so a CHECK-KIND binary (check_module_kind below) can prove a reject is for the
+// RIGHT reason. It reuses every predicate from the count layer (same is_*_err logic), only
+// swapping each "+ 1" for "this error's kind". Zero new judgments → the count and the kind
+// agree exactly (kind != 0 iff count > 0). These are DISTINCT functions (kv_*/…_kind suffix);
+// they never touch check_module/check_linked, so the oracle's count exit code is untouched.
+//
+// Kind codes (small fixed set the task names). KNONE=0 means "no error".
+KNONE         = () i32 { 0 }
+KARITY        = () i32 { 1 }    // a call's arg COUNT ≠ the declared parameter count
+KARGTYPE      = () i32 { 2 }    // an arg's type doesn't fit its parameter
+KUNDEFINED    = () i32 { 3 }    // a call to a non-local, non-intrinsic, non-imported, non-trait name
+KSTRUCTFIELD  = () i32 { 4 }    // a struct-literal init field / a member access that names no real field
+KEXHAUST      = () i32 { 5 }    // a non-wildcard enum match misses a variant
+KDUPVARIANT   = () i32 { 6 }    // a match arm repeats a variant
+KOPERAND      = () i32 { 7 }    // an arith/logic operator on the wrong operand category
+KINDEX        = () i32 { 8 }    // seq[idx] with a non-slice seq or a non-numeric idx
+KRETURNFIT    = () i32 { 9 }    // a returned / trailing value doesn't fit the declared return type
+KASSIGNFIT    = () i32 { 10 }   // x = v where v doesn't fit x's let-inferred type (incl. xs[i]=v)
+KCONFORMANCE  = () i32 { 11 }   // a Type.impl(Trait) misses a method or its signature differs
+KDUPFN        = () i32 { 12 }   // two top-level fns share a name (Zen has no overloading)
+KVALPOSRETURN = () i32 { 13 }   // an early (dropped) return in a value-position block arm
+
+// first-nonzero combinator: the kind of the FIRST error in traversal order.
+kv_kor = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
+// a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
+kv_one = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
+
+// ── a CALL: arity vs arg-type vs undefined ── mirrors check_call/call_errs, but distinguishes WHY.
+// arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
+kv_arg_type_kind = (env: Env, params: [Param], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(env.arg_err_at(params, i, ar).kv_one(KARGTYPE())) })
+    acc
+}
+// a known local fn: wrong arity → KARITY; right arity but a mistyped arg → KARGTYPE.
+kv_call_errs_kind = (env: Env, c: CallData) i32 {
+    ps := env.decls.fn_params(c.fn)
+    (ps.len == c.args.len).match ({
+        true  => env.kv_arg_type_kind(ps, c.args),
+        false => KARITY()
+    })
+}
+kv_check_call_kind = (env: Env, c: CallData) i32 {
+    env.decls.is_known_fn(c.fn).match ({
+        true  => env.kv_call_errs_kind(c),
+        false => c.fn.is_intrinsic().match ({
+            true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
+            false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => KUNDEFINED() })
+        })
+    })
+}
+kv_check_args_kind = (env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(env.kv_check_expr_kind(ar.addr())) })
+    acc
+}
+kv_check_arms_kind = (env: Env, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(env.kv_check_expr_kind(ar.body)) })
+    acc
+}
+kv_arm_return_kind = (arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(ar.body.expr_drops_return().kv_one(KVALPOSRETURN())) })
+    acc
+}
+// struct-literal init fields: an unknown field OR a mistyped value is KSTRUCTFIELD.
+kv_check_inits_kind = (env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc.kv_kor(env.kv_check_expr_kind(fi.value)) })
+    acc
+}
+kv_makestruct_kind = (env: Env, m: MakeStructData) i32 { env.makestruct_err(m).kv_one(KSTRUCTFIELD()) }
+kv_member_kind     = (env: Env, obj: Ptr<Expr>, field: str) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()) }
+// a match: exhaustiveness vs duplicate-variant, split out from match_err.
+kv_match_kind = (env: Env, m: MatchData) i32 {
+    m.arms.has_wildcard().match ({
+        true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()),
+        false => env.exhaustive_err(m).kv_one(KEXHAUST()).kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()))
+    })
+}
+kv_index_kind   = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
+kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()) }
+// the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
+kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.kv_check_expr_kind(l.value),
+        .Assign(x)   => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)),
+        .Return(r)   => env.kv_check_expr_kind(r),
+        .ExprStmt(e) => env.kv_check_expr_kind(e),
+        .If(f)       => env.kv_check_expr_kind(f.c),
+        .While(w)    => env.kv_check_expr_kind(w.c),
+        .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value))
+    })
+}
+kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
+    acc := 0
+    stmts.loop((h, i, st) { acc = acc.kv_kor(env.kv_check_block_stmt_kind(st)) })
+    acc
+}
+// mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
+kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => env.kv_check_call_kind(c).kv_kor(env.kv_check_args_kind(c.args)),
+        .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
+        .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
+        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
+        .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
+        .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
+        .Match(m)       => env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(kv_arm_return_kind(m.arms)),
+        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload),
+        .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
+        .Block(b)       => env.kv_check_block_kind(b.stmts),
+        _               => 0
+    })
+}
+kv_ret_kind    = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()) }
+kv_assign_kind = (env: Env, x: AssignData) i32 { env.assign_err(x).kv_one(KASSIGNFIT()) }
+kv_idxset_kind = (env: Env, x: IndexSetData) i32 { env.idxset_err(x).kv_one(KASSIGNFIT()) }
+// mirrors check_stmt: the statement's sub-expressions, then its own fit check.
+kv_check_stmt_kind = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)    => env.kv_check_expr_kind(l.value),
+        .Assign(x) => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
+        .Return(r) => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)),
+        .ExprStmt(e) => env.kv_check_expr_kind(e),
+        .If(f)     => env.kv_check_expr_kind(f.c).kv_kor(a.kv_check_body_kind(env, f.then)).kv_kor(a.kv_check_body_kind(env, f.els)),
+        .While(w)  => env.kv_check_expr_kind(w.c).kv_kor(a.kv_check_body_kind(env, w.body)),
+        .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_idxset_kind(x))
+    })
+}
+kv_check_body_kind = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.kv_check_stmt_kind(e, st))
+        e   = a.extend_env(e, st)
+    })
+    acc
+}
+// the trailing-value check, kind-flavoured: an empty / non-value-ending non-void body, or a trailing
+// expr that doesn't fit, is a KRETURNFIT (a missing/mistyped yielded value).
+kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
+    st.match ({
+        .ExprStmt(e) => env.kv_ret_kind(e),
+        .Return(r)   => 0,
+        _            => KRETURNFIT()
+    })
+}
+kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
+    env.exp.is_void_ty().match ({
+        true  => 0,
+        false => (body.len == 0).match ({
+            true  => KRETURNFIT(),
+            false => env.kv_last_stmt_kind(body[body.len - 1])
+        })
+    })
+}
+kv_check_func_kind = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
+    a.kv_check_body_kind(env, f.body).kv_kor(env.kv_trailing_kind(f.body))
+}
+// trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
+kv_method_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 { a.method_err(decls, im, f).kv_one(KCONFORMANCE()) }
+kv_conformance_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
+    acc := 0
+    sd.fields.loop((h, i, f) { acc = acc.kv_kor(a.kv_method_kind(decls, im, f)) })
+    acc
+}
+kv_impl_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => a.kv_conformance_kind(decls, im, sd), false => 0 }), _ => 0 })) })
+    acc
+}
+// the KIND of the FIRST error check_module would have counted, in the same order: dup-fn names
+// first, then each decl's body (DFunc) / impl (DImpl). Returns KNONE (0) for an accepting module.
+// A CHECK-KIND binary reads this; check_module's COUNT is untouched, so the oracle's verdict path
+// (which exits with the count) keeps working unchanged.
+check_module_kind* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+    acc := decls.dup_name_errs().kv_one(KDUPFN())
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, f), .DImpl(im) => a.kv_impl_kind(decls, im), _ => 0 })) })
+    acc
+}
+// the kind layer over a CROSS-MODULE link (mirrors check_linked): same layered header, then
+// check_module_kind instead of check_module. Lets a cross-module reject also be pinned by KIND.
+check_linked_kind* = (a: Ptr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
+    hdr   := a.module_header(lib)
+    rfile := a.resolve_module(decls)
+    world := a.dbuf(hdr.len + rfile.len)
+    hdr.loop((h, i, d) { world[i] = d })
+    rfile.loop((h, i, d) { world[hdr.len + i] = d })
+    a.check_module_kind(world)
+}
+
 // ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
 // The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
 // every function becomes a bodyless DForeign (structs/enums pass through). Checking a file against
