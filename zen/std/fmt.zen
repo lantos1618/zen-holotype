@@ -1,0 +1,35 @@
+// std.fmt — minimal formatted OUTPUT: the "show my result" primitive a normal program needs.
+//
+// Zen had no print and no int→string — you hand-rolled a putchar decimal loop. This is the daily-driver
+// layer over std.io.print (a str → stdout) + std.string's growable String:
+//
+//   { println, println_int } = std.fmt
+//   main = () i32 { println("answer:")  println_int(42)  0 }
+//
+// @self-hosted-only — like std.io it's not a fixpoint SOURCE; it rides on read_file/print's libc FFI.
+
+{ print } = std.io
+{ String, new, push, finish } = std.string
+
+// append the decimal digits of a NON-negative i64 to `out`, most-significant first. The recursion
+// unwinds high→low: the high part (n/10) is appended before this frame's low digit (n%10), so the
+// digits land in reading order. '0' is the byte 48, so '0' + d is the ASCII digit byte.
+udigits = (out: String, n: i64) String {
+    (n < 10).match ({
+        true  => out.push('0' + n),
+        false => out.udigits(n / 10).push('0' + (n % 10))
+    })
+}
+
+// the decimal text of an i64 (a leading '-' for negatives), as a fresh NUL-terminated str.
+int_to_str* = (n: i64) str {
+    (n < 0).match ({
+        true  => new().push('-').udigits(0 - n).finish(),
+        false => new().udigits(n).finish()
+    })
+}
+
+// ── the print verbs (return the byte count, like POSIX write / printf; used as statements) ──────────
+print_int*   = (n: i64) i64 { print(int_to_str(n)) }            // an int, no newline
+println*     = (s: str) i64 { print(s)  print("\n") }           // a line of text
+println_int* = (n: i64) i64 { print(int_to_str(n))  print("\n") }    // an int, then a newline

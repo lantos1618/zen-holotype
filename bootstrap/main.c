@@ -146,6 +146,12 @@ static String build_self_source(const char* srcroot){
  * via zenrt.h instead, so we swap the head for the include (== generate.py.gen_c_file()). */
 static const char HEAD[] = "typedef struct { void* ptr; int64_t len; } zslice; ";
 static const char HEAD_REPL[] = "#include \"zenrt.h\"\n";
+/* The build/run path uses this variant instead: a built program that imports std.string emits its OWN
+ * String + builders (strong, they override zenrt.c's weak copies at link), so define ZEN_NO_STRING to
+ * suppress zenrt.h's String and avoid the struct clash (#98). NOTE the compiler's own gen.c (build_self,
+ * above) uses the plain HEAD_REPL — it relies on zenrt's String (its gen.c strips std imports, emits
+ * none of its own). A built program that doesn't use String is unaffected (zenrt's String fns unreferenced). */
+static const char HEAD_REPL_PROG[] = "#define ZEN_NO_STRING 1\n#include \"zenrt.h\"\n";
 
 static int build_self(const char* out_path, const char* srcroot){
     String src = build_self_source(srcroot);
@@ -226,12 +232,12 @@ static int build_program(const char* argv0, const char* in_path, const char* out
         fprintf(stderr, "zenc: emitted C did not start with the expected head\n");
         return 1;
     }
-    /* wrapped C to a temp file: #include "zenrt.h" + the emitted body (HEAD stripped). */
+    /* wrapped C to a temp file: ZEN_NO_STRING + #include "zenrt.h" + the emitted body (HEAD stripped). */
     char cpath[256];
     snprintf(cpath, sizeof cpath, "/tmp/zenc_build_%d.c", (int)getpid());
     FILE* f = fopen(cpath, "wb");
     if (!f){ fprintf(stderr, "zenc: cannot write %s\n", cpath); return 1; }
-    fwrite(HEAD_REPL, 1, sizeof(HEAD_REPL) - 1, f);
+    fwrite(HEAD_REPL_PROG, 1, sizeof(HEAD_REPL_PROG) - 1, f);
     fwrite((const char*)out.ptr + hlen, 1, out.len - hlen, f);
     fclose(f);
 

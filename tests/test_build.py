@@ -114,3 +114,32 @@ def test_zenc_check_resolves_std_import():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(_IMPORT_PROG % '"ab", "ab"')
     assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
+
+
+# ── U3: std.fmt — a program can PRINT (output + int→string), via std.string ──────────────────────────
+# This also locks in the #98 fix: std.fmt pulls std.string, so a built program emits its own `String`,
+# which must NOT clash with zenrt.h's (the build path defines ZEN_NO_STRING to suppress the latter).
+def test_zenc_run_prints_text_and_ints():
+    """`println`/`println_int` from std.fmt actually write to stdout — text, then a formatted int."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println, println_int } = std.fmt\n"
+        "main = () i32 { println(\"answer:\")  println_int(42)  0 }\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "answer:\n42\n", repr(r.stdout)
+
+
+def test_zenc_run_int_to_str_negatives_and_zero():
+    """int→string handles 0, negatives (leading '-'), and multi-digit — the itoa edge cases."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println_int } = std.fmt\n"
+        "main = () i32 { println_int(0)  println_int(-7)  println_int(1000000)  0 }\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "0\n-7\n1000000\n", repr(r.stdout)
