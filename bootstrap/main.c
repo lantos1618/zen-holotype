@@ -151,7 +151,7 @@ static const char HEAD_REPL[] = "#include \"zenrt.h\"\n";
  * suppress zenrt.h's String and avoid the struct clash (#98). NOTE the compiler's own gen.c (build_self,
  * above) uses the plain HEAD_REPL — it relies on zenrt's String (its gen.c strips std imports, emits
  * none of its own). A built program that doesn't use String is unaffected (zenrt's String fns unreferenced). */
-static const char HEAD_REPL_PROG[] = "#define ZEN_NO_STRING 1\n#include \"zenrt.h\"\n";
+static const char HEAD_REPL_PROG[] = "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n";
 
 static int build_self(const char* out_path, const char* srcroot){
     String src = build_self_source(srcroot);

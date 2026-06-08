@@ -2,7 +2,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 typedef struct { void* ptr; int64_t len; } zslice;
+/* Like String below: a built program that imports std.alloc emits its own `Malloc` (+ Allocator impls),
+ * so the build path defines ZEN_NO_MALLOC to suppress zenrt's. The compiler binary (no macro) keeps it —
+ * main.c's `Malloc m = {0}` + gen.c's `Malloc*` params need it, and gen.c emits none of its own (#98). */
+#ifndef ZEN_NO_MALLOC
 typedef struct { int32_t _; } Malloc;
+#endif
 bool eq(const char* a, const char* b);
 bool is_empty(const char* s);
 void* heap(int64_t n);
