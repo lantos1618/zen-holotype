@@ -58,18 +58,28 @@ ffi = (name: str, ps: [Param], ret: Ty) Decl {
     dforeign(Func( name: name, params: ps.dup(), ret: ret, tparams: no_params(), body: no_stmts() ))
 }
 
-// ── the libc surface the stdlib uses today ──────────────────────────────────────────────────────────
-//   memory   — malloc/calloc/memcpy/free   (std.mem)
-//   strings  — strlen/strcmp               (std.str)
-//   abort    — fatal exit                  (a fail-fast primitive)
-// Returns the foreign DECLARATIONS as `[Decl]`; `genModule(libc())` emits their C prototypes. The
-// `[…]` decl literal has stack storage, so `.dup()` heap-copies it — safe to return and walk later.
+// ── the libc surface the stdlib uses ─────────────────────────────────────────────────────────────────
+//   memory   — malloc/calloc/realloc/free, memcpy/memmove/memset   (std.mem, std.alloc)
+//   strings  — strlen/strcmp                                        (std.str)
+//   io       — putchar/getchar/puts                                 (std.io)
+//   process  — abort/exit                                           (fail-fast primitives)
+// This is the ONE canonical libc binding list — it absorbs what the old static `bindings/libc.zen`
+// declared, so there is a single source of truth as data. Returns the foreign DECLARATIONS as `[Decl]`;
+// `genModule(libc())` emits their C prototypes. The `[…]` decl literal has stack storage, so `.dup()`
+// heap-copies it — safe to return and walk later.
 libc* = () [Decl] {
-    [ ffi("malloc", [param("n", ti64())],                                      rawptr()),
-      ffi("calloc", [param("n", ti64()), param("size", ti64())],               rawptr()),
-      ffi("memcpy", [param("dst", rawptr()), param("src", rawptr()), param("n", ti64())], rawptr()),
-      ffi("free",   [param("p", rawptr())],                                    tvoid()),
-      ffi("strlen", [param("s", tstr())],                                      ti64()),
-      ffi("strcmp", [param("a", tstr()), param("b", tstr())],                  ti32()),
-      ffi("abort",  no_params(),                                               tvoid()) ].dup()
+    [ ffi("malloc",  [param("n", ti64())],                                       rawptr()),
+      ffi("calloc",  [param("n", ti64()), param("size", ti64())],                rawptr()),
+      ffi("realloc", [param("p", rawptr()), param("n", ti64())],                 rawptr()),
+      ffi("free",    [param("p", rawptr())],                                     tvoid()),
+      ffi("memcpy",  [param("dst", rawptr()), param("src", rawptr()), param("n", ti64())], rawptr()),
+      ffi("memmove", [param("dst", rawptr()), param("src", rawptr()), param("n", ti64())], rawptr()),
+      ffi("memset",  [param("p", rawptr()), param("v", ti32()), param("n", ti64())],       rawptr()),
+      ffi("strlen",  [param("s", tstr())],                                       ti64()),
+      ffi("strcmp",  [param("a", tstr()), param("b", tstr())],                   ti32()),
+      ffi("putchar", [param("c", ti32())],                                       ti32()),
+      ffi("getchar", no_params(),                                                ti32()),
+      ffi("puts",    [param("s", tstr())],                                       ti32()),
+      ffi("abort",   no_params(),                                                tvoid()),
+      ffi("exit",    [param("code", ti32())],                                    tvoid()) ].dup()
 }
