@@ -11,9 +11,15 @@
 //
 //   m := Malloc(_: 0)
 //   v := addr(m).vec_of([10, 20])     // a Vec<i32>, backed by m; T inferred from the slice, A from `a`
-//   v  = addr(m).push(v, 30)          // grows (resize, double+1) through m when full
+//   v  = addr(m).vpush(v, 30)         // grows (resize, double+1) through m when full
 //   total := v.get(0) + v.get(2)
 //   addr(m).free_vec(v)               // hand the buffer back to m
+//
+// The mutators are v-prefixed (vpush/vlen/vgrow) because Zen has a FLAT name space with no overloading:
+// a bare `push`/`len`/`grow` would clash with std.string's same-named String ops when both are imported
+// (e.g. a program that uses a Vec AND println). The principled fix — a shared Seq trait both Vec and
+// String impl, so `x.push(…)` dispatches by receiver type — is tracked separately; this keeps the names
+// globally unique today. `get`/`buf`/`vec_of`/`free_vec` don't clash, so they keep their plain names.
 
 { Allocator } = std.alloc        // the explicit-allocator trait (acquire/resize/release), NOT raw malloc
 
@@ -22,7 +28,7 @@ Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }    // ptr -> a buffer of `cap` 
 // the whole backing buffer as a [T] (cap elements) — for indexed reads/writes
 buf*<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }
 // the live count, and one element by index
-len*<T> = (v: Vec<T>) i64 { v.len }
+vlen*<T> = (v: Vec<T>) i64 { v.len }
 get*<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }
 
 // a `Vec<T>` seeded from a slice (copies `xs`), its buffer acquired from `a`. T inferred from `xs`, A from `a`.
@@ -35,14 +41,14 @@ vec_of*<T, A> = (a: Ptr<A>, xs: [T]) Vec<T> {
 
 // grow (double + 1) by RESIZING the buffer through `a` — keeps the live bytes, leaks nothing. (The
 // pre-allocator version malloc'd a fresh buffer and never released the old one — a leak on every grow.)
-grow*<T, A> = (a: Ptr<A>, v: Vec<T>) Vec<T> {
+vgrow*<T, A> = (a: Ptr<A>, v: Vec<T>) Vec<T> {
     ncap := (v.cap * 2) + 1
     Vec<T>( ptr: a.resize(v.ptr, ncap * sizeof(T)), len: v.len, cap: ncap )
 }
 
 // push x, growing through `a` if full; returns the updated Vec
-push*<T, A> = (a: Ptr<A>, v: Vec<T>, x: T) Vec<T> {
-    r := (v.len < v.cap).match ({ true => v, false => a.grow(v) })
+vpush*<T, A> = (a: Ptr<A>, v: Vec<T>, x: T) Vec<T> {
+    r := (v.len < v.cap).match ({ true => v, false => a.vgrow(v) })
     b := r.buf()
     b[r.len] = x
     Vec<T>( ptr: r.ptr, len: r.len + 1, cap: r.cap )

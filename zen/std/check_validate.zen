@@ -101,15 +101,40 @@ intrinsic_arity = (fn: str) i32 {
     eq(fn, "atomic_add_i64").match ({ true => 2, false =>            // atomic_add_i64(p, delta) -> new value
     eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof = 1
 }
+// A UFCS call `x.m(…)` whose name `m` is a TRAIT METHOD but whose (Named) receiver type has no in-scope
+// impl providing it — e.g. a generic template's `a.release(…)` on `a: Ptr<A>`, A an abstract tparam —
+// dispatches to the right impl at MONOMORPHIZATION, NOT to any coincidentally same-named top-level fn.
+// Binding it to that top-level fn's signature here false-rejects on arity/arg-type. Concretely: std.mem
+// has a free-wrapper `release(p)` (1 arg) and std.alloc's Allocator trait method is `release(self, p)`
+// (2 args); a std.vec using an explicit allocator calls `a.release(v.ptr)`, which must defer to the impl,
+// not bind to mem's `release`. This extends the is_trait_method leniency below (which already fires when
+// the name is ONLY a trait method) to the case where the name ALSO collides with a top-level fn. Gated on
+// a non-empty Named receiver + an UNRESOLVED dispatch (dispatch_name == c.fn), so a plain top-level call
+// whose receiver is concrete (dispatch resolves) or non-Named (e.g. RawPtr) is still fully checked.
+is_unresolved_trait_call = (env: Env, c: CallData) bool {
+    (c.args.len > 0).match ({
+        false => false,
+        true  => env.decls.is_trait_method(c.fn).match ({
+            false => false,
+            true  => eq(env.dispatch_name(c), c.fn).match ({
+                false => false,
+                true  => env.infer_expr(c.args[0].addr()).enum_name().is_empty().match ({ true => false, false => true })
+            })
+        })
+    })
+}
 // a call: a LOCAL fn must match arity + arg types; an INTRINSIC has a fixed arity (checked above);
 // an IMPORTED name is known-but-unchecked (no signature here); anything else is UNDEFINED — a typo
-// or a missing import — and is rejected (1 error).
+// or a missing import — and is rejected (1 error). A deferred UFCS trait-method call (above) skips first.
 check_call = (env: Env, c: CallData) i32 {
-    env.decls.is_known_fn(c.fn).match ({
-        true  => env.call_errs(c),
-        false => c.fn.is_intrinsic().match ({
-            true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),  // known arity → check it
-            false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => 1 })   // imported / a UFCS trait method on a generic receiver: no local signature
+    env.is_unresolved_trait_call(c).match ({
+        true  => 0,
+        false => env.decls.is_known_fn(c.fn).match ({
+            true  => env.call_errs(c),
+            false => c.fn.is_intrinsic().match ({
+                true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),  // known arity → check it
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => 1 })   // imported / a UFCS trait method on a generic receiver: no local signature
+            })
         })
     })
 }
@@ -588,11 +613,14 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
-    env.decls.is_known_fn(c.fn).match ({
-        true  => env.kv_call_errs_kind(c),
-        false => c.fn.is_intrinsic().match ({
-            true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
-            false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => KUNDEFINED() })
+    env.is_unresolved_trait_call(c).match ({
+        true  => 0,                                       // deferred UFCS trait-method call (see check_call)
+        false => env.decls.is_known_fn(c.fn).match ({
+            true  => env.kv_call_errs_kind(c),
+            false => c.fn.is_intrinsic().match ({
+                true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => KUNDEFINED() })
+            })
         })
     })
 }
