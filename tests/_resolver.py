@@ -46,6 +46,14 @@ _IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*std\.(?P<mod>\w+)")
 # `new<T>* =`, `own_get<T>* =`); without it the generic stdlib exports (Own/new/clone/release/…)
 # were invisible to split_decls, so a cross-module CONSUMER of them saw them as undefined.
 _DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(<[^>]*>)?(\*?)\s*[=:]")
+# A method-impl head `Type.impl(Trait, { … })` is ALSO a top-level decl, but it has no `name =/:` head so
+# _DECL_HEAD_RE misses it. It must survive resolution: a cross-module CONSUMER of a trait method (e.g.
+# std.vec calling `a.acquire(…)` on an explicit Allocator, where acquire lives in std.alloc's
+# `Malloc.impl(Allocator, …)`) needs the impl present so the checker's is_trait_method resolves the call —
+# otherwise the method reads as undefined-name. The real loader (resolve.zen) always keeps impls; this
+# mirrors that. Keyed per (Type, Trait) so two impls (many traits per type / many types per trait) never
+# dedup each other away, while a re-import of the SAME module's impl still collapses to one.
+_IMPL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.impl\(\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def all_modules():
@@ -194,6 +202,25 @@ def split_decls(src):
         if (not l) or l[0].isspace() or stripped.startswith("//") or \
            (stripped.startswith("{ ") and "= std." in l):
             i += 1
+            continue
+        mi = _IMPL_HEAD_RE.match(l)
+        if mi:
+            # a `Type.impl(Trait, {…})` block: capture it brace-balanced, keyed uniquely so it is never
+            # deduped against a real decl or another impl. Impls are always public (kept in the lib).
+            name = f"{mi.group(1)}.impl({mi.group(2)})"
+            start = i
+            depth, seen_brace = 0, False
+            while i < n:
+                d = _brace_delta(lines[i])
+                depth += d
+                if d != 0:
+                    seen_brace = True
+                i += 1
+                if seen_brace and depth <= 0:
+                    break
+                if not seen_brace:
+                    break
+            decls.append((name, True, "\n".join(lines[start:i])))
             continue
         m = _DECL_HEAD_RE.match(l)
         if not m:

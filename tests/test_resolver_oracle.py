@@ -182,9 +182,16 @@ def test_splitter_covers_every_top_level_decl(module):
     src = _resolver._src(module)
     split_names = {n for n, _e, _t in _resolver.split_decls(src)}
     head_names = set()
+    impl_depth = 0   # >0 ⇒ inside a `Type.impl(Trait, {…})` body; its methods are NOT top-level decls
     for l in src.splitlines():
+        if impl_depth > 0:                                   # skip the impl body (its method heads, e.g.
+            impl_depth += _resolver._brace_delta(l)          # runtime's column-0 `suspend = …`, aren't decls)
+            continue
         if l and not l[0].isspace() and not l.lstrip().startswith("//") \
            and not (l.lstrip().startswith("{ ") and "= std." in l):
+            if _resolver._IMPL_HEAD_RE.match(l):             # an impl head: consume its brace-balanced body
+                impl_depth = _resolver._brace_delta(l)
+                continue
             m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\*?\s*[=:]", l)
             if m:
                 head_names.add(m.group(1))

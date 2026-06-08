@@ -143,3 +143,42 @@ def test_zenc_run_int_to_str_negatives_and_zero():
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "0\n-7\n1000000\n", repr(r.stdout)
+
+
+# ── U3: std.vec — a growable Vec<T> with an EXPLICIT allocator (acquire/resize/release), no hidden malloc ─
+def test_zenc_run_vec_explicit_allocator():
+    """Vec<T> threads a Ptr<A:Allocator> per op: vec_of/push/get/free_vec, Malloc-backed. Proves generic
+    + trait dispatch (a.acquire/resize/release monomorphize to impl_Allocator_Malloc_*) end to end."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ vec_of, push, get, free_vec } = std.vec\n"
+        "main = () i32 {\n"
+        "  m := Malloc(_: 0)\n"
+        "  v := addr(m).vec_of([10, 20])\n"
+        "  v2 := addr(m).push(v, 30)\n"          # len==cap → grows via a.resize
+        "  total := v2.get(0) + v2.get(2)\n"
+        "  addr(m).free_vec(v2)\n"
+        "  total\n"
+        "}\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 40
+
+
+def test_zenc_run_vec_growth_resizes():
+    """Repeated push past capacity forces several a.resize grows; live elements survive each grow."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    pushes = "".join(f"  v{i} := addr(m).push(v{i-1}, {i+1})\n" for i in range(1, 6))
+    gets = " + ".join(f"v5.get({i})" for i in range(6))
+    (d / "p.zen").write_text(
+        "{ vec_of, push, get } = std.vec\n"
+        "main = () i32 {\n"
+        "  m := Malloc(_: 0)\n"
+        "  v0 := addr(m).vec_of([1])\n"
+        f"{pushes}"
+        f"  {gets}\n"
+        "}\n"
+    )
+    # 1+2+3+4+5+6 = 21
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 21
