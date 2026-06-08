@@ -237,31 +237,12 @@ def imports_of(path):
     return out
 
 
-def imports_a_cross_module_generic(path):
-    """True iff `path` imports a name that is a GENERIC (`<T>`) decl in its defining std module, e.g.
-    `{ Own, new, … } = std.drop` where drop's `new<T>* = …` is generic. The cross-module checker
-    (check_validate.check_linked) reduces an imported decl to a bodyless DForeign via module_header,
-    which DROPS its `<…>` tparams — so any CALL to an imported generic is flagged (a known checker
-    gap; even a trivial `wrap(n)` across modules fails, independent of the caller). Such a module
-    can't reach 0 cross-module errors until module_header preserves tparams + check_linked
-    monomorphizes imported generics. The two cross-module oracle tests skip these on this property
-    (keyed on a REAL fact about the imports, not on a module name)."""
-    import re
-    head = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*std\.(?P<mod>\w+)")
-    gen_head = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)<[^>]*>\*?\s*[=:]")
-    for line in (ROOT / path).read_text().splitlines():
-        m = head.match(line)
-        if not m:
-            continue
-        srcpath = ROOT / "zen/std" / (m.group("mod") + ".zen")
-        if not srcpath.exists():
-            continue
-        imported = {nm.strip() for nm in m.group("names").split(",") if nm.strip()}
-        for src_line in srcpath.read_text().splitlines():
-            gm = gen_head.match(src_line)
-            if gm and gm.group(1) in imported:
-                return True
-    return False
+# (Removed: imports_a_cross_module_generic — the marker the two cross-module oracle tests used to SKIP a
+# module that calls an imported generic, e.g. std.cown -> std.drop's new<T>/own_get<T>. That checker gap
+# is FIXED: check_validate.call_errs now skips the strict arg-TYPE check for an imported generic call —
+# its param types still carry the unbound tparam `T`, uninferable at the call site — exactly as a LOCAL
+# generic call is monomorphized away before the validating pass; arity is still enforced. cown now
+# namespaced-checks at 0, so both tests run it for real with no skip.)
 
 
 def check_linked_count(target, libs=None):

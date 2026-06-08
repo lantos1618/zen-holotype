@@ -114,6 +114,13 @@ VALUE_CASES = [
 # --- recovered breadth: arithmetic precedence + recursion ---
     ('test* = () i32 { 2 + 3 * 4 - 1 }', 13),
     ('fac* = (n: i32) i32 { (n == 0).match({ true => 1, false => n * fac(n - 1) }) }\ntest* = () i32 { fac(5) }', 120),
+# --- regression (#93): an INLINE nested match on a GENERIC enum's payload bind. The outer
+#     `r.match({ .Err(e) => e.match({…}) })` must give `e` the SUBSTITUTED concrete payload type
+#     (E = IoError of Result<i32, IoError>) so the inner match resolves IoError's tags — they used
+#     to emit BARE (`_Errno`) instead of prefixed (`IoError_Errno`), yielding uncompilable C.
+    ('Result<T, E>: Ok(T) | Err(E)\nIoError*: NotFound | Denied | Errno(i32)\nmkErr<T, E> = (ok: T, x: E) Result<T, E> { .Err(x) }\ntest* = () i32 {\n  r := mkErr(0, .Errno(7))\n  r.match({ .Ok(v) => v, .Err(e) => e.match({ .NotFound => 1, .Denied => 2, .Errno(n) => n }) })\n}', 7),
+# the same idiom on a single-tparam generic enum (Box<T> wrapping the inner enum)
+    ('IoError*: NotFound | Denied | Errno(i32)\nBox<T>: B(T)\nmkBox<T> = (x: T) Box<T> { .B(x) }\ntest* = () i32 {\n  r := mkBox(.Denied)\n  r.match({ .B(e) => e.match({ .NotFound => 1, .Denied => 2, .Errno(n) => n }) })\n}', 2),
 ]
 
 # (src, verdict) the check binary must produce.
@@ -133,6 +140,16 @@ VERDICT_CASES = [
     # --- test_partial_match_without_wildcard_rejected ---
     ('R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 } })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }', 'reject'),
     ('f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }', 'reject'),
+    # --- #96: a single non-`_` bool/literal match arm is non-exhaustive (lone value-arm = subject-
+    #     ignoring default); a single `_` arm, or a tested arm + a default, is fine ---
+    ('f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }', 'reject'),                         # 1 non-`_` bool arm
+    ('f* = (b: bool) i32 {\n b.match({ true => 1 })\n}\ntest* = () i32 { f(true) }', 'reject'),                           # 1 non-`_` bool arm
+    ('f* = (n: i32) i32 {\n n.match({ 0 => 9 })\n}\ntest* = () i32 { f(5) }', 'reject'),                                 # 1 non-`_` literal arm
+    ('f* = (b: bool) i32 {\n b.match({ true => 1, false => 0 })\n}\ntest* = () i32 { f(false) }', 'accept'),             # tested + default (2 arms)
+    ('f* = (b: bool) i32 {\n b.match({ false => 9, _ })\n 7\n}\ntest* = () i32 { f(false) }', 'accept'),                 # arm + bare `_` guard
+    ('f* = (n: i32) i32 {\n n.match({ 0 => 1, _ => 2 })\n}\ntest* = () i32 { f(5) }', 'accept'),                         # literal arm + `_` default
+    ('f* = (n: i32) i32 {\n n.match({ _ => 0 })\n}\ntest* = () i32 { f(5) }', 'accept'),                                 # lone `_` catch-all
+    ('f* = (n: i32) i32 {\n n.match({ 0 => 1, 1 => 2, _ => 3 })\n}\ntest* = () i32 { f(5) }', 'accept'),                 # 3-arm literal match
     # --- test_value_position_return_rejected ---
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 'reject'),
     ('f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 'reject'),
@@ -302,6 +319,12 @@ VERDICT_KIND_CASES = [
     ('use* = (n: i32) i32 { n }\ntest* = () i32 { use(missing()) }', 'undefined-name'),                                  # nested in an arg
     ('test* = () i32 { 1 + gone() }', 'undefined-name'),                                                                 # nested in an operand
     ('f* = (b: bool) i32 { b.match({ true => { ghost()  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }', 'undefined-name'),  # inside a block arm
+    # A bool/literal match with a SINGLE non-`_` arm is non-exhaustive (its lone value-arm becomes a
+    # subject-ignoring default — #96). The parser, having no error channel, lowers it to a call to an
+    # undefined sentinel (`__nonexhaustive_match`), so the validator rejects it as an undefined name.
+    ('f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }', 'undefined-name'),  # single non-`_` bool arm
+    ('f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }', 'undefined-name'),                 # single non-`_` bool arm (expr body)
+    ('f* = (n: i32) i32 {\n n.match({ 0 => 9 })\n}\ntest* = () i32 { f(5) }', 'undefined-name'),                          # single non-`_` literal arm
 
     # --- struct-field: a struct-literal init field / a member access that names no real field, or a mistyped init ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 0, y: 1 }  p.x }', 'struct-field'),                                   # unknown init field y
@@ -319,9 +342,7 @@ VERDICT_KIND_CASES = [
     ('C*: A | B\nf* = (c: C) i32 { c.match({ .A => 1, .A => 2, .B => 3 }) }\ntest* = () i32 { f(.A()) }', 'dup-variant'),
     ('R*: Ok(i32) | Err\nf* = (r: R) i32 { r.match({ .Ok(v) => v, .Ok(w) => w, .Err => 0 }) }\ntest* = () i32 { f(.Ok(5)) }', 'dup-variant'),
 
-    # --- operand-type: arith on non-numeric / logic on non-bool (a partial bool match lowers to an
-    #     uninferable Cond branch, which the operand check flags — so it pins here, not exhaustiveness) ---
-    ('f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }', 'operand-type'),
+    # --- operand-type: arith on non-numeric / logic on non-bool ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P { x: 1 }  q := P { x: 2 }  (p + q).x }', 'operand-type'),                  # struct + struct
     ('test* = () i32 { ("hi" + "bye")  0 }', 'operand-type'),                                                            # str + str
     ('test* = () bool { 1 && 2 }', 'operand-type'),                                                                      # && on numbers

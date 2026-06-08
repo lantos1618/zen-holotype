@@ -113,9 +113,24 @@ check_call = (env: Env, c: CallData) i32 {
         })
     })
 }
+// is the callee a GENERIC function (carries `<T>` tparams)? For a LOCAL generic call, resolve_module
+// inlines/monomorphizes the template AWAY before this validating pass runs, so a template body's call
+// never reaches call_errs as-is. But a call to an IMPORTED generic resolves to the cross-module HEADER
+// sig (a bodyless DForeign that as_sig preserves the tparams on), and resolve_module — run on the
+// caller's file alone — CAN'T inline it (the template body lives in another module). So the call stays
+// `f(args)` against param types that still carry the UNBOUND tparam (`x: T`). Arg-type-checking those
+// against the unsubstituted `T` false-rejects a perfectly correct call (a `Buf` does not "fit" the bare
+// `Named("T")`). Mirror the local case: skip the strict arg-TYPE check for an imported generic — the
+// tparam is uninferable here, exactly the "uninferable -> skip" leniency this validator already applies.
+// Arity is still verified (a generic fn has a fixed param count), and a non-generic cross-module call is
+// unchanged — so wrong-arity / wrong-arg-type imported calls (the negative tests) are still rejected.
+is_generic_call = (decls: [Decl], fn: str) bool { decls.the_func(fn).tparams.len > 0 }
 call_errs = (env: Env, c: CallData) i32 {
     ps := env.decls.fn_params(c.fn)
-    (ps.len == c.args.len).match ({ true => env.arg_type_errs(ps, c.args), false => 1 })
+    (ps.len == c.args.len).match ({
+        false => 1,                                                            // arity mismatch (checked for generics too)
+        true  => env.decls.is_generic_call(c.fn).match ({ true => 0, false => env.arg_type_errs(ps, c.args) })   // imported generic: arg types carry unbound tparams -> skip (sound, like a local generic call)
+    })
 }
 check_args = (env: Env, args: [Expr]) i32 {
     acc := 0
@@ -563,12 +578,13 @@ kv_arg_type_kind = (env: Env, params: [Param], args: [Expr]) i32 {
     args.loop((h, i, ar) { acc = acc.kv_kor(env.arg_err_at(params, i, ar).kv_one(KARGTYPE())) })
     acc
 }
-// a known local fn: wrong arity → KARITY; right arity but a mistyped arg → KARGTYPE.
+// a known local fn: wrong arity → KARITY; right arity but a mistyped arg → KARGTYPE. An imported
+// generic call skips the arg-type kind too, mirroring call_errs (so count and kind stay in agreement).
 kv_call_errs_kind = (env: Env, c: CallData) i32 {
     ps := env.decls.fn_params(c.fn)
     (ps.len == c.args.len).match ({
-        true  => env.kv_arg_type_kind(ps, c.args),
-        false => KARITY()
+        false => KARITY(),
+        true  => env.decls.is_generic_call(c.fn).match ({ true => 0, false => env.kv_arg_type_kind(ps, c.args) })
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {

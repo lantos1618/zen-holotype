@@ -312,6 +312,18 @@ parse_match = (a: Ptr<Malloc>, src: str, subj: PExpr) PExpr {
 }
 is_bool_label = (src: str, t: Token) bool { src.tok_eq(t, "true") || src.tok_eq(t, "false") }
 is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
+// A bool/literal `.match` with a SINGLE non-`_` arm is NON-EXHAUSTIVE: a lone value-arm lowers to a
+// pure default that IGNORES the subject (`b.match({ false => 9 })` would silently return 9 for `b`
+// true AND false). The lit/bool forms lower to Cond, not Match, so the enum exhaustiveness check
+// never sees them — so reject HERE, at parse, type-independently (the rule needs no subject type).
+// The parser has no error channel, so emit a Call to an undefined sentinel name: std.check's
+// validator rejects an unknown call (`__nonexhaustive_match` is no fn/intrinsic/import/trait method),
+// exactly as a malformed parse is caught today — but now for the RIGHT reason. `next` is supplied by
+// the caller (pointed past the match's `}`), so close_match still drops the trailing `)`.
+no_args = (a: Ptr<Malloc>) [Expr] { slice(malloc(0), 0) }
+reject_match = (a: Ptr<Malloc>, next: i32) PExpr {
+    PExpr( expr: a.enode(call("__nonexhaustive_match", a.no_args())), next: next )
+}
 // arms come in EITHER order — `{ true => X, false => Y }` or `{ false => Y, true => X }`. Read
 // the first arm's label to map them: the `true` arm is the cond's then-branch, the `false` arm
 // its else-branch. (Assuming positional [true, false] order silently inverts a false-first match.)
@@ -320,7 +332,13 @@ is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
 parse_bool_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
     first := src.scan(open.next)                                    // the first arm's label token
     a0    := a.parse_arm(src, open.next)                            // first arm body
-    comma := src.scan(a0.next)                                      // ','
+    comma := src.scan(a0.next)                                      // ',' — or '}' if this is the LONE arm
+    src.is_rbrace(comma.tok).match ({
+        true  => a.reject_match(comma.next),                        // `{ true => X }` — a single non-`_` arm: non-exhaustive
+        false => a.parse_bool_rest(src, subj, first, a0, comma)
+    })
+}
+parse_bool_rest = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, comma: Scan) PExpr {
     second := src.scan(comma.next)                                  // the second arm's leading token
     src.is_wild_label(second.tok).match ({
         true  => a.parse_bool_wild(src, subj, first, a0, second),   // `_` — a partial bool guard
@@ -352,10 +370,31 @@ parse_bool_wild = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr
 // `_` wildcard, or just the last label). Fixes the old parse_bool_match, which only ever read TWO arms
 // and bool-coerced the subject — crashing on 3+ arms and silently mis-evaluating non-zero labels.
 LitArmEnd*: { test: Ptr<Expr>, body: Ptr<Expr>, next: i32 }
-parse_lit_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr { a.parse_lit_arms(src, subj, open.next) }
+// The FIRST arm gets an extra guard: if it's ALSO the last arm (followed by `}`) and is NOT a `_`
+// wildcard, the match has a single value-arm that becomes a subject-ignoring default — reject it
+// (parse_lit_arms below would otherwise return that lone body and silently drop the subject). A lone
+// `_` arm (`{ _ => 0 }`) is a legitimate catch-all and is left to parse_lit_arms unchanged.
+parse_lit_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
+    first := src.scan(open.next)                                    // the first arm's label token
+    src.is_wild_label(first.tok).match ({
+        true  => a.parse_lit_arms(src, subj, open.next),           // a lone/leading `_` — valid catch-all
+        false => a.parse_lit_first(src, subj, open.next)
+    })
+}
+parse_lit_first = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
+    arm   := a.parse_lit_arm(src, subj, pos)
+    after := src.scan(arm.next)                                     // ',' (more arms) or '}' (LONE non-`_` arm → reject)
+    src.is_rbrace(after.tok).match ({
+        true  => a.reject_match(after.next),                       // `{ 0 => 9 }` — a single non-`_` arm: non-exhaustive
+        false => a.parse_lit_after(src, subj, arm, after)          // a comma (or EOF) follows: behave as before
+    })
+}
 parse_lit_arms = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
     arm   := a.parse_lit_arm(src, subj, pos)
     after := src.scan(arm.next)                                     // ',' (more arms) or '}' (last = default)
+    a.parse_lit_after(src, subj, arm, after)
+}
+parse_lit_after = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
     after.tok.kind.match ({
         .Eof => PExpr( expr: arm.body, next: after.next ),         // unterminated `{ … `: stop at EOF, don't recurse forever
         _    => src.is_rbrace(after.tok).match ({

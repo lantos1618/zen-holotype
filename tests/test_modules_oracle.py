@@ -40,11 +40,10 @@ def test_module_typechecks_against_its_imports(module):
     # signature (layered via check_linked's module_header), not waved through as "imported". 0 errors
     # == this module composes with its imports as a well-typed inter-module unit.
     path = "zen/std/" + module
-    # KNOWN CHECKER GAP: module_header drops an imported decl's `<T>` tparams, so a call to a
-    # cross-module GENERIC (e.g. std.cown calling std.drop's `new<T>`/`own_get<T>`) is flagged
-    # regardless of the caller. Skip such modules until check_linked monomorphizes imported generics.
-    if _oracle.imports_a_cross_module_generic(path):
-        pytest.skip(f"{module} imports a cross-module generic; check_linked can't monomorphize it yet")
+    # A call to a cross-module GENERIC (e.g. std.cown calling std.drop's `new<T>`/`own_get<T>`) is now
+    # handled: check_validate.call_errs skips the strict arg-TYPE check for an imported generic (its
+    # param types still carry the unbound tparam `T`, uninferable at the call site), mirroring how a
+    # LOCAL generic call is monomorphized away before this pass. Arity is still enforced.
     n = _oracle.check_linked_count(path)
     assert n == 0, f"{module}: {n} cross-module type error(s) against imports {_oracle.imports_of(path)}"
 

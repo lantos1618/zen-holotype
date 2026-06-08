@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = std.genc
 { Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -247,8 +247,8 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),
-        .MakeEnum(mk)  => eq(mk.mty, "").match ({ true => tnamed(env.enum_inst_mk(mk.variant, mk.payload).mty), false => tnamed(mk.mty) }),   // trust a resolved ctor's monomorphized name
-        .Tag(t)        => eq(t.mty, "").match ({ true => tnamed(env.enum_inst_tag(t.variant).mty), false => tnamed(t.mty) }),
+        .MakeEnum(mk)  => env.mkenum_ty(mk),                  // a resolved generic ctor keeps its targs (Generic), so a later match-arm bind recovers the concrete payload
+        .Tag(t)        => env.tag_ty(t),
         .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
@@ -345,6 +345,23 @@ infer_call = (env: Env, c: CallData) Ty {
         })
     })
 }
+// a constructor's type. A RESOLVED ctor (mty set) of a GENERIC enum keeps its type args as a Generic
+// (`.Err(x): Result_void_IoError` carries args [void, IoError]) — so a match-arm bind on it recovers the
+// substituted payload (IoError) for a nested match. A non-generic ctor (no targs) is a plain Named. An
+// UNRESOLVED ctor (mty == "") falls back to enum_inst_* (which itself yields the monomorphized name).
+einst_ty = (ei: EnumInst) Ty { (ei.targs.len > 0).match ({ true => tgeneric(ei.base, ei.targs, ei.mty), false => tnamed(ei.mty) }) }
+mkenum_ty = (env: Env, mk: MakeEnumData) Ty {
+    eq(mk.mty, "").match ({
+        true  => env.enum_inst_mk(mk.variant, mk.payload).einst_ty(),
+        false => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.mty) })
+    })
+}
+tag_ty = (env: Env, t: TagData) Ty {
+    eq(t.mty, "").match ({
+        true  => env.enum_inst_tag(t.variant).einst_ty(),
+        false => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.mty) })
+    })
+}
 infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
 infer_match_ty = (env: Env, m: MatchData) Ty {
     (m.arms.len > 0).match ({ true => env.infer_expr(m.arms[0].body), false => tvoid() })
@@ -430,13 +447,39 @@ resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.resolve_expr(env, fi.value)) })
     buf
 }
+// the declared payload type of variant `vn` of the NON-generic enum named `ename` (void if absent).
+vdef_payload = (vs: [VariantDef], vn: str) Ty {
+    found := tvoid()
+    vs.loop((h, i, v) { found = eq(v.name, vn).match ({ true => v.payload, false => found }) })
+    found
+}
+concrete_variant_payload = (decls: [Decl], ename: str, vn: str) Ty {
+    found := tvoid()
+    decls.loop((h, i, d) { found = d.match ({
+        .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants.vdef_payload(vn), false => found }),
+        _          => found
+    }) })
+    found
+}
+// the CONCRETE payload type a match arm binds for `variant`, given the subject's inferred type `t`.
+// For a generic enum instance (`Result<i32, IoError>` → Generic(base="Result", args=[i32, IoError])),
+// the `.Err` payload is the DECLARED `E` substituted through the genenum's tparams (→ IoError) — so a
+// nested `e.match(…)` on the bound `e` resolves the inner enum's ename. For a plain Named/Ptr enum the
+// declared payload is already concrete. Void when the variant carries no payload (a tagless arm).
+subj_variant_payload = (env: Env, t: Ty, variant: str) Ty {
+    t.match ({
+        .Generic(g) => env.decls.find_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
+        _           => env.decls.concrete_variant_payload(t.enum_name(), variant)
+    })
+}
+gsubst = (pty: Ty, env: Env, g: GenericData) Ty { env.decls.find_genenum(g.name).tparams.subst_ty(g.args, pty) }
 // fill an enum match's ename from the subject's declared type. If the subject is a POINTER
 // (`Ptr<Enum>`), emit genc's ematchp so the tag test is `subj->tag` (not `subj.tag`).
 resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
     subj2 := a.resolve_expr(env.clr_exp(), m.subj)  // resolve the subject FIRST — stamps mty on a ctor subject
     t     := env.infer_expr(subj2)             // infer from the RESOLVED subject → the monomorphized enum name
     en    := t.enum_name()
-    arms  := a.resolve_arms(env, m.arms)
+    arms  := a.resolve_arms(env, t, m.arms)
     t.ty_is_ptr().match ({
         true  => a.cenode(ematchp(subj2, en, arms)),
         false => a.cenode(ematch(subj2, en, arms))
@@ -462,9 +505,17 @@ resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     })
     a.cenode(call(dn, buf))
 }
-resolve_arms = (a: Ptr<Malloc>, env: Env, arms: [ArmData]) [ArmData] {
+// resolve each arm body, binding a payload arm's `e` to the variant's CONCRETE payload type so a
+// nested `e.match(…)` resolves the inner enum's ename (an empty bind threads env unchanged).
+arm_env = (a: Ptr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
+    eq(ar.bind, "").match ({
+        true  => env,
+        false => Env( vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars), decls: env.decls, exp: env.exp, a: env.a )
+    })
+}
+resolve_arms = (a: Ptr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
-    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(env, ar.body)) })
+    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(a.arm_env(env, t, ar), ar.body)) })
     buf
 }
 
