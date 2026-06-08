@@ -126,3 +126,30 @@ strip_imports* = (out: String, s: str) String { out.strip_into(s, 0, true) }
 // finishes each file's String to a str, or — as the prototype test does — inlines the fold over a
 // single growing String, emitting the '\n' separator between files itself.)
 concat_files* = (out: String, a: str, b: str) String { out.append(a).push(10).append(b) }
+
+// ── the import EDGE: which module does an import line name? ───────────────────────────────────────
+// strip_imports drops import lines; the dependency-ordering driver needs the other half — the module
+// NAME each import line points at (`{ malloc } = std.alloc` → "alloc"), to read zen/std/<name>.zen and
+// recurse. These read the name off the `= std.<name>` marker is_import_line already matched.
+
+// length of the `= std.` marker that is_marker_at checks; the module name begins just past it.
+STD_MARKER_LEN := 6
+
+// the byte position of the module name on the import line starting at p — scan to the `= std.` marker
+// (is_import_line guarantees one before the newline), then step past its 6 bytes onto the name's first
+// char. (Only ever called on a line where is_import_line(p) already holds, so the marker is present.)
+std_name_pos = (s: str, p: i32) i32 {
+    s.is_marker_at(p).match ({ true => p + STD_MARKER_LEN, false => s.std_name_pos(p + 1) })
+}
+// an identifier byte — the module-name charset (a module path is `std.<ident>`): letters, digits, '_'.
+is_ident_byte = (b: u8) bool {
+    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || ((b >= '0') && (b <= '9')) || (b == '_')
+}
+// append the identifier run starting at p (the module name) to `out`, stopping at the first non-ident
+// byte (whitespace / newline / NUL end the name).
+take_name = (out: String, s: str, p: i32) String {
+    s.byte_at(p).is_ident_byte().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
+}
+// import_module(out, s, p): append the module name imported on the import line starting at p — e.g.
+// "alloc" for `{ malloc, free } = std.alloc`. The driver maps it to zen/std/<name>.zen.
+import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.std_name_pos(p)) }
