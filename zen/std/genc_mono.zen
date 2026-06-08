@@ -56,9 +56,32 @@ has_mangled = (buf: [GenericData], cnt: i32, m: str) bool {
     buf.loop((h, i, e) { found = (i < cnt).match ({ true => eq(e.mangled, m).match ({ true => true, false => found }), false => found }) })
     found
 }
+mono_imax = (a: i32, b: i32) i32 { (a > b).match ({ true => a, false => b }) }
+// type-arg NESTING depth of a Ty: `Box<Vec<i32>>` is 2, `i32`/`Box` (no args) is ≤1. A well-formed
+// instance is shallow; a polymorphic-recursive one (see add_inst) grows this by 1 each mono step.
+mty_depth = (t: Ty) i32 {
+    t.match ({
+        .Generic(g) => 1 + g.args.tys_max_depth(),
+        .Ptr(p)     => load(p).mty_depth(),
+        .Slice(e)   => load(e).mty_depth(),
+        _           => 0
+    })
+}
+tys_max_depth = (ts: [Ty]) i32 {
+    d := 0
+    ts.loop((h, i, t) { d = d.mono_imax(t.mty_depth()) })
+    d
+}
 add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
-    buf[cnt] = g
-    cnt + 1
+    // bounded two ways against a MALFORMED polymorphic-recursive generic — a type whose field/payload
+    // names the SAME generic with a strictly-deeper arg (`Box<T>: { next: Box<Box<T>> }`). Each mono step
+    // yields a brand-new, ever-deeper instance (Box_i32 → Box_Box_i32 → …), so has_mangled dedup never
+    // fires and the worklist would grow forever — overrunning this fixed buffer and overflowing
+    // expand_insts' stack. (1) drop an instance whose type-arg nesting is absurdly deep (a well-formed
+    // instance is shallow; only the runaway one passes the limit) and (2) never write past the buffer.
+    // Neither bound is reachable by a well-formed program; dropping the degenerate deep instance turns the
+    // crash into bounded, finite work.
+    ((1 + g.args.tys_max_depth()) > 24 || cnt >= buf.len).match ({ true => cnt, false => { buf[cnt] = g  cnt + 1 } })
 }
 collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
     t.match ({

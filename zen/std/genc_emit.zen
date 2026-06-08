@@ -12,8 +12,9 @@
 { view, is_empty, eq } = std.str
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
   BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
-  gen_ty, is_template, is_trait, call, arm, block, param, field } = std.genc
+  gen_ty, is_template, is_trait, call, lit, arm, block, param, field } = std.genc
 { monomorphize } = std.genc_mono
+{ malloc } = std.alloc
 
 // ── int -> decimal digits (byte access, no view/slice — so genc.zen self-hosts) ────────
 sbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
@@ -105,8 +106,20 @@ gen_bin = (s: String, b: BinData) String {
 // they erase to raw pointer ops, exactly as the Python lowerer does. Everything else is an
 // ordinary `fn(args)`. (sizeof/slice need a type argument and are left for the slice/generic
 // work — they don't appear in the scanner core.)
-arg0 = (c: CallData) Ptr<Expr> { c.args[0].addr() }
-arg1 = (c: CallData) Ptr<Expr> { c.args[1].addr() }
+// BOUNDS-SAFE positional intrinsic args. The gen_call intrinsics (load/offset/store/slice/…) read fixed
+// arg positions; a MALFORMED program can name an intrinsic with too FEW args (only the validator checks
+// intrinsic arity, and the EMIT path doesn't run it), so a raw c.args[0]/c.args[1] reads PAST the args
+// buffer — a heap-buffer-overflow. A missing arg degrades to a literal 0 (emits "0", valid C). A
+// correct-arity call always takes the in-bounds branch, so valid output is byte-identical.
+earg_buf = () [Expr] { slice(malloc(sizeof(Expr)), 1) }
+zero_arg = () Ptr<Expr> {
+    b := earg_buf()
+    b[0] = lit(0)
+    b[0].addr()
+}
+arg_at = (c: CallData, i: i32) Ptr<Expr> { (i < c.args.len).match ({ true => c.args[i].addr(), false => zero_arg() }) }
+arg0 = (c: CallData) Ptr<Expr> { c.arg_at(0) }
+arg1 = (c: CallData) Ptr<Expr> { c.arg_at(1) }
 gen_call = (s: String, c: CallData) String {
     eq(c.fn, "load").match   ({ true => s.append("(*(").gen_expr(c.arg0()).append("))"), false =>
     eq(c.fn, "offset").match ({ true => s.append("((uint8_t*)(").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"), false =>
@@ -375,40 +388,79 @@ slen = (decls: [Decl]) i32 {                       // decl count (an i32 upper b
 is_type_named = (d: Decl, name: str) bool {
     d.match ({ .DStruct(sd) => eq(sd.name, name), .DEnum(ed) => eq(ed.name, name), _ => false })
 }
-// depth contribution of a by-value type slot: 1 + the named type's depth; 0 for Ptr/primitives
-slot_depth = (decls: [Decl], t: Ty) i32 { t.match ({ .Named(n) => 1 + decls.type_depth(n), .Generic(g) => 1 + decls.type_depth(g.mangled), _ => 0 }) }
-struct_depth = (decls: [Decl], sd: StructDecl) i32 {
-    d := 0
-    sd.fields.loop((h, i, f) { d = maxi(d, decls.slot_depth(f.ty)) })
-    d
-}
-enum_depth = (decls: [Decl], ed: EnumDecl) i32 {
-    d := 0
-    ed.variants.loop((h, i, v) { d = maxi(d, decls.slot_depth(v.payload)) })
-    d
-}
-decl_depth = (decls: [Decl], d: Decl) i32 {
-    d.match ({ .DStruct(sd) => decls.struct_depth(sd), .DEnum(ed) => decls.enum_depth(ed), _ => 0 })
-}
-type_depth = (decls: [Decl], name: str) i32 {                    // depth of the type NAMED `name`
-    found := 0
-    decls.loop((h, i, d) { found = is_type_named(d, name).match ({ true => decls.decl_depth(d), false => found }) })
+// ── by-value type-nesting depth, MEMOIZED (cache indexed by decl position) ──
+// Each named struct/enum has depth = 1 + max by-value field/payload depth (a Ptr or primitive slot is 0),
+// so in C a type is emitted AFTER the types it contains by value. The depth is computed ONCE per type into
+// `cache`: 0-1 = not yet computed, 0-2 = currently on the recursion stack, else the memoized depth. The
+// on-stack marker breaks a MALFORMED by-value CYCLE (struct A holds B by value, B holds A — an
+// infinite-size type) by contributing 0, which both terminates the walk AND stops an EXPONENTIAL blow-up:
+// an unmemoized walk recomputes every shared/cyclic subgraph, which on a branching cycle is 2^depth work —
+// a real compiler hang. Memoizing makes it linear. For a valid (acyclic) graph the marker never fires and
+// the depths — hence the emit order, hence the emitted bytes — match a plain recursive walk exactly.
+DepthMemo*: { d: i32 }                                          // one per-type depth cell: 0-1 unvisited, 0-2 on-stack, else memoized depth
+ty_idx = (decls: [Decl], name: str) i32 {                       // position of the type named `name`, or -1
+    found := 0 - 1
+    decls.loop((h, i, d) { found = is_type_named(d, name).match ({ true => i, false => found }) })
     found
 }
+slot_depth = (decls: [Decl], cache: [DepthMemo], t: Ty) i32 {
+    t.match ({
+        .Named(n)   => 1 + decls.idx_depth(cache, decls.ty_idx(n)),
+        .Generic(g) => 1 + decls.idx_depth(cache, decls.ty_idx(g.mangled)),
+        _           => 0
+    })
+}
+struct_depth = (decls: [Decl], cache: [DepthMemo], sd: StructDecl) i32 {
+    d := 0
+    sd.fields.loop((h, i, f) { d = maxi(d, decls.slot_depth(cache, f.ty)) })
+    d
+}
+enum_depth = (decls: [Decl], cache: [DepthMemo], ed: EnumDecl) i32 {
+    d := 0
+    ed.variants.loop((h, i, v) { d = maxi(d, decls.slot_depth(cache, v.payload)) })
+    d
+}
+decl_body_depth = (decls: [Decl], cache: [DepthMemo], d: Decl) i32 {
+    d.match ({ .DStruct(sd) => decls.struct_depth(cache, sd), .DEnum(ed) => decls.enum_depth(cache, ed), _ => 0 })
+}
+compute_idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
+    cache[idx] = DepthMemo { d: 0 - 2 }                        // mark on-stack (so a cycle back here yields 0)
+    r := decls.decl_body_depth(cache, decls[idx])
+    cache[idx] = DepthMemo { d: r }                            // memoize
+    r
+}
+idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
+    (idx < 0).match ({
+        true  => 0,                                            // unknown type name → contributes nothing
+        false => (cache[idx].d >= 0).match ({
+            true  => cache[idx].d,                             // already memoized
+            false => (cache[idx].d == (0 - 2)).match ({
+                true  => 0,                                    // on the stack → by-value cycle, contributes 0
+                false => decls.compute_idx_depth(cache, idx)   // not yet computed → compute once
+            })
+        })
+    })
+}
+dmemo_buf = (n: i64) [DepthMemo] { slice(malloc(n * sizeof(DepthMemo)), n) }   // typed alloc (return type fixes the element type)
+depth_cache = (decls: [Decl]) [DepthMemo] {                     // a fresh per-type depth memo, all unvisited
+    c := dmemo_buf(decls.slen())
+    c.loop((h, i, x) { c[i] = DepthMemo { d: 0 - 1 } })
+    c
+}
 // emit the TYPE definitions whose depth == k (in their original relative order)
-gen_types_at = (s: String, decls: [Decl], k: i32) String {
+gen_types_at = (s: String, decls: [Decl], cache: [DepthMemo], k: i32) String {
     out := s
     decls.loop((h, i, d) {
         out = d.match ({
-            .DStruct(sd) => d.is_trait().match ({ true => out, false => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }) }),
-            .DEnum(ed)   => (decls.decl_depth(d) == k).match ({ true => out.gen_decl(d).append(" "), false => out }),
+            .DStruct(sd) => d.is_trait().match ({ true => out, false => (decls.idx_depth(cache, i) == k).match ({ true => out.gen_decl(d).append(" "), false => out }) }),
+            .DEnum(ed)   => (decls.idx_depth(cache, i) == k).match ({ true => out.gen_decl(d).append(" "), false => out }),
             _            => out
         })
     })
     out
 }
-gen_types_upto = (s: String, decls: [Decl], k: i32, n: i32) String {
-    (k < n).match ({ true => s.gen_types_at(decls, k).gen_types_upto(decls, k + 1, n), false => s })
+gen_types_upto = (s: String, decls: [Decl], cache: [DepthMemo], k: i32, n: i32) String {
+    (k < n).match ({ true => s.gen_types_at(decls, cache, k).gen_types_upto(decls, cache, k + 1, n), false => s })
 }
 // then functions + verbatim raw, in original order (all types are now fully defined above)
 gen_funcs = (s: String, decls: [Decl]) String {
@@ -436,7 +488,7 @@ genModule* = (raw: [Decl]) String {
     s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")   // the [T] fat pointer
     decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
     decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
-    s = s.gen_types_upto(decls, 0, slen(decls))         // pass 3: type defs in dependency order
+    s = s.gen_types_upto(decls, depth_cache(decls), 0, slen(decls))   // pass 3: type defs in dependency order (memoized depths)
     decls.loop((h, i, d) { s = s.gen_global(d) })       // pass 3.5: module globals (after their type, before fns)
     s.gen_funcs(decls)                                  // pass 4: functions + raw
 }

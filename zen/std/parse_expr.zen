@@ -356,9 +356,12 @@ parse_lit_match = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr { a.
 parse_lit_arms = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
     arm   := a.parse_lit_arm(src, subj, pos)
     after := src.scan(arm.next)                                     // ',' (more arms) or '}' (last = default)
-    src.is_rbrace(after.tok).match ({
-        true  => PExpr { expr: arm.body, next: after.next },        // the final arm is the default — no test
-        false => a.cons_lit_arm(src, subj, arm, after)
+    after.tok.kind.match ({
+        .Eof => PExpr { expr: arm.body, next: after.next },         // unterminated `{ … `: stop at EOF, don't recurse forever
+        _    => src.is_rbrace(after.tok).match ({
+            true  => PExpr { expr: arm.body, next: after.next },    // the final arm is the default — no test
+            false => a.cons_lit_arm(src, subj, arm, after)
+        })
     })
 }
 cons_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
