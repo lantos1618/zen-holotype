@@ -1,0 +1,70 @@
+// std.result — the project's ERROR-HANDLING convention: errors are VALUES.
+//
+// Zen is match-only; it has NO exceptions and NO stack unwinding (hidden control
+// flow is banned). A fallible operation returns a `Result<T, E>` — `Ok(T)` on
+// success, `Err(E)` on failure — and the caller `.match`es it. An optional value
+// (present or absent, no error detail) is an `Opt<T>`: `Some(T)` or `None`.
+//
+//   read(fd).match ({              // a Result<i32, IoError>
+//       .Ok(n)  => n,
+//       .Err(e) => { return .Err(e) }   // propagate by VALUE, no unwinding
+//   })
+//
+// The boundary helpers (`ok_if` / `ok_ptr`) turn a raw C sentinel — a negative rc,
+// a null pointer — into a Result, so a thin FFI wrapper converts a libc result into
+// a value the rest of the program matches on. `panic` is the explicit, greppable
+// abort for invariant breaks (NOT the default path; the default path is a Result).
+
+// ── the carriers ─────────────────────────────────────────────────────────────
+// generic enums (monomorphized per concrete use, like generic structs). Construct
+// with `.Ok(x)` / `.Err(e)` / `.Some(x)` / `.None`; match the same way.
+Result*<T, E>: Ok(T) | Err(E)
+Opt*<T>: Some(T) | None
+
+// the standard FFI error: a libc/POSIX call failed. `Errno` carries the raw code
+// (a negative rc or saved errno) for the cases that have no named variant here.
+IoError*: NotFound | Denied | Eof | Errno(i32)
+
+// ── FFI: the externs `panic` needs ──────────────────────────────────────────────
+// Bodyless externs (like std.mem's malloc): they lower to bare calls the linker
+// binds to libc — no system header is included, nothing is re-prototyped. Writing
+// to fd 2 (stderr) by hand, and re-declaring abort/write here, is exactly the kind
+// of scattered FFI the foreign-namespace goal (N1/N2) will gather behind one door.
+abort = () void                                    // libc: print nothing, end the process
+write = (fd: i32, buf: RawPtr<u8>, n: i64) i64     // POSIX: write n bytes from buf to fd
+strlen = (s: str) i64                              // libc: a str's byte length (excl. NUL)
+
+STDERR := 2     // the standard-error file descriptor (POSIX): not a magic number
+
+// ── boundary checkers: a raw C sentinel -> a Result ──────────────────────────────
+
+// a libc call's `int` return where < 0 means failure (the open/read/close idiom):
+// >= 0 is the value (a fd, a byte count), < 0 is the error code. This is how a thin
+// wrapper lifts an FFI sentinel into the Result world the caller matches on.
+ok_if* = (rc: i32) Result<i32, IoError> {
+    (rc >= 0).match ({
+        true  => .Ok(rc),
+        false => .Err(.Errno(rc))
+    })
+}
+
+// a libc call that returns a pointer where NULL means failure (the malloc/fopen
+// idiom): a null pointer becomes `.Err(.NotFound)`, any other pointer `.Ok(p)`.
+ok_ptr* = (p: RawPtr<u8>) Result<RawPtr<u8>, IoError> {
+    (p == null_ptr()).match ({
+        true  => .Err(.NotFound),
+        false => .Ok(p)
+    })
+}
+
+// ── panic: the explicit, greppable abort ─────────────────────────────────────────
+// For IMPOSSIBLE / invariant-break states only — the unreachable match arm, the
+// "this cannot have happened" branch. It is NOT how ordinary failure is reported
+// (that is a Result the caller matches). It writes `msg` to stderr and ends the
+// process via libc `abort`; it never returns, so an arm calling it satisfies the
+// match's type whatever the other arms produce.
+panic* = (msg: str) void {
+    n := strlen(msg)
+    write(STDERR, slice(msg, n).ptr, n)
+    abort()
+}
