@@ -1,10 +1,14 @@
 # zen
 
-**zen** is a tiny compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
+**zen** is a tiny, **self-hosted** compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
 language, built to test one idea: **pin down what every value _is_ with type structure,
 and you lock out everything it isn't.** Do that for pointers, modules, and functions
 alike, and module imports, type-checking, and pointer safety all become the _same_
 operation — checking that a signature fits in one shared space.
+
+The compiler is written in Zen and compiles itself: `cc` builds a `zenc` binary from
+committed C, and `zenc` re-emits that C byte-for-byte. There is **no Python and no
+tree-sitter** in the build — see [Build & run](#build--run).
 
 > Every path resolves to exactly **one** canonical node — the single definition that
 > *is* the meaning of a name — and diamond imports collapse onto it.
@@ -39,13 +43,16 @@ allows, nothing more.
 ## How it works
 
 ```
-   build.zen  ──interpret──►  { name: vecdemo,  entry: main,  out: build/ }   (drives the build)
+   lex.zen ──tokens──► parse_*.zen ──► std.genc AST ──► check.zen ──► genc_emit.zen ──► C ──► cc
+   (all four stages are ordinary Zen, in zen/std/)
+```
 
+```
    core/vec.zen   ops.zen   main.zen
         │
-        ▼  tree-sitter  (grammar.js)
+        ▼  std.lex + std.parse  (lexer + recursive-descent parser, in Zen)
    ┌──────────┐
-   │   AST    │   dataclasses + enums
+   │   AST    │   std.genc Expr / Stmt / Decl values
    └────┬─────┘
         │  insert every decl at its path
         ▼
@@ -84,8 +91,8 @@ tidy — it buys real things:
 - **Zero runtime cost.** The discipline is a compile-time fiction: `Ptr` erases to
   `const*`, `Option` to a bare pointer. Once it checks, the emitted C carries no tags and
   no guards — and `cc` re-verifies the const-correctness, a free second opinion.
-- **It stays tiny.** The whole checker is one trie + a ~20-line `fits()`. That smallness
-  *is* the result: three problems folded into one.
+- **It stays tiny, and it's its own proof.** The whole checker is one trie + a ~20-line
+  `fits()` — written in Zen, and it compiles itself (a deterministic fixpoint).
 
 The trade: it leans on **nominal** identity (a type *is* its path) and asks you to write
 every pointer's direction and nullability down. In return you delete two entire passes.
@@ -108,7 +115,9 @@ conflict?  ONLY if two files both define  core.vec.Vec
 ```
 
 No separate symbol table, import resolver, or conflict pass — they're the same
-lookup in one trie.
+lookup in one trie. (`std.resolve` is the self-hosted loader that walks a program's
+`{ … } = std.X` imports, gathers the transitive closure, and hands `zenc` one flat
+module — see [Modules & imports](#modules--imports).)
 
 **2. Pointers are types. `fits()` is the only logic outside the trie.**
 Direction (`Ptr`/`MutPtr`/`RawPtr`) and nullability (`Option<T>`, no bare null)
@@ -134,112 +143,148 @@ fits(given, want):
 `Option<ptr>` → a bare pointer. All safety is proven *before* codegen, so the
 output is zero-overhead and the C compiler re-checks the const-correctness for free.
 
-**4. `build.zen` is the build graph, written in the language** — and *executed*, not
-scraped: `build()` runs at compile time through the comptime engine, with `b` a live
-`Builder`. So `b.add` / `b.use` / `b.config` are real calls, and helpers, conditionals
-and computed values in the script are honoured. `b.config()` finalizes to a `Result`:
+**4. The compiler is Zen, and self-hosting.** Lexer, parser, checker, and the C
+backend are all ordinary Zen modules in `zen/std/` (`lex`, `parse*`, `check`, `genc*`).
+`zenc` compiles them to C; fed its **own** sources it re-emits byte-for-byte the committed
+`bootstrap/zenc.gen.c` — a deterministic **fixpoint**. New backend = new walk over the same
+AST (a JavaScript one, `std.genjs`, already exists alongside `std.genc`).
 
-```zen
-{ Builder, BuildConfig, BuildError, Executable, Test } = @builtin.build
+## Build & run
 
-build = (b: Builder) Result<BuildConfig, BuildError> {
-    b.add(Executable {
-        name: "vecdemo",
-        main: "main.zen",
-        out_dir: "build",
-    })
-    b.add(Test { root: "test.zen" })
-    b.config()
-}
-```
-
-## Run it
+The compiler is the `zenc` binary. `cc` builds it from committed C; nothing else is needed.
 
 ```sh
-pip install -r requirements.txt        # tree_sitter (front end)
-python3 -m zen build examples     # read build.zen -> check -> emit C -> cc -> run
-python3 -m zen check examples     # type-check report + emit a C lib
+make -f bootstrap/Makefile zenc        # cc bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
+./zenc path/to/source.zen              # read flat Zen → emit C on stdout
+echo 'add* = (a: i32, b: i32) i32 { a + b }' | ./zenc    # or from stdin
 ```
 
-Tests (the lattice is the whole safety argument, so it's the most-covered part):
+`zenc` reads **one flat module** and writes C to stdout — `cc` does the rest. To run a
+program, emit its C, link with a tiny `main`, and compile:
 
 ```sh
-pip install -r requirements-dev.txt    # adds pytest + mypy
-python3 -m pytest                       # fits() lattice + laws, infer(), Namespace, parser,
-                                        # Zen //~ PASS/FAIL fixtures, end-to-end build, mypy
+./zenc prog.zen > prog.c
+cc prog.c runner.c -o prog && ./prog   # runner.c calls the exported entry and prints it
 ```
 
-The AST carries `Type`/`Expr` unions and `python3 -m mypy zen` is clean (a test
-runs it), so the node types can't silently drift.
+A multi-module program (`{ … } = std.X` imports) is flattened to one module first by the
+self-hosted loader — see [Modules & imports](#modules--imports).
 
-The first run compiles the tree-sitter grammar (`tree-sitter-zen/src/parser.c`) into
-`build/zen.so` with `cc` — no Node needed at runtime, only to regenerate the grammar.
+**Regenerate the committed C** after editing any compiler source under
+`zen/std/{lex,parse*,check*,genc*}.zen` — the binary rebuilds its own C, with no Python:
 
-Ill-typed functions are **excluded from codegen** — `zen build` reports them and
-builds only what type-checks:
-
+```sh
+make -f bootstrap/Makefile regen       # builds zenc, then: ./zenc --build-self bootstrap/zenc.gen.c .
+git diff --quiet bootstrap/zenc.gen.c  # the fixpoint: the regenerated C must be byte-identical
 ```
-── type checks ──
-   PASS ✓  main.area
-   FAIL ✗  main.bad       Option<Ptr<Vec>>  ⊀  Ptr<Vec>
-   FAIL ✗  main.dirbad    Ptr<Vec>          ⊀  MutPtr<Vec>
-   PASS ✓  main.main
-   ...
-vecdemo -> 12
+
+**Tests** — the **binary-only oracle**. `pytest` here is just the test *runner*: it drives
+the compiled `zenc` (and a check-mode build of it) as subprocesses and imports **zero**
+compiler code. It is the correctness reference while a Zen-native oracle is brought up.
+
+```sh
+pip install -r requirements-dev.txt    # only pytest (no mypy, no compiler deps)
+pytest tests/                          # emit/run parity, reject-parity, the fixpoint, modules, traits, genjs
 ```
+
+## Foreign bindings & the prelude
+
+A program is built from three layers — what's *implicitly there*, what *just links*, and
+what you must *import*. Keeping that boundary explicit is the point.
+
+- **The compiler-emitted head.** Every emitted translation unit opens with the `zslice`
+  typedef (`typedef struct { void* ptr; int64_t len; } zslice;` — the `[T]` fat pointer)
+  and the C `stdint`/`stdbool` types. You write nothing to get these.
+- **Intrinsics — handled inline by the backend**, never declared or imported:
+  `slice`, `addr`, `load`, `store`, `offset`, `cstr`, `null_ptr`, `load_i64`, `store_i64`,
+  `atomic_add_i64`, and `sizeof(T)`. They lower to raw C (a pointer deref, a struct
+  literal), so they need no binding.
+- **Foreign bindings — a bodyless function IS a C extern.** `malloc = (n: i64) RawPtr<u8>`
+  with no `{ … }` body binds the libc symbol `malloc`; the checker learns the signature and
+  the backend emits a forward declaration. libc symbols (`malloc`, `putchar`, `strlen`, …)
+  then **just link** — the system headers define them. No `extern` keyword.
+- **The header *is* a function.** `zen/std/c.zen`'s `libc() [Decl]` builds those bodyless
+  bindings *as AST* and `std.genc.genModule(libc())` emits exactly the C prototypes a TU
+  needs — the bindings live in **one** Zen module instead of being re-prototyped in every
+  file. (`std.mem`, `std.io`, `std.cown`, `std.result` still re-declare the handful of
+  symbols they each need at the top, which is the scatter `std.c` is gathering.)
+- **std modules — you must import them.** `std.mem`, `std.str`, `std.string`, `std.alloc`,
+  `std.vec`, `std.iter`, … are ordinary Zen you bring in with `{ … } = std.X`; they are
+  checked and lowered like your own code.
+
+The FFI memory rule (`zen/std/cown.zen`): FFI is the **raw floor below** the allocator
+discipline. A C function that allocates hands you a `RawPtr<T>` — the type-system marker
+for *"the discipline does not reach here — wrap me."* Re-establish ownership the instant
+the pointer crosses back in: wrap the raw handle in a struct that `impl(Drop, …)` and put
+it behind `Own<T>` (`std.drop`), so the matching `free`/`close` fires **exactly once**, at
+refcount zero. See **[FEATURES.md](FEATURES.md)** for the full bindings/errors/memory
+inventory.
+
+## Modules & imports
+
+Imports are a destructuring of a module path: `{ a, b } = std.X` binds `a` and `b` from
+`zen/std/X.zen`. `zenc` itself compiles **one flat module**, so a multi-module program is
+resolved first by `zen/std/resolve.zen` — the self-hosted loader:
+
+- it reads the program's `{ … } = std.X` import lines, follows each edge to
+  `zen/std/X.zen`, and gathers the **transitive closure**;
+- it strips the import lines and concatenates each module's body **once** (per-module dedup
+  breaks import cycles; a final per-**name** pass keeps the first definition of each
+  top-level name, so a cross-module clash like `string.free` vs `mem.free` resolves the same
+  way "nearest defining module wins" would);
+- the result is one flat module handed straight to `zenc`.
+
+`tools/loader/` packages this as a runnable driver (`loader_driver.zen` + `loader_main.c`):
+`loader <prog.zen> <out_flat.zen> <root>` writes the flattened module. It is itself a
+multi-module program, so it bootstraps once via `tools/loader/bootstrap_driver.sh` — the
+loader's analogue of `zenc` being built from committed C.
+
+## Errors are values
+
+Zen is `.match`-only — **no exceptions, no stack unwinding** (hidden control flow is
+banned). A fallible call returns a `Result<T, E>` (`std.result`): `.Ok(T)` or `.Err(E)`,
+which the caller `.match`es. `.match` *is* the catch; `return .Err(e)` propagates by value.
+An optional value is `Opt<T>` (`.Some` / `.None`); the standard FFI error is `IoError`. The
+boundary helpers `ok_if` / `ok_ptr` lift a raw C sentinel (a negative rc, a null pointer)
+into a `Result`. `panic` is the explicit, greppable abort for invariant breaks — *not* the
+default path.
+
+## What it covers
+
+The language now covers structs and **generic data types** (`Box<T>` — the type-arg
+inferred from field values, monomorphized to concrete C), **user enums** (`|`-separated
+variants, C tagged unions), **generic functions** (`id<T>` — type-args inferred by
+unification, **monomorphized**), **traits / constrained generics** (keyword-free: a trait
+is a record of signatures `Area*: { … }`, an impl is `Vec.impl(Area, { … })`,
+`<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound is a type
+error), **`.match`** with payload-binding, exhaustiveness, and **literal patterns** on
+`i32`/`bool` (so with **recursion** the language is Turing-complete — `fact`/`fib` compile
+and run), **return-type inference** (omit the return type and it's inferred from the body,
+across calls), `Ptr/MutPtr/RawPtr` and `Option`, `i32`/`i64`/`u8`/`bool` with widening, the
+full operator set (`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v`
+let-bindings, the single `loop` iteration construct, mutation, slices `[T]`, a
+heap-allocating `String`/`Vec` on an explicit allocator, and **metaprogramming as values**
+(build AST with `std.ast` → emit with `std.genc.genModule` — no `@emit` pragma). Type
+errors carry `ns:line:col`.
+
+See **[FEATURES.md](FEATURES.md)** for the full inventory,
+**[ARCHITECTURE.md](ARCHITECTURE.md)** for how the self-hosted compiler is structured,
+**[VISION.md](VISION.md)** for the why, and **[CHANGELOG.md](CHANGELOG.md)** for history.
 
 ## Layout
 
-| file | role |
+| path | role |
 |---|---|
-| `tree-sitter-zen/grammar.js` | the real grammar (a tree-sitter parser generator) |
-| `zen/parser.py` | converts the tree-sitter parse tree → AST |
-| `zen/ast.py`    | AST — dataclasses + enums (`Dir`, `Prim`; no stringly-typed kinds) |
-| `zen/types.py`  | `Namespace` (the trie + impl registry) + `fits()` lattice + `infer()` |
-| `zen/lower.py`  | transcribe to C (the type system erases here) |
-| `zen/main.py`   | driver + `build.zen` interpreter |
-| `tests/`             | pytest suite — `fits()` lattice + laws, `infer()`, Namespace, parser, mypy, end-to-end |
-
-`Namespace` is built during *resolve* and is strictly read-only during *checking* —
-the only state the checker writes is the typed AST itself (a memoized `fn.ret`), so
-data and checking context stay cleanly separated.
-| `tests/cases/*.zen`  | type-checker tests written **in Zen** — inline `//~ PASS`/`//~ FAIL` verdicts |
-
-(`ast.py` and `types.py` are safe as classic names because they live in a package —
-stdlib `import ast` / `import types` still resolve to the real ones.)
-
-The front end is a real **tree-sitter** grammar — a method call is just a `call`
-whose callee is a field access, so there's no special rule for it. The language
-now covers structs and **generic data types** (`Box<T>` — the type-arg inferred
-from the field values, monomorphized to concrete C), **user enums** (C tagged
-unions), **generic functions** (`id<T>` — type-args inferred by unification,
-**monomorphized**), **traits / constrained generics** (keyword-free: a trait is a
-record of signatures `Area*: { … }`, an impl is `Vec.impl(Area) { … }`,
-`<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound
-is a type error), **`match`** with payload-binding, exhaustiveness, and **literal
-patterns** on `i32`/`bool` (so with **recursion** the language is Turing-complete —
-`fact`/`fib` compile and run), **return-type inference** (omit the return type and
-it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` and `Option`,
-`i32`/`i64`/`bool` with `i32→i64` widening, the full operator set
-(`+ - *  ==  < > <= >=  && ||  !`, each operand-checked), and `x := v` let-bindings.
-Type errors carry `ns:line:col`. Still a subset of Zen (no strings/heap/stdlib,
-higher-kinded types, or full Hindley-Milner — which is unsound under subtyping
-anyway) — the point is to test the type idea, which is exactly why the parser is
-someone else's grammar generator rather than hand-rolled.
-
-Since then the language has grown well past that subset: a single `loop`
-construct (desugared onto a structured `@while` primitive that folds to a C
-`for`) and mutation, bodyless-function C bindings + raw memory intrinsics (a
-heap-allocating `String`), and a **comptime metaprogramming layer** whose headline is that the
-**AST is defined in Zen** — `impl`/`derive` are ordinary Zen functions
-(`prelude/derive.zen`) that the compiler runs at comptime and splices back in.
-See **[FEATURES.md](FEATURES.md)** for the full current inventory, and
-**[ARCHITECTURE.md](ARCHITECTURE.md)** for the compiler pipeline, the three ASTs, and the
-path to self-hosting.
-
-`build.zen` can declare a `Test { root: "test.zen" }`; `zen build` then
-compiles that root with the project and runs each no-arg `bool` test, printing
-PASS/FAIL (SKIP if it doesn't type-check).
+| `zen/std/lex.zen` | the lexer — `scan(src, pos)` over a `str`, slice-free |
+| `zen/std/parse.zen` + `parse_expr` / `parse_stmt` / `parse_type` | recursive-descent parser → `std.genc` AST |
+| `zen/std/check.zen` + `check_validate.zen` | resolver + the `fits()` validator |
+| `zen/std/genc.zen` + `genc_emit` / `genc_mono` | the C backend (the shared AST + emit + monomorphization) |
+| `zen/std/genjs.zen` | a JavaScript backend over the *same* AST |
+| `zen/std/{mem,str,string,alloc,vec,iter}.zen` | the runtime stdlib (allocator, slices, strings, iterators) |
+| `zen/std/{c,result,cown,drop,io,resolve}.zen` | bindings, errors-as-values, FFI-memory rule, module loader |
+| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `zenrt.c` (runtime) + `main.c` + `Makefile` |
+| `tools/loader/` | the runnable transitive-closure import resolver |
+| `tests/` | the binary-only oracle (pytest as runner; imports no compiler code) |
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight
 into typed objects, hook-based) and the syntax of

@@ -1,9 +1,9 @@
 # Zen — the vision: **one structure**
 
-> The compiler today (structs, enums, traits, generics, `fits()`, comptime, a self-hosted
-> derive prelude) proves *"structure is the constraint."* This document is where it's
-> headed: take that to the end, until there are no keywords — because there is only **one**
-> kind of thing. A `{ }`. Everything else is how you read it.
+> The compiler today (structs, enums, traits, generics, `fits()`, a self-hosted front end +
+> C/JS backends, metaprogramming as AST values) proves *"structure is the constraint."* This
+> document is where it's headed: take that to the end, until there are no keywords — because
+> there is only **one** kind of thing. A `{ }`. Everything else is how you read it.
 
 ## The one rule
 
@@ -176,8 +176,9 @@ run = (v: Ptr<vec.Vec>) i32 {
 
 ## Grammar sketch (the one-structure direction)
 
-The whole front end gets small because there's one declaration shape. (EBNF-ish; the working
-`grammar.js` is the keyword-ful form today — this is the shape it collapses toward.)
+The whole front end gets small because there's one declaration shape. (EBNF-ish; the
+self-hosted parser `std.parse*` accepts the keyword-ful form today — this is the shape it
+collapses toward.)
 
 ```
 file        = decl*                                  // a file is the outermost record body
@@ -212,14 +213,14 @@ end (monomorphize → C) and the `fits()` lattice **carry straight over**: a rec
 product, a sum is still a tagged union, a method is still a trie node. The grammar evolves in
 place; there is **one** language, growing toward its own end state — not two.
 
-## The architecture: kernel + backends + self-hosted prelude
+## The architecture: kernel + backends + Zen generators
 
 The compiler does exactly **two** things — *check that structure fits*, and *hand off a checked
-AST*. Everything else plugs in.
+AST*. Everything else plugs in. (It is already self-hosted: kernel and backends are all Zen.)
 
 ```
                          ┌──────────────────────────────────┐
-   text ──parse──► AST ──►  trie · fits() · comptime          ──► CHECKED AST
+   text ──parse──► AST ──►  trie · fits()                    ──► CHECKED AST
                          └────────────────┬─────────────────┘
                                           │  one structure, many emitters
               ┌──────────┬────────────────┼────────────────┬──────────┐
@@ -230,19 +231,22 @@ AST*. Everything else plugs in.
 The three layers and the contract between them:
 
 ```
-kernel   :  text       → CheckedAst      // parse + trie + fits + comptime
-backend  :  CheckedAst → target          // gen.c / gen.llvm / gen.js / gen.json
-prelude  :  Ast        → Ast   (in Zen)  // impl / derive / macros, run at comptime
+kernel   :  text       → CheckedAst      // parse + trie + fits
+backend  :  CheckedAst → target          // gen.c (std.genc) / gen.js (std.genjs) / gen.llvm / …
+generator:  () → [Decl]  (in Zen)        // a function that BUILDS AST and returns it
 ```
 
 - The **kernel** never knows about C, JS, or LLVM. It produces a *checked, resolved* AST —
   structure that has been proven to fit. It only ever answers "does this fit?".
-- A **backend** is a walk over that AST emitting a target. `gen.c` exists (`lower.py`);
-  `gen.llvm` / `gen.js` / `gen.json` are *more of the same* — each keeps its own variable/type
-  tables, but never re-checks, because the kernel already did. **New target = new backend.**
-- The **prelude is Zen.** `impl`, `derive`, traits are `(n: Ast) Ast` functions run at comptime;
-  the AST they build flows back through the same kernel and out the same backends.
-  **New feature = new prelude function**, not compiler code.
+- A **backend** is a walk over that AST emitting a target. `gen.c` exists (`std.genc`), and a
+  JavaScript one (`std.genjs`) walks the *same* AST; `gen.llvm` / `gen.json` are *more of the
+  same* — each keeps its own variable/type tables, but never re-checks, because the kernel
+  already did. **New target = new backend.**
+- **Metaprogramming is Zen, as values** (not pragmas). A generator is an ordinary function
+  that builds AST values and returns `[Decl]`, emitted by `std.genc.genModule`; `std.ast`
+  gives the fluent builders. There is no `@emit` and no comptime evaluator — code is data, so
+  generating it is just a function over data. **New feature = new generator**, not compiler
+  code.
 
 So the kernel stays tiny *forever*: it checks structure and emits; targets and features both live
 outside it. **Structure is king** — data is shape, behavior is functions over shape, and code is
@@ -250,33 +254,25 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 
 ### Roadmap
 
-1. **comptime** — a compile-time evaluator that runs Zen fns over AST values. *(the hinge)* ✅
-2. **reified AST + self-host** — define the AST in Zen; rewrite `impl`/`derive`/traits as prelude
-   `(Ast) Ast` functions. ✅ The `Ast`/`Decl` model and the derives (`derive_zero`, `derive_eq`,
-   `derive_tag`, `derive_payload`, `derive_tag_impl`) live in `prelude/derive.zen`, covering products,
-   sums, payload binding, and trait impls; the host keeps only a reflection kernel + reifier.
-   *Remaining: type-check the generators against the Zen `Ast`, and trait reflection so a derive
-   can implement any trait.*
+1. **Self-host** — define the AST in Zen (`std.genc`) and write the whole front end in Zen
+   (`std.lex` / `std.parse*` / `std.check`). ✅ The compiler compiles itself to C and reproduces
+   its committed C byte-for-byte (the fixpoint); Python and tree-sitter are gone.
+2. **Metaprogramming as values** — generators that build `[Decl]` and emit via `genModule`,
+   with `std.ast`'s builders. ✅ (`std.c`'s `libc()` is the canonical example: a function that
+   returns its bindings as AST.) *Remaining: grow the self-hosted checker to full language parity.*
 3. **the one-structure grammar** — collapse the keyword-ful surface into the single `decl` shape
    (fold struct/enum/trait/impl/visibility into the trie). Same back end, same `fits()`.
-4. **more backends** — `gen.llvm`, `gen.js` — each just another walk over the same CheckedAst.
+4. **more backends** — `gen.llvm`, a richer `gen.js` — each just another walk over the same CheckedAst.
 
-### How a derive works today (the self-hosted loop)
+### How a generator works today (the self-hosted loop)
 
 ```
-  user.zen:   { derive_eq } = prelude.derive
-              @emit(derive_eq(reflect(Point)))         // a top-level directive
+  generator.zen:   libc = () [Decl] { [ ffi("malloc", …), ffi("free", …), … ].dup() }
 
-  kernel  :   resolve ─► run_emits ─► check ─► lower
-                          │
-                          ├─ evaluate derive_eq(reflect(Point)) at comptime
-                          │     derive_eq is ORDINARY ZEN (prelude/derive.zen):
-                          │     it reads structure (field_count/field_name_at — the
-                          │     host reflection kernel) and builds an `Ast` value.
-                          └─ reify_decl: Zen `Ast` value → real ast.Fn → splice
-                                         (then checked + lowered like hand-written code)
+  emit       :     genModule(libc())  ─►  C prototypes for the whole binding set
 ```
 
-The kernel's only AST-construction knowledge is `reify_decl` (≈40 lines). The shape of every
-node — `Int`, `Bin`, `Struct`, `Func`, the field/param lists — is **defined in Zen**, and the
-derives are **Zen functions**. New derive = new prelude function, not compiler code.
+A generator is **ordinary Zen** (`std.c`, built on `std.ast`/`std.genc`): it reads or builds
+structure and returns AST values, which `genModule` lowers to C — the same backend that lowers
+hand-written code. The shape of every node — `Int`, `Bin`, `Struct`, `Func`, the field/param
+lists — is **defined in Zen** (`std.genc`). New generator = new Zen function, not compiler code.
