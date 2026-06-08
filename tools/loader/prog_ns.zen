@@ -1,0 +1,15 @@
+// N2b PROOF: QUALIFIED namespace access — `c = std.c` then `c.malloc`/`c.free`, the Zig-style ergonomic.
+//
+// The loader (std.resolve) desugars this BEFORE zenc parses: the `c = std.c` bind line loads std.c's whole
+// transitive closure (which defines the libc `malloc`/`free` as bodyless foreign functions via std.alloc)
+// and registers the qualifier `c`; every `c.malloc` / `c.free` is rewritten to the bare `malloc` / `free`.
+// So the flat output zenc sees is plain `malloc(8)` / `free(p)` — proving `c.malloc` resolved to real libc
+// malloc. The program allocates 8 bytes, frees them, and returns 42.
+
+c = std.c
+
+prog_main* = () i32 {
+    p := c.malloc(8)     // → malloc(8)   (the real libc malloc, declared by std.c's closure)
+    c.free(p)            // → free(p)
+    42
+}

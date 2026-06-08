@@ -368,14 +368,152 @@ import_name_span = (out: String, flat: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.push(flat.byte_at(p)).import_name_span(flat, p + 1, e) })
 }
 
+// ── QUALIFIED NAMESPACE ACCESS (N2b): `c = std.c` then `c.malloc(8)` ──────────────────────────────────
+// Pure SOURCE-TO-SOURCE sugar, desugared in THE LOADER before zenc ever parses — the parser/checker/genc
+// see ZERO `c.malloc`, so they need no Ty::Namespace and no change. Two new shapes vs the destructuring
+// import `{ a, b } = std.X`:
+//   • a NAMESPACE-BIND line `<ident> = std.<modname>` (e.g. `c = std.c`): an identifier, a one-char `=`,
+//     then `std.<name>`, with NO `{` head (that is what tells it apart from the brace import). It pulls
+//     the WHOLE transitive closure of std.<modname> in (reuse load_closure, exactly like an import) and
+//     REGISTERS the qualifier `c` for the module.
+//   • a QUALIFIED ACCESS `<qualifier>.member`: rewritten to the bare `member` the loaded module defines
+//     (`c.malloc(8)` → `malloc(8)`). ONLY a registered qualifier strips; a real value's member access
+//     (`p.x`, `p` not a registered namespace) is left untouched. The bind line itself is then stripped,
+//     like an import line. The result is the same flat single module destructuring imports produce — and
+//     per-name dedup already absorbs `malloc` also arriving from another import (same libc symbol).
+//
+// The qualifier SET is a String of `name\n` lines, exactly the module-name SET (seen / add_name / line_eq
+// reused over it). A bind line that names a qualifier ALSO loads that module's closure, so the bare name
+// the rewrite produces is defined in the flat output.
+
+// is the line at p a NAMESPACE-BIND `<ident> = std.<name>` (and NOT a `{ … } = std.X` import / a real
+// decl)?  After lstrip: an ident-START byte (so not `{`), its identifier run, optional whitespace, then
+// the `= std.` marker is_marker_at checks. The marker's leading space + single `=` (is_marker_at wants
+// `= ` not `==`/`:=`) plus the whitespace-only gap between the ident and `=` pin the `c = std.c` shape —
+// a `c.x = …` or `c := …` has a non-ws, non-`=` byte where the marker must start, so it is rejected.
+is_ns_line* = (s: str, p: i32) bool {
+    ls := s.lstrip(p)
+    s.byte_at(ls).is_ident_byte().match ({
+        true  => s.is_marker_at(s.lstrip(s.ident_end(ls))),     // ident run, skip ws, must hit `= std.`
+        false => false                                          // `{ …` import or punctuation: not a bind
+    })
+}
+
+// the qualifier NAME bound on a namespace-bind line at p — the leading identifier (`c` for `c = std.c`).
+// Appended to `out` (a String), like import_module appends the module name. Only called where
+// is_ns_line(p) holds, so the leading ident is present.
+ns_qualifier* = (out: String, s: str, p: i32) String {
+    ls := s.lstrip(p)
+    out.import_name_span(s, ls, s.ident_end(ls))
+}
+
+// the closure scan state: the qualifier SET (a SEPARATE set from the module-name dedup set) paired with
+// the running Closure, threaded through collect_ns. Zen threads one value, so they ride together.
+NsScan*: { quals: String, c: Closure }
+
+// walk mainsrc, collecting EVERY namespace-bind qualifier into the SET `st.quals` AND loading the bound
+// module's transitive closure into `st.c` (so the module the qualifier points at is present in the flat
+// output). Threads both. Non-bind lines are skipped here — this pass only follows the namespace BINDS.
+collect_ns* = (root: str, src: str, p: i32, st: NsScan) NsScan {
+    (src.byte_at(p) == 0).match ({
+        true  => st,
+        false => src.is_ns_line(p).match ({
+            true  => {
+                modname := import_module(with_cap(16), src, p)                  // the `std.<modname>`
+                c2      := load_closure(root, modname, st.c)                    // pull its closure in
+                q2      := st.quals.add_name(ns_qualifier(with_cap(16), src, p))  // register the qualifier
+                collect_ns(root, src, src.next_line(p), NsScan( quals: q2, c: c2 ))
+            },
+            false => collect_ns(root, src, src.next_line(p), st)
+        })
+    })
+}
+
+// ── the qualifier-STRIP rewrite (token / identifier-aware) ────────────────────────────────────────────
+// rewrite the body `s` so every `<qualifier>.member` (qualifier ∈ `quals`) becomes the bare `member`.
+// Walks byte-by-byte but jumps over whole identifier RUNS, so it only ever lands on an ident-START at a
+// token boundary (the prev byte is a non-ident / the buffer start). At an ident token it checks: is the
+// run a registered qualifier AND immediately followed by `.<ident-start>`?  If so, emit NOTHING for the
+// `<qualifier>.` prefix (skip past the '.'), so the trailing member name is emitted next as a bare ident.
+// Otherwise the identifier is emitted verbatim — a real value's `p.x` (p ∉ quals) is untouched, and a
+// bare identifier that merely ENDS in a qualifier's letters (`abc` vs qualifier `c`) never matches because
+// the whole run `abc`, not its suffix, is tested against the set.
+
+// is `b` an identifier-START byte (letter or '_')? — a token can begin here. (Digits can't start an
+// identifier, so a number like `3.foo` is never treated as a qualified access.)
+is_ident_start = (b: u8) bool {
+    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_')
+}
+
+// at a token boundary p (ident-start, prev byte non-ident): does the ident run [p, ie) name a registered
+// qualifier that is immediately followed by `.<ident-start>`?  ie = ident_end(p).
+is_qual_access = (s: str, p: i32, ie: i32, quals: String) bool {
+    ((s.byte_at(ie) == '.') && s.byte_at(ie + 1).is_ident_start()).match ({
+        true  => quals.seen(import_name_span(with_cap(16), s, p, ie)),    // run ∈ qualifier set?
+        false => false                                                    // not `<run>.<ident>` shape
+    })
+}
+
+// the rewrite worker. `out` accumulates the rewritten bytes; p is the read cursor over `s`.
+rewrite_quals = (out: String, s: str, p: i32, quals: String) String {
+    b := s.byte_at(p)
+    (b == 0).match ({
+        true  => out,
+        false => (b.is_ident_start() && ((p == 0) || (!s.byte_at(p - 1).is_ident_byte()))).match ({
+            // a token start: an identifier run begins here.
+            true  => {
+                ie := s.ident_end(p)
+                s.is_qual_access(p, ie, quals).match ({
+                    // `<qual>.member` → drop the `<qual>.` prefix; resume AT the member's first byte.
+                    true  => out.rewrite_quals(s, ie + 1, quals),
+                    // a plain identifier (or a non-qualifier member access `p.x`): emit it verbatim.
+                    false => out.append_span(s, p, ie).rewrite_quals(s, ie, quals)
+                })
+            },
+            // any non-ident-start byte (whitespace, punctuation, a '.', a digit): copy it verbatim.
+            false => out.push(b).rewrite_quals(s, p + 1, quals)
+        })
+    })
+}
+
+// the bytes [p, e) of `s` as a fresh NUL-terminated str (one line, '\n' excluded) — so rewrite_quals runs
+// over JUST this line (its ident-boundary / prev-byte logic stays line-local, like is_ns_line).
+line_slice = (s: str, p: i32, e: i32) str { with_cap(64).append_span(s, p, e).finish() }
+
+// strip BOTH import lines AND namespace-bind lines out of `s` while rewriting `<qualifier>.member` → bare
+// `member` — the body half of resolve_program once the qualifier SET is known. Mirrors strip_into, but
+// (a) a namespace-bind line is dropped too, and (b) each KEPT line's bytes go through the qualifier
+// rewrite. Per-line so a bind line is recognised at its own line start (is_ns_line is line-local).
+strip_ns_into = (out: String, s: str, p: i32, quals: String, first: bool) String {
+    (s.byte_at(p) == 0).match ({
+        true  => out,
+        false => (s.is_import_line(p) || s.is_ns_line(p)).match ({
+            true  => out.strip_ns_into(s, s.next_line(p), quals, first),       // drop import / bind line
+            false => first.match ({
+                true  => out.rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
+                            .strip_ns_into(s, s.next_line(p), quals, false),
+                false => out.push(10).rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
+                            .strip_ns_into(s, s.next_line(p), quals, false)
+            })
+        })
+    })
+}
+
 // ── resolve_program: the public entry ───────────────────────────────────────────────────────────────
 // resolve_program(root, mainsrc): the flat, single-module source for a multi-module PROGRAM `mainsrc`.
-// Strips mainsrc's own imports into the output, loads the transitive closure of each module mainsrc
-// imports (per-MODULE dedup), then runs dedup_decls (per-NAME dedup) over the whole thing so a closure
-// with a cross-module name clash (e.g. string.free vs mem.free, both reachable from this very loader)
-// still yields a clash-free single module. Returns the finished (NUL-terminated) flat source.
+// FIRST collects mainsrc's namespace binds (`c = std.c`) — loading each bound module's closure and
+// registering its qualifier — THEN strips mainsrc's import + bind lines (rewriting `c.malloc` → `malloc`
+// as it copies the kept lines) into the output, loads the transitive closure of each `{ … } = std.X`
+// import (per-MODULE dedup), and finally runs dedup_decls (per-NAME dedup) over the whole thing so a
+// closure with a cross-module name clash (string.free vs mem.free) still yields a clash-free single
+// module — and `malloc` arriving from BOTH a namespace bind and an import collapses to one. Returns the
+// finished (NUL-terminated) flat source.
 resolve_program* = (root: str, mainsrc: str) str {
-    c0 := Closure( seen: with_cap(256), out: with_cap(4096).strip_into(mainsrc, 0, true) )
-    cN := load_imports(root, mainsrc, 0, c0)
+    ns   := collect_ns(root, mainsrc, 0, NsScan( quals: with_cap(64), c: Closure( seen: with_cap(256), out: with_cap(4096) ) ))
+    // `first` ⇒ the first kept main line gets NO leading '\n'; only true when no namespace-bound module
+    // body precedes it (else it would glue onto that body's last line — load_closure prefixes each body
+    // with a '\n', so a non-empty ns.c.out already ends a line and the main body needs its own '\n').
+    body := ns.c.out.strip_ns_into(mainsrc, 0, ns.quals, ns.c.out.len == 0)
+    cN   := load_imports(root, mainsrc, 0, Closure( seen: ns.c.seen, out: body ))
     dedup_decls(cN.out.finish())
 }
