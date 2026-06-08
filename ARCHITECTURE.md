@@ -1,62 +1,116 @@
 # Architecture
 
-How the compiler is shaped, and the path from Python-hosted to self-hosting. For *what*
-the language does see [FEATURES](FEATURES.md); for the *why* see [README](README.md); for
-the long-term language see [VISION](VISION.md).
+How the **self-hosted** compiler is shaped. For *what* the language does see
+[FEATURES](FEATURES.md); for the *why* see [README](README.md); for the long-term language
+see [VISION](VISION.md).
+
+The compiler is written entirely in Zen (`zen/std/`) and compiles itself. There is no
+Python frontend and no tree-sitter — `cc` builds a `zenc` binary from committed C, and
+`zenc` regenerates that C. The only Python left in the repo is the **test runner**
+(`tests/`), which drives the `zenc` binary as a subprocess and imports no compiler code.
 
 ## The pipeline
 
+Each stage is an ordinary Zen module. `zenc` runs them over **one flat module** of source
+and prints C; `cc` compiles that C.
+
 ```
-.zen source
-  → parse            (tree-sitter grammar → ast.py dataclasses)        zen/parser.py
-  → build_namespace  (one trie: the namespace + import resolver)       zen/resolve.py
-  → build_scopes     (per-file local-name → qualified-path map)        zen/resolve.py
-  → resolve          (resolve refs, check visibility, desugar loops)   zen/resolve.py
-  → fold_comptime    (evaluate comptime(...) into constants)           zen/comptime.py
-  → run_emits        (run @emit generators, graft the spliced decls)   zen/main.py + comptime.py
-  → check            (infer types, fits() at every call site)          zen/types.py
-  → emit_c           (monomorphize reachable, lower to C)              zen/emit.py + lower.py
-  → cc               (the system C compiler)
+.zen source (one flat module)
+  → scan       (lexer: source → tokens, slice-free)               zen/std/lex.zen
+  → parse      (recursive-descent → std.genc Expr/Stmt/Decl)      zen/std/parse{,_expr,_stmt,_type}.zen
+  → check      (resolve refs, infer types, fits() each call)      zen/std/check.zen + check_validate.zen
+  → emit C     (monomorphize generics, lower the AST to C text)   zen/std/genc.zen + genc_emit.zen + genc_mono.zen
+  → cc         (the system C compiler)
 ```
 
-Only well-typed functions are lowered. An executable emits only what's reachable from its
-entry (dead-code elimination); a `check` build emits every function that type-checks.
+`std.genc`'s `Expr`/`Stmt`/`Decl` are the **one AST** the parser builds, the checker
+annotates, and a backend walks. `std.genjs` is a second backend over that same AST (it
+emits JavaScript), which is what proves the AST is genuinely backend-neutral IR rather than
+a C-specific tree.
 
-## The three ASTs — by role, not by accident
+Ill-typed functions are reported by the checker and excluded from codegen; the rest builds.
 
-There are three AST/value models. They are **not** redundant; they serve three different
-roles. Conflating them is the standing risk, so the boundaries are explicit:
+## Multi-module programs: the loader
 
-| model | where | role |
+`zenc` compiles a single flat module. A program that spans files with `{ … } = std.X`
+imports is resolved first by **`zen/std/resolve.zen`** — the self-hosted loader. It reads a
+program's import edges, gathers the transitive closure of `zen/std/<name>.zen` modules,
+strips the import lines, and concatenates each module body exactly once into one flat module
+(per-module dedup breaks cycles; a final per-**name** pass keeps the first definition of
+each top-level name, so a cross-module clash resolves deterministically). `tools/loader/`
+wraps it as a runnable driver. See [README → Modules & imports](README.md#modules--imports).
+
+## The bootstrap: building the compiler, and the fixpoint
+
+`bootstrap/` holds everything needed to build `zenc` with **no Python**:
+
+| file | what it is |
+|---|---|
+| `zenc.gen.c` | the compiler's `.zen` sources, already compiled to C (committed, the bootstrap seed) |
+| `zenrt.c` / `zenrt.h` | a ~30-line runtime: the growable `String`, `eq`/`is_empty`, `heap` |
+| `main.c` | the CLI entry — reads Zen (file/stdin → C on stdout), plus `--build-self` regen |
+| `Makefile` | `zenc:` builds the binary; `regen:` regenerates `zenc.gen.c` with it |
+
+```
+make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
+make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self bootstrap/zenc.gen.c .
+```
+
+**The fixpoint.** `--build-self` reads the compiler sources, flattens them (the same
+import-strip + concat `std.resolve` reproduces), and emits C. Fed its **own** sources,
+`zenc` emits **byte-for-byte** the committed `zenc.gen.c` — the compiler reproduces itself.
+`tests/test_bootstrap.py` builds the binary from the committed C and checks the
+reproduction; codegen is deterministic, so the byte-exact match is the parity guarantee
+(no separate "compare two compilers" oracle is needed).
+
+## Correctness: the binary-only oracle
+
+The test suite (`tests/`, run with `pytest`) is the **sole correctness reference**, and it
+is Python-*free* in the sense that matters: it imports **no compiler code**. It builds two
+artifacts from the committed bootstrap C with `cc` only —
+
+- an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,main.c}`): Zen source → C on stdout;
+- a **CHECK** binary (the same gen.c plus `check_validate.zen`, linked with a tiny
+  `check_main.c`): exit code = the number of type errors —
+
+then drives them as subprocesses: `emit_value(src, want)` compiles and runs the emitted C
+and asserts the result (a silent-miscompile guard); `verdict(src)` asserts accept/reject
+(a reject-parity guard). The harness is being ported to a Zen-native oracle; until then
+this is the reference.
+
+The checker is told about a small **runtime prelude** the loader would otherwise supply —
+`heap`, `putchar` — prepended as bodyless `DForeign` decls so a checked program treats them
+as known imported signatures (`tests/_oracle.py`'s `_PRELUDE`).
+
+## One AST, many emitters
+
+There is a single AST — `std.genc`'s `Expr`/`Stmt`/`Decl`. The parser builds it, the
+checker annotates it (filling enum names on `match`/constructors, etc.), and each backend is
+a walk over it:
+
+| backend | module | target |
 |---|---|---|
-| **`ast.py`** dataclasses | `zen/ast.py` | the **source AST** — what the host parser produces and the checker/lowerer consume. The Python compiler's working representation. |
-| **reified `Ast`** | `zen/prelude/derive.zen` | the **comptime metaprogramming model** — zen *values* a comptime generator reads/builds, so `@emit(gen(reflect(T)))` can splice real declarations. The language reflecting on itself. |
-| **`std.genc` `Expr/Stmt/Decl`** | `zen/std/genc.zen` | the **backend IR** — what the *Zen-written* code generator (`genC`) lowers to C at runtime. This is the self-hosted equivalent of `lower.py`/`emit.py`. |
+| `genc` | `zen/std/genc_emit.zen` | C |
+| `genjs` | `zen/std/genjs.zen` | JavaScript (the computational subset) |
 
-**Decision: `std.genc` is the backend IR (lowering), written in Zen** — not a second source
-AST. `std.parse` (the Zen-written parser) targets it directly today for the subset it
-covers, so front (lexer/parser) and back (genc) meet there into a tiny but complete
-self-hosted compiler.
+A new backend is a new walk; it never re-checks, because the checker already proved the
+structure fits. This is the [VISION](VISION.md) "kernel + a row of emitters" made real for
+the subset the self-hosted compiler covers today.
 
-## The bootstrap path
+## Metaprogramming, as values
 
-The goal is to move codegen — then the whole front end — into Zen, without breaking the
-working Python compiler, gated by parity tests every step:
+There is **no `@emit` pragma and no comptime evaluator** in the self-hosted compiler. You
+metaprogram by building AST values and emitting them: an ordinary function returns
+`[Decl]`, and `std.genc.genModule` lowers it to C — `std.ast` gives fluent heap-allocating
+builders (`var("x").dot("a").eq(…)`), and `zen/std/c.zen`'s `libc()` is exactly this shape
+(a function that returns the libc bindings as `[Decl]`). The AST is data; a generator is a
+function over data.
 
-1. **Backend in Zen** — `std.genc` walks an AST and emits C at runtime. ✅ (a subset:
-   scalars, structs, enums + `match`, pointers, control flow, recursion).
-2. **Front end in Zen** — `std.lex` (lexer) + `std.parse` (recursive-descent parser),
-   building `std.genc`'s AST. ✅ for arithmetic + `let`; the loop closes:
-   `"(1 + 2) * 3"` → scan → parse → genC → `cc` → `f() == 9`, all in Zen.
-3. **Parity gates** (before retiring any Python) — `tests/test_parity.py` (Zen `genC` vs
-   Python `emit_c` agree), `tests/test_lex_parity.py` (`std.lex` vs tree-sitter tokens),
-   and `zen/astdump.py` / `zen dump` (a canonical, formatting-invariant AST hash — the
-   reference a Zen parser is diffed against).
-4. **Grow the Zen front end up to the full `ast.py`** (the real remaining gap), then
-   **bootstrap**: Python compiles the Zen compiler to C, the compiled `zenc` re-emits
-   byte-identical C (a deterministic **fixpoint**), commit the C, release the binary, and
-   retire the host.
+## What's deferred
 
-What's intentionally deferred: a typed IR boundary (lowering still re-runs inference — it's
-entangled with monomorphization), deleting Python, new backends (JS/wasm), and the future
-keyword-free "one structure" syntax.
+- A typed IR boundary distinct from the source AST (lowering still re-runs inference,
+  entangled with monomorphization).
+- Growing the self-hosted frontend to full parity with the language `zenlang` describes
+  (the checker covers a real but partial slice today).
+- More backends (`gen.llvm`, a richer `gen.js`), and the one-structure surface syntax from
+  [VISION](VISION.md).

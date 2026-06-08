@@ -42,7 +42,10 @@ ROOT = Path(__file__).resolve().parent.parent
 STD = ROOT / "zen" / "std"
 
 _IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*std\.(?P<mod>\w+)")
-_DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\*?)\s*[=:]")
+# A decl head is `name[<tparams>][*] =/:` — the optional `<…>` is a GENERIC head (`Own<T>:`,
+# `new<T>* =`, `own_get<T>* =`); without it the generic stdlib exports (Own/new/clone/release/…)
+# were invisible to split_decls, so a cross-module CONSUMER of them saw them as undefined.
+_DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(<[^>]*>)?(\*?)\s*[=:]")
 
 
 def all_modules():
@@ -196,7 +199,7 @@ def split_decls(src):
         if not m:
             i += 1
             continue
-        name, star = m.group(1), m.group(2)
+        name, star = m.group(1), m.group(3)      # group(2) is the optional <tparams>, group(3) the `*`
         start = i
         depth, seen_brace = 0, False
         while i < n:

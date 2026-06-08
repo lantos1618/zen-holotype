@@ -20,7 +20,8 @@
 // (std templates aren't emitted into a stand-alone test binary). acid checks THIS file as-is.
 
 { byte_at } = std.lex
-{ String, push, append } = std.string
+{ String, push, append, with_cap, finish } = std.string
+{ read_file } = std.io
 
 // space or tab — the whitespace lstrip skips (Python str.strip() also drops \r/\n, but those
 // terminate a line, so on a single line only space/tab matter here).
@@ -126,3 +127,255 @@ strip_imports* = (out: String, s: str) String { out.strip_into(s, 0, true) }
 // finishes each file's String to a str, or — as the prototype test does — inlines the fold over a
 // single growing String, emitting the '\n' separator between files itself.)
 concat_files* = (out: String, a: str, b: str) String { out.append(a).push(10).append(b) }
+
+// ── the import EDGE: which module does an import line name? ───────────────────────────────────────
+// strip_imports drops import lines; the dependency-ordering driver needs the other half — the module
+// NAME each import line points at (`{ malloc } = std.alloc` → "alloc"), to read zen/std/<name>.zen and
+// recurse. These read the name off the `= std.<name>` marker is_import_line already matched.
+
+// length of the `= std.` marker that is_marker_at checks; the module name begins just past it.
+STD_MARKER_LEN := 6
+
+// the byte position of the module name on the import line starting at p — scan to the `= std.` marker
+// (is_import_line guarantees one before the newline), then step past its 6 bytes onto the name's first
+// char. (Only ever called on a line where is_import_line(p) already holds, so the marker is present.)
+std_name_pos = (s: str, p: i32) i32 {
+    s.is_marker_at(p).match ({ true => p + STD_MARKER_LEN, false => s.std_name_pos(p + 1) })
+}
+// an identifier byte — the module-name charset (a module path is `std.<ident>`): letters, digits, '_'.
+is_ident_byte = (b: u8) bool {
+    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || ((b >= '0') && (b <= '9')) || (b == '_')
+}
+// append the identifier run starting at p (the module name) to `out`, stopping at the first non-ident
+// byte (whitespace / newline / NUL end the name).
+take_name = (out: String, s: str, p: i32) String {
+    s.byte_at(p).is_ident_byte().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
+}
+// import_module(out, s, p): append the module name imported on the import line starting at p — e.g.
+// "alloc" for `{ malloc, free } = std.alloc`. The driver maps it to zen/std/<name>.zen.
+import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.std_name_pos(p)) }
+
+// ── THE TRANSITIVE-CLOSURE LOADER (N2a) ─────────────────────────────────────────────────────────────
+// Everything above is the PURE line/edge plumbing. This section is the actual import RESOLVER: given a
+// main program's source it reads its `{ … } = std.X` edges, recursively loads zen/std/<X>.zen for the
+// whole transitive closure, and folds each module's import-stripped body into ONE flat String that zenc
+// compiles as a single module — each module included exactly ONCE. This is the self-hosted replacement
+// for the `cat <hand-picked files> | grep -vE '^\{ .* \} = std\.'` flatten + the oracle_rt.zen shim.
+//
+// DEDUP — TWO LEVELS:
+//   1. PER-MODULE: a SET of module names breaks import cycles (the parse_* modules import each other) and
+//      guarantees each module's body is read + emitted exactly once. Sufficient + collision-free for any
+//      closure whose modules share NO top-level name — e.g. the oracle's set std.io → {std.mem, std.str}
+//      (`free` lives only in std.mem). load_closure does this.
+//   2. PER-NAME (dedup_decls, the final pass): a closure CAN pull two modules that both define a top-level
+//      name (the classic std.string `free(String)` vs std.mem `free(RawPtr<u8>)`, both reachable from the
+//      LOADER ITSELF). Emitting both bodies is a dup-name clash, so dedup_decls walks the flattened source
+//      a SECOND time and keeps only the FIRST top-level decl of each NAME, dropping later same-named decls.
+//      Because load_closure emits a module's DEPENDENCIES before the module itself, the dependency's decl
+//      is the first seen and wins (str.eq survives, mem.free survives over string.free) — the same
+//      "nearest defining module wins" the Python reference (tests/_resolver.resolve → split_decls) gives.
+//
+// HOW per-name dedup splits decls WITHOUT a brace counter: after imports are stripped, every top-level
+// decl in the stdlib begins at a COLUMN-0 decl-head line — `name[*] =`/`name[*]:`/`Name.impl(...`. The
+// only other column-0 lines are `}` (a decl's closing brace) and `//` comments / blanks, which all attach
+// to the decl they sit in/before. So a decl runs from one column-0 head to JUST BEFORE the next column-0
+// head — no need to count braces (and thus no need to special-case '{' char literals or brace-mentioning
+// comments, the trap _resolver._brace_delta works around). This holds for the whole committed stdlib.
+
+// ── a String byte accessor + a module-name SET over a flat String ───────────────────────────────────
+// The SET is just a String holding each seen module name as a `name\n` line (set starts empty, so every
+// entry begins at a line boundary). Membership is a line-exact scan — no hashing, no per-name alloc.
+
+// byte i of a String's buffer (the String twin of std.lex.byte_at over a `str`).
+sbyte = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
+
+// do the `m` bytes of `name` equal `set`'s bytes starting at `i`, immediately followed by a '\n'? — i.e.
+// is the line at `i` of `set` EXACTLY `name`. Compares byte-by-byte; the trailing-'\n' check makes it a
+// whole-line (not prefix) match, so `mem` does not spuriously match a stored `memx`.
+line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
+    (j == m).match ({
+        true  => set.sbyte(i) == 10,                                  // name exhausted ⇒ must hit the '\n'
+        false => (set.sbyte(i) == name.sbyte(j)).match ({
+            true  => set.line_eq(i + 1, name, j + 1, m),
+            false => false
+        })
+    })
+}
+
+// scan `set` line-by-line from position `i` for a line exactly equal to `name`. `i` is always a line
+// start (0, or just past a '\n'). Stops at the buffer end (i == set.len).
+seen_scan = (set: String, name: String, i: i64) bool {
+    (i >= set.len).match ({
+        true  => false,
+        false => set.line_eq(i, name, 0, name.len).match ({
+            true  => true,
+            false => set.seen_scan(name, set.snext_line(i))             // skip to the next line start
+        })
+    })
+}
+// position just past the next '\n' at/after `i` in a String (or set.len at the end) — String twin of
+// next_line over a str.
+snext_line = (set: String, i: i64) i64 {
+    (i >= set.len).match ({
+        true  => set.len,
+        false => (set.sbyte(i) == 10).match ({ true => i + 1, false => set.snext_line(i + 1) })
+    })
+}
+
+// is module `name` already in the SET? (line-exact membership). `name` is a String (built by
+// import_module / a path-free take_name) so it can be compared against the buffer directly.
+seen* = (set: String, name: String) bool { set.seen_scan(name, 0) }
+
+// add `name` to the SET (append its bytes + a '\n' line terminator). Caller checks `seen` first.
+add_name = (set: String, name: String) String { set.append_string(name).push(10) }
+// append every byte of String `src` to `out` (String→String copy, byte by byte).
+append_string = (out: String, src: String) String { out.copy_from(src, 0) }
+copy_from = (out: String, src: String, i: i64) String {
+    (i >= src.len).match ({ true => out, false => out.push(src.sbyte(i)).copy_from(src, i + 1) })
+}
+
+// ── the closure state threaded through the recursion ────────────────────────────────────────────────
+// load_closure must return BOTH the grown SET and the grown OUTPUT; Zen threads a single value, so they
+// ride together in this struct (the functional `s := s.op(...)` style, two fields at once).
+Closure*: { seen: String, out: String }
+
+// ── the path zen/std/<modname>.zen ──────────────────────────────────────────────────────────────────
+// build `<root>/zen/std/<modname>.zen` as a NUL-terminated str for read_file. `root` is the project
+// root (a str); `name` is the module name String. A trailing '/' on root is tolerated by the FS, so we
+// always insert one — keep it simple.
+module_path = (root: str, name: String) str {
+    with_cap(64).append(root).append("/zen/std/").append_string(name).append(".zen").finish()
+}
+
+// ── load_closure: the recursive transitive loader ───────────────────────────────────────────────────
+// load_closure(root, name, c): if `name` is already in c.seen, return c unchanged (dedup + cycle break);
+// else mark it seen, read zen/std/<name>.zen, recursively load each module IT imports FIRST (so a
+// dependency is present before its dependents — though order is irrelevant for a flat namespace), then
+// append THIS module's import-stripped body + a '\n' separator to c.out.
+load_closure* = (root: str, name: String, c: Closure) Closure {
+    c.seen.seen(name).match ({
+        true  => c,
+        false => {
+            src := read_file(module_path(root, name))
+            c2  := Closure { seen: c.seen.add_name(name), out: c.out }
+            c3  := load_imports(root, src, 0, c2)                      // recurse on this module's edges
+            Closure { seen: c3.seen, out: c3.out.push(10).strip_into(src, 0, true) }
+        }
+    })
+}
+
+// walk module source `src` from line position `p`; for each import line, load_closure the module it
+// names (depth-first), threading the Closure. Non-import lines are skipped here (they are emitted in
+// bulk by strip_into back in load_closure) — this pass only follows EDGES.
+load_imports = (root: str, src: str, p: i32, c: Closure) Closure {
+    (src.byte_at(p) == 0).match ({
+        true  => c,
+        false => src.is_import_line(p).match ({
+            true  => load_imports(root, src, src.next_line(p),
+                         load_closure(root, import_module(with_cap(16), src, p), c)),
+            false => load_imports(root, src, src.next_line(p), c)
+        })
+    })
+}
+
+// ── PER-NAME DEDUP: keep the first top-level decl of each name ───────────────────────────────────────
+// dedup_decls(flat) walks the per-module-flattened source line by line, classifying each COLUMN-0 line:
+//   • a decl HEAD `name[*] =/:`  → the name's FIRST occurrence is kept (emit + record name); a later
+//     same-named head starts a DROPPED decl (its body lines, dropped too — see `keeping`).
+//   • a `.impl(...)` head        → a method-impl block: a decl boundary, but ALWAYS kept (impls don't
+//     collide by name — many traits per type), never recorded.
+//   • anything else at column 0 (`}`, `//` comment, blank) or any INDENTED line → a continuation of the
+//     current decl: emitted iff the current decl is being kept (`keeping`). A `}` closing a dropped decl
+//     is thus correctly dropped with it.
+// State threaded: out (the kept source), seen (names already emitted), keeping (is the current decl kept).
+
+// the column of the first byte of the line at p — actually we only need: is byte p the line's first AND
+// non-space? A column-0 decl head starts with an identifier byte at p with no leading space.
+is_head_start = (flat: str, p: i32) bool {
+    b := flat.byte_at(p)
+    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_')
+}
+
+// at position `p` (just past a candidate name's ident run), is this a top-level decl head? — optional
+// '*', optional spaces, then '=' or ':'  (e.g. `name =`, `name* =`, `Name:`, `Name*: {`).
+after_name_is_decl = (flat: str, p: i32) bool {
+    b := flat.byte_at(p)
+    (b == '*').match ({
+        true  => flat.after_name_is_decl(p + 1),
+        false => (b == ' ').match ({
+            true  => flat.after_name_is_decl(p + 1),
+            false => (b == '=') || (b == ':')
+        })
+    })
+}
+// at position `p` (just past an ident run), is this a `.impl(` method-impl head?
+after_name_is_impl = (flat: str, p: i32) bool {
+    (flat.byte_at(p) == '.') && (flat.byte_at(p + 1) == 'i') && (flat.byte_at(p + 2) == 'm')
+        && (flat.byte_at(p + 3) == 'p') && (flat.byte_at(p + 4) == 'l')
+}
+// end of the identifier run starting at p (first non-ident byte).
+ident_end = (flat: str, p: i32) i32 {
+    flat.byte_at(p).is_ident_byte().match ({ true => flat.ident_end(p + 1), false => p })
+}
+
+// dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
+// the per-name pass; resolve_program runs it over its per-module-flattened output.
+dedup_decls* = (flat: str) str { with_cap(4096).dd(flat, 0, with_cap(256), true).finish() }
+
+// the worker: `out` accumulates kept lines, `set` the names kept so far, `keeping` whether the decl whose
+// body we're inside is being emitted. Recurses line by line to the NUL.
+dd = (out: String, flat: str, p: i32, set: String, keeping: bool) String {
+    (flat.byte_at(p) == 0).match ({
+        true  => out,
+        false => flat.is_head_start(p).match ({
+            // a COLUMN-0 ident line: a decl head, an impl head, or (rarely) something else.
+            true  => {
+                ie := flat.ident_end(p)
+                flat.after_name_is_impl(ie).match ({
+                    true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, true),   // impl: always keep
+                    false => flat.after_name_is_decl(ie).match ({
+                        true  => {
+                            nm   := import_name_span(with_cap(16), flat, p, ie)               // the decl's NAME
+                            keep := set.seen(nm).match ({ true => false, false => true })
+                            keep.match ({
+                                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set.add_name(nm), true),
+                                false => out.dd(flat, flat.next_line(p), set, false)          // drop this decl
+                            })
+                        },
+                        // a column-0 ident line that is NOT a decl/impl head (shouldn't occur post-strip):
+                        // treat as a continuation of the current decl.
+                        false => keeping.match ({
+                            true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping),
+                            false => out.dd(flat, flat.next_line(p), set, keeping)
+                        })
+                    })
+                })
+            },
+            // a continuation line (`}`, indented, `//` comment, blank): emit iff the current decl is kept.
+            false => keeping.match ({
+                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping),
+                false => out.dd(flat, flat.next_line(p), set, keeping)
+            })
+        })
+    })
+}
+// append the line [p, next) of `flat` to `out` INCLUDING its trailing '\n' (next_line lands past the
+// '\n'; copying [p, next) keeps the newline, so kept lines stay separated).
+emit_line = (out: String, flat: str, p: i32) String { out.append_span(flat, p, flat.next_line(p)) }
+// append the ident span [p, e) of `flat` (a decl name) to `out` — like import_module's take_name but for
+// an explicit [p, e) range rather than scanning the charset (the caller already found the end).
+import_name_span = (out: String, flat: str, p: i32, e: i32) String {
+    (p == e).match ({ true => out, false => out.push(flat.byte_at(p)).import_name_span(flat, p + 1, e) })
+}
+
+// ── resolve_program: the public entry ───────────────────────────────────────────────────────────────
+// resolve_program(root, mainsrc): the flat, single-module source for a multi-module PROGRAM `mainsrc`.
+// Strips mainsrc's own imports into the output, loads the transitive closure of each module mainsrc
+// imports (per-MODULE dedup), then runs dedup_decls (per-NAME dedup) over the whole thing so a closure
+// with a cross-module name clash (e.g. string.free vs mem.free, both reachable from this very loader)
+// still yields a clash-free single module. Returns the finished (NUL-terminated) flat source.
+resolve_program* = (root: str, mainsrc: str) str {
+    c0 := Closure { seen: with_cap(256), out: with_cap(4096).strip_into(mainsrc, 0, true) }
+    cN := load_imports(root, mainsrc, 0, c0)
+    dedup_decls(cN.out.finish())
+}

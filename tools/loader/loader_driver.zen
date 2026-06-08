@@ -1,0 +1,29 @@
+// loader_driver — a runnable Zen PROGRAM that drives std.resolve's transitive-closure loader.
+//
+// Given a MAIN program path + the project root, it reads the program, computes the flat single-module
+// source via std.resolve.resolve_program (the transitive import closure, per-module + per-name deduped),
+// and writes that flat source to an output path — the file you then hand straight to `zenc`.
+//
+// This is the SELF-HOSTED replacement for the hand-maintained
+//     cat <hand-picked file list> | grep -vE '^\{ .* \} = std\.'
+// flatten + the tests/oracle_rt.zen collision shim. The driver itself is a multi-module program, so it
+// hits the very bootstrapping problem it solves: its own closure pulls std.string AND std.mem (both
+// define `free`). That clash is resolved by std.resolve's PER-NAME dedup — so the driver self-hosts
+// cleanly once bootstrapped (see tools/loader/bootstrap_driver.sh for the one-time bootstrap flatten).
+//
+// The C wrapper (loader_main.c) passes argv → resolve_to(in_path, out_path, root); the return code is the
+// number of bytes written (>0 on success), so the shell harness can check it wrote something.
+
+{ resolve_program } = std.resolve
+{ read_file, write_file } = std.io
+{ len } = std.str
+
+// read `in_path`, resolve its transitive closure against `root`, write the flat module to `out_path`.
+// returns the number of bytes written (0 ⇒ nothing written / empty).
+resolve_to* = (in_path: str, out_path: str, root: str) i64 {
+    mainsrc := read_file(in_path)
+    flat    := resolve_program(root, mainsrc)
+    n       := len(flat)
+    write_file(out_path, flat, n)
+    n
+}
