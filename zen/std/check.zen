@@ -27,7 +27,7 @@ VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 // shared by several enums — `lit = (n) Expr { .Int(n) }` picks Expr.Int over TokKind.Int because
 // Expr is the expected type. tvoid() means "no expectation" → fall back to a name-only scan.
 Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: Ptr<Malloc> }   // a = allocator (heap-alloc in infer)
-with_exp = (env: Env, t: Ty) Env { Env { vars: env.vars, decls: env.decls, exp: t, a: env.a } }
+with_exp = (env: Env, t: Ty) Env { Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 
 // heap-allocate fresh nodes (the same pattern the parser uses). Named cebuf/cenode (not
@@ -62,7 +62,7 @@ vlnode = (a: Ptr<Malloc>, v: VList) Ptr<VList> {
 // ctor fns give the leading-dot enum a return-type context (a bare `.VNil()` passed into the
 // generic vlnode can't infer its enum)
 vnil_val  = () VList { .VNil() }
-vcons_val = (nm: str, t: Ty, tail: Ptr<VList>) VList { .VCons(VCell { name: nm, ty: t, tail: tail }) }
+vcons_val = (nm: str, t: Ty, tail: Ptr<VList>) VList { .VCons(VCell( name: nm, ty: t, tail: tail )) }
 vnil = (a: Ptr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
 vcons = (a: Ptr<Malloc>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
 // the initial environment: each parameter consed onto an empty list
@@ -84,7 +84,7 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
 // (`g := g …`, only ever from malformed input — a valid init never names its own global) resolves
 // via lookup_var instead of re-entering global_ty forever (a resolver stack overflow).
 infer_global_init = (env: Env, name: str, init: Ptr<Expr>) Ty {
-    env2 := Env { vars: env.a.vcons(name, tnamed(""), env.vars), decls: env.decls, exp: env.exp, a: env.a }
+    env2 := Env( vars: env.a.vcons(name, tnamed(""), env.vars), decls: env.decls, exp: env.exp, a: env.a )
     env2.infer_expr(init)
 }
 global_ty = (env: Env, name: str) Ty {
@@ -199,18 +199,18 @@ infer_enum_targs = (env: Env, g: GenEnumDecl, variant: str, pty: Ty) [Ty] {
 }
 enum_inst_payload = (env: Env, g: GenEnumDecl, base: str, variant: str, pty: Ty) EnumInst {
     ta := env.infer_enum_targs(g, variant, pty)
-    EnumInst { base: base, mty: mangle_str(base, ta), targs: ta }
+    EnumInst( base: base, mty: mangle_str(base, ta), targs: ta )
 }
 enum_inst_gen = (env: Env, g: GenEnumDecl, base: str, variant: str, pty: Ty) EnumInst {
     env.exp.match ({
-        .Generic(ge) => eq(ge.name, base).match ({ true => EnumInst { base: base, mty: ge.mangled, targs: ge.args }, false => env.enum_inst_payload(g, base, variant, pty) }),
+        .Generic(ge) => eq(ge.name, base).match ({ true => EnumInst( base: base, mty: ge.mangled, targs: ge.args ), false => env.enum_inst_payload(g, base, variant, pty) }),
         _            => env.enum_inst_payload(g, base, variant, pty)
     })
 }
 enum_inst_of = (env: Env, base: str, variant: str, pty: Ty) EnumInst {
     g := env.decls.find_genenum(base)
     eq(g.name, "").match ({
-        true  => EnumInst { base: base, mty: base, targs: no_tys() },     // a non-generic enum
+        true  => EnumInst( base: base, mty: base, targs: no_tys() ),     // a non-generic enum
         false => env.enum_inst_gen(g, base, variant, pty)
     })
 }
@@ -421,7 +421,7 @@ resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
 // loop variables (index i: i32, element x: elemTy) added to the environment.
 resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.keep_elem(l.elemTy, l.seq)   // keep a concrete element type (a generic inline substituted it)
-    env2 := Env { vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a }
+    env2 := Env( vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a )
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
 }
 fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(malloc(n * sizeof(FieldInit)), n) }
@@ -629,20 +629,20 @@ fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
 }
 extend_env* = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
-        .Let(l) => Env { vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp, a: env.a },
+        .Let(l) => Env( vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp, a: env.a ),
         _       => env
     })
 }
 
 // ── rebuild decls: a function's body is resolved against its params + the module's enums ──
 resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
-    env := Env { vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a }
-    Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) }
+    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+    Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) )
 }
 // a module-level global: infer its init's type (the parser left it void) and resolve the init, so
 // genc emits `static <real ty> name = <init>;`. [Goal Z E1]
 resolve_global = (a: Ptr<Malloc>, decls: [Decl], g: GlobalData) Decl {
-    env := Env { vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a }
+    env := Env( vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a )
     dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init))
 }
 resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
@@ -665,7 +665,7 @@ pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
 }
 param_index = (params: [Param], name: str) i32 { params.pidx(name, 0 - 1, 0) }
 the_func* = (decls: [Decl], name: str) Func {
-    found := Func { name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() }
+    found := Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() )
     decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => f, false => found }), .DForeign(f) => eq(f.name, name).match ({ true => f, false => found }), _ => found }) })
     found
 }
@@ -975,7 +975,7 @@ xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], farg
 }
 inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({
-        .DFunc(f) => dfunc(Func { name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args(), a.params_env(f.params)) }),
+        .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args(), a.params_env(f.params)) )),
         _         => d
     })
 }
@@ -997,8 +997,8 @@ default_for_type = (a: Ptr<Malloc>, td: TraitDefData, tyname: str) Func {
     ag := a.self_arg(tyname)
     ps := a.pbuf(td.fn.params.len)
     td.fn.params.loop((h, i, p) { ps[i] = param(p.name, sp.subst_ty(ag, p.ty)) })
-    Func { name: impl_cname(td.trname, tyname, td.fn.name), params: ps,
-           ret: sp.subst_ty(ag, td.fn.ret), tparams: td.fn.tparams, body: td.fn.body }
+    Func( name: impl_cname(td.trname, tyname, td.fn.name), params: ps,
+           ret: sp.subst_ty(ag, td.fn.ret), tparams: td.fn.tparams, body: td.fn.body )
 }
 // is method name `m` among a [Param] of bare method names?
 param_names_have = (names: [Param], m: str) bool {

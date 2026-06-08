@@ -33,13 +33,13 @@ parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     params := buf.take_params(pe.count)
     src.is_lbrace(src.scan(rt.next).tok).match ({       // a '{' here → a body; otherwise foreign
         true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next)),
-        false => DeclEnd { func: Func { name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body() },
-                           next: rt.next, foreign: true }
+        false => DeclEnd( func: Func( name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body() ),
+                           next: rt.next, foreign: true )
     })
 }
 parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], tparams: [Param], ret: Ty, bstart: i32) DeclEnd {
-    func := Func { name: name, params: params, ret: ret, tparams: tparams, body: a.build_body(src, bstart) }
-    DeclEnd { func: func, next: src.skip_block(bstart), foreign: false }
+    func := Func( name: name, params: params, ret: ret, tparams: tparams, body: a.build_body(src, bstart) )
+    DeclEnd( func: func, next: src.skip_block(bstart), foreign: false )
 }
 parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 
@@ -61,13 +61,13 @@ parse_tparams = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {
     sc := src.scan(pos)
     src.is_langle(sc.tok).match ({
         true  => a.parse_tparam_list(src, sc.next),
-        false => TParamEnd { names: a.no_tparams(), count: 0, next: pos }
+        false => TParamEnd( names: a.no_tparams(), count: 0, next: pos )
     })
 }
 parse_tparam_list = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {   // pos just past '<'
     buf := a.param_buf()
     te  := a.fill_tparams(src, pos, buf, 0)
-    TParamEnd { names: buf.take_params(te.count), count: te.count, next: te.next }
+    TParamEnd( names: buf.take_params(te.count), count: te.count, next: te.next )
 }
 record_tparam = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd {
     buf[i] = param(a.lexeme(src, sc.tok), tvoid())
@@ -76,9 +76,9 @@ record_tparam = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd 
 fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => PEnd { count: i, next: sc.next },        // unterminated `<…`: stop at EOF, don't recurse forever
+        .Eof => PEnd( count: i, next: sc.next ),        // unterminated `<…`: stop at EOF, don't recurse forever
         _    => src.is_rangle(sc.tok).match ({
-            true  => PEnd { count: i, next: sc.next },
+            true  => PEnd( count: i, next: sc.next ),
             false => is_ident_tok(sc.tok).match ({       // an ident is a tparam; commas are skipped
                 true  => a.record_tparam(src, sc, buf, i),
                 false => a.fill_tparams(src, sc.next, buf, i)
@@ -99,7 +99,7 @@ is_eq_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && 
 FieldsEnd*: { count: i32, ndef: i32, next: i32 }
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     sc := src.scan(pos)
-    src.is_rbrace(sc.tok).match ({ true => FieldsEnd { count: i, ndef: dn, next: sc.next }, false => a.fill_field(src, pos, buf, i, dbuf, dn) })
+    src.is_rbrace(sc.tok).match ({ true => FieldsEnd( count: i, ndef: dn, next: sc.next ), false => a.fill_field(src, pos, buf, i, dbuf, dn) })
 }
 // a DEFAULT-bodied trait method `m = (params) ret { body }`: parse it as a whole function decl, store
 // the Func (for instantiation per impl), and give the field the method's FnT signature (so conformance
@@ -124,7 +124,7 @@ fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [F
             after := src.scan(te.next)                   // ',' or '}'
             src.is_comma(after.tok).match ({
                 true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
-                false => FieldsEnd { count: i + 1, ndef: dn, next: after.next }  // '}'
+                false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )  // '}'
             })
         }
     })
@@ -137,7 +137,7 @@ parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
     buf    := a.field_buf()
     dbuf   := a.dfn_buf()
     fe     := a.fill_fields(src, bstart, buf, 0, dbuf, 0)   // fields (+ any default bodies) + pos past '}'
-    StructEnd { sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) }
+    StructEnd( sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) )
 }
 parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
@@ -154,18 +154,18 @@ take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }  
 variant_payload = (a: Ptr<Malloc>, src: str, pos: i32) VPay {
     te := a.parse_ty(src, pos)                           // the payload type (may be Ptr<…>)
     rp := src.scan(te.next)                              // ')'
-    VPay { ty: te.ty, next: rp.next }
+    VPay( ty: te.ty, next: rp.next )
 }
 fill_variants = (a: Ptr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
     nt   := src.scan(pos)                                // variant name
     nm   := a.lexeme(src, nt.tok)
     pk   := src.scan(nt.next)                            // '(' (payload), '|', or the next decl
-    vp   := src.is_lparen(pk.tok).match ({ true => a.variant_payload(src, pk.next), false => VPay { ty: tvoid(), next: nt.next } })
+    vp   := src.is_lparen(pk.tok).match ({ true => a.variant_payload(src, pk.next), false => VPay( ty: tvoid(), next: nt.next ) })
     buf[i] = vdef(nm, vp.ty)
     after := src.scan(vp.next)                           // '|' continues the list, else it ends
     src.is_bar(after.tok).match ({
         true  => a.fill_variants(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: vp.next }     // enum done; resume after the last variant
+        false => PEnd( count: i + 1, next: vp.next )     // enum done; resume after the last variant
     })
 }
 skip_to_colon = (src: str, pos: i32) i32 {
@@ -179,7 +179,7 @@ parse_enum_at = (a: Ptr<Malloc>, src: str, pos: i32) EnumEnd {
     cpos := src.skip_to_colon(nt.next)                   // pos just past ':' (skips `* <…>`)
     buf  := a.variant_buf()
     ve   := a.fill_variants(src, cpos, buf, 0)           // variants + pos after the last one
-    EnumEnd { ed: edef(name, buf.take_variants(ve.count)), tparams: tp.names, ntp: tp.count, next: ve.next }
+    EnumEnd( ed: edef(name, buf.take_variants(ve.count)), tparams: tp.names, ntp: tp.count, next: ve.next )
 }
 parse_enum* = (a: Ptr<Malloc>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
 
@@ -242,9 +242,9 @@ record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportE
 fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) ImportEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => ImportEnd { count: i, next: sc.next },  // unterminated `{ … `: stop at EOF, don't recurse forever
+        .Eof => ImportEnd( count: i, next: sc.next ),  // unterminated `{ … `: stop at EOF, don't recurse forever
         _    => src.is_rbrace(sc.tok).match ({           // '}' ends the import list
-            true  => ImportEnd { count: i, next: sc.next },
+            true  => ImportEnd( count: i, next: sc.next ),
             false => is_ident_tok(sc.tok).match ({       // an ident is a name; commas are skipped
                 true  => a.record_name(src, sc, buf, i),
                 false => a.fill_import_names(src, sc.next, buf, i)
@@ -322,11 +322,11 @@ fill_impl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => ImplEnd { decls: i, methods: m, next: sc.next },         // unterminated `impl(… { …`: stop at EOF, don't recurse forever
+        .Eof => ImplEnd( decls: i, methods: m, next: sc.next ),         // unterminated `impl(… { …`: stop at EOF, don't recurse forever
         _    => src.is_comma(sc.tok).match ({                            // optional ',' OR newline between methods (struct-literal ergonomics)
             true  => a.fill_impl_methods(src, sc.next, buf, i, mbuf, m, tyname, trname),
             false => src.is_rbrace(sc.tok).match ({
-                true  => ImplEnd { decls: i, methods: m, next: sc.next },   // '}' ends the impl block
+                true  => ImplEnd( decls: i, methods: m, next: sc.next ),   // '}' ends the impl block
                 false => a.fill_impl_one(src, pos, buf, i, mbuf, m, tyname, trname)
             })
         })
@@ -335,7 +335,7 @@ fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mb
 fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
     de := a.parse_decl_at(src, pos)                          // one method is just a function decl
     cn := impl_cname(trname, tyname, de.func.name)           // mangle: a DISTINCT C fn per (trait, type, method)
-    buf[i]  = dfunc(Func { name: cn, params: de.func.params, ret: de.func.ret, tparams: de.func.tparams, body: de.func.body })
+    buf[i]  = dfunc(Func( name: cn, params: de.func.params, ret: de.func.ret, tparams: de.func.tparams, body: de.func.body ))
     mbuf[m] = param(de.func.name, tvoid())                  // the BARE method name, for conformance + dispatch
     a.fill_impl_methods(src, de.next, buf, i + 1, mbuf, m + 1, tyname, trname)
 }
@@ -393,7 +393,7 @@ parse* = (a: Ptr<Malloc>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
 // compiler's own source must avoid it (this file is read by the toolchain it describes).
 no_params = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
 parse_fn* = (a: Ptr<Malloc>, src: str, fname: str) Func {
-    Func { name: fname, params: a.no_params(), ret: ti32(), tparams: a.no_params(), body: a.build_body(src, 0) }
+    Func( name: fname, params: a.no_params(), ret: ti32(), tparams: a.no_params(), body: a.build_body(src, 0) )
 }
 
 // ── eval: interpret the tree (proof the parse is right) ───────────────────────────

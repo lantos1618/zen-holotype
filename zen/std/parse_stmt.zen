@@ -19,7 +19,7 @@ SCell*: { head: Stmt, tail: Ptr<SList> }
 
 // ctor fns — a leading-dot enum can't infer its type passed straight into a generic call
 snil_val  = () SList { .SNil() }
-scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell { head: h, tail: t }) }
+scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell( head: h, tail: t )) }
 slbuf = (a: Ptr<Malloc>) [SList] { slice(malloc(sizeof(SList)), 1) }
 slnode = (a: Ptr<Malloc>, v: SList) Ptr<SList> {
     buf := a.slbuf()
@@ -184,7 +184,7 @@ parse_while = (a: Ptr<Malloc>, src: str, pos: i32) WhileEnd {
     rp     := src.scan(c.next)                      // ')'
     bstart := src.skip_to_brace(rp.next)           // pos just past '{'
     blk    := a.parse_block(src, bstart)           // statements until '}'
-    WhileEnd { stmt: swhile(c.expr, a.materialize(blk.list)), next: blk.next }
+    WhileEnd( stmt: swhile(c.expr, a.materialize(blk.list)), next: blk.next )
 }
 // the top-level statement form: a While, then the rest of the function body
 parse_while_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
@@ -214,19 +214,19 @@ parse_if = (a: Ptr<Malloc>, src: str, pos: i32) IfEnd {
     tstart := src.skip_to_brace(rp.next)           // pos just past the then-'{'
     tblk   := a.parse_block(src, tstart)           // then-block statements
     eb     := a.parse_else(src, tblk.next)         // optional else-block
-    IfEnd { stmt: sif(c.expr, a.materialize(tblk.list), eb.els), next: eb.next }
+    IfEnd( stmt: sif(c.expr, a.materialize(tblk.list), eb.els), next: eb.next )
 }
 parse_else = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {
     sc := src.scan(pos)
     src.is_else_kw(sc.tok).match ({
         true  => a.parse_else_block(src, sc.next),
-        false => ElseEnd { els: a.empty_stmts(), next: pos }   // no else -> empty block
+        false => ElseEnd( els: a.empty_stmts(), next: pos )   // no else -> empty block
     })
 }
 parse_else_block = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {   // pos just past 'else'
     estart := src.skip_to_brace(pos)               // pos just past the else-'{'
     eblk   := a.parse_block(src, estart)
-    ElseEnd { els: a.materialize(eblk.list), next: eblk.next }
+    ElseEnd( els: a.materialize(eblk.list), next: eblk.next )
 }
 // the top-level statement form: an If, then the rest of the function body
 parse_if_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
@@ -239,9 +239,9 @@ BlockEnd*: { list: Ptr<SList>, next: i32 }
 parse_block* = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => BlockEnd { list: a.snil(), next: sc.next },        // unterminated `{ …`: stop at EOF, don't recurse forever
+        .Eof => BlockEnd( list: a.snil(), next: sc.next ),        // unterminated `{ …`: stop at EOF, don't recurse forever
         _    => src.is_rbrace(sc.tok).match ({
-            true  => BlockEnd { list: a.snil(), next: sc.next },   // '}' — block done
+            true  => BlockEnd( list: a.snil(), next: sc.next ),   // '}' — block done
             false => a.block_stmt(src, pos)
         })
     })
@@ -263,7 +263,7 @@ block_return = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     kw   := src.scan(pos)                            // 'return'
     r    := a.parse_or(src, kw.next)                 // the returned value
     rest := a.parse_block(src, r.next)
-    BlockEnd { list: a.scons(sret(r.expr), rest.list), next: rest.next }
+    BlockEnd( list: a.scons(sret(r.expr), rest.list), next: rest.next )
 }
 block_idxset = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)                            // the array name
@@ -274,17 +274,17 @@ block_idxset = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     eq   := src.scan(rb.next)                        // '='
     v    := a.parse_or(src, eq.next)                 // value
     rest := a.parse_block(src, v.next)
-    BlockEnd { list: a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), rest.list), next: rest.next }
+    BlockEnd( list: a.scons(sidxset(a.enode(vref(name)), ie.expr, tvoid(), v.expr), rest.list), next: rest.next )
 }
 block_expr = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     e    := a.parse_or(src, pos)                     // a bare expression, evaluated for effect
     rest := a.parse_block(src, e.next)
-    BlockEnd { list: a.scons(sexpr(e.expr), rest.list), next: rest.next }
+    BlockEnd( list: a.scons(sexpr(e.expr), rest.list), next: rest.next )
 }
 block_if = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     f    := a.parse_if(src, pos)
     rest := a.parse_block(src, f.next)
-    BlockEnd { list: a.scons(f.stmt, rest.list), next: rest.next }
+    BlockEnd( list: a.scons(f.stmt, rest.list), next: rest.next )
 }
 block_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)
@@ -292,19 +292,19 @@ block_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     at   := src.scan(nt.next)                       // ':='
     v    := a.parse_or(src, at.next)
     rest := a.parse_block(src, v.next)
-    BlockEnd { list: a.scons(slet(name, v.expr), rest.list), next: rest.next }
+    BlockEnd( list: a.scons(slet(name, v.expr), rest.list), next: rest.next )
 }
 block_set = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     lhs  := a.parse_atom(src, pos)                   // the lvalue target (Var or Member chain)
     eq   := src.scan(lhs.next)                       // '='
     v    := a.parse_or(src, eq.next)
     rest := a.parse_block(src, v.next)
-    BlockEnd { list: a.scons(sassign(lhs.expr, v.expr), rest.list), next: rest.next }
+    BlockEnd( list: a.scons(sassign(lhs.expr, v.expr), rest.list), next: rest.next )
 }
 block_while = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     w    := a.parse_while(src, pos)
     rest := a.parse_block(src, w.next)
-    BlockEnd { list: a.scons(w.stmt, rest.list), next: rest.next }
+    BlockEnd( list: a.scons(w.stmt, rest.list), next: rest.next )
 }
 
 // count the statements, then fill a heap [Stmt] from the list (return the next index)

@@ -32,57 +32,57 @@ PCell*: { pnm: str, pty: str, ptr: bool, tail: PList }   // pnm: (Ptr<pty> if pt
 zero_inits = (T: Ast, i: i32) FList {
     (field_count(T) - i).match ({
         0 => .FNil(),
-        _ => .FCons(FCell { key: field_name_at(T, i), val: .Int(0), tail: zero_inits(T, i + 1) })
+        _ => .FCons(FCell( key: field_name_at(T, i), val: .Int(0), tail: zero_inits(T, i + 1) ))
     })
 }
 derive_zero* = (T: Ast) Decl {
-    .Func(FuncData {
+    .Func(FuncData(
         nm: concat(name_of(T), "_zero"),
         ps: .PNil(),
         ret: name_of(T),
-        body: .Struct(StructData { ty: name_of(T), inits: zero_inits(T, 0) })
-    })
+        body: .Struct(StructData( ty: name_of(T), inits: zero_inits(T, 0) ))
+    ))
 }
 
 // ── derive: structural equality  (a, b: Ptr<T>) bool ─────────────────────────
 field_eq = (T: Ast, i: i32) Ast {
-    .Bin(BinData {
+    .Bin(BinData(
         op: "==",
-        lhs: .Field(FieldData { obj: .Var("a"), fld: field_name_at(T, i) }),
-        rhs: .Field(FieldData { obj: .Var("b"), fld: field_name_at(T, i) })
-    })
+        lhs: .Field(FieldData( obj: .Var("a"), fld: field_name_at(T, i) )),
+        rhs: .Field(FieldData( obj: .Var("b"), fld: field_name_at(T, i) ))
+    ))
 }
 eq_body = (T: Ast, acc: Ast, i: i32) Ast {
     (field_count(T) - i).match ({
         0 => acc,
-        _ => eq_body(T, .Bin(BinData { op: "&&", lhs: acc, rhs: field_eq(T, i) }), i + 1)
+        _ => eq_body(T, .Bin(BinData( op: "&&", lhs: acc, rhs: field_eq(T, i) )), i + 1)
     })
 }
 derive_eq* = (T: Ast) Decl {
-    .Func(FuncData {
+    .Func(FuncData(
         nm: concat(name_of(T), "_eq"),
-        ps: .PCons(PCell { pnm: "a", pty: name_of(T), ptr: true,
-             tail: .PCons(PCell { pnm: "b", pty: name_of(T), ptr: true, tail: .PNil() }) }),
+        ps: .PCons(PCell( pnm: "a", pty: name_of(T), ptr: true,
+             tail: .PCons(PCell( pnm: "b", pty: name_of(T), ptr: true, tail: .PNil() )) )),
         ret: "bool",
         body: eq_body(T, .Boolean(true), 0)
-    })
+    ))
 }
 
 // ── derive (sum type): the variant tag  (e: E) i32 { e.match { .V => idx } } ──
 tag_arms = (E: Ast, i: i32) AList {
     (variant_count(E) - i).match ({
         0 => .ANil(),
-        _ => .ACons(ACell { tag: variant_name_at(E, i), bind: "",
-                            body: .Int(i), tail: tag_arms(E, i + 1) })
+        _ => .ACons(ACell( tag: variant_name_at(E, i), bind: "",
+                            body: .Int(i), tail: tag_arms(E, i + 1) ))
     })
 }
 derive_tag* = (E: Ast) Decl {
-    .Func(FuncData {
+    .Func(FuncData(
         nm: concat(name_of(E), "_tag"),
-        ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
+        ps: .PCons(PCell( pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() )),
         ret: "i32",
-        body: .Match(MatchData { subj: .Var("e"), arms: tag_arms(E, 0) })
-    })
+        body: .Match(MatchData( subj: .Var("e"), arms: tag_arms(E, 0) ))
+    ))
 }
 
 // ── derive (sum payload): bind each i32 payload, or 0 for a nullary variant ───
@@ -90,8 +90,8 @@ derive_tag* = (E: Ast) Decl {
 //   -> Shape_payload = (e) i32 { e.match { .Circle(v)=>v, .Square(v)=>v, .Dot=>0 } }
 pay_arm = (E: Ast, i: i32, rest: AList) ACell {
     (variant_has_payload(E, i)).match ({
-        true  => ACell { tag: variant_name_at(E, i), bind: "v", body: .Var("v"), tail: rest },
-        false => ACell { tag: variant_name_at(E, i), bind: "",  body: .Int(0),  tail: rest }
+        true  => ACell( tag: variant_name_at(E, i), bind: "v", body: .Var("v"), tail: rest ),
+        false => ACell( tag: variant_name_at(E, i), bind: "",  body: .Int(0),  tail: rest )
     })
 }
 pay_arms = (E: Ast, i: i32) AList {
@@ -101,12 +101,12 @@ pay_arms = (E: Ast, i: i32) AList {
     })
 }
 derive_payload* = (E: Ast) Decl {
-    .Func(FuncData {
+    .Func(FuncData(
         nm: concat(name_of(E), "_payload"),
-        ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
+        ps: .PCons(PCell( pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() )),
         ret: "i32",
-        body: .Match(MatchData { subj: .Var("e"), arms: pay_arms(E, 0) })
-    })
+        body: .Match(MatchData( subj: .Var("e"), arms: pay_arms(E, 0) ))
+    ))
 }
 
 // ── derive (trait impl): implement ANY single-method `(Self) i32` trait ───────
@@ -117,14 +117,14 @@ derive_payload* = (E: Ast) Decl {
 //       // -> Color.impl(Ranked, { rank = (e: Color) i32 { e.match { .V => idx } } })
 //   reachable through a bound `<T: Ranked>`, the way the compiler dispatches trait methods.
 derive_tag_impl* = (Tr: Ast, E: Ast) Decl {
-    .Impl(ImplData {
+    .Impl(ImplData(
         trait: name_of(Tr),
         ty: name_of(E),
-        method: FuncData {
+        method: FuncData(
             nm: trait_method_name(Tr),
-            ps: .PCons(PCell { pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() }),
+            ps: .PCons(PCell( pnm: "e", pty: name_of(E), ptr: false, tail: .PNil() )),
             ret: "i32",
-            body: .Match(MatchData { subj: .Var("e"), arms: tag_arms(E, 0) })
-        }
-    })
+            body: .Match(MatchData( subj: .Var("e"), arms: tag_arms(E, 0) ))
+        )
+    ))
 }

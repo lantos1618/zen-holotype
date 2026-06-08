@@ -67,14 +67,14 @@ parse_leaf_ty = (a: Ptr<Malloc>, src: str, tt: Scan) TyEnd {
     nx := src.scan(tt.next)
     src.is_langle(nx.tok).match ({
         true  => a.parse_generic_ty(src, tt, nx.next),
-        false => TyEnd { ty: a.ty_of(src, tt.tok), next: tt.next }
+        false => TyEnd( ty: a.ty_of(src, tt.tok), next: tt.next )
     })
 }
 TyArgs*: { args: [Ty], next: i32 }
 parse_tyargs* = (a: Ptr<Malloc>, src: str, pos: i32) TyArgs {   // pos just past '<'
     buf := a.ty_buf()
     ae  := a.fill_tyargs(src, pos, buf, 0)
-    TyArgs { args: buf.take_tys(ae.count), next: ae.next }
+    TyArgs( args: buf.take_tys(ae.count), next: ae.next )
 }
 fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   // `>`-terminated type list
     te    := a.parse_ty(src, pos)
@@ -82,13 +82,13 @@ fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   /
     after := src.scan(te.next)                           // ',' or '>'
     src.is_comma(after.tok).match ({
         true  => a.fill_tyargs(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: after.next }  // '>'
+        false => PEnd( count: i + 1, next: after.next )  // '>'
     })
 }
 parse_generic_ty = (a: Ptr<Malloc>, src: str, nameTok: Scan, pos: i32) TyEnd {   // pos just past '<'
     name := a.lexeme(src, nameTok.tok)
     ta   := a.parse_tyargs(src, pos)
-    TyEnd { ty: tgeneric(name, ta.args, mangle_str(name, ta.args)), next: ta.next }
+    TyEnd( ty: tgeneric(name, ta.args, mangle_str(name, ta.args)), next: ta.next )
 }
 // a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
@@ -96,7 +96,7 @@ ty_buf = (a: Ptr<Malloc>) [Ty] { slice(malloc(256 * sizeof(Ty)), 256) }   // cap
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
 fill_tys = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_ty(src, pos, buf, i) })
+    src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_ty(src, pos, buf, i) })
 }
 fill_ty = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     te    := a.parse_ty(src, pos)                        // one parameter type
@@ -104,14 +104,14 @@ fill_ty = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     after := src.scan(te.next)                           // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_tys(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: after.next }  // ')'
+        false => PEnd( count: i + 1, next: after.next )  // ')'
     })
 }
 parse_fn_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '('
     buf := a.ty_buf()
     pe  := a.fill_tys(src, pos, buf, 0)                  // param types, pos just past ')'
     rt  := a.parse_ty(src, pe.next)                      // the return type
-    TyEnd { ty: fntype(buf.take_tys(pe.count), a.tynode(rt.ty)), next: rt.next }
+    TyEnd( ty: fntype(buf.take_tys(pe.count), a.tynode(rt.ty)), next: rt.next )
 }
 // `Ptr`, `MutPtr`, and `RawPtr` all lower to `T*` — accept any as the pointer-type head. (The
 // Python frontend distinguishes Ptr=read-only from MutPtr=writable for assignment safety; the
@@ -120,13 +120,13 @@ is_ptr_kw = (src: str, t: Token) bool { src.tok_eq(t, "Ptr") || src.tok_eq(t, "M
 parse_slice_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
     inner := a.parse_ty(src, pos)                        // the element type
     rb    := src.scan(inner.next)                        // ']'
-    TyEnd { ty: tslice(a.tynode(inner.ty)), next: rb.next }
+    TyEnd( ty: tslice(a.tynode(inner.ty)), next: rb.next )
 }
 parse_ptr_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
     lt    := src.scan(pos)                               // '<'
     inner := a.parse_ty(src, lt.next)                    // the pointee (recursive)
     gt    := src.scan(inner.next)                        // '>'
-    TyEnd { ty: tptr(a.tynode(inner.ty)), next: gt.next }
+    TyEnd( ty: tptr(a.tynode(inner.ty)), next: gt.next )
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
@@ -144,7 +144,7 @@ param_buf* = (a: Ptr<Malloc>) [Param] { slice(malloc(1024 * sizeof(Param)), 1024
 take_params* = (buf: [Param], n: i32) [Param] { slice(buf.ptr, n) }                            // exact length
 fill_params* = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd { count: i, next: sc.next }, false => a.fill_one(src, pos, buf, i) })
+    src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_one(src, pos, buf, i) })
 }
 fill_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     nt    := src.scan(pos)                               // param name
@@ -155,7 +155,7 @@ fill_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     after := src.scan(te.next)                           // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_params(src, after.next, buf, i + 1),
-        false => PEnd { count: i + 1, next: after.next }  // ')'
+        false => PEnd( count: i + 1, next: after.next )  // ')'
     })
 }
 
