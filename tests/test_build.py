@@ -46,3 +46,28 @@ def test_zenc_build_bad_file():
     zenc = _zenc()
     r = subprocess.run([zenc, "build", "/no/such/file.zen", "-o", "/tmp/x"], capture_output=True, text=True)
     assert r.returncode != 0  # clean failure, not a crash
+
+
+def test_zenc_check_rejects_undefined_name():
+    """U1.2: the binary now type-checks — the killer case (undefined name was emit-exit-0)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("main = () i32 { undefined_fn(1, 2) }\n")
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+
+
+def test_zenc_check_ok_program():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("main = () i32 { 6 * 2 }\n")
+    assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
+
+
+def test_zenc_build_rejects_illtyped_no_binary():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("main = () i32 { 1 < 2 }\n")  # bool not<: i32 -> return-fit
+    out = d / "p"
+    r = subprocess.run([zenc, "build", str(d / "p.zen"), "-o", str(out)], capture_output=True, text=True)
+    assert r.returncode != 0 and not out.exists(), "ill-typed program should not produce a binary"

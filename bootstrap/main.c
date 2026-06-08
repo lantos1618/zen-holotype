@@ -7,6 +7,8 @@
 zslice parse_module(Malloc* a, const char* src);
 zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
+int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
+int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND (0 = ok, 1..13) */
 
 /* ── normal mode: read one flat .zen (argv[1] or stdin), emit C to stdout ──────────────────────── */
 static char* read_all(FILE* in, size_t* out_len){
@@ -44,6 +46,11 @@ static const char* const SOURCES[] = {
     "zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
     "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
     "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen",
+    /* U1.2: check_validate.zen is now compiled INTO the binary so `zenc build`/`check` can TYPE-CHECK
+     * (check_module / check_module_kind). It depends only on genc/check/lex (above) + zenrt's
+     * Malloc/eq/is_empty/malloc (its imports are stripped like every SOURCE), and shares zero top-level
+     * names with the others. The emit-only path (compile_stdin_or_file) and --build-self do not call it. */
+    "zen/std/check_validate.zen",
 };
 static const int N_SOURCES = (int)(sizeof(SOURCES) / sizeof(SOURCES[0]));
 
@@ -165,12 +172,34 @@ static void bin_dir(const char* argv0, char* out, size_t n){
     memcpy(out, argv0, len); out[len] = 0;
 }
 
+/* the 13 validator error KINDs (check_module_kind's 1..13 return) → human-readable names. */
+static const char* const KIND_NAME[] = {
+    "ok", "arity", "arg-type", "undefined-name", "struct-field", "exhaustiveness",
+    "dup-variant", "operand-type", "index", "return-fit", "assign-fit",
+    "conformance", "dup-fn", "value-pos-return",
+};
+
+/* U1.2: type-check resolved decls. Prints a Zen-LEVEL error (a count + the first error's KIND) to stderr
+ * and returns the error count (0 = ok) — so a user finally sees `zenc: foo.zen: 1 error (undefined-name)`
+ * instead of cc errors on generated C they never wrote. (Real line:col + messages are U1 Step 4.) */
+static int type_check(Malloc* m, zslice decls, const char* in_path){
+    int kind = check_module_kind(m, decls);
+    if (kind == 0) return 0;
+    int count = check_module(m, decls);
+    if (count < 1) count = 1;
+    const char* kn = (kind >= 1 && kind <= 13) ? KIND_NAME[kind] : "error";
+    fprintf(stderr, "zenc: %s: %d error%s (first: %s)\n", in_path, count, count == 1 ? "" : "s", kn);
+    return count;
+}
+
 static int build_program(const char* argv0, const char* in_path, const char* out_path, int run){
     size_t len = 0;
     char* buf = slurp(in_path, &len);
     if (!buf) return 1;
     Malloc m = { 0 };
-    String out = genModule(resolve_module(&m, parse_module(&m, buf)));
+    zslice decls = resolve_module(&m, parse_module(&m, buf));
+    if (type_check(&m, decls, in_path) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
+    String out = genModule(decls);
     free(buf);
 
     size_t hlen = sizeof(HEAD) - 1;
@@ -222,6 +251,17 @@ int main(int argc, char** argv){
     if (argc >= 2 && strcmp(argv[1], "run") == 0){
         if (argc < 3){ fprintf(stderr, "usage: %s run <in.zen>\n", argv[0]); return 2; }
         return build_program(argv[0], argv[2], NULL, 1);
+    }
+    if (argc >= 2 && strcmp(argv[1], "check") == 0){  /* U1.2: type-check only, no build */
+        if (argc < 3){ fprintf(stderr, "usage: %s check <in.zen>\n", argv[0]); return 2; }
+        char* buf = slurp(argv[2], NULL);
+        if (!buf) return 1;
+        Malloc m = { 0 };
+        zslice decls = resolve_module(&m, parse_module(&m, buf));
+        free(buf);
+        int n = type_check(&m, decls, argv[2]);
+        if (n == 0) fprintf(stderr, "zenc: %s: ok\n", argv[2]);
+        return n == 0 ? 0 : 1;
     }
     return compile_stdin_or_file(argc, argv);
 }
