@@ -18,15 +18,15 @@ from _oracle import self_side, check_count
     # one impl method, called via UFCS; field access on the Ptr receiver auto-derefs
     ("Point*: { x: i32, y: i32 }\n"
      "Point.impl(Show, { sumk = (p: Ptr<Point>, k: i32) i32 { p.x + p.y + k } })\n"
-     "test* = () i32 { p := Point { x: 3, y: 4 }\n p.addr().sumk(10) }", 17),
+     "test* = () i32 { p := Point(x: 3, y: 4)\n p.addr().sumk(10) }", 17),
     # two methods in one impl block
     ("Counter*: { n: i32 }\n"
      "Counter.impl(Inc, { bump = (c: Ptr<Counter>) i32 { c.n + 1 }  get = (c: Ptr<Counter>) i32 { c.n } })\n"
-     "test* = () i32 { c := Counter { n: 41 }\n c.addr().bump() }", 42),
+     "test* = () i32 { c := Counter(n: 41)\n c.addr().bump() }", 42),
     # an impl method that chains another UFCS call
     ("Box*: { v: i32 }\n"
      "Box.impl(B, { val = (b: Ptr<Box>) i32 { b.v }  twice = (b: Ptr<Box>) i32 { b.val() + b.val() } })\n"
-     "test* = () i32 { b := Box { v: 21 }\n b.addr().twice() }", 42),
+     "test* = () i32 { b := Box(v: 21)\n b.addr().twice() }", 42),
 ])
 def test_impl_method_runs(prog, want):
     assert self_side(prog)["value"] == want, prog
@@ -38,7 +38,7 @@ def test_impl_method_runs(prog, want):
     ("Show*: { render: (Ptr<Self>) i32 }\n"
      "Point*: { x: i32, y: i32 }\n"
      "Point.impl(Show, { render = (p: Ptr<Point>) i32 { p.x * 10 + p.y } })\n"
-     "test* = () i32 { p := Point { x: 4, y: 2 }\n p.addr().render() }", 42),
+     "test* = () i32 { p := Point(x: 4, y: 2)\n p.addr().render() }", 42),
 ])
 def test_declared_trait_with_impl_runs(prog, want):
     assert self_side(prog)["value"] == want, prog

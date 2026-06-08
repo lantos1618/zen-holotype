@@ -137,7 +137,7 @@ def test_naive_flat_concat_DOES_false_positive_on_the_clash():
 # direct import of app — the resolver must pull it in transitively so Pt's definition is present.
 _CHAIN = {
     "base": "Pt*: { x: i32, y: i32 }\n",
-    "mid": "{ Pt } = std.base\nmake* = (v: i32) Pt { Pt { x: v, y: v } }\n",
+    "mid": "{ Pt } = std.base\nmake* = (v: i32) Pt { Pt(x: v, y: v) }\n",
 }
 
 

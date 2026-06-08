@@ -75,7 +75,7 @@ def targeted(rng):
     if pick == 7:                                   # malformed `<…>` tails on a decl name
         return rng.choice(["Foo<", "Bar<T", "Baz<<<", "Q<,>", "W< = ()", "Z<T,,>: {"])
     if pick == 8:                                   # truncations of a real program (off-by-token)
-        full = "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P { x: 5 }) }"
+        full = "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
         return full[: rng.randint(1, len(full))]
     if pick == 9:                                   # deep nested parens / brackets unterminated
         n = rng.randint(1, 20)

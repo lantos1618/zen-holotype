@@ -72,7 +72,7 @@ PROGRAMS = [
                          "return grid(4)==16 ? 0 : 1;"),
     ("enum_match",       "Shape*: Circle(i32) | Square(i32)\nmk* = (n: i32) Shape {\n .Circle(n)\n}\narea* = (s: Shape) i32 {\n s.match({ .Circle(r) => r*r*3, .Square(w) => w*w })\n}",
                          "return area(mk(2))==12 ? 0 : 1;"),
-    ("struct_field",     "Pt*: { x: i32, y: i32 }\nmk* = (a: i32, b: i32) Pt {\n Pt { x: a, y: b }\n}\nnsq* = (p: Pt) i32 {\n p.x*p.x + p.y*p.y\n}",
+    ("struct_field",     "Pt*: { x: i32, y: i32 }\nmk* = (a: i32, b: i32) Pt {\n Pt(x: a, y: b)\n}\nnsq* = (p: Pt) i32 {\n p.x*p.x + p.y*p.y\n}",
                          "return nsq(mk(3,4))==25 ? 0 : 1;"),
     ("precedence",       "e* = () i32 { 1 + 2 * 3 - 4 }",
                          "return e()==3 ? 0 : 1;"),

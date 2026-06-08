@@ -125,7 +125,7 @@ PREC = "test* = () i32 { (1 + 2) * 3 }\n"
 DIV = "test* = () i32 { 17 / 5 }\n"                       # integer division must truncate: 3, not 3.4
 MODP = "test* = () i32 { 17 - (17 / 5) * 5 }\n"           # remainder via div: 2
 STRUCT = ("Pt*: { x: i32, y: i32 }\n"
-          "mk* = (a: i32, b: i32) Pt { Pt { x: a, y: b } }\n"
+          "mk* = (a: i32, b: i32) Pt { Pt(x: a, y: b) }\n"
           "norm_sq* = (p: Pt) i32 { p.x * p.x + p.y * p.y }\n"
           "test* = () i32 { norm_sq(mk(3, 4)) }\n")       # 25
 ENUM = ("Shape*: Circle(i32) | Square(i32) | Other\n"

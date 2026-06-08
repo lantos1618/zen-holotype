@@ -50,8 +50,8 @@ def _struct_field_lits():
     """A struct literal naming a field the struct doesn't have -> 'struct-field'."""
     out = []
     for bad in ("y", "z", "w", "nope", "k0"):
-        out.append(("P*: { x: i32 }\ntest* = () i32 { p := P { %s: 0 }  0 }" % bad, "struct-field"))
-        out.append(("P*: { x: i32 }\ntest* = () i32 { p := P { x: 0, %s: 1 }  p.x }" % bad, "struct-field"))
+        out.append(("P*: { x: i32 }\ntest* = () i32 { p := P(%s: 0)  0 }" % bad, "struct-field"))
+        out.append(("P*: { x: i32 }\ntest* = () i32 { p := P(x: 0, %s: 1)  p.x }" % bad, "struct-field"))
     return out
 
 
@@ -59,7 +59,7 @@ def _member_access():
     """A member access on a known struct naming no real field -> 'struct-field'."""
     out = []
     for bad in ("nope", "bad", "qq", "zz"):
-        out.append(("P*: { x: i32 }\ntest* = () i32 { p := P { x: 5 }  p.%s }" % bad, "struct-field"))
+        out.append(("P*: { x: i32 }\ntest* = () i32 { p := P(x: 5)  p.%s }" % bad, "struct-field"))
     return out
 
 
@@ -96,7 +96,7 @@ def _operand_type():
     out.append(('test* = () i32 { ("a" - "b")  0 }', "operand-type"))
     out.append(("test* = () bool { 1 && 2 }", "operand-type"))
     out.append(("test* = () bool { 0 || 1 }", "operand-type"))
-    out.append(("P*: { x: i32 }\ntest* = () i32 { a := P { x: 1 }  b := P { x: 2 }  (a + b).x }", "operand-type"))
+    out.append(("P*: { x: i32 }\ntest* = () i32 { a := P(x: 1)  b := P(x: 2)  (a + b).x }", "operand-type"))
     return out
 
 
@@ -105,7 +105,7 @@ def _index_type():
     out = []
     out.append(("test* = () i32 { x := 5  x[0] }", "index"))
     out.append(("test* = () i32 { x := 7  y := 1  x[y] }", "index"))
-    out.append(("P*: { x: i32 }\ntest* = () i32 { s := [1, 2]  p := P { x: 0 }  s[p] }", "index"))
+    out.append(("P*: { x: i32 }\ntest* = () i32 { s := [1, 2]  p := P(x: 0)  s[p] }", "index"))
     return out
 
 
@@ -117,7 +117,7 @@ def _return_fit():
     out.append(('test* = () i32 { "s" }', "return-fit"))             # str ⊀ i32
     out.append(("test* = () bool { 5 }", "return-fit"))              # numeric ⊀ bool
     out.append(("test* = () i32 { 1 < 2 }", "return-fit"))           # bool ⊀ i32
-    out.append(("P*: { x: i32 }\ntest* = () i32 { P { x: 5 } }", "return-fit"))  # struct ⊀ i32
+    out.append(("P*: { x: i32 }\ntest* = () i32 { P(x: 5) }", "return-fit"))  # struct ⊀ i32
     return out
 
 

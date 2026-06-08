@@ -529,15 +529,15 @@ parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
             true  => a.parse_paren_struct_lit(src, name, nx),      // `Name(f: v, …)` — a struct construction
             false => a.parse_call(src, name, nx)                   // `name(args)` — a call
         }),
-        false => src.is_lbrace(nx.tok).match ({
-            true  => a.parse_struct_lit(src, name, nx),            // `Name { f: v, … }` — a struct literal
-            false => src.is_langle(nx.tok).match ({
-                true  => src.looks_generic_lit(nx.next).match ({   // `Name<…>{` or `Name<…>(f: v)` -> a generic struct literal
-                    true  => a.parse_generic_struct_lit(src, name, nx.next),
-                    false => PExpr( expr: a.enode(vref(name)), next: sc.next )   // `name < …` is a comparison
-                }),
-                false => PExpr( expr: a.enode(vref(name)), next: sc.next )   // a bare variable
-            })
+        false => src.is_langle(nx.tok).match ({
+            // Phase C: `Name { … }` in expression position is NO LONGER a struct literal — a `{`
+            // after a value/Name is now unambiguously a block. The ONLY struct construction is the
+            // paren form `Name(f: v)` (handled above) / `Name<…>(f: v)` (the generic paren form below).
+            true  => src.looks_generic_lit(nx.next).match ({       // `Name<…>(f: v)` -> a generic struct construction
+                true  => a.parse_generic_struct_lit(src, name, nx.next),
+                false => PExpr( expr: a.enode(vref(name)), next: sc.next )   // `name < …` is a comparison
+            }),
+            false => PExpr( expr: a.enode(vref(name)), next: sc.next )   // a bare variable, OR `Name { … }` -> Name then a block
         })
     })
 }
@@ -545,19 +545,16 @@ parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
 // `pos` is just past the '<'. Conservatively scan only TYPE-ARG tokens (idents, commas, `[ ]`, nested
 // `< >`); the moment a non-type token appears (a number, `)`, an operator) it's a comparison — bail.
 // So `Box<i32>{` is a literal, but `i < cnt)` / `(x < 9).match` are comparisons.
-// a generic struct literal is `Name<…>{ … }` (brace form) or `Name<…>( field : … )` (paren
-// construction) — the latter only when the token past `(` is a NAMED field (`Ident :`), so a
-// real generic call / comparison is never mistaken for one.
+// Phase C: a generic struct construction is ONLY `Name<…>( field : … )` (the paren form) — the
+// brace form `Name<…>{ … }` is no longer recognized. It's a construction only when the token past
+// `(` is a NAMED field (`Ident :`), so a real generic call / comparison is never mistaken for one.
 looks_generic_lit = (src: str, pos: i32) bool {
     after := src.tyargs_end(pos, 1)
     (after < 0).match ({ true => false, false => src.generic_open(after) })
 }
 generic_open = (src: str, after: i32) bool {
     sc := src.scan(after)
-    src.is_lbrace(sc.tok).match ({
-        true  => true,
-        false => src.is_lparen(sc.tok).match ({ true => src.paren_is_struct(sc.next), false => false })
-    })
+    src.is_lparen(sc.tok).match ({ true => src.paren_is_struct(sc.next), false => false })
 }
 tyargs_end* = (src: str, pos: i32, depth: i32) i32 {      // pos past matching '>', or -1 if not type args
     sc := src.scan(pos)
@@ -572,37 +569,26 @@ tyargs_end* = (src: str, pos: i32, depth: i32) i32 {      // pos past matching '
 is_tyarg_tok = (src: str, t: Token) bool {              // a token that may appear inside `<…>` type args
     is_ident_tok(t) || src.is_comma(t) || src.is_lbracket(t) || src.is_rbracket(t)
 }
+// Phase C: a generic struct construction is the paren form `Name<…>(f: v)` ONLY — looks_generic_lit
+// guarantees a '(' follows the type args, so the field inits always close on ')'.
 parse_generic_struct_lit = (a: Ptr<Malloc>, src: str, name: str, pos: i32) PExpr {   // pos just past '<'
     ta   := a.parse_tyargs(src, pos)                              // the `<i32>` type args, pos past '>'
-    open := src.scan(ta.next)                                     // '{' or '('
+    open := src.scan(ta.next)                                     // '(' (the paren construction)
     buf  := a.finit_buf()
-    fe   := src.is_lparen(open.tok).match ({                      // `Name<…>(f: v)` vs `Name<…>{ f: v }`
-        true  => a.fill_pinits(src, open.next, buf, 0),
-        false => a.fill_inits(src, open.next, buf, 0)
-    })
+    fe   := a.fill_pinits(src, open.next, buf, 0)                 // `field: v, …` inits, pos past ')'
     PExpr( expr: a.enode(mkstructg(name, mangle_str(name, ta.args), ta.args, buf.take_inits(fe.count))), next: fe.next )
 }
-// `Name { field: value, … }` — the `field: value` inits parse into a heap [FieldInit], then
-// the struct literal is built. open is the Scan of the opening '{'.
+// `Name(field: value, …)` — the PAREN construction form: the `field: value` inits parse into a heap
+// [FieldInit], then the MakeStruct is built. open is the Scan of the opening '('. (Phase C: this is
+// the ONLY struct construction syntax — the old brace form `Name { … }` was removed.)
 finit_buf = (a: Ptr<Malloc>) [FieldInit] { slice(malloc(1024 * sizeof(FieldInit)), 1024) }   // cap 1024
 take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }                            // exact length
-parse_struct_lit = (a: Ptr<Malloc>, src: str, name: str, open: Scan) PExpr {
-    buf := a.finit_buf()
-    fe  := a.fill_inits(src, open.next, buf, 0)                    // inits + pos just past '}'
-    PExpr( expr: a.enode(mkstruct(name, buf.take_inits(fe.count))), next: fe.next )
-}
-// `Name(field: value, …)` — the PAREN construction form. Same FieldInit list and MakeStruct AST
-// as the brace form, only the close bracket is ')'. open is the Scan of the opening '('.
 parse_paren_struct_lit = (a: Ptr<Malloc>, src: str, name: str, open: Scan) PExpr {
     buf := a.finit_buf()
     fe  := a.fill_pinits(src, open.next, buf, 0)                   // inits + pos just past ')'
     PExpr( expr: a.enode(mkstruct(name, buf.take_inits(fe.count))), next: fe.next )
 }
-fill_inits = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
-    sc := src.scan(pos)
-    src.is_rbrace(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_init(src, pos, buf, i) })
-}
-// paren-terminated field-init loop — mirrors fill_inits but closes on ')'.
+// paren-terminated field-init loop — `field: value` pairs, closing on ')'.
 fill_pinits = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_pinit(src, pos, buf, i) })
@@ -617,18 +603,6 @@ fill_pinit = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd
     src.is_comma(after.tok).match ({
         true  => a.fill_pinits(src, after.next, buf, i + 1),
         false => PEnd( count: i + 1, next: after.next )  // ')'
-    })
-}
-fill_init = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
-    nt    := src.scan(pos)                               // field name
-    nm    := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)                           // ':'
-    v     := a.parse_or(src, colon.next)                 // the value (a full expression)
-    buf[i] = finit(nm, v.expr)
-    after := src.scan(v.next)                            // ',' or '}'
-    src.is_comma(after.tok).match ({
-        true  => a.fill_inits(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )  // '}'
     })
 }
 // `name(a, b, …)` — parse the comma-separated arguments into a heap [Expr] (each arg's
