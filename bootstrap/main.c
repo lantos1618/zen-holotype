@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
 zslice parse_module(Malloc* a, const char* src);
 zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
@@ -146,10 +148,80 @@ static int build_self(const char* out_path, const char* srcroot){
     return 0;
 }
 
+/* ── build/run mode (Goal U / U1 Step 1): compile a .zen to a runnable native binary ───────────────
+ * Emits the program's C (genModule), swaps the leading HEAD typedef for #include "zenrt.h" (== the
+ * gen_c_file form), writes it to a temp .c, and links it with bootstrap/zenrt.c into `-o <out>` via cc.
+ * A Zen `main = () i32 { … }` emits as C `int32_t main()` — the program's entry, no separate runner.
+ * NOTE: the binary does NOT yet resolve `{ } = std.X` imports (U1 Step 3), so the program must be
+ * self-contained for now. zenrt.{c,h} are found relative to the zenc binary: <dir(argv0)>/bootstrap. */
+
+/* directory of argv[0]: everything up to the last '/', or "." if none. zenc lives at <root>/zenc, so
+ * this is <root>, and <root>/bootstrap holds zenrt.{c,h}. */
+static void bin_dir(const char* argv0, char* out, size_t n){
+    const char* slash = strrchr(argv0, '/');
+    if (!slash){ snprintf(out, n, "."); return; }
+    size_t len = (size_t)(slash - argv0);
+    if (len >= n) len = n - 1;
+    memcpy(out, argv0, len); out[len] = 0;
+}
+
+static int build_program(const char* argv0, const char* in_path, const char* out_path, int run){
+    size_t len = 0;
+    char* buf = slurp(in_path, &len);
+    if (!buf) return 1;
+    Malloc m = { 0 };
+    String out = genModule(resolve_module(&m, parse_module(&m, buf)));
+    free(buf);
+
+    size_t hlen = sizeof(HEAD) - 1;
+    if ((size_t)out.len < hlen || memcmp(out.ptr, HEAD, hlen) != 0){
+        fprintf(stderr, "zenc: emitted C did not start with the expected head\n");
+        return 1;
+    }
+    /* wrapped C to a temp file: #include "zenrt.h" + the emitted body (HEAD stripped). */
+    char cpath[256];
+    snprintf(cpath, sizeof cpath, "/tmp/zenc_build_%d.c", (int)getpid());
+    FILE* f = fopen(cpath, "wb");
+    if (!f){ fprintf(stderr, "zenc: cannot write %s\n", cpath); return 1; }
+    fwrite(HEAD_REPL, 1, sizeof(HEAD_REPL) - 1, f);
+    fwrite((const char*)out.ptr + hlen, 1, out.len - hlen, f);
+    fclose(f);
+
+    char dir[4096]; bin_dir(argv0, dir, sizeof dir);
+    char binpath[256];
+    if (run){ snprintf(binpath, sizeof binpath, "/tmp/zenc_run_%d", (int)getpid()); out_path = binpath; }
+
+    char cmd[8192];
+    snprintf(cmd, sizeof cmd, "cc -std=gnu11 -w -I%s/bootstrap %s %s/bootstrap/zenrt.c -o %s",
+             dir, cpath, dir, out_path);
+    int rc = system(cmd);
+    unlink(cpath);
+    if (rc != 0){ fprintf(stderr, "zenc: cc failed to link %s\n", in_path); return 1; }
+    if (run){
+        int prc = system(out_path);
+        unlink(out_path);
+        return (prc >= 0 && WIFEXITED(prc)) ? WEXITSTATUS(prc) : 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv){
     if (argc >= 2 && strcmp(argv[1], "--build-self") == 0){
         if (argc < 4){ fprintf(stderr, "usage: %s --build-self <out.c> <srcroot>\n", argv[0]); return 2; }
         return build_self(argv[2], argv[3]);
+    }
+    if (argc >= 2 && strcmp(argv[1], "build") == 0){
+        const char* in = NULL; const char* out = "a.out";
+        for (int i = 2; i < argc; i++){
+            if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out = argv[++i];
+            else in = argv[i];
+        }
+        if (!in){ fprintf(stderr, "usage: %s build <in.zen> [-o out]\n", argv[0]); return 2; }
+        return build_program(argv[0], in, out, 0);
+    }
+    if (argc >= 2 && strcmp(argv[1], "run") == 0){
+        if (argc < 3){ fprintf(stderr, "usage: %s run <in.zen>\n", argv[0]); return 2; }
+        return build_program(argv[0], argv[2], NULL, 1);
     }
     return compile_stdin_or_file(argc, argv);
 }
