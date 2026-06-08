@@ -12,3 +12,7 @@ const char* finish(String s);
 bool eq(const char* a, const char* b);
 bool is_empty(const char* s);
 void* heap(int64_t n);
+/* U1.3: loader primitives (mirror std.mem.alloc / std.str.view / std.string.with_cap). */
+uint8_t* alloc(int64_t n);
+zslice view(const char* s);
+String with_cap(int64_t cap);

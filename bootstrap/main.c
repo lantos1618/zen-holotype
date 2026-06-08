@@ -9,6 +9,11 @@ zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
 int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND (0 = ok, 1..13) */
+/* U1.3: the Zen module loader (zen/std/resolve.zen, now a SOURCE). Given the project root (the dir that
+ * contains zen/std/) + the program source, returns the flat single-module source with the transitive
+ * `std.X` import closure spliced in (per-module + per-name dedup; N2b qualified `c.x` too). build/run/
+ * check call it BEFORE parse_module so a program that imports the stdlib resolves from disk. */
+const char* resolve_program(const char* root, const char* src);
 
 /* ── normal mode: read one flat .zen (argv[1] or stdin), emit C to stdout ──────────────────────── */
 static char* read_all(FILE* in, size_t* out_len){
@@ -51,6 +56,14 @@ static const char* const SOURCES[] = {
      * Malloc/eq/is_empty/malloc (its imports are stripped like every SOURCE), and shares zero top-level
      * names with the others. The emit-only path (compile_stdin_or_file) and --build-self do not call it. */
     "zen/std/check_validate.zen",
+    /* U1.3: the Zen-written module LOADER folded into the binary so `zenc build`/`run`/`check` RESOLVE
+     * `{ a, b } = std.X` imports from disk (resolve_program). io.zen supplies read_file (the on-disk
+     * read); resolve.zen the resolver itself. Their home modules (mem/str/string) are NOT SOURCES — the
+     * handful of primitives they need (alloc/view/with_cap) live in zenrt.c as C, so adding those modules
+     * would duplicate zenrt's String/eq/etc and break the link. The two had 2 name clashes with the
+     * SOURCES above (ident_end vs lex, sbyte vs genc_emit), resolved by renaming the resolve.zen copies
+     * to res_ident_end / res_sbyte. Their `{ … } = std.X` imports are stripped like every SOURCE. */
+    "zen/std/io.zen", "zen/std/resolve.zen",
 };
 static const int N_SOURCES = (int)(sizeof(SOURCES) / sizeof(SOURCES[0]));
 
@@ -197,7 +210,13 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     char* buf = slurp(in_path, &len);
     if (!buf) return 1;
     Malloc m = { 0 };
-    zslice decls = resolve_module(&m, parse_module(&m, buf));
+    /* U1.3: resolve `{ … } = std.X` imports from disk (the loader reads <root>/zen/std/X.zen) before
+     * parsing, so a program that imports the stdlib builds. root = dir of the zenc binary (holds zen/std).
+     * resolve_program returns the flat single-module source; on a program with no imports it is a pass-
+     * through. The returned str is borrowed from the loader's arena — don't free it. */
+    char dir[4096]; bin_dir(argv0, dir, sizeof dir);
+    const char* flat = resolve_program(dir, buf);
+    zslice decls = resolve_module(&m, parse_module(&m, flat));
     if (type_check(&m, decls, in_path) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
     String out = genModule(decls);
     free(buf);
@@ -216,7 +235,6 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     fwrite((const char*)out.ptr + hlen, 1, out.len - hlen, f);
     fclose(f);
 
-    char dir[4096]; bin_dir(argv0, dir, sizeof dir);
     char binpath[256];
     if (run){ snprintf(binpath, sizeof binpath, "/tmp/zenc_run_%d", (int)getpid()); out_path = binpath; }
 
@@ -257,7 +275,10 @@ int main(int argc, char** argv){
         char* buf = slurp(argv[2], NULL);
         if (!buf) return 1;
         Malloc m = { 0 };
-        zslice decls = resolve_module(&m, parse_module(&m, buf));
+        /* U1.3: resolve std.X imports from disk before checking, same as build_program. */
+        char dir[4096]; bin_dir(argv[0], dir, sizeof dir);
+        const char* flat = resolve_program(dir, buf);
+        zslice decls = resolve_module(&m, parse_module(&m, flat));
         free(buf);
         int n = type_check(&m, decls, argv[2]);
         if (n == 0) fprintf(stderr, "zenc: %s: ok\n", argv[2]);

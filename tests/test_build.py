@@ -3,8 +3,9 @@
 The shipping `zenc` gains a real build path: it emits the program's C (HEAD swapped for #include "zenrt.h"),
 links bootstrap/zenrt.c via cc, and runs it. A Zen `main = () i32 { … }` is the entry (emits C `int32_t
 main()`). zenrt.{c,h} are found relative to the binary (<dir(argv0)>/bootstrap), so this uses the repo's
-make-built ROOT/zenc (which sits beside ROOT/bootstrap). Imports are NOT yet resolved (that's U1 Step 3),
-so these programs are self-contained.
+make-built ROOT/zenc (which sits beside ROOT/bootstrap). U1 Step 3 wired the Zen module loader
+(std.resolve.resolve_program) into the binary, so `zenc build/run/check` now RESOLVE `{ … } = std.X`
+imports from <root>/zen/std/X.zen — see test_zenc_run_resolves_std_import below.
 """
 import subprocess
 import tempfile
@@ -71,3 +72,45 @@ def test_zenc_build_rejects_illtyped_no_binary():
     out = d / "p"
     r = subprocess.run([zenc, "build", str(d / "p.zen"), "-o", str(out)], capture_output=True, text=True)
     assert r.returncode != 0 and not out.exists(), "ill-typed program should not produce a binary"
+
+
+# ── U1.3: the binary RESOLVES `{ … } = std.X` imports from disk (std.resolve folded in) ──────────────
+_IMPORT_PROG = (
+    "{ eq } = std.str\n"
+    "main = () i32 { eq(%s).match ({ true => 1, false => 0 }) }\n"
+)
+
+
+def test_zenc_run_resolves_std_import():
+    """THE U1.3 PAYOFF: a program that imports std.str builds + runs — the import is resolved from
+    <root>/zen/std/str.zen (today the binary used to silently strip imports → stdlib unreachable)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    # eq of equal strings → true → 1 (so a non-resolving build, which would fail to link `eq`, can't pass).
+    (d / "p.zen").write_text(_IMPORT_PROG % '"ab", "ab"')
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 1, r.stderr  # eq("ab","ab") == true → 1
+    # the false branch resolves identically → 0.
+    (d / "q.zen").write_text(_IMPORT_PROG % '"ab", "xy"')
+    r = subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr  # eq("ab","xy") == false → 0
+
+
+def test_zenc_build_resolves_std_import():
+    """`zenc build` (not just run) of a std-importing program yields a runnable native binary."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(_IMPORT_PROG % '"ab", "ab"')
+    out = d / "p"
+    r = subprocess.run([zenc, "build", str(d / "p.zen"), "-o", str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert out.exists(), "zenc build of a std-importing program produced no binary"
+    assert subprocess.run([str(out)]).returncode == 1
+
+
+def test_zenc_check_resolves_std_import():
+    """`zenc check` resolves the import too — a well-typed std-importing program checks ok."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(_IMPORT_PROG % '"ab", "ab"')
+    assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
