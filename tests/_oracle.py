@@ -314,6 +314,14 @@ def emit_c_for(src):
     return subprocess.run([str(_build_emit())], input=src, capture_output=True, text=True).stdout
 
 
+def emit_rc(src):
+    """The EMIT binary's process exit code for `src`: 0 on a clean emit, NEGATIVE on a signal (a
+    parse/resolve/monomorphize crash). Used by the fuzz gate to assert the front-to-back EMIT pipeline
+    never segfaults on malformed input. Raises TimeoutExpired on a hang (also a robustness failure)."""
+    return subprocess.run([str(_build_emit())], input=src, capture_output=True, text=True,
+                          timeout=30).returncode
+
+
 def check_count(src):
     """The CHECK binary's error count (process exit code) — the drop-in for _selfhost.check_errors.
     The runtime _PRELUDE makes _selfhost's imported runtime symbols (heap, …) known to the checker."""

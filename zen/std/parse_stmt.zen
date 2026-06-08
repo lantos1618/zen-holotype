@@ -50,7 +50,10 @@ is_set_here = (src: str, pos: i32) bool {
 // is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
 skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'
     sc := src.scan(pos)
-    src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) })
+    sc.tok.kind.match ({
+        .Eof => sc.next,                                   // unterminated '[': stop at EOF, don't recurse forever
+        _    => src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) })
+    })
 }
 is_idxset_here = (src: str, pos: i32) bool {
     nt := src.scan(pos)
@@ -235,9 +238,12 @@ parse_if_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
 BlockEnd*: { list: Ptr<SList>, next: i32 }
 parse_block* = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     sc := src.scan(pos)
-    src.is_rbrace(sc.tok).match ({
-        true  => BlockEnd { list: a.snil(), next: sc.next },   // '}' — block done
-        false => a.block_stmt(src, pos)
+    sc.tok.kind.match ({
+        .Eof => BlockEnd { list: a.snil(), next: sc.next },        // unterminated `{ …`: stop at EOF, don't recurse forever
+        _    => src.is_rbrace(sc.tok).match ({
+            true  => BlockEnd { list: a.snil(), next: sc.next },   // '}' — block done
+            false => a.block_stmt(src, pos)
+        })
     })
 }
 // same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare

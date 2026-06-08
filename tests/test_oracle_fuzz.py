@@ -17,7 +17,7 @@ import random
 import pytest
 
 import _oracle
-from _oracle import check_count, check_kind, verdict_kind
+from _oracle import check_count, check_kind, verdict_kind, emit_rc
 
 
 # ── malformed-program generators: each returns a list of (src, kind|None) ──────────────────────────
@@ -166,25 +166,56 @@ def test_fuzz_corpus_is_broad():
                      "dup-variant", "operand-type", "index", "return-fit", "dup-fn"}
 
 
+# ── crash-class regressions: one minimal representative per malformed-input non-termination bug that
+#    used to segfault or hang the front-to-back pipeline (parse → resolve → monomorphize → emit). Each
+#    must now exit CLEANLY (a non-negative code — an error count / kind, never a signal) through every
+#    binary. These are the permanent gate for the hardening; see _fuzz_campaign.py for the fuzz sweep
+#    that originally surfaced them. ──
+_CRASH_CLASSES = [
+    ("cyclic-global",        "g := g"),                                       # self-referential global init
+    ("mutual-globals",       "a := b\nb := a"),                               # mutually-referential globals
+    ("byvalue-type-cycle",   "A*: { b: B } B*: { a: A }"),                    # struct A↔B by value
+    ("unterminated-block",   "f = () i32 {"),                                 # block never closed
+    ("unterminated-match",   "f = () i32 { 0 .match ({ 1 => 2"),             # match arms never closed
+    ("unterminated-impl",    "T*: { x: i32 } T.impl(Tr, { m = () void {"),   # impl body never closed
+    ("unterminated-bracket", "f = () i32 { x := 5  x[0 "),                    # `[` never closed (skip_brackets)
+    ("idxset-unterminated",  "f = () i32 { s := [1,2]  s[0 = 3 }"),          # idxset `[` scan past EOF
+    ("malformed-tyargs",     "Foo<"),                                         # `<` with no closing `>`
+    ("recursive-generic-fn", "f<T> = (x: T) T { f(x) }"),                     # self-recursive generic → inliner
+    ("mutual-generic-fn",    "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }"),
+    ("polyrec-type",         "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }"),
+    ("polyrec-type-field",   "P<T>: { a: T, n: P<P<T>> }  use* = (b: P<i32>) i32 { 0 }"),  # by-value cycle in mono'd structs
+]
+
+
+@pytest.mark.parametrize("name,src", _CRASH_CLASSES, ids=[c[0] for c in _CRASH_CLASSES])
+def test_fuzz_malformed_no_crash(name, src):
+    # Every malformed-input crash class must exit CLEANLY (no signal, no hang) through all three
+    # binaries. A negative return code is a signal (segfault); a TimeoutExpired (raised by the helpers'
+    # 30s timeout) is a hang — both are robustness failures and fail the test.
+    assert check_count(src) >= 0, (name, "CHECK signalled")
+    assert check_kind(src) >= 0, (name, "CHECK-KIND signalled")
+    assert emit_rc(src) >= 0, (name, "EMIT signalled")
+
+
 def test_fuzz_random_garbage_terminates():
-    # A coarser robustness sweep: feed RANDOM token soup and assert the binaries always TERMINATE
-    # (no hang — the 30s timeout in check_count/check_kind would raise) and agree with each other on
-    # crash-vs-clean. NOTE: the parse->resolve pipeline has a KNOWN PRE-EXISTING fragility — some
-    # unparseable token soup segfaults the resolver (the COUNT binary built from the unchanged
-    # check_module crashes identically, so this predates and is independent of the kind layer). We
-    # therefore don't require a clean exit on arbitrary soup; we require termination, and that the
-    # count and kind binaries CRASH-OR-SURVIVE TOGETHER (the kind layer never adds a crash the count
-    # layer doesn't already have). Clean exits must still be sane non-negative codes.
+    # A coarser robustness sweep: feed RANDOM token soup and assert the front-to-back pipeline always
+    # exits CLEANLY — no hang (the 30s timeout in the helpers would raise) AND no crash (a negative rc
+    # is a signal). The parse→resolve→monomorphize→emit path is hardened against malformed input
+    # (see _fuzz_campaign.py + the crash-class regressions above), so arbitrary token soup must never
+    # segfault any of the CHECK / CHECK-KIND / EMIT binaries; clean exits are sane non-negative codes.
     rng = random.Random(20260607)
     toks = ["test*", "=", "(", ")", "i32", "{", "}", "x", ":=", "5", ".match", "[", "]",
-            "+", "P", "{", "x:", "0", "}", "f", "1", "<", "2", "return", "_", "=>", ","]
-    for _ in range(80):
-        n = rng.randint(1, 14)
+            "+", "P", "{", "x:", "0", "}", "f", "1", "<", "2", "return", "_", "=>", ",",
+            "T", "<T>", ":", "|", ".Some", "impl", "use*", "Box", "n:"]
+    for _ in range(120):
+        n = rng.randint(1, 16)
         src = " ".join(rng.choice(toks) for _ in range(n))
         cnt = check_count(src)     # raises on timeout/hang — that IS the assertion for "terminates"
         kd = check_kind(src)
-        # the kind layer must not introduce a crash the count layer doesn't already have, and vice
-        # versa: a negative rc is a signal (the known parser fragility); both must see it or neither.
-        assert (cnt < 0) == (kd < 0), (src, cnt, kd)
-        if cnt >= 0:
-            assert kd >= 0 and cnt < 1000 and kd <= 13, (src, cnt, kd)
+        er = emit_rc(src)
+        # no binary may crash (negative == signal) on any soup; clean exits are sane non-negative codes.
+        assert cnt >= 0, (src, "CHECK signalled", cnt)
+        assert kd >= 0, (src, "CHECK-KIND signalled", kd)
+        assert er >= 0, (src, "EMIT signalled", er)
+        assert cnt < 1000 and kd <= 13, (src, cnt, kd)

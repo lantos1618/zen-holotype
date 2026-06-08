@@ -79,10 +79,17 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
     })
 }
 // a module-level global's type — inferred from its init (Goal Z E1). The fallback when a bare Var
-// is not a local. Returns void if there's no such global.
+// is not a local. Returns void if there's no such global. The global's OWN name is bound (to a
+// non-void in-progress marker) in the env it infers the init under, so a self/cyclic reference
+// (`g := g …`, only ever from malformed input — a valid init never names its own global) resolves
+// via lookup_var instead of re-entering global_ty forever (a resolver stack overflow).
+infer_global_init = (env: Env, name: str, init: Ptr<Expr>) Ty {
+    env2 := Env { vars: env.a.vcons(name, tnamed(""), env.vars), decls: env.decls, exp: env.exp, a: env.a }
+    env2.infer_expr(init)
+}
 global_ty = (env: Env, name: str) Ty {
     found := tvoid()
-    env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_expr(g.init), false => found }), _ => found }) })
+    env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_global_init(g.name, g.init), false => found }), _ => found }) })
     found
 }
 // a bare Var's type: an in-scope local, else a module-level global, else void.
@@ -313,9 +320,16 @@ gen_call_ret = (env: Env, c: CallData) Ty {
         false => f.ret
     })
 }
+// the inferred type of a 1-arg intrinsic's operand. BOUNDS-SAFE: a MALFORMED call naming an intrinsic
+// with NO args (only the validator checks intrinsic arity; resolve_module does not) would read c.args[0]
+// past the args buffer — a heap-buffer-overflow. Missing operand → void. A well-formed call (≥1 arg)
+// takes the same path as before, so inferred types — hence emitted output — are unchanged.
+arg0_ty = (env: Env, c: CallData) Ty {
+    (c.args.len > 0).match ({ true => env.infer_expr(c.args[0].addr()), false => tvoid() })
+}
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "load").match ({
-        true  => env.infer_expr(c.args[0].addr()).pointee_of(),
+        true  => env.arg0_ty(c).pointee_of(),
         false => eq(c.fn, "load_i64").match ({
             true  => ti64(),                                            // load_i64(p): an i64 read at a byte ptr
             false => eq(c.fn, "atomic_add_i64").match ({
@@ -323,7 +337,7 @@ infer_call = (env: Env, c: CallData) Ty {
             false => eq(c.fn, "null_ptr").match ({
                 true  => tptr(env.a.tnode(tu8())),                      // null_ptr(): a null RawPtr<u8> (a constant 0)
                 false => eq(c.fn, "addr").match ({
-                    true  => tptr(env.a.tnode(env.infer_expr(c.args[0].addr()))),   // addr(x): Ptr<typeof(x)>, so x.m() dispatches on x's type
+                    true  => tptr(env.a.tnode(env.arg0_ty(c))),         // addr(x): Ptr<typeof(x)>, so x.m() dispatches on x's type
                     false => env.gen_call_ret(c)
                 })
             })
@@ -865,17 +879,33 @@ subst_body = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt
     body.loop((h, i, st) { buf[i] = a.subst_stmt(tparams, targs, st) })
     buf
 }
+// a Ty that no real value ever has: the empty-named struct, reused (like global_ty's marker) as an
+// "in-progress" sentinel — here, "this generic template is currently being inlined on an ancestor frame".
+is_empty_named = (t: Ty) bool { t.match ({ .Named(n) => eq(n, ""), _ => false }) }
+// is generic template `name` already mid-inline up the call stack? Walk the WHOLE env: inline_template
+// marks the in-progress template with (name, empty-Named); a real local of the same name binds a
+// concrete type, so it can never be mistaken for the sentinel. Used to break recursive-generic inlining.
+is_inlining = (v: Ptr<VList>, name: str) bool {
+    v.match ({
+        .VNil     => false,
+        .VCons(c) => (eq(c.name, name) && c.ty.is_empty_named()).match ({ true => true, false => c.tail.is_inlining(name) })
+    })
+}
 inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     tf   := decls.the_func(name)
+    ienv := a.vcons(name, tnamed(""), env)          // mark `name` in-progress so a recursive call to it stops (is_inlining)
     body := (tf.tparams.len > 0).match ({           // a generic fn: substitute its type params in the body first
         true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs, env, decls), tf.body),
         false => tf.body
     })
-    a.blockify(a.xform_body(decls, body, tf.params, cargs, env))
+    a.blockify(a.xform_body(decls, body, tf.params, cargs, ienv))
 }
 maybe_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     decls.is_template_call(name).match ({
-        true  => a.inline_template(decls, name, cargs, env),
+        true  => env.is_inlining(name).match ({
+            true  => a.cenode(call(name, cargs)),   // `name` already inlining up-stack — a self/mutually-recursive generic (only malformed/non-terminating input recurses here); stop to avoid a resolver stack overflow
+            false => a.inline_template(decls, name, cargs, env)
+        }),
         false => a.cenode(call(name, cargs))
     })
 }
