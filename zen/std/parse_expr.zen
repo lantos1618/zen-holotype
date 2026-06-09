@@ -280,7 +280,7 @@ parse_field = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     fld  := src.scan(dot.next)                                     // field / method / variant name
     name := a.lexeme(src, fld.tok)
     is_qual_ctor(base, name).match ({
-        true  => a.parse_postfix(src, a.parse_qual_ctor(src, name, fld)),  // Type.Variant -> Tag/MakeEnum
+        true  => a.parse_postfix(src, a.parse_qual_ctor(src, subj_name(base.expr), name, fld)),  // Type.Variant: carry the TYPE qualifier
         false => a.parse_field_plain(src, base, name, fld)
     })
 }
@@ -291,15 +291,25 @@ parse_field_plain = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, fld: Scan
         false => a.parse_postfix(src, PExpr( expr: a.enode(member(base.expr, name)), next: fld.next ))  // field, chain
     })
 }
-// the leading-dot ctor dispatch (mirrors parse_ctor) starting from the variant token `fld`
-parse_qual_ctor = (a: Ptr<Malloc>, src: str, vn: str, fld: Scan) PExpr {
+// `Type.Variant[(payload)]` — emits the Tag/MakeEnum with the EXPLICIT type `tyname`, so a variant name
+// shared by two enums resolves unambiguously to `tyname` (was: dropped the qualifier via mktag("",…)/
+// parse_ctor_payload → resolved by last-declared-wins, fuzz #5).
+parse_qual_ctor = (a: Ptr<Malloc>, src: str, tyname: str, vn: str, fld: Scan) PExpr {
     nx := src.scan(fld.next)                                       // '(' (payload) or anything else (bare tag)
     src.is_lparen(nx.tok).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
-            true  => a.parse_ctor_empty(src, vn, nx),     // `Type.Variant()` -> Tag (empty payload)
-            false => a.parse_ctor_payload(src, vn, nx)    // `Type.Variant(arg)` -> MakeEnum
+            true  => PExpr( expr: a.enode(mktag(tyname, vn)), next: src.scan(nx.next).next ),   // `Type.Variant()` -> Tag
+            false => a.parse_qual_payload(src, tyname, vn, nx)    // `Type.Variant(arg)` -> MakeEnum(tyname, …)
         }),
-        false => PExpr( expr: a.enode(mktag("", vn)), next: fld.next )   // `Type.Variant` -> Tag
+        false => PExpr( expr: a.enode(mktag(tyname, vn)), next: fld.next )   // `Type.Variant` -> Tag
+    })
+}
+parse_qual_payload = (a: Ptr<Malloc>, src: str, tyname: str, vn: str, lp: Scan) PExpr {
+    arg := a.parse_or(src, lp.next)                  // the single payload expression
+    rp  := src.scan(arg.next)                        // MUST be ')'
+    src.is_rparen(rp.tok).match ({
+        true  => PExpr( expr: a.enode(mkenum(tyname, vn, arg.expr)), next: rp.next ),
+        false => a.reject_match(rp.next)             // empty/garbage/multi payload (same guard as parse_ctor_payload)
     })
 }
 parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan) PExpr {
