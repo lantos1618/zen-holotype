@@ -1,0 +1,49 @@
+// examples/stats.zen — a small, real Zen program: list statistics over a Vec<i32>.
+//
+// The Goal-U capstone proof — a non-trivial program that COMPOSES the whole stack and BUILDS + RUNS via
+// `zenc run examples/stats.zen`:
+//   • std.vec  — a growable Vec<T> with an EXPLICIT allocator (no hidden malloc): `addr(m).vec_of([…])`
+//   • generics — vec_of/get/vlen are `<T>`, monomorphized to Vec<i32> here
+//   • recursion + .match — the only control flow (Zen has no if/while); folds over the Vec by index
+//   • an enum + a str-returning match — `Query` dispatched to the right fold, and labelled
+//   • std.fmt  — println / int→string for output
+//
+//   $ zenc run examples/stats.zen
+//   sum:\n39\nmax:\n9\nevens:\n3
+
+{ vec_of, get, vlen } = std.vec
+{ println, println_int } = std.fmt
+
+// sum of v[i..] — a recursive fold over the Vec
+sum_from = (v: Vec<i32>, i: i64) i32 {
+    (i >= v.vlen()).match ({ true => 0, false => v.get(i) + v.sum_from(i + 1) })
+}
+// max of v[i..], threading the best-so-far
+max_from = (v: Vec<i32>, i: i64, best: i32) i32 {
+    (i >= v.vlen()).match ({
+        true  => best,
+        false => v.max_from(i + 1, (v.get(i) > best).match ({ true => v.get(i), false => best }))
+    })
+}
+// how many of v[i..] are even
+count_even = (v: Vec<i32>, i: i64) i32 {
+    (i >= v.vlen()).match ({
+        true  => 0,
+        false => ((v.get(i) % 2) == 0).match ({ true => 1, false => 0 }) + v.count_even(i + 1)
+    })
+}
+
+// an enum-tagged query, dispatched by .match to the right fold (and to its label)
+Query*: Sum | Max | Evens
+label  = (q: Query) str { q.match ({ .Sum => "sum:", .Max => "max:", .Evens => "evens:" }) }
+eval_q = (v: Vec<i32>, q: Query) i32 {
+    q.match ({ .Sum => v.sum_from(0), .Max => v.max_from(0, 0), .Evens => v.count_even(0) })
+}
+run = (v: Vec<i32>, q: Query) i32 { println(label(q))  println_int(v.eval_q(q))  0 }
+
+main = () i32 {
+    m := Malloc(_: 0)                              // the explicit libc allocator
+    v := addr(m).vec_of([3, 7, 2, 8, 5, 1, 9, 4])  // a Vec<i32> backed by m
+    v.run(.Sum)  v.run(.Max)  v.run(.Evens)
+    0
+}

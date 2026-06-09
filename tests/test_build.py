@@ -214,3 +214,13 @@ def test_zenc_run_vec_and_print_together():
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "10\n30\n", repr(r.stdout)
+
+
+# ── CAPSTONE: a real program (examples/stats.zen) composing Vec + generics + enums + match + fmt ──────
+def test_zenc_run_capstone_stats_example():
+    """The Goal-U proof: examples/stats.zen — list statistics (sum/max/even-count) over a Vec<i32> with an
+    explicit allocator, enum-dispatched via .match, printed via std.fmt — builds and runs end to end."""
+    zenc = _zenc()
+    r = subprocess.run([zenc, "run", str(ROOT / "examples" / "stats.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "sum:\n39\nmax:\n9\nevens:\n3\n", repr(r.stdout)
