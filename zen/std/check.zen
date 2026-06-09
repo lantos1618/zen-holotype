@@ -254,7 +254,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.index_elem(ix),                // T of a [T] index — the stored elem if concrete, else re-infer the seq
         .Loop(l)       => tvoid(),                            // a loop is a void statement
-        .SliceLit(sd)  => tslice(env.a.tnode(sd.elem)),       // `[a, b, c]` of element E -> [E] (elem heap-alloc'd)
+        .SliceLit(sd)  => tslice(env.a.tnode(env.sl_elem(sd.items))),  // `[a,b,c]` of element E -> [E]; infer E from the ITEMS (sd.elem is void on an un-resolved literal, so `b := [a[0]]` recorded its element as void — fuzz #6)
         _              => tvoid()
     })
 }
@@ -362,7 +362,31 @@ tag_ty = (env: Env, t: TagData) Ty {
         false => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.mty) })
     })
 }
-infer_member = (env: Env, m: MemberData) Ty { env.decls.struct_field(env.infer_expr(m.obj).enum_name(), m.field) }
+// the type of field `fname` read from a value of GENERIC struct `gname<targs>` — the field's declared
+// type with the struct's tparams substituted by the receiver's concrete `targs`. So `Hold<i32>.o`
+// (field `o: Opt<T>`) yields `Opt<i32>` (mangled Opt_i32), not the un-substituted `Opt<T>` whose
+// enum_name() is empty — which made a generic enum read out of a generic struct field lose its
+// monomorphized tag prefix (`_Some` instead of `Opt_i32_Some`, fuzz #4).
+gen_field_at = (fields: [Field], fname: str) Ty {
+    found := tvoid()
+    fields.loop((h, i, f) { found = eq(f.name, fname).match ({ true => f.ty, false => found }) })
+    found
+}
+gen_struct_field = (decls: [Decl], gname: str, fname: str, targs: [Ty]) Ty {
+    found := tvoid()
+    decls.loop((h, i, d) { found = d.match ({
+        .DGenStruct(gsd) => eq(gsd.name, gname).match ({ true => gsd.tparams.subst_ty(targs, gsd.fields.gen_field_at(fname)), false => found }),
+        _ => found }) })
+    found
+}
+ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => t }) }   // see through a pointer receiver
+infer_member = (env: Env, m: MemberData) Ty {
+    oty := env.infer_expr(m.obj)
+    oty.ty_under_ptr().match ({
+        .Generic(g) => env.decls.gen_struct_field(g.name, m.field, g.args),   // a generic-struct value: substitute its targs into the field type
+        _           => env.decls.struct_field(oty.enum_name(), m.field)        // a plain struct (enum_name sees through a Ptr)
+    })
+}
 infer_match_ty = (env: Env, m: MatchData) Ty {
     (m.arms.len > 0).match ({ true => env.infer_expr(m.arms[0].body), false => tvoid() })
 }
