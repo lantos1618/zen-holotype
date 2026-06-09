@@ -10,8 +10,8 @@ drives the SELF-HOSTED toolchain — NO Python compiler — exactly like _oracle
   2. For each program, we genjs-emit its JS, wrap it with a `console.log(test())` epilogue, run it
      with `node -e`, and assert the number node prints == the value the C backend computes.
 
-So the proof is end-to-end: Zen source -> (Zen-written genjs, via the committed binary) -> JS ->
-node -> the expected integer. If node is unavailable, we fall back to asserting the emitted JS TEXT.
+So the proof is end-to-end: Zen source -> (Zen-written genjs, via the committed binary) -> JS -> node
+-> the expected integer. The emitted JS text is asserted separately every run.
 """
 import shutil
 import subprocess
@@ -151,7 +151,6 @@ CASES = [
 ]
 
 
-@pytest.mark.skipif(NODE is None, reason="node unavailable — see test_genjs_text_when_no_node")
 @pytest.mark.parametrize("name,src,want", CASES, ids=[c[0] for c in CASES])
 def test_genjs_runs_in_node(name, src, want):
     # the SELF-HOSTED genjs backend emits JS; node runs it and computes exactly `want`.
@@ -180,8 +179,7 @@ def test_genjs_enum_match_is_tagged_object():
     assert "_0" in js                       # payload slot
 
 
-@pytest.mark.skipif(NODE is not None, reason="node present — run_js path covers it")
-def test_genjs_text_when_no_node():
-    # node-proof pending: at least assert the JS text is well-formed for the key cases.
+def test_genjs_emits_text_for_core_cases():
+    # This is useful even when node is present: it pins backend text for key lowering decisions.
     assert "function fac(n)" in emit_js(FAC)
     assert "Math.trunc(" in emit_js(DIV)
