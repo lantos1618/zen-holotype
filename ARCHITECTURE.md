@@ -31,7 +31,7 @@ annotates, and a backend walks. `std.genjs` is a second backend over that same A
 emits JavaScript), which is what proves the AST is genuinely backend-neutral IR rather than
 a C-specific tree.
 
-Ill-typed functions are reported by the checker and excluded from codegen; the rest builds.
+Checked CLI modes reject on any type error before linking.
 The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one
 already-flat module, skips `std.resolve`/`check_validate`, and writes C to stdout.
 

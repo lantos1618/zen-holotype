@@ -94,8 +94,6 @@ VALUE_CASES = [
     ('R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 }, _ })\n 7\n}\ntest* = () i32 { f(.Err()) }', 9),
     ('R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 }, _ })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }', 7),
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n r.match({ .Err(e) => { return e }, _ })\n 7\n}\ntest* = () i32 { f(.Err(42)) }', 42),
-    ('f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }', 9),
-    ('f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(false) }', 7),
     ('f* = (n: i32) i32 {\n x := 0\n n.match({ 0 => { x = 1 }, 1 => { x = 2 }, _ })\n x\n}\ntest* = () i32 { f(0)*100 + f(1)*10 + f(9) }', 120),
     ('R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Ok(v) => { return v }, .Err => { return 9 } })\n 0\n}\ntest* = () i32 { f(.Ok(5)) + f(.Err()) }', 14),
 # --- test_value_position_trailing_yield_accepted (value half) ---
@@ -150,6 +148,8 @@ VERDICT_CASES = [
     ('f* = (n: i32) i32 {\n n.match({ 0 => 1, _ => 2 })\n}\ntest* = () i32 { f(5) }', 'accept'),                         # literal arm + `_` default
     ('f* = (n: i32) i32 {\n n.match({ _ => 0 })\n}\ntest* = () i32 { f(5) }', 'accept'),                                 # lone `_` catch-all
     ('f* = (n: i32) i32 {\n n.match({ 0 => 1, 1 => 2, _ => 3 })\n}\ntest* = () i32 { f(5) }', 'accept'),                 # 3-arm literal match
+    ('f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }', 'reject'),              # source-level if is not part of Zen
+    ('f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }', 'reject'),
     # --- test_value_position_return_rejected ---
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 'reject'),
     ('f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 'reject'),
@@ -333,6 +333,8 @@ VERDICT_KIND_CASES = [
     ('f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }', 'undefined-name'),  # single non-`_` bool arm
     ('f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }', 'undefined-name'),                 # single non-`_` bool arm (expr body)
     ('f* = (n: i32) i32 {\n n.match({ 0 => 9 })\n}\ntest* = () i32 { f(5) }', 'undefined-name'),                          # single non-`_` literal arm
+    ('f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }', 'undefined-name'),                         # `if` parses as an undefined call
+    ('f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }', 'undefined-name'),
 
     # --- struct-field: a struct-literal init field / a member access that names no real field, or a mistyped init ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 0, y: 1)  p.x }', 'struct-field'),                                   # unknown init field y

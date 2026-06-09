@@ -320,11 +320,15 @@ res_ident_end = (flat: str, p: i32) i32 {
 
 // dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
 // the per-name pass; resolve_program runs it over its per-module-flattened output.
-dedup_decls* = (flat: str) str { with_cap(4096).dd(flat, 0, with_cap(256), true).finish() }
+dedup_decls* = (flat: str, bodylen: i64) str { with_cap(4096).dd(flat, 0, with_cap(256), true, bodylen).finish() }
 
 // the worker: `out` accumulates kept lines, `set` the names kept so far, `keeping` whether the decl whose
-// body we're inside is being emitted. Recurses line by line to the NUL.
-dd = (out: String, flat: str, p: i32, set: String, keeping: bool) String {
+// body we're inside is being emitted. `bodylen` = byte length of the MAIN file body (it occupies [0, bodylen)
+// of `flat`; imported module bodies follow). A decl head in the main region [0, bodylen) is ALWAYS kept (so
+// a same-file duplicate survives to the validator, which rejects it as dup-fn) but still recorded so an
+// import colliding with a main name is still dropped (main wins). Imported decls dedup as before. (bodylen=0
+// reproduces full dedup for the public dedup_decls path.) Recurses line by line to the NUL.
+dd = (out: String, flat: str, p: i32, set: String, keeping: bool, bodylen: i64) String {
     (flat.byte_at(p) == 0).match ({
         true  => out,
         false => flat.is_head_start(p).match ({
@@ -332,29 +336,29 @@ dd = (out: String, flat: str, p: i32, set: String, keeping: bool) String {
             true  => {
                 ie := flat.res_ident_end(p)
                 flat.after_name_is_impl(ie).match ({
-                    true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, true),   // impl: always keep
+                    true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, true, bodylen),   // impl: always keep
                     false => flat.after_name_is_decl(ie).match ({
                         true  => {
                             nm   := import_name_span(with_cap(16), flat, p, ie)               // the decl's NAME
-                            keep := set.seen(nm).match ({ true => false, false => true })
+                            keep := (p < bodylen).match ({ true => true, false => set.seen(nm).match ({ true => false, false => true }) })   // main region: always keep (same-file dups survive); imports: dedup
                             keep.match ({
-                                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set.add_name(nm), true),
-                                false => out.dd(flat, flat.next_line(p), set, false)          // drop this decl
+                                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set.add_name(nm), true, bodylen),
+                                false => out.dd(flat, flat.next_line(p), set, false, bodylen)          // drop this decl
                             })
                         },
                         // a column-0 ident line that is NOT a decl/impl head (shouldn't occur post-strip):
                         // treat as a continuation of the current decl.
                         false => keeping.match ({
-                            true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping),
-                            false => out.dd(flat, flat.next_line(p), set, keeping)
+                            true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodylen),
+                            false => out.dd(flat, flat.next_line(p), set, keeping, bodylen)
                         })
                     })
                 })
             },
             // a continuation line (`}`, indented, `//` comment, blank): emit iff the current decl is kept.
             false => keeping.match ({
-                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping),
-                false => out.dd(flat, flat.next_line(p), set, keeping)
+                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodylen),
+                false => out.dd(flat, flat.next_line(p), set, keeping, bodylen)
             })
         })
     })
@@ -515,5 +519,5 @@ resolve_program* = (root: str, mainsrc: str) str {
     // with a '\n', so a non-empty ns.c.out already ends a line and the main body needs its own '\n').
     body := ns.c.out.strip_ns_into(mainsrc, 0, ns.quals, ns.c.out.len == 0)
     cN   := load_imports(root, mainsrc, 0, Closure( seen: ns.c.seen, out: body ))
-    dedup_decls(cN.out.finish())
+    dedup_decls(cN.out.finish(), body.len)
 }

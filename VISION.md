@@ -1,9 +1,10 @@
 # Zen — the vision: **one structure**
 
 > The compiler today (structs, enums, traits, generics, `fits()`, a self-hosted front end +
-> C/JS backends, metaprogramming as AST values) proves *"structure is the constraint."* This
-> document is where it's headed: take that to the end, until there are no keywords — because
-> there is only **one** kind of thing. A `{ }`. Everything else is how you read it.
+> C/JS backends, metaprogramming as AST values) proves *"structure is the constraint."* C is
+> the intentional bootstrap/intermediate target in that backend row, not a defect. This document
+> is where Zen is headed: take the structure idea to the end, until there are no keywords —
+> because there is only **one** kind of thing. A `{ }`. Everything else is how you read it.
 
 ## The one rule
 
@@ -132,6 +133,10 @@ sign = (n: i32) i32 { (n > 0).match { True => 1, False => 0 - 1 } }
 [1, 2, 3].loop((i: i32) { @self.add(i) })
 ```
 
+That restriction is on Zen source. Backends still lower checked structure into the target's
+own control flow when that is the right representation: today's C backend may emit `if`/`else`
+or `?:` for a `.match`, and that does not add an `if` statement to the source language.
+
 Arm separator is `=>` ("maps to") — `:` is taken by *declare*, `=` reads as assignment.
 
 ## A whole file, in the language
@@ -239,9 +244,10 @@ generator:  () → [Decl]  (in Zen)        // a function that BUILDS AST and ret
 - The **kernel** never knows about C, JS, or LLVM. It produces a *checked, resolved* AST —
   structure that has been proven to fit. It only ever answers "does this fit?".
 - A **backend** is a walk over that AST emitting a target. `gen.c` exists (`std.genc`), and a
-  JavaScript one (`std.genjs`) walks the *same* AST; `gen.llvm` / `gen.json` are *more of the
-  same* — each keeps its own variable/type tables, but never re-checks, because the kernel
-  already did. **New target = new backend.**
+  JavaScript one (`std.genjs`) walks the *same* AST. C stays the bootstrap target while
+  `gen.llvm` / `gen.json` are *more of the same* — each keeps its own variable/type tables
+  and target-native branches, but never re-checks, because the kernel already did. **New
+  target = new backend.**
 - **Metaprogramming is Zen, as values** (not pragmas). A generator is an ordinary function
   that builds AST values and returns `[Decl]`, emitted by `std.genc.genModule`; `std.ast`
   gives the fluent builders. There is no `@emit` and no comptime evaluator — code is data, so

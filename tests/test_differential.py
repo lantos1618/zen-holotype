@@ -294,9 +294,6 @@ def test_many_match_arms():
     ("R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 }, _ })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }", 7),
     # enum guard binding the payload: `.Err(e) => { return e }`
     ("R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n r.match({ .Err(e) => { return e }, _ })\n 7\n}\ntest* = () i32 { f(.Err(42)) }", 42),
-    # an early `return` mid-body (not inside a match) via an if-statement
-    ("f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }", 9),
-    ("f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(false) }", 7),
     # literal guard if-chain with assigns + terminal bare `_`
     ("f* = (n: i32) i32 {\n x := 0\n n.match({ 0 => { x = 1 }, 1 => { x = 2 }, _ })\n x\n}\ntest* = () i32 { f(0)*100 + f(1)*10 + f(9) }", 120),
     # a FULLY EXHAUSTIVE statement-position enum match (no `_`) with returns still lowers + works
@@ -315,6 +312,14 @@ def test_guard_early_return(src, want):
     "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }",
 ])
 def test_partial_match_without_wildcard_rejected(src):
+    assert self_side(src)["verdict"] == "reject", src
+
+
+@pytest.mark.parametrize("src", [
+    "f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }",
+    "f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }",
+])
+def test_source_if_rejected(src):
     assert self_side(src)["verdict"] == "reject", src
 
 

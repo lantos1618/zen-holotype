@@ -6,6 +6,17 @@ All notable changes to **zen**. The format loosely follows
 
 ## Unreleased
 
+**Documentation alignment for current compiler decisions**:
+
+- **C is the intentional intermediate/bootstrap target** — not a defect or fallback. The
+  self-hosted compiler still reproduces `bootstrap/zenc.gen.c` byte-for-byte, and `std.genc`
+  remains the concrete backend used to build `zenc` today.
+- **Branching is source-level `.match` only.** Zen source has no `if` statement; checked
+  matches may still lower to C `if`/`else` or `?:` inside the backend.
+- **CLI module behavior clarified.** `zenc check`, `zenc build`, and `zenc run` resolve
+  `{ … } = std.X` imports from `zen/std/` before parsing/checking. Plain emit mode
+  (`zenc file.zen` or stdin) remains a flat, unvalidated C emitter.
+
 **Explicit foreign & module boundaries** — the foundation for binding to C and spanning
 multiple modules, all in Zen:
 

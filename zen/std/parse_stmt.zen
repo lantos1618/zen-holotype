@@ -1,13 +1,13 @@
 // std.parse_stmt — statement parsing: the SList cons-list, statement-kind classification,
-// let/set/idxset/return/while/if/block statements, build_body + materialize. Split out of
+// let/set/idxset/return/while/block statements, build_body + materialize. Split out of
 // std.parse (god-file split). Statements pull the expression parser (parse_or/parse_atom)
 // from std.parse_expr and the type/brace helpers from std.parse_type.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Stmt, slet, sassign, sidxset, swhile, sif, sret, sexpr, vref, tvoid } = std.genc
+{ Stmt, slet, sassign, sidxset, swhile, sret, sexpr, vref, tvoid } = std.genc
 { Token, scan, byte_at } = std.lex
 { Malloc, malloc } = std.alloc
-{ enode, lexeme, is_op, is_dot, is_lparen, parse_atom, parse_or } = std.parse_expr
+{ enode, lexeme, is_op, is_dot, parse_atom, parse_or } = std.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq } = std.parse_type
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
@@ -79,7 +79,7 @@ is_return_here = (src: str, pos: i32) bool {
 
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
-SKind*: SLet | SIdx | SSet | SWhile | SIf | SRet | SExpr
+SKind*: SLet | SIdx | SSet | SWhile | SRet | SExpr
 stmt_kind = (src: str, pos: i32) SKind {
     src.is_let_here(pos).match ({
         true  => .SLet(),
@@ -89,10 +89,7 @@ stmt_kind = (src: str, pos: i32) SKind {
                 true  => .SSet(),
                 false => src.is_while_here(pos).match ({
                     true  => .SWhile(),
-                    false => src.is_if_here(pos).match ({
-                        true  => .SIf(),
-                        false => src.is_return_here(pos).match ({ true => .SRet(), false => .SExpr() })
-                    })
+                    false => src.is_return_here(pos).match ({ true => .SRet(), false => .SExpr() })
                 })
             })
         })
@@ -109,7 +106,6 @@ parse_stmts = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
             .SIdx   => a.parse_idxset_stmt(src, pos),
             .SSet   => a.parse_set_stmt(src, pos),
             .SWhile => a.parse_while_stmt(src, pos),
-            .SIf    => a.parse_if_stmt(src, pos),
             .SRet   => a.parse_return_stmt(src, pos),
             .SExpr  => a.parse_ret_stmt(src, pos)
         })
@@ -192,47 +188,7 @@ parse_while_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     a.scons(w.stmt, a.parse_stmts(src, w.next))
 }
 
-// ── if statements ────────────────────────────────────────────────────────────────
-// `if (cond) { then } else { els }` (the else is optional) — both arms are no-return
-// statement blocks (like a loop body). Lowers to genc's If. Detected by the `if` Ident
-// followed by `(`. Sibling to @while.
-is_if_kw   = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "if"), _ => false }) }
-is_else_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "else"), _ => false }) }
-is_if_here = (src: str, pos: i32) bool {
-    sc := src.scan(pos)
-    src.is_if_kw(sc.tok).match ({ true => src.is_lparen(src.scan(sc.next).tok), false => false })
-}
 empty_stmts = (a: Ptr<Malloc>) [Stmt] { a.materialize(a.snil()) }
-
-IfEnd*:   { stmt: Stmt, next: i32 }
-ElseEnd*: { els: [Stmt], next: i32 }
-parse_if = (a: Ptr<Malloc>, src: str, pos: i32) IfEnd {
-    kw     := src.scan(pos)                        // 'if'
-    lp     := src.skip_to_lparen(kw.next)          // pos just past '('
-    c      := a.parse_or(src, lp)                  // condition (stops at ')')
-    rp     := src.scan(c.next)                      // ')'
-    tstart := src.skip_to_brace(rp.next)           // pos just past the then-'{'
-    tblk   := a.parse_block(src, tstart)           // then-block statements
-    eb     := a.parse_else(src, tblk.next)         // optional else-block
-    IfEnd( stmt: sif(c.expr, a.materialize(tblk.list), eb.els), next: eb.next )
-}
-parse_else = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {
-    sc := src.scan(pos)
-    src.is_else_kw(sc.tok).match ({
-        true  => a.parse_else_block(src, sc.next),
-        false => ElseEnd( els: a.empty_stmts(), next: pos )   // no else -> empty block
-    })
-}
-parse_else_block = (a: Ptr<Malloc>, src: str, pos: i32) ElseEnd {   // pos just past 'else'
-    estart := src.skip_to_brace(pos)               // pos just past the else-'{'
-    eblk   := a.parse_block(src, estart)
-    ElseEnd( els: a.materialize(eblk.list), next: eblk.next )
-}
-// the top-level statement form: an If, then the rest of the function body
-parse_if_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    f := a.parse_if(src, pos)
-    a.scons(f.stmt, a.parse_stmts(src, f.next))
-}
 
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
 BlockEnd*: { list: Ptr<SList>, next: i32 }
@@ -254,7 +210,6 @@ block_stmt = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
         .SIdx   => a.block_idxset(src, pos),         // buf[i] = v  inside a loop/if body
         .SSet   => a.block_set(src, pos),
         .SWhile => a.block_while(src, pos),
-        .SIf    => a.block_if(src, pos),
         .SRet   => a.block_return(src, pos),         // an early `return <expr>` inside a block
         .SExpr  => a.block_expr(src, pos)            // a bare expression statement (e.g. putchar(b))
     })
@@ -280,11 +235,6 @@ block_expr = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     e    := a.parse_or(src, pos)                     // a bare expression, evaluated for effect
     rest := a.parse_block(src, e.next)
     BlockEnd( list: a.scons(sexpr(e.expr), rest.list), next: rest.next )
-}
-block_if = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
-    f    := a.parse_if(src, pos)
-    rest := a.parse_block(src, f.next)
-    BlockEnd( list: a.scons(f.stmt, rest.list), next: rest.next )
 }
 block_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)

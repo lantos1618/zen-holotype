@@ -272,13 +272,13 @@ is a record of signatures `Area*: { … }`, an impl is `Vec.impl(Area, { … })`
 `<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound is a type
 error), **`.match`** with payload-binding, exhaustiveness, and **literal patterns** on
 `i32`/`bool` (so with **recursion** the language is Turing-complete — `fact`/`fib` compile
-and run; there is no source-level `if` statement), **return-type inference** (omit the return type and it's inferred from the body,
-across calls), `Ptr/MutPtr/RawPtr` and `Option`, `i32`/`i64`/`u8`/`bool` with widening, the
-full operator set (`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v`
-let-bindings, the single `loop` iteration construct, mutation, slices `[T]`, a
-heap-allocating `String`/`Vec` on an explicit allocator, and **metaprogramming as values**
-(build AST with `std.ast` → emit with `std.genc.genModule` — no `@emit` pragma). Type
-errors carry `ns:line:col`.
+and run; there is no source-level `if` statement), **return-type inference** (omit the
+return type and it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` and
+`Option`, `i32`/`i64`/`u8`/`bool` with widening, the full operator set
+(`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v` let-bindings, the
+single `loop` iteration construct, mutation, slices `[T]`, a heap-allocating `String`/`Vec`
+on an explicit allocator, and **metaprogramming as values** (build AST with `std.ast` →
+emit with `std.genc.genModule` — no `@emit` pragma). Type errors carry `ns:line:col`.
 
 See **[FEATURES.md](FEATURES.md)** for the full inventory,
 **[ARCHITECTURE.md](ARCHITECTURE.md)** for how the self-hosted compiler is structured,

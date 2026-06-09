@@ -76,8 +76,8 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   translation unit needs. One source of truth for the libc surface, instead of the same
   externs re-prototyped in every module (the scatter `std.mem`/`std.io`/`std.cown`/
   `std.result` still have at the top, which `std.c` gathers).
-- **Errors are values** (`std.result`) — Zen is `.match`-only with **no `if`, no exceptions, and no
-  unwinding**. A fallible call returns a `Result<T, E>` (`.Ok` / `.Err`) the caller
+- **Errors are values** (`std.result`) — Zen is `.match`-only with **no `if`, no exceptions,
+  and no unwinding**. A fallible call returns a `Result<T, E>` (`.Ok` / `.Err`) the caller
   `.match`es; an optional is `Opt<T>` (`.Some` / `.None`); the standard FFI error is
   `IoError`. `.match` *is* the catch; `return .Err(e)` propagates by value; the boundary
   checkers `ok_if` / `ok_ptr` lift a raw C sentinel (a negative rc, a null pointer) into a
@@ -205,14 +205,15 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 
 ## Diagnostics
 - A type error carries its **structured location** (a `ns`+`(row,col)`), and the check
-  report draws a **caret** under the offending column straight from that structure. Each
-  ill-typed function is reported independently (the rest still builds).
+  report draws a **caret** under the offending column straight from that structure. Checked
+  CLI modes reject on any type error; lower-level codegen can still operate on the accepted
+  declarations.
 
 ## Pipeline
 Checked commands run `resolve std imports (std.resolve) → scan (std.lex) → parse
 (std.parse*) → check (std.check/check_validate) → emit C (std.genc) → cc`, all ordinary Zen
-modules that the `zenc` binary runs and that compile themselves. Ill-typed functions are
-reported and excluded from codegen; `build`/`run` reject an ill-typed program before linking.
+modules that the `zenc` binary runs and that compile themselves. `build`/`run` reject an
+ill-typed program before linking.
 Plain emit mode skips the std-import loader and validator and writes C for one flat module.
 
 ## Not yet (the honest gaps)
