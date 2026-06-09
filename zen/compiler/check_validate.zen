@@ -175,7 +175,7 @@ check_arms = (env: Env, arms: [ArmData]) i32 {
 // control never leaves the function. The parser makes a block's FINAL expression a `.Return` too
 // (that IS the yielded value — `{ store(p) }` parses to `[Return(store(p))]`), and genc emits it
 // correctly; so the trailing return is fine. Only a return BEFORE the last statement is the bug.
-// Reject those, matching the Python frontend (which won't parse a mid-arm `return` in value position).
+// Reject those so checked mode never accepts a return that codegen would silently drop.
 early_returns = (stmts: [Stmt]) bool {
     found := false
     stmts.loop((h, i, st) { found = (i < stmts.len - 1).match ({
@@ -203,9 +203,9 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
     acc
 }
 // struct-literal validation (reject-parity): every init field must EXIST on the struct ("no field 'z'")
-// and its value must FIT the field's type ("bool ⊀ i32"). Matching the Python frontend; missing fields
-// are allowed (partial init). Only runs for a KNOWN, non-generic DStruct — an imported/generic literal
-// is skipped (sound). A polymorphic numeric literal fits any numeric field; uninferable values skip.
+// and its value must FIT the field's type ("bool ⊀ i32"). Missing fields are allowed (partial init).
+// Only runs for a KNOWN, non-generic DStruct — an imported/generic literal is skipped (sound). A
+// polymorphic numeric literal fits any numeric field; uninferable values skip.
 no_fields = () [Field] { slice(malloc(0), 0) }
 is_struct = (decls: [Decl], name: str) bool {
     f := false
@@ -249,9 +249,9 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
     })
 }
 // field-access validation (reject-parity): `obj.field` must name a real field of obj's struct ("no
-// field 'nope' on P") — matching the Python frontend. Handles a value receiver (Member) and a Ptr
-// receiver (Arrow, after resolve auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is
-// checked; an uninferable receiver, an enum, or a monomorphized-only generic name is skipped.
+// field 'nope' on P"). Handles a value receiver (Member) and a Ptr receiver (Arrow, after resolve
+// auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is checked; an uninferable
+// receiver, an enum, or a monomorphized-only generic name is skipped.
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
     obj.is_lit_numeric().match ({                                   // `3.14` lexes as Int(3).Member("14") — a member
         true  => 1,                                                 // access on a numeric literal is never valid (also
@@ -265,9 +265,8 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
     })
 }
 // match validation (reject-parity): an enum match must be EXHAUSTIVE — cover every variant, or have a
-// wildcard `_` — and must not DUPLICATE an arm. Matching the Python frontend ("non-exhaustive match:
-// missing .C" / "duplicate match arm '.A'"). Bool/integer matches lower to Cond (not Match), so only
-// enum matches reach here. SOUND — an unknown enum name (a generic instance / unfilled "") -> skip.
+// wildcard `_` — and must not DUPLICATE an arm. Bool/integer matches lower to Cond (not Match), so
+// only enum matches reach here. SOUND — an unknown enum name (a generic instance / unfilled "") -> skip.
 no_variants = () [VariantDef] { slice(malloc(0), 0) }
 enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     found := no_variants()
@@ -313,9 +312,9 @@ match_err = (env: Env, m: MatchData) i32 {
     })
 }
 // operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
-// `&& ||` needs BOOL operands — matching the Python frontend ("'+' needs numeric operands"). Sound:
-// an UNINFERABLE operand (void — e.g. a match-arm binding the partial checker can't type) is skipped,
-// never false-rejected. Comparisons (`== != < > <= >=`) accept any operand types, so aren't checked.
+// `&& ||` needs BOOL operands. Sound: an UNINFERABLE operand (void — e.g. a match-arm binding the
+// partial checker can't type) is skipped, never false-rejected. Comparisons (`== != < > <= >=`) accept
+// any operand types, so aren't checked.
 is_arith_op = (op: str) bool {
     b := op.byte_at(0)
     (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')   // distinct from &|=<>!
@@ -339,8 +338,8 @@ operand_err = (env: Env, b: BinData) i32 {
         })
     })
 }
-// index validation (reject-parity): `seq[idx]` needs a SLICE `seq` and a NUMERIC `idx` — matching the
-// Python frontend ("indexing a non-slice value" / "a slice index must be numeric"). Uninferable -> skip.
+// index validation (reject-parity): `seq[idx]` needs a SLICE `seq` and a NUMERIC `idx`.
+// Uninferable -> skip.
 is_slice_ty = (t: Ty) bool { t.match ({ .Slice(e) => true, _ => false }) }
 non_slice = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
@@ -540,8 +539,8 @@ impl_errs = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
 }
 // Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /
 // "conflicting types") — the self-hosted backend mangles only generic-type instances, not plain fns,
-// so two `f`s (or two trait impls of one method) both emit `… f(…)`. Reject the second, matching the
-// Python frontend (Namespace raises Conflict on a duplicate path). Zen has no overloading.
+// so two `f`s (or two trait impls of one method) both emit `… f(…)`. Reject the second. Zen has no
+// overloading.
 fn_name_of = (d: Decl) str { d.match ({ .DFunc(f) => f.name, _ => "" }) }
 fn_dup_before = (decls: [Decl], name: str, upto: i64) bool {
     f := false
