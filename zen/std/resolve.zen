@@ -20,8 +20,7 @@
 { String, push, append, with_cap, finish } = std.string
 { read_file } = std.io
 
-// space or tab — the whitespace lstrip skips (Python str.strip() also drops \r/\n, but those
-// terminate a line, so on a single line only space/tab matter here).
+// space or tab — the whitespace lstrip is line-local, so newlines are handled by next_line.
 is_ws = (b: u8) bool { (b == ' ') || (b == 9) }
 
 // pos of the first non-whitespace byte of the line starting at p (an lstrip, line-local).
@@ -60,7 +59,8 @@ is_compiler_marker_at = (s: str, p: i32) bool {
 is_marker_at = (s: str, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
 
 // THE CLASSIFIER — is the line starting at p an import line (to be stripped)? Equivalent to
-// Python: `l.strip().startswith("{ ") and ("= std." in l or "= compiler." in l)`.
+// the bootstrap source-prep rule: after line-local lstrip, imports start with `{ ` and contain
+// either `= std.` or `= compiler.` before the newline.
 // This is the one decision the compiler-source flatteners make per line; everything else (concat in
 // dependency order) is plumbing.
 is_import_line* = (s: str, p: i32) bool {
@@ -79,7 +79,7 @@ next_line = (s: str, p: i32) i32 {
 
 // count the lines that strip_imports would KEEP (non-import lines) — a verifiable digest of the
 // classifier over a whole source. The real resolver concatenates those kept lines instead of
-// counting them; counting is what the prototype test asserts against the Python reference.
+// counting them; counting is what the prototype test asserts against this classifier.
 strip_count* = (s: str, p: i32, n: i32) i32 {
     (s.byte_at(p) == 0).match ({
         true  => n,
@@ -88,9 +88,9 @@ strip_count* = (s: str, p: i32, n: i32) i32 {
 }
 
 // ── THE STRIP ITSELF: bytes, not a count ────────────────────────────────────────────────────────
-// strip_count proves the classifier; these produce the actual flat source bytes, reproducing
-// Python's strip_imports / compiler_source. Built on std.string's growable String so a kept line's
-// bytes are appended directly (no per-line allocation), mirroring how genc emits C as a value.
+// strip_count proves the classifier; these produce the actual flat source bytes used by bootstrap
+// source prep. Built on std.string's growable String so a kept line's bytes are appended directly
+// (no per-line allocation), mirroring how genc emits C as a value.
 
 // the end of the line starting at p — the position of its terminating '\n', or of the NUL at EOF.
 // (next_line lands PAST the '\n'; this lands ON it, so [p, line_end) is the line's bytes sans '\n'.)
@@ -105,11 +105,11 @@ append_span = (out: String, s: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.push(s.byte_at(p)).append_span(s, p + 1, e) })
 }
 
-// strip ONE file's imports into `out`, reproducing Python's strip_imports = "\n".join(kept lines):
+// strip ONE file's imports into `out`, joining kept lines with '\n':
 // kept (non-import) lines are appended with a '\n' SEPARATOR before every kept line after the first
 // (so no leading/trailing newline within a file). `first` threads "have we emitted a kept line yet".
 // Walks to the NUL; a trailing '\n' in the file leaves p AT the NUL with no spurious empty line,
-// matching str.splitlines() (which drops the empty element after a final newline).
+// matching the bootstrap driver's split-lines behavior (no empty element after a final newline).
 strip_into = (out: String, s: str, p: i32, first: bool) String {
     (s.byte_at(p) == 0).match ({
         true  => out,
@@ -196,8 +196,8 @@ import_id = (out: String, s: str, p: i32) String {
 //      LOADER ITSELF). Emitting both bodies is a dup-name clash, so dedup_decls walks the flattened source
 //      a SECOND time and keeps only the FIRST top-level decl of each NAME, dropping later same-named decls.
 //      Because load_closure emits a module's DEPENDENCIES before the module itself, the dependency's decl
-//      is the first seen and wins (str.eq survives, mem.free survives over string.free) — the same
-//      "nearest defining module wins" the Python reference (tests/_resolver.resolve → split_decls) gives.
+//      is the first seen and wins (str.eq survives, mem.free survives over string.free) — the current
+//      resolver's "nearest defining module wins" rule.
 //
 // HOW per-name dedup splits decls WITHOUT a brace counter: after imports are stripped, every top-level
 // decl in the stdlib begins at a COLUMN-0 decl-head line — `name[*] =`/`name[*]:`/`Name.impl(...`. The
