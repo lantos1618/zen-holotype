@@ -44,8 +44,8 @@ multiple modules, all in Zen:
 imports no compiler code) remains, and it is being ported to a Zen-native oracle.
 
 - **`compiler.genjs`** — a second backend over the *same* `compiler.genc` AST, emitting JavaScript (the
-  computational subset). Proves the AST is genuine backend-neutral IR: zen generates its own C
-  **and** JS.
+  computational subset). Demonstrates reuse of the shared AST for a second backend: zen generates its
+  own C and a partial JS target.
 - **Enum variants are `|`-separated** (was `,`): `Opt*<T>: None | Some(T)`. A sum type is a
   *choice*, so `|` ("or") — visually distinct from the `{a, b}` *record* (comma = "and").
 
