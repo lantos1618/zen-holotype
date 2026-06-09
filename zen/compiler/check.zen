@@ -93,10 +93,24 @@ global_ty = (env: Env, name: str) Ty {
     found
 }
 // a bare Var's type: an in-scope local, else a module-level global, else void.
-var_or_global = (env: Env, name: str) Ty {
+var_or_global* = (env: Env, name: str) Ty {
     lv := env.vars.lookup_var(name)
     lv.is_void_ty().match ({ true => env.global_ty(name), false => lv })
 }
+// is `name` BOUND — present in the local env OR as a module global — REGARDLESS of its (possibly void /
+// uninferable) type? This is membership, NOT a type lookup: a local bound to a void-typed value (a
+// void-returning call, an un-inferable generic) is still defined. (var_or_global returns void both for
+// "unbound" and "bound-to-void", so it can't tell undefined from void-typed — the validator's `.Var`
+// definedness check must use THIS instead, or it false-rejects every void-typed local.)
+var_bound = (v: Ptr<VList>, name: str) bool {
+    v.match ({ .VNil => false, .VCons(c) => eq(c.name, name).match ({ true => true, false => c.tail.var_bound(name) }) })
+}
+global_bound = (decls: [Decl], name: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => true, false => found }), _ => found }) })
+    found
+}
+is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.global_bound(name) }
 // the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
 enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }   // a generic enum instance -> its monomorphized name
@@ -496,7 +510,7 @@ concrete_variant_payload = (decls: [Decl], ename: str, vn: str) Ty {
 // the `.Err` payload is the DECLARED `E` substituted through the genenum's tparams (→ IoError) — so a
 // nested `e.match(…)` on the bound `e` resolves the inner enum's ename. For a plain Named/Ptr enum the
 // declared payload is already concrete. Void when the variant carries no payload (a tagless arm).
-subj_variant_payload = (env: Env, t: Ty, variant: str) Ty {
+subj_variant_payload* = (env: Env, t: Ty, variant: str) Ty {
     t.match ({
         .Generic(g) => env.decls.find_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
         _           => env.decls.concrete_variant_payload(t.enum_name(), variant)
@@ -537,7 +551,7 @@ resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
 }
 // resolve each arm body, binding a payload arm's `e` to the variant's CONCRETE payload type so a
 // nested `e.match(…)` resolves the inner enum's ename (an empty bind threads env unchanged).
-arm_env = (a: Ptr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
+arm_env* = (a: Ptr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
     eq(ar.bind, "").match ({
         true  => env,
         false => Env( vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars), decls: env.decls, exp: env.exp, a: env.a )

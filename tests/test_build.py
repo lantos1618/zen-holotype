@@ -234,3 +234,34 @@ def test_zenc_run_capstone_stats_example():
     r = subprocess.run([zenc, "run", str(ROOT / "examples" / "stats.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "sum:\n39\nmax:\n9\nevens:\n3\n", repr(r.stdout)
+
+
+# ── U2/fuzz #2b/P3: undefined name in VALUE/ARG position is rejected (was check=ok → leaked cc errors) ──
+def test_zenc_check_rejects_undefined_name_in_value_position():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("main = () i32 { undefined_thing }\n")
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+
+
+def test_zenc_check_rejects_undefined_name_in_arg_position():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("id = (n: i32) i32 { n }\nmain = () i32 { id(undefined_thing) }\n")
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+
+
+def test_p3_does_not_false_reject_true_false_or_sizeof_or_bound_locals():
+    """Guard the P3 false-positives: `true`/`false` as values, `sizeof(T)` (T is a type, not a value), and
+    a local bound to a void/generic value all stay ACCEPTED (the membership-based var_err)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "Box<T>: { v: T }\n"
+        "mk<T> = (x: T) i64 { b := Box<T>(v: x)  sizeof(T) }\n"   # sizeof(T) + a generic-struct-bound local
+        "pick = (c: bool) bool { c.match ({ true => false, false => true }) }\n"  # true/false as VALUES
+        "main = () i32 { 0 }\n"
+    )
+    assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0

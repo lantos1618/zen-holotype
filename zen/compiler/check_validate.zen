@@ -6,7 +6,7 @@
 // against real signatures. It depends ONE-WAY on compiler.check (inference + the type lattice + the env);
 // compiler.check never imports this module back.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
-{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, arm_env, subj_variant_payload, is_bound, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.alloc
 { byte_at } = compiler.lex
 { eq, is_empty } = std.str
@@ -162,9 +162,9 @@ check_args = (env: Env, args: [Expr]) i32 {
     args.loop((h, i, ar) { acc = acc + env.check_expr(ar.addr()) })
     acc
 }
-check_arms = (env: Env, arms: [ArmData]) i32 {
+check_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
-    arms.loop((h, i, ar) { acc = acc + env.check_expr(ar.body) })
+    arms.loop((h, i, ar) { acc = acc + env.a.arm_env(env, subjty, ar).check_expr(ar.body) })
     acc
 }
 // A value-position match arm whose body contains an EARLY (non-trailing) `return` is INVALID. By the
@@ -368,21 +368,35 @@ check_block_stmt = (env: Env, st: Stmt) i32 {
 }
 check_block = (env: Env, stmts: [Stmt]) i32 {
     acc := 0
-    stmts.loop((h, i, st) { acc = acc + env.check_block_stmt(st) })
+    e   := env
+    stmts.loop((h, i, st) { acc = acc + e.check_block_stmt(st)  e = e.a.extend_env(e, st) })   // thread inner `x := e` binds
     acc
+}
+// A bare identifier (.Var) in VALUE / ARGUMENT / operand position must name SOMETHING: a BOUND local or
+// global (is_bound — MEMBERSHIP, so a void-typed local still counts), a function-as-value (is_known_fn),
+// an imported name, a trait method, or an intrinsic. Else UNDEFINED — rejected (kind 3) so a typo'd name
+// in a return/arg position fails the check instead of leaking an "undeclared" cc error (fuzz #2b/P3).
+var_err = (env: Env, name: str) i32 {
+    // `true`/`false` are boolean-literal VALUES lexed as identifiers (genc emits them as C bools), so they
+    // reach here as bare Vars — accept them. Then: a bound local/global, a fn-as-value, an import, a trait
+    // method, or an intrinsic. Anything else is undefined.
+    (eq(name, "true") || eq(name, "false")
+        || env.is_bound(name) || env.decls.is_known_fn(name) || env.decls.is_imported(name)
+        || env.decls.is_trait_method(name) || name.is_intrinsic()).match ({ true => 0, false => 1 })
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.check_call(c) + env.check_args(c.args),
+        .Call(c)        => env.check_call(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => env.check_expr(m.subj) + env.check_arms(m.arms) + env.match_err(m) + arm_return_errs(m.arms),
+        .Match(m)       => env.check_expr(m.subj) + env.check_arms(env.infer_expr(m.subj), m.arms) + env.match_err(m) + arm_return_errs(m.arms),
         .MakeEnum(mk)   => env.check_expr(mk.payload),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         .Block(b)       => env.check_block(b.stmts),    // a value-position block arm: recurse its statements
+        .Var(v)         => env.var_err(v.name),         // a bare identifier in value/arg position must be defined
         _               => 0                            // Int/Var/Tag/StrLit: no call inside
     })
 }
@@ -633,9 +647,9 @@ kv_check_args_kind = (env: Env, args: [Expr]) i32 {
     args.loop((h, i, ar) { acc = acc.kv_kor(env.kv_check_expr_kind(ar.addr())) })
     acc
 }
-kv_check_arms_kind = (env: Env, arms: [ArmData]) i32 {
+kv_check_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
-    arms.loop((h, i, ar) { acc = acc.kv_kor(env.kv_check_expr_kind(ar.body)) })
+    arms.loop((h, i, ar) { acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).kv_check_expr_kind(ar.body)) })
     acc
 }
 kv_arm_return_kind = (arms: [ArmData]) i32 {
@@ -674,22 +688,24 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
 }
 kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     acc := 0
-    stmts.loop((h, i, st) { acc = acc.kv_kor(env.kv_check_block_stmt_kind(st)) })
+    e   := env
+    stmts.loop((h, i, st) { acc = acc.kv_kor(e.kv_check_block_stmt_kind(st))  e = e.a.extend_env(e, st) })
     acc
 }
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kv_check_call_kind(c).kv_kor(env.kv_check_args_kind(c.args)),
+        .Call(c)        => env.kv_check_call_kind(c).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
         .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
         .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
-        .Match(m)       => env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(kv_arm_return_kind(m.arms)),
+        .Match(m)       => env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(env.infer_expr(m.subj), m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(kv_arm_return_kind(m.arms)),
         .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload),
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
+        .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()),
         _               => 0
     })
 }
