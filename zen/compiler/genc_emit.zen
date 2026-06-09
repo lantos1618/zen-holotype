@@ -9,7 +9,7 @@
 // genModule's monomorphize pass lives in compiler.genc_mono. So: genc ← genc_mono ← genc_emit.
 
 { String, new, append, push, finish } = std.string
-{ view, is_empty, eq } = std.str
+{ is_empty, eq } = std.str
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
   BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
   gen_ty, is_template, is_trait, call, lit, arm, block, param, field } = compiler.genc
@@ -55,7 +55,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Index(ix) => s.gen_index(ix),
         .Loop(l) => s.gen_loop(l),
         .Lambda(lm) => s.append("0"),       // unreachable: a lambda is inlined where its FnT param is called
-        .Block(b) => s.gen_blockexpr(b)     // a statement-expression `({ … })` (an inlined template body)
+        .Block(b) => s.gen_blockexpr(b)     // a statement-expression `({ … })`
     })
 }
 // `({ s1 s2 … })` — a GCC statement-expression; its value is the last statement's. A trailing
@@ -188,8 +188,8 @@ gen_escape_byte = (s: String, b: u8) String {
 gen_strlit = (s: String, v: str) String {
     s.append("\"").gen_escape_from(v, 0).append("\"")
 }
-// escape the str's bytes one by one (recursion to the NUL terminator) — no view/slice, so
-// genc.zen self-hosts (the self-hosted checker can't yet type an imported `view`'s result).
+// escape the str's bytes one by one (recursion to the NUL terminator). Avoiding view/slice keeps this
+// helper independent of extra std runtime plumbing in the bootstrap source set.
 gen_escape_from = (s: String, v: str, i: i32) String {
     (sbyte(v, i) == 0).match ({
         true  => s,
