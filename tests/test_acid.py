@@ -6,14 +6,12 @@ verbatim — imports and all, no pre-processing. The binary PARSES + RESOLVES + 
 source file with no crash and a non-trivial emission. NO Python is in the loop: `_oracle` drives only
 `cc` + the committed binary.
 
-NOTE on what's NOT this gate (and why it differs from the old Python-host acid test): the binary's
-CHECK mode is a FLAT single-module checker with no module resolver, so it can't type-check a real
-std file's `{ … } = std.x` cross-module imports (those symbols would count as undefined). The old
-acid test got a zero-error CHECK verdict only because the Python host resolved all std.* modules
-into one namespace — that cross-module type-check moves to a future module loader. What the binary
-DOES gate here is parse + resolve + codegen over the full, unstripped stdlib; the compiler's own
-files additionally self-host (tests/test_bootstrap.py), and the per-construct CHECK/value behavior
-is gated by the oracle corpus (tests/test_oracle.py).
+NOTE on what's NOT this gate: the binary's CHECK mode is a FLAT single-module checker with no module
+resolver, so it can't type-check a real std file's `{ … } = std.x` cross-module imports (those
+symbols would count as undefined). Cross-module type-checking is covered separately by the module
+oracle tests. What this gate DOES cover is parse + resolve + codegen over the full, unstripped
+stdlib; the compiler's own files additionally self-host (tests/test_bootstrap.py), and the
+per-construct CHECK/value behavior is gated by the oracle corpus (tests/test_oracle.py).
 """
 from pathlib import Path
 

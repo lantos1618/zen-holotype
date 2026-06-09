@@ -1,12 +1,9 @@
-"""Stage-C2 PROTOTYPE: the self-hosted-compiler oracle WITHOUT the Python reference frontend.
+"""Self-hosted compiler oracle over golden emitted-value and checker-verdict cases.
 
 Re-runs the differential GOLDEN corpus (the value + reject-parity expectations migrated to
 _oracle_corpus.py) through `_oracle.self_side`, which drives ONLY the self-hosted BINARIES
 (emit + check). This whole module imports NO `zen.*` / `zen.main` — verified by
 test_oracle_has_no_python_frontend_dependency below.
-
-This is the conversion target for Stage D: the binary-only oracle is a drop-in for the
-cross-frontend `_difftest.self_side` for every test that asserts a self-hosted golden value/verdict.
 
 test_oracle_catches_regression deliberately checks WRONG golden values/verdicts and asserts the
 oracle FAILS them — proving the net isn't hollow.
