@@ -58,6 +58,14 @@ def test_zenc_check_rejects_undefined_name():
     assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
 
 
+def test_zenc_check_rejects_source_if():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("main = () i32 { if (1 < 2) { return 9 } 7 }\n")
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+
+
 def test_zenc_check_ok_program():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
