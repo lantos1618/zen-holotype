@@ -1,8 +1,8 @@
 """Golden corpus for the self-hosted-compiler oracle — single-sourced expected verdicts/values.
 
-Migrated from test_differential.py's parametrize lists. This module imports NOTHING (no zen.*, no
-_difftest, no _selfhost) — it is pure data, so the oracle tests that read it have ZERO Python-frontend
-dependency. When Stage D deletes zen/*.py, these golden expectations are what keeps coverage.
+Migrated from test_differential.py's parametrize lists. This module imports NOTHING (no zen.*) — it is
+pure data, so the oracle tests that read it have ZERO Python-frontend dependency after Stage D deleted
+zen/*.py. These golden expectations are what keeps coverage.
 
   VALUE_CASES   : [(src, want_int)]   — the self-hosted binary must COMPUTE want
   VERDICT_CASES : [(src, "accept"|"reject")] — the check binary must produce that verdict
