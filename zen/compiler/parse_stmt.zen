@@ -7,8 +7,8 @@
 { Stmt, slet, sassign, sidxset, swhile, sret, sexpr, vref, tvoid } = compiler.genc
 { Token, scan, byte_at } = compiler.lex
 { Malloc, malloc } = std.alloc
-{ enode, lexeme, is_op, is_dot, parse_atom, parse_or } = compiler.parse_expr
-{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq } = compiler.parse_type
+{ enode, lexeme, is_op, is_dot, is_field_colon, parse_atom, parse_or } = compiler.parse_expr
+{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty } = compiler.parse_type
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -36,6 +36,26 @@ is_assign = (src: str, t: Token) bool {
 is_let_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
     sc.tok.kind.match ({ .Ident => src.is_assign(src.scan(sc.next).tok), _ => false })
+}
+// a TYPED let `name : Type :=` / `name : Type =` — an Ident, a single ':', a type, then ':='/'='. Lets a
+// user write `x: i32 := 5` / `x: i32 = 5`; the annotation is parsed (to find the '=') then DISCARDED (the
+// binding infers like a plain `x := 5`). Was: misclassified as a bare expr statement → mis-parsed (fuzz #9).
+is_typed_let_here = (a: Ptr<Malloc>, src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Ident => {
+            colon := src.scan(sc.next)
+            src.is_field_colon(colon.tok).match ({
+                true  => {
+                    te := a.parse_ty(src, colon.next)        // consume the type; te.next lands at ':=' or '='
+                    op := src.scan(te.next)
+                    src.is_assign(op.tok) || src.is_eq(op.tok)
+                },
+                false => false
+            })
+        },
+        _ => false
+    })
 }
 // is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
 is_eq = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
@@ -79,9 +99,11 @@ is_return_here = (src: str, pos: i32) bool {
 
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
-SKind*: SLet | SIdx | SSet | SWhile | SRet | SExpr
-stmt_kind = (src: str, pos: i32) SKind {
-    src.is_let_here(pos).match ({
+SKind*: SLet | SLetT | SIdx | SSet | SWhile | SRet | SExpr
+stmt_kind = (a: Ptr<Malloc>, src: str, pos: i32) SKind {
+    a.is_typed_let_here(src, pos).match ({
+        true  => .SLetT(),
+        false => src.is_let_here(pos).match ({
         true  => .SLet(),
         false => src.is_idxset_here(pos).match ({
             true  => .SIdx(),
@@ -93,6 +115,7 @@ stmt_kind = (src: str, pos: i32) SKind {
                 })
             })
         })
+        })
     })
 }
 
@@ -101,8 +124,9 @@ stmt_kind = (src: str, pos: i32) SKind {
 parse_stmts = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     src.at_body_end(pos).match ({
         true  => a.snil(),                          // an empty body `{ }` (a void no-op) — no statements
-        false => src.stmt_kind(pos).match ({
+        false => a.stmt_kind(src, pos).match ({
             .SLet   => a.parse_let_stmt(src, pos),
+            .SLetT  => a.parse_typed_let_stmt(src, pos),
             .SIdx   => a.parse_idxset_stmt(src, pos),
             .SSet   => a.parse_set_stmt(src, pos),
             .SWhile => a.parse_while_stmt(src, pos),
@@ -134,6 +158,16 @@ parse_let_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
     at   := src.scan(nt.next)                // ':='
     v    := a.parse_or(src, at.next)        // value (full expression, incl. comparison)
     a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
+}
+// `name : Type := value` / `name : Type = value` — the type annotation is parsed (to skip it) and discarded.
+parse_typed_let_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    nt    := src.scan(pos)
+    name  := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)               // ':'
+    te    := a.parse_ty(src, colon.next)     // the (discarded) type annotation; te.next lands at ':='/'='
+    op    := src.scan(te.next)
+    v     := a.parse_or(src, op.next)        // value
+    a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))
 }
 // the final expression of a body is its return; a non-final expression (something else
 // follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
@@ -203,8 +237,9 @@ parse_block* = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
 // same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare
 // statement. An explicit `return <expr>` (SRet) IS allowed inside a block (a guard arm's body).
 block_stmt = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
-    src.stmt_kind(pos).match ({
+    a.stmt_kind(src, pos).match ({
         .SLet   => a.block_let(src, pos),
+        .SLetT  => a.block_typed_let(src, pos),
         .SIdx   => a.block_idxset(src, pos),         // buf[i] = v  inside a loop/if body
         .SSet   => a.block_set(src, pos),
         .SWhile => a.block_while(src, pos),
@@ -217,6 +252,16 @@ block_return = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     r    := a.parse_or(src, kw.next)                 // the returned value
     rest := a.parse_block(src, r.next)
     BlockEnd( list: a.scons(sret(r.expr), rest.list), next: rest.next )
+}
+block_typed_let = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
+    nt    := src.scan(pos)
+    name  := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)                       // ':'
+    te    := a.parse_ty(src, colon.next)             // (discarded) type annotation
+    op    := src.scan(te.next)                       // ':=' / '='
+    v     := a.parse_or(src, op.next)
+    rest  := a.parse_block(src, v.next)
+    BlockEnd( list: a.scons(slet(name, v.expr), rest.list), next: rest.next )
 }
 block_idxset = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)                            // the array name
