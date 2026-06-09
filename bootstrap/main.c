@@ -201,6 +201,18 @@ static const char* const KIND_NAME[] = {
 /* U1.2: type-check resolved decls. Prints a Zen-LEVEL error (a count + the first error's KIND) to stderr
  * and returns the error count (0 = ok) — so a user finally sees `zenc: foo.zen: 1 error (undefined-name)`
  * instead of cc errors on generated C they never wrote. (Real line:col + messages are U1 Step 4.) */
+/* U2: a runnable program must define `main`. genModule emits the entry as `int32_t main(` (proto + def)
+ * — the exact token cc links against — so scan the emitted C for that 13-byte substring. (A fn named
+ * `mainframe` emits `int32_t mainframe(`, which this does NOT match because of the trailing `(`.) */
+static int emits_main(String out){
+    static const char NEEDLE[] = "int32_t main(";
+    size_t nlen = sizeof(NEEDLE) - 1;
+    if ((size_t)out.len < nlen) return 0;
+    for (size_t i = 0; i + nlen <= (size_t)out.len; i++)
+        if (memcmp((const char*)out.ptr + i, NEEDLE, nlen) == 0) return 1;
+    return 0;
+}
+
 static int type_check(Malloc* m, zslice decls, const char* in_path){
     int kind = check_module_kind(m, decls);
     if (kind == 0) return 0;
@@ -223,9 +235,11 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     char dir[4096]; bin_dir(argv0, dir, sizeof dir);
     const char* flat = resolve_program(dir, buf);
     zslice decls = resolve_module(&m, parse_module(&m, flat));
+    if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); free(buf); return 1; }  /* U2 */
     if (type_check(&m, decls, in_path) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
     String out = genModule(decls);
     free(buf);
+    if (!emits_main(out)){ fprintf(stderr, "zenc: %s: no `main` entry point (need `main = () i32 { … }`)\n", in_path); return 1; }  /* U2 */
 
     size_t hlen = sizeof(HEAD) - 1;
     if ((size_t)out.len < hlen || memcmp(out.ptr, HEAD, hlen) != 0){
@@ -286,6 +300,9 @@ int main(int argc, char** argv){
         const char* flat = resolve_program(dir, buf);
         zslice decls = resolve_module(&m, parse_module(&m, flat));
         free(buf);
+        /* U2: reject gross parse failure (zero decls). NOTE: a missing `main` is NOT enforced in `check`
+         * — a library module (std.*) legitimately has no main; build/run enforce it instead. */
+        if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", argv[2]); return 1; }
         int n = type_check(&m, decls, argv[2]);
         if (n == 0) fprintf(stderr, "zenc: %s: ok\n", argv[2]);
         return n == 0 ? 0 : 1;

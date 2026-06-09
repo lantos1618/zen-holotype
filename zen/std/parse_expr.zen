@@ -150,7 +150,13 @@ unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
 // a leading-dot enum constructor `.Variant` (a Tag) or `.Variant(payload)` (a MakeEnum). The
 // enum TYPE is left "" — std.check fills it by looking the variant up among the enum decls.
 parse_ctor = (a: Ptr<Malloc>, src: str, dot: Scan) PExpr {
-    vt := src.scan(dot.next)                         // the variant name
+    vt := src.scan(dot.next)                         // the variant name — MUST be an identifier
+    vt.tok.kind.match ({
+        .Ident => a.parse_ctor_named(src, vt),
+        _      => a.reject_match(vt.next)            // `.14` (the stray tail of a float literal like 3.14), `.0`, … — not a variant
+    })
+}
+parse_ctor_named = (a: Ptr<Malloc>, src: str, vt: Scan) PExpr {
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)                          // '(' (payload) or anything else (a bare tag)
     src.is_lparen(nx.tok).match ({
@@ -247,14 +253,41 @@ parse_index = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
 // `recv.name` is field access (genc Member); `recv.name(args)` is a UFCS method call, which
 // DESUGARS to `name(recv, args)` — a plain Call with the receiver as the first argument
 // (`b.is_alpha()` -> `is_alpha(b)`, `x.f(a, b)` -> `f(x, a, b)`). Both chain.
+// `Type.Variant` / `Type.Variant(payload)` — a TYPE-QUALIFIED enum constructor. Detected syntactically:
+// an Uppercase receiver name (a type) dotted with an Uppercase field (a variant). Lowered to the SAME
+// Tag/MakeEnum nodes as the leading-dot `.Variant` form (enum type left "" — std.check resolves it by
+// variant scan). Lowercase receivers/fields stay field access / UFCS calls. (Was: `Type.Variant` parsed
+// to a member access that the checker accepted but genc emitted as literal `Type.Variant` → bad C.)
+is_upper_byte = (b: u8) bool { (b >= 'A') && (b <= 'Z') }
+is_qual_ctor  = (base: PExpr, name: str) bool {
+    rn := subj_name(base.expr)                                     // receiver var name, "" if not a bare Var
+    rn.byte_at(0).is_upper_byte() && name.byte_at(0).is_upper_byte()
+}
 parse_field = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     dot  := src.scan(base.next)                                    // '.'
-    fld  := src.scan(dot.next)                                     // the field / method name
+    fld  := src.scan(dot.next)                                     // field / method / variant name
     name := a.lexeme(src, fld.tok)
-    nx   := src.scan(fld.next)                                     // '(' (method call) or not (field)
+    is_qual_ctor(base, name).match ({
+        true  => a.parse_postfix(src, a.parse_qual_ctor(src, name, fld)),  // Type.Variant -> Tag/MakeEnum
+        false => a.parse_field_plain(src, base, name, fld)
+    })
+}
+parse_field_plain = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, fld: Scan) PExpr {
+    nx := src.scan(fld.next)                                       // '(' (method call) or not (field)
     src.is_lparen(nx.tok).match ({
         true  => a.parse_method(src, base, name, nx),
         false => a.parse_postfix(src, PExpr( expr: a.enode(member(base.expr, name)), next: fld.next ))  // field, chain
+    })
+}
+// the leading-dot ctor dispatch (mirrors parse_ctor) starting from the variant token `fld`
+parse_qual_ctor = (a: Ptr<Malloc>, src: str, vn: str, fld: Scan) PExpr {
+    nx := src.scan(fld.next)                                       // '(' (payload) or anything else (bare tag)
+    src.is_lparen(nx.tok).match ({
+        true  => src.is_rparen(src.scan(nx.next).tok).match ({
+            true  => a.parse_ctor_empty(src, vn, nx),     // `Type.Variant()` -> Tag (empty payload)
+            false => a.parse_ctor_payload(src, vn, nx)    // `Type.Variant(arg)` -> MakeEnum
+        }),
+        false => PExpr( expr: a.enode(mktag("", vn)), next: fld.next )   // `Type.Variant` -> Tag
     })
 }
 parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan) PExpr {
@@ -369,7 +402,7 @@ parse_bool_wild = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr
 // subject against its literal label; the FINAL arm (followed by `}`) is the default with no test (a
 // `_` wildcard, or just the last label). Fixes the old parse_bool_match, which only ever read TWO arms
 // and bool-coerced the subject — crashing on 3+ arms and silently mis-evaluating non-zero labels.
-LitArmEnd*: { test: Ptr<Expr>, body: Ptr<Expr>, next: i32 }
+LitArmEnd*: { test: Ptr<Expr>, body: Ptr<Expr>, wild: bool, next: i32 }   // wild = the arm was a `_` catch-all
 // The FIRST arm gets an extra guard: if it's ALSO the last arm (followed by `}`) and is NOT a `_`
 // wildcard, the match has a single value-arm that becomes a subject-ignoring default — reject it
 // (parse_lit_arms below would otherwise return that lone body and silently drop the subject). A lone
@@ -396,9 +429,11 @@ parse_lit_arms = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
 }
 parse_lit_after = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
     after.tok.kind.match ({
-        .Eof => PExpr( expr: arm.body, next: after.next ),         // unterminated `{ … `: stop at EOF, don't recurse forever
+        .Eof => arm.wild.match ({ true => PExpr( expr: arm.body, next: after.next ), false => a.reject_match(after.next) }),  // unterminated, no `_` → non-exhaustive
         _    => src.is_rbrace(after.tok).match ({
-            true  => PExpr( expr: arm.body, next: after.next ),    // the final arm is the default — no test
+            // the final arm is the subject-ignoring default ONLY if it was `_`; a concrete literal as the
+            // last arm leaves the other subject values uncovered → reject as non-exhaustive (kind 3 sentinel).
+            true  => arm.wild.match ({ true => PExpr( expr: arm.body, next: after.next ), false => a.reject_match(after.next) }),
             false => a.cons_lit_arm(src, subj, arm, after)
         })
     })
@@ -420,19 +455,19 @@ parse_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
 parse_lit_arm_wild = (a: Ptr<Malloc>, src: str, us: Scan) LitArmEnd {
     src.is_fat_arrow(src.scan(us.next).tok).match ({
         true  => a.parse_lit_arm_wild_body(src, us),
-        false => LitArmEnd( test: a.enode(lit(1)), body: a.enode(block(a.no_arm_stmts())), next: us.next )
+        false => LitArmEnd( test: a.enode(lit(1)), body: a.enode(block(a.no_arm_stmts())), wild: true, next: us.next )
     })
 }
 parse_lit_arm_wild_body = (a: Ptr<Malloc>, src: str, us: Scan) LitArmEnd {
     arrow := src.scan(us.next)                                      // '=>'
     body  := a.parse_arm_body(src, arrow.next)
-    LitArmEnd( test: a.enode(lit(1)), body: body.expr, next: body.next )   // `1` -> always taken
+    LitArmEnd( test: a.enode(lit(1)), body: body.expr, wild: true, next: body.next )   // `1` -> always taken
 }
 parse_lit_arm_val = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd {
     le    := a.parse_atom(src, pos)                                 // the literal label (0, 'a', -5, …)
     arrow := src.scan(le.next)                                      // '=>'
     body  := a.parse_arm_body(src, arrow.next)
-    LitArmEnd( test: a.enode(bin("==", subj.expr, le.expr)), body: body.expr, next: body.next )
+    LitArmEnd( test: a.enode(bin("==", subj.expr, le.expr)), body: body.expr, wild: false, next: body.next )
 }
 // the subject of an enum match must be a bare variable (genc's MatchData.subj is its NAME);
 // pull the name back out of the already-parsed Var node.

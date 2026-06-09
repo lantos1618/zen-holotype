@@ -253,10 +253,15 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
 // receiver (Arrow, after resolve auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is
 // checked; an uninferable receiver, an enum, or a monomorphized-only generic name is skipped.
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
-    sname := env.infer_expr(obj).enum_name()                        // struct name (sees through a Ptr)
-    env.decls.is_struct(sname).match ({
-        true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
-        false => 0
+    obj.is_lit_numeric().match ({                                   // `3.14` lexes as Int(3).Member("14") — a member
+        true  => 1,                                                 // access on a numeric literal is never valid (also
+        false => {                                                  // the only way a stray float literal reaches codegen)
+            sname := env.infer_expr(obj).enum_name()                // struct name (sees through a Ptr)
+            env.decls.is_struct(sname).match ({
+                true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
+                false => 0
+            })
+        }
     })
 }
 // match validation (reject-parity): an enum match must be EXHAUSTIVE — cover every variant, or have a

@@ -7,8 +7,8 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest          # provides cc — needed to build the tree-sitter parser
-    steps:                          # (zen.so) and to compile the codegen test programs
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -18,38 +18,17 @@ jobs:
       - name: Install dev dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Type-check (mypy)
-        run: python -m mypy zen
+      - name: Build zenc
+        run: make -f bootstrap/Makefile zenc
 
-      - name: Tests (pytest)
-        run: python -m pytest -q
-        env:
-          PYTHONPATH: ${{ github.workspace }}
+      - name: Tests
+        run: pytest -q
 
-      - name: Smoke build (zen build examples -> "vecdemo -> 12")
+      - name: Regenerate bootstrap C
         run: |
-          python -m zen build examples | tee build.log
-          grep -q "vecdemo -> 12" build.log
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-
-  # The committed tree-sitter-zen/src (parser.c, grammar.json, node-types.json) is what
-  # the compiler actually parses with. CI's `test` job builds from it — so an edit to
-  # grammar.js that forgets to regenerate would pass against the STALE parser. This job
-  # regenerates from grammar.js (pinned CLI, the version the committed files were built
-  # with) and fails if src/ drifts.
-  grammar-sync:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Regenerate parser from grammar.js and check src/ is in sync
-        run: |
-          (cd tree-sitter-zen && npx --yes -p tree-sitter-cli@0.26.9 tree-sitter generate)
-          if ! git diff --quiet tree-sitter-zen/src; then
-            echo "::error::tree-sitter-zen/src is stale - run 'tree-sitter generate' in tree-sitter-zen and commit"
-            git diff --stat tree-sitter-zen/src
+          make -f bootstrap/Makefile regen
+          if ! git diff --quiet -- bootstrap/zenc.gen.c; then
+            echo "::error::bootstrap/zenc.gen.c is stale - run 'make -f bootstrap/Makefile regen' and commit"
+            git diff -- bootstrap/zenc.gen.c
             exit 1
           fi
