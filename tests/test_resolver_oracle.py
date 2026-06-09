@@ -5,20 +5,20 @@ DIRECT imports, flat-concatenated into one lib. That is correct for the real std
 direct-import sets happen not to clash; it is NOT a real resolver, and a genuine cross-module name
 CLASH would false-positive (a noted risk). This module builds + proves the real thing:
 
-  GRAPH      module_graph()  parses every std/*.zen import line into the name->defining-module map and
+  GRAPH      module_graph()  parses every std/*.zen and compiler/*.zen import line into the name->defining-module map and
                              the module->imports adjacency (the DImport edges).
   ORDER      topo_order()    Kahn topological order of that graph; the parse_* cluster is a real cycle
                              and is reported as such (the rest is a DAG, dependency-first).
   NAMESPACE  resolve(t)      per-module world for t: the TRANSITIVE import closure, deduped per-NAME so
                              each top-level name resolves to ONE module — t's `eq` is str.eq, never
                              ast.eq, because only t's closure is present. Two modules' private helpers
-                             that share a name (genjs+check_validate is_intrinsic) never collide.
+                             that share a name (compiler/genjs + compiler/check_validate is_intrinsic) never collide.
 
 Driven entirely by the committed `zenc` binary + cc (via _oracle.check_namespaced_count) — NO Python
 compiler. The resolver itself (tests/_resolver.py) is pure harness text-processing; it touches no
 compiler SOURCE, so there is zero bootstrap-fixpoint risk.
 
-POSITIVE: every real std/*.zen type-checks against its REAL transitive imports through the namespaced
+POSITIVE: every real std/compiler source type-checks against its REAL transitive imports through the namespaced
 world with 0 errors (the whole stdlib is a well-typed inter-module unit — INCLUDING the parse cycle,
 which the direct-import driver only handled by luck of its import sets). NEGATIVE / NAMESPACE: a real
 cross-module name clash does NOT false-positive (and the naive flat-concat that DOES is shown for
@@ -40,16 +40,18 @@ ALL_MODULES = _resolver.all_modules()
 def test_graph_covers_every_module_and_resolves_known_edges():
     edges, origin = _resolver.module_graph()
     assert set(edges) == set(ALL_MODULES)
-    # spot-check a few real edges: check_validate imports from genc/check/alloc/lex/str.
-    assert set(edges["check_validate"]) >= {"genc", "check", "alloc", "lex", "str"}
-    # and per-name origin: check_validate's `eq` comes from std.str (NOT std.ast, which also defines eq).
-    assert origin["check_validate"]["eq"] == "str"
+    # spot-check a few real edges: compiler/check_validate imports from compiler and std modules.
+    assert set(edges["compiler/check_validate"]) >= {
+        "compiler/genc", "compiler/check", "compiler/lex", "std/alloc", "std/str"
+    }
+    # and per-name origin: check_validate's `eq` comes from std/str (NOT std/ast, which also defines eq).
+    assert origin["compiler/check_validate"]["eq"] == "std/str"
 
 
 def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
     order, cycle = _resolver.topo_order()
     # the parse_* modules import each other -> a genuine cycle; everything else is a DAG.
-    assert set(cycle) == {"parse", "parse_expr", "parse_stmt", "parse_type"}
+    assert set(cycle) == {"compiler/parse", "compiler/parse_expr", "compiler/parse_stmt", "compiler/parse_type"}
     assert set(order) | set(cycle) == set(ALL_MODULES)        # every module accounted for exactly once
     assert not (set(order) & set(cycle))
     edges, _ = _resolver.module_graph()
@@ -62,11 +64,12 @@ def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
 
 
 def test_reachable_is_the_transitive_closure():
-    # check_validate -> check -> {genc, str, string, lex, mem, alloc}; the closure is transitive,
+    # compiler/check_validate -> compiler/check -> {compiler/genc, std/str, std/string, compiler/lex, std/mem, std/alloc}; the closure is transitive,
     # so `string`/`mem` appear though check_validate imports neither directly.
     reach = set(_resolver.reachable("check_validate"))
-    assert {"genc", "check", "str", "string", "lex", "mem", "alloc"} <= reach
-    assert "check_validate" not in reach                       # a module is not in its own closure
+    assert {"compiler/genc", "compiler/check", "std/str", "std/string",
+            "compiler/lex", "std/mem", "std/alloc"} <= reach
+    assert "compiler/check_validate" not in reach               # a module is not in its own closure
 
 
 # ── POSITIVE: the whole stdlib type-checks through the NAMESPACED resolver ────────────────────────
@@ -87,7 +90,7 @@ def test_module_typechecks_through_namespaced_resolver(module):
 def test_parse_cycle_modules_resolve():
     # The mutually-recursive parse_* cluster is the resolver's hard case: each module imports from the
     # others. The namespaced world (transitive closure, per-name deduped) checks every one at 0 errors.
-    for m in ("parse", "parse_expr", "parse_stmt", "parse_type"):
+    for m in ("compiler/parse", "compiler/parse_expr", "compiler/parse_stmt", "compiler/parse_type"):
         assert _oracle.check_namespaced_count(m) == 0, f"{m} did not resolve in the parse cycle"
 
 
@@ -188,7 +191,7 @@ def test_splitter_covers_every_top_level_decl(module):
             impl_depth += _resolver._brace_delta(l)          # runtime's column-0 `suspend = …`, aren't decls)
             continue
         if l and not l[0].isspace() and not l.lstrip().startswith("//") \
-           and not (l.lstrip().startswith("{ ") and "= std." in l):
+           and not (l.lstrip().startswith("{ ") and ("= std." in l or "= compiler." in l)):
             if _resolver._IMPL_HEAD_RE.match(l):             # an impl head: consume its brace-balanced body
                 impl_depth = _resolver._brace_delta(l)
                 continue
@@ -198,11 +201,15 @@ def test_splitter_covers_every_top_level_decl(module):
     assert head_names <= split_names, f"{module}: splitter dropped {head_names - split_names}"
 
 
-def test_build_self_reorder_would_break_the_fixpoint():
-    # Pins the STRETCH plan's premise (see the wiring note at the foot of _resolver.py): the bootstrap
-    # --build-self concatenation order is load-bearing (genModule emits in source order), and a topo
-    # order of the SOURCES is NOT byte-identical to the committed hardcoded order — so wiring the
-    # resolver into --build-self needs an SCC-pinned order, not a raw topo. This guards that claim.
+def test_bootstrap_manifest_is_graph_derived_scc_order():
+    # The C bootstrap still reads a manifest, but the order is now derived from the import graph:
+    # roots + runtime-provided exclusions define the set, SCC topo defines the order.
+    assert _resolver._bootstrap_manifest_modules() == _resolver._bootstrap_graph_order()
+
+
+def test_build_self_raw_topo_would_break_the_fixpoint():
+    # Raw topo is still not enough because the parse_* cluster is a real cycle. The manifest is
+    # therefore SCC-derived, with deterministic sorting inside each SCC.
     assert _resolver._build_self_order_differs()
 
 

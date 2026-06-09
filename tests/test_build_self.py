@@ -1,11 +1,11 @@
 """Stage A — Python-free regeneration of bootstrap/zenc.gen.c, driven by the BINARY.
 
-bootstrap/main.c grows a `--build-self <out.c> <srcroot>` mode: the binary reads the compiler
-SOURCES (hardcoded, in generate.py's exact order), strips each file's `{ … } = std.…` import lines
-and concatenates them with "\n" — the SAME flat source bootstrap/generate.py.compiler_source() builds —
+bootstrap/main.c has a `--build-self <out.c> <srcroot>` mode: the binary reads
+`<srcroot>/bootstrap/sources.txt`, strips each listed file's module import lines, concatenates them
+with "\n",
 then runs the existing parse_module -> resolve_module -> genModule path on it and writes the emitted C
-(head swapped for `#include "zenrt.h"`, == gen_c_file) to <out.c>. ZERO Python participates in the
-source-prep or the emit: only `cc` (to build the binary once) and the binary itself.
+(head swapped for `#include "zenrt.h"`) to <out.c>. ZERO Python participates in the source-prep or the
+emit: only `cc` (to build the binary once) and the binary itself.
 
 This is the Stage-A goal: a Python-free path that reproduces the committed bootstrap/zenc.gen.c
 byte-for-byte. (The fixpoint that the COMMITTED C reproduces ITS sources is tests/test_bootstrap.py;
@@ -30,7 +30,7 @@ def _build(tmp_path):
 
 
 def test_build_self_reproduces_committed_c(tmp_path):
-    # cc + --build-self + diff, NO python3 in the loop: the binary reads/strips/concats the SOURCES,
+    # cc + --build-self + diff, NO python3 in the loop: the binary reads/strips/concats the manifest,
     # compiles, and writes C == the committed bootstrap/zenc.gen.c byte-for-byte.
     exe = _build(tmp_path)
     out_c = tmp_path / "out.c"

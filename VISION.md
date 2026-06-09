@@ -182,7 +182,7 @@ run = (v: Ptr<vec.Vec>) i32 {
 ## Grammar sketch (the one-structure direction)
 
 The whole front end gets small because there's one declaration shape. (EBNF-ish; the
-self-hosted parser `std.parse*` accepts the keyword-ful form today — this is the shape it
+self-hosted parser `compiler.parse*` accepts the keyword-ful form today — this is the shape it
 collapses toward.)
 
 ```
@@ -237,19 +237,19 @@ The three layers and the contract between them:
 
 ```
 kernel   :  text       → CheckedAst      // parse + trie + fits
-backend  :  CheckedAst → target          // gen.c (std.genc) / gen.js (std.genjs) / gen.llvm / …
+backend  :  CheckedAst → target          // gen.c (compiler.genc) / gen.js (compiler.genjs) / gen.llvm / …
 generator:  () → [Decl]  (in Zen)        // a function that BUILDS AST and returns it
 ```
 
 - The **kernel** never knows about C, JS, or LLVM. It produces a *checked, resolved* AST —
   structure that has been proven to fit. It only ever answers "does this fit?".
-- A **backend** is a walk over that AST emitting a target. `gen.c` exists (`std.genc`), and a
-  JavaScript one (`std.genjs`) walks the *same* AST. C stays the bootstrap target while
+- A **backend** is a walk over that AST emitting a target. `gen.c` exists (`compiler.genc`), and a
+  JavaScript one (`compiler.genjs`) walks the *same* AST. C stays the bootstrap target while
   `gen.llvm` / `gen.json` are *more of the same* — each keeps its own variable/type tables
   and target-native branches, but never re-checks, because the kernel already did. **New
   target = new backend.**
 - **Metaprogramming is Zen, as values** (not pragmas). A generator is an ordinary function
-  that builds AST values and returns `[Decl]`, emitted by `std.genc.genModule`; `std.ast`
+  that builds AST values and returns `[Decl]`, emitted by `compiler.genc.genModule`; `std.ast`
   gives the fluent builders. There is no `@emit` and no comptime evaluator — code is data, so
   generating it is just a function over data. **New feature = new generator**, not compiler
   code.
@@ -260,8 +260,8 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 
 ### Roadmap
 
-1. **Self-host** — define the AST in Zen (`std.genc`) and write the whole front end in Zen
-   (`std.lex` / `std.parse*` / `std.check`). ✅ The compiler compiles itself to C and reproduces
+1. **Self-host** — define the AST in Zen (`compiler.genc`) and write the whole front end in Zen
+   (`compiler.lex` / `compiler.parse*` / `compiler.check`). ✅ The compiler compiles itself to C and reproduces
    its committed C byte-for-byte (the fixpoint); Python and tree-sitter are gone.
 2. **Metaprogramming as values** — generators that build `[Decl]` and emit via `genModule`,
    with `std.ast`'s builders. ✅ (`std.c`'s `libc()` is the canonical example: a function that
@@ -278,7 +278,7 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
   emit       :     genModule(libc())  ─►  C prototypes for the whole binding set
 ```
 
-A generator is **ordinary Zen** (`std.c`, built on `std.ast`/`std.genc`): it reads or builds
+A generator is **ordinary Zen** (`std.c`, built on `std.ast`/`compiler.genc`): it reads or builds
 structure and returns AST values, which `genModule` lowers to C — the same backend that lowers
 hand-written code. The shape of every node — `Int`, `Bin`, `Struct`, `Func`, the field/param
-lists — is **defined in Zen** (`std.genc`). New generator = new Zen function, not compiler code.
+lists — is **defined in Zen** (`compiler.genc`). New generator = new Zen function, not compiler code.

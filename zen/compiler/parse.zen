@@ -1,18 +1,18 @@
-// std.parse — the public parser entry: parse_module + the declaration parsers
+// compiler.parse — the public parser entry: parse_module + the declaration parsers
 // (parse_decl/parse_fn_body/parse_struct/parse_enum/imports/impl + tparams + the
 // decl-classification dispatch). The bulk of the expression/statement/type parsers now
-// live in std.parse_expr / std.parse_stmt / std.parse_type, which this file imports.
+// live in compiler.parse_expr / compiler.parse_stmt / compiler.parse_type, which this file imports.
 //
 // parse_module is the PUBLIC entry the compiler driver (bootstrap/main.c) and the tests use,
-// so it stays here, importable from std.parse.
+// so it stays here, importable from compiler.parse.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, ti32, tvoid } = std.genc
-{ Token, Scan, scan, byte_at } = std.lex
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, ti32, tvoid } = compiler.genc
+{ Token, Scan, scan, byte_at } = compiler.lex
 { Malloc, malloc } = std.alloc
-{ parse_or, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = std.parse_expr
-{ build_body } = std.parse_stmt
-{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd } = std.parse_type
+{ parse_or, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
+{ build_body } = compiler.parse_stmt
+{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd } = compiler.parse_type
 
 // ── a whole function DECLARATION — `name* = (params) RetType { body }` ──────────────
 // The leading Ident is the name; the typed parameter list parses into a heap [Param]; the
@@ -226,13 +226,13 @@ take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // checker can tell an imported call from an undefined one. It collects the brace-list idents, then
 // skips the `=` and the dotted module path. This lets a real file (imports first) parse + check.
 decl_is_import = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
-skip_path = (src: str, pos: i32) i32 {                  // a dotted path `std.genc`: ident (`.` ident)*
+skip_path = (src: str, pos: i32) i32 {                  // a dotted path `compiler.genc`: ident (`.` ident)*
     id  := src.scan(pos)
     dot := src.scan(id.next)
     src.is_dot(dot.tok).match ({ true => src.skip_path(dot.next), false => id.next })
 }
 // imported names are stored as name-only Params (matching genc's ImportData) in a dedicated buffer
-// (cap 256 — an import list can be long, e.g. parse's own 60-name `std.genc` import).
+// (cap 256 — an import list can be long, e.g. parse's own 60-name `compiler.genc` import).
 import_buf = (a: Ptr<Malloc>) [Param] { slice(malloc(256 * sizeof(Param)), 256) }
 ImportEnd*: { count: i32, next: i32 }                   // how many names collected, and pos past '}'
 record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportEnd {
@@ -383,8 +383,8 @@ parse_module* = (a: Ptr<Malloc>, src: str) [Decl] {
 }
 
 // ── whole-string entry points ──────────────────────────────────────────────────────
-// the public single-source-string entries (kept here so std.parse's surface is stable —
-// the expression/statement parsers they delegate to live in std.parse_expr / std.parse_stmt).
+// the public single-source-string entries (kept here so compiler.parse's surface is stable —
+// the expression/statement parsers they delegate to live in compiler.parse_expr / compiler.parse_stmt).
 // parse a whole source string to an expression tree (the loosest level is `||`)
 parse* = (a: Ptr<Malloc>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
 // ── a function BODY under a caller-chosen name (the source is just the statements) ──

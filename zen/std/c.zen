@@ -7,7 +7,7 @@
 //
 // This file makes the bindings ONE thing. Following std.ast's metaprogramming style ("a generator is
 // just a function that builds AST values and returns them, emitted by genModule — no @emit"), a
-// "lib/header" is an ordinary function that RETURNS `[Decl]`: `libc()` builds, with the std.genc AST
+// "lib/header" is an ordinary function that RETURNS `[Decl]`: `libc()` builds, with the compiler.genc AST
 // constructors, the bodyless foreign DECLARATIONS for libc — the single source of truth, as data.
 //
 // A DForeign is a Func with no body — the checker learns its full signature, and genModule emits just
@@ -18,7 +18,7 @@
 // is N2). N1 proves the shape and gives the bindings one place to live.
 
 { malloc } = std.alloc
-{ Decl, Func, Param, Stmt, Ty, dforeign, tptr, param, ti32, ti64, tu8, tstr, tvoid } = std.genc
+{ Decl, Func, Param, Stmt, Ty, dforeign, tptr, param, ti32, ti64, tu8, tstr, tvoid } = compiler.genc
 
 // a generic heap copy of a (stack) `[…]` literal — the keystone of std.ast's builders, inlined here so
 // this header stays self-contained (deps: genc + alloc only). A function that RETURNS the AST it built
@@ -32,14 +32,14 @@ dup<T>  = (xs: [T]) [T] {
 }
 
 // ── empty AST sub-slices, built without a `[]` literal so this self-hosts (the same `slice(malloc(0),
-//    0)` idiom std.genc.no_tys / std.check.empty_params use). A foreign binding has no type params and
+//    0)` idiom compiler.genc.no_tys / compiler.check.empty_params use). A foreign binding has no type params and
 //    no body, so every `ffi` shares these. ──
 no_params = () [Param] { slice(malloc(0), 0) }                  // an empty [Param] (no tparams)
 no_stmts  = () [Stmt]  { slice(malloc(0), 0) }                  // an empty [Stmt]  (no body)
 
 // a heap-stable Ptr<Ty>, so a Ty returned from here (e.g. inside `tptr`) doesn't dangle: `addr()` of a
 // local would point into this frame, so box the value on the heap first (one slot of a fresh [Ty]).
-// (Mirrors std.genc.mono_tynode / std.parse_type.tynode — both private, so c.zen carries its own.)
+// (Mirrors compiler.genc.mono_tynode / compiler.parse_type.tynode — both private, so c.zen carries its own.)
 // `tybuf`'s `[Ty]` RETURN type is what fixes the element type (so `buf[0]` reads a Ty, not a void*).
 tybuf  = (n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
 tynode = (t: Ty) Ptr<Ty> {
@@ -47,8 +47,8 @@ tynode = (t: Ty) Ptr<Ty> {
     buf[0] = t
     buf[0].addr()
 }
-// `RawPtr<u8>` lowers to `uint8_t*` — a pointer to u8. (std.parse_type erases Ptr/MutPtr/RawPtr to a
-// bare `T*`; std.check builds a null RawPtr<u8> as exactly `tptr(tnode(tu8()))`.) This is how the libc
+// `RawPtr<u8>` lowers to `uint8_t*` — a pointer to u8. (compiler.parse_type erases Ptr/MutPtr/RawPtr to a
+// bare `T*`; compiler.check builds a null RawPtr<u8> as exactly `tptr(tnode(tu8()))`.) This is how the libc
 // allocation symbols spell their pointer arg/return type.
 rawptr = () Ty { tptr(tynode(tu8())) }
 

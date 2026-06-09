@@ -15,7 +15,7 @@ real resolver:
 
 THE REAL THING, built here (pure harness — touches NO compiler SOURCE, so zero fixpoint risk):
 
-  1. module_graph()  — parse every std/*.zen import line into the name->defining-module map and the
+  1. module_graph()  — parse every std/compiler import line into the name->defining-module map and the
                        module->[imported modules] edge set (the DImport graph).
   2. topo_order()    — Kahn topological sort of that graph (cycle-tolerant: a back edge is reported).
   3. resolve(target) — the per-module NAMESPACED world for `target`: the transitive closure of the
@@ -40,8 +40,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STD = ROOT / "zen" / "std"
+COMPILER = ROOT / "zen" / "compiler"
 
-_IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*std\.(?P<mod>\w+)")
+_IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*(?P<ns>std|compiler)\.(?P<mod>\w+)", re.S)
 # A decl head is `name[<tparams>][*] =/:` — the optional `<…>` is a GENERIC head (`Own<T>:`,
 # `new<T>* =`, `own_get<T>* =`); without it the generic stdlib exports (Own/new/clone/release/…)
 # were invisible to split_decls, so a cross-module CONSUMER of them saw them as undefined.
@@ -56,25 +57,69 @@ _DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(<[^>]*>)?(\*?)\s*[=:]")
 _IMPL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.impl\(\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def _module_id(ns, mod):
+    return ns + "/" + mod
+
+
+def _real_id(mod):
+    """Normalize a real on-disk module name to `std/name` or `compiler/name`."""
+    if "/" in mod:
+        return mod
+    if (STD / (mod + ".zen")).exists():
+        return _module_id("std", mod)
+    if (COMPILER / (mod + ".zen")).exists():
+        return _module_id("compiler", mod)
+    return mod
+
+
+def module_relpath(mod):
+    mid = _real_id(mod)
+    if "/" in mid:
+        ns, name = mid.split("/", 1)
+        return "zen/" + ns + "/" + name + ".zen"
+    return "zen/std/" + mid + ".zen"
+
+
+def _module_path(mod):
+    return ROOT / module_relpath(mod)
+
+
+def _normalize_modules(modules):
+    if modules is None:
+        return all_modules()
+    return [_real_id(m) for m in modules]
+
+
 def all_modules():
-    """Every std module name (no .zen), sorted — the universe the graph is built over."""
-    return sorted(p.stem for p in STD.glob("*.zen"))
+    """Every real std/compiler module id, sorted — the universe the graph is built over."""
+    return sorted([_module_id("std", p.stem) for p in STD.glob("*.zen")] +
+                  [_module_id("compiler", p.stem) for p in COMPILER.glob("*.zen")])
 
 
 def _src(mod):
-    return (STD / (mod + ".zen")).read_text()
+    return _module_path(mod).read_text()
 
 
 def import_edges(mod):
-    """The `{ a, b } = std.X` imports of `mod`, as a list of (imported_name, source_module) pairs in
-    source order. This is exactly std.resolve.is_import_line's classification, parsed for its names +
-    target module — the per-name edge the graph needs (the flat imports_of only kept the module)."""
+    """The `{ a, b } = std.X` / `compiler.X` imports of `mod`, as a list of
+    (imported_name, source_module_id) pairs in source order. This is exactly std.resolve.is_import_line's
+    classification, parsed for its names + target module — the per-name edge the graph needs."""
     out = []
-    for line in _src(mod).splitlines():
-        m = _IMPORT_RE.match(line)
+    lines = _src(mod).splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not line.lstrip().startswith("{ "):
+            continue
+        block = line
+        while ("}" not in block or not re.search(r"}\s*=\s*(std|compiler)\.", block, re.S)) and i < len(lines):
+            block += "\n" + lines[i]
+            i += 1
+        m = _IMPORT_RE.match(block)
         if not m:
             continue
-        srcmod = m.group("mod")
+        srcmod = _module_id(m.group("ns"), m.group("mod"))
         for nm in m.group("names").split(","):
             nm = nm.strip()
             if nm:
@@ -87,8 +132,7 @@ def module_graph(modules=None):
       edges[mod]        = ordered, de-duplicated list of modules `mod` imports (the adjacency list).
       name_origin[mod]  = { imported_name : defining_module } for `mod` (per-name resolution).
     Built once over every std module so a new module joins the graph automatically."""
-    if modules is None:
-        modules = all_modules()
+    modules = _normalize_modules(modules)
     modset = set(modules)
     edges = {}
     name_origin = {}
@@ -109,8 +153,7 @@ def topo_order(modules=None):
     (dependency-first — the order build_self would concat in). Returns (order, cycle_nodes); a
     self-loop / cycle leaves its members in cycle_nodes (the stdlib graph is a DAG, so it's empty).
     Edge direction: mod -> dep means `mod imports dep`; we want deps emitted first."""
-    if modules is None:
-        modules = all_modules()
+    modules = _normalize_modules(modules)
     edges, _ = module_graph(modules)
     # indegree counted on the DEPENDED-UPON node would invert; instead build reverse adjacency:
     # dep -> [modules that import dep], and indegree[mod] = number of deps mod still waits on.
@@ -138,6 +181,7 @@ def reachable(target, modules=None):
     """The transitive import closure of `target` (every module `target` reaches through imports,
     EXCLUDING `target` itself), in a deterministic dependency-first order. This is the set of modules
     whose definitions `target`'s imported names can resolve to — the world the resolver namespaces."""
+    target = _real_id(target)
     edges, _ = module_graph(modules)
     if target not in edges:
         return []
@@ -200,7 +244,7 @@ def split_decls(src):
         l = lines[i]
         stripped = l.lstrip()
         if (not l) or l[0].isspace() or stripped.startswith("//") or \
-           (stripped.startswith("{ ") and "= std." in l):
+           (stripped.startswith("{ ") and ("= std." in l or "= compiler." in l)):
             i += 1
             continue
         mi = _IMPL_HEAD_RE.match(l)
@@ -245,7 +289,7 @@ def split_decls(src):
 
 # ── in-memory variant: resolve over a synthetic module map (for the clash / transitive tests) ─────
 # Same algorithm as the real-file path, but the module bodies come from a {name: source} dict instead
-# of zen/std/*.zen, so a test can construct a deliberate name CLASH or a re-export CHAIN and prove the
+# of on-disk modules, so a test can construct a deliberate name CLASH or a re-export CHAIN and prove the
 # resolver namespaces / transitively-resolves it. Mirrors module_graph/reachable/resolve exactly.
 def _import_edges_src(src):
     out = []
@@ -305,6 +349,7 @@ def resolve(target, modules=None):
 
     Returns the resolved lib text. Feeding it to check_linked checks `target`'s imported calls against
     the resolved definitions, with no clash false-positive and full transitive reach."""
+    target = _real_id(target)
     libmods = reachable(target, modules)
     seen_names = set()
     chunks = []
@@ -317,46 +362,118 @@ def resolve(target, modules=None):
     return "\n".join(chunks)
 
 
-# ── STRETCH: wiring bootstrap/main.c --build-self to the resolver (PLAN, not yet done) ────────────
-# --build-self today flat-concats a HARDCODED SOURCES list (genc, genc_mono, genc_emit, lex,
-# parse_expr, parse_type, parse_stmt, parse, check) with imports stripped, then parse->resolve->emit,
-# and the bootstrap FIXPOINT (tests/test_bootstrap.py) requires the result be BYTE-EXACT.
-#
-# Why a topo-order substitution can't be a drop-in (verified):
-#   * genModule emits decls in SOURCE ORDER, so the flat concatenation order is load-bearing — change
-#     it and the emitted C changes, breaking the fixpoint.
-#   * topo_order(SOURCES) != the hardcoded order (it puts `check` before the parse_* modules), and the
-#     parse_* SOURCES form a CYCLE (no canonical topological position). So "order = topo_order()" alone
-#     reorders decls and diverges. (build_self_self_test below proves the concats differ.)
-#
-# The correct wiring (a real follow-up, kept out of this PR to protect the fixpoint):
-#   1. Add a Zen entry `compiler_source*(a, roots: [str]) str` to std.resolve that, given the SOURCE
-#      file BODIES (read by std.io), reproduces build_self_source: for each file in a fixed order,
-#      strip imports (already in std.resolve.strip_imports) and concat with '\n' (concat_files). This
-#      already exists in prototype form — strip_imports/concat_files are the primitives.
-#   2. Have it DISCOVER the file set + order from the import GRAPH instead of a hardcoded list, but
-#      pin the order to a STABLE topo that ties the parse_* cycle deterministically to the CURRENT
-#      hardcoded order (e.g. SCC-condense the graph, topo-order the condensation, and within each SCC
-#      keep the committed file order). That yields the same concatenation the hardcoded list does, so
-#      the fixpoint stays byte-exact while the SOURCES list is now graph-derived, not hand-maintained.
-#   3. Replace bootstrap/main.c's SOURCES[]/build_self_source with a call into that Zen entry (the C
-#      side shrinks to: read roots, call compiler_source, emit). Then run `make regen` + the fixpoint
-#      test; iterate the SCC tie-breaker until byte-exact.
-# Until step 2's order-pinning is proven byte-exact, --build-self is LEFT AS-IS (per the task's
-# fallback): the resolver + the complete namespaced cross-module CHECK below ship now; the build wiring
-# is this plan.
+# ── bootstrap/sources.txt graph order ─────────────────────────────────────────────────────────────
+# --build-self still consumes an explicit manifest because the committed C seed must be buildable before
+# any Zen compiler exists. The manifest is no longer a hidden/manual order: tests derive the expected
+# source SET from bootstrap roots + runtime-provided std exclusions, then derive the expected ORDER by
+# SCC-condensing the import graph and sorting deterministically inside each SCC.
+
+_BOOTSTRAP_ROOTS = ["compiler/genc_emit", "compiler/parse", "compiler/check_validate", "std/resolve"]
+_BOOTSTRAP_RUNTIME_MODULES = {"std/alloc", "std/mem", "std/str", "std/string"}
+
+
+def _bootstrap_manifest_modules():
+    mods = []
+    for raw in (ROOT / "bootstrap" / "sources.txt").read_text().splitlines():
+        rel = raw.strip()
+        if not rel or rel.startswith("#"):
+            continue
+        p = Path(rel)
+        if len(p.parts) == 3 and p.parts[0] == "zen" and p.parts[1] in ("std", "compiler") and p.suffix == ".zen":
+            mods.append(p.parts[1] + "/" + p.stem)
+    return mods
+
+
+def _bootstrap_source_set():
+    edges, _ = module_graph()
+    seen = set()
+
+    def walk(mod):
+        mod = _real_id(mod)
+        if mod in seen or mod in _BOOTSTRAP_RUNTIME_MODULES:
+            return
+        seen.add(mod)
+        for dep in edges.get(mod, []):
+            walk(dep)
+
+    for root in _BOOTSTRAP_ROOTS:
+        walk(root)
+    return seen
+
+
+def _scc_graph_order(modules):
+    modules = sorted(_real_id(m) for m in modules)
+    edges, _ = module_graph(modules)
+    index = 0
+    stack = []
+    on_stack = set()
+    idx = {}
+    low = {}
+    comps = []
+
+    def strongconnect(v):
+        nonlocal index
+        idx[v] = index
+        low[v] = index
+        index += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in sorted(edges[v]):
+            if w not in idx:
+                strongconnect(w)
+                low[v] = min(low[v], low[w])
+            elif w in on_stack:
+                low[v] = min(low[v], idx[w])
+        if low[v] == idx[v]:
+            comp = []
+            while True:
+                w = stack.pop()
+                on_stack.remove(w)
+                comp.append(w)
+                if w == v:
+                    break
+            comps.append(sorted(comp))
+
+    for mod in modules:
+        if mod not in idx:
+            strongconnect(mod)
+
+    comp_of = {m: i for i, comp in enumerate(comps) for m in comp}
+    comp_edges = {i: set() for i in range(len(comps))}
+    indeg = {i: 0 for i in range(len(comps))}
+    for mod in modules:
+        for dep in edges[mod]:
+            a = comp_of[dep]
+            b = comp_of[mod]
+            if a != b and b not in comp_edges[a]:
+                comp_edges[a].add(b)
+                indeg[b] += 1
+
+    ready = sorted((i for i, n in indeg.items() if n == 0), key=lambda i: comps[i][0])
+    out = []
+    while ready:
+        comp = ready.pop(0)
+        out.extend(comps[comp])
+        for nxt in sorted(comp_edges[comp], key=lambda i: comps[i][0]):
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                ready.append(nxt)
+        ready.sort(key=lambda i: comps[i][0])
+    return out
+
+
+def _bootstrap_graph_order():
+    return _scc_graph_order(_bootstrap_source_set())
 
 
 def _build_self_order_differs():
-    """Evidence for the plan above: a topo concat of the bootstrap SOURCES is NOT byte-identical to the
-    hardcoded-order concat, so reordering --build-self by topo alone would break the fixpoint. Returns
-    True (they differ) — asserted by test_resolver_oracle so the claim can't silently rot."""
-    sources = ["genc", "genc_mono", "genc_emit", "lex",
-               "parse_expr", "parse_type", "parse_stmt", "parse", "check"]
+    """Raw topo still cannot replace SCC order because the parse modules form a cycle."""
+    sources = _bootstrap_manifest_modules()
+    assert sources, "bootstrap/sources.txt listed no Zen modules"
 
     def strip(m):
         return "\n".join(l for l in _src(m).splitlines()
-                         if not (l.strip().startswith("{ ") and "= std." in l))
+                         if not (l.strip().startswith("{ ") and ("= std." in l or "= compiler." in l)))
     hard = "\n".join(strip(m) for m in sources)
     order, cycle = topo_order(sources)
     topo = "\n".join(strip(m) for m in (order + cycle))
