@@ -311,3 +311,18 @@ def test_zenc_check_rejects_midfile_garbage():
     (d / "p.zen").write_text("good = () i32 { 1 }\n@@@ !!!\nmain = () i32 { good() + 6 }\n")
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode != 0 and "syntax error" in r.stderr, r.stderr
+
+
+# ── review fix #4 / fuzz #8: leading-paren statement glue ────────────────────────────────────────────
+def test_zenc_no_leading_paren_statement_glue():
+    """`b := id` then a new line `(4)` used to glue into `b := id(4)` (a silent miscompile when the RHS
+    names a fn). A `(` that opens a NEW LINE is its own statement, mirroring the `[` same-line rule."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println_int } = std.fmt\n"
+        "id = (n: i64) i64 { n }\n"
+        "main = () i32 {\n  b := id\n  (4)\n  println_int(7)\n  0\n}\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == "7\n", (r.returncode, r.stdout, r.stderr)

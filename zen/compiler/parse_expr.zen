@@ -597,7 +597,10 @@ paren_is_struct = (src: str, pos: i32) bool {
 parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
-    src.is_lparen(nx.tok).match ({
+    // a call/construction `(` continues the expression ONLY on the SAME line as the name — a `(` that
+    // opens a new line is its own (parenthesized) statement, not an argument list. Mirrors is_index_at's
+    // `[` rule; without it `b := id` ⨯ newline ⨯ `(4)` silently glued into `b := id(4)` (fuzz #8).
+    (src.is_lparen(nx.tok) && !src.nl_between(sc.next, nx.tok.start)).match ({
         true  => src.paren_is_struct(nx.next).match ({
             true  => a.parse_paren_struct_lit(src, name, nx),      // `Name(f: v, …)` — a struct construction
             false => a.parse_call(src, name, nx)                   // `name(args)` — a call
