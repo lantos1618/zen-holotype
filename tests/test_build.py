@@ -265,3 +265,24 @@ def test_p3_does_not_false_reject_true_false_or_sizeof_or_bound_locals():
         "main = () i32 { 0 }\n"
     )
     assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
+
+
+def test_zenc_check_keeps_match_payload_bindings_in_scope():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "R*: Ok(i32) | Err\n"
+        "main = () i32 { r := .Ok(7)  r.match({ .Ok(v) => v, .Err => 0 }) }\n"
+    )
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_zenc_check_threads_block_let_bindings():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "main = () i32 { true.match({ true => { x := 4  x }, false => 0 }) }\n"
+    )
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
