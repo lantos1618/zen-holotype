@@ -6,8 +6,7 @@ resolves to one. A method's `s.field` on a `Ptr<Type>` receiver auto-derefs to `
 
 Driven entirely by `_oracle` (the EMIT + CHECK binaries built from the committed bootstrap C by
 `cc` — zero Python): `self_side(src)["value"]` runs the emitted program; `check_count(src)` is the
-CHECK binary's trait-conformance error count. (Replaces the old `_selfhost.run_value` / `check_errors`
-that drove the Python host.)
+CHECK binary's trait-conformance error count.
 """
 import pytest
 

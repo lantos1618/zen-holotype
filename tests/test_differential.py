@@ -5,8 +5,7 @@ we assert the self-hosted side now computes the right value / verdict.
 `self_side(src)` runs the program through the self-hosted BINARY oracle (`_oracle.self_side`) and
 returns {verdict: accept|reject, value: int|None}. NO Python frontend is in the loop — the EMIT +
 CHECK binaries (built from the committed bootstrap C by `cc` alone) are the sole correctness
-reference. (The old cross-frontend `py_side` agreement check, test_no_divergence, was deleted with
-the Python reference in Stage D — the oracle's golden values stand in for it.)
+reference.
 """
 import pytest
 
@@ -244,8 +243,7 @@ def test_integer_match(src, want):
 
 
 # Member-target assignment `p.x = v` — was dropped entirely (the `= v` glued onto the next line),
-# silently corrupting the return value. (Python's reference grammar lacks reassignment, so we assert
-# the self-hosted value directly.)
+# silently corrupting the return value. Assert the self-hosted value directly.
 @pytest.mark.parametrize("src,want", [
     # the write is a dead store; trailing 5 is returned (was miscompiled to 99)
     ("P*: { x: i32 }\nf* = (p: P) i32 {\n p.x = 99\n 5\n}\ntest* = () i32 { f(P(x: 0)) }", 5),
@@ -352,7 +350,7 @@ def test_value_position_trailing_yield_accepted(src, want):
 
 # Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /
 # "conflicting types"). The self-hosted backend doesn't mangle plain fn names, so the checker must
-# reject a duplicate, matching the Python frontend's Namespace Conflict. Zen has no overloading. (#5.)
+# reject duplicates before C emission. Zen has no overloading. (#5.)
 @pytest.mark.parametrize("src", [
     "foo* = () i32 { 1 }\nfoo* = () i32 { 2 }\ntest* = () i32 { foo() }",
     "a* = () i32 { 1 }\ndup* = () i32 { 2 }\ndup* = () i32 { 3 }\ntest* = () i32 { a() }",

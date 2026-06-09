@@ -1,4 +1,4 @@
-"""Python-FREE self-hosted oracle — the Stage-C2 replacement for `_difftest.self_side`.
+"""Python-FREE self-hosted oracle for emitted values and checker verdicts.
 
 The self-hosted `zenc` BINARY is the sole correctness reference: NO `zen.main` (the Python
 reference frontend) is imported here. Two binaries, both built from the committed bootstrap C
@@ -132,10 +132,10 @@ int main(int argc, char** argv){
 }
 """
 
-# Runtime/compiler symbols the _selfhost driver's _PRELUDE makes visible to a checked program
+# Runtime/compiler symbols made visible to checked source snippets
 # (Malloc, heap, slice, putchar, …). The check binary's flat source has no module resolver, so a
 # program that uses these names would otherwise count them as undefined. We prepend bodyless
-# DForeign decls so the checker treats them as known imported signatures (matching _selfhost).
+# DForeign decls so the checker treats them as known imported signatures.
 # (Only used by the CHECK path; the emit path tolerates them via genc's intrinsic handling.)
 _PRELUDE = (
     "heap = (n: i64) RawPtr<u8>\n"
@@ -358,8 +358,8 @@ def emit_rc(src):
 
 
 def check_count(src):
-    """The CHECK binary's error count (process exit code) — the drop-in for _selfhost.check_errors.
-    The runtime _PRELUDE makes _selfhost's imported runtime symbols (heap, …) known to the checker."""
+    """The CHECK binary's error count (process exit code).
+    The runtime _PRELUDE makes imported runtime symbols (heap, ...) known to the checker."""
     return subprocess.run([str(_build_check())], input=_PRELUDE + src, capture_output=True,
                           text=True, timeout=30).returncode
 
@@ -401,7 +401,7 @@ def emit_value(src):
 
 
 def self_side(src):
-    """Drop-in shape-compatible with _difftest.self_side: {verdict, value}."""
+    """Return the oracle shape used by tests: {verdict, value}."""
     v = verdict(src)
     val = emit_value(src) if ("test*" in src or "test *" in src) else None
     return {"verdict": v, "value": val}
