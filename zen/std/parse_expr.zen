@@ -173,8 +173,14 @@ parse_ctor_empty = (a: Ptr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
 }
 parse_ctor_payload = (a: Ptr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
     arg := a.parse_or(src, lp.next)                  // the single payload expression
-    rp  := src.scan(arg.next)                        // ')'
-    PExpr( expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next )     // `.Variant(arg)` -> MakeEnum
+    rp  := src.scan(arg.next)                        // MUST be ')'
+    // A variant payload is exactly ONE expression. An empty/garbage/extra-comma slot — `.A(,)`, `.A(7,)`,
+    // `.A(7,8)` — leaves a non-`)` token here; parse_or yielded a null/placeholder arg node that codegen
+    // later dereferenced → SIGSEGV (fuzz #2). Reject it (the undefined-name sentinel) instead.
+    src.is_rparen(rp.tok).match ({
+        true  => PExpr( expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next ),     // `.Variant(arg)` -> MakeEnum
+        false => a.reject_match(rp.next)
+    })
 }
 // a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
 is_dot*      = (src: str, t: Token) bool { src.is_op(t, '.') }
