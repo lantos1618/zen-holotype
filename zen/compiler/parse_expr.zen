@@ -462,8 +462,18 @@ parse_lit_after = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after:
             // the final arm is the subject-ignoring default ONLY if it was `_`; a concrete literal as the
             // last arm leaves the other subject values uncovered → reject as non-exhaustive (kind 3 sentinel).
             true  => arm.wild.match ({ true => PExpr( expr: arm.body, next: after.next ), false => a.reject_match(after.next) }),
-            false => a.cons_lit_arm(src, subj, arm, after)
+            false => a.lit_arm_more(src, subj, arm, after)
         })
+    })
+}
+// `after` is the ','. A TRAILING comma (`, }` — the user's match-arm style allows one on the last arm)
+// just closes the match: peek past the comma, and a '}' ends the arms exactly like the no-comma rbrace
+// case above (wild gates default-vs-non-exhaustive). Anything else is a real next arm.
+lit_arm_more = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
+    nx := src.scan(after.next)
+    src.is_rbrace(nx.tok).match ({
+        true  => arm.wild.match ({ true => PExpr( expr: arm.body, next: nx.next ), false => a.reject_match(nx.next) }),
+        false => a.cons_lit_arm(src, subj, arm, after)
     })
 }
 cons_lit_arm = (a: Ptr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
