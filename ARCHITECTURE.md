@@ -28,9 +28,9 @@ emitted C to `cc`.
 ```
 
 `compiler.genc`'s `Expr`/`Stmt`/`Decl` are the **one AST** the parser builds, the checker
-annotates, and a backend walks. `compiler.genjs` is a second backend over that same AST (it
-emits JavaScript), which is what proves the AST is genuinely backend-neutral IR rather than
-a C-specific tree.
+annotates, and a backend walks. `compiler.genjs` is a second, partial backend over that
+same AST for the computational subset; it demonstrates AST reuse without making the whole
+IR backend-neutral yet.
 
 Checked CLI modes reject on any type error before linking.
 The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one

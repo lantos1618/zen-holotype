@@ -210,9 +210,9 @@ a method is a node, visibility is "does it have a node." No separate symbol tabl
 
 ## Today → the direction
 
-The compiler today is a working, tested one for a keyword-ful surface (`trait`, `impl`,
-`Name: { }`) — though visibility is already the VISION's glued `*` (`Vec*`, `area*`), not a `pub`
-keyword. Getting to the one-structure form above is a front-end change — fold
+The compiler today is a working, tested one for the current surface (trait records,
+`Type.impl(...)`, `Name: { }`) — though visibility is already the VISION's glued `*`
+(`Vec*`, `area*`), not a `pub` keyword. Getting to the one-structure form above is a front-end change — fold
 struct/enum/trait/impl/visibility into the trie under the single `decl` shape — while the back
 end (monomorphize → C) and the `fits()` lattice **carry straight over**: a record is still a
 product, a sum is still a tagged union, a method is still a trie node. The grammar evolves in
@@ -244,7 +244,7 @@ generator:  () → [Decl]  (in Zen)        // a function that BUILDS AST and ret
 - The **kernel** never knows about C, JS, or LLVM. It produces a *checked, resolved* AST —
   structure that has been proven to fit. It only ever answers "does this fit?".
 - A **backend** is a walk over that AST emitting a target. `gen.c` exists (`compiler.genc`), and a
-  JavaScript one (`compiler.genjs`) walks the *same* AST. C stays the bootstrap target while
+  partial JavaScript one (`compiler.genjs`) walks the *same* AST. C stays the bootstrap target while
   `gen.llvm` / `gen.json` are *more of the same* — each keeps its own variable/type tables
   and target-native branches, but never re-checks, because the kernel already did. **New
   target = new backend.**
@@ -266,7 +266,7 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
 2. **Metaprogramming as values** — generators that build `[Decl]` and emit via `genModule`,
    with `std.ast`'s builders. ✅ (`std.c`'s `libc()` is the canonical example: a function that
    returns its bindings as AST.) *Remaining: grow the self-hosted checker to full language parity.*
-3. **the one-structure grammar** — collapse the keyword-ful surface into the single `decl` shape
+3. **the one-structure grammar** — collapse the current multi-form surface into the single `decl` shape
    (fold struct/enum/trait/impl/visibility into the trie). Same back end, same `fits()`.
 4. **more backends** — `gen.llvm`, a richer `gen.js` — each just another walk over the same CheckedAst.
 

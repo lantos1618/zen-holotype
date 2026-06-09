@@ -19,10 +19,10 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   (lowered to C tagged unions).
 - **Slices** — `[T]`, a `(ptr, len)` view (lowers to `struct { T* ptr; int64_t len; }`).
   `[a, b, c]` literals, `xs[i]` indexing, `xs.len`. Iterated with the element-form `loop`.
-- **Pointers, three kinds, with a real subtyping lattice:** `Ptr<T>` (read-only),
-  `MutPtr<T>` (writable), `RawPtr<T>` (untyped, for FFI). `fits()` enforces direction
-  (`MutPtr ≤ Ptr`), nullability (`T ≤ Option<T>`, no bare null), invariant writable
-  pointees, and integer widening (`u8 ≤ i32 ≤ i64`). All of it erases to plain C.
+- **Pointers:** the parser accepts `Ptr<T>`, `MutPtr<T>`, and `RawPtr<T>`, and the backend
+  erases them to plain C pointers. The checker currently treats those spellings as one
+  pointer type with invariant pointee equality; `fits()` also handles integer widening
+  (`u8 ≤ i32 ≤ i64`). Full pointer-direction and nullability enforcement is still pending.
 - **Generics:** `Box<T>`, bounded `<T: Area>` — unification + **monomorphization** to
   concrete C.
 - **Traits & impls (keyword-free):** a trait is a record of method signatures
@@ -40,17 +40,15 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   exhaustiveness, and wildcards — the source-level branching form, usable as an expression
   or a statement. The C backend may lower checked matches to `?:` or `if`/`else`
   internally; Zen source does not have an `if` statement.
-- **`loop`** — the *one* iteration construct (no `while`/`for`). `loop(n, (h, i) { … })` counts;
-  `loop(xs, (h, i, x) { … })` / `xs.loop((h, i, x) { … })` iterates a slice's elements — or a
-  **user struct**'s, when it supplies `len` and an `at(Ptr<Self>, i64) T` method (`[]`-overloading);
-  `loop((h) { … })` is iterless and handle-driven; the handle does `h.break()` / `h.continue()`.
-  It desugars onto the **`@while(cond) { … }`** structured primitive, which lowers to a C `for`
-  (kept structured so it stays auto-vectorizable — never gotos).
+- **`loop`** — postfix slice iteration: `xs.loop((h, i, x) { … })` iterates a slice's
+  elements. The backend also has an internal structured `@while(cond) { … }` form, lowered
+  to a C `for`; Zen source does not expose `while`/`for`.
 - **Closures-as-values** — a function with a closure-typed parameter `f: (A, B) C` is an
   *inline template*: it is never emitted as a standalone C function. Each call splices the
   body as a GNU statement-expression with the closure argument `(a, x) { … }` inlined where the
   parameter is called. **Zero-cost** (no function pointers), captures resolve in the caller's
-  scope so they read *and* mutate as written, and the C stays clean under `-Wall -Wextra -Werror`.
+  scope so they read *and* mutate as written, and the generated C is compiled by the system `cc`
+  in the bootstrap/build paths.
   So `fold`/`each` are ordinary Zen on top of `loop` — `fold(xs, 0, (a, x) { a + x })`.
 - **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`), `xs[i] = v` (write a slice element).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
@@ -60,8 +58,8 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   It desugars uniformly (checker, reachability scan, lowerer), so it resolves free functions and
   trait-bound methods identically to the free-call form, and chains (`5.inc().dbl()`).
 - **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `Area*: { … }` —
-  not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). Bare name = private to
-  its file, and **enforced**: another module importing a non-`*` name is a `Private` error.
+  not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). It marks the intended
+  public surface; full cross-module privacy enforcement is still pending.
 
 ## Foreign bindings, errors & FFI memory
 The boundary to C, and what's on each side of it, kept explicit. A program is built from
@@ -144,8 +142,9 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   monomorphization. `If`/`While` here are backend/internal structured target forms; the Zen
   source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
   not a demo.
-- **`compiler.genjs` — a second backend over that same AST**, emitting JavaScript (the computational
-  subset). Proof the AST is genuine backend-neutral IR: zen generates its own C and JS.
+- **`compiler.genjs` — a second backend over that same AST**, emitting JavaScript for the
+  computational subset. It demonstrates reuse of the shared AST without claiming the whole
+  compiler IR is backend-neutral yet.
 - **`compiler.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
   kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (a `str` is a `const char*`),
   tokens are spans (allocation-free), and it handles idents, ints, strings (with escapes), multi-char
@@ -192,8 +191,8 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 
 ## Modules & imports
 - An import is a destructuring of a module path — `{ a, b } = std.X` binds `a`, `b` from
-  `zen/std/X.zen`. Visibility is the glued `*`: only `name*` declarations are reachable
-  across files; importing a non-`*` name is a `Private` error.
+  `zen/std/X.zen`. Visibility is the glued `*` marker on public names; resolver-level
+  privacy errors are still pending.
 - `zenc check`, `zenc build`, and `zenc run` resolve `std` imports from disk before parsing:
   **`zen/std/resolve.zen`** follows the program's import edges, gathers the transitive
   closure of `zen/std/*.zen` modules, strips the import lines, and concatenates each body

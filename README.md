@@ -2,9 +2,9 @@
 
 **zen** is a tiny, **self-hosted** compiler for a small [Zen](https://github.com/lantos1618/zenlang)-flavoured
 language, built to test one idea: **pin down what every value _is_ with type structure,
-and you lock out everything it isn't.** Do that for pointers, modules, and functions
-alike, and module imports, type-checking, and pointer safety all become the _same_
-operation — checking that a signature fits in one shared space.
+and you lock out everything it isn't.** The compiler already applies that to names,
+functions, generics, and numeric fits; pointer direction/nullability are still converging
+on the same model.
 
 The compiler is written in Zen and compiles itself: `cc` builds a `zenc` binary from
 committed C, and `zenc` re-emits that C byte-for-byte. C is the intentional
@@ -16,12 +16,13 @@ intermediate/bootstrap target today — not a defect or a host-language fallback
 
 ## What we're actually doing: structure *is* the constraint
 
-We're not writing checks that hunt for bad programs — no null pass, no borrow pass, no
-separate linker. We do the opposite: **we describe exactly what each thing is, and that
-description locks out everything it isn't.** A type is a closed door; "checking" is just
-confirming the key fits the lock.
+The target is not a pile of checks that hunt for bad programs — no separate null pass,
+borrow pass, and linker-shaped namespace pass. We do the opposite: **describe exactly
+what each thing is, and let that description lock out everything it isn't.** A type is a
+closed door; "checking" is confirming the key fits the lock.
 
-Take one annotation. `Ptr<Vec>` is not "a pointer" — it's three locks at once:
+Take one annotation. The intended shape of `Ptr<Vec>` is not "a pointer" — it's three
+locks at once:
 
 ```
    Ptr < Vec >
@@ -30,16 +31,22 @@ Take one annotation. `Ptr<Vec>` is not "a pointer" — it's three locks at once:
     └──────── non-null    →  absence locked out       (null needs Option<…>)
 ```
 
-Every capability is **opt-in**. Didn't write `MutPtr`? You cannot mutate. Didn't write
-`Option`? There is no null. Whatever you didn't permit isn't "checked for and rejected" —
-it's *unrepresentable*. The same move scales: a **path** locks identity (`core.vec.Vec`
-is one node, so you can't mean a different `Vec`), and a **function signature** locks its
-call sites (only values whose locks match the parameter get in).
+The desired capability model is **opt-in**. Didn't write `MutPtr`? Mutation should be
+locked out. Didn't write `Option`? Null should be unrepresentable. The same move scales:
+a **path** locks identity (`core.vec.Vec` is one node, so you can't mean a different
+`Vec`), and a **function signature** locks its call sites (only values whose locks match
+the parameter get in).
+
+Current implementation note: the parser accepts `Ptr<T>`, `MutPtr<T>`, and `RawPtr<T>`,
+but the checker/backend currently collapse them to one pointer type and enforce invariant
+pointee equality. Nullable values are modeled through library enums/raw pointers today; the
+full pointer-direction/nullability lattice is the direction, not fully enforced shipping
+behavior yet.
 
 So the three things a compiler usually does separately — resolve names, check types, prove
-pointer safety — are here the single act of **fitting a key to a lock**. That's why one
-`fits()` does all of it, and why the legal program is exactly the shape the structure
-allows, nothing more.
+pointer safety — are meant to become the single act of **fitting a key to a lock**. The
+current compiler already uses that shape for function calls, generics, numeric widening,
+and invariant pointer pointees.
 
 ## How it works
 
@@ -67,43 +74,41 @@ allows, nothing more.
                         ▼
               ┌─────────────────────┐
      PASS ✓ ◄─┤  fits(given, want)? ├─► FAIL ✗   reported, excluded from codegen
-              └──────────┬──────────┘   null → nonnull ✗  ·  read → mut ✗
-                         ▼               (rules: nonnull ≤ Option,  MutPtr ≤ Ptr)
+              └──────────┬──────────┘   type mismatch ✗
+                         ▼               (numeric widening + structural equality today)
               ┌─────────────────────┐
-              │     lower to C      │   Ptr → const* ,  Option → *   (types erase away)
+              │     lower to C      │   pointers erase to C pointers
               └──────────┬──────────┘
-                         ▼  cc -Wall -Wextra
+                        ▼  cc
                     build/vecdemo   ──►   12
 ```
 
 ## Why it pays off
 
-Folding name-resolution, type-checking, and pointer-safety into one `fits()` isn't just
-tidy — it buys real things:
+Folding name-resolution, type-checking, and pointer-safety toward one `fits()` relation
+isn't just tidy — it buys real things:
 
-- **Imports come for free.** A path *is* a type's identity, so importing is just a trie
-  lookup. Diamond imports (A and B both import C) land on the same node automatically — no
-  dedup, no conflict logic. The only way to clash is two files claiming one path, which the
-  filesystem already forbids.
-- **Pointer safety *is* type-checking.** Nullability (`Option<T>`) and direction
-  (`Ptr`/`MutPtr`) are axes of the type, so a null flowing into a non-null — or a read-only
-  pointer into a mutable slot — is caught by the *same* `fits()` that checks everything
-  else. No separate null pass, no borrow checker to write or keep in sync.
-- **Zero runtime cost.** The discipline is a compile-time fiction: `Ptr` erases to
-  `const*`, `Option` to a bare pointer. Once it checks, the emitted C carries no tags and
-  no guards — and `cc` re-verifies the const-correctness, a free second opinion.
-- **It stays tiny, and it's its own proof.** The whole checker is one trie + a ~20-line
-  `fits()` — written in Zen, and it compiles itself (a deterministic fixpoint).
+- **Imports are becoming structural.** Today `std.resolve` flattens the `std`/`compiler`
+  import closure, dedups by module and top-level name, and gives deterministic
+  first-definition behavior. The trie/path model is the direction.
+- **Pointer safety is moving into type-checking.** Numeric widening and invariant pointer
+  pointees are checked by `fits()` today. Pointer direction and nullability are spelled in
+  source, but full enforcement of those axes is still pending.
+- **Low runtime cost.** Implemented pointer forms erase to plain C pointers, and checked
+  program structure lowers directly to C. Library `Opt`/`Result` values remain explicit
+  user-level enums where tags are part of the chosen representation.
+- **It stays small, and it's its own proof.** The checker and validator are written in Zen,
+  and the compiler compiles itself (a deterministic fixpoint).
 
 The trade: it leans on **nominal** identity (a type *is* its path) and asks you to write
-every pointer's direction and nullability down. In return you delete two entire passes.
+every pointer's direction and nullability down. As the checker catches up to that surface,
+those axes can stay in one pass instead of becoming separate analyses.
 
 ## The whole compiler, in four ideas
 
-**1. One trie is the namespace, the import resolver, and the conflict checker.**
-A file's path *is* its name. `core/vec.zen` defining `Vec` becomes the one node
-`core.vec.Vec` — so every import of it lands on that same node, and the only way
-to get a name conflict is for two files to claim the same path.
+**1. The path/trie model is the namespace direction.**
+Conceptually, a file's path *is* its name. `core/vec.zen` defining `Vec` becomes the
+one node `core.vec.Vec` — so every import of it lands on that same node.
 
 ```
 core/vec.zen     Vec*: { len: i32, cap: i32 }      →  defines node  core.vec.Vec
@@ -112,18 +117,20 @@ ops/area.zen     { Vec } = core.vec    ─┐
 main.zen         { Vec } = core.vec    ─┴─►  both resolve to that ONE node
                                              (a diamond import — never duplicated)
 
-conflict?  ONLY if two files both define  core.vec.Vec
+target conflict?  two files both define  core.vec.Vec
 ```
 
-No separate symbol table, import resolver, or conflict pass — they're the same
-lookup in one trie. (`std.resolve` is the self-hosted loader that walks a program's
-`{ … } = std.X` imports, gathers the transitive closure, and hands `zenc` one flat
-module — see [Modules & imports](#modules--imports).)
+The trie model is the direction for names and imports. Today `std.resolve` is the
+self-hosted loader that walks a program's `{ … } = std.X` imports, gathers the
+transitive closure, dedups module/name collisions, and hands `zenc` one flat module —
+see [Modules & imports](#modules--imports).
 
-**2. Pointers are types. `fits()` is the only logic outside the trie.**
-Direction (`Ptr`/`MutPtr`/`RawPtr`) and nullability (`Option<T>`, no bare null)
-are axes of the type, so the same check that resolves everything else also locks
-pointer direction and rejects nulls — no separate null pass, no separate borrow pass.
+**2. Pointers are types. `fits()` is where that logic is landing.**
+The target shape has direction (`Ptr`/`MutPtr`/`RawPtr`) and nullability
+(`Option<T>`, no bare null) as axes of the type, so the same check that resolves
+everything else can also lock pointer direction and reject nulls. Today, `fits()`
+enforces numeric widening plus structural equality, including invariant pointer
+pointees; direction/nullability enforcement is still pending.
 
 ```
  DIRECTION              NULLABILITY
@@ -133,17 +140,16 @@ pointer direction and rejects nulls — no separate null pass, no separate borro
 ```
 
 ```
-fits(given, want):
-    nonnull T    where Option<T> wanted   -> ok      (T ≤ Option<T>)
+target fits(given, want):
+    nonnull T    where Option<T> wanted   -> ok      (T <= Option<T>)
     Option<T>    where plain    T wanted   -> REJECT  (the null guard)
-    MutPtr<T>    where Ptr<T>   wanted     -> ok      (MutPtr ≤ Ptr)
+    MutPtr<T>    where Ptr<T>   wanted     -> ok      (MutPtr <= Ptr)
     Ptr<T>       where MutPtr<T> wanted    -> REJECT  (direction locked)
 ```
 
-**3. The type system erases to plain C.** `Ptr` → `const *`, `MutPtr` → `*`,
-`Option<ptr>` → a bare pointer. All safety is proven *before* codegen, so the
-output is zero-overhead and the C compiler re-checks the const-correctness for free. The
-source language still branches with `.match` only; the C backend is free to lower checked
+**3. The type system lowers to plain C.** Implemented pointer forms erase to C pointers,
+and checked structure lowers directly. The source language still branches with `.match`
+only; the C backend is free to lower checked
 matches to target-level `if`/`else` or `?:` because those are backend details, not Zen
 syntax.
 
@@ -151,8 +157,8 @@ syntax.
 backend are all ordinary Zen modules in `zen/compiler/` (`lex`, `parse*`, `check`, `genc*`).
 `zenc` compiles them to C; fed its **own** sources it re-emits byte-for-byte the committed
 `bootstrap/zenc.gen.c` — a deterministic **fixpoint**. New backend = new walk over the same
-AST (a JavaScript one, `compiler.genjs`, already exists alongside the intentional bootstrap C
-backend, `compiler.genc`).
+AST (a partial JavaScript backend, `compiler.genjs`, already exists alongside the
+intentional bootstrap C backend, `compiler.genc`).
 
 ## Build & run
 
@@ -298,7 +304,7 @@ See **[FEATURES.md](FEATURES.md)** for the full inventory,
 | `zen/compiler/parse.zen` + `parse_expr` / `parse_stmt` / `parse_type` | recursive-descent parser → `compiler.genc` AST |
 | `zen/compiler/check.zen` + `check_validate.zen` | resolver + the `fits()` validator |
 | `zen/compiler/genc.zen` + `genc_emit` / `genc_mono` | the C backend (the shared AST + emit + monomorphization) |
-| `zen/compiler/genjs.zen` | a JavaScript backend over the *same* AST |
+| `zen/compiler/genjs.zen` | a partial JavaScript backend over the *same* AST |
 | `zen/std/{mem,str,string,alloc,vec,iter}.zen` | the runtime stdlib (allocator, slices, strings, iterators) |
 | `zen/std/{c,result,cown,drop,io,resolve}.zen` | bindings, errors-as-values, FFI-memory rule, module loader |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked bootstrap manifest) + `zenrt.c`/`main.c`/`Makefile` |

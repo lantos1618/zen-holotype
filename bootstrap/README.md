@@ -17,7 +17,7 @@ it into a standalone `zenc` binary **without Python**:
 
 ```sh
 make -f bootstrap/Makefile zenc   # cc -std=gnu11 -w bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
-./zenc path/to/source.zen        # or: echo 'add* = (a:i32,b:i32) i32 { a+b }' | ./zenc
+./zenc path/to/flat.zen > out.c  # plain emit mode; see ../README.md for check/build/run
 ```
 
 ## The fixpoint 🏁
