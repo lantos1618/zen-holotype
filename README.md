@@ -282,7 +282,9 @@ return type and it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` 
 (`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v` let-bindings, the
 single `loop` iteration construct, mutation, slices `[T]`, a heap-allocating `String`/`Vec`
 on an explicit allocator, and **metaprogramming as values** (build AST with `std.ast` →
-emit with `compiler.genc.genModule` — no `@emit` pragma). Type errors carry `ns:line:col`.
+emit with `compiler.genc.genModule` — no `@emit` pragma). Checked CLI errors report the
+source path, error count, and first validator kind; source spans and caret diagnostics are
+still future work.
 
 See **[FEATURES.md](FEATURES.md)** for the full inventory,
 **[ARCHITECTURE.md](ARCHITECTURE.md)** for how the self-hosted compiler is structured,

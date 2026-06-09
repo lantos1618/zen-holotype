@@ -237,7 +237,7 @@ static const char* const KIND_NAME[] = {
 };
 
 /* U1.2: type-check resolved decls. Prints a Zen-LEVEL error (a count + the first error's KIND) to stderr
- * and returns the error count (0 = ok) — so a user finally sees `zenc: foo.zen: 1 error (undefined-name)`
+ * and returns the error count (0 = ok) — so a user finally sees `zenc: foo.zen: 1 error (first: undefined-name)`
  * instead of cc errors on generated C they never wrote. (Real line:col + messages are U1 Step 4.) */
 /* U2: a runnable program must define `main`. genModule emits the entry as `int32_t main(` (proto + def)
  * — the exact token cc links against — so scan the emitted C for that 13-byte substring. (A fn named
