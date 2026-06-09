@@ -55,7 +55,7 @@ def test_zenc_check_rejects_undefined_name():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text("main = () i32 { undefined_fn(1, 2) }\n")
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
-    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+    assert r.returncode != 0 and "undefined name" in r.stderr, r.stderr
 
 
 def test_zenc_check_reports_error_count_and_first_kind():
@@ -65,7 +65,7 @@ def test_zenc_check_reports_error_count_and_first_kind():
     src.write_text("main = () i32 { undefined_fn(1, 2) }\n")
     r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
     assert r.returncode == 1
-    assert r.stderr == f"zenc: {src}: 1 error (first: undefined-name)\n"
+    assert r.stderr == f"zenc: {src}: error: undefined name\n"   # U1.4 Phase 1A: human message
 
 
 def test_zenc_check_rejects_source_if():
@@ -73,7 +73,7 @@ def test_zenc_check_rejects_source_if():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text("main = () i32 { if (1 < 2) { return 9 } 7 }\n")
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
-    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+    assert r.returncode != 0 and "undefined name" in r.stderr, r.stderr
 
 
 def test_zenc_check_ok_program():
@@ -242,7 +242,7 @@ def test_zenc_check_rejects_undefined_name_in_value_position():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text("main = () i32 { undefined_thing }\n")
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
-    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+    assert r.returncode != 0 and "undefined name" in r.stderr, r.stderr
 
 
 def test_zenc_check_rejects_undefined_name_in_arg_position():
@@ -250,7 +250,7 @@ def test_zenc_check_rejects_undefined_name_in_arg_position():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text("id = (n: i32) i32 { n }\nmain = () i32 { id(undefined_thing) }\n")
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
-    assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
+    assert r.returncode != 0 and "undefined name" in r.stderr, r.stderr
 
 
 def test_p3_does_not_false_reject_true_false_or_sizeof_or_bound_locals():
