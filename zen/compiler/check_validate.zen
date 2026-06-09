@@ -6,7 +6,7 @@
 // against real signatures. It depends ONE-WAY on compiler.check (inference + the type lattice + the env);
 // compiler.check never imports this module back.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
-{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, arm_env, subj_variant_payload, is_bound, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.alloc
 { byte_at } = compiler.lex
 { eq, is_empty } = std.str
@@ -133,7 +133,7 @@ check_call = (env: Env, c: CallData) i32 {
             true  => env.call_errs(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),  // known arity → check it
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => 1 })   // imported / a UFCS trait method on a generic receiver: no local signature
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => 1 })   // imported / a UFCS trait method on a generic receiver / a call to a FN-TYPED param or local (`f(x)` where f: (i32) i32 — a HOF callee, inlined at mono): no local signature
             })
         })
     })
@@ -637,7 +637,7 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
             true  => env.kv_call_errs_kind(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => KUNDEFINED() })
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => KUNDEFINED() })
             })
         })
     })

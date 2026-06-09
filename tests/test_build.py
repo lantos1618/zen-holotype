@@ -286,3 +286,17 @@ def test_zenc_check_threads_block_let_bindings():
     )
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ── review fix #1: HOFs — calling a fn-typed PARAM works (named fn AND lambda args) ──────────────────
+def test_zenc_run_hof_named_fn_and_lambda():
+    """`apply = (f: (i32) i32, x: i32) i32 { f(x) }` — the call f(x) was false-rejected as undefined-name
+    (validator missed the FnT-param case), and a NAMED fn arg mono-inlined to a bare var (bad C)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "apply = (f: (i32) i32, x: i32) i32 { f(x) }\n"
+        "twice = (n: i32) i32 { n * 2 }\n"
+        "main = () i32 { apply(twice, 11) + apply((n){ n + 9 }, 11) }\n"   # 22 + 20 = 42
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 42
