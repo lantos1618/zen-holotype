@@ -207,10 +207,10 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   resolver as a standalone runnable driver.
 
 ## Diagnostics
-- A type error carries its **structured location** (a `ns`+`(row,col)`), and the check
-  report draws a **caret** under the offending column straight from that structure. Checked
-  CLI modes reject on any type error; lower-level codegen can still operate on the accepted
-  declarations.
+- Checked CLI modes reject on any type error and report the source path, total error count,
+  and first validator kind, e.g. `zenc: app.zen: 1 error (first: undefined-name)`.
+  Structured source spans and caret rendering are still future work; lower-level codegen can
+  still operate on the accepted declarations.
 
 ## Pipeline
 Checked commands run `resolve imports (std.resolve) → scan (compiler.lex) → parse

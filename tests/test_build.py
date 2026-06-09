@@ -58,6 +58,16 @@ def test_zenc_check_rejects_undefined_name():
     assert r.returncode != 0 and "undefined-name" in r.stderr, r.stderr
 
 
+def test_zenc_check_reports_error_count_and_first_kind():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "p.zen"
+    src.write_text("main = () i32 { undefined_fn(1, 2) }\n")
+    r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert r.stderr == f"zenc: {src}: 1 error (first: undefined-name)\n"
+
+
 def test_zenc_check_rejects_source_if():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
