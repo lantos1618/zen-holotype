@@ -49,12 +49,11 @@ def test_module_typechecks_against_its_imports(module):
 
 
 def test_compiler_sources_typecheck_as_a_whole():
-    # The compiler's OWN SOURCES (the --build-self list) must type-check cross-module — this is the
+    # The compiler's manifest-listed sources must type-check cross-module — this is the
     # acid-CHECK dimension over the real multi-module compiler that deleting Python removed.
-    sources = ["genc", "genc_mono", "genc_emit", "lex", "parse_expr",
-               "parse_type", "parse_stmt", "parse", "check", "check_validate"]
+    sources = [Path(p).stem for p in _oracle._CHECK_SOURCES]
     for m in sources:
-        n = _oracle.check_linked_count("zen/std/" + m + ".zen")
+        n = _oracle.check_linked_count("zen/compiler/" + m + ".zen")
         assert n == 0, f"compiler source {m}.zen: {n} cross-module error(s)"
 
 

@@ -1,25 +1,22 @@
 // std.resolve — the MODULE RESOLVER (S1 prototype).  @self-hosted-only
 //
-// THE GOAL (Goal Z / S1): today bootstrap/generate.py flat-concatenates the std SOURCES with
-// imports STRIPPED (compiler_source/strip_imports in Python) and feeds ONE flat file to the
-// binary. The binary cannot resolve `{ a, b } = std.x` imports itself. This module is the
-// self-hosted replacement for that Python pre-processing: it lets zenc read the REAL multi-module
-// stdlib and resolve imports natively — the gate to deleting bootstrap/generate.py's Python.
+// THE GOAL (Goal Z / S1): the checked CLI path must read REAL multi-module source instead of requiring
+// callers to hand-flatten files first. This module is the self-hosted loader: it lets zenc resolve
+// `{ a, b } = std.x` and internal `{ ... } = compiler.x` imports natively before parsing/checking.
 //
 // THE RESOLUTION ALGORITHM (full design — see the module-level design note at the bottom of the
 // file and the task report). The prototype here proves the load-bearing primitive: the SAME
-// line-classification that Python's strip_imports does, in pure Zen. With this + a file reader
-// (Move-to-Zen Phase A) and a per-module parse, a driver can: parse each module -> read its
-// DImport edges -> topologically order the modules -> concat-in-dependency-order with import lines
-// dropped, reproducing compiler_source() byte-for-byte with no Python.
+// line-classification the bootstrap flatteners use, in pure Zen. With this + a file reader, a driver
+// can parse each module -> read its DImport edges -> topologically order the modules ->
+// concat-in-dependency-order with import lines dropped.
 //
 //   { is_import_line, strip_count } = std.resolve
 //
-// NB self-contained-test note: this module imports std.lex's byte_at (the canonical byte
-// accessor). The run_value PROTOTYPE TEST inlines the same logic so it links without std.lex
+// NB self-contained-test note: this module imports compiler.lex's byte_at (the canonical byte
+// accessor). The run_value PROTOTYPE TEST inlines the same logic so it links without compiler.lex
 // (std templates aren't emitted into a stand-alone test binary). acid checks THIS file as-is.
 
-{ byte_at } = std.lex
+{ byte_at } = compiler.lex
 { String, push, append, with_cap, finish } = std.string
 { read_file } = std.io
 
@@ -38,28 +35,37 @@ opens_import = (s: str, p: i32) bool {
     (s.byte_at(p) == '{') && (s.byte_at(p + 1) == ' ')
 }
 
-// does the line starting at p contain the marker `= std.` before its newline / EOF? Scans
-// bytes; stops at line end so it never reads into the next line. Matches Python's `"= std." in l`
-// (l is one line), combined with the `{ ` prefix below this is EXACTLY strip_imports' predicate.
-has_std_marker = (s: str, p: i32) bool {
+// does the line starting at p contain an import marker (`= std.` or `= compiler.`) before its newline /
+// EOF? Scans bytes; stops at line end so it never reads into the next line.
+has_import_marker = (s: str, p: i32) bool {
     b := s.byte_at(p)
     ((b == 0) || (b == 10)).match ({
         true  => false,
-        false => s.is_marker_at(p).match ({ true => true, false => s.has_std_marker(p + 1) })
+        false => s.is_marker_at(p).match ({ true => true, false => s.has_import_marker(p + 1) })
     })
 }
 // is the 6-byte window at p exactly `= std.`?
-is_marker_at = (s: str, p: i32) bool {
+is_std_marker_at = (s: str, p: i32) bool {
     (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && (s.byte_at(p + 2) == 's')
         && (s.byte_at(p + 3) == 't') && (s.byte_at(p + 4) == 'd') && (s.byte_at(p + 5) == '.')
 }
+// is the 11-byte window at p exactly `= compiler.`?
+is_compiler_marker_at = (s: str, p: i32) bool {
+    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && (s.byte_at(p + 2) == 'c')
+        && (s.byte_at(p + 3) == 'o') && (s.byte_at(p + 4) == 'm') && (s.byte_at(p + 5) == 'p')
+        && (s.byte_at(p + 6) == 'i') && (s.byte_at(p + 7) == 'l') && (s.byte_at(p + 8) == 'e')
+        && (s.byte_at(p + 9) == 'r') && (s.byte_at(p + 10) == '.')
+}
+// does either supported module marker start at p?
+is_marker_at = (s: str, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
 
 // THE CLASSIFIER — is the line starting at p an import line (to be stripped)? Equivalent to
-// Python: `l.strip().startswith("{ ") and "= std." in l`. This is the one decision generate.py's
-// strip_imports makes per line; everything else (concat in dependency order) is plumbing.
+// Python: `l.strip().startswith("{ ") and ("= std." in l or "= compiler." in l)`.
+// This is the one decision the compiler-source flatteners make per line; everything else (concat in
+// dependency order) is plumbing.
 is_import_line* = (s: str, p: i32) bool {
     ls := s.lstrip(p)
-    s.opens_import(ls).match ({ true => s.has_std_marker(ls), false => false })
+    s.opens_import(ls).match ({ true => s.has_import_marker(ls), false => false })
 }
 
 // advance p to the first byte of the NEXT line (just past the next '\n'), or to EOF (the NUL).
@@ -117,8 +123,8 @@ strip_into = (out: String, s: str, p: i32, first: bool) String {
     })
 }
 
-// strip_imports(file_src): a fresh flat String of `s` with its import lines dropped — the Zen twin of
-// generate.py's strip_imports(path) (the read happens in the driver; this is the pure transform).
+// strip_imports(file_src): a fresh flat String of `s` with its import lines dropped. The read happens
+// in the driver; this is the pure transform.
 strip_imports* = (out: String, s: str) String { out.strip_into(s, 0, true) }
 
 // concatenate two already-stripped file bodies with a single '\n' between them — the per-file join in
@@ -130,17 +136,23 @@ concat_files* = (out: String, a: str, b: str) String { out.append(a).push(10).ap
 
 // ── the import EDGE: which module does an import line name? ───────────────────────────────────────
 // strip_imports drops import lines; the dependency-ordering driver needs the other half — the module
-// NAME each import line points at (`{ malloc } = std.alloc` → "alloc"), to read zen/std/<name>.zen and
-// recurse. These read the name off the `= std.<name>` marker is_import_line already matched.
+// NAME each import line points at (`{ malloc } = std.alloc` → "alloc"), to read the module file and
+// recurse. These read the name off the module marker is_import_line already matched.
 
 // length of the `= std.` marker that is_marker_at checks; the module name begins just past it.
 STD_MARKER_LEN := 6
+COMPILER_MARKER_LEN := 11
 
-// the byte position of the module name on the import line starting at p — scan to the `= std.` marker
-// (is_import_line guarantees one before the newline), then step past its 6 bytes onto the name's first
-// char. (Only ever called on a line where is_import_line(p) already holds, so the marker is present.)
-std_name_pos = (s: str, p: i32) i32 {
-    s.is_marker_at(p).match ({ true => p + STD_MARKER_LEN, false => s.std_name_pos(p + 1) })
+// the byte position of the module name on the import line starting at p — scan to the supported marker
+// (is_import_line guarantees one before the newline), then step past it onto the name's first char.
+module_name_pos = (s: str, p: i32) i32 {
+    s.is_std_marker_at(p).match ({
+        true  => p + STD_MARKER_LEN,
+        false => s.is_compiler_marker_at(p).match ({
+            true  => p + COMPILER_MARKER_LEN,
+            false => s.module_name_pos(p + 1)
+        })
+    })
 }
 // an identifier byte — the module-name charset (a module path is `std.<ident>`): letters, digits, '_'.
 is_ident_byte = (b: u8) bool {
@@ -153,7 +165,19 @@ take_name = (out: String, s: str, p: i32) String {
 }
 // import_module(out, s, p): append the module name imported on the import line starting at p — e.g.
 // "alloc" for `{ malloc, free } = std.alloc`. The driver maps it to zen/std/<name>.zen.
-import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.std_name_pos(p)) }
+import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.module_name_pos(p)) }
+
+// internal module id for loading/dedup: `std/alloc` or `compiler/genc`. Keeping the namespace in the id
+// prevents a std module and compiler module with the same basename from colliding in the closure SET.
+import_id = (out: String, s: str, p: i32) String {
+    s.is_std_marker_at(p).match ({
+        true  => out.append("std/").take_name(s, p + STD_MARKER_LEN),
+        false => s.is_compiler_marker_at(p).match ({
+            true  => out.append("compiler/").take_name(s, p + COMPILER_MARKER_LEN),
+            false => out.import_id(s, p + 1)
+        })
+    })
+}
 
 // ── THE TRANSITIVE-CLOSURE LOADER (N2a) ─────────────────────────────────────────────────────────────
 // Everything above is the PURE line/edge plumbing. This section is the actual import RESOLVER: given a
@@ -186,7 +210,7 @@ import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.std_n
 // The SET is just a String holding each seen module name as a `name\n` line (set starts empty, so every
 // entry begins at a line boundary). Membership is a line-exact scan — no hashing, no per-name alloc.
 
-// byte i of a String's buffer (the String twin of std.lex.byte_at over a `str`).
+// byte i of a String's buffer (the String twin of compiler.lex.byte_at over a `str`).
 res_sbyte = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
 
 // do the `m` bytes of `name` equal `set`'s bytes starting at `i`, immediately followed by a '\n'? — i.e.
@@ -239,25 +263,25 @@ copy_from = (out: String, src: String, i: i64) String {
 // ride together in this struct (the functional `s := s.op(...)` style, two fields at once).
 Closure*: { seen: String, out: String }
 
-// ── the path zen/std/<modname>.zen ──────────────────────────────────────────────────────────────────
-// build `<root>/zen/std/<modname>.zen` as a NUL-terminated str for read_file. `root` is the project
-// root (a str); `name` is the module name String. A trailing '/' on root is tolerated by the FS, so we
-// always insert one — keep it simple.
-module_path = (root: str, name: String) str {
-    with_cap(64).append(root).append("/zen/std/").append_string(name).append(".zen").finish()
+// ── the path zen/<namespace>/<modname>.zen ───────────────────────────────────────────────────────────
+// build `<root>/zen/<id>.zen` as a NUL-terminated str for read_file. `root` is the project root (a str);
+// `id` is `std/<name>` or `compiler/<name>`. A trailing '/' on root is tolerated by the FS, so we always
+// insert one — keep it simple.
+module_path = (root: str, id: String) str {
+    with_cap(64).append(root).append("/zen/").append_string(id).append(".zen").finish()
 }
 
 // ── load_closure: the recursive transitive loader ───────────────────────────────────────────────────
-// load_closure(root, name, c): if `name` is already in c.seen, return c unchanged (dedup + cycle break);
-// else mark it seen, read zen/std/<name>.zen, recursively load each module IT imports FIRST (so a
+// load_closure(root, id, c): if `id` is already in c.seen, return c unchanged (dedup + cycle break);
+// else mark it seen, read zen/<id>.zen, recursively load each module IT imports FIRST (so a
 // dependency is present before its dependents — though order is irrelevant for a flat namespace), then
 // append THIS module's import-stripped body + a '\n' separator to c.out.
-load_closure* = (root: str, name: String, c: Closure) Closure {
-    c.seen.seen(name).match ({
+load_closure* = (root: str, id: String, c: Closure) Closure {
+    c.seen.seen(id).match ({
         true  => c,
         false => {
-            src := read_file(module_path(root, name))
-            c2  := Closure( seen: c.seen.add_name(name), out: c.out )
+            src := read_file(module_path(root, id))
+            c2  := Closure( seen: c.seen.add_name(id), out: c.out )
             c3  := load_imports(root, src, 0, c2)                      // recurse on this module's edges
             Closure( seen: c3.seen, out: c3.out.push(10).strip_into(src, 0, true) )
         }
@@ -272,7 +296,7 @@ load_imports = (root: str, src: str, p: i32, c: Closure) Closure {
         true  => c,
         false => src.is_import_line(p).match ({
             true  => load_imports(root, src, src.next_line(p),
-                         load_closure(root, import_module(with_cap(16), src, p), c)),
+                         load_closure(root, import_id(with_cap(24), src, p), c)),
             false => load_imports(root, src, src.next_line(p), c)
         })
     })
@@ -376,10 +400,10 @@ import_name_span = (out: String, flat: str, p: i32, e: i32) String {
 // Pure SOURCE-TO-SOURCE sugar, desugared in THE LOADER before zenc ever parses — the parser/checker/genc
 // see ZERO `c.malloc`, so they need no Ty::Namespace and no change. Two new shapes vs the destructuring
 // import `{ a, b } = std.X`:
-//   • a NAMESPACE-BIND line `<ident> = std.<modname>` (e.g. `c = std.c`): an identifier, a one-char `=`,
-//     then `std.<name>`, with NO `{` head (that is what tells it apart from the brace import). It pulls
-//     the WHOLE transitive closure of std.<modname> in (reuse load_closure, exactly like an import) and
-//     REGISTERS the qualifier `c` for the module.
+//   • a NAMESPACE-BIND line `<ident> = std.<modname>` (e.g. `c = std.c`) or `<ident> = compiler.<modname>`:
+//     an identifier, a one-char `=`, then a supported module marker, with NO `{` head (that is what tells
+//     it apart from the brace import). It pulls the WHOLE transitive closure of that module in (reuse
+//     load_closure, exactly like an import) and REGISTERS the qualifier `c` for the module.
 //   • a QUALIFIED ACCESS `<qualifier>.member`: rewritten to the bare `member` the loaded module defines
 //     (`c.malloc(8)` → `malloc(8)`). ONLY a registered qualifier strips; a real value's member access
 //     (`p.x`, `p` not a registered namespace) is left untouched. The bind line itself is then stripped,
@@ -390,9 +414,9 @@ import_name_span = (out: String, flat: str, p: i32, e: i32) String {
 // reused over it). A bind line that names a qualifier ALSO loads that module's closure, so the bare name
 // the rewrite produces is defined in the flat output.
 
-// is the line at p a NAMESPACE-BIND `<ident> = std.<name>` (and NOT a `{ … } = std.X` import / a real
+// is the line at p a NAMESPACE-BIND `<ident> = std.<name>` / `<ident> = compiler.<name>` (and NOT an import / real
 // decl)?  After lstrip: an ident-START byte (so not `{`), its identifier run, optional whitespace, then
-// the `= std.` marker is_marker_at checks. The marker's leading space + single `=` (is_marker_at wants
+// a supported module marker is_marker_at checks. The marker's leading space + single `=` (is_marker_at wants
 // `= ` not `==`/`:=`) plus the whitespace-only gap between the ident and `=` pin the `c = std.c` shape —
 // a `c.x = …` or `c := …` has a non-ws, non-`=` byte where the marker must start, so it is rejected.
 is_ns_line* = (s: str, p: i32) bool {
@@ -423,8 +447,8 @@ collect_ns* = (root: str, src: str, p: i32, st: NsScan) NsScan {
         true  => st,
         false => src.is_ns_line(p).match ({
             true  => {
-                modname := import_module(with_cap(16), src, p)                  // the `std.<modname>`
-                c2      := load_closure(root, modname, st.c)                    // pull its closure in
+                modid   := import_id(with_cap(24), src, p)                     // `std/<mod>` or `compiler/<mod>`
+                c2      := load_closure(root, modid, st.c)                     // pull its closure in
                 q2      := st.quals.add_name(ns_qualifier(with_cap(16), src, p))  // register the qualifier
                 collect_ns(root, src, src.next_line(p), NsScan( quals: q2, c: c2 ))
             },

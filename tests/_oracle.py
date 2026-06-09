@@ -27,13 +27,24 @@ HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
 _CC = ["cc", "-std=gnu11", "-w"]
 _RUNNER = "\n#include <stdio.h>\nint main(void){ printf(\"%%lld\", (long long)(test())); return 0; }\n"
 
-# the compiler IS these files (the SOURCES list in bootstrap/main.c's --build-self mode);
-# check_validate.zen adds the VALIDATING pass (check_module) the emit-only binary omits. Imports
-# (`{…} = std.x`) are stripped — runtime types come from zenrt.{h,c}. (Mirrors main.c's SOURCES.)
-_EMIT_SOURCES = ["zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
-                 "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
-                 "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen"]
-_CHECK_SOURCES = _EMIT_SOURCES + ["zen/std/check_validate.zen"]
+# The compiler sources come from bootstrap/sources.txt. The CHECK binary includes check_validate.zen;
+# the emit-only binary omits that validating pass. Imports (`{...} = std.x` / `compiler.x`) are
+# stripped, and runtime types come from zenrt.{h,c}. This mirrors bootstrap/main.c's source prep
+# without duplicating the manifest order here.
+def _bootstrap_compiler_sources(include_validate=False):
+    out = []
+    for raw in (BOOT / "sources.txt").read_text().splitlines():
+        rel = raw.strip()
+        if not rel or rel.startswith("#") or not rel.startswith("zen/compiler/"):
+            continue
+        if rel.endswith("/check_validate.zen") and not include_validate:
+            continue
+        out.append(rel)
+    return out
+
+
+_EMIT_SOURCES = _bootstrap_compiler_sources()
+_CHECK_SOURCES = _bootstrap_compiler_sources(include_validate=True)
 
 # a CLI entry that returns check_module's error count as the process exit code.
 _CHECK_MAIN = r"""#include "zenrt.h"
@@ -137,9 +148,14 @@ _check_linked_exe = None
 _check_kind_exe = None
 
 
+def _is_import_line(line):
+    s = line.strip()
+    return s.startswith("{ ") and ("= std." in s or "= compiler." in s)
+
+
 def _strip_imports(path):
     return "\n".join(l for l in (ROOT / path).read_text().splitlines()
-                     if not (l.strip().startswith("{ ") and "= std." in l))
+                     if not _is_import_line(l))
 
 
 def _build_emit():
@@ -222,19 +238,29 @@ def _build_check_linked():
 
 
 def imports_of(path):
-    """The std modules `path` imports — every `{ … } = std.X` head's X. This is exactly the import
-    classification std.resolve.is_import_line makes (`{ ` prefix + `= std.`), read here to assemble
-    the lib header. Returns module names in first-seen order, de-duplicated."""
+    """The modules `path` imports — every `{ … } = std.X` / `compiler.X` head as `namespace/name`.
+    This is exactly the import classification std.resolve.is_import_line makes, read here to assemble
+    the lib header. Returns module ids in first-seen order, de-duplicated."""
     seen, out = set(), []
     for l in (ROOT / path).read_text().splitlines():
         s = l.strip()
-        if s.startswith("{ ") and "= std." in s:
-            mod = s.split("= std.", 1)[1].strip().split()[0].rstrip()
-            mod = "".join(ch for ch in mod if ch.isalnum() or ch == "_")
-            if mod and mod not in seen:
-                seen.add(mod)
-                out.append(mod)
+        for ns in ("std", "compiler"):
+            marker = "= " + ns + "."
+            if s.startswith("{ ") and marker in s:
+                mod = s.split(marker, 1)[1].strip().split()[0].rstrip()
+                mod = "".join(ch for ch in mod if ch.isalnum() or ch == "_")
+                mid = ns + "/" + mod
+                if mod and mid not in seen:
+                    seen.add(mid)
+                    out.append(mid)
     return out
+
+
+def _module_relpath(module_id):
+    if "/" in module_id:
+        ns, name = module_id.split("/", 1)
+        return "zen/" + ns + "/" + name + ".zen"
+    return "zen/std/" + module_id + ".zen"
 
 
 # (Removed: imports_a_cross_module_generic — the marker the two cross-module oracle tests used to SKIP a
@@ -258,8 +284,8 @@ def check_linked_count(target, libs=None):
     tgt = d / "target.zen"
     tgt.write_text("\n".join(_strip_imports(target).splitlines()))
     lib = d / "lib.zen"
-    lib.write_text("\n".join("\n".join(_strip_imports("zen/std/" + m + ".zen").splitlines())
-                             for m in libs if (ROOT / "zen/std" / (m + ".zen")).exists()))
+    lib.write_text("\n".join("\n".join(_strip_imports(_module_relpath(m)).splitlines())
+                             for m in libs if (ROOT / _module_relpath(m)).exists()))
     return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
                           text=True, timeout=60).returncode
 
@@ -273,11 +299,12 @@ def check_namespaced_count(target, modules=None):
     with no clash. 0 == `target` type-checks against its REAL transitive imports as a namespaced unit."""
     import _resolver
     exe = _build_check_linked()
+    target_id = _resolver._real_id(target)
     d = Path(tempfile.mkdtemp())
     tgt = d / "target.zen"
-    tgt.write_text("\n".join(_strip_imports("zen/std/" + target + ".zen").splitlines()))
+    tgt.write_text("\n".join(_strip_imports(_resolver.module_relpath(target_id)).splitlines()))
     lib = d / "lib.zen"
-    lib.write_text(_resolver.resolve(target, modules))
+    lib.write_text(_resolver.resolve(target_id, modules))
     return subprocess.run([str(exe), str(tgt), str(lib)], capture_output=True,
                           text=True, timeout=60).returncode
 
@@ -300,9 +327,9 @@ def check_namespaced_count_src(target, mods):
 
 
 def _strip_imports_text(text):
-    """_strip_imports, but over an in-memory source string (the same `{ ` + `= std.` classifier)."""
+    """_strip_imports, but over an in-memory source string (the same import-line classifier)."""
     return "\n".join(l for l in text.splitlines()
-                     if not (l.strip().startswith("{ ") and "= std." in l))
+                     if not _is_import_line(l))
 
 
 def check_linked_count_src(target_src, lib_src):

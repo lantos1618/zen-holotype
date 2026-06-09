@@ -9,7 +9,7 @@ All notable changes to **zen**. The format loosely follows
 **Documentation alignment for current compiler decisions**:
 
 - **C is the intentional intermediate/bootstrap target** — not a defect or fallback. The
-  self-hosted compiler still reproduces `bootstrap/zenc.gen.c` byte-for-byte, and `std.genc`
+  self-hosted compiler still reproduces `bootstrap/zenc.gen.c` byte-for-byte, and `compiler.genc`
   remains the concrete backend used to build `zenc` today.
 - **Branching is source-level `.match` only.** Zen source has no `if` statement; checked
   matches may still lower to C `if`/`else` or `?:` inside the backend.
@@ -43,7 +43,7 @@ multiple modules, all in Zen:
 `generate.py`, and `mypy` are gone; only the binary-only test oracle (pytest as a runner that
 imports no compiler code) remains, and it is being ported to a Zen-native oracle.
 
-- **`std.genjs`** — a second backend over the *same* `std.genc` AST, emitting JavaScript (the
+- **`compiler.genjs`** — a second backend over the *same* `compiler.genc` AST, emitting JavaScript (the
   computational subset). Proves the AST is genuine backend-neutral IR: zen generates its own C
   **and** JS.
 - **Enum variants are `|`-separated** (was `,`): `Opt*<T>: None | Some(T)`. A sum type is a
@@ -61,10 +61,10 @@ zen sources ──(zenc, the compiler written in zen)──▶ C files ──(cc
                                                commit the C        release the binary
 ```
 
-1. **Backend in Zen** — `std.genc` walked an AST and emitted C: scalars, structs, enums +
+1. **Backend in Zen** — `compiler.genc` walked an AST and emitted C: scalars, structs, enums +
    `match`, pointers, control flow, recursion; `genModule([Decl])` for a whole translation unit.
-2. **Front end in Zen** — `std.lex` (lexer) + `std.parse*` (recursive-descent parser) building
-   `std.genc`'s AST, plus `std.check` (resolver + `fits()` validator).
+2. **Front end in Zen** — `compiler.lex` (lexer) + `compiler.parse*` (recursive-descent parser) building
+   `compiler.genc`'s AST, plus `compiler.check` (resolver + `fits()` validator).
 3. **Generate + commit the C** — `zenc` lowered the Zen compiler to C, committed under
    `bootstrap/` as the tracked bootstrap seed; now `cc bootstrap/*.c -o zenc` builds it with no
    Python and no tree-sitter.

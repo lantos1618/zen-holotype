@@ -10,7 +10,7 @@
 # bootstrap that the self-hosted tool supersedes. It performs the SAME two dedup levels std.resolve does,
 # but in awk:
 #   • PER-MODULE: each module file appended once (the closure list below is the driver's transitive set).
-#   • PER-NAME:   strip `{ … } = std.X` import lines, then keep only the FIRST top-level decl of each
+#   • PER-NAME:   strip `{ … } = std.X` / `compiler.X` import lines, then keep only the FIRST top-level decl of each
 #     name — a decl runs from a COLUMN-0 head (`name[*] =/:` or `Name.impl(`) to the next column-0 head;
 #     a later same-named head + its body are dropped. This resolves string.free / mem.free / alloc.free.
 set -euo pipefail
@@ -25,7 +25,7 @@ CLOSURE=(
   "$ROOT/zen/std/str.zen"
   "$ROOT/zen/std/string.zen"
   "$ROOT/zen/std/alloc.zen"
-  "$ROOT/zen/std/lex.zen"
+  "$ROOT/zen/compiler/lex.zen"
   "$ROOT/zen/std/io.zen"
   "$ROOT/zen/std/resolve.zen"
   "$ROOT/tools/loader/loader_driver.zen"
@@ -36,9 +36,9 @@ cat "${CLOSURE[@]}" | awk '
   function is_ws(c){ return c==" " || c=="\t" }
   {
     line=$0
-    # drop `{ … } = std.X` import lines (the std.resolve / generate.py strip predicate).
+    # drop `{ … } = std.X` / `compiler.X` import lines (the std.resolve strip predicate).
     s=line; sub(/^[ \t]+/,"",s)
-    if (s ~ /^\{ / && line ~ /= std\./) next
+    if (s ~ /^\{ / && (line ~ /= std\./ || line ~ /= compiler\./)) next
 
     # is this a COLUMN-0 top-level decl head?  ident run at col 0, then `*`/space then `=`/`:`,
     # OR `.impl(` (a method-impl block: a decl boundary that is ALWAYS kept, never deduped).

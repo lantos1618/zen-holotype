@@ -1,15 +1,15 @@
-// std.parse_expr — the expression parser: atoms, postfix (.match/.field/[index]/.loop),
+// compiler.parse_expr — the expression parser: atoms, postfix (.match/.field/[index]/.loop),
 // match-expression lowering (bool/enum/literal arms), and the binary/logical precedence
 // ladder (term → expr → cmp → and → or), plus the lexeme/token-classification utilities
 // (is_op, to_int, char_val, …) and the PExpr/ebuf/enode heap-node plumbing. Split out of
-// std.parse (god-file split); parse_module still lives in std.parse and drives these.
+// compiler.parse (god-file split); parse_module still lives in compiler.parse and drives these.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = std.genc
-{ Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = std.lex
+{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = compiler.genc
+{ Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = compiler.lex
 { Malloc, malloc } = std.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, parse_tyargs, param_buf, take_params, skip_block, PEnd } = std.parse_type
-{ build_body, parse_block, materialize } = std.parse_stmt
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, parse_tyargs, param_buf, take_params, skip_block, PEnd } = compiler.parse_type
+{ build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
 
@@ -154,7 +154,7 @@ unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     src.unescape(pos + 1, end, dst, di + 1)
 }
 // a leading-dot enum constructor `.Variant` (a Tag) or `.Variant(payload)` (a MakeEnum). The
-// enum TYPE is left "" — std.check fills it by looking the variant up among the enum decls.
+// enum TYPE is left "" — compiler.check fills it by looking the variant up among the enum decls.
 parse_ctor = (a: Ptr<Malloc>, src: str, dot: Scan) PExpr {
     vt := src.scan(dot.next)                         // the variant name — MUST be an identifier
     vt.tok.kind.match ({
@@ -228,7 +228,7 @@ parse_postfix = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
             false => src.is_field_at(base.next).match ({
                 true  => a.parse_field(src, base),
                 false => src.is_index_at(base.next).match ({
-                    true  => a.parse_index(src, base),   // seq[i] — element type filled by std.check
+                    true  => a.parse_index(src, base),   // seq[i] — element type filled by compiler.check
                     false => base
                 })
             })
@@ -237,7 +237,7 @@ parse_postfix = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
 }
 // `recv.loop((h, i, x) { body })` — a foreach over recv: h is the (ignored) loop handle, i the
 // index, x the element. The body is a no-return statement block (it mutates captured locals).
-// The element type is left void; std.check fills it from recv's inferred slice type.
+// The element type is left void; compiler.check fills it from recv's inferred slice type.
 parse_loop = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     dot   := src.scan(base.next)                         // '.'
     kw    := src.scan(dot.next)                          // 'loop'
@@ -267,7 +267,7 @@ parse_index = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
 // (`b.is_alpha()` -> `is_alpha(b)`, `x.f(a, b)` -> `f(x, a, b)`). Both chain.
 // `Type.Variant` / `Type.Variant(payload)` — a TYPE-QUALIFIED enum constructor. Detected syntactically:
 // an Uppercase receiver name (a type) dotted with an Uppercase field (a variant). Lowered to the SAME
-// Tag/MakeEnum nodes as the leading-dot `.Variant` form (enum type left "" — std.check resolves it by
+// Tag/MakeEnum nodes as the leading-dot `.Variant` form (enum type left "" — compiler.check resolves it by
 // variant scan). Lowercase receivers/fields stay field access / UFCS calls. (Was: `Type.Variant` parsed
 // to a member access that the checker accepted but genc emitted as literal `Type.Variant` → bad C.)
 is_upper_byte = (b: u8) bool { (b >= 'A') && (b <= 'Z') }
@@ -377,7 +377,7 @@ is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
 // pure default that IGNORES the subject (`b.match({ false => 9 })` would silently return 9 for `b`
 // true AND false). The lit/bool forms lower to Cond, not Match, so the enum exhaustiveness check
 // never sees them — so reject HERE, at parse, type-independently (the rule needs no subject type).
-// The parser has no error channel, so emit a Call to an undefined sentinel name: std.check's
+// The parser has no error channel, so emit a Call to an undefined sentinel name: compiler.check's
 // validator rejects an unknown call (`__nonexhaustive_match` is no fn/intrinsic/import/trait method),
 // exactly as a malformed parse is caught today — but now for the RIGHT reason. `next` is supplied by
 // the caller (pointed past the match's `}`), so close_match still drops the trailing `)`.
@@ -501,7 +501,7 @@ parse_lit_arm_val = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd 
 // pull the name back out of the already-parsed Var node.
 subj_name = (e: Ptr<Expr>) str { load(e).match ({ .Var(v) => v.name, _ => "" }) }
 // `.Variant(bind) => body` / `.Variant => body` arms, comma-separated, into a heap [ArmData].
-// ename is left "" here — std.check fills it once the subject's enum type is known.
+// ename is left "" here — compiler.check fills it once the subject's enum type is known.
 BindEnd*: { bind: str, next: i32 }
 arm_buf = (a: Ptr<Malloc>) [ArmData] { slice(malloc(1024 * sizeof(ArmData)), 1024) }   // cap 1024
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }                            // exact length
@@ -710,7 +710,7 @@ parse_not = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {     // sc = the '!'
     PExpr( expr: a.enode(cond(inner.expr, a.enode(vref("false")), a.enode(vref("true")))), next: inner.next )
 }
 // `[a, b, c]` — a slice literal: comma-separated expressions to `]`. The element type is left
-// void; std.check fills it from the first item's inferred type (like an index's element type).
+// void; compiler.check fills it from the first item's inferred type (like an index's element type).
 fill_sitems = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rbracket(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_sitem(src, pos, buf, i) })

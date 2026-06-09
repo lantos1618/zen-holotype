@@ -1,10 +1,10 @@
-"""genJs — the JavaScript backend (std.genjs), the final item of `zen generates its own C AND JS`.
+"""genJs — the JavaScript backend (compiler.genjs), the final item of `zen generates its own C AND JS`.
 
-std.genjs walks the SAME shared AST (std.genc) the C backend walks, and emits JavaScript. This test
+compiler.genjs walks the SAME shared AST (compiler.genc) the C backend walks, and emits JavaScript. This test
 drives the SELF-HOSTED toolchain — NO Python compiler — exactly like _oracle.py's check binary:
 
   1. The committed EMIT binary (cc bootstrap/{zenc.gen.c,zenrt.c,main.c}) compiles the frontend
-     SOURCES + std/genjs.zen into one flat .gen.c (the binary is Zen-written, compiled to the
+     SOURCES + compiler/genjs.zen into one flat .gen.c (the binary is Zen-written, compiled to the
      committed bootstrap C). `cc` links that with a tiny C main that reads a .zen file, runs
      parse_module -> resolve_module, then calls genModuleJs -> a JS String written to stdout.
   2. For each program, we genjs-emit its JS, wrap it with a `console.log(test())` epilogue, run it
@@ -29,11 +29,11 @@ NODE = shutil.which("node")
 
 # the frontend the genjs driver needs: the shared AST + mono + the C emitter (genModule is unused
 # but genc_emit defines helpers genjs leans on via the shared module), the lexer/parser, the checker
-# (resolve_module lives in parse/resolve path), PLUS std/genjs.zen — the new backend under test.
-_GENJS_SOURCES = ["zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
-                  "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
-                  "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen",
-                  "zen/std/genjs.zen"]
+# (resolve_module lives in parse/resolve path), PLUS compiler/genjs.zen — the backend under test.
+_GENJS_SOURCES = ["zen/compiler/genc.zen", "zen/compiler/genc_mono.zen", "zen/compiler/genc_emit.zen",
+                  "zen/compiler/lex.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_type.zen",
+                  "zen/compiler/parse_stmt.zen", "zen/compiler/parse.zen", "zen/compiler/check.zen",
+                  "zen/compiler/genjs.zen"]
 
 # a CLI entry: read a .zen file (argv[1] or stdin), parse+resolve, emit JS via genModuleJs to stdout.
 _GENJS_MAIN = r"""#include "zenrt.h"
@@ -64,7 +64,7 @@ _genjs_exe = None
 
 def _strip_imports(path):
     return "\n".join(l for l in (ROOT / path).read_text().splitlines()
-                     if not (l.strip().startswith("{ ") and "= std." in l))
+                     if not (l.strip().startswith("{ ") and ("= std." in l or "= compiler." in l)))
 
 
 def _build_emit():

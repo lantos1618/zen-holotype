@@ -44,16 +44,16 @@ allows, nothing more.
 ## How it works
 
 ```
-   lex.zen ──tokens──► parse_*.zen ──► std.genc AST ──► check.zen ──► genc_emit.zen ──► C ──► cc
-   (all four stages are ordinary Zen, in zen/std/)
+   lex.zen ──tokens──► parse_*.zen ──► compiler.genc AST ──► check.zen ──► genc_emit.zen ──► C ──► cc
+   (all compiler stages are ordinary Zen, in zen/compiler/)
 ```
 
 ```
    core/vec.zen   ops.zen   main.zen
         │
-        ▼  std.lex + std.parse  (lexer + recursive-descent parser, in Zen)
+        ▼  compiler.lex + compiler.parse  (lexer + recursive-descent parser, in Zen)
    ┌──────────┐
-   │   AST    │   std.genc Expr / Stmt / Decl values
+   │   AST    │   compiler.genc Expr / Stmt / Decl values
    └────┬─────┘
         │  insert every decl at its path
         ▼
@@ -148,11 +148,11 @@ matches to target-level `if`/`else` or `?:` because those are backend details, n
 syntax.
 
 **4. The compiler is Zen, and self-hosting.** Lexer, parser, checker, and the C
-backend are all ordinary Zen modules in `zen/std/` (`lex`, `parse*`, `check`, `genc*`).
+backend are all ordinary Zen modules in `zen/compiler/` (`lex`, `parse*`, `check`, `genc*`).
 `zenc` compiles them to C; fed its **own** sources it re-emits byte-for-byte the committed
 `bootstrap/zenc.gen.c` — a deterministic **fixpoint**. New backend = new walk over the same
-AST (a JavaScript one, `std.genjs`, already exists alongside the intentional bootstrap C
-backend, `std.genc`).
+AST (a JavaScript one, `compiler.genjs`, already exists alongside the intentional bootstrap C
+backend, `compiler.genc`).
 
 ## Build & run
 
@@ -178,9 +178,10 @@ modes for programs:
 `main`. A program with `{ … } = std.X` imports is flattened by the self-hosted loader inside
 those checked modes — see [Modules & imports](#modules--imports).
 
-**Regenerate the committed C** after editing any compiler/bootstrap source under
-`zen/std/{lex,parse*,check*,genc*,io,resolve}.zen` or `zen/std/check_validate.zen` — the
-binary rebuilds its own C, with no Python:
+**Regenerate the committed C** after editing any graph-listed bootstrap compiler source under
+`zen/compiler/{lex,parse*,check*,check_validate,genc*}.zen` or the loader sources
+`zen/std/{io,resolve}.zen` — the binary reads `bootstrap/sources.txt` and rebuilds its own C,
+with no Python. The manifest order is checked against the resolver graph's SCC order.
 
 ```sh
 make -f bootstrap/Makefile regen       # builds zenc, then: ./zenc --build-self bootstrap/zenc.gen.c .
@@ -213,7 +214,7 @@ what you must *import*. Keeping that boundary explicit is the point.
   the backend emits a forward declaration. libc symbols (`malloc`, `putchar`, `strlen`, …)
   then **just link** — the system headers define them. No `extern` keyword.
 - **The header *is* a function.** `zen/std/c.zen`'s `libc() [Decl]` builds those bodyless
-  bindings *as AST* and `std.genc.genModule(libc())` emits exactly the C prototypes a TU
+  bindings *as AST* and `compiler.genc.genModule(libc())` emits exactly the C prototypes a TU
   needs — the bindings live in **one** Zen module instead of being re-prototyped in every
   file. (`std.mem`, `std.io`, `std.cown`, `std.result` still re-declare the handful of
   symbols they each need at the top, which is the scatter `std.c` is gathering.)
@@ -246,6 +247,9 @@ then checked as one flattened module:
 
 The bare emit form (`zenc file.zen` or stdin) remains lower-level: it expects the source to
 already be flat and emits C without the `std` import-loading/check/build wrapper.
+The resolver also understands `compiler.X` for internal compiler/std dependencies such as
+`std.ast` building values from `compiler.genc`; normal user-facing imports should stay in
+the `std` namespace.
 `tools/loader/` also packages the resolver as a runnable driver (`loader_driver.zen` +
 `loader_main.c`):
 `loader <prog.zen> <out_flat.zen> <root>` writes the flattened module. It is itself a
@@ -278,7 +282,7 @@ return type and it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` 
 (`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v` let-bindings, the
 single `loop` iteration construct, mutation, slices `[T]`, a heap-allocating `String`/`Vec`
 on an explicit allocator, and **metaprogramming as values** (build AST with `std.ast` →
-emit with `std.genc.genModule` — no `@emit` pragma). Type errors carry `ns:line:col`.
+emit with `compiler.genc.genModule` — no `@emit` pragma). Type errors carry `ns:line:col`.
 
 See **[FEATURES.md](FEATURES.md)** for the full inventory,
 **[ARCHITECTURE.md](ARCHITECTURE.md)** for how the self-hosted compiler is structured,
@@ -288,14 +292,14 @@ See **[FEATURES.md](FEATURES.md)** for the full inventory,
 
 | path | role |
 |---|---|
-| `zen/std/lex.zen` | the lexer — `scan(src, pos)` over a `str`, slice-free |
-| `zen/std/parse.zen` + `parse_expr` / `parse_stmt` / `parse_type` | recursive-descent parser → `std.genc` AST |
-| `zen/std/check.zen` + `check_validate.zen` | resolver + the `fits()` validator |
-| `zen/std/genc.zen` + `genc_emit` / `genc_mono` | the C backend (the shared AST + emit + monomorphization) |
-| `zen/std/genjs.zen` | a JavaScript backend over the *same* AST |
+| `zen/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `str`, slice-free |
+| `zen/compiler/parse.zen` + `parse_expr` / `parse_stmt` / `parse_type` | recursive-descent parser → `compiler.genc` AST |
+| `zen/compiler/check.zen` + `check_validate.zen` | resolver + the `fits()` validator |
+| `zen/compiler/genc.zen` + `genc_emit` / `genc_mono` | the C backend (the shared AST + emit + monomorphization) |
+| `zen/compiler/genjs.zen` | a JavaScript backend over the *same* AST |
 | `zen/std/{mem,str,string,alloc,vec,iter}.zen` | the runtime stdlib (allocator, slices, strings, iterators) |
 | `zen/std/{c,result,cown,drop,io,resolve}.zen` | bindings, errors-as-values, FFI-memory rule, module loader |
-| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `zenrt.c` (runtime) + `main.c` + `Makefile` |
+| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked bootstrap manifest) + `zenrt.c`/`main.c`/`Makefile` |
 | `tools/loader/` | the runnable transitive-closure import resolver |
 | `tests/` | the binary-only oracle (pytest as runner; imports no compiler code) |
 

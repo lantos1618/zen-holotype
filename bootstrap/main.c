@@ -10,9 +10,9 @@ String genModule(zslice decls);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
 int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND (0 = ok, 1..13) */
 /* U1.3: the Zen module loader (zen/std/resolve.zen, now a SOURCE). Given the project root (the dir that
- * contains zen/std/) + the program source, returns the flat single-module source with the transitive
- * `std.X` import closure spliced in (per-module + per-name dedup; N2b qualified `c.x` too). build/run/
- * check call it BEFORE parse_module so a program that imports the stdlib resolves from disk. */
+ * contains zen/std/ and zen/compiler/) + the program source, returns the flat single-module source with
+ * the transitive import closure spliced in (per-module + per-name dedup; N2b qualified `c.x` too).
+ * build/run/check call it BEFORE parse_module so a program that imports the stdlib resolves from disk. */
 const char* resolve_program(const char* root, const char* src);
 
 /* ── normal mode: read one flat .zen (argv[1] or stdin), emit C to stdout ──────────────────────── */
@@ -36,36 +36,19 @@ static int compile_stdin_or_file(int argc, char** argv){
 
 /* ── --build-self mode: Python-free regeneration of bootstrap/zenc.gen.c ─────────────────────────
  *
- * This reproduces, in C driver glue, exactly what bootstrap/generate.py.compiler_source() builds:
- *   compiler_source() = "\n".join(strip_imports(p) for p in SOURCES)
+ * This reproduces, in C driver glue, the flat compiler source shape used for the committed seed:
+ *   compiler_source() = "\n".join(strip_imports(p) for p in bootstrap/sources.txt)
  *   strip_imports(p)  = "\n".join(l for l in TEXT.splitlines()
- *                                 if not (l.strip().startswith("{ ") and "= std." in l))
+ *                                 if not (l.strip().startswith("{ ")
+ *                                         and ("= std." in l or "= compiler." in l)))
  * then feeds that flat source through the SAME parse_module->resolve_module->genModule path the
  * normal mode uses, and writes the emitted C to <out.c>. ZERO Python participates.
  *
- * The SOURCES list + order are HARDCODED below, identical to bootstrap/generate.py's SOURCES (paths
- * relative to the <srcroot> argument). check_validate.zen / alloc / io are intentionally NOT here —
- * the bootstrap binary only emits C; it does not type-check.
+ * The source list lives in bootstrap/sources.txt (paths relative to the <srcroot> argument).
+ * alloc is intentionally NOT there — the bootstrap binary links runtime primitives from zenrt
+ * rather than compiling the std allocator module into the seed.
  */
-static const char* const SOURCES[] = {
-    "zen/std/genc.zen", "zen/std/genc_mono.zen", "zen/std/genc_emit.zen",
-    "zen/std/lex.zen", "zen/std/parse_expr.zen", "zen/std/parse_type.zen",
-    "zen/std/parse_stmt.zen", "zen/std/parse.zen", "zen/std/check.zen",
-    /* U1.2: check_validate.zen is now compiled INTO the binary so `zenc build`/`check` can TYPE-CHECK
-     * (check_module / check_module_kind). It depends only on genc/check/lex (above) + zenrt's
-     * Malloc/eq/is_empty/malloc (its imports are stripped like every SOURCE), and shares zero top-level
-     * names with the others. The emit-only path (compile_stdin_or_file) and --build-self do not call it. */
-    "zen/std/check_validate.zen",
-    /* U1.3: the Zen-written module LOADER folded into the binary so `zenc build`/`run`/`check` RESOLVE
-     * `{ a, b } = std.X` imports from disk (resolve_program). io.zen supplies read_file (the on-disk
-     * read); resolve.zen the resolver itself. Their home modules (mem/str/string) are NOT SOURCES — the
-     * handful of primitives they need (alloc/view/with_cap) live in zenrt.c as C, so adding those modules
-     * would duplicate zenrt's String/eq/etc and break the link. The two had 2 name clashes with the
-     * SOURCES above (ident_end vs lex, sbyte vs genc_emit), resolved by renaming the resolve.zen copies
-     * to res_ident_end / res_sbyte. Their `{ … } = std.X` imports are stripped like every SOURCE. */
-    "zen/std/io.zen", "zen/std/resolve.zen",
-};
-static const int N_SOURCES = (int)(sizeof(SOURCES) / sizeof(SOURCES[0]));
+static const char SOURCE_MANIFEST[] = "bootstrap/sources.txt";
 
 /* read an entire file into a malloc'd, NUL-terminated buffer; returns NULL (and prints) on error. */
 static char* slurp(const char* path, size_t* out_len){
@@ -76,74 +59,125 @@ static char* slurp(const char* path, size_t* out_len){
     return buf;
 }
 
+static char* join_root_path(const char* root, const char* rel){
+    size_t rootlen = strlen(root);
+    int need_trailing_slash = (rootlen > 0 && root[rootlen-1] != '/');
+    size_t plen = rootlen + (need_trailing_slash ? 1 : 0) + strlen(rel) + 1;
+    char* path = malloc(plen);
+    memcpy(path, root, rootlen);
+    size_t pos = rootlen;
+    if (need_trailing_slash) path[pos++] = '/';
+    memcpy(path + pos, rel, strlen(rel) + 1);
+    return path;
+}
+
 /* Python str.strip() whitespace set (ASCII): space, \t, \n, \r, \v, \f. */
 static int py_isspace(unsigned char c){
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
 /* the strip_imports predicate, applied to ONE physical line [p, e) of `src` (e is the index of the
- * line's '\n' or the terminating NUL). Returns 1 iff the line is an `{ … } = std.…` import to drop:
- *   l.strip().startswith("{ ")  AND  "= std." in l   (the membership test is over the WHOLE line). */
+ * line's '\n' or the terminating NUL). Returns 1 iff the line is an import to drop:
+ *   l.strip().startswith("{ ")  AND  ("= std." in l OR "= compiler." in l)
+ * (the membership test is over the WHOLE line). */
 static int is_import_line(const char* src, size_t p, size_t e){
     /* l.strip(): advance over leading py-whitespace, then test startswith("{ "). */
     size_t s = p;
     while (s < e && py_isspace((unsigned char)src[s])) s++;
     if (!(s + 1 < e && src[s] == '{' && src[s+1] == ' ')) return 0;
-    /* "= std." in l: substring search within [p, e). */
-    static const char NEEDLE[] = "= std.";
-    size_t nlen = sizeof(NEEDLE) - 1;
-    if (e < p || e - p < nlen) return 0;
-    for (size_t i = p; i + nlen <= e; i++){
-        if (memcmp(src + i, NEEDLE, nlen) == 0) return 1;
+    /* import marker in l: substring search within [p, e). */
+    static const char STD_NEEDLE[] = "= std.";
+    static const char COMPILER_NEEDLE[] = "= compiler.";
+    size_t std_len = sizeof(STD_NEEDLE) - 1;
+    size_t compiler_len = sizeof(COMPILER_NEEDLE) - 1;
+    for (size_t i = p; i <= e; i++){
+        if (i + std_len <= e && memcmp(src + i, STD_NEEDLE, std_len) == 0) return 1;
+        if (i + compiler_len <= e && memcmp(src + i, COMPILER_NEEDLE, compiler_len) == 0) return 1;
     }
     return 0;
 }
 
-/* Build the flat compiler source: for each SOURCE (in order), append `\n` as a file separator iff
- * this is not the first file, then append that file's body with import lines dropped. Lines are split
- * on '\n' (Python splitlines: a trailing '\n' yields no extra empty line) and rejoined with '\n'. */
+static int append_stripped_file(String* out, const char* path){
+    size_t len = 0;
+    char* src = slurp(path, &len);
+    if (!src) return 1;
+
+    /* scan physical lines; emit each kept line, '\n'-separated within this file. */
+    int first_kept = 1;
+    size_t p = 0;
+    while (p < len){
+        size_t e = p;
+        while (e < len && src[e] != '\n') e++;   /* [p, e) is the line body (no terminator) */
+        if (!is_import_line(src, p, e)){
+            if (!first_kept) *out = push(*out, '\n');  /* "\n".join within file */
+            first_kept = 0;
+            for (size_t i = p; i < e; i++) *out = push(*out, (uint8_t)src[i]);
+        }
+        if (e >= len) break;  /* no terminator -> last line (splitlines drops trailing) */
+        p = e + 1;            /* skip the '\n'; if it was the final byte, loop ends (p==len) */
+    }
+    free(src);
+    return 0;
+}
+
+static int manifest_entry(const char* src, size_t p, size_t e, size_t* s_out, size_t* n_out){
+    size_t s = p;
+    while (s < e && py_isspace((unsigned char)src[s])) s++;
+    size_t t = e;
+    while (t > s && py_isspace((unsigned char)src[t-1])) t--;
+    if (s == t || src[s] == '#') return 0;
+    *s_out = s;
+    *n_out = t - s;
+    return 1;
+}
+
+/* Build the flat compiler source: for each path in bootstrap/sources.txt, append `\n` as a file
+ * separator iff this is not the first file, then append that file's body with import lines dropped.
+ * Lines are split on '\n' (Python splitlines: a trailing '\n' yields no extra empty line) and rejoined
+ * with '\n'. */
 static String build_self_source(const char* srcroot){
     String out = new();
-    size_t rootlen = strlen(srcroot);
-    int need_trailing_slash = (rootlen > 0 && srcroot[rootlen-1] != '/');
-    for (int fi = 0; fi < N_SOURCES; fi++){
-        /* join the absolute path: <srcroot>[/]<SOURCES[fi]>. */
-        const char* rel = SOURCES[fi];
-        size_t plen = rootlen + (need_trailing_slash ? 1 : 0) + strlen(rel) + 1;
-        char* path = malloc(plen);
-        memcpy(path, srcroot, rootlen);
-        size_t pos = rootlen;
-        if (need_trailing_slash) path[pos++] = '/';
-        memcpy(path + pos, rel, strlen(rel) + 1);
+    char* manifest_path = join_root_path(srcroot, SOURCE_MANIFEST);
+    size_t manifest_len = 0;
+    char* manifest = slurp(manifest_path, &manifest_len);
+    free(manifest_path);
+    if (!manifest){ out.ptr = NULL; return out; }
 
-        size_t len = 0;
-        char* src = slurp(path, &len);
-        free(path);
-        if (!src){ out.ptr = NULL; return out; }  /* signal error to caller via NULL ptr */
-
-        if (fi > 0) out = push(out, '\n');  /* "\n".join across files */
-
-        /* scan physical lines; emit each kept line, '\n'-separated within this file. */
-        int first_kept = 1;
-        size_t p = 0;
-        while (p < len){
-            size_t e = p;
-            while (e < len && src[e] != '\n') e++;   /* [p, e) is the line body (no terminator) */
-            if (!is_import_line(src, p, e)){
-                if (!first_kept) out = push(out, '\n');  /* "\n".join within file */
-                first_kept = 0;
-                for (size_t i = p; i < e; i++) out = push(out, (uint8_t)src[i]);
+    int file_count = 0;
+    size_t p = 0;
+    while (p < manifest_len){
+        size_t e = p;
+        while (e < manifest_len && manifest[e] != '\n') e++;
+        size_t s = 0, n = 0;
+        if (manifest_entry(manifest, p, e, &s, &n)){
+            char* rel = malloc(n + 1);
+            memcpy(rel, manifest + s, n);
+            rel[n] = 0;
+            char* path = join_root_path(srcroot, rel);
+            free(rel);
+            if (file_count > 0) out = push(out, '\n');  /* "\n".join across files */
+            if (append_stripped_file(&out, path) != 0){
+                free(path);
+                free(manifest);
+                out.ptr = NULL;
+                return out;
             }
-            if (e >= len) break;  /* no terminator -> last line (splitlines drops trailing) */
-            p = e + 1;            /* skip the '\n'; if it was the final byte, loop ends (p==len) */
+            free(path);
+            file_count++;
         }
-        free(src);
+        if (e >= manifest_len) break;
+        p = e + 1;
+    }
+    free(manifest);
+    if (file_count == 0){
+        fprintf(stderr, "zenc: no sources listed in %s\n", SOURCE_MANIFEST);
+        out.ptr = NULL;
     }
     return out;
 }
 
 /* genModule emits this zslice typedef at the head of every module; bootstrap/zenc.gen.c provides it
- * via zenrt.h instead, so we swap the head for the include (== generate.py.gen_c_file()). */
+ * via zenrt.h instead, so we swap the head for the include. */
 static const char HEAD[] = "typedef struct { void* ptr; int64_t len; } zslice; ";
 static const char HEAD_REPL[] = "#include \"zenrt.h\"\n";
 /* The build/run path uses this variant instead: a built program that imports std.string emits its OWN
@@ -153,12 +187,17 @@ static const char HEAD_REPL[] = "#include \"zenrt.h\"\n";
  * none of its own). A built program that doesn't use String is unaffected (zenrt's String fns unreferenced). */
 static const char HEAD_REPL_PROG[] = "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n";
 
+static void trim_trailing_ws(String* s){
+    while (s->len > 0 && py_isspace(((uint8_t*)s->ptr)[s->len - 1])) s->len--;
+}
+
 static int build_self(const char* out_path, const char* srcroot){
     String src = build_self_source(srcroot);
     if (src.ptr == NULL){ return 1; }  /* a source file could not be read */
     const char* flat = finish(src);    /* NUL-terminate the flat source for the parser */
     Malloc m = { 0 };
     String out = genModule(resolve_module(&m, parse_module(&m, flat)));
+    trim_trailing_ws(&out);
 
     size_t hlen = sizeof(HEAD) - 1;
     if ((size_t)out.len < hlen || memcmp(out.ptr, HEAD, hlen) != 0){
@@ -178,8 +217,7 @@ static int build_self(const char* out_path, const char* srcroot){
  * Emits the program's C (genModule), swaps the leading HEAD typedef for #include "zenrt.h" (== the
  * gen_c_file form), writes it to a temp .c, and links it with bootstrap/zenrt.c into `-o <out>` via cc.
  * A Zen `main = () i32 { … }` emits as C `int32_t main()` — the program's entry, no separate runner.
- * NOTE: the binary does NOT yet resolve `{ } = std.X` imports (U1 Step 3), so the program must be
- * self-contained for now. zenrt.{c,h} are found relative to the zenc binary: <dir(argv0)>/bootstrap. */
+ * zenrt.{c,h} are found relative to the zenc binary: <dir(argv0)>/bootstrap. */
 
 /* directory of argv[0]: everything up to the last '/', or "." if none. zenc lives at <root>/zenc, so
  * this is <root>, and <root>/bootstrap holds zenrt.{c,h}. */
@@ -228,8 +266,8 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     char* buf = slurp(in_path, &len);
     if (!buf) return 1;
     Malloc m = { 0 };
-    /* U1.3: resolve `{ … } = std.X` imports from disk (the loader reads <root>/zen/std/X.zen) before
-     * parsing, so a program that imports the stdlib builds. root = dir of the zenc binary (holds zen/std).
+    /* U1.3: resolve `{ … } = std.X` / `compiler.X` imports from disk before parsing, so a program that
+     * imports the stdlib builds. root = dir of the zenc binary (holds zen/std and zen/compiler).
      * resolve_program returns the flat single-module source; on a program with no imports it is a pass-
      * through. The returned str is borrowed from the loader's arena — don't free it. */
     char dir[4096]; bin_dir(argv0, dir, sizeof dir);

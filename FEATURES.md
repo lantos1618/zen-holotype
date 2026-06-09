@@ -1,7 +1,8 @@
 # Features
 
 What the language has and does today. The compiler is **self-hosted** — lexer, parser,
-checker, and the C backend are all Zen modules in `zen/std/` that compile to C via `cc` and
+checker, and the C backend are all Zen modules in `zen/compiler/`; the runtime and loader live in
+`zen/std/`. They compile to C via `cc` and
 reproduce their own committed C byte-for-byte (the fixpoint). C is the intentional
 intermediate/bootstrap target, not a defect. No Python, no tree-sitter.
 (For the *why* — "structure is the constraint" — see [README](README.md); for how the
@@ -72,7 +73,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   emits a forward declaration, and the linker binds it (the system headers define it). No
   `extern` keyword. So libc symbols (`malloc`, `putchar`, `strlen`, …) **just link**.
 - **The header is a function** — `zen/std/c.zen`'s `libc() [Decl]` builds those bodyless
-  bindings *as AST*, and `std.genc.genModule(libc())` emits exactly the C prototypes a
+  bindings *as AST*, and `compiler.genc.genModule(libc())` emits exactly the C prototypes a
   translation unit needs. One source of truth for the libc surface, instead of the same
   externs re-prototyped in every module (the scatter `std.mem`/`std.io`/`std.cown`/
   `std.result` still have at the top, which `std.c` gathers).
@@ -92,7 +93,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   zero (worked examples: `Buf` over `malloc`/`free`, `File` over `open`/`close`).
 - **Metaprogramming is values, not pragmas** — there is no `@emit` and no comptime
   evaluator. A generator is an ordinary function returning `[Decl]`, emitted by
-  `std.genc.genModule`; `std.ast` gives fluent heap-allocating builders
+  `compiler.genc.genModule`; `std.ast` gives fluent heap-allocating builders
   (`var("x").dot("a").eq(…)`). `libc()` above is exactly this shape — a function that
   returns its bindings as AST.
 - **Raw memory intrinsics** (handled inline by the backend — never declared or imported):
@@ -134,7 +135,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   allocator). Nothing hides a `malloc`.
 - **`std.vec`** — a growable array that threads the allocator explicitly: `a.vec(cap)` /
   `v.push(a, x)` (grows via `a.resize`) / `v.items()` / `v.vfree(a)`.
-- **`std.genc` (+ `genc_emit` / `genc_mono`) — the C backend, in Zen, AND the compiler's own
+- **`compiler.genc` (+ `genc_emit` / `genc_mono`) — the C backend, in Zen, AND the compiler's own
   codegen.** It defines the **one AST** the whole pipeline shares — expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond`/`Member`/`Arrow`/`MakeEnum`/`Tag`/`Match`/`StrLit`, statements
   `Let`/`Assign`/`Return`/`If`/`While`, `Struct`/`Enum`/`DRaw` decls, typed `[Param]` + a `Ty` enum
@@ -143,15 +144,15 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   monomorphization. `If`/`While` here are backend/internal structured target forms; the Zen
   source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
   not a demo.
-- **`std.genjs` — a second backend over that same AST**, emitting JavaScript (the computational
+- **`compiler.genjs` — a second backend over that same AST**, emitting JavaScript (the computational
   subset). Proof the AST is genuine backend-neutral IR: zen generates its own C and JS.
-- **`std.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
+- **`compiler.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
   kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (a `str` is a `const char*`),
   tokens are spans (allocation-free), and it handles idents, ints, strings (with escapes), multi-char
   operators (`:= == => <= …`), and `//` comments. The token stream is the pure positional `scan`
   iterated to Eof — or a materialized heap cons-list via `tokenize(a, src)`.
-- **`std.parse` — a recursive-descent parser written in Zen.** Pulls tokens from `std.lex` and
-  builds `std.genc`'s `Expr`/`Stmt`/`Decl` AST (a heap tree, allocated through the allocator).
+- **`compiler.parse` — a recursive-descent parser written in Zen.** Pulls tokens from `compiler.lex` and
+  builds `compiler.genc`'s `Expr`/`Stmt`/`Decl` AST (a heap tree, allocated through the allocator).
   Covers a real subset: **expressions** — integers, identifiers, `+ - * /`, comparisons
   (`== < > <= >=`), one-arg calls, parens, and a boolean **`.match`** that the C backend may
   lower to a ternary;
@@ -159,12 +160,12 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   and whole **function declarations** `name* = (typed params) RetType { body }`, **several per
   module** (`parse_module → genModule` = a translation unit). Written UFCS throughout
   (`src.scan(pos)`, `src.byte_at(i).op_str()`).
-- **`std.check` + `std.check_validate`** — the resolver and the `fits()` validator, in Zen.
+- **`compiler.check` + `compiler.check_validate`** — the resolver and the `fits()` validator, in Zen.
   `check` fills the type information the parser can't (each `match`'s enum name, each
   constructor's enum type) by looking names up among a module's decls; `check_validate` adds
   the validating pass whose exit code is the type-error count (the CHECK binary the oracle drives).
-- **The loop is closed — the compiler IS this stdlib.** `std.lex` → `std.parse*` → `std.check`
-  → `std.genc` is the whole `zenc` pipeline, all ordinary Zen. Fed its **own** sources, `zenc`
+- **The loop is closed — the compiler is ordinary Zen.** `compiler.lex` → `compiler.parse*` → `compiler.check`
+  → `compiler.genc` is the whole `zenc` pipeline, all ordinary Zen. Fed its **own** sources, `zenc`
   re-emits the committed `bootstrap/zenc.gen.c` byte-for-byte (the fixpoint). Correctness is the
   **binary-only oracle** (`tests/`): emit/run parity, reject-parity, and the byte-exact
   reproduction — no second compiler to diff against, since the compiler reproduces itself.
@@ -174,9 +175,9 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 ## Metaprogramming — the AST is data, no pragmas
 - **There is no `@emit` pragma and no comptime evaluator.** You metaprogram by building AST
   *values* and emitting them: an ordinary function returns `[Decl]`, and
-  `std.genc.genModule` lowers it to C. A generator is just a function over data; a `derive`
+  `compiler.genc.genModule` lowers it to C. A generator is just a function over data; a `derive`
   is just a function over a `StructDecl`.
-- **`std.ast`** — ergonomic, heap-allocating builders over `std.genc`'s reified AST, in
+- **`std.ast`** — ergonomic, heap-allocating builders over `compiler.genc`'s reified AST, in
   fluent UFCS style, so the builder reads like the Zen it generates:
 
   ```zen
@@ -199,6 +200,8 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   exactly once (per-module dedup breaks cycles; a per-name pass keeps the first definition
   of each top-level name, so a cross-module clash like `string.free` vs `mem.free` resolves
   deterministically).
+- The same resolver understands `compiler.X` for internal compiler/std dependencies, but
+  normal user-facing library imports live under `std.X`.
 - Plain emit mode (`zenc file.zen` or stdin) remains flat and unvalidated: it expects an
   already-flattened module and writes C to stdout. `tools/loader/` still packages the same
   resolver as a standalone runnable driver.
@@ -210,8 +213,8 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   declarations.
 
 ## Pipeline
-Checked commands run `resolve std imports (std.resolve) → scan (std.lex) → parse
-(std.parse*) → check (std.check/check_validate) → emit C (std.genc) → cc`, all ordinary Zen
+Checked commands run `resolve imports (std.resolve) → scan (compiler.lex) → parse
+(compiler.parse*) → check (compiler.check/check_validate) → emit C (compiler.genc) → cc`, all ordinary Zen
 modules that the `zenc` binary runs and that compile themselves. `build`/`run` reject an
 ill-typed program before linking.
 Plain emit mode skips the std-import loader and validator and writes C for one flat module.
@@ -224,6 +227,6 @@ Plain emit mode skips the std-import loader and validator and writes C for one f
   full parity with what `zenlang` describes is the active arc.
 - The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
   (the `map_into`/`filter_into` forms are already generic).
-- Two backends (`std.genc` for C, `std.genjs` for JS — the latter the computational subset).
+- Two backends (`compiler.genc` for C, `compiler.genjs` for JS — the latter the computational subset).
   An LLVM backend and the one-structure surface syntax from [VISION](VISION.md) are the
   *direction*, not the current state.

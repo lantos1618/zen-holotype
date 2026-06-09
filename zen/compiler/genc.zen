@@ -1,4 +1,4 @@
-// std.genc — a C backend written IN Zen, run at RUNTIME.
+// compiler.genc — a C backend written IN Zen, run at RUNTIME.
 //
 // It walks an AST (ordinary lowered structs + enums — runtime values, not the
 // comptime prelude model) and emits C source into a heap String. The point: codegen
@@ -107,7 +107,7 @@ ImportData*: { names: [Param] }
 GlobalData*: { name: str, ty: Ty, init: Ptr<Expr> }
 // DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
 // `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
-// no C of its own: std.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
+// no C of its own: compiler.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
 // instantiates `impl_<Trait>_<Type>_<m>` from this body with `Self` → the concrete type, as an ordinary
 // DFunc. The checker treats a method with a default as satisfied even when an impl doesn't provide it.
 TraitDefData*: { trname: str, fn: Func }
@@ -135,7 +135,7 @@ eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt]) Expr { 
 lam* = (params: [Param], body: [Stmt]) Expr { .Lambda(LambdaData( params: params, body: body )) }
 block* = (stmts: [Stmt]) Expr { .Block(BlockData( stmts: stmts )) }
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
-// (std.check splices it), never emitted as a C function — so genModule skips it.
+// (compiler.check splices it), never emitted as a C function — so genModule skips it.
 is_fnt* = (t: Ty) bool { t.match ({ .FnT(f) => true, _ => false }) }
 has_fnt_param* = (ps: [Param]) bool {
     found := false
@@ -197,7 +197,7 @@ mangle_str* = (base: str, args: [Ty]) str {
 }
 // the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
 // types implementing the same trait method emit DISTINCT C functions (matching the Python frontend's
-// impl_cname). UFCS dispatch routes `x.m()` to the impl for x's type (std.check dispatch_name).
+// impl_cname). UFCS dispatch routes `x.m()` to the impl for x's type (compiler.check dispatch_name).
 impl_cname* = (trname: str, ty: str, method: str) str {
     new().append("impl_").append(trname).append("_").append(ty).append("_").append(method).finish()
 }
@@ -249,8 +249,8 @@ gen_ty* = (s: String, t: Ptr<Ty>) String {
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 ty_cname* = (t: Ty) str { new().gen_ty(t.addr()).finish() }
 
-// ── type substitution (tparam→arg): shared by std.check (subst_ty/find_genenum) and the
-//    monomorphize pass (std.genc_mono). A tiny stack of [Ty] buffer helpers + the recursive
+// ── type substitution (tparam→arg): shared by compiler.check (subst_ty/find_genenum) and the
+//    monomorphize pass (compiler.genc_mono). A tiny stack of [Ty] buffer helpers + the recursive
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
 mono_tybuf = (n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
 mono_tynode = (t: Ty) Ptr<Ty> {

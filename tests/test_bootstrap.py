@@ -1,12 +1,13 @@
 """The bootstrap fixpoint 🏁 — the self-hosted compiler reproduces itself with no Python.
 
 `cc bootstrap/*.c -o zenc` builds a standalone binary from the COMMITTED C (bootstrap/
-zenc.gen.c + a tiny runtime). That binary reads Zen source and emits C. Fed its OWN four
-source files (via the binary's `--build-self` mode, which strips imports + concatenates the
-compiler SOURCES and emits C), it produces byte-for-byte the C it was built from — the fixpoint.
+zenc.gen.c + a tiny runtime). That binary reads Zen source and emits C. Fed its OWN
+source manifest (via the binary's `--build-self` mode, which strips imports + concatenates the
+listed Zen sources and emits C), it produces byte-for-byte the C it was built from — the fixpoint.
 
 ZERO Python participates: `cc` builds the binary, the binary regenerates its own source. If these
-fail after editing std/{genc,lex,parse,check}.zen, regenerate the committed C with the binary:
+fail after editing `zen/compiler/` or manifest-listed `zen/std/` sources, regenerate the committed C
+with the binary:
     make -f bootstrap/Makefile regen
 """
 import subprocess
@@ -45,7 +46,7 @@ def test_bootstrap_binary_compiles_zen(tmp_path):
 
 def test_bootstrap_fixpoint(tmp_path):
     # 🏁 the binary, fed the compiler's own source files (via --build-self), reproduces the C it was
-    # built from BYTE-FOR-BYTE. No Python: the binary itself reads/strips/concats the SOURCES and emits.
+    # built from BYTE-FOR-BYTE. No Python: the binary itself reads/strips/concats the manifest and emits.
     exe = _build(tmp_path)
     out_c = tmp_path / "repro.gen.c"
     r = subprocess.run([str(exe), "--build-self", str(out_c), str(ROOT)],
