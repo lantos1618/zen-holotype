@@ -91,7 +91,12 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
 // the non-literal, non-identifier atoms, by leading token: `.Variant` ctor, prefix `!`/`-`,
 // a `[…]` slice literal, a `(names){…}` lambda, or a parenthesized expression.
 parse_other = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
-    src.is_dot(sc.tok).match ({
+    src.is_lbrace(sc.tok).match ({
+        // a VALUE-position brace block `{ stmts  tail }` — parses like a match-arm block (trailing bare
+        // expr = the block's value via gen_blockexpr's `({ … })`). Was missing here, so `x := { y:=1  y }`
+        // fell through to parse_paren and mis-lowered (used y before its declaration) — fuzz #3a.
+        true  => a.parse_postfix(src, a.parse_arm_block(src, sc)),
+        false => src.is_dot(sc.tok).match ({
         true  => a.parse_ctor(src, sc),
         false => src.is_not(sc.tok).match ({
             true  => a.parse_not(src, sc),               // prefix `!x` -> (x ? false : true)
@@ -106,6 +111,7 @@ parse_other = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
                 })
             })
         })
+    })
     })
 }
 // the byte a backslash escape denotes: n -> 10, t -> 9, r -> 13, 0 -> 0; any other escaped
