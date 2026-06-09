@@ -233,7 +233,7 @@ static void bin_dir(const char* argv0, char* out, size_t n){
 static const char* const KIND_NAME[] = {
     "ok", "arity", "arg-type", "undefined-name", "struct-field", "exhaustiveness",
     "dup-variant", "operand-type", "index", "return-fit", "assign-fit",
-    "conformance", "dup-fn", "value-pos-return",
+    "conformance", "dup-fn", "value-pos-return", "parse",
 };
 /* U1.4 Phase 1A: a human-readable MESSAGE per kind (index-aligned to KIND_NAME / the K* codes). The bare
  * kind name was developer shorthand; this is what an outsider reads. (Phase 1B will splice in the offending
@@ -253,6 +253,7 @@ static const char* const KIND_MSG[] = {
     "impl does not satisfy the trait",
     "duplicate top-level definition",
     "early `return` in a value-position match arm",
+    "syntax error: unparseable top-level input",
 };
 
 /* U1.2: type-check resolved decls. Prints a Zen-LEVEL error (a count + the first error's KIND) to stderr
@@ -275,7 +276,7 @@ static int type_check(Malloc* m, zslice decls, const char* in_path){
     if (kind == 0) return 0;
     int count = check_module(m, decls);
     if (count < 1) count = 1;
-    const char* msg = (kind >= 1 && kind <= 13) ? KIND_MSG[kind] : "type error";
+    const char* msg = (kind >= 1 && kind <= 14) ? KIND_MSG[kind] : "type error";
     /* U1.4 Phase 1A: `zenc: <file>: error: <human message>`. (Phase 2 inserts <file>:<line>:<col>.) */
     if (count == 1)
         fprintf(stderr, "zenc: %s: error: %s\n", in_path, msg);

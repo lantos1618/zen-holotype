@@ -218,4 +218,4 @@ def test_fuzz_random_garbage_terminates():
         assert cnt >= 0, (src, "CHECK signalled", cnt)
         assert kd >= 0, (src, "CHECK-KIND signalled", kd)
         assert er >= 0, (src, "EMIT signalled", er)
-        assert cnt < 1000 and kd <= 13, (src, cnt, kd)
+        assert cnt < 1000 and kd <= 14, (src, cnt, kd)   # 14 = parse (syntax-error sentinel)

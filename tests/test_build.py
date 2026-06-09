@@ -300,3 +300,14 @@ def test_zenc_run_hof_named_fn_and_lambda():
         "main = () i32 { apply(twice, 11) + apply((n){ n + 9 }, 11) }\n"   # 22 + 20 = 42
     )
     assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 42
+
+
+# ── review fix #3: mid-file garbage is a SYNTAX ERROR, not silently-dropped decls ────────────────────
+def test_zenc_check_rejects_midfile_garbage():
+    """A truncated/garbage region used to make `check` say ok while silently DROPPING every decl after it
+    (then run said "no main"). Now: kind 14 syntax-error sentinel per unparseable token, later decls kept."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("good = () i32 { 1 }\n@@@ !!!\nmain = () i32 { good() + 6 }\n")
+    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode != 0 and "syntax error" in r.stderr, r.stderr

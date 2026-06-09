@@ -7,10 +7,10 @@
 // so it stays here, importable from compiler.parse.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, ti32, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, lit, ti32, tvoid } = compiler.genc
 { Token, Scan, scan, byte_at } = compiler.lex
 { Malloc, malloc } = std.alloc
-{ parse_or, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
+{ parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd } = compiler.parse_type
 
@@ -261,7 +261,15 @@ fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         .Eof => i,
         _    => src.decl_is_import(pos).match ({
             true  => a.fill_import(src, pos, buf, i),    // record an import's names as a DImport
-            false => a.fill_decl(src, pos, buf, i)
+            false => sc.tok.kind.match ({
+                // every top-level decl starts with an IDENTIFIER (a name / Type). Anything else — stray
+                // punctuation, a number, leftover garbage — used to fall into fill_func, which consumed
+                // an arbitrary span (silently swallowing the decls AFTER it, so a truncated file checked
+                // 'ok' with `main` dropped). Emit a SYNTAX-ERROR sentinel decl (the validator rejects it
+                // as kind 14 "syntax error"), skip ONE token, and keep parsing so later decls still check.
+                .Ident => a.fill_decl(src, pos, buf, i),
+                _      => { buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  a.fill_decls(src, sc.next, buf, i + 1) }
+            })
         })
     })
 }

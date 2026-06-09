@@ -579,7 +579,7 @@ dup_name_errs = (decls: [Decl]) i32 {
 }
 check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs()
-    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => a.impl_errs(decls, im), _ => 0 }) })
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => a.impl_errs(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => 1, false => 0 }), _ => 0 }) })
     acc
 }
 
@@ -608,6 +608,7 @@ KASSIGNFIT    = () i32 { 10 }   // x = v where v doesn't fit x's let-inferred ty
 KCONFORMANCE  = () i32 { 11 }   // a Type.impl(Trait) misses a method or its signature differs
 KDUPFN        = () i32 { 12 }   // two top-level fns share a name (Zen has no overloading)
 KVALPOSRETURN = () i32 { 13 }   // an early (dropped) return in a value-position block arm
+KPARSE        = () i32 { 14 }   // unparseable top-level input (the parser's __syntax_error sentinel)
 
 // first-nonzero combinator: the kind of the FIRST error in traversal order.
 kv_kor = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
@@ -773,7 +774,7 @@ kv_impl_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
 // (which exits with the count) keeps working unchanged.
 check_module_kind* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs().kv_one(KDUPFN())
-    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, f), .DImpl(im) => a.kv_impl_kind(decls, im), _ => 0 })) })
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE(), false => 0 }), _ => 0 })) })
     acc
 }
 // the kind layer over a CROSS-MODULE link (mirrors check_linked): same layered header, then
