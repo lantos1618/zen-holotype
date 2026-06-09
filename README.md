@@ -7,8 +7,9 @@ alike, and module imports, type-checking, and pointer safety all become the _sam
 operation — checking that a signature fits in one shared space.
 
 The compiler is written in Zen and compiles itself: `cc` builds a `zenc` binary from
-committed C, and `zenc` re-emits that C byte-for-byte. There is **no Python and no
-tree-sitter** in the build — see [Build & run](#build--run).
+committed C, and `zenc` re-emits that C byte-for-byte. C is the intentional
+intermediate/bootstrap target today — not a defect or a host-language fallback. There is
+**no Python and no tree-sitter** in the build — see [Build & run](#build--run).
 
 > Every path resolves to exactly **one** canonical node — the single definition that
 > *is* the meaning of a name — and diamond imports collapse onto it.
@@ -141,13 +142,17 @@ fits(given, want):
 
 **3. The type system erases to plain C.** `Ptr` → `const *`, `MutPtr` → `*`,
 `Option<ptr>` → a bare pointer. All safety is proven *before* codegen, so the
-output is zero-overhead and the C compiler re-checks the const-correctness for free.
+output is zero-overhead and the C compiler re-checks the const-correctness for free. The
+source language still branches with `.match` only; the C backend is free to lower checked
+matches to target-level `if`/`else` or `?:` because those are backend details, not Zen
+syntax.
 
 **4. The compiler is Zen, and self-hosting.** Lexer, parser, checker, and the C
 backend are all ordinary Zen modules in `zen/std/` (`lex`, `parse*`, `check`, `genc*`).
 `zenc` compiles them to C; fed its **own** sources it re-emits byte-for-byte the committed
 `bootstrap/zenc.gen.c` — a deterministic **fixpoint**. New backend = new walk over the same
-AST (a JavaScript one, `std.genjs`, already exists alongside `std.genc`).
+AST (a JavaScript one, `std.genjs`, already exists alongside the intentional bootstrap C
+backend, `std.genc`).
 
 ## Build & run
 
@@ -155,23 +160,27 @@ The compiler is the `zenc` binary. `cc` builds it from committed C; nothing else
 
 ```sh
 make -f bootstrap/Makefile zenc        # cc bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
-./zenc path/to/source.zen              # read flat Zen → emit C on stdout
-echo 'add* = (a: i32, b: i32) i32 { a + b }' | ./zenc    # or from stdin
+./zenc path/to/flat.zen > out.c        # plain emit: read flat Zen → emit C on stdout
+echo 'add* = (a: i32, b: i32) i32 { a + b }' | ./zenc > out.c
 ```
 
-`zenc` reads **one flat module** and writes C to stdout — `cc` does the rest. To run a
-program, emit its C, link with a tiny `main`, and compile:
+Plain emit mode is deliberately small: it expects **one already-flat module**, does not load
+`std` imports from disk, and is not the validating user-program path. Use the checked CLI
+modes for programs:
 
 ```sh
-./zenc prog.zen > prog.c
-cc prog.c runner.c -o prog && ./prog   # runner.c calls the exported entry and prints it
+./zenc check prog.zen                  # resolve std imports, type-check, no binary
+./zenc build prog.zen -o prog          # resolve std imports, type-check, emit C, link with cc
+./zenc run prog.zen                    # same as build, then run the temporary binary
 ```
 
-A multi-module program (`{ … } = std.X` imports) is flattened to one module first by the
-self-hosted loader — see [Modules & imports](#modules--imports).
+`build`/`run` require `main = () i32 { … }`; `check` accepts library-like modules without
+`main`. A program with `{ … } = std.X` imports is flattened by the self-hosted loader inside
+those checked modes — see [Modules & imports](#modules--imports).
 
-**Regenerate the committed C** after editing any compiler source under
-`zen/std/{lex,parse*,check*,genc*}.zen` — the binary rebuilds its own C, with no Python:
+**Regenerate the committed C** after editing any compiler/bootstrap source under
+`zen/std/{lex,parse*,check*,genc*,io,resolve}.zen` or `zen/std/check_validate.zen` — the
+binary rebuilds its own C, with no Python:
 
 ```sh
 make -f bootstrap/Makefile regen       # builds zenc, then: ./zenc --build-self bootstrap/zenc.gen.c .
@@ -223,8 +232,9 @@ inventory.
 ## Modules & imports
 
 Imports are a destructuring of a module path: `{ a, b } = std.X` binds `a` and `b` from
-`zen/std/X.zen`. `zenc` itself compiles **one flat module**, so a multi-module program is
-resolved first by `zen/std/resolve.zen` — the self-hosted loader:
+`zen/std/X.zen`. The checked CLI modes (`zenc check`, `zenc build`, `zenc run`) call
+`zen/std/resolve.zen` before parsing, so std imports resolve from disk and the program is
+then checked as one flattened module:
 
 - it reads the program's `{ … } = std.X` import lines, follows each edge to
   `zen/std/X.zen`, and gathers the **transitive closure**;
@@ -232,9 +242,12 @@ resolved first by `zen/std/resolve.zen` — the self-hosted loader:
   breaks import cycles; a final per-**name** pass keeps the first definition of each
   top-level name, so a cross-module clash like `string.free` vs `mem.free` resolves the same
   way "nearest defining module wins" would);
-- the result is one flat module handed straight to `zenc`.
+- the result is one flat module handed to the normal parse/check/codegen pipeline.
 
-`tools/loader/` packages this as a runnable driver (`loader_driver.zen` + `loader_main.c`):
+The bare emit form (`zenc file.zen` or stdin) remains lower-level: it expects the source to
+already be flat and emits C without the `std` import-loading/check/build wrapper.
+`tools/loader/` also packages the resolver as a runnable driver (`loader_driver.zen` +
+`loader_main.c`):
 `loader <prog.zen> <out_flat.zen> <root>` writes the flattened module. It is itself a
 multi-module program, so it bootstraps once via `tools/loader/bootstrap_driver.sh` — the
 loader's analogue of `zenc` being built from committed C.
@@ -259,7 +272,7 @@ is a record of signatures `Area*: { … }`, an impl is `Vec.impl(Area, { … })`
 `<T: Trait>` — bound methods dispatch to the concrete impl; an unsatisfied bound is a type
 error), **`.match`** with payload-binding, exhaustiveness, and **literal patterns** on
 `i32`/`bool` (so with **recursion** the language is Turing-complete — `fact`/`fib` compile
-and run), **return-type inference** (omit the return type and it's inferred from the body,
+and run; there is no source-level `if` statement), **return-type inference** (omit the return type and it's inferred from the body,
 across calls), `Ptr/MutPtr/RawPtr` and `Option`, `i32`/`i64`/`u8`/`bool` with widening, the
 full operator set (`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v`
 let-bindings, the single `loop` iteration construct, mutation, slices `[T]`, a

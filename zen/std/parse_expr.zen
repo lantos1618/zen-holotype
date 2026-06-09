@@ -311,9 +311,15 @@ parse_arm_body = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
     })
 }
 parse_arm_block = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {    // open = '{'
-    body := a.build_body(src, open.next)                            // statements (trailing expr = value)
-    endp := src.skip_block(open.next)                               // pos just past the matching '}'
-    PExpr( expr: a.enode(block(body)), next: endp )
+    // Parse with the loop-body rule (parse_block): a TRAILING bare expression becomes an ExprStmt (run for
+    // effect / yield-as-value), NOT a Return — so a STATEMENT-position match's arm falls through to the
+    // statements after the match instead of stealing the function's return. An explicit `return <e>`
+    // keyword still parses to a Return (a guard early-exit). Value position is unchanged: gen_blockexpr's
+    // `({ … })` takes the last statement's value, so a trailing `e;` ExprStmt IS the block's value —
+    // identical to the old demoted-Return output. (Was: build_body made the trailing expr a Return, which
+    // gen_block emits as a real `return` in statement position — the silent early-return miscompile.)
+    blk := a.parse_block(src, open.next)
+    PExpr( expr: a.enode(block(a.materialize(blk.list))), next: blk.next )
 }
 // `.match ({` either has boolean arms (`true => X, false => Y`, -> Cond) or enum-variant arms
 // (`.Circle(r) => …, .Square(w) => …`, -> genc Match). The first arm's leading token tells

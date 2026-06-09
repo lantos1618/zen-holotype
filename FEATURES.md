@@ -2,7 +2,8 @@
 
 What the language has and does today. The compiler is **self-hosted** — lexer, parser,
 checker, and the C backend are all Zen modules in `zen/std/` that compile to C via `cc` and
-reproduce their own committed C byte-for-byte (the fixpoint). No Python, no tree-sitter.
+reproduce their own committed C byte-for-byte (the fixpoint). C is the intentional
+intermediate/bootstrap target, not a defect. No Python, no tree-sitter.
 (For the *why* — "structure is the constraint" — see [README](README.md); for how the
 compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
 [VISION](VISION.md).)
@@ -35,7 +36,9 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
 - Full operator set: `+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked. `/` and `%`
   are C truncate-toward-zero, and `/ %` bind tighter than `+ -`.
 - `match` with **literal patterns** (`i32`/`bool`), **payload binding** (`.Circle(v) => v`),
-  exhaustiveness, and wildcards — usable as an expression *or* a statement (`?:` or `if/else`).
+  exhaustiveness, and wildcards — the source-level branching form, usable as an expression
+  or a statement. The C backend may lower checked matches to `?:` or `if`/`else`
+  internally; Zen source does not have an `if` statement.
 - **`loop`** — the *one* iteration construct (no `while`/`for`). `loop(n, (h, i) { … })` counts;
   `loop(xs, (h, i, x) { … })` / `xs.loop((h, i, x) { … })` iterates a slice's elements — or a
   **user struct**'s, when it supplies `len` and an `at(Ptr<Self>, i64) T` method (`[]`-overloading);
@@ -50,6 +53,7 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   So `fold`/`each` are ordinary Zen on top of `loop` — `fold(xs, 0, (a, x) { a + x })`.
 - **Mutation** — `x = 5` (reassign a local), `s.f = v` (set a field through a `MutPtr`), `xs[i] = v` (write a slice element).
 - **Recursion** (so with literal-pattern `match`, it's Turing-complete — `fact`/`fib` run).
+  Branching at source level is match-only; booleans branch by matching `true`/`false`.
 - `x := v` let-bindings; struct literals; enum constructors; field access; calls.
 - **UFCS** — `x.f(a, b)` is sugar for `f(x, a, b)`: the receiver becomes the first argument.
   It desugars uniformly (checker, reachability scan, lowerer), so it resolves free functions and
@@ -72,7 +76,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   translation unit needs. One source of truth for the libc surface, instead of the same
   externs re-prototyped in every module (the scatter `std.mem`/`std.io`/`std.cown`/
   `std.result` still have at the top, which `std.c` gathers).
-- **Errors are values** (`std.result`) — Zen is `.match`-only with **no exceptions and no
+- **Errors are values** (`std.result`) — Zen is `.match`-only with **no `if`, no exceptions, and no
   unwinding**. A fallible call returns a `Result<T, E>` (`.Ok` / `.Err`) the caller
   `.match`es; an optional is `Opt<T>` (`.Some` / `.None`); the standard FFI error is
   `IoError`. `.match` *is* the catch; `return .Err(e)` propagates by value; the boundary
@@ -136,7 +140,9 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   `Let`/`Assign`/`Return`/`If`/`While`, `Struct`/`Enum`/`DRaw` decls, typed `[Param]` + a `Ty` enum
   — and walks it to C in a `String`: `genModule([Decl])` for a whole translation unit
   (forward-declared so recursive types compile), with `genc_mono` doing generic
-  monomorphization. This is the actual backend the `zenc` binary uses, not a demo.
+  monomorphization. `If`/`While` here are backend/internal structured target forms; the Zen
+  source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
+  not a demo.
 - **`std.genjs` — a second backend over that same AST**, emitting JavaScript (the computational
   subset). Proof the AST is genuine backend-neutral IR: zen generates its own C and JS.
 - **`std.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
@@ -147,7 +153,8 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - **`std.parse` — a recursive-descent parser written in Zen.** Pulls tokens from `std.lex` and
   builds `std.genc`'s `Expr`/`Stmt`/`Decl` AST (a heap tree, allocated through the allocator).
   Covers a real subset: **expressions** — integers, identifiers, `+ - * /`, comparisons
-  (`== < > <= >=`), one-arg calls, parens, and a boolean **`.match`** that lowers to a ternary;
+  (`== < > <= >=`), one-arg calls, parens, and a boolean **`.match`** that the C backend may
+  lower to a ternary;
   **statements** — `name := v` (let), `name = v` (assign), a final-expression return, N of them;
   and whole **function declarations** `name* = (typed params) RetType { body }`, **several per
   module** (`parse_module → genModule` = a translation unit). Written UFCS throughout
@@ -186,12 +193,15 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - An import is a destructuring of a module path — `{ a, b } = std.X` binds `a`, `b` from
   `zen/std/X.zen`. Visibility is the glued `*`: only `name*` declarations are reachable
   across files; importing a non-`*` name is a `Private` error.
-- `zenc` compiles **one flat module**, so a multi-module program is resolved first by
-  **`zen/std/resolve.zen`** — the self-hosted loader. It follows the program's import edges,
-  gathers the transitive closure of `zen/std/*.zen` modules, strips the import lines, and
-  concatenates each body exactly once (per-module dedup breaks cycles; a per-name pass keeps
-  the first definition of each top-level name, so a cross-module clash like `string.free` vs
-  `mem.free` resolves deterministically). `tools/loader/` packages it as a runnable driver.
+- `zenc check`, `zenc build`, and `zenc run` resolve `std` imports from disk before parsing:
+  **`zen/std/resolve.zen`** follows the program's import edges, gathers the transitive
+  closure of `zen/std/*.zen` modules, strips the import lines, and concatenates each body
+  exactly once (per-module dedup breaks cycles; a per-name pass keeps the first definition
+  of each top-level name, so a cross-module clash like `string.free` vs `mem.free` resolves
+  deterministically).
+- Plain emit mode (`zenc file.zen` or stdin) remains flat and unvalidated: it expects an
+  already-flattened module and writes C to stdout. `tools/loader/` still packages the same
+  resolver as a standalone runnable driver.
 
 ## Diagnostics
 - A type error carries its **structured location** (a `ns`+`(row,col)`), and the check
@@ -199,13 +209,16 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   ill-typed function is reported independently (the rest still builds).
 
 ## Pipeline
-`scan (std.lex) → parse (std.parse*) → check (std.check) → emit C (std.genc) → cc`, all
-ordinary Zen modules that the `zenc` binary runs and that compile themselves. Ill-typed
-functions are reported and excluded from codegen; the rest builds and runs.
+Checked commands run `resolve std imports (std.resolve) → scan (std.lex) → parse
+(std.parse*) → check (std.check/check_validate) → emit C (std.genc) → cc`, all ordinary Zen
+modules that the `zenc` binary runs and that compile themselves. Ill-typed functions are
+reported and excluded from codegen; `build`/`run` reject an ill-typed program before linking.
+Plain emit mode skips the std-import loader and validator and writes C for one flat module.
 
 ## Not yet (the honest gaps)
-- `zenc` compiles **one flat module**; multi-module programs are flattened first by
-  `std.resolve` + `tools/loader/` (an external pass), not resolved inside the binary.
+- Plain emit mode is still a flat-module C emitter, not the checked multi-module path.
+- `zenc check`/`build`/`run` resolve `std.X` imports from the repo's `zen/std/`; a broader
+  package/module system beyond that std-import closure is still future work.
 - The self-hosted checker covers a real but **partial** slice of the language; growing it to
   full parity with what `zenlang` describes is the active arc.
 - The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
