@@ -9,14 +9,14 @@
 // C strings are NUL-terminated, so byte 0 ends the scan and no length is threaded.
 //
 //   sc := scan(src, 0)        // one token + where to resume
-//   sc.tok.kind               // Ident | Int | Str | Sym | Eof
+//   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
 //   sc.next                   // feed back into scan for the next token
 
 // ── source bytes (slice-free: a str is a const char*) ────────────────────────
 byte_at* = (s: str, i: i32) u8 { load(offset(s, i)) }
 
 // ── tokens ───────────────────────────────────────────────────────────────────
-TokKind*: Ident | Int | Str | Char | Sym | Eof
+TokKind*: Ident | Int | Float | Str | Char | Sym | Eof
 Token*: { kind: TokKind, start: i32, len: i32 }    // lexeme = source[start .. start+len]
 Scan*:  { tok: Token, next: i32 }                  // one scan step: the token + resume pos
 
@@ -121,11 +121,22 @@ sym_end = (src: str, pos: i32) i32 {
 
 // ── one token ──────────────────────────────────────────────────────────────────
 mk = (k: TokKind, start: i32, end: i32) Scan { Scan( tok: Token( kind: k, start: start, len: end - start ), next: end ) }
+// a number token. A decimal digit run whose very next bytes are `.` THEN a digit continues as a
+// FLOAT literal — `digits '.' digits`, nothing more (NO exponent form: write 0.001, not 1e-3; NO
+// hex floats). The dot must be followed by a digit, so `1.match` / `xs[0].addr()` still scan as
+// an Int and a `.` postfix — only `1.5` fuses into one Float token.
+num_tok = (src: str, pos: i32) Scan {
+    e := src.num_end(pos)
+    (!src.is_hex_prefix(pos) && (src.byte_at(e) == '.') && src.byte_at(e + 1).is_digit()).match ({
+        true  => mk(.Float(), pos, src.int_end(e + 1)),
+        false => mk(.Int(), pos, e)
+    })
+}
 scan_one = (src: str, pos: i32, b: u8) Scan {
     b.is_alpha().match ({
         true  => mk(.Ident(), pos, src.ident_end(pos + 1)),
         false => b.is_digit().match ({
-            true  => mk(.Int(), pos, src.num_end(pos)),
+            true  => src.num_tok(pos),
             false => (b == '"').match ({
                 true  => mk(.Str(), pos, src.str_end(pos + 1)),
                 false => (b == '\'').match ({

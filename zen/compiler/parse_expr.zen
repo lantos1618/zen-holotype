@@ -5,7 +5,7 @@
 // compiler.parse (god-file split); parse_module still lives in compiler.parse and drives these.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, vref, vref_at, bin, call, call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, flit, vref, vref_at, bin, call, call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = compiler.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = compiler.lex
 { Malloc, malloc } = std.alloc
 { is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, parse_tyargs, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
@@ -109,6 +109,7 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Int   => PExpr( expr: a.enode(lit(src.to_int(sc.tok))), next: sc.next ),
+        .Float => PExpr( expr: a.enode(flit(a.lexeme(src, sc.tok))), next: sc.next ),   // a float -> its TEXT, verbatim (typed f64; never parsed to a value here)
         .Char  => PExpr( expr: a.enode(byte_lit(src.char_val(sc.tok.start))), next: sc.next ),   // a char -> its byte (u8)
         .Str   => src.str_open(sc.tok).match ({
             true  => a.parse_garbage(src, sc),       // an UNTERMINATED string (the token ran to end-of-file)
@@ -205,7 +206,7 @@ parse_ctor = (a: Ptr<Malloc>, src: str, dot: Scan) PExpr {
     vt := src.scan(dot.next)                         // the variant name — MUST be an identifier
     vt.tok.kind.match ({
         .Ident => a.parse_ctor_named(src, vt),
-        _      => a.reject_match(vt.next)            // `.14` (the stray tail of a float literal like 3.14), `.0`, … — not a variant
+        _      => a.reject_match(vt.next)            // a statement-initial `.14` / `.0` (a dotted number with no integer part) — not a variant
     })
 }
 parse_ctor_named = (a: Ptr<Malloc>, src: str, vt: Scan) PExpr {

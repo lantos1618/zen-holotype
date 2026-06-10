@@ -152,6 +152,26 @@ def test_zenc_build_rejects_illtyped_no_binary():
     assert r.returncode != 0 and not out.exists(), "ill-typed program should not produce a binary"
 
 
+def test_zenc_run_prints_floats():
+    """f64 end-to-end: float literals, arithmetic, and std.fmt's println_float (the %g-flavoured
+    Zen-side formatter) — exact stdout pinned, so the formatting can't silently drift."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println_float } = std.fmt\n\n"
+        "main = () i32 {\n"
+        "  println_float(1.5)\n"
+        "  println_float(0.25)\n"
+        "  println_float(-3.0)\n"
+        "  println_float(0.001)\n"
+        "  println_float(1.5 + 0.25 * 2.0)\n"   # precedence: 1.5 + 0.5 = 2
+        "  0\n"
+        "}\n")
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "1.5\n0.25\n-3\n0.001\n2\n", repr(r.stdout)
+
+
 # ── U1.3: the binary RESOLVES `{ … } = std.X` imports from disk (std.resolve folded in) ──────────────
 _IMPORT_PROG = (
     "{ eq } = std.str\n"
