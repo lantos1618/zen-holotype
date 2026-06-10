@@ -668,6 +668,12 @@ KPARSE        = () i32 { 14 }   // unparseable top-level input (the parser's __s
 kv_kor = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
 // a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
 kv_one = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
+// pack a SOURCE POSITION into a kind code: kinds are 1..14 (4 bits), so `kind + pos*16` carries the
+// error's byte offset alongside it (pos 0 = unknown/synthesized — the bare kind, the old encoding).
+// Consumers unpack with `& 15` / `>> 4`. Applied only at leaves that HAVE a pos (Call/Var); an
+// already-packed nested result is never re-packed (kv_at is a no-op on 0 and packs raw kinds only,
+// so it must wrap a LEAF judgment, not a recursion).
+kv_at = (k: i32, p: i32) i32 { (k == 0).match ({ true => 0, false => k + (p * 16) }) }
 
 // ── a CALL: arity vs arg-type vs undefined ── mirrors check_call/call_errs, but distinguishes WHY.
 // arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
@@ -750,7 +756,7 @@ kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kv_check_call_kind(c).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
+        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
         .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
@@ -760,7 +766,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload),
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
-        .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()),
+        .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
         _               => 0
     })
 }

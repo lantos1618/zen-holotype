@@ -5,7 +5,7 @@
 // compiler.parse (god-file split); parse_module still lives in compiler.parse and drives these.
 //
 // Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
-{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, vref, bin, call, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, vref, vref_at, bin, call, call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = compiler.genc
 { Token, Scan, scan, byte_at, is_digit, is_hex_prefix } = compiler.lex
 { Malloc, malloc } = std.alloc
 { is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, parse_tyargs, param_buf, take_params, skip_block, PEnd } = compiler.parse_type
@@ -315,7 +315,7 @@ parse_field = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
 parse_field_plain = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, fld: Scan) PExpr {
     nx := src.scan(fld.next)                                       // '(' (method call) or not (field)
     src.is_lparen(nx.tok).match ({
-        true  => a.parse_method(src, base, name, nx),
+        true  => a.parse_method(src, base, name, nx, fld.tok.start),
         false => a.parse_postfix(src, PExpr( expr: a.enode(member(base.expr, name)), next: fld.next ))  // field, chain
     })
 }
@@ -340,11 +340,11 @@ parse_qual_payload = (a: Ptr<Malloc>, src: str, tyname: str, vn: str, lp: Scan) 
         false => a.reject_match(rp.next)             // empty/garbage/multi payload (same guard as parse_ctor_payload)
     })
 }
-parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan) PExpr {
+parse_method = (a: Ptr<Malloc>, src: str, base: PExpr, name: str, lp: Scan, at: i32) PExpr {
     buf    := a.arg_buf()
     buf[0] = load(base.expr)                                       // receiver becomes the first arg
     ae     := a.fill_args(src, lp.next, buf, 1)                    // the rest of the args follow it
-    a.parse_postfix(src, PExpr( expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next ))   // chain
+    a.parse_postfix(src, PExpr( expr: a.enode(call_at(name, buf.take_args(ae.count), at)), next: ae.next ))   // chain
 }
 parse_arm = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {   // `true =>` / `false =>`, then a body
     pat   := src.scan(pos)                                          // the pattern (true / false)
@@ -644,7 +644,7 @@ parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     (src.is_lparen(nx.tok) && !src.nl_between(sc.next, nx.tok.start)).match ({
         true  => src.paren_is_struct(nx.next).match ({
             true  => a.parse_paren_struct_lit(src, name, nx),      // `Name(f: v, …)` — a struct construction
-            false => a.parse_call(src, name, nx)                   // `name(args)` — a call
+            false => a.parse_call(src, name, nx, sc.tok.start)     // `name(args)` — a call
         }),
         false => src.is_langle(nx.tok).match ({
             // Phase C: `Name { … }` in expression position is NO LONGER a struct literal — a `{`
@@ -652,9 +652,9 @@ parse_ident = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
             // paren form `Name(f: v)` (handled above) / `Name<…>(f: v)` (the generic paren form below).
             true  => src.looks_generic_lit(nx.next).match ({       // `Name<…>(f: v)` -> a generic struct construction
                 true  => a.parse_generic_struct_lit(src, name, nx.next),
-                false => PExpr( expr: a.enode(vref(name)), next: sc.next )   // `name < …` is a comparison
+                false => PExpr( expr: a.enode(vref_at(name, sc.tok.start)), next: sc.next )   // `name < …` is a comparison
             }),
-            false => PExpr( expr: a.enode(vref(name)), next: sc.next )   // a bare variable, OR `Name { … }` -> Name then a block
+            false => PExpr( expr: a.enode(vref_at(name, sc.tok.start)), next: sc.next )   // a bare variable, OR `Name { … }` -> Name then a block
         })
     })
 }
@@ -726,10 +726,10 @@ fill_pinit = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd
 // VALUE), then build the call. lp is the Scan of the opening '('.
 arg_buf = (a: Ptr<Malloc>) [Expr] { slice(malloc(64 * sizeof(Expr)), 64) }   // cap 64 args
 take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }                           // exact length
-parse_call = (a: Ptr<Malloc>, src: str, name: str, lp: Scan) PExpr {
+parse_call = (a: Ptr<Malloc>, src: str, name: str, lp: Scan, at: i32) PExpr {
     buf := a.arg_buf()
     ae  := a.fill_args(src, lp.next, buf, 0)         // args + pos just past ')'
-    PExpr( expr: a.enode(call(name, buf.take_args(ae.count))), next: ae.next )
+    PExpr( expr: a.enode(call_at(name, buf.take_args(ae.count), at)), next: ae.next )
 }
 fill_args = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)

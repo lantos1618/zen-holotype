@@ -17,9 +17,9 @@
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
 // which needs only a forward decl, so the recursion closes.
-VarData*: { name: str }
+VarData*: { name: str, pos: i32 }                      // pos = byte offset of the name in the source (0 = synthesized)
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
-CallData*: { fn: str, args: [Expr] }                    // fn(a, b, …) — a call with N args (by value)
+CallData*: { fn: str, args: [Expr], pos: i32 }          // fn(a, b, …) — a call with N args (by value); pos = byte offset of `fn` (0 = synthesized)
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
 ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
@@ -117,9 +117,11 @@ Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(I
 // builds the body as a slice of statements: `[slet("y", addr(e)), sret(addr(r))]`
 lit* = (n: i64) Expr { .Int(n) }
 byte_lit* = (n: i32) Expr { .Byte(n) }   // a char literal's byte value (typed u8 by the checker)
-vref* = (nm: str) Expr { .Var(VarData( name: nm )) }
+vref* = (nm: str) Expr { .Var(VarData( name: nm, pos: 0 )) }
+vref_at* = (nm: str, p: i32) Expr { .Var(VarData( name: nm, pos: p )) }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData( op: op, lhs: l, rhs: r )) }
-call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args )) }
+call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args, pos: 0 )) }
+call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p )) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData( c: c, t: t, e: e )) }
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData( obj: o, field: f )) }
 arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData( obj: o, field: f )) }

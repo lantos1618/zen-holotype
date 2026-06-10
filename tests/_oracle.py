@@ -85,7 +85,9 @@ int main(int argc, char** argv){
     int c; while ((c = fgetc(in)) != EOF){ if (len + 1 >= cap){ cap *= 2; buf = realloc(buf, cap); } buf[len++] = (char)c; }
     buf[len] = 0;
     Malloc m = { 0 };
-    return check_module_kind(&m, resolve_module(&m, parse_module(&m, buf)));
+    /* check_module_kind packs the first error's byte offset alongside the kind (kind + pos*16,
+     * U1.4 Phase 2); the exit code is 8-bit, so return the bare kind. */
+    return check_module_kind(&m, resolve_module(&m, parse_module(&m, buf))) & 15;
 }
 """
 

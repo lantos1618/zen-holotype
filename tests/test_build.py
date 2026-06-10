@@ -61,7 +61,20 @@ def test_zenc_check_reports_error_count_and_first_kind():
     src.write_text("main = () i32 { undefined_fn(1, 2) }\n")
     r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
     assert r.returncode == 1
-    assert r.stderr == f"zenc: {src}: error: undefined name\n"   # U1.4 Phase 1A: human message
+    # U1.4 Phase 2: human message + the error's 1-based line:col (undefined_fn starts at col 17)
+    assert r.stderr == f"zenc: {src}:1:17: error: undefined name\n"
+
+
+def test_zenc_check_position_survives_import_flattening():
+    """U1.4 Phase 2: the checker's byte offset is into the import-FLATTENED source; the reported
+    line:col must still land in the USER's file (mapped back by the error line's text)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "p.zen"
+    src.write_text('{ println } = std.fmt\nmain = () i32 {\n    println("hi")\n    oops()\n}\n')
+    r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert r.stderr == f"zenc: {src}:4:5: error: undefined name\n"
 
 
 def test_zenc_check_rejects_source_if():

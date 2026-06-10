@@ -8,7 +8,7 @@ zslice parse_module(Malloc* a, const char* src);
 zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
-int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND (0 = ok, 1..13) */
+int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, U1.4: packed kind + pos*16 (0 = ok) */
 /* U1.3: the Zen module loader (zen/std/resolve.zen, now a SOURCE). Given the project root (the dir that
  * contains zen/std/ and zen/compiler/) + the program source, returns the flat single-module source with
  * the transitive import closure spliced in (per-module + per-name dedup; N2b qualified `c.x` too).
@@ -274,17 +274,43 @@ static int emits_main(String out){
     return 0;
 }
 
-static int type_check(Malloc* m, zslice decls, const char* in_path){
-    int kind = check_module_kind(m, decls);
-    if (kind == 0) return 0;
+/* U1.4 Phase 2: check_module_kind packs the first error's source BYTE OFFSET alongside its kind
+ * (kind + pos*16; pos 0 = unknown/synthesized). The offset is into the import-FLATTENED source, not
+ * the user's file — resolve_program strips import lines and can rewrite `ns.name` quals — so map back
+ * by the error LINE's text: take the flat line holding pos, find that exact line in the user's buffer,
+ * and report its 1-based line + the column within it. A no-import program is a pass-through (exact);
+ * a rewritten line or an error inside an imported std module doesn't match and falls back to the
+ * position-less format. */
+static int user_line_of(const char* user, const char* ls, size_t llen){
+    int line = 1;
+    const char* p = user;
+    for (;;){
+        const char* e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == llen && memcmp(p, ls, llen) == 0) return line;
+        if (!e) return 0;
+        p = e + 1; line++;
+    }
+}
+static int type_check(Malloc* m, zslice decls, const char* in_path, const char* flat, const char* user){
+    int packed = check_module_kind(m, decls);
+    if (packed == 0) return 0;
+    int kind = packed & 15;
+    long pos = packed >> 4;
     int count = check_module(m, decls);
     if (count < 1) count = 1;
     const char* msg = (kind >= 1 && kind <= 14) ? KIND_MSG[kind] : "type error";
-    /* U1.4 Phase 1A: `zenc: <file>: error: <human message>`. (Phase 2 inserts <file>:<line>:<col>.) */
+    char where[64] = "";
+    if (pos > 0 && flat && user && (size_t)pos < strlen(flat)){
+        const char* ls = flat + pos; while (ls > flat && ls[-1] != '\n') ls--;
+        const char* le = flat + pos; while (*le && *le != '\n') le++;
+        int uline = user_line_of(user, ls, (size_t)(le - ls));
+        if (uline > 0) snprintf(where, sizeof where, ":%d:%d", uline, (int)(flat + pos - ls) + 1);
+    }
     if (count == 1)
-        fprintf(stderr, "zenc: %s: error: %s\n", in_path, msg);
+        fprintf(stderr, "zenc: %s%s: error: %s\n", in_path, where, msg);
     else
-        fprintf(stderr, "zenc: %s: error: %s (+%d more error%s)\n", in_path, msg, count - 1, count - 1 == 1 ? "" : "s");
+        fprintf(stderr, "zenc: %s%s: error: %s (+%d more error%s)\n", in_path, where, msg, count - 1, count - 1 == 1 ? "" : "s");
     return count;
 }
 
@@ -301,7 +327,7 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     const char* flat = resolve_program(dir, buf);
     zslice decls = resolve_module(&m, parse_module(&m, flat));
     if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); free(buf); return 1; }  /* U2 */
-    if (type_check(&m, decls, in_path) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
+    if (type_check(&m, decls, in_path, flat, buf) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
     String out = genModule(decls);
     free(buf);
     if (!emits_main(out)){ fprintf(stderr, "zenc: %s: no `main` entry point (need `main = () i32 { … }`)\n", in_path); return 1; }  /* U2 */
@@ -387,11 +413,11 @@ int main(int argc, char** argv){
         char dir[4096]; bin_dir(argv[0], dir, sizeof dir);
         const char* flat = resolve_program(dir, buf);
         zslice decls = resolve_module(&m, parse_module(&m, flat));
-        free(buf);
         /* U2: reject gross parse failure (zero decls). NOTE: a missing `main` is NOT enforced in `check`
          * — a library module (std.*) legitimately has no main; build/run enforce it instead. */
-        if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", argv[2]); return 1; }
-        int n = type_check(&m, decls, argv[2]);
+        if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", argv[2]); free(buf); return 1; }
+        int n = type_check(&m, decls, argv[2], flat, buf);
+        free(buf);
         if (n == 0) fprintf(stderr, "zenc: %s: ok\n", argv[2]);
         return n == 0 ? 0 : 1;
     }
