@@ -218,7 +218,7 @@ decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).
 // ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
 // `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
 // which genModule lowers to a translation unit. Parses decls until Eof.
-decl_buf = (a: Ptr<Malloc>) [Decl] { slice(malloc(1024 * sizeof(Decl)), 1024) }   // cap 1024
+decl_buf = (a: Ptr<Malloc>) [Decl] { slice(malloc(16384 * sizeof(Decl)), 16384) }   // cap 16384 — the loader flattens the WHOLE std closure + user program into one module, so this is the cap that real programs can approach (census #11; was 1024 with SILENT truncation)
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── imports ──────────────────────────────────────────────────────────────────────
 // `{ A, B } = std.x` — a destructuring import. It carries no code (modules resolve at link time,
@@ -256,6 +256,9 @@ fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) I
 // metaprogramming in Zen is done as ordinary VALUES, not a pragma: a generator is a function that
 // builds AST and returns it (see std.ast), emitted by genModule. (There is no `@emit` special form.)
 fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    // OVERFLOW GUARD: at the buffer's last slot, stop and plant the syntax-error sentinel instead of
+    // writing past the heap buffer (was: silent truncation + corruption past the cap, census #11).
+    (i >= buf.len - 1).match ({ true => { buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  return i + 1 }, false => {} })
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,

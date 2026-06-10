@@ -360,3 +360,12 @@ def test_zenc_c_keyword_identifiers():
         "main = () i32 { short := P(int: double(20))  short.int + 2 }\n"
     )
     assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 42
+
+
+# ── census #11: the 1024-decl cap silently truncated big programs ────────────────────────────────────
+def test_zenc_2000_decl_program():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    fns = "\n".join(f"f{i} = () i32 {{ {i % 100} }}" for i in range(2000))
+    (d / "p.zen").write_text(fns + "\nmain = () i32 { f1999() }\n")
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 99
