@@ -1,0 +1,123 @@
+// std.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the std.vec mold.
+// Every op that allocates takes the allocator as `a: Ptr<A>` and goes through std.alloc's `Allocator`
+// trait (acquire/resize/release) — nothing here hides a malloc. Lookup is a LINEAR SCAN (v1: fine for
+// the small maps the compiler and examples need; hashing can land behind the same API later).
+//
+// Layout: two PARALLEL buffers of `cap` slots — `keys` holds `str` key pointers, `vals` holds T's —
+// plus `len` live entries. Keys are BORROWED `str` pointers: the map stores the pointer, not a copy,
+// so a key must outlive the map (string literals always do; `dup` one from std.str otherwise). Key
+// comparison is byte-wise `eq` from std.str, never pointer `==`.
+//
+//   m := Malloc(_: 0)
+//   w := addr(m).map_new("the", 1)        // a Map<i32>; T inferred from the seed (the vec_of pattern)
+//   w  = addr(m).mput(w, "cat", 2)        // insert — grows (resize, double+1) through m when full
+//   w  = addr(m).mput(w, "the", 9)        // upsert — same key overwrites in place
+//   n := w.mget("the", 0)                 // 9; absent keys yield the default
+//   addr(m).free_map(w)                   // hand both buffers back to m
+//
+// Names are m-prefixed (map_new/mput/mget/mhas/mlen/mgrow) because Zen's namespace is FLAT with no
+// overloading — a bare `put`/`get`/`len`/`new` would clash with std.string/std.vec/std.str when
+// imported together (`get` is std.vec's, `len` is std.str's, `new` is std.string's).
+//
+// LOCALS in the generic bodies are mk-prefixed (mkm/mkr/mkks/mkvs/mkcap) on purpose: generic mono
+// INLINES these bodies into the caller and substitutes argument EXPRESSIONS textually, without
+// alpha-renaming — a body local named `m` would capture the `m` in a caller's `addr(m).mput(…)`
+// (silent mis-dispatch; see the capture repro in this module's PR). Distinctive names dodge it.
+// For the same reason no generic body here uses `return` (the inliner hoists it into the CALLER's
+// frame) and every value-returning branch is a whole-body match — the two body shapes the inliner
+// lowers soundly in any context (proven by std.vec): a single match/call EXPRESSION, or statements
+// followed by a trailing variable/constructor.
+
+{ Allocator } = std.alloc        // the explicit-allocator trait (acquire/resize/release), NOT raw malloc
+{ eq } = std.str                 // byte-wise str equality (`==` on str compares POINTERS)
+
+// one key slot: a borrowed `str`. Exists for its size — `sizeof(str)` doesn't lower to C (str is no
+// C type name), `sizeof(MKey)` does, and a one-pointer struct is exactly one key slot.
+MKey: { k: str }
+
+Map*<T>: { keys: RawPtr<u8>, vals: RawPtr<u8>, len: i64, cap: i64 }    // parallel buffers of cap slots
+
+// the backing buffers as typed slices (cap slots) — for indexed reads/writes
+mkeys*<T> = (m: Map<T>) [str] { slice(m.keys, m.cap) }
+mvals*<T> = (m: Map<T>) [T] { slice(m.vals, m.cap) }
+// the live entry count
+mlen*<T> = (m: Map<T>) i64 { m.len }
+
+// index of k in the first n slots of ks (linear scan from i), or -1 if absent. CONCRETE on purpose:
+// the key columns of every Map<T> are the same [str], and a concrete fn may recurse (a recursive
+// GENERIC fn never gets a monomorphized definition emitted — the inliner unrolls one level and
+// leaves a call to the bare generic name, an undefined symbol; see PR).
+mscan = (ks: [str], n: i64, k: str, i: i64) i64 {
+    (i >= n).match ({
+        true  => -1,
+        false => eq(ks[i], k).match ({ true => i, false => mscan(ks, n, k, i + 1) }),
+    })
+}
+
+// index of k among m's live keys, or -1 if absent
+mfind<T> = (m: Map<T>, k: str) i64 { mscan(m.mkeys(), m.len, k, 0) }
+
+// a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
+// (Zen has no call-site type args — the vec_of/buf_of pattern). Starts at cap 1, like vec_of full.
+map_new*<T, A> = (a: Ptr<A>, seed_key: str, seed_val: T) Map<T> {
+    mkm := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)), len: 1, cap: 1 )
+    mkks := mkm.mkeys()
+    mkvs := mkm.mvals()
+    mkks[0] = seed_key
+    mkvs[0] = seed_val
+    mkm
+}
+
+// grow (double + 1) by RESIZING both buffers through `a` — keeps the live entries, leaks nothing
+mgrow*<T, A> = (a: Ptr<A>, m: Map<T>) Map<T> {
+    mkcap := (m.cap * 2) + 1
+    Map<T>( keys: a.resize(m.keys, mkcap * sizeof(MKey)),
+            vals: a.resize(m.vals, mkcap * sizeof(T)),
+            len: m.len, cap: mkcap )
+}
+
+// overwrite slot i with v, in place (i must be a live index)
+mset<T> = (m: Map<T>, i: i64, v: T) Map<T> {
+    mkvs := m.mvals()
+    mkvs[i] = v
+    m
+}
+
+// append a NEW entry (k known absent), growing through `a` if full
+mappend<T, A> = (a: Ptr<A>, m: Map<T>, k: str, v: T) Map<T> {
+    // force k and v FIRST: the inliner substitutes argument expressions by NAME (re-evaluated at
+    // each use), so a caller's `m.mget(k, 0) + 1` value arg would otherwise be evaluated after the
+    // grow below — reading m's buffers AFTER resize freed them (a use-after-free; see PR)
+    mkk := k
+    mkv := v
+    mkr := (m.len < m.cap).match ({ true => m, false => a.mgrow(m) })
+    mkks := mkr.mkeys()
+    mkvs := mkr.mvals()
+    mkks[mkr.len] = mkk
+    mkvs[mkr.len] = mkv
+    Map<T>( keys: mkr.keys, vals: mkr.vals, len: mkr.len + 1, cap: mkr.cap )
+}
+
+// upsert: overwrite in place if k is present, else append (growing through `a` if full); returns the
+// updated Map. The hit arm rescans for the index — a second linear pass, the price of keeping this
+// body a single inliner-safe expression (v1: scans are the cost model anyway).
+mput*<T, A> = (a: Ptr<A>, m: Map<T>, k: str, v: T) Map<T> {
+    (m.mfind(k) < 0).match ({
+        true  => a.mappend(m, k, v),
+        false => m.mset(m.mfind(k), v),
+    })
+}
+
+// the value at live index i, dflt when i is the miss sentinel -1
+mget_at<T> = (m: Map<T>, i: i64, dflt: T) T {
+    (i < 0).match ({ true => dflt, false => m.mvals()[i] })
+}
+
+// the value under k, or dflt if absent
+mget*<T> = (m: Map<T>, k: str, dflt: T) T { m.mget_at(m.mfind(k), dflt) }
+
+// is k present?
+mhas*<T> = (m: Map<T>, k: str) bool { m.mfind(k) >= 0 }
+
+// hand both buffers back to `a` (free_map, not free — std.alloc/std.mem own that name)
+free_map*<T, A> = (a: Ptr<A>, m: Map<T>) void { a.release(m.keys)  a.release(m.vals) }

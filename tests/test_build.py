@@ -446,3 +446,75 @@ def test_typed_local_annotations_honored():
     (d / "c.zen").write_text('main = () i32 { x: i32 := "nope"  0 }\n')
     r = subprocess.run([zenc, "check", str(d / "c.zen")], capture_output=True, text=True)
     assert r.returncode != 0 and "does not fit" in r.stderr
+
+
+# ── std.map: a str-keyed Map<T> with an EXPLICIT allocator (parallel str/T buffers, linear scan) ─────
+def test_zenc_run_map_wordfreq():
+    """THE std.map acceptance: word-frequency counting via the mget+1-then-mput idiom — exercises
+    put/get/overwrite-upsert/has/miss-default/len AND growth (cap 1 -> 3 -> 7 across 5 distinct keys).
+    The counting idiom is also the regression guard for the by-name-arg use-after-free: the value arg
+    `m.mget(w, 0) + 1` must be evaluated BEFORE mput's grow resizes the buffers (mappend force-binds)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ map_new, mput, mget, mhas, mlen, free_map } = std.map\n'
+        '{ println_int } = std.fmt\n'
+        'bump = (a: Ptr<Malloc>, m: Map<i32>, w: str) Map<i32> { a.mput(m, w, m.mget(w, 0) + 1) }\n'
+        'main = () i32 {\n'
+        '    m := Malloc(_: 0)\n'
+        '    a := addr(m)\n'
+        '    w := a.map_new("the", 1)\n'                     # "the cat sat on the mat the cat"
+        '    w = a.bump(w, "cat")\n'
+        '    w = a.bump(w, "sat")\n'
+        '    w = a.bump(w, "on")\n'
+        '    w = a.bump(w, "the")\n'
+        '    w = a.bump(w, "mat")\n'
+        '    w = a.bump(w, "the")\n'
+        '    w = a.bump(w, "cat")\n'
+        '    println_int(w.mget("the", 0))\n'                # 3
+        '    println_int(w.mget("cat", 0))\n'                # 2
+        '    println_int(w.mget("sat", 0))\n'                # 1
+        '    println_int(w.mget("dog", -1))\n'               # -1: miss -> the default
+        '    println_int(w.mhas("mat").match ({ true => 1, false => 0 }))\n'   # 1
+        '    println_int(w.mhas("dog").match ({ true => 1, false => 0 }))\n'   # 0
+        '    println_int(w.mlen())\n'                        # 5 distinct words
+        '    a.free_map(w)\n'
+        '    0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "3\n2\n1\n-1\n1\n0\n5\n", repr(r.stdout)
+
+
+def test_zenc_run_map_growth_and_second_value_type():
+    """Entries survive repeated grows (9 keys force cap 1 -> 3 -> 7 -> 15, both buffers realloc'd), and
+    a Map<str> coexists with a Map<i32> — two monomorphized C types from the one generic source."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    puts = "".join(f'    w = a.mput(w, "k{i}", {i * 10})\n' for i in range(1, 9))
+    (d / "p.zen").write_text(
+        '{ map_new, mput, mget, mlen, free_map } = std.map\n'
+        '{ println, println_int } = std.fmt\n'
+        'main = () i32 {\n'
+        '    m := Malloc(_: 0)\n'
+        '    a := addr(m)\n'
+        '    w := a.map_new("k0", 0)\n'
+        f'{puts}'
+        '    println_int(w.mlen())\n'                        # 9
+        '    println_int(w.mget("k0", -1))\n'                # 0: the seed survived 3 grows
+        '    println_int(w.mget("k8", -1))\n'                # 80
+        '    caps := a.map_new("uk", "london")\n'            # a Map<str> beside the Map<i32>
+        '    caps = a.mput(caps, "fr", "paris")\n'
+        '    caps = a.mput(caps, "fr", "PARIS")\n'           # upsert overwrites in place
+        '    println(caps.mget("fr", "?"))\n'                # PARIS
+        '    println(caps.mget("de", "miss"))\n'             # miss
+        '    println_int(caps.mlen())\n'                     # 2
+        '    a.free_map(w)\n'
+        '    a.free_map(caps)\n'
+        '    0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "9\n0\n80\nPARIS\nmiss\n2\n", repr(r.stdout)
