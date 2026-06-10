@@ -9,6 +9,18 @@
 { Malloc, malloc } = std.alloc
 { is_op, is_lparen, lexeme } = compiler.parse_expr
 
+// ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
+// The recursive-descent parsers have no error channel (every result is a plain value), so a parse
+// that detects garbage — an unclosed delimiter, a desynced arm record, a token no rule accepts —
+// SETS this flag (and resyncs as best it can) instead of silently stopping with a truncated tree
+// (which the checker then misreported as a position-less type error, or worse, ran wrong).
+// parse_module reads it and plants the `__syntax_error` sentinel decl FIRST, so the validator
+// rejects the module as a parse error (KPARSE). Reset at every parse_module entry.
+parse_failed := 0
+perr_set*   = () void { parse_failed = 1 }
+perr_reset* = () void { parse_failed = 0 }
+perr_get*   = () bool { parse_failed == 1 }
+
 // ── type tokens ──────────────────────────────────────────────────────────────────
 is_lbrace* = (src: str, t: Token) bool { src.is_op(t, '{') }
 skip_to_brace* = (src: str, pos: i32) i32 {
@@ -136,7 +148,7 @@ is_comma*  = (src: str, t: Token) bool { src.is_op(t, ',') }
 skip_to_lparen* = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({                                  // stop at EOF (scan returns next==pos there)
-        .Eof => sc.next,                                  // no `(` before EOF: terminate, don't recurse forever
+        .Eof => { perr_set()  sc.next },                  // no `(` before EOF: a truncated decl — flag, don't recurse forever
         _    => src.is_lparen(sc.tok).match ({ true => sc.next, false => src.skip_to_lparen(sc.next) })
     })
 }
@@ -144,7 +156,10 @@ param_buf* = (a: Ptr<Malloc>) [Param] { slice(malloc(1024 * sizeof(Param)), 1024
 take_params* = (buf: [Param], n: i32) [Param] { slice(buf.ptr, n) }                            // exact length
 fill_params* = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_one(src, pos, buf, i) })
+    sc.tok.kind.match ({
+        .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },   // unterminated `(…`: a truncated param list
+        _    => src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_one(src, pos, buf, i) })
+    })
 }
 fill_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     nt    := src.scan(pos)                               // param name
@@ -167,7 +182,7 @@ skip_block* = (src: str, pos: i32) i32 { src.skip_block_d(pos, 1) }
 skip_block_d = (src: str, pos: i32, depth: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => pos,
+        .Eof => { perr_set()  pos },                      // an opened `{` never closed: flag, terminate
         _    => src.is_lbrace(sc.tok).match ({
             true  => src.skip_block_d(sc.next, depth + 1),
             false => src.is_rbrace(sc.tok).match ({
