@@ -33,15 +33,28 @@ opens_import = (s: str, p: i32) bool {
     (s.byte_at(p) == '{') && (s.byte_at(p + 1) == ' ')
 }
 
-// does the line starting at p contain an import marker (`= std.` or `= compiler.`) before its newline /
-// EOF? Scans bytes; stops at line end so it never reads into the next line.
-has_import_marker = (s: str, p: i32) bool {
+// the position of the import marker (`= std.` / `= compiler.`) for the import OPENING at p — scanning
+// ACROSS newlines to the import's closing `}` (a destructure import never nests braces), then over
+// spaces to the marker. -1 if the `}`-then-marker shape isn't there. Cross-line, because real imports
+// wrap: std.ast's `{ Expr, Stmt, …\n  vref, … } = compiler.genc` spans 5 lines — the old line-local
+// scan classified line 1 as NOT an import, leaking the import's body into the flattened source.
+import_marker_from = (s: str, p: i32) i32 {
     b := s.byte_at(p)
-    ((b == 0) || (b == 10)).match ({
-        true  => false,
-        false => s.is_marker_at(p).match ({ true => true, false => s.has_import_marker(p + 1) })
+    (b == 0).match ({
+        true  => 0 - 1,
+        false => (b == '}').match ({
+            true  => s.marker_after_close(p + 1),
+            false => s.import_marker_from(p + 1)
+        })
     })
 }
+marker_after_close = (s: str, p: i32) i32 {
+    (s.byte_at(p) == ' ').match ({
+        true  => s.marker_after_close(p + 1),
+        false => s.is_marker_at(p).match ({ true => p, false => 0 - 1 })
+    })
+}
+has_import_marker = (s: str, p: i32) bool { s.import_marker_from(p) >= 0 }
 // is the 6-byte window at p exactly `= std.`?
 is_std_marker_at = (s: str, p: i32) bool {
     (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && (s.byte_at(p + 2) == 's')
@@ -67,6 +80,10 @@ is_import_line* = (s: str, p: i32) bool {
     s.opens_import(ls).match ({ true => s.has_import_marker(ls), false => false })
 }
 
+// the position just PAST a (possibly multi-line) import starting at p: next_line from its marker
+// (the line holding `} = std.x`). Callers detected the import via is_import_line first.
+import_end = (s: str, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
+
 // advance p to the first byte of the NEXT line (just past the next '\n'), or to EOF (the NUL).
 next_line = (s: str, p: i32) i32 {
     b := s.byte_at(p)
@@ -82,7 +99,10 @@ next_line = (s: str, p: i32) i32 {
 strip_count* = (s: str, p: i32, n: i32) i32 {
     (s.byte_at(p) == 0).match ({
         true  => n,
-        false => s.strip_count(s.next_line(p), s.is_import_line(p).match ({ true => n, false => n + 1 }))
+        false => s.is_import_line(p).match ({
+            true  => s.strip_count(s.import_end(p), n),
+            false => s.strip_count(s.next_line(p), n + 1)
+        })
     })
 }
 
@@ -113,7 +133,7 @@ strip_into = (out: String, s: str, p: i32, first: bool) String {
     (s.byte_at(p) == 0).match ({
         true  => out,
         false => s.is_import_line(p).match ({
-            true  => out.strip_into(s, s.next_line(p), first),
+            true  => out.strip_into(s, s.import_end(p), first),   // skip the WHOLE (possibly multi-line) import
             false => first.match ({
                 true  => out.append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false),
                 false => out.push(10).append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false)
@@ -294,7 +314,7 @@ load_imports = (root: str, src: str, p: i32, c: Closure) Closure {
     (src.byte_at(p) == 0).match ({
         true  => c,
         false => src.is_import_line(p).match ({
-            true  => load_imports(root, src, src.next_line(p),
+            true  => load_imports(root, src, src.import_end(p),
                          load_closure(root, import_id(with_cap(24), src, p), c)),
             false => load_imports(root, src, src.next_line(p), c)
         })
@@ -323,11 +343,28 @@ is_head_start = (flat: str, p: i32) bool {
 // '*', optional spaces, then '=' or ':'  (e.g. `name =`, `name* =`, `Name:`, `Name*: {`).
 after_name_is_decl = (flat: str, p: i32) bool {
     b := flat.byte_at(p)
-    (b == '*').match ({
+    (b == '<').match ({
+        true  => flat.after_name_is_decl(flat.skip_angles(p + 1, 1)),   // a GENERIC head `name<T, A>* =` — skip the tparams (was: bailed at '<', so generic decls were invisible to dedup → rc/arc/drop + fmt all "duplicate top-level")
+        false => (b == '*').match ({
         true  => flat.after_name_is_decl(p + 1),
         false => (b == ' ').match ({
             true  => flat.after_name_is_decl(p + 1),
             false => (b == '=') || (b == ':')
+        })
+        })
+    })
+}
+// past the matching '>' of an already-open angle group (depth = open count); stops at NUL/newline.
+skip_angles = (flat: str, p: i32, depth: i32) i32 {
+    b := flat.byte_at(p)
+    ((b == 0) || (b == 10)).match ({
+        true  => p,
+        false => (b == '<').match ({
+            true  => flat.skip_angles(p + 1, depth + 1),
+            false => (b == '>').match ({
+                true  => (depth == 1).match ({ true => p + 1, false => flat.skip_angles(p + 1, depth - 1) }),
+                false => flat.skip_angles(p + 1, depth)
+            })
         })
     })
 }
@@ -343,7 +380,7 @@ res_ident_end = (flat: str, p: i32) i32 {
 
 // dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
 // the per-name pass; resolve_program runs it over its per-module-flattened output.
-dedup_decls* = (flat: str, bodylen: i64) str { with_cap(4096).dd(flat, 0, with_cap(256), true, bodylen).finish() }
+dedup_decls* = (flat: str, bodystart: i64, bodylen: i64) str { with_cap(4096).dd(flat, 0, with_cap(256), true, bodystart, bodylen).finish() }
 
 // the worker: `out` accumulates kept lines, `set` the names kept so far, `keeping` whether the decl whose
 // body we're inside is being emitted. `bodylen` = byte length of the MAIN file body (it occupies [0, bodylen)
@@ -351,7 +388,7 @@ dedup_decls* = (flat: str, bodylen: i64) str { with_cap(4096).dd(flat, 0, with_c
 // a same-file duplicate survives to the validator, which rejects it as dup-fn) but still recorded so an
 // import colliding with a main name is still dropped (main wins). Imported decls dedup as before. (bodylen=0
 // reproduces full dedup for the public dedup_decls path.) Recurses line by line to the NUL.
-dd = (out: String, flat: str, p: i32, set: String, keeping: bool, bodylen: i64) String {
+dd = (out: String, flat: str, p: i32, set: String, keeping: bool, bodystart: i64, bodylen: i64) String {
     (flat.byte_at(p) == 0).match ({
         true  => out,
         false => flat.is_head_start(p).match ({
@@ -359,29 +396,29 @@ dd = (out: String, flat: str, p: i32, set: String, keeping: bool, bodylen: i64) 
             true  => {
                 ie := flat.res_ident_end(p)
                 flat.after_name_is_impl(ie).match ({
-                    true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, true, bodylen),   // impl: always keep
+                    true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, true, bodystart, bodylen),   // impl: always keep
                     false => flat.after_name_is_decl(ie).match ({
                         true  => {
                             nm   := import_name_span(with_cap(16), flat, p, ie)               // the decl's NAME
-                            keep := (p < bodylen).match ({ true => true, false => set.seen(nm).match ({ true => false, false => true }) })   // main region: always keep (same-file dups survive); imports: dedup
+                            keep := ((p >= bodystart) && (p < bodylen)).match ({ true => true, false => set.seen(nm).match ({ true => false, false => true }) })   // MAIN-FILE region only: always keep (same-file dups survive). Namespace-bound module bodies sit BEFORE bodystart and dedup like imports (was: counted as main → `c = std.c` died on duplicate-toplevel)
                             keep.match ({
-                                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set.add_name(nm), true, bodylen),
-                                false => out.dd(flat, flat.next_line(p), set, false, bodylen)          // drop this decl
+                                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set.add_name(nm), true, bodystart, bodylen),
+                                false => out.dd(flat, flat.next_line(p), set, false, bodystart, bodylen)          // drop this decl
                             })
                         },
                         // a column-0 ident line that is NOT a decl/impl head (shouldn't occur post-strip):
                         // treat as a continuation of the current decl.
                         false => keeping.match ({
-                            true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodylen),
-                            false => out.dd(flat, flat.next_line(p), set, keeping, bodylen)
+                            true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen),
+                            false => out.dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen)
                         })
                     })
                 })
             },
             // a continuation line (`}`, indented, `//` comment, blank): emit iff the current decl is kept.
             false => keeping.match ({
-                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodylen),
-                false => out.dd(flat, flat.next_line(p), set, keeping, bodylen)
+                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen),
+                false => out.dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen)
             })
         })
     })
@@ -514,14 +551,17 @@ line_slice = (s: str, p: i32, e: i32) str { with_cap(64).append_span(s, p, e).fi
 strip_ns_into = (out: String, s: str, p: i32, quals: String, first: bool) String {
     (s.byte_at(p) == 0).match ({
         true  => out,
-        false => (s.is_import_line(p) || s.is_ns_line(p)).match ({
-            true  => out.strip_ns_into(s, s.next_line(p), quals, first),       // drop import / bind line
+        false => s.is_import_line(p).match ({
+            true  => out.strip_ns_into(s, s.import_end(p), quals, first),      // drop the whole import
+            false => s.is_ns_line(p).match ({
+            true  => out.strip_ns_into(s, s.next_line(p), quals, first),       // drop the (single-line) bind
             false => first.match ({
                 true  => out.rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
                             .strip_ns_into(s, s.next_line(p), quals, false),
                 false => out.push(10).rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
                             .strip_ns_into(s, s.next_line(p), quals, false)
             })
+        })
         })
     })
 }
@@ -540,7 +580,8 @@ resolve_program* = (root: str, mainsrc: str) str {
     // `first` ⇒ the first kept main line gets NO leading '\n'; only true when no namespace-bound module
     // body precedes it (else it would glue onto that body's last line — load_closure prefixes each body
     // with a '\n', so a non-empty ns.c.out already ends a line and the main body needs its own '\n').
+    nsl  := ns.c.out.len                                     // ns-bound module bodies end here; the MAIN file follows
     body := ns.c.out.strip_ns_into(mainsrc, 0, ns.quals, ns.c.out.len == 0)
     cN   := load_imports(root, mainsrc, 0, Closure( seen: ns.c.seen, out: body ))
-    dedup_decls(cN.out.finish(), body.len)
+    dedup_decls(cN.out.finish(), nsl, body.len)
 }

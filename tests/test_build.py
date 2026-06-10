@@ -446,3 +446,14 @@ def test_typed_local_annotations_honored():
     (d / "c.zen").write_text('main = () i32 { x: i32 := "nope"  0 }\n')
     r = subprocess.run([zenc, "check", str(d / "c.zen")], capture_output=True, text=True)
     assert r.returncode != 0 and "does not fit" in r.stderr
+
+
+# ── resolver triple-fix: generic-head dedup + multi-line imports + ns-region boundary ────────────────
+def test_drop_and_fmt_coimport():
+    """Generic decl heads (`new<T>* =`) were invisible to the per-name dedup (after_name_is_decl bailed
+    at '<'), so std.drop + std.fmt co-import died on "duplicate top-level". Now dedup sees them."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("{ println_int } = std.fmt\n{ Own } = std.drop\nmain = () i32 { println_int(7)  0 }\n")
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == "7\n", (r.returncode, r.stdout, r.stderr)
