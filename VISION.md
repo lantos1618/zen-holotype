@@ -54,19 +54,24 @@ area = (s: Shape) i32 {
 }
 ```
 
-## Traits & impl are just completion — no keywords
+## Traits Are Incomplete Records; Impl Is Completion
 
 ```zen
-Area = { area: (Ptr<@Self>) i32 }            // a trait = a record of requirements
+Area = {
+    area: (Ptr<@Self>) i32                   // a requirement: any completing type must provide it
+}
 
-Vec = Area {                                  // "impl Area" = complete its requirements
+Vec = Area {                                  // completion: Vec includes Area's requirements
     len: i32
     cap: i32
     area = (v: Ptr<@Self>) i32 { v.len * v.cap }
 }
 ```
 
-No `trait`, no `impl`, no `for`. You extend a record and fill what's missing.
+`Area` is not a special trait declaration. It is just an incomplete record: it contains a
+requirement and no provision. `Vec = Area { ... }` completes that requirement while adding its own
+data. No `trait`, no `impl`, no `for`: "implementing" is just extending a record and filling what
+is still missing.
 
 ## Self & paths
 
@@ -144,13 +149,15 @@ Arm separator is `=>` ("maps to") — `:` is taken by *declare*, `=` reads as as
 ```zen
 // core/vec.zen   — this record is `vec`
 
+Area = {
+    area: (Ptr<@Self>) i32
+}
+
 Vec = Area {
     len: i32
     cap: i32
     area = (v: Ptr<@Self>) i32 { v.len * v.cap }
 }
-
-Area = { area: (Ptr<@Self>) i32 }
 
 scale = (n: i32) i32 { n * 2 }       // bare → private helper
 ```
@@ -211,7 +218,8 @@ a method is a node, visibility is "does it have a node." No separate symbol tabl
 ## Today → the direction
 
 The compiler today is a working, tested one for the current surface (trait records,
-`Type.impl(...)`, `Name: { }`) — though visibility is already the VISION's glued `*`
+`Type.impl(Trait, { ... })`, `Name: { }`). In the vision, `Type.impl(Trait, { ... })`
+collapses into record completion: `Type = Trait { ... }`. Visibility is already the VISION's glued `*`
 (`Vec*`, `area*`), not a `pub` keyword. Getting to the one-structure form above is a front-end change — fold
 struct/enum/trait/impl/visibility into the trie under the single `decl` shape — while the back
 end (monomorphize → C) and the `fits()` lattice **carry straight over**: a record is still a

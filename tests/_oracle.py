@@ -27,7 +27,7 @@ HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
 _CC = ["cc", "-std=gnu11", "-w"]
 _RUNNER = "\n#include <stdio.h>\nint main(void){ printf(\"%%lld\", (long long)(test())); return 0; }\n"
 
-# The compiler sources come from bootstrap/sources.txt. The CHECK binary includes check_validate.zen;
+# The bootstrap sources come from bootstrap/sources.txt. The CHECK binary includes check_validate.zen;
 # the emit-only binary omits that validating pass. Imports (`{...} = std.x` / `compiler.x`) are
 # stripped, and runtime types come from zenrt.{h,c}. This mirrors bootstrap/main.c's source prep
 # without duplicating the manifest order here.
@@ -35,7 +35,7 @@ def _bootstrap_compiler_sources(include_validate=False):
     out = []
     for raw in (BOOT / "sources.txt").read_text().splitlines():
         rel = raw.strip()
-        if not rel or rel.startswith("#") or not rel.startswith("zen/compiler/"):
+        if not rel or rel.startswith("#") or not (rel.startswith("zen/compiler/") or rel.startswith("zen/std/")):
             continue
         if rel.endswith("/check_validate.zen") and not include_validate:
             continue

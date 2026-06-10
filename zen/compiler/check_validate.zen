@@ -1,34 +1,18 @@
-// compiler.check_validate — the VALIDATING pass, extracted from compiler.check (a pure move, no behavior change).
-// Where compiler.check's resolve_module REWRITES the AST (filling enum names + monomorphizing), this pass
-// READS the resolved AST and COUNTS type errors: call arity + arg types, struct-literal fields, field
-// access, match exhaustiveness/duplicates, operand types, index types, return/assign/index-set fits,
-// and trait conformance. check_linked layers a cross-module header on so an imported call is checked
-// against real signatures. It depends ONE-WAY on compiler.check (inference + the type lattice + the env);
-// compiler.check never imports this module back.
+// compiler.check_validate — read the resolved AST and count type errors.
+// This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, is_f64_ty, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.alloc
-{ byte_at } = compiler.lex
+{ byte_at } = std.bytes
 { eq, is_empty } = std.str
 
-// ── check_module: a VALIDATING pass (Goal C Phases 1-2) — count type errors ────────────
-// Distinct from resolve_module (which rewrites the AST): this walks the module counting type
-// errors. It checks CALL ARITY (a known fn must get the right number of args; a call to an
-// unknown name is an intrinsic/external, not an error) and ARG TYPES (each arg's type must
-// `fit` the parameter — widening or structural). An arg whose type can't be inferred (void)
-// is SKIPPED, so a valid program never gets a false positive. The param env feeds infer_expr.
-// a LOCAL fn (DFunc or DForeign) is known iff the_func finds it by name (sentinel name is "").
+// Local fn is known iff the_func finds it by name (sentinel name is "").
 is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
-// one argument fits its parameter? an UNINFERABLE arg type is skipped (sound: never false-reject)
-// — that's a bare void OR a slice/pointer whose element/pointee is void (the checker couldn't type
-// it, e.g. it came through an imported fn). Otherwise fits().
+// Uninferable types are skipped so validation does not false-reject imported/generic residue.
 is_uninferable = (t: Ty) bool {
     t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(p) => load(p).is_void_ty(), _ => false })
 }
-// a Named type that names NO declared struct/enum (nor a generic template) can only be a generic
-// fn's tparam leaking through a STORED type the template-env erasure can't reach (a `[T]` index's
-// stored elem, `Self` in a trait default body) — judged uninferable, the same sound-leaning skip.
-// In a monomorphic module every Named type a judgment sees is declared.
+// Undeclared Named types are treated as uninferable template residue.
 named_declared = (decls: [Decl], n: str) bool {
     found := false
     decls.loop((h, i, d) { found = d.match ({
@@ -47,13 +31,10 @@ unknown_ty = (env: Env, t: Ty) bool {
     })
 }
 fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
-    // a function-POINTER parameter (an extern callback like makecontext's `void(*)()`) accepts a
-    // function/lambda arg; the validator doesn't model FnT compatibility structurally, so skip it
-    // (sound — never false-reject; a gross mismatch is caught by the C compiler).
+    // FnT parameters are checked by C for now.
     (env.unknown_ty(argty) || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
 }
-// a numeric literal fits any numeric slot — but only when its VALUE is in the target's RANGE:
-// `a: u8 := 300` and `x: i32 := 4294967296` were accepted and ran as the C-truncated value.
+// Numeric literals fit numeric slots only when in range.
 lit_fits = (e: Ptr<Expr>, t: Ty) bool {
     load(e).match ({
         .Int(n) => t.match ({
@@ -65,8 +46,6 @@ lit_fits = (e: Ptr<Expr>, t: Ty) bool {
     })
 }
 arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
-    // a polymorphic numeric literal (`0`, `10`) fits ANY numeric param — `0` is a valid u8/i32/i64 —
-    // so skip the narrowing check for it, mirroring ret_err's lit_to_num (the return-position rule).
     (i < params.len).match ({
         true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0 && ar.addr().lit_fits(params[i].ty)).match ({
             true  => 0,
@@ -80,9 +59,6 @@ arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
     args.loop((h, i, ar) { acc = acc + env.arg_err_at(params, i, ar) })
     acc
 }
-// a name is RESOLVABLE without a local signature if it's imported (`{ f } = std.x`) or a compiler
-// intrinsic (lowered specially by genc — see gen_call). Such a call is KNOWN but UNCHECKED (we have
-// no signature to check arity/types against), so it's accepted as-is — never false-rejected.
 names_has = (names: [Param], fn: str) bool {
     found := false
     names.loop((h, i, n) { found = eq(n.name, fn).match ({ true => true, false => found }) })
@@ -93,13 +69,7 @@ is_imported = (decls: [Decl], fn: str) bool {
     decls.loop((h, i, d) { found = d.match ({ .DImport(im) => im.names.names_has(fn).match ({ true => true, false => found }), _ => found }) })
     found
 }
-// is `fn` a TRAIT METHOD — a method name some `Type.impl(Trait, {…})` provides? Such a name is never
-// a top-level fn; a UFCS call `x.fn()` is dispatch-resolved (check.dispatch_recv) to the impl's
-// mangled `impl_<Trait>_<Type>_fn` once the receiver type is concrete. But inside a GENERIC fn body
-// the receiver is the bare tparam `T` (no impl on `T`), so the call stays the bare `fn` until the
-// template is monomorphized into a concrete caller (where it re-dispatches correctly — see
-// check.index_elem). Validating the un-monomorphized template body would false-reject that bare `fn`;
-// so the validator treats it as known-but-unchecked, exactly as it does an imported name.
+// Trait methods can remain unresolved in generic bodies until monomorphization.
 is_trait_method = (decls: [Decl], fn: str) bool {
     found := false
     decls.loop((h, i, d) { found = d.match ({
@@ -108,7 +78,7 @@ is_trait_method = (decls: [Decl], fn: str) bool {
         _ => found }) })
     found
 }
-// the genc intrinsics (gen_call) + `malloc`/`sizeof` (runtime/builtin) — names with no Zen decl.
+// genc/runtime intrinsics with no Zen declaration.
 is_intrinsic = (fn: str) bool {
     eq(fn, "load").match   ({ true => true, false =>
     eq(fn, "store").match  ({ true => true, false =>
@@ -129,9 +99,7 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "to_u8").match  ({ true => true, false =>
     eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })   // explicit int -> f64 cast
 }
-// each intrinsic's fixed arity — store/offset/slice take 2 operands (gen_call reads arg1), the rest
-// (load/addr/cstr/malloc/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
-// `c.args[1]` unconditionally for the 2-arg ops, so `store(p)` would otherwise read a garbage Expr.
+// Intrinsic arity must be checked before emission.
 intrinsic_arity = (fn: str) i32 {
     eq(fn, "__str_eq").match  ({ true => 2, false =>
     eq(fn, "__str_ne").match  ({ true => 2, false =>
@@ -142,16 +110,7 @@ intrinsic_arity = (fn: str) i32 {
     eq(fn, "atomic_add_i64").match ({ true => 2, false =>            // atomic_add_i64(p, delta) -> new value
     eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof/to_* (incl. to_f64) = 1
 }
-// A UFCS call `x.m(…)` whose name `m` is a TRAIT METHOD but whose (Named) receiver type has no in-scope
-// impl providing it — e.g. a generic template's `a.release(…)` on `a: Ptr<A>`, A an abstract tparam —
-// dispatches to the right impl at MONOMORPHIZATION, NOT to any coincidentally same-named top-level fn.
-// Binding it to that top-level fn's signature here false-rejects on arity/arg-type. Concretely: std.mem
-// has a free-wrapper `release(p)` (1 arg) and std.alloc's Allocator trait method is `release(self, p)`
-// (2 args); a std.vec using an explicit allocator calls `a.release(v.ptr)`, which must defer to the impl,
-// not bind to mem's `release`. This extends the is_trait_method leniency below (which already fires when
-// the name is ONLY a trait method) to the case where the name ALSO collides with a top-level fn. Gated on
-// a non-empty Named receiver + an UNRESOLVED dispatch (dispatch_name == c.fn), so a plain top-level call
-// whose receiver is concrete (dispatch resolves) or non-Named (e.g. RawPtr) is still fully checked.
+// Generic UFCS trait calls may need to defer even if a top-level fn has the same name.
 is_unresolved_trait_call = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
         false => false,
@@ -164,38 +123,31 @@ is_unresolved_trait_call = (env: Env, c: CallData) bool {
         })
     })
 }
-// a call: a LOCAL fn must match arity + arg types; an INTRINSIC has a fixed arity (checked above);
-// an IMPORTED name is known-but-unchecked (no signature here); anything else is UNDEFINED — a typo
-// or a missing import — and is rejected (1 error). A deferred UFCS trait-method call (above) skips first.
+// `@malloc` is not a magic allocator; use an ordinary foreign function or allocator API.
+is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }
+
+// Calls: local signatures are checked; imported/deferred trait names are accepted; unknowns reject.
 check_call = (env: Env, c: CallData) i32 {
-    env.is_unresolved_trait_call(c).match ({
+    c.is_forbidden_raw_call().match ({
+        true => 1,
+        false => env.is_unresolved_trait_call(c).match ({
         true  => 0,
         false => env.decls.is_known_fn(c.fn).match ({
             true  => env.call_errs(c),
             false => c.fn.is_intrinsic().match ({
-                true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),  // known arity → check it
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => 1 })   // imported / a UFCS trait method on a generic receiver / a call to a FN-TYPED param or local (`f(x)` where f: (i32) i32 — a HOF callee, inlined at mono): no local signature
+                true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => 1 })
             })
         })
-    })
+    }) })
 }
-// is the callee a GENERIC function (carries `<T>` tparams)? For a LOCAL generic call, resolve_module
-// inlines/monomorphizes the template AWAY before this validating pass runs, so a template body's call
-// never reaches call_errs as-is. But a call to an IMPORTED generic resolves to the cross-module HEADER
-// sig (a bodyless DForeign that as_sig preserves the tparams on), and resolve_module — run on the
-// caller's file alone — CAN'T inline it (the template body lives in another module). So the call stays
-// `f(args)` against param types that still carry the UNBOUND tparam (`x: T`). Arg-type-checking those
-// against the unsubstituted `T` false-rejects a perfectly correct call (a `Buf` does not "fit" the bare
-// `Named("T")`). Mirror the local case: skip the strict arg-TYPE check for an imported generic — the
-// tparam is uninferable here, exactly the "uninferable -> skip" leniency this validator already applies.
-// Arity is still verified (a generic fn has a fixed param count), and a non-generic cross-module call is
-// unchanged — so wrong-arity / wrong-arg-type imported calls (the negative tests) are still rejected.
+// Imported generic calls check arity but skip arg-fit against unbound tparams.
 is_generic_call = (decls: [Decl], fn: str) bool { decls.the_func(fn).tparams.len > 0 }
 call_errs = (env: Env, c: CallData) i32 {
     ps := env.decls.fn_params(c.fn)
     (ps.len == c.args.len).match ({
-        false => 1,                                                            // arity mismatch (checked for generics too)
-        true  => env.decls.is_generic_call(c.fn).match ({ true => 0, false => env.arg_type_errs(ps, c.args) })   // imported generic: arg types carry unbound tparams -> skip (sound, like a local generic call)
+        false => 1,
+        true  => env.decls.is_generic_call(c.fn).match ({ true => 0, false => env.arg_type_errs(ps, c.args) })
     })
 }
 check_args = (env: Env, args: [Expr]) i32 {
@@ -208,25 +160,15 @@ check_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     arms.loop((h, i, ar) { acc = acc + env.a.arm_env(env, subjty, ar).check_expr(ar.body) })
     acc
 }
-// A value-position match arm whose body contains an EARLY (non-trailing) `return` is INVALID. By the
-// time the validator runs, statement-position matches have been lowered to real `if`s (where a
-// guard-clause `return` correctly fires); a match still in EXPRESSION position lowers to a `({…})`/
-// ternary, where the emitter (genc's ret_to_expr) turns the block's TRAILING statement into the
-// yielded value — but an EARLY `return` mid-block becomes a bare `e;` and is silently dropped, so
-// control never leaves the function. The parser makes a block's FINAL expression a `.Return` too
-// (that IS the yielded value — `{ store(p) }` parses to `[Return(store(p))]`), and genc emits it
-// correctly; so the trailing return is fine. Only a return BEFORE the last statement is the bug.
-// Reject those so checked mode never accepts a return that codegen would silently drop.
+// Early returns inside value-position block arms would be dropped by expression emission.
 early_returns = (stmts: [Stmt]) bool {
     found := false
     stmts.loop((h, i, st) { found = (i < stmts.len - 1).match ({
-        true  => st.match ({ .Return(r) => true, _ => found }),       // a return that is NOT the last stmt
-        false => found                                                // the trailing stmt = the yielded value
+        true  => st.match ({ .Return(r) => true, _ => found }),
+        false => found
     }) })
     found
 }
-// 1 if `e` is a value-position branch/arm body whose Block contains an EARLY (dropped) `return`.
-// Used for both enum-match arms and bool/literal-match (Cond) branches.
 expr_drops_return = (e: Ptr<Expr>) i32 {
     load(e).match ({
         .Block(b) => b.stmts.early_returns().match ({ true => 1, false => 0 }),
@@ -243,10 +185,7 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
     inits.loop((h, i, fi) { acc = acc + env.check_expr(fi.value) })
     acc
 }
-// struct-literal validation (reject-parity): every init field must EXIST on the struct ("no field 'z'")
-// and its value must FIT the field's type ("bool ⊀ i32"). Missing fields are allowed (partial init).
-// Only runs for a KNOWN, non-generic DStruct — an imported/generic literal is skipped (sound). A
-// polymorphic numeric literal fits any numeric field; uninferable values skip.
+// Struct literals check known fields and value fits; imported/generic literals stay lenient.
 no_fields = () [Field] { slice(malloc(0), 0) }
 is_struct = (decls: [Decl], name: str) bool {
     f := false
@@ -289,15 +228,12 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
         false => env.decls.is_struct(m.ty).match ({ true => env.struct_init_errs(env.decls.struct_fields(m.ty), m.inits), false => 0 })
     })
 }
-// field-access validation (reject-parity): `obj.field` must name a real field of obj's struct ("no
-// field 'nope' on P"). Handles a value receiver (Member) and a Ptr receiver (Arrow, after resolve
-// auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is checked; an uninferable
-// receiver, an enum, or a monomorphized-only generic name is skipped.
+// Field access checks only known concrete struct receivers.
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
-    obj.is_lit_numeric().match ({                                   // a member access on a numeric literal — `(3).x`
-        true  => 1,                                                 // (or `3.x`, which lexes as Int(3).Member("x")) —
-        false => {                                                  // is never valid. (`3.14` is ONE Float token now.)
-            sname := env.infer_expr(obj).enum_name()                // struct name (sees through a Ptr)
+    obj.is_lit_numeric().match ({
+        true  => 1,
+        false => {
+            sname := env.infer_expr(obj).enum_name()
             env.decls.is_struct(sname).match ({
                 true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
                 false => 0
@@ -305,9 +241,7 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
         }
     })
 }
-// match validation (reject-parity): an enum match must be EXHAUSTIVE — cover every variant, or have a
-// wildcard `_` — and must not DUPLICATE an arm. Bool/integer matches lower to Cond (not Match), so
-// only enum matches reach here. SOUND — an unknown enum name (a generic instance / unfilled "") -> skip.
+// Enum matches must be exhaustive and have no duplicate arms.
 no_variants = () [VariantDef] { slice(malloc(0), 0) }
 enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     found := no_variants()
@@ -331,7 +265,7 @@ missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
 }
 exhaustive_err = (env: Env, m: MatchData) i32 {
     vs := env.decls.enum_variants(m.ename)
-    (vs.len == 0).match ({                                          // unknown enum (generic / "") -> skip
+    (vs.len == 0).match ({
         true  => 0,
         false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 })
     })
@@ -346,24 +280,54 @@ dup_arm_errs = (arms: [ArmData]) i32 {
     arms.loop((h, i, a) { n = n + eq(a.variant, "_").match ({ true => 0, false => arms.dup_before(a.variant, i).match ({ true => 1, false => 0 }) }) })
     n
 }
-match_err = (env: Env, m: MatchData) i32 {
-    m.arms.has_wildcard().match ({
-        true  => m.arms.dup_arm_errs(),                            // a wildcard makes it exhaustive
-        false => env.exhaustive_err(m) + m.arms.dup_arm_errs()
+// Reject constructors whose variant is not declared in the linked decl set.
+enum_declares = (decls: [Decl], vn: str) bool {
+    f := false
+    decls.loop((h, i, d) { f = d.match ({
+        .DEnum(ed)   => ed.variants.arm_known(vn).match ({ true => true, false => f }),
+        .DGenEnum(g) => g.variants.arm_known(vn).match ({ true => true, false => f }),
+        _            => f
+    }) })
+    f
+}
+mkenum_err = (env: Env, ty: str, variant: str) i32 {
+    is_empty(ty).match ({
+        true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
+        false => 0
     })
 }
-// operand-type checking (reject-parity): an arithmetic `+ - * / %` needs NUMERIC operands, a logical
-// `&& ||` needs BOOL operands. Sound: an UNINFERABLE operand (void — e.g. a match-arm binding the
-// partial checker can't type) is skipped, never false-rejected. Comparisons (`== != < > <= >=`) accept
-// any operand types, so aren't checked.
+
+// Every non-wildcard arm must name a declared variant.
+arm_known = (vs: [VariantDef], vname: str) bool {
+    f := false
+    vs.loop((h, i, v) { f = eq(v.name, vname).match ({ true => true, false => f }) })
+    f
+}
+unknown_arm_errs = (env: Env, m: MatchData) i32 {
+    vs := env.decls.enum_variants(m.ename)
+    n  := 0
+    (vs.len == 0).match ({
+        true  => 0,
+        false => {
+            m.arms.loop((h, i, a) { n = n + eq(a.variant, "_").match ({ true => 0, false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }) }) })
+            n
+        },
+    })
+}
+match_err = (env: Env, m: MatchData) i32 {
+    base := m.arms.has_wildcard().match ({
+        true  => m.arms.dup_arm_errs(),
+        false => env.exhaustive_err(m) + m.arms.dup_arm_errs()
+    })
+    base + env.unknown_arm_errs(m)
+}
+// Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: str) bool {
     b := op.byte_at(0)
-    (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')   // distinct from &|=<>!
+    (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')
 }
 is_logic_op = (op: str) bool { eq(op, "&&") || eq(op, "||") }
-// the strict comparisons — `<` `>` `<=` `>=` (NOT ==/!=, which compare any matching pair, and NOT
-// the shifts: exact-string match). Their operands must be numeric: `1 < x < 10` parses as
-// `(1 < x) < 10` — a bool operand — and was silently accepted as always-true (census gap 6).
+// Strict comparisons require numeric operands; shifts are separate bitwise ops.
 is_cmp_op_v = (op: str) bool { eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
 is_bitwise_op = (op: str) bool { eq(op, "&") || eq(op, "|") || eq(op, "^") || eq(op, "<<") || eq(op, ">>") }
 is_bool_ty = (t: Ty) bool { t.match ({ .Bool => true, _ => false }) }
@@ -375,19 +339,14 @@ non_bool = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
     env.unknown_ty(t).match ({ true => false, false => t.is_bool_ty().match ({ true => false, false => true }) })
 }
-// ── the f64 operator surface (strict, no implicit int<->float mixing) ──
-// f64 op f64 is legal for `+ - * /` and the comparisons; `%`, bitwise and shifts NEVER take an
-// f64; an f64 against a KNOWN non-f64 operand is the int<->float mix — rejected (`1.5 + 1`).
+// f64 operators are strict: no implicit int<->float mixing.
 is_eq_op_v = (op: str) bool { eq(op, "==") || eq(op, "!=") }
 f64_op_ok = (op: str) bool { eq(op, "+") || eq(op, "-") || eq(op, "*") || eq(op, "/") || op.is_cmp_op_v() }
-// one side of an f64 operation: an f64, or an uninferable type (skipped — the same sound-lenient
-// rule every judgment here applies). A KNOWN non-f64 side is the rejected mix.
 f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
 f64_operand_err = (env: Env, op: str, lt: Ty, rt: Ty) i32 {
     (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({ true => 0, false => 1 })
 }
-// an arith/bitwise/strict-cmp Bin: any f64 side routes to the f64 surface above; otherwise the
-// integer rule (numeric operands) as before.
+// Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
 num_operand_err = (env: Env, b: BinData) i32 {
     lt := env.infer_expr(b.lhs)
     rt := env.infer_expr(b.rhs)
@@ -396,7 +355,7 @@ num_operand_err = (env: Env, b: BinData) i32 {
         false => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 })
     })
 }
-// `==`/`!=` accept any matching operand pair — EXCEPT an f64 against a known non-f64 (the mix).
+// Equality allows any pair except known f64/non-f64 mixes.
 eq_mix_err = (env: Env, b: BinData) i32 {
     lt := env.infer_expr(b.lhs)
     rt := env.infer_expr(b.rhs)
@@ -414,8 +373,7 @@ operand_err = (env: Env, b: BinData) i32 {
         })
     })
 }
-// index validation (reject-parity): `seq[idx]` needs a SLICE `seq` and a NUMERIC `idx`.
-// Uninferable -> skip.
+// Indexing needs a slice and numeric index; uninferable types skip.
 is_slice_ty = (t: Ty) bool { t.match ({ .Slice(e) => true, _ => false }) }
 non_slice = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
@@ -424,13 +382,7 @@ non_slice = (env: Env, e: Ptr<Expr>) bool {
 index_err = (env: Env, ix: IndexData) i32 {
     (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
 }
-// A value-position block arm `{ s1  s2 }` carries real statements (its trailing one is the yielded
-// value). check_expr lands on the Block; recurse into each statement's EXPRESSIONS so a genuinely-bad
-// call/operand/field inside a block arm is still caught (e.g. a mis-arity'd `g(1,2,3)` or an undefined
-// `nope()`). We check sub-expressions only — not the full statement-position env-threading (that needs
-// the allocator, which check_expr lacks) — so a later `x = v` after a `let` inside the block isn't
-// type-fit-checked; that's sound-leaning (never a false positive). A nested if/while body is skipped
-// the same way (its condition IS checked). The early-`return` case is handled by expr_drops_return.
+// Value-position blocks recurse into statement expressions; full env-threading stays in check_body.
 check_block_stmt = (env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.check_expr(l.value),
@@ -445,25 +397,17 @@ check_block_stmt = (env: Env, st: Stmt) i32 {
 check_block = (env: Env, stmts: [Stmt]) i32 {
     acc := 0
     e   := env
-    stmts.loop((h, i, st) { acc = acc + e.check_block_stmt(st)  e = e.a.extend_env(e, st) })   // thread inner `x := e` binds
+    stmts.loop((h, i, st) { acc = acc + e.check_block_stmt(st)  e = e.a.extend_env(e, st) })
     acc
 }
-// A bare identifier (.Var) in VALUE / ARGUMENT / operand position must name SOMETHING: a BOUND local or
-// global (is_bound — MEMBERSHIP, so a void-typed local still counts), a function-as-value (is_known_fn),
-// an imported name, a trait method, or an intrinsic. Else UNDEFINED — rejected (kind 3) so a typo'd name
-// in a return/arg position fails the check instead of leaking an "undeclared" cc error (fuzz #2b/P3).
+// Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
 var_err = (env: Env, name: str) i32 {
-    // `true`/`false` are boolean-literal VALUES lexed as identifiers (genc emits them as C bools), so they
-    // reach here as bare Vars — accept them. Then: a bound local/global, a fn-as-value, an import, a trait
-    // method, an intrinsic, or a lowered enum tag constant. Anything else is undefined.
     (eq(name, "true") || eq(name, "false")
         || env.is_bound(name) || env.decls.is_known_fn(name) || env.decls.is_imported(name)
         || env.decls.is_trait_method(name) || name.is_intrinsic()
         || env.decls.is_tag_const(name)).match ({ true => 0, false => 1 })
 }
-// resolve lowers a statement-position match into an if-chain testing `subj.tag == Ename_Variant`
-// (lower_match_stmt) — that tag constant is a real name in the EMITTED C, not an undefined Zen
-// var. Tried LAST in var_err, so it only runs on otherwise-unknown names.
+// Lowered statement-match tag constants count as generated names.
 variant_tags_has = (vs: [VariantDef], ename: str, name: str) bool {
     found := false
     vs.loop((h, i, v) { found = eq(name, tag_const(ename, v.name)).match ({ true => true, false => found }) })
@@ -483,29 +427,23 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
         .Match(m)       => env.check_expr(m.subj) + env.check_arms(env.infer_expr(m.subj), m.arms) + env.match_err(m) + arm_return_errs(m.arms),
-        .MakeEnum(mk)   => env.check_expr(mk.payload),
+        .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant),
+        .Tag(t)         => env.mkenum_err(t.ty, t.variant),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
-        .Block(b)       => env.check_block(b.stmts),    // a value-position block arm: recurse its statements
-        .Var(v)         => env.var_err(v.name),         // a bare identifier in value/arg position must be defined
-        _               => 0                            // Int/Var/Tag/StrLit: no call inside
+        .Block(b)       => env.check_block(b.stmts),
+        .Var(v)         => env.var_err(v.name),
+        _               => 0
     })
 }
-// a returned value must fit the function's declared return type (env.exp). Sound-leaning: skip
-// when the value's type OR the return type is uninferable (void / slice·ptr-of-void) — only a
-// concrete mismatch is an error. This is what catches `(…) i32 { someStr }`-style return bugs.
+// Return/assign/index-set checks only reject concrete mismatches.
 ret_err = (env: Env, r: Ptr<Expr>) i32 {
     rt := env.infer_expr(r)
-    // skip when uninferable, OR when a polymorphic literal is returned to a numeric type (`10` as
-    // u8 is fine). Otherwise fits() — which catches BOTH a category mismatch (str/bool/struct where
-    // another is declared) AND a computed numeric narrowing (an i64-returning call declared i32).
     lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0) && r.lit_fits(env.exp)
     (env.unknown_ty(rt) || env.unknown_ty(env.exp) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, env.exp).match ({ true => 0, false => 1 })
     })
 }
-// an assignment `x = v` must fit x's type (the type its `let` inferred). Sound-leaning, same shape
-// as ret_err: skip when either side is uninferable, or a polymorphic literal goes to a numeric x.
 assign_err = (env: Env, x: AssignData) i32 {
     vt := env.infer_expr(x.target)
     rt := env.infer_expr(x.value)
@@ -515,8 +453,6 @@ assign_err = (env: Env, x: AssignData) i32 {
         false => fits(rt, vt).match ({ true => 0, false => 1 })
     })
 }
-// `xs[i] = v` must store a value that fits the slice's element type. Same sound-leaning shape as
-// ret_err/assign_err (skip uninferable + a polymorphic literal to a numeric element).
 idxset_err = (env: Env, x: IndexSetData) i32 {
     rt := env.infer_expr(x.value)
     lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0) && x.value.lit_fits(x.elem)
@@ -525,8 +461,7 @@ idxset_err = (env: Env, x: IndexSetData) i32 {
         false => fits(rt, x.elem).match ({ true => 0, false => 1 })
     })
 }
-// an ANNOTATED let (`x: T := e`): the init must fit the declared T (numeric-literal widening allowed,
-// uninferable skipped — the same leniencies as assign_err). Unannotated lets (ty = void) are unchecked.
+// Annotated lets must fit their declared type; unannotated lets are inferred only.
 let_fit_err = (env: Env, l: LetData) i32 {
     l.ty.is_void_ty().match ({
         true  => 0,
@@ -551,8 +486,7 @@ check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
         .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value) + env.idxset_err(x)
     })
 }
-// thread the env: each `let` adds its (name, inferred type) for the statements that follow, so a
-// later `x = v` knows x's type. (The same fold resolve_body does, here for the validating pass.)
+// Thread lets into the validating environment.
 check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
     e   := env
@@ -743,7 +677,9 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
-    env.is_unresolved_trait_call(c).match ({
+    c.is_forbidden_raw_call().match ({
+        true => KUNDEFINED(),
+        false => env.is_unresolved_trait_call(c).match ({
         true  => 0,                                       // deferred UFCS trait-method call (see check_call)
         false => env.decls.is_known_fn(c.fn).match ({
             true  => env.kv_call_errs_kind(c),
@@ -752,7 +688,7 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
                 false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => KUNDEFINED() })
             })
         })
-    })
+    }) })
 }
 kv_check_args_kind = (env: Env, args: [Expr]) i32 {
     acc := 0
@@ -779,10 +715,11 @@ kv_makestruct_kind = (env: Env, m: MakeStructData) i32 { env.makestruct_err(m).k
 kv_member_kind     = (env: Env, obj: Ptr<Expr>, field: str) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()) }
 // a match: exhaustiveness vs duplicate-variant, split out from match_err.
 kv_match_kind = (env: Env, m: MatchData) i32 {
-    m.arms.has_wildcard().match ({
+    base := m.arms.has_wildcard().match ({
         true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()),
         false => env.exhaustive_err(m).kv_one(KEXHAUST()).kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()))
     })
+    base.kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()))
 }
 kv_index_kind   = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
 kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()) }
@@ -814,7 +751,8 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
         .Match(m)       => env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(env.infer_expr(m.subj), m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(kv_arm_return_kind(m.arms)),
-        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload),
+        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())),
+        .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
         .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),

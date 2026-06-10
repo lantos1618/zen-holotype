@@ -23,7 +23,8 @@ emitted C to `cc`.
   → scan       (lexer: source → tokens, slice-free)               zen/compiler/lex.zen
   → parse      (recursive-descent → compiler.genc Expr/Stmt/Decl)  zen/compiler/parse{,_expr,_stmt,_type}.zen
   → check      (resolve refs, infer types, fits() each call)      zen/compiler/check.zen + check_validate.zen
-  → emit C     (monomorphize generics, lower the AST to C text)   zen/compiler/genc.zen + genc_emit.zen + genc_mono.zen
+  → mono       (specialize generics for every concrete use)       zen/compiler/mono.zen
+  → emit C     (lower the specialized AST to C text)              zen/compiler/genc.zen + genc_emit.zen
   → cc         (the system C compiler)
 ```
 
@@ -47,7 +48,7 @@ of each top-level name, so a cross-module clash resolves deterministically).
 
 That loader is folded into the shipping CLI for `zenc check`, `zenc build`, and `zenc run`,
 so std-importing programs resolve from disk in those modes. Plain emit mode remains flat and
-unvalidated. `tools/loader/` still wraps the same resolver as a standalone runnable driver.
+unvalidated.
 See [README → Modules & imports](README.md#modules--imports).
 
 ## The bootstrap: building the compiler, and the fixpoint

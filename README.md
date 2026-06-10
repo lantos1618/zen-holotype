@@ -256,11 +256,6 @@ already be flat and emits C without the `std` import-loading/check/build wrapper
 The resolver also understands `compiler.X` for internal compiler/std dependencies such as
 `std.ast` building values from `compiler.genc`; normal user-facing imports should stay in
 the `std` namespace.
-`tools/loader/` also packages the resolver as a runnable driver (`loader_driver.zen` +
-`loader_main.c`):
-`loader <prog.zen> <out_flat.zen> <root>` writes the flattened module. It is itself a
-multi-module program, so it bootstraps once via `tools/loader/bootstrap_driver.sh` — the
-loader's analogue of `zenc` being built from committed C.
 
 ## Errors are values
 
@@ -303,12 +298,11 @@ See **[FEATURES.md](FEATURES.md)** for the full inventory,
 | `zen/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `str`, slice-free |
 | `zen/compiler/parse.zen` + `parse_expr` / `parse_stmt` / `parse_type` | recursive-descent parser → `compiler.genc` AST |
 | `zen/compiler/check.zen` + `check_validate.zen` | resolver + the `fits()` validator |
-| `zen/compiler/genc.zen` + `genc_emit` / `genc_mono` | the C backend (the shared AST + emit + monomorphization) |
+| `zen/compiler/genc.zen` + `mono` + `genc_emit` | shared AST + monomorphization + C backend |
 | `zen/compiler/genjs.zen` | a partial JavaScript backend over the *same* AST |
 | `zen/std/{mem,str,string,alloc,vec,iter}.zen` | the runtime stdlib (allocator, slices, strings, iterators) |
 | `zen/std/{c,result,cown,drop,io,resolve}.zen` | bindings, errors-as-values, FFI-memory rule, module loader |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked bootstrap manifest) + `zenrt.c`/`main.c`/`Makefile` |
-| `tools/loader/` | the runnable transitive-closure import resolver |
 | `tests/` | the binary-only oracle (pytest as runner; imports no compiler code) |
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight

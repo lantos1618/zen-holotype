@@ -1,15 +1,20 @@
 // std.fmt — minimal formatted OUTPUT: the "show my result" primitive a normal program needs.
 //
-// Zen had no print and no int→string — you hand-rolled a putchar decimal loop. This is the daily-driver
-// layer over std.io.print (a str → stdout) + std.string's growable String:
+// This is the daily-driver layer over stdout writes plus std.string's growable
+// String. `str` is borrowed/NUL-terminated; `String` is owned/length-tracked and
+// prints by length, without forcing `finish()`.
 //
-//   { println, println_int, println_float } = std.fmt
+//   { println, println_string, println_int, println_float } = std.fmt
 //   main = () i32 { println("answer:")  println_int(42)  println_float(1.5)  0 }
 //
 // @self-hosted-only — like std.io it's not a fixpoint SOURCE; it rides on read_file/print's libc FFI.
 
-{ print } = std.io
-{ String, new, push, finish } = std.string
+{ print, print_bytes } = std.io
+{ String, new, push, finish, bytes } = std.string
+// std.mem's release, NOT string's `free`: `free` is provided by BOTH std.string (String-typed)
+// and std.alloc (the raw extern), and the flatten's per-name dedup makes a call ambiguous;
+// `release` has one provider once std.drop's verbs carry their own_ prefix.
+{ release } = std.mem
 
 // append the decimal digits of a NON-negative i64 to `out`, most-significant first. The recursion
 // unwinds high→low: the high part (n/10) is appended before this frame's low digit (n%10), so the
@@ -21,13 +26,26 @@ udigits = (out: String, n: i64) String {
     })
 }
 
-// the decimal text of an i64 (a leading '-' for negatives), as a fresh NUL-terminated str.
-int_to_str* = (n: i64) str {
-    (n < 0).match ({
-        true  => new().push('-').udigits(0 - n).finish(),
-        false => new().udigits(n).finish()
+// the digits of a NEGATIVE n, via negated remainders — so INT64_MIN, whose `0 - n` overflows
+// (it printed "-0"), emits correctly without ever negating the whole value.
+ndigits = (out: String, n: i64) String {
+    (n > 0 - 10).match ({
+        true  => out.push('0' + (0 - n)),
+        false => out.ndigits(n / 10).push('0' + (0 - (n % 10)))
     })
 }
+
+// the digits of any i64 into an OWNED String (the caller frees/prints-and-frees).
+int_string = (n: i64) String {
+    (n < 0).match ({
+        true  => new().push('-').ndigits(n),
+        false => new().udigits(n)
+    })
+}
+
+// the decimal text of an i64 (a leading '-' for negatives), as a fresh NUL-terminated str.
+// The buffer is the caller's (release it via std.mem once done); print_int below frees its own.
+int_to_str* = (n: i64) str { int_string(n).finish() }
 
 // ── floats: the decimal text of an f64, %g-flavoured ────────────────────────────────────────────
 // Hand-rolled in Zen (no snprintf extern — a libc prototype here would collide with a host
@@ -66,16 +84,48 @@ fabs_digits = (out: String, x: f64) String {
         false => out.fparts(ip, scaled)
     })
 }
-float_to_str* = (x: f64) str {
+// the f64 SPECIALS, matched before the digit path (whose to_i64 is UB on them): NaN is the one
+// value that differs from itself; magnitudes past i64's range print as infinities, like %g.
+// Returns "" for a finite, in-range value (the digit path's job).
+F64_DIGIT_MAX := 9000000000000000000.0    // just inside i64 (9.22e18): beyond it to_i64 is UB
+f64_special = (x: f64) str {
+    (x != x).match ({ true => { return "nan" }, false => {} })
+    (x > F64_DIGIT_MAX).match ({ true => { return "inf" }, false => {} })
+    (x < 0.0 - F64_DIGIT_MAX).match ({ true => { return "-inf" }, false => {} })
+    ""
+}
+// the digits of a finite f64 into an OWNED String (the caller frees/prints-and-frees).
+float_string = (x: f64) String {
     (x < 0.0).match ({
-        true  => new().push('-').fabs_digits(0.0 - x).finish(),
-        false => new().fabs_digits(x).finish()
+        true  => new().push('-').fabs_digits(0.0 - x),
+        false => new().fabs_digits(x)
     })
 }
+float_to_str* = (x: f64) str {
+    sp := x.f64_special()
+    is_special(sp).match ({ true => { return sp }, false => {} })
+    float_string(x).finish()
+}
+is_special = (sp: str) bool { load(offset(sp, 0)) != '\0' }
 
 // ── the print verbs (return the byte count, like POSIX write / printf; used as statements) ──────────
-print_int*   = (n: i64) i64 { print(int_to_str(n)) }            // an int, no newline
-println*     = (s: str) i64 { print(s)  print("\n") }           // a line of text
-println_int* = (n: i64) i64 { print(int_to_str(n))  print("\n") }    // an int, then a newline
-print_float*   = (x: f64) i64 { print(float_to_str(x)) }             // an f64, no newline
-println_float* = (x: f64) i64 { print(float_to_str(x))  print("\n") }    // an f64, then a newline
+// The int/float verbs format into an owned String, print its BYTES, and release the buffer —
+// they run in loops, and leaking one heap String per call grew without bound (the daily-driver leak).
+print_owned = (t: String) i64 {
+    w := print_bytes(t.bytes())
+    release(t.ptr)
+    w
+}
+print_str*   = (s: str) i64 { print(s) }                        // a borrowed str, no newline
+println_str* = (s: str) i64 { print(s)  print("\n") }            // a borrowed str, then a newline
+print_string*   = (s: String) i64 { print_bytes(s.bytes()) }     // an owned String, no newline
+println_string* = (s: String) i64 { s.print_string()  print("\n") }  // an owned String, then a newline
+print_int*   = (n: i64) i64 { print_owned(int_string(n)) }       // an int, no newline
+println*     = (s: str) i64 { s.println_str() }                  // existing shorthand for println_str
+println_int* = (n: i64) i64 { n.print_int()  print("\n") }       // an int, then a newline
+print_float* = (x: f64) i64 {                                    // an f64, no newline
+    sp := x.f64_special()
+    is_special(sp).match ({ true => { return print(sp) }, false => {} })
+    print_owned(float_string(x))
+}
+println_float* = (x: f64) i64 { x.print_float()  print("\n") }   // an f64, then a newline

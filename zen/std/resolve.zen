@@ -1,46 +1,23 @@
-// std.resolve — the MODULE RESOLVER used by checked CLI modes.  @self-hosted-only
-//
-// THE GOAL (Goal Z / S1): the checked CLI path reads REAL multi-module source instead of requiring
-// callers to hand-flatten files first. This module is the self-hosted loader: it lets zenc resolve
-// `{ a, b } = std.x` and internal `{ ... } = compiler.x` imports natively before parsing/checking.
-//
-// THE RESOLUTION ALGORITHM (full design — see the module-level design note at the bottom of the
-// file and the task report). The load-bearing primitive is the SAME line-classification the bootstrap
-// flatteners use, in pure Zen. With this + a file reader, the driver parses each module -> reads its
-// DImport edges -> orders the modules -> concats in dependency order with import lines dropped.
-//
-//   { is_import_line, strip_count } = std.resolve
-//
-// NB self-contained-test note: this module imports compiler.lex's byte_at (the canonical byte
-// accessor). The run_value test inlines the same logic so it links without compiler.lex
-// (std templates aren't emitted into a stand-alone test binary). acid checks THIS file as-is.
+// @self-hosted-only
+// Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 
-{ byte_at } = compiler.lex
+{ byte_at } = std.bytes
 { decl_span } = compiler.parse
 { Malloc } = std.alloc
 { String, push, append, with_cap, finish } = std.string
 { read_file, open, close, write, O_RDONLY } = std.io
 { view } = std.str
 
-// space or tab — the whitespace lstrip is line-local, so newlines are handled by next_line.
 is_ws = (b: u8) bool { (b == ' ') || (b == 9) }
 
-// pos of the first non-whitespace byte of the line starting at p (an lstrip, line-local).
 lstrip = (s: str, p: i32) i32 {
     byte_at(s, p).is_ws().match ({ true => s.lstrip(p + 1), false => p })
 }
 
-// after lstrip, does the line begin with the two bytes `{ ` (open-brace then space)? — the
-// shape of a destructuring import head `{ A, B } = std.x`.
 opens_import = (s: str, p: i32) bool {
     (s.byte_at(p) == '{') && (s.byte_at(p + 1) == ' ')
 }
 
-// the position of the import marker (`= std.` / `= compiler.`) for the import OPENING at p — scanning
-// ACROSS newlines to the import's closing `}` (a destructure import never nests braces), then over
-// spaces to the marker. -1 if the `}`-then-marker shape isn't there. Cross-line, because real imports
-// wrap: std.ast's `{ Expr, Stmt, …\n  vref, … } = compiler.genc` spans 5 lines — the old line-local
-// scan classified line 1 as NOT an import, leaking the import's body into the flattened source.
 import_marker_from = (s: str, p: i32) i32 {
     b := s.byte_at(p)
     (b == 0).match ({
@@ -58,59 +35,42 @@ marker_after_close = (s: str, p: i32) i32 {
     })
 }
 has_import_marker = (s: str, p: i32) bool { s.import_marker_from(p) >= 0 }
-// is the 6-byte window at p exactly `= std.`?
-is_std_marker_at = (s: str, p: i32) bool {
-    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && (s.byte_at(p + 2) == 's')
-        && (s.byte_at(p + 3) == 't') && (s.byte_at(p + 4) == 'd') && (s.byte_at(p + 5) == '.')
+
+resolve_span_eq = (s: str, p: i32, lit: str, i: i32) bool {
+    (lit.byte_at(i) == 0).match ({
+        true  => true,
+        false => (s.byte_at(p + i) == lit.byte_at(i)) && s.resolve_span_eq(p, lit, i + 1)
+    })
 }
-// is the 11-byte window at p exactly `= compiler.`?
-is_compiler_marker_at = (s: str, p: i32) bool {
-    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && (s.byte_at(p + 2) == 'c')
-        && (s.byte_at(p + 3) == 'o') && (s.byte_at(p + 4) == 'm') && (s.byte_at(p + 5) == 'p')
-        && (s.byte_at(p + 6) == 'i') && (s.byte_at(p + 7) == 'l') && (s.byte_at(p + 8) == 'e')
-        && (s.byte_at(p + 9) == 'r') && (s.byte_at(p + 10) == '.')
-}
-// does either NAMESPACED module marker start at p? (`= std.` / `= compiler.` — what a ns-BIND accepts)
+is_std_marker_at = (s: str, p: i32) bool { s.resolve_span_eq(p, "= std.", 0) }
+is_compiler_marker_at = (s: str, p: i32) bool { s.resolve_span_eq(p, "= compiler.", 0) }
+
 is_marker_at = (s: str, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
-// is the window at p `= <ident>` with NO dot after the identifier run — a USER (sibling-file) module
-// marker: `{ helper } = b` loads b.zen from the importing PROGRAM's own directory. Dots stay reserved
-// for the std. / compiler. namespaces (so `= std.x` — ident then '.' — is NOT a user marker), which
-// also keeps a future `= foo.bar` namespace shape from silently resolving as a file named `foo`.
+
 is_user_marker_at = (s: str, p: i32) bool {
     (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && s.byte_at(p + 2).is_ident_start()
         && (s.byte_at(s.res_ident_end(p + 2)) != '.')
 }
-// ANY import marker — namespaced or user — for the `{ … } = X` import classifier. (Namespace BINDS
-// `c = std.c` deliberately stay is_marker_at-only: extending binds to bare idents would classify every
-// plain reassignment `x = y` inside a body as a bind.)
 is_any_marker_at = (s: str, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 
-// THE CLASSIFIER — is the line starting at p an import line (to be stripped)? Equivalent to
-// the bootstrap source-prep rule: after line-local lstrip, imports start with `{ ` and contain
-// either `= std.` or `= compiler.` before the newline.
-// This is the one decision the compiler-source flatteners make per line; everything else (concat in
-// dependency order) is plumbing.
 is_import_line* = (s: str, p: i32) bool {
     ls := s.lstrip(p)
     s.opens_import(ls).match ({ true => s.has_import_marker(ls), false => false })
 }
 
-// the position just PAST a (possibly multi-line) import starting at p: next_line from its marker
-// (the line holding `} = std.x`). Callers detected the import via is_import_line first.
 import_end = (s: str, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
 
-// advance p to the first byte of the NEXT line (just past the next '\n'), or to EOF (the NUL).
 next_line = (s: str, p: i32) i32 {
     b := s.byte_at(p)
     (b == 0).match ({
         true  => p,
-        false => (b == 10).match ({ true => p + 1, false => s.next_line(p + 1) })
+        false => (b == 10).match ({
+            true  => p + 1,
+            false => s.next_line(p + 1)
+        })
     })
 }
 
-// count the lines that strip_imports would KEEP (non-import lines) — a verifiable digest of the
-// classifier over a whole source. The real resolver concatenates those kept lines instead of
-// counting them; counting is what the self-contained resolver test asserts against this classifier.
 strip_count* = (s: str, p: i32, n: i32) i32 {
     (s.byte_at(p) == 0).match ({
         true  => n,
@@ -121,34 +81,20 @@ strip_count* = (s: str, p: i32, n: i32) i32 {
     })
 }
 
-// ── THE STRIP ITSELF: bytes, not a count ────────────────────────────────────────────────────────
-// strip_count proves the classifier; these produce the actual flat source bytes used by bootstrap
-// source prep. Built on std.string's growable String so a kept line's bytes are appended directly
-// (no per-line allocation), mirroring how genc emits C as a value.
-
-// the end of the line starting at p — the position of its terminating '\n', or of the NUL at EOF.
-// (next_line lands PAST the '\n'; this lands ON it, so [p, line_end) is the line's bytes sans '\n'.)
 line_end = (s: str, p: i32) i32 {
     b := s.byte_at(p)
     ((b == 0) || (b == 10)).match ({ true => p, false => s.line_end(p + 1) })
 }
 
-// append the bytes [p, e) of `s` to the builder `out` (one line, the '\n' excluded). Byte-by-byte:
-// the builder owns its buffer, so this is just String.push over the line's span.
 append_span = (out: String, s: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.push(s.byte_at(p)).append_span(s, p + 1, e) })
 }
 
-// strip ONE file's imports into `out`, joining kept lines with '\n':
-// kept (non-import) lines are appended with a '\n' SEPARATOR before every kept line after the first
-// (so no leading/trailing newline within a file). `first` threads "have we emitted a kept line yet".
-// Walks to the NUL; a trailing '\n' in the file leaves p AT the NUL with no spurious empty line,
-// matching the bootstrap driver's split-lines behavior (no empty element after a final newline).
 strip_into = (out: String, s: str, p: i32, first: bool) String {
     (s.byte_at(p) == 0).match ({
         true  => out,
         false => s.is_import_line(p).match ({
-            true  => out.strip_into(s, s.import_end(p), first),   // skip the WHOLE (possibly multi-line) import
+            true  => out.strip_into(s, s.import_end(p), first),
             false => first.match ({
                 true  => out.append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false),
                 false => out.push(10).append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false)
@@ -157,58 +103,34 @@ strip_into = (out: String, s: str, p: i32, first: bool) String {
     })
 }
 
-// strip_imports(file_src): a fresh flat String of `s` with its import lines dropped. The read happens
-// in the driver; this is the pure transform.
 strip_imports* = (out: String, s: str) String { out.strip_into(s, 0, true) }
 
-// concatenate two already-stripped file bodies with a single '\n' between them — the per-file join in
-// compiler_source = "\n".join(...). A driver folds the SOURCES through this: start with file 0's strip,
-// then for each later file push '\n' and append its stripped body. (append takes a str; the driver
-// finishes each file's String to a str, or — as the self-contained test does — inlines the fold over a
-// single growing String, emitting the '\n' separator between files itself.)
 concat_files* = (out: String, a: str, b: str) String { out.append(a).push(10).append(b) }
 
-// ── the import EDGE: which module does an import line name? ───────────────────────────────────────
-// strip_imports drops import lines; the dependency-ordering driver needs the other half — the module
-// NAME each import line points at (`{ malloc } = std.alloc` → "alloc"), to read the module file and
-// recurse. These read the name off the module marker is_import_line already matched.
-
-// length of the `= std.` marker that is_marker_at checks; the module name begins just past it.
 STD_MARKER_LEN := 6
 COMPILER_MARKER_LEN := 11
-USER_MARKER_LEN := 2          // `= ` — a user marker's module name begins right after the space
+USER_MARKER_LEN := 2
 
-// the byte position of the module name on the import line starting at p — scan to the supported marker
-// (is_import_line guarantees one before the newline), then step past it onto the name's first char.
 module_name_pos = (s: str, p: i32) i32 {
     s.is_std_marker_at(p).match ({
         true  => p + STD_MARKER_LEN,
         false => s.is_compiler_marker_at(p).match ({
             true  => p + COMPILER_MARKER_LEN,
             false => s.is_user_marker_at(p).match ({
-                true  => p + USER_MARKER_LEN,                 // `= b`: the name starts right after `= `
+                true  => p + USER_MARKER_LEN,
                 false => s.module_name_pos(p + 1)
             })
         })
     })
 }
-// an identifier byte — the module-name charset (a module path is `std.<ident>`): letters, digits, '_'.
 is_ident_byte = (b: u8) bool {
     ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || ((b >= '0') && (b <= '9')) || (b == '_')
 }
-// append the identifier run starting at p (the module name) to `out`, stopping at the first non-ident
-// byte (whitespace / newline / NUL end the name).
 take_name = (out: String, s: str, p: i32) String {
     s.byte_at(p).is_ident_byte().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
 }
-// import_module(out, s, p): append the module name imported on the import line starting at p — e.g.
-// "alloc" for `{ malloc, free } = std.alloc`. The driver maps it to zen/std/<name>.zen.
 import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.module_name_pos(p)) }
 
-// internal module id for loading/dedup: `std/alloc`, `compiler/genc`, or `u/<name>` for a USER sibling
-// module (`{ helper } = b` → `u/b`). Keeping the namespace in the id prevents a std module, a compiler
-// module, and a user file with the same basename from colliding in the closure SET ('u' is not a
-// namespace prefix the other two can produce).
 import_id = (out: String, s: str, p: i32) String {
     s.is_std_marker_at(p).match ({
         true  => out.append("std/").take_name(s, p + STD_MARKER_LEN),
@@ -221,47 +143,15 @@ import_id = (out: String, s: str, p: i32) String {
         })
     })
 }
-// is the id a user (sibling-file) module id — `u/<name>`?
 id_is_user = (id: String) bool { (id.len >= 2) && (id.res_sbyte(0) == 'u') && (id.res_sbyte(1) == '/') }
 
-// ── THE TRANSITIVE-CLOSURE LOADER (N2a) ─────────────────────────────────────────────────────────────
-// Everything above is the PURE line/edge plumbing. This section is the actual import RESOLVER: given a
-// main program's source it reads its `{ … } = std.X` edges, recursively loads zen/std/<X>.zen for the
-// whole transitive closure, and folds each module's import-stripped body into ONE flat String that zenc
-// compiles as a single module — each module included exactly ONCE. This is the self-hosted replacement
-// for the `cat <hand-picked files> | grep -vE '^\{ .* \} = std\.'` flatten + the oracle_rt.zen shim.
-//
-// DEDUP — TWO LEVELS:
-//   1. PER-MODULE: a SET of module names breaks import cycles (the parse_* modules import each other) and
-//      guarantees each module's body is read + emitted exactly once. Sufficient + collision-free for any
-//      closure whose modules share NO top-level name — e.g. the oracle's set std.io → {std.mem, std.str}
-//      (`free` lives only in std.mem). load_closure does this.
-//   2. PER-NAME (dedup_decls, the final pass): a closure CAN pull two modules that both define a top-level
-//      name (the classic std.string `free(String)` vs std.mem `free(RawPtr<u8>)`, both reachable from the
-//      LOADER ITSELF). Emitting both bodies is a dup-name clash, so dedup_decls walks the flattened source
-//      a SECOND time and keeps only the FIRST top-level decl of each NAME, dropping later same-named decls.
-//      Because load_closure emits a module's DEPENDENCIES before the module itself, the dependency's decl
-//      is the first seen and wins (str.eq survives, mem.free survives over string.free) — the current
-//      resolver's "nearest defining module wins" rule.
-//
-// HOW per-name dedup splits decls: it does NOT — the PARSER does. compiler.parse.decl_span reuses the
-// real decl parsers to hand dedup each top-level decl's name + byte span, so the loader carries no
-// second definition of "what is a decl" (the line-based scanner it replaced diverged from the grammar
-// three times: generic `<T>` heads, column-0 impl-method lines, multi-line imports).
+// String-backed line set: `name\n` entries, scanned without per-name allocation.
 
-// ── a String byte accessor + a module-name SET over a flat String ───────────────────────────────────
-// The SET is just a String holding each seen module name as a `name\n` line (set starts empty, so every
-// entry begins at a line boundary). Membership is a line-exact scan — no hashing, no per-name alloc.
-
-// byte i of a String's buffer (the String twin of compiler.lex.byte_at over a `str`).
 res_sbyte = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
 
-// do the `m` bytes of `name` equal `set`'s bytes starting at `i`, immediately followed by a '\n'? — i.e.
-// is the line at `i` of `set` EXACTLY `name`. Compares byte-by-byte; the trailing-'\n' check makes it a
-// whole-line (not prefix) match, so `mem` does not spuriously match a stored `memx`.
 line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
     (j == m).match ({
-        true  => set.res_sbyte(i) == 10,                                  // name exhausted ⇒ must hit the '\n'
+        true  => set.res_sbyte(i) == 10,
         false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
             true  => set.line_eq(i + 1, name, j + 1, m),
             false => false
@@ -269,19 +159,15 @@ line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
     })
 }
 
-// scan `set` line-by-line from position `i` for a line exactly equal to `name`. `i` is always a line
-// start (0, or just past a '\n'). Stops at the buffer end (i == set.len).
 seen_scan = (set: String, name: String, i: i64) bool {
     (i >= set.len).match ({
         true  => false,
         false => set.line_eq(i, name, 0, name.len).match ({
             true  => true,
-            false => set.seen_scan(name, set.snext_line(i))             // skip to the next line start
+            false => set.seen_scan(name, set.snext_line(i))
         })
     })
 }
-// position just past the next '\n' at/after `i` in a String (or set.len at the end) — String twin of
-// next_line over a str.
 snext_line = (set: String, i: i64) i64 {
     (i >= set.len).match ({
         true  => set.len,
@@ -289,42 +175,25 @@ snext_line = (set: String, i: i64) i64 {
     })
 }
 
-// is module `name` already in the SET? (line-exact membership). `name` is a String (built by
-// import_module / a path-free take_name) so it can be compared against the buffer directly.
 seen* = (set: String, name: String) bool { set.seen_scan(name, 0) }
 
-// add `name` to the SET (append its bytes + a '\n' line terminator). Caller checks `seen` first.
 add_name = (set: String, name: String) String { set.append_string(name).push(10) }
-// append every byte of String `src` to `out` (String→String copy, byte by byte).
 append_string = (out: String, src: String) String { out.copy_from(src, 0) }
 copy_from = (out: String, src: String, i: i64) String {
     (i >= src.len).match ({ true => out, false => out.push(src.res_sbyte(i)).copy_from(src, i + 1) })
 }
 
-// ── the closure state threaded through the recursion ────────────────────────────────────────────────
-// load_closure must return the grown SET, the grown OUTPUT, and the running user-decl-name set (for the
-// cross-sibling duplicate check); Zen threads a single value, so they ride together in this struct (the
-// functional `s := s.op(...)` style, three fields at once).
 Closure*: { seen: String, out: String, useen: String }
 
-// ── the LOADER ERROR CHANNEL ─────────────────────────────────────────────────────────────────────────
-// A loader error (unknown module, unknown imported name, sibling clash, stdin sibling) is FATAL and
-// already fully formatted, so the channel is: print one `zenc: <file>: error: …` line on fd 2 and
-// exit(1) — the C driver never sees a partial flatten and adds nothing. `exit` is libc's, a bodyless
-// extern exactly like std.io's open/write (the fail_* helpers return an unused i32 AFTER it so they
-// stay expression-shaped; the 0 is unreachable).
-STDERR := 2                                       // the standard-error file descriptor (POSIX)
-exit = (code: i32) i32                            // libc exit(3): terminate with `code`
-eprint = (s: str) i64 { v := view(s)  write(STDERR, v.ptr, v.len) }
+exit = (code: i32) i32
+eprint = (s: str) i64 { v := view(s)  write(2, v.ptr, v.len) }
 
-// does `path` name a readable file? An open(2) probe — read_file has NO failure channel (on a missing
-// file it would read garbage), so the loader checks existence first and reports the module cleanly.
+// Probe first so missing modules get a distinct error from unreadable modules.
 file_exists = (path: str) bool {
     fd := open(path, O_RDONLY, 0)
     (fd >= 0).match ({ true => { close(fd)  true }, false => false })
 }
 
-// the user-facing module name for an internal id: `u/b` → `b`, `std/fmt` → `std.fmt`.
 append_id_name = (out: String, id: String) String {
     id.id_is_user().match ({ true => out.copy_from(id, 2), false => out.copy_id_dotted(id, 0) })
 }
@@ -338,8 +207,6 @@ copy_id_dotted = (out: String, id: String, i: i64) String {
     })
 }
 
-// `{ f } = nosuch` — the import names a module with no file behind it. Previously this fell through to
-// the typechecker (which TRUSTS DImport names) and died in raw linker spew; now it is the loader's error.
 fail_unknown_module = (inpath: str, id: String, path: str) i32 {
     msg := with_cap(160).append("zenc: ").append(inpath).append(": error: unknown module '").append_id_name(id)
     m2  := id.id_is_user().match ({
@@ -350,15 +217,23 @@ fail_unknown_module = (inpath: str, id: String, path: str) i32 {
     exit(1)
     0
 }
-// `{ nope } = b` where b.zen's top-level decls (and re-imports) don't define `nope` — name BOTH sides.
+fail_unreadable = (inpath: str, path: str) str {
+    eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: cannot read module file ").append(path).push(10).finish())
+    exit(1)
+    ""
+}
+read_module = (inpath: str, path: str) str {
+    read_file(path).match ({
+        .Ok(s)  => s,
+        .Err(e) => fail_unreadable(inpath, path),
+    })
+}
 fail_unknown_name = (inpath: str, nm: String, id: String) i32 {
     eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: unknown name '").append_string(nm)
         .append("' in module '").append_id_name(id).append("' (no such top-level definition)").push(10).finish())
     exit(1)
     0
 }
-// two SIBLING modules both define `nm` — reject loudly (per-name first-wins dedup is the std rule;
-// silently shadowing between user files would be a miscompile trap).
 fail_dup_user = (inpath: str, id: String, nm: String) i32 {
     eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: duplicate top-level definition '")
         .append_string(nm).append("' (module '").append_id_name(id)
@@ -366,7 +241,6 @@ fail_dup_user = (inpath: str, id: String, nm: String) i32 {
     exit(1)
     0
 }
-// a sibling import with NO program directory (source arrived on stdin) — there is nowhere to load from.
 fail_no_progdir = (inpath: str, id: String) i32 {
     eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: sibling import '").append_id_name(id)
         .append("' needs a source file on disk (stdin has no directory to load it from)").push(10).finish())
@@ -374,10 +248,6 @@ fail_no_progdir = (inpath: str, id: String) i32 {
     0
 }
 
-// ── module id → file path ────────────────────────────────────────────────────────────────────────────
-// `<root>/zen/std/<name>.zen` / `<root>/zen/compiler/<name>.zen` for namespaced ids; a USER id `u/b`
-// resolves to `<progdir>/b.zen` — a SIBLING of the importing program. A trailing '/' on root/progdir is
-// tolerated by the FS, so we always insert one — keep it simple.
 module_path = (root: str, progdir: str, id: String) str {
     id.id_is_user().match ({
         true  => with_cap(64).append(progdir).append("/").copy_from(id, 2).append(".zen").finish(),
@@ -385,8 +255,6 @@ module_path = (root: str, progdir: str, id: String) str {
     })
 }
 
-// the load-time guards for module `id` at `path`: a user module needs a program directory (stdin has
-// none) and — user or std — the file must exist; each failure prints + exits via the error channel.
 guard_module = (progdir: str, inpath: str, id: String, path: str) i32 {
     (id.id_is_user() && (progdir.byte_at(0) == 0)).match ({
         true  => fail_no_progdir(inpath, id),
@@ -395,37 +263,25 @@ guard_module = (progdir: str, inpath: str, id: String, path: str) i32 {
     file_exists(path).match ({ true => 0, false => fail_unknown_module(inpath, id, path) })
 }
 
-// ── load_closure: the recursive transitive loader ───────────────────────────────────────────────────
-// load_closure(a, root, progdir, inpath, id, c): if `id` is already in c.seen, return c unchanged
-// (dedup + cycle break — a sibling cycle a↔b terminates here on the second visit); else mark it seen,
-// read the module file, recursively load each module IT imports FIRST (so a dependency is present
-// before its dependents — though order is irrelevant for a flat namespace), then append THIS module's
-// import-stripped body + a '\n' separator to c.out. USER modules additionally (1) record their decl
-// names into c.useen, failing on a cross-sibling duplicate, and (2) get their own import heads
-// VALIDATED (validate=true on the recursion) — std/compiler internals are trusted as-is.
+// Recursive transitive loader; dependencies are loaded before each module body.
 load_closure* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, c: Closure) Closure {
     c.seen.seen(id).match ({
         true  => c,
         false => {
             path := module_path(root, progdir, id)
             guard_module(progdir, inpath, id, path)
-            src := read_file(path)
+            src := read_module(inpath, path)
             u2  := id.id_is_user().match ({
                 true  => a.user_decls_into(c.useen, src, 0, id, inpath),
                 false => c.useen
             })
             c2  := Closure( seen: c.seen.add_name(id), out: c.out, useen: u2 )
-            c3  := a.load_imports(root, progdir, inpath, src, 0, id.id_is_user(), c2)   // recurse on this module's edges
+            c3  := a.load_imports(root, progdir, inpath, src, 0, id.id_is_user(), c2)
             Closure( seen: c3.seen, out: c3.out.push(10).strip_into(src, 0, true), useen: c3.useen )
         }
     })
 }
 
-// walk module source `src` from line position `p`; for each import line, load_closure the module it
-// names (depth-first), threading the Closure. Non-import lines are skipped here (they are emitted in
-// bulk by strip_into back in load_closure) — this pass only follows EDGES. With `validate` set (the
-// MAIN program's edges and user-module edges), each import head is checked against the names the
-// imported module provides — AFTER load_closure, so a missing module errors first with its own message.
 load_imports = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, validate: bool, c: Closure) Closure {
     (src.byte_at(p) == 0).match ({
         true  => c,
@@ -444,14 +300,7 @@ load_imports = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, 
     })
 }
 
-// ── IMPORT-HEAD VALIDATION: `{ f, g } = m` ⊆ what m provides ────────────────────────────────────────
-// The parser TRUSTS DImport names (the checker registers them as known), so a typo'd import name used
-// to typecheck and die in the linker. The loader now checks each head name against the names the
-// imported module PROVIDES: its own top-level decls (decl_span, the parser-as-oracle — no second
-// definition of "what is a decl") plus the names IT re-imports (std modules import each other loosely;
-// a passing-through name is still defined once in the closure).
-
-// every top-level decl NAME of `src`, appended to `set` (one decl_span step per decl, like dd).
+// Import-head validation: `{ f, g } = m` must be provided by `m`.
 decl_names_into = (a: Ptr<Malloc>, set: String, src: str, p: i32) String {
     sp := a.decl_span(src, p)
     (sp.eof || (sp.next <= p)).match ({
@@ -462,8 +311,6 @@ decl_names_into = (a: Ptr<Malloc>, set: String, src: str, p: i32) String {
         })
     })
 }
-// every name in the (possibly multi-line) import HEAD starting at p (just past the '{'): each
-// identifier run up to the closing '}' is a name; commas/whitespace/newlines separate.
 head_names_into = (set: String, src: str, p: i32) String {
     b := src.byte_at(p)
     ((b == '}') || (b == 0)).match ({
@@ -477,7 +324,6 @@ head_names_into = (set: String, src: str, p: i32) String {
         })
     })
 }
-// the head names of every import LINE of `src`, appended to `set` (the re-export half of "provides").
 import_heads_into = (set: String, src: str, p: i32) String {
     (src.byte_at(p) == 0).match ({
         true  => set,
@@ -487,15 +333,12 @@ import_heads_into = (set: String, src: str, p: i32) String {
         })
     })
 }
-// the full provides-set of module source `src`: own decls + re-imported names.
 provided_names = (a: Ptr<Malloc>, src: str) String {
     a.decl_names_into(with_cap(256), src, 0).import_heads_into(src, 0)
 }
 
-// check every name in the import head at line p of `src` against what module `id` provides; an unknown
-// name prints + exits. (The module file exists — load_closure guarded it on this same edge.)
 check_import_names = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, id: String) i32 {
-    provided := a.provided_names(read_file(module_path(root, progdir, id)))
+    provided := a.provided_names(read_module(inpath, module_path(root, progdir, id)))
     src.check_head(src.lstrip(p) + 1, provided, id, inpath)
 }
 check_head = (src: str, p: i32, provided: String, id: String, inpath: str) i32 {
@@ -514,8 +357,6 @@ check_head = (src: str, p: i32, provided: String, id: String, inpath: str) i32 {
     })
 }
 
-// record every top-level decl name of USER module `id` into `useen`, failing on a name some OTHER
-// user module already recorded — the cross-sibling duplicate-definition reject.
 user_decls_into = (a: Ptr<Malloc>, useen: String, src: str, p: i32, id: String, inpath: str) String {
     sp := a.decl_span(src, p)
     (sp.eof || (sp.next <= p)).match ({
@@ -531,9 +372,6 @@ user_decls_into = (a: Ptr<Malloc>, useen: String, src: str, p: i32, id: String, 
     })
 }
 
-// the first SIBLING (user-file) module name imported by `src`, or "" — the C driver's STDIN guard:
-// piped source has no directory to resolve a sibling from, so bare `zenc` reports it cleanly instead
-// of emitting C that references names no one defines.
 first_user_import* = (src: str) str { fui_scan(with_cap(16), src, 0).finish() }
 fui_scan = (out: String, src: str, p: i32) String {
     (src.byte_at(p) == 0).match ({
@@ -551,55 +389,26 @@ fui_scan = (out: String, src: str, p: i32) String {
     })
 }
 
-// ── PER-NAME DEDUP: keep the first top-level decl of each name ───────────────────────────────────────
-// dedup_decls used to RE-IMPLEMENT "what is a decl" as a column-0 line scanner (decl-head shapes,
-// generic `<T>` skipping, brace-balanced impl bodies with string/char/comment special cases…) — a second
-// parser that diverged from the real grammar three separate times. It now asks THE parser instead:
-// compiler.parse.decl_span reuses the real decl parsers to report each top-level decl's NAME and byte
-// span [start, next), and dedup keeps/drops whole SPANS of the original text — kept source stays
-// byte-identical (the driver's error-position line mapping depends on that), and decl boundaries can
-// no longer desync from the grammar.
-//
-// KEEP/DROP per named decl, in flat order (ns-bound module bodies, the MAIN program, then imported
-// module closures, dependency-first):
-//   • MAIN region [bodystart, bodylen): ALWAYS kept (a same-file duplicate survives to the validator,
-//     which rejects it as dup-fn) and recorded in BOTH sets.
-//   • an unseen imported name: kept + recorded (the defining module comes first, so it wins).
-//   • an imported name another IMPORT already defined: dropped (first-wins — std.string's `free`
-//     yields to std.mem's, the classic cross-module clash).
-//   • an imported name the MAIN program also defines: KEPT, so the validator reports "duplicate
-//     top-level definition". Silently shadowing a std decl the program (transitively) imported was a
-//     miscompile trap — the std module's own internal calls would rebind to the user's decl.
-// Impl blocks and anything unnamed are kept verbatim (impls don't collide by name — many traits per
-// type), and trivia between decls (comments, blank lines) always survives with its neighbors.
+// Per-name dedup keeps the first dependency decl; main decls stay for validation.
 
-// end of the identifier run starting at p (first non-ident byte) — used by the ns-qualifier scan below.
 res_ident_end = (flat: str, p: i32) i32 {
     flat.byte_at(p).is_ident_byte().match ({ true => flat.res_ident_end(p + 1), false => p })
 }
-// append the ident span [p, e) of `flat` (a decl name) to `out` — like import_module's take_name but for
-// an explicit [p, e) range rather than scanning the charset (the caller already found the end).
 import_name_span = (out: String, flat: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.push(flat.byte_at(p)).import_name_span(flat, p + 1, e) })
 }
-// append everything from p to the terminating NUL (the trailing trivia after the last decl).
 append_to_nul = (out: String, s: str, p: i32) String {
     (s.byte_at(p) == 0).match ({ true => out, false => out.push(s.byte_at(p)).append_to_nul(s, p + 1) })
 }
 
-// dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
-// the per-name pass; resolve_program runs it over its per-module-flattened output. The allocator feeds
-// the parser the spans are read with.
 dedup_decls* = (a: Ptr<Malloc>, flat: str, bodystart: i64, bodylen: i64) str {
     a.dd(with_cap(4096), flat, 0, with_cap(256), with_cap(64), bodystart, bodylen).finish()
 }
 
-// the worker: one decl_span per step. `out` accumulates kept bytes; `set` = every name emitted so far;
-// `mainset` = the names the MAIN region defined. A span keeps its leading trivia [p, start) either way.
 dd = (a: Ptr<Malloc>, out: String, flat: str, p: i32, set: String, mainset: String, bodystart: i64, bodylen: i64) String {
     sp := a.decl_span(flat, p)
-    (sp.eof || (sp.next <= p)).match ({                  // done — or NO PROGRESS on malformed soup:
-        true  => out.append_to_nul(flat, p),             // keep the rest verbatim and let the parser/validator judge it
+    (sp.eof || (sp.next <= p)).match ({
+        true  => out.append_to_nul(flat, p),
         false => sp.named.match ({
             true  => {
                 nm     := with_cap(16).append(sp.name)
@@ -609,68 +418,38 @@ dd = (a: Ptr<Malloc>, out: String, flat: str, p: i32, set: String, mainset: Stri
                 m2     := inmain.match ({ true => mainset.add_name(nm), false => mainset })
                 keep.match ({
                     true  => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, s2, m2, bodystart, bodylen),
-                    false => a.dd(out.append_span(flat, p, sp.start), flat, sp.next, s2, m2, bodystart, bodylen)   // drop [start, next)
+                    false => a.dd(out.append_span(flat, p, sp.start), flat, sp.next, s2, m2, bodystart, bodylen)
                 })
             },
-            false => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, set, mainset, bodystart, bodylen)   // impl/import/other: keep verbatim
+            false => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, set, mainset, bodystart, bodylen)
         })
     })
 }
 
-// ── QUALIFIED NAMESPACE ACCESS (N2b): `c = std.c` then `c.malloc(8)` ──────────────────────────────────
-// Pure SOURCE-TO-SOURCE sugar, desugared in THE LOADER before zenc ever parses — the parser/checker/genc
-// see ZERO `c.malloc`, so they need no Ty::Namespace and no change. Two new shapes vs the destructuring
-// import `{ a, b } = std.X`:
-//   • a NAMESPACE-BIND line `<ident> = std.<modname>` (e.g. `c = std.c`) or `<ident> = compiler.<modname>`:
-//     an identifier, a one-char `=`, then a supported module marker, with NO `{` head (that is what tells
-//     it apart from the brace import). It pulls the WHOLE transitive closure of that module in (reuse
-//     load_closure, exactly like an import) and REGISTERS the qualifier `c` for the module.
-//   • a QUALIFIED ACCESS `<qualifier>.member`: rewritten to the bare `member` the loaded module defines
-//     (`c.malloc(8)` → `malloc(8)`). ONLY a registered qualifier strips; a real value's member access
-//     (`p.x`, `p` not a registered namespace) is left untouched. The bind line itself is then stripped,
-//     like an import line. The result is the same flat single module destructuring imports produce — and
-//     per-name dedup already absorbs `malloc` also arriving from another import (same libc symbol).
-//
-// The qualifier SET is a String of `name\n` lines, exactly the module-name SET (seen / add_name / line_eq
-// reused over it). A bind line that names a qualifier ALSO loads that module's closure, so the bare name
-// the rewrite produces is defined in the flat output.
-
-// is the line at p a NAMESPACE-BIND `<ident> = std.<name>` / `<ident> = compiler.<name>` (and NOT an import / real
-// decl)?  After lstrip: an ident-START byte (so not `{`), its identifier run, optional whitespace, then
-// a supported module marker is_marker_at checks. The marker's leading space + single `=` (is_marker_at wants
-// `= ` not `==`/`:=`) plus the whitespace-only gap between the ident and `=` pin the `c = std.c` shape —
-// a `c.x = …` or `c := …` has a non-ws, non-`=` byte where the marker must start, so it is rejected.
+// Namespace binds load `c = std.c` and rewrite `c.malloc` to `malloc`.
 is_ns_line* = (s: str, p: i32) bool {
     ls := s.lstrip(p)
     s.byte_at(ls).is_ident_byte().match ({
-        true  => s.is_marker_at(s.lstrip(s.res_ident_end(ls))),     // ident run, skip ws, must hit `= std.`
-        false => false                                          // `{ …` import or punctuation: not a bind
+        true  => s.is_marker_at(s.lstrip(s.res_ident_end(ls))),
+        false => false
     })
 }
 
-// the qualifier NAME bound on a namespace-bind line at p — the leading identifier (`c` for `c = std.c`).
-// Appended to `out` (a String), like import_module appends the module name. Only called where
-// is_ns_line(p) holds, so the leading ident is present.
 ns_qualifier* = (out: String, s: str, p: i32) String {
     ls := s.lstrip(p)
     out.import_name_span(s, ls, s.res_ident_end(ls))
 }
 
-// the closure scan state: the qualifier SET (a SEPARATE set from the module-name dedup set) paired with
-// the running Closure, threaded through collect_ns. Zen threads one value, so they ride together.
 NsScan*: { quals: String, c: Closure }
 
-// walk mainsrc, collecting EVERY namespace-bind qualifier into the SET `st.quals` AND loading the bound
-// module's transitive closure into `st.c` (so the module the qualifier points at is present in the flat
-// output). Threads both. Non-bind lines are skipped here — this pass only follows the namespace BINDS.
 collect_ns* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, st: NsScan) NsScan {
     (src.byte_at(p) == 0).match ({
         true  => st,
         false => src.is_ns_line(p).match ({
             true  => {
-                modid   := import_id(with_cap(24), src, p)                     // `std/<mod>` or `compiler/<mod>`
-                c2      := a.load_closure(root, progdir, inpath, modid, st.c)  // pull its closure in
-                q2      := st.quals.add_name(ns_qualifier(with_cap(16), src, p))  // register the qualifier
+                modid   := import_id(with_cap(24), src, p)
+                c2      := a.load_closure(root, progdir, inpath, modid, st.c)
+                q2      := st.quals.add_name(ns_qualifier(with_cap(16), src, p))
                 a.collect_ns(root, progdir, inpath, src, src.next_line(p), NsScan( quals: q2, c: c2 ))
             },
             false => a.collect_ns(root, progdir, inpath, src, src.next_line(p), st)
@@ -678,100 +457,60 @@ collect_ns* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p
     })
 }
 
-// ── the qualifier-STRIP rewrite (token / identifier-aware) ────────────────────────────────────────────
-// rewrite the body `s` so every `<qualifier>.member` (qualifier ∈ `quals`) becomes the bare `member`.
-// Walks byte-by-byte but jumps over whole identifier RUNS, so it only ever lands on an ident-START at a
-// token boundary (the prev byte is a non-ident / the buffer start). At an ident token it checks: is the
-// run a registered qualifier AND immediately followed by `.<ident-start>`?  If so, emit NOTHING for the
-// `<qualifier>.` prefix (skip past the '.'), so the trailing member name is emitted next as a bare ident.
-// Otherwise the identifier is emitted verbatim — a real value's `p.x` (p ∉ quals) is untouched, and a
-// bare identifier that merely ENDS in a qualifier's letters (`abc` vs qualifier `c`) never matches because
-// the whole run `abc`, not its suffix, is tested against the set.
-
-// is `b` an identifier-START byte (letter or '_')? — a token can begin here. (Digits can't start an
-// identifier, so a number like `3.foo` is never treated as a qualified access.)
 is_ident_start = (b: u8) bool {
     ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_')
 }
 
-// at a token boundary p (ident-start, prev byte non-ident): does the ident run [p, ie) name a registered
-// qualifier that is immediately followed by `.<ident-start>`?  ie = res_ident_end(p).
 is_qual_access = (s: str, p: i32, ie: i32, quals: String) bool {
     ((s.byte_at(ie) == '.') && s.byte_at(ie + 1).is_ident_start()).match ({
-        true  => quals.seen(import_name_span(with_cap(16), s, p, ie)),    // run ∈ qualifier set?
-        false => false                                                    // not `<run>.<ident>` shape
+        true  => quals.seen(import_name_span(with_cap(16), s, p, ie)),
+        false => false
     })
 }
 
-// the rewrite worker. `out` accumulates the rewritten bytes; p is the read cursor over `s`.
 rewrite_quals = (out: String, s: str, p: i32, quals: String) String {
     b := s.byte_at(p)
     (b == 0).match ({
         true  => out,
         false => (b.is_ident_start() && ((p == 0) || (!s.byte_at(p - 1).is_ident_byte()))).match ({
-            // a token start: an identifier run begins here.
             true  => {
                 ie := s.res_ident_end(p)
                 s.is_qual_access(p, ie, quals).match ({
-                    // `<qual>.member` → drop the `<qual>.` prefix; resume AT the member's first byte.
                     true  => out.rewrite_quals(s, ie + 1, quals),
-                    // a plain identifier (or a non-qualifier member access `p.x`): emit it verbatim.
                     false => out.append_span(s, p, ie).rewrite_quals(s, ie, quals)
                 })
             },
-            // any non-ident-start byte (whitespace, punctuation, a '.', a digit): copy it verbatim.
             false => out.push(b).rewrite_quals(s, p + 1, quals)
         })
     })
 }
 
-// the bytes [p, e) of `s` as a fresh NUL-terminated str (one line, '\n' excluded) — so rewrite_quals runs
-// over JUST this line (its ident-boundary / prev-byte logic stays line-local, like is_ns_line).
 line_slice = (s: str, p: i32, e: i32) str { with_cap(64).append_span(s, p, e).finish() }
 
-// strip BOTH import lines AND namespace-bind lines out of `s` while rewriting `<qualifier>.member` → bare
-// `member` — the body half of resolve_program once the qualifier SET is known. Mirrors strip_into, but
-// (a) a namespace-bind line is dropped too, and (b) each KEPT line's bytes go through the qualifier
-// rewrite. Per-line so a bind line is recognised at its own line start (is_ns_line is line-local).
 strip_ns_into = (out: String, s: str, p: i32, quals: String, first: bool) String {
     (s.byte_at(p) == 0).match ({
         true  => out,
         false => s.is_import_line(p).match ({
-            true  => out.strip_ns_into(s, s.import_end(p), quals, first),      // drop the whole import
+            true  => out.strip_ns_into(s, s.import_end(p), quals, first),
             false => s.is_ns_line(p).match ({
-            true  => out.strip_ns_into(s, s.next_line(p), quals, first),       // drop the (single-line) bind
-            false => first.match ({
-                true  => out.rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
-                            .strip_ns_into(s, s.next_line(p), quals, false),
-                false => out.push(10).rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
-                            .strip_ns_into(s, s.next_line(p), quals, false)
+                true  => out.strip_ns_into(s, s.next_line(p), quals, first),
+                false => first.match ({
+                    true  => out.rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
+                                .strip_ns_into(s, s.next_line(p), quals, false),
+                    false => out.push(10).rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
+                                .strip_ns_into(s, s.next_line(p), quals, false)
+                })
             })
-        })
         })
     })
 }
 
-// ── resolve_program: the public entry ───────────────────────────────────────────────────────────────
-// resolve_program(root, progdir, inpath, mainsrc): the flat, single-module source for a multi-module
-// PROGRAM `mainsrc`. `root` holds zen/std + zen/compiler; `progdir` is the directory of the program's
-// own file ("" when the source has no file, e.g. stdin — a sibling import then errors cleanly); `inpath`
-// is the program's path, used only to prefix loader error messages.
-// FIRST collects mainsrc's namespace binds (`c = std.c`) — loading each bound module's closure and
-// registering its qualifier — THEN strips mainsrc's import + bind lines (rewriting `c.malloc` → `malloc`
-// as it copies the kept lines) into the output, loads the transitive closure of each `{ … } = std.X` /
-// sibling `{ … } = b` import (per-MODULE dedup; the main file's + user modules' import heads are
-// name-VALIDATED), and finally runs dedup_decls (per-NAME dedup) over the whole thing so a closure with
-// a cross-module name clash (string.free vs mem.free) still yields a clash-free single module — and
-// `malloc` arriving from BOTH a namespace bind and an import collapses to one. Returns the finished
-// (NUL-terminated) flat source. ERRORS (unknown module / unknown imported name / sibling duplicate /
-// sibling-from-stdin) never return: the loader prints one `zenc: <file>: error: …` line and exits 1.
+// Public loader entry: collect namespace binds, strip imports/binds from the main
+// source, load transitive imports, then dedup names across the flat program.
 resolve_program* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) str {
     ns   := a.collect_ns(root, progdir, inpath, mainsrc, 0,
                 NsScan( quals: with_cap(64), c: Closure( seen: with_cap(256), out: with_cap(4096), useen: with_cap(64) ) ))
-    // `first` ⇒ the first kept main line gets NO leading '\n'; only true when no namespace-bound module
-    // body precedes it (else it would glue onto that body's last line — load_closure prefixes each body
-    // with a '\n', so a non-empty ns.c.out already ends a line and the main body needs its own '\n').
-    nsl  := ns.c.out.len                                     // ns-bound module bodies end here; the MAIN file follows
+    nsl  := ns.c.out.len
     body := ns.c.out.strip_ns_into(mainsrc, 0, ns.quals, ns.c.out.len == 0)
     cN   := a.load_imports(root, progdir, inpath, mainsrc, 0, true, Closure( seen: ns.c.seen, out: body, useen: ns.c.useen ))
     a.dedup_decls(cN.out.finish(), nsl, body.len)

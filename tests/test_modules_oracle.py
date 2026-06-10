@@ -48,13 +48,12 @@ def test_module_typechecks_against_its_imports(module):
     assert n == 0, f"{module}: {n} cross-module type error(s) against imports {_oracle.imports_of(path)}"
 
 
-def test_compiler_sources_typecheck_as_a_whole():
-    # The compiler's manifest-listed sources must type-check cross-module — this is the
+def test_bootstrap_sources_typecheck_as_a_whole():
+    # The bootstrap manifest-listed sources must type-check cross-module — this is the
     # acid-CHECK dimension over the real multi-module compiler that deleting Python removed.
-    sources = [Path(p).stem for p in _oracle._CHECK_SOURCES]
-    for m in sources:
-        n = _oracle.check_linked_count("zen/compiler/" + m + ".zen")
-        assert n == 0, f"compiler source {m}.zen: {n} cross-module error(s)"
+    for rel in _oracle._CHECK_SOURCES:
+        n = _oracle.check_linked_count(rel)
+        assert n == 0, f"bootstrap source {rel}: {n} cross-module error(s)"
 
 
 # ── the NET IS NOT HOLLOW: a wrong cross-module call must be REJECTED ────────────────────────────

@@ -14,7 +14,7 @@ Arc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:
 
 arc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }
 
-new<T> = (x: T) Arc<T> {
+arc_new<T> = (x: T) Arc<T> {
     base := malloc(8 + sizeof(T))
     store_i64(base, 1)                                // initial count — no other thread sees it yet
     r := Arc<T>( base: base )
@@ -22,15 +22,15 @@ new<T> = (x: T) Arc<T> {
     s[0] = x
     r
 }
-get<T>   = (r: Arc<T>) T  { r.arc_val()[0] }
-count<T> = (r: Arc<T>) i64 { load_i64(r.base) }
+arc_get<T> = (r: Arc<T>) T  { r.arc_val()[0] }
+arc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }
 
 // clone/drop are the thread-safe operations: an atomic fetch-add publishes the new count to all threads.
-clone<T> = (r: Arc<T>) Arc<T> {
+arc_clone<T> = (r: Arc<T>) Arc<T> {
     atomic_add_i64(r.base, 1)
     Arc<T>( base: r.base )
 }
-drop<T> = (r: Arc<T>) void {
+arc_drop<T> = (r: Arc<T>) void {
     // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
     (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} })
 }

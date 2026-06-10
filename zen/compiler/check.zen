@@ -1,102 +1,65 @@
-// compiler.check — a minimal type resolver over the genc AST, the smallest slice of a checker.
-// It supplies the two pieces of type information the parser can't compute on its own:
-//   • each enum `match`'s `ename` — the enum type name genc needs to emit `subj.tag == E_V`,
-//     found by looking the match subject up among the enclosing function's PARAMETERS;
-//   • each enum constructor's type — `.Circle(5)` / `.Lo` carry no enum name from the parser,
-//     so we look the VARIANT up among the module's enum decls and fill it in.
-// Together that's exactly what's needed to cross the "enum" wall (match was blocked on the
-// subject's enum name; construction on the variant's enum name) — not the 700-LOC full port.
-//
-// The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
-// can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
-// unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname, bin, cond, call, call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+// compiler.check — resolve and infer over the shared genc AST.
+// This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
+// type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname, bin, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
-{ byte_at } = compiler.lex
+{ byte_at } = std.bytes
 
-// the variable environment: a cons-list of (name, type) bindings — the function's params,
-// then each `let` as it is encountered (so a later `s.match` can find s's enum type). Built
-// functionally (cons) so extending it for a let is just one allocated node.
+// Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
 VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
-// the resolution environment: the live variable bindings + every module decl (for enums/fns)
-// `exp` is the EXPECTED type at the current expression position (the function's return type,
-// threaded into return/branch positions). It disambiguates a constructor whose variant name is
-// shared by several enums — `lit = (n) Expr { .Int(n) }` picks Expr.Int over TokKind.Int because
-// Expr is the expected type. tvoid() means "no expectation" → fall back to a name-only scan.
+// exp is the current expected type; tvoid() means no expectation.
 Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: Ptr<Malloc> }   // a = allocator (heap-alloc in infer)
 with_exp = (env: Env, t: Ty) Env { Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
-// the env for a LET's value: an annotated `x: T := e` makes T the EXPECTED type (drives `.None`/ctor
-// resolution exactly like a param/return position); unannotated stays expectation-free.
 let_exp = (env: Env, t: Ty) Env { t.is_void_ty().match ({ true => env.clr_exp(), false => Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }) }
 
-// heap-allocate fresh nodes (the same pattern the parser uses). Named cebuf/cenode (not
-// ebuf/enode) so they don't collide with parse.zen's identically-purposed helpers when the
-// whole compiler is compiled as one TU — until genc namespaces functions by module, every
-// top-level name across the compiler's sources must be unique.
+// Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
 cebuf = (a: Ptr<Malloc>, n: i64) [Expr] { slice(malloc(n * sizeof(Expr)), n) }
 cenode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.cebuf(1)
     buf[0] = v
     buf[0].addr()
 }
-// ── pos-preserving rebuilds (structural, not conventional) ──────────────────────────────
-// Call/Var carry `pos` (the byte offset errors are reported at; 0 = synthesized). The resolver/
-// inliner REBUILDS those nodes in many places (resolve_call, subst_expr, xform_call/maybe_template,
-// inline_lambda, …), and ONE rebuild site using the pos-0 ctor silently zeroes the position of
-// every call the pass walks — that bug shipped once. So a rebuild takes the ORIGINAL node's data
-// and copies its pos ITSELF: a site written with recall/revar/var_call cannot drop it. The bare
-// call()/vref() ctors remain for SYNTHESIZED nodes only — lowering glue with no source location
-// (the tag-const refs in lower_match_arms, parse-time sentinels).
-recall   = (a: Ptr<Malloc>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(call_at(fn, args, c.pos)) }
+// Pos-preserving rebuilds. Bare call()/vref() are only for synthesized nodes.
+recall   = (a: Ptr<Malloc>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(c.raw.match ({ true => raw_call_at(fn, args, c.pos), false => call_at(fn, args, c.pos) })) }
 revar    = (a: Ptr<Malloc>, v: VarData, name: str) Ptr<Expr> { a.cenode(vref_at(name, v.pos)) }
-var_call = (a: Ptr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }   // a Call derived from a VAR (a named fn passed as a HOF arg, called at the splice site)
+var_call = (a: Ptr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }
 abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(malloc(n * sizeof(ArmData)), n) }
 sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(malloc(n * sizeof(Stmt)), n) }
 dbuf* = (a: Ptr<Malloc>, n: i64) [Decl] { slice(malloc(n * sizeof(Decl)), n) }
 tbuf = (a: Ptr<Malloc>, n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
-// a heap Ptr<Ty> — so a Ty a function builds (e.g. a slice's element type in infer_expr) outlives
-// the frame, instead of dangling via `&(localTy)` (which silently corrupts fits/ty_eq downstream).
+// Heap-own a Ty so Ptr<Ty> fields do not dangle.
 tnode* = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tbuf(1)
     buf[0] = t
     buf[0].addr()
 }
 
-// ── the variable environment (a cons-list) ────────────────────────────────────────────
 vlbuf = (a: Ptr<Malloc>) [VList] { slice(malloc(sizeof(VList)), 1) }
 vlnode = (a: Ptr<Malloc>, v: VList) Ptr<VList> {
     buf := a.vlbuf()
     buf[0] = v
     buf[0].addr()
 }
-// ctor fns give the leading-dot enum a return-type context (a bare `.VNil()` passed into the
-// generic vlnode can't infer its enum)
 vnil_val  = () VList { .VNil() }
 vcons_val = (nm: str, t: Ty, tail: Ptr<VList>) VList { .VCons(VCell( name: nm, ty: t, tail: tail )) }
 vnil = (a: Ptr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
 vcons = (a: Ptr<Malloc>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
-// the initial environment: each parameter consed onto an empty list
 params_env* = (a: Ptr<Malloc>, ps: [Param]) Ptr<VList> {
     e := a.vnil()
     ps.loop((h, i, p) { e = a.vcons(p.name, p.ty, e) })
     e
 }
-// the type bound to `name` (walk the cons-list); void if unbound
 lookup_var = (v: Ptr<VList>, name: str) Ty {
     v.match ({
         .VNil     => tvoid(),
         .VCons(c) => eq(c.name, name).match ({ true => c.ty, false => c.tail.lookup_var(name) })
     })
 }
-// a module-level global's type — inferred from its init (Goal Z E1). The fallback when a bare Var
-// is not a local. Returns void if there's no such global. The global's OWN name is bound (to a
-// non-void in-progress marker) in the env it infers the init under, so a self/cyclic reference
-// (`g := g …`, only ever from malformed input — a valid init never names its own global) resolves
-// via lookup_var instead of re-entering global_ty forever (a resolver stack overflow).
+// Infer global init types; bind the global name while doing so to avoid self-recursive lookup.
 infer_global_init = (env: Env, name: str, init: Ptr<Expr>) Ty {
     env2 := Env( vars: env.a.vcons(name, tnamed(""), env.vars), decls: env.decls, exp: env.exp, a: env.a )
     env2.infer_expr(init)
@@ -106,16 +69,11 @@ global_ty = (env: Env, name: str) Ty {
     env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_global_init(g.name, g.init), false => found }), _ => found }) })
     found
 }
-// a bare Var's type: an in-scope local, else a module-level global, else void.
 var_or_global* = (env: Env, name: str) Ty {
     lv := env.vars.lookup_var(name)
     lv.is_void_ty().match ({ true => env.global_ty(name), false => lv })
 }
-// is `name` BOUND — present in the local env OR as a module global — REGARDLESS of its (possibly void /
-// uninferable) type? This is membership, NOT a type lookup: a local bound to a void-typed value (a
-// void-returning call, an un-inferable generic) is still defined. (var_or_global returns void both for
-// "unbound" and "bound-to-void", so it can't tell undefined from void-typed — the validator's `.Var`
-// definedness check must use THIS instead, or it false-rejects every void-typed local.)
+// Membership check, distinct from type lookup; void-typed locals still count as bound.
 var_bound = (v: Ptr<VList>, name: str) bool {
     v.match ({ .VNil => false, .VCons(c) => eq(c.name, name).match ({ true => true, false => c.tail.var_bound(name) }) })
 }
@@ -125,12 +83,10 @@ global_bound = (decls: [Decl], name: str) bool {
     found
 }
 is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.global_bound(name) }
-// the enum a type refers to — a Named, OR a Ptr to a Named (a `Ptr<Enum>` subject); else "".
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
-enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }   // a generic enum instance -> its monomorphized name
+enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }
 ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
-elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }   // the element type of a [T]
-// the enum that declares variant `vn` (scan every enum decl) — "" if none
+elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }
 enum_has = (ed: EnumDecl, vn: str) bool {
     f := false
     ed.variants.loop((h, i, v) { f = eq(v.name, vn).match ({ true => true, false => f }) })
@@ -142,8 +98,7 @@ gen_enum_has = (g: GenEnumDecl, vn: str) bool {
     g.variants.loop((h, i, v) { f = eq(v.name, vn).match ({ true => true, false => f }) })
     f
 }
-// the enum a variant `.vn` belongs to — scans BOTH concrete and generic enums (a generic `Opt<T>`
-// is a DGenEnum, so `.Some` must find its base name "Opt" before the concrete Opt_i32 is emitted).
+// Find the enum, concrete or generic, that declares variant `vn`.
 enum_of_variant = (decls: [Decl], vn: str) str {
     found := ""
     decls.loop((h, i, d) { found = d.match ({
@@ -153,27 +108,18 @@ enum_of_variant = (decls: [Decl], vn: str) str {
     }) })
     found
 }
-// does the enum named `ename` declare variant `vn`?
 named_has = (decls: [Decl], ename: str, vn: str) bool {
     found := false
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.enum_has(vn), false => found }), _ => found }) })
     found
 }
-// the enum for constructor `.vn(…)`: prefer the EXPECTED type (env.exp) when it has the variant,
-// else scan by name. This is what disambiguates Expr.Int from TokKind.Int in a combined module.
-// The base enum a constructor `.vn` belongs to: the expected enum if it has the variant, else a
-// by-variant scan (which now also covers generic enums). `enum_inst_*` then layers on the generic
-// monomorphization (type args from the expected type or the payload).
+// Constructor enum: expected type wins, otherwise scan by variant name.
 ctor_enum_plain = (env: Env, vn: str) str {
     en := env.exp.enum_name()
     env.decls.named_has(en, vn).match ({ true => en, false => env.decls.enum_of_variant(vn) })
 }
 
-// ── infer_expr: the Ty of an expression in an environment (Goal C Phase 2) ──────────────
-// Enough of the checker to type `let` right-hand sides, so a let-bound variable used as a
-// match subject (`s := scan(…)\n s.match { … }`) resolves. A comparison/logical Bin is bool;
-// an arithmetic Bin is the operand type; a Call is the callee's return type; a constructor is
-// its enum; a Member is the field's type (seeing through a Ptr to the struct).
+// Infer expression types needed by resolve and validate.
 fn_ret = (decls: [Decl], name: str) Ty { decls.the_func(name).ret }   // the_func's sentinel.ret is tvoid()
 field_ty = (sd: StructDecl, fname: str) Ty {
     found := tvoid()
@@ -185,10 +131,8 @@ struct_field = (decls: [Decl], sname: str, fname: str) Ty {
     decls.loop((h, i, d) { found = d.match ({ .DStruct(sd) => eq(sd.name, sname).match ({ true => sd.field_ty(fname), false => found }), _ => found }) })
     found
 }
-// a comparison / logical operator (== < > <= >= && || !=) yields bool; an arithmetic one its operand
 is_cmp_op = (op: str) bool {
-    // bool-RESULT ops: == != < <= > >= && || !. NOT the bitwise ops, which keep the lhs type:
-    // `<<`/`>>` (b1 == b0 for </>) and the 1-byte `&`/`|`/`^` (the 2-byte && / || ARE bool).
+    // Bool-result ops; bitwise ops keep the lhs type.
     b  := op.byte_at(0)
     b1 := op.byte_at(1)
     (b == '=') || (b == '!')
@@ -196,9 +140,7 @@ is_cmp_op = (op: str) bool {
         || (((b == '&') || (b == '|')) && (b1 == b))
 }
 bin_ty = (op: str, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
-// is `e` a purely-LITERAL numeric expression? Such a value is polymorphic — it fits any numeric
-// type (`10` is a valid u8 / i32 / i64) — so the checker must not read it as a narrowing. An
-// ARITHMETIC bin of literals stays numeric; a COMPARISON of literals (`3 < 4`) is a bool, not this.
+// Numeric literals are polymorphic until a context fixes their size.
 is_lit_numeric* = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Int(n)  => true,
@@ -208,15 +150,11 @@ is_lit_numeric* = (e: Ptr<Expr>) bool {
         _        => false
     })
 }
-// a `c ? t : e` conditional's type. A LITERAL then-branch (polymorphic) defers to the else, so
-// `cond ? 10 : e` where `e: u8` types as u8, not i32 — matching how literals size to context.
+// Conditionals defer to the else branch when the then branch is a numeric literal.
 cond_ty = (env: Env, d: CondData) Ty {
     d.t.is_lit_numeric().match ({ true => env.infer_expr(d.e), false => env.infer_expr(d.t) })
 }
-// ── generic-enum constructors: monomorphize a `.Some(5)` of a generic `Opt<T>` like a struct literal.
-//    Compute (base enum, type args, mangled name): the args come from the EXPECTED generic type if one
-//    is threaded, else are inferred by unifying the variant's declared payload type against the actual
-//    payload type (so `.Some(5)` → Opt<i32>). A non-generic enum keeps its plain name + empty args. ──
+// Generic enum constructors: compute base enum, type args, and mangled concrete name.
 EnumInst*: { base: str, mty: str, targs: [Ty] }
 gen_variant_payload = (g: GenEnumDecl, vname: str) Ty {
     found := tvoid()
@@ -249,55 +187,42 @@ enum_inst_of = (env: Env, base: str, variant: str, pty: Ty) EnumInst {
 }
 enum_inst_mk = (env: Env, variant: str, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
 enum_inst_tag = (env: Env, variant: str) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
-// a block expression `({ … ; tail })` (e.g. a multi-statement template inlined at a call site) has
-// the type of its tail expression — so `a := coro_new(…)` (which inlines to a block ending in a
-// `Coro{…}`) types `a` as Coro, not void. Inner lets aren't threaded, so a tail that is itself an
-// inner local stays void (rare); a tail expr/struct/call — the common template shape — types fine.
+// Block expressions take their trailing expression/return type.
 last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
     stmts[stmts.len - 1].match ({ .ExprStmt(e) => env.infer_expr(e), .Return(r) => env.infer_expr(r), _ => tvoid() })
 }
 block_ty = (env: Env, b: BlockData) Ty {
-    // NB: kept as a single expression (no `n := b.stmts.len` then a `(`-leading line) — the Python
-    // frontend's statement-glue bug would parse `.len` + the next `(…)` as a call. [[leading-dot-statement-glue]]
+    // Keep as one expression; older frontends glued a `.len` line to a following call.
     (b.stmts.len == 0).match ({ true => tvoid(), false => env.last_stmt_ty(b.stmts) })
 }
-// the element type of `seq[i]`: prefer the Index's STORED elem when it is concrete — a generic
-// template's `[T]` index has its elem substituted to the concrete T at inline time (subst_targs),
-// whereas re-inferring `seq` after inlining can lose it (the seq became a `slice(…)` builtin call /
-// statement-expr whose type is void). Re-inferring only when the stored elem is void preserves the
-// original behaviour for un-substituted indices. This is what lets a generic `Own<T>`'s spliced
-// `addr(own_val(o)[0]).drop()` infer the receiver as `MutPtr<Res>` and re-dispatch to T's Drop impl.
+// Prefer a concrete stored index element type; generic inlining may make re-inference lose it.
 index_elem = (env: Env, ix: IndexData) Ty {
     ix.elem.is_void_ty().match ({ true => env.infer_expr(ix.seq).elem_of(), false => ix.elem })
 }
 infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
     load(e).match ({
-        .Int(n)        => ((n > 2147483647) || (n < 0 - 2147483648)).match ({ true => ti64(), false => ti32() }),   // an out-of-i32-range literal IS an i64 (so `x: i32 := 4294967296` rejects instead of running as 0)
+        .Int(n)        => ((n > 2147483647) || (n < 0 - 2147483648)).match ({ true => ti64(), false => ti32() }),
         .Block(b)      => env.block_ty(b),
-        .Byte(n)       => tu8(),                             // a char literal is a byte
-        .FloatLit(ft)  => tf64(),                            // a float literal IS an f64 (never an int — no int<->float mixing)
+        .Byte(n)       => tu8(),
+        .FloatLit(ft)  => tf64(),
         .Var(v)        => env.var_or_global(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),
-        .MakeEnum(mk)  => env.mkenum_ty(mk),                  // a resolved generic ctor keeps its targs (Generic), so a later match-arm bind recovers the concrete payload
+        .MakeEnum(mk)  => env.mkenum_ty(mk),
         .Tag(t)        => env.tag_ty(t),
         .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
         .StrLit(x)     => tstr(),
         .Match(m)      => env.infer_match_ty(m),
-        .Index(ix)     => env.index_elem(ix),                // T of a [T] index — the stored elem if concrete, else re-infer the seq
-        .Loop(l)       => tvoid(),                            // a loop is a void statement
-        .SliceLit(sd)  => tslice(env.a.tnode(env.sl_elem(sd.items))),  // `[a,b,c]` of element E -> [E]; infer E from the ITEMS (sd.elem is void on an un-resolved literal, so `b := [a[0]]` recorded its element as void — fuzz #6)
+        .Index(ix)     => env.index_elem(ix),
+        .Loop(l)       => tvoid(),
+        .SliceLit(sd)  => tslice(env.a.tnode(env.sl_elem(sd.items))),
         _              => tvoid()
     })
 }
-// a call's result type: the `load(p)` intrinsic yields the pointee (so `load(e).match` resolves);
-// any other call yields the callee's declared return type.
 pointee_of = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => tvoid() }) }
-// the type of a call: for a GENERIC callee, infer its type args from the arguments (unify each
-// param type against the arg's inferred type) and substitute them into the declared return type —
-// so `vec_of([10,20]) : Vec<i32>` (not the leaked `Vec<T>`), which a downstream `v.vget(0)` needs.
+// Generic calls infer type args from arguments, then substitute the return type.
 targ_of = (env: Env, params: [Param], args: [Expr], tp: str) Ty {
     found := tvoid()
     params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(env.infer_expr(args[i].addr()), tp), false => found }), false => found }) })
@@ -308,16 +233,13 @@ call_targs = (env: Env, f: Func, args: [Expr]) [Ty] {
     f.tparams.loop((h, i, tp) { buf[i] = env.targ_of(f.params, args, tp.name) })
     buf
 }
-// ── UFCS trait-method dispatch: `x.m()` desugars to `m(x, …)`. If `m` is a method provided by an
-//    impl on x's TYPE, route the call to that impl's mangled C name (impl_<Trait>_<Type>_m), so two
-//    types can implement the same trait method. A plain fn (no matching impl) keeps its name. ──
+// UFCS trait dispatch: route `x.m()` to the receiver type's impl when one exists.
 method_in = (methods: [Param], fn: str) bool {
     f := false
     methods.loop((h, i, n) { f = eq(n.name, fn).match ({ true => true, false => f }) })
     f
 }
-// does trait `trname` declare a default body for method `m`? (then an impl that omits `m` still
-// dispatches via the default's instantiated `impl_<trname>_<Type>_m`.)
+// Trait default methods dispatch as if the impl listed them.
 trait_default_exists = (decls: [Decl], trname: str, m: str) bool {
     found := false
     decls.loop((h, i, d) { found = d.match ({
@@ -325,9 +247,6 @@ trait_default_exists = (decls: [Decl], trname: str, m: str) bool {
         _ => found }) })
     found
 }
-// `x.m()` on a value of `tyname` routes to the impl method: m is either LISTED by the impl, or OMITTED
-// but supplied by the trait's default (both emit `impl_<Trait>_<Type>_m`, the latter via resolve_module's
-// default instantiation).
 dispatch_recv = (decls: [Decl], fn: str, tyname: str) str {
     found := ""
     decls.loop((h, i, d) {
@@ -354,36 +273,33 @@ gen_call_ret = (env: Env, c: CallData) Ty {
         false => f.ret
     })
 }
-// the inferred type of a 1-arg intrinsic's operand. BOUNDS-SAFE: a MALFORMED call naming an intrinsic
-// with NO args (only the validator checks intrinsic arity; resolve_module does not) would read c.args[0]
-// past the args buffer — a heap-buffer-overflow. Missing operand → void. A well-formed call (≥1 arg)
-// takes the same path as before, so inferred types — hence emitted output — are unchanged.
+// Bounds-safe operand inference for 1-arg intrinsics.
 arg0_ty = (env: Env, c: CallData) Ty {
     (c.args.len > 0).match ({ true => env.infer_expr(c.args[0].addr()), false => tvoid() })
 }
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "__str_eq").match ({
-    true  => tbool(),                                                   // lowered str content equality
+    true  => tbool(),
     false => eq(c.fn, "__str_ne").match ({
     true  => tbool(),
     false => eq(c.fn, "load").match ({
         true  => env.arg0_ty(c).pointee_of(),
         false => eq(c.fn, "load_i64").match ({
-            true  => ti64(),                                            // load_i64(p): an i64 read at a byte ptr
+            true  => ti64(),
             false => eq(c.fn, "atomic_add_i64").match ({
-            true  => ti64(),                                            // atomic_add_i64(p, d): the new i64 value
+            true  => ti64(),
             false => eq(c.fn, "to_i32").match ({
-            true  => ti32(),                                            // to_i32(x): explicit cast (truncating)
+            true  => ti32(),
             false => eq(c.fn, "to_i64").match ({
-            true  => ti64(),                                            // to_i64(x): explicit widening cast
+            true  => ti64(),
             false => eq(c.fn, "to_u8").match ({
-            true  => tu8(),                                             // to_u8(x): explicit cast (truncating)
+            true  => tu8(),
             false => eq(c.fn, "to_f64").match ({
-            true  => tf64(),                                            // to_f64(x): explicit int -> float cast
+            true  => tf64(),
             false => eq(c.fn, "null_ptr").match ({
-                true  => tptr(env.a.tnode(tu8())),                      // null_ptr(): a null RawPtr<u8> (a constant 0)
+                true  => tptr(env.a.tnode(tu8())),
                 false => eq(c.fn, "addr").match ({
-                    true  => tptr(env.a.tnode(env.arg0_ty(c))),         // addr(x): Ptr<typeof(x)>, so x.m() dispatches on x's type
+                    true  => tptr(env.a.tnode(env.arg0_ty(c))),
                     false => env.gen_call_ret(c)
                 })
             }) }) }) }) })
@@ -391,10 +307,7 @@ infer_call = (env: Env, c: CallData) Ty {
         })
     }) }) })
 }
-// a constructor's type. A RESOLVED ctor (mty set) of a GENERIC enum keeps its type args as a Generic
-// (`.Err(x): Result_void_IoError` carries args [void, IoError]) — so a match-arm bind on it recovers the
-// substituted payload (IoError) for a nested match. A non-generic ctor (no targs) is a plain Named. An
-// UNRESOLVED ctor (mty == "") falls back to enum_inst_* (which itself yields the monomorphized name).
+// Constructor types keep generic args so later match-arm binds recover concrete payload types.
 einst_ty = (ei: EnumInst) Ty { (ei.targs.len > 0).match ({ true => tgeneric(ei.base, ei.targs, ei.mty), false => tnamed(ei.mty) }) }
 mkenum_ty = (env: Env, mk: MakeEnumData) Ty {
     eq(mk.mty, "").match ({
@@ -408,11 +321,7 @@ tag_ty = (env: Env, t: TagData) Ty {
         false => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.mty) })
     })
 }
-// the type of field `fname` read from a value of GENERIC struct `gname<targs>` — the field's declared
-// type with the struct's tparams substituted by the receiver's concrete `targs`. So `Hold<i32>.o`
-// (field `o: Opt<T>`) yields `Opt<i32>` (mangled Opt_i32), not the un-substituted `Opt<T>` whose
-// enum_name() is empty — which made a generic enum read out of a generic struct field lose its
-// monomorphized tag prefix (`_Some` instead of `Opt_i32_Some`, fuzz #4).
+// Generic struct field reads substitute the receiver's concrete type args.
 gen_field_at = (fields: [Field], fname: str) Ty {
     found := tvoid()
     fields.loop((h, i, f) { found = eq(f.name, fname).match ({ true => f.ty, false => found }) })
@@ -425,29 +334,26 @@ gen_struct_field = (decls: [Decl], gname: str, fname: str, targs: [Ty]) Ty {
         _ => found }) })
     found
 }
-ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => t }) }   // see through a pointer receiver
+ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => t }) }
 infer_member = (env: Env, m: MemberData) Ty {
     oty := env.infer_expr(m.obj)
     oty.ty_under_ptr().match ({
-        .Generic(g) => env.decls.gen_struct_field(g.name, m.field, g.args),   // a generic-struct value: substitute its targs into the field type
-        _           => env.decls.struct_field(oty.enum_name(), m.field)        // a plain struct (enum_name sees through a Ptr)
+        .Generic(g) => env.decls.gen_struct_field(g.name, m.field, g.args),
+        _           => env.decls.struct_field(oty.enum_name(), m.field)
     })
 }
 infer_match_ty = (env: Env, m: MatchData) Ty {
     (m.arms.len > 0).match ({ true => env.infer_expr(m.arms[0].body), false => tvoid() })
 }
 
-// stamp a ctor with its monomorphized enum: a `.Some(5)` of generic `Opt<T>` becomes a MakeEnum
-// carrying mty=`Opt_i32` + targs=[i32], so genc emits `(Opt_i32){…}` and collect emits the instance.
-// A node that ALREADY carries targs is monomorphized (subst made it concrete, or a prior pass did) —
-// preserve it. The re-resolve pass runs with no expected type, so recomputing would lose `.None`'s T.
+// Stamp enum constructors with their concrete generic instance when needed.
 resolve_mkenum = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str, payload: Ptr<Expr>) Ptr<Expr> {
     p := a.resolve_expr(env.clr_exp(), payload)
     (etargs.len > 0).match ({
         true  => a.cenode(mkenumg(ety, emty, etargs, variant, p)),
         false => eq(ety, "").match ({
-            true  => a.resolve_mkenum_fresh(env, variant, p),               // unqualified `.Variant(x)`: resolve by expected + variant scan
-            false => a.cenode(mkenumg(ety, emty, no_tys(), variant, p))     // qualified `Type.Variant(x)`: honor the explicit type (fuzz #5)
+            true  => a.resolve_mkenum_fresh(env, variant, p),
+            false => a.cenode(mkenumg(ety, emty, no_tys(), variant, p))
         })
     })
 }
@@ -459,8 +365,8 @@ resolve_mktag = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], va
     (etargs.len > 0).match ({
         true  => a.cenode(mktagg(ety, emty, etargs, variant)),
         false => eq(ety, "").match ({
-            true  => a.resolve_mktag_fresh(env, variant),                   // unqualified `.Variant`: resolve by expected + variant scan
-            false => a.cenode(mktagg(ety, emty, no_tys(), variant))         // qualified `Type.Variant`: honor the explicit type (fuzz #5)
+            true  => a.resolve_mktag_fresh(env, variant),
+            false => a.cenode(mktagg(ety, emty, no_tys(), variant))
         })
     })
 }
@@ -468,20 +374,16 @@ resolve_mktag_fresh = (a: Ptr<Malloc>, env: Env, variant: str) Ptr<Expr> {
     inst := env.enum_inst_tag(variant)
     a.cenode(mktagg(inst.base, inst.mty, inst.targs, variant))
 }
-// a slice index's element type: keep an already-concrete one (set in pass 1 / substituted at inline),
-// else infer it from the sequence. The re-resolve pass would otherwise recompute it from a let like
-// `b := slice(…)` whose builtin-call type is void — clobbering the concrete element a generic inline produced.
+// Keep concrete slice element types across re-resolve.
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty {
     existing.is_void_ty().match ({ true => env.infer_expr(seq).elem_of(), false => existing })
 }
-// an IndexSet's element type: the stored/seq-inferred elem, else fall back to the assigned VALUE's
-// type — `buf := slice(malloc(8), 1)` has an unknowable elem (void), but `buf[0] = P(x: 42)` tells us
-// exactly what is being stored, so the emit cast is `(P*)` not the invalid `(void*)` (census #9).
+// For index assignment, fall back to the stored value's type when the sequence elem is unknown.
 set_elem = (env: Env, existing: Ty, seq: Ptr<Expr>, value: Ptr<Expr>) Ty {
     e := env.keep_elem(existing, seq)
     e.is_void_ty().match ({ true => env.infer_expr(value), false => e })
 }
-// ── rebuild an expression, filling enum match enames + constructor types ───────────────
+// Rebuild expressions with resolved enum, constructor, member, and loop metadata.
 resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)     => a.resolve_match(env, m),
@@ -491,25 +393,22 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Cond(c)      => a.cenode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
         .Call(c)      => a.resolve_call(env, c),
         .Member(mm)   => a.resolve_member(env, mm),
-        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.resolve_inits(env.clr_exp(), sd.inits))),   // recurse, preserving the monomorphized name + type args
+        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.resolve_inits(env.clr_exp(), sd.inits))),
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.keep_elem(ix.elem, ix.seq))),
         .Loop(l)      => a.resolve_loop(env, l),
         .SliceLit(sd) => a.resolve_slicelit(env, sd),
-        .Block(b)     => a.cenode(block(a.resolve_body(env, b.stmts))),   // a multi-statement arm body
-        _             => e                            // Int/Var/StrLit/Arrow: unchanged
+        .Block(b)     => a.cenode(block(a.resolve_body(env, b.stmts))),
+        _             => e
     })
 }
-// `[a, b, c]` — fill the element type from the first item (the parser leaves it void), and
-// resolve each item. An empty literal `[]` keeps a void element (nothing to infer from).
+// Slice literal element type comes from the first item; empty stays void.
 sl_elem = (env: Env, items: [Expr]) Ty {
     (items.len == 0).match ({ true => tvoid(), false => env.infer_expr(items[0].addr()) })
 }
 resolve_slicelit = (a: Ptr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
     a.cenode(slit(env.sl_elem(sd.items), a.resolve_args(env.clr_exp(), sd.items)))
 }
-// field access auto-derefs a pointer receiver: `p.field` on a `Ptr<Struct>` emits `p->field`
-// (genc Arrow), on a value struct emits `p.field` (Member). This is what lets impl methods —
-// whose receiver is `Ptr<Type>` — read fields with plain `.`.
+// Field access auto-derefs pointer receivers.
 resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
     obj := a.resolve_expr(env.clr_exp(), mm.obj)
     env.infer_expr(mm.obj).ty_is_ptr().match ({
@@ -517,10 +416,9 @@ resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
         false => a.cenode(member(obj, mm.field))
     })
 }
-// a foreach loop: infer the element type from the sequence, then resolve the body with the
-// loop variables (index i: i32, element x: elemTy) added to the environment.
+// Resolve foreach body with index and element bindings.
 resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
-    et   := env.keep_elem(l.elemTy, l.seq)   // keep a concrete element type (a generic inline substituted it)
+    et   := env.keep_elem(l.elemTy, l.seq)
     env2 := Env( vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a )
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
 }
@@ -530,7 +428,6 @@ resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.resolve_expr(env, fi.value)) })
     buf
 }
-// the declared payload type of variant `vn` of the NON-generic enum named `ename` (void if absent).
 vdef_payload = (vs: [VariantDef], vn: str) Ty {
     found := tvoid()
     vs.loop((h, i, v) { found = eq(v.name, vn).match ({ true => v.payload, false => found }) })
@@ -544,11 +441,7 @@ concrete_variant_payload = (decls: [Decl], ename: str, vn: str) Ty {
     }) })
     found
 }
-// the CONCRETE payload type a match arm binds for `variant`, given the subject's inferred type `t`.
-// For a generic enum instance (`Result<i32, IoError>` → Generic(base="Result", args=[i32, IoError])),
-// the `.Err` payload is the DECLARED `E` substituted through the genenum's tparams (→ IoError) — so a
-// nested `e.match(…)` on the bound `e` resolves the inner enum's ename. For a plain Named/Ptr enum the
-// declared payload is already concrete. Void when the variant carries no payload (a tagless arm).
+// Concrete payload type for a match arm bind, including generic enum substitution.
 subj_variant_payload* = (env: Env, t: Ty, variant: str) Ty {
     t.match ({
         .Generic(g) => env.decls.find_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
@@ -556,11 +449,10 @@ subj_variant_payload* = (env: Env, t: Ty, variant: str) Ty {
     })
 }
 gsubst = (pty: Ty, env: Env, g: GenericData) Ty { env.decls.find_genenum(g.name).tparams.subst_ty(g.args, pty) }
-// fill an enum match's ename from the subject's declared type. If the subject is a POINTER
-// (`Ptr<Enum>`), emit genc's ematchp so the tag test is `subj->tag` (not `subj.tag`).
+// Fill match enum name and choose pointer/value tag access.
 resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
-    subj2 := a.resolve_expr(env.clr_exp(), m.subj)  // resolve the subject FIRST — stamps mty on a ctor subject
-    t     := env.infer_expr(subj2)             // infer from the RESOLVED subject → the monomorphized enum name
+    subj2 := a.resolve_expr(env.clr_exp(), m.subj)
+    t     := env.infer_expr(subj2)
     en    := t.enum_name()
     arms  := a.resolve_arms(env, t, m.arms)
     t.ty_is_ptr().match ({
@@ -573,14 +465,8 @@ resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
     args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env, ar.addr())) })
     buf
 }
-// resolve a call, threading each PARAMETER's type as the expected type for its argument — so a bare
-// constructor `.Some(5)` in `f(.Some(5))` sees `f`'s param type (e.g. a generic `Opt<i32>`) and is
-// stamped with the right (monomorphized) enum name. An unknown fn has no params -> no expectation.
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
-// `==`/`!=` on two STRINGS is CONTENT equality, not pointer identity — `int_to_str(123) ==
-// int_to_str(123)` compared POINTERS before (true only via cc literal pooling; census gap 2).
-// Lowered to the __str_eq/__str_ne marker intrinsics so each backend emits natively (genc:
-// zenrt's strcmp-backed `eq`; genjs: `===`, the content compare it already meant).
+// String equality lowers to backend-specific content comparison intrinsics.
 is_str_t = (t: Ty) bool { t.match ({ .Str => true, _ => false }) }
 str_eq_args = (a: Ptr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf := a.cebuf(2)
@@ -597,9 +483,7 @@ resolve_bin = (a: Ptr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
         false => a.resolve_f64_neg(env, b.op, lhs, rhs)
     })
 }
-// prefix `-x` parses as `(0 - x)` (parse_neg has no Unary node). When x is an f64, that synthesized
-// int 0 would be the int<->float MIX the operand check rejects — so the zero becomes the f64
-// literal 0.0 here. A user-written `0 - x` takes the same rewrite (same value, now well-typed).
+// Prefix `-f64` parses as `0 - x`; rewrite that zero to `0.0`.
 is_int_zero = (e: Ptr<Expr>) bool { load(e).match ({ .Int(n) => n == 0, _ => false }) }
 resolve_f64_neg = (a: Ptr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>) Ptr<Expr> {
     (eq(op, "-") && lhs.is_int_zero() && env.infer_expr(rhs).is_f64_ty()).match ({
@@ -608,18 +492,17 @@ resolve_f64_neg = (a: Ptr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Ptr<E
     })
 }
 resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
-    dn   := env.dispatch_name(c)               // a UFCS trait-method call routes to the impl for the receiver's type
+    dn   := env.dispatch_name(c)
     ps   := env.decls.fn_params(dn)
-    tmpl := env.decls.is_template_call(dn)      // a generic fn's param types carry UNBOUND tparams (Opt<T>);
-    buf  := a.cebuf(c.args.len)                // stamping a bare-ctor arg with them yields Opt_T, not the
-    c.args.loop((h, i, ar) {                   // payload-inferred Opt_i32 — so let template args self-resolve.
+    tmpl := env.decls.is_template_call(dn)
+    buf  := a.cebuf(c.args.len)
+    c.args.loop((h, i, ar) {
         ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
     a.recall(c, dn, buf)
 }
-// resolve each arm body, binding a payload arm's `e` to the variant's CONCRETE payload type so a
-// nested `e.match(…)` resolves the inner enum's ename (an empty bind threads env unchanged).
+// Arm payload binds get their concrete payload type.
 arm_env* = (a: Ptr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
     eq(ar.bind, "").match ({
         true  => env,
@@ -632,26 +515,13 @@ resolve_arms = (a: Ptr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf
 }
 
-// ── statement-position match → `if` lowering (the early-return CRUX) ────────────────────
-// genc emits a `.Return` as a real `return e;` ONLY at statement level; inside a value-position
-// match (a ternary / `({ … })` block-expr) a `return` would become a bare `e;`. So a match whose
-// value is DISCARDED (a non-final ExprStmt) is lowered here into `if` STATEMENTS, where genc's
-// gen_if emits real `return`s. A VALUE-position match (the body's trailing expr, or a let/return
-// value, or a sub-expression) is left as the exhaustive ternary/Match — its value is used.
-//
-// The lowering is uniform over the two parsed shapes a match takes: an ENUM match is a Match node
-// (tag tests + payload binds); a BOOL/LITERAL match is a (possibly nested) Cond `c ? t : e`. Both
-// become if/else; a terminal `_` arm — parsed as an empty `Block` — becomes an empty branch.
-
-// ── exhaustiveness gate: only an EXHAUSTIVE (or `_`-closed) enum match is lowered to `if`. A
-//    partial match WITHOUT `_` is LEFT as a Match node, so check_validate's exhaustiveness pass
-//    still sees it and rejects it (exhaustiveness stays enforced — no implicit fall-through). ──
+// Discarded matches lower to `if` so arm returns remain real returns. Value-position matches
+// stay expressions. Non-exhaustive enum matches stay Match nodes for the validator to reject.
 match_has_wild = (m: MatchData) bool {
     f := false
     m.arms.loop((h, i, ar) { f = eq(ar.variant, "_").match ({ true => true, false => f }) })
     f
 }
-// the enum named `ename`'s variants are all covered by the match's arms?
 arm_covers_v = (m: MatchData, vn: str) bool {
     f := false
     m.arms.loop((h, i, ar) { f = eq(ar.variant, vn).match ({ true => true, false => f }) })
@@ -667,14 +537,10 @@ enum_exhaustive = (decls: [Decl], m: MatchData) bool {
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, m.ename).match ({ true => ed.ed_covered(m), false => found }), _ => found }) })
     found
 }
-// lowerable iff a `_` closes it, OR every variant is covered. An unknown ename (generic / "") is
-// NOT lowered (left as a Match) — sound: the existing ternary path keeps working for those.
 match_lowerable = (decls: [Decl], m: MatchData) bool {
     match_has_wild(m).match ({ true => true, false => decls.enum_exhaustive(m) })
 }
 
-// an arm/branch body Expr as [Stmt]: a Block contributes its statements (so a trailing `return`
-// stays a real Return); any other expr is wrapped as a single ExprStmt (a discarded value).
 one_stmt = (a: Ptr<Malloc>, st: Stmt) [Stmt] {
     buf := a.sbuf(1)
     buf[0] = st
@@ -682,22 +548,18 @@ one_stmt = (a: Ptr<Malloc>, st: Stmt) [Stmt] {
 }
 branch_stmts = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
     load(e).match ({
-        .Block(b) => b.stmts,                            // `{ … }` arm — its own statements
-        _         => a.one_stmt(sexpr(e))                // a bare expr arm — a discarded value
+        .Block(b) => b.stmts,
+        _         => a.one_stmt(sexpr(e))
     })
 }
-// the C tag constant `Ename_Variant` for a tag test (`subj.tag == R_Err`)
 tag_const* = (ename: str, variant: str) str { new().append(ename).append("_").append(variant).finish() }
-// `subj.tag` / `subj->tag`  (ptr -> arrow)
 subj_tag = (a: Ptr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     ptr.match ({ true => a.cenode(arrow(subj, "tag")), false => a.cenode(member(subj, "tag")) })
 }
-// `subj.u.V` / `subj->u.V` — the payload of variant V (the first hop is `->` for a ptr subject)
 subj_payload = (a: Ptr<Malloc>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr<Expr> {
     u := ptr.match ({ true => a.cenode(arrow(subj, "u")), false => a.cenode(member(subj, "u")) })
     a.cenode(member(u, variant))
 }
-// prepend the payload bind `__auto_type bind = subj.u.V;` to an arm's statements (when it binds one)
 arm_then = (a: Ptr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
     body := a.branch_stmts(ar.body)
     eq(ar.bind, "").match ({
@@ -711,36 +573,31 @@ cons_stmt = (a: Ptr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
     rest.loop((h, i, st) { buf[i + 1] = st })
     buf
 }
-// the if-chain over arms[i:]: each non-`_` arm tests its tag; the `_` arm (or running off the end)
-// is the final else. A bare `_` arm's empty Block contributes no statements -> an empty else.
+// Build if/else chain over enum arms.
 lower_match_arms = (a: Ptr<Malloc>, m: MatchData, i: i32) [Stmt] {
     (i >= m.arms.len).match ({
-        true  => no_stmts(),                                                     // no `_` -> empty else (rejected upstream)
+        true  => no_stmts(),
         false => eq(m.arms[i].variant, "_").match ({
-            true  => a.branch_stmts(m.arms[i].body),                             // the catch-all -> the final else
+            true  => a.branch_stmts(m.arms[i].body),
             false => a.one_stmt(sif(a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(tag_const(m.ename, m.arms[i].variant))))), a.arm_then(m, m.arms[i]), a.lower_match_arms(m, i + 1)))
         })
     })
 }
 lower_match_stmt = (a: Ptr<Malloc>, m: MatchData) Stmt {
     stmts := a.lower_match_arms(m, 0)
-    (stmts.len == 1).match ({ true => stmts[0], false => sexpr(a.cenode(block(stmts))) })   // the chain is one If
+    (stmts.len == 1).match ({ true => stmts[0], false => sexpr(a.cenode(block(stmts))) })
 }
-// a bool/literal match in statement position: `c ? t : e` -> `if (c) { t } else { e }`. A nested
-// Cond in the else (a multi-arm literal match) recurses, building the if-chain; an empty-Block
-// branch (a terminal `_`) becomes an empty branch.
+// Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
 lower_cond_stmt = (a: Ptr<Malloc>, d: CondData) Stmt {
     sif(d.c, a.branch_stmts(d.t), a.cond_else(d.e))
 }
 cond_else = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
     load(e).match ({
-        .Cond(d) => a.one_stmt(a.lower_cond_stmt(d)),    // a nested arm -> a nested if (the if-chain)
-        _        => a.branch_stmts(e)                    // the final else branch
+        .Cond(d) => a.one_stmt(a.lower_cond_stmt(d)),
+        _        => a.branch_stmts(e)
     })
 }
-// lower a resolved statement-position expr (its value discarded) to a statement: an EXHAUSTIVE-or-
-// `_`-closed Match becomes an if-chain; a Cond becomes if/else; anything else (incl. a non-exhaustive
-// Match, left for check_validate to reject) stays a bare ExprStmt.
+// Lower resolved statement-position expressions whose values are discarded.
 lower_stmt_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
     load(e).match ({
         .Match(m) => env.decls.match_lowerable(m).match ({ true => a.lower_match_stmt(m), false => sexpr(e) }),
@@ -749,15 +606,7 @@ lower_stmt_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
     })
 }
 
-// ── rebuild statements ────────────────────────────────────────────────────────────────
-// `last` = this is the final statement of the body, i.e. the value it yields. A trailing ExprStmt is
-// the return value, so it KEEPS the expected type (a bare `.None` then sees its `Opt<T>` context); a
-// non-final expr-statement is discarded, so its expectation is cleared. A non-final (value-discarded)
-// match/cond is lowered to `if` STATEMENTS so an arm's `return` actually leaves the function.
-// a let: an annotation becomes the value's EXPECTED type (so `o: Opt<i32> := .None` resolves).
-// An UNANNOTATED let whose value infers u8 is STAMPED u8 so the emitted C is `uint8_t` and the
-// value truncates exactly as the checker types it — `c := a + b` on u8s used to be TYPED u8 but
-// RUN as the un-truncated C int (200 + 100 was 300 at runtime, census gap 5).
+// Resolve statements, preserving expected type only for value-yielding tail expressions.
 resolve_let = (a: Ptr<Malloc>, env: Env, l: LetData) Stmt {
     v := a.resolve_expr(env.let_exp(l.ty), l.value)
     ty := l.ty.is_void_ty().match ({
@@ -770,25 +619,21 @@ resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     st.match ({
         .Let(l)    => a.resolve_let(env, l),
         .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
-        .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
+        .Return(r) => sret(a.resolve_expr(env, r)),
         .ExprStmt(e) => last.match ({
-            // a value-yielding tail keeps the ternary/Match; but a tail in VOID return position yields
-            // nothing, so a void Cond/Match (e.g. a conditional `free`) must lower to an `if` statement —
-            // a C ternary over void operands is invalid. Statement-position (non-last) always lowers.
+            // Void tails lower to statements; value tails keep expression matches.
             true  => env.exp.is_void_ty().match ({
-                true  => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)),  // void tail — lower to `if`
-                false => sexpr(a.resolve_expr(env, e))                             // value tail — keep ternary/Match
+                true  => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)),
+                false => sexpr(a.resolve_expr(env, e))
             }),
-            false => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))   // statement position — lower to `if`
+            false => a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))
         }),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body)),
         .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.set_elem(x.elem, x.seq, x.value), a.resolve_expr(env.clr_exp(), x.value))
     })
 }
-// resolve a statement sequence, THREADING the environment: a `let` adds its binding (the
-// inferred type of its value) for every statement that follows — that's what lets a later
-// `s.match { … }` find s's enum type when s was bound by `s := scan(…)`.
+// Resolve a statement sequence while threading let bindings.
 noop2 = () void { }
 resolve_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
@@ -805,18 +650,16 @@ fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
 }
 extend_env* = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
-        .Let(l) => Env( vars: a.vcons(l.name, l.ty.is_void_ty().match ({ true => env.infer_expr(l.value), false => l.ty }), env.vars), decls: env.decls, exp: env.exp, a: env.a ),   // a declared annotation WINS over inference
+        .Let(l) => Env( vars: a.vcons(l.name, l.ty.is_void_ty().match ({ true => env.infer_expr(l.value), false => l.ty }), env.vars), decls: env.decls, exp: env.exp, a: env.a ),
         _       => env
     })
 }
 
-// ── rebuild decls: a function's body is resolved against its params + the module's enums ──
+// Rebuild decls with resolved bodies/inits.
 resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
     Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) )
 }
-// a module-level global: infer its init's type (the parser left it void) and resolve the init, so
-// genc emits `static <real ty> name = <init>;`. [Goal Z E1]
 resolve_global = (a: Ptr<Malloc>, decls: [Decl], g: GlobalData) Decl {
     env := Env( vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a )
     dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init))
@@ -825,12 +668,7 @@ resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), .DGlobal(g) => a.resolve_global(decls, g), _ => d })
 }
 
-// ── inline templates: a function with an FnT parameter is spliced at each call site ──────
-// ONE traversal (xform) does it all. Walking a body: a Call to a TEMPLATE recurses into the
-// template's body with the call's args bound to its params; a Call to an FnT PARAMETER splices
-// the lambda passed for it (its params bound to the call args). A template's own locals and a
-// lambda's captures just resolve at the splice site — the inlined body is a GCC statement-
-// expression `({ … })` nested in the caller's scope. (Mirrors lower.py's _c_inline_template.)
+// Template/lambda inlining pass.
 no_stmts* = () [Stmt] { slice(malloc(0), 0) }
 empty_args = () [Expr] { slice(malloc(0), 0) }
 pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
@@ -846,21 +684,18 @@ the_func* = (decls: [Decl], name: str) Func {
     found
 }
 is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).is_generic_fn() }
-// the substituted argument for a Var, or the Var unchanged if it isn't one of `params`
 subst_var = (a: Ptr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
     (idx < 0).match ({ true => e, false => args[idx].addr() })
 }
-// build `({ … })` from a body: the trailing `return e;` becomes a bare `e;` so the block yields it
+// Inline body as block expression: trailing return becomes yielded expression.
 ret_to_expr = (st: Stmt) Stmt { st.match ({ .Return(e) => sexpr(e), _ => st }) }
 block_of = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     buf := a.sbuf(stmts.len)
     stmts.loop((h, i, st) { buf[i] = (i == stmts.len - 1).match ({ true => ret_to_expr(st), false => st }) })
     a.cenode(block(buf))
 }
-// a body inlined as an expression. A ONE-statement body whose statement is a value (a return or a
-// bare expr) IS that expression — no `({ … })` wrapper needed (so `f(x)` inlines to `(a + x)`, not
-// `({ (a + x); })`). Anything else (lets, assigns, multiple statements) becomes a statement-expr.
+// One value statement inlines directly; larger bodies become block expressions.
 blockify = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     (stmts.len == 1).match ({
         true  => stmts[0].match ({ .Return(e) => e, .ExprStmt(e) => e, _ => a.block_of(stmts) }),
@@ -880,25 +715,18 @@ xform_arms = (a: Ptr<Malloc>, decls: [Decl], arms: [ArmData], params: [Param], f
 inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
         .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs, env)),
-        .Var(v)     => a.var_call(v, cargs),              // a NAMED fn passed as the HOF arg (`apply(twice, 21)`): a direct call `twice(21)` at the Var's pos (was: kept the bare var → `return twice;` bad C)
-        _           => a.cenode(lamx)                     // anything else (shouldn't happen) — keep
+        .Var(v)     => a.var_call(v, cargs),
+        _           => a.cenode(lamx)
     })
 }
-// ── generic CONSTRUCTORS (Slice 3b): infer the type args at the call site, then substitute them in
-//    the template body's TYPES before splicing — so `wrap<T> = (x: T) Box<T> { Box<T>(v:x) }` inlined
-//    at `wrap(42)` becomes `Box_i32(v:42)` (not the leaked `Box_T`). Inlining alone binds VALUE params;
-//    this also binds the TYPE param T = i32. ──
-// a light structural type of an argument expression — enough to unify a tparam. `env` carries the
-// types of in-scope locals so a `Var` arg resolves (e.g. `wrap(n)` with `n := 5` infers T=i32 —
-// without it the tparam stayed open → a `Box_void` miscompile).
-lty_node = (t: Ty) Ptr<Ty> {                          // a heap Ptr<Ty> (no allocator needed)
+// Generic template calls infer type args at the call site before splicing.
+// Light types are enough to unify tparams, including local Var args.
+lty_node = (t: Ty) Ptr<Ty> {
     buf := einst_tybuf(1)
     buf[0] = t
     buf[0].addr()
 }
-// a call's light type: a GENERIC callee's return type with its type args inferred from the call's
-// args (mirrors infer_call, but in the template-splice phase). So `b := v.vbuf()` and a let bound to
-// `vec_of([10,20])` carry their concrete element/instance type, which a downstream generic call needs.
+// Light call type mirrors infer_call for template-splice inference.
 light_one = (params: [Param], args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     found := tvoid()
     params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(env, decls), tp), false => found }), false => found }) })
@@ -923,17 +751,17 @@ light_ty = (e: Ptr<Expr>, env: Ptr<VList>, decls: [Decl]) Ty {
         .FloatLit(ft)  => tf64(),
         .StrLit(s)     => tstr(),
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
-        .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),   // a generic-enum ctor unifies a tparam (`Opt<i32>` → T)
+        .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),
         .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
-        .SliceLit(sd)  => tslice(lty_node(sd.elem)),      // `[10, 20]` of element E -> [E], so a `[T]` param unifies T
-        .Var(v)        => env.lookup_var(v.name),         // an in-scope local — its tracked type
-        .Call(c)       => decls.light_call_ty(c, env),    // a generic call's return type, type-args inferred
-        .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(env, decls)),   // arithmetic/unary(`-x`=`0-x`) -> lhs type; compare -> bool. (was void → `wrap(x+1)` mis-inferred Box_void)
-        .Cond(d)       => d.t.light_ty(env, decls),       // a ternary / lowered match value — the then-branch's type
+        .SliceLit(sd)  => tslice(lty_node(sd.elem)),
+        .Var(v)        => env.lookup_var(v.name),
+        .Call(c)       => decls.light_call_ty(c, env),
+        .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(env, decls)),
+        .Cond(d)       => d.t.light_ty(env, decls),
         _              => tvoid()
     })
 }
-// unify a PARAM type (which may mention tparam `tp`) against an ARG type to extract tp's binding.
+// Unify a param type against an arg type to infer one tparam.
 unify_ty = (pty: Ty, aty: Ty, tp: str) Ty {
     pty.match ({
         .Named(n)   => eq(n, tp).match ({ true => aty, false => tvoid() }),
@@ -958,8 +786,7 @@ infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], cargs: [Expr],
     tparams.loop((h, i, tp) { buf[i] = params.infer_one(cargs, tp.name, env, decls) })
     buf
 }
-// substitute tparams→targs in the type-bearing nodes of a body (MakeStruct's targs/mty + Index/Slice/
-// Loop element types). Other nodes are rebuilt structurally so nested literals are reached.
+// Substitute tparams in type-bearing expression/statement nodes.
 subst_targs = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
     buf := a.tbuf(xs.len)
     xs.loop((h, i, t) { buf[i] = tparams.subst_ty(targs, t) })
@@ -995,8 +822,7 @@ subst_match = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MatchData) Ptr<
     arms := a.subst_arms(tparams, targs, m.arms)
     m.ptr.match ({ true => a.cenode(ematchp(subj, m.ename, arms)), false => a.cenode(ematch(subj, m.ename, arms)) })
 }
-// a generic-enum ctor/tag inside a template body carries targs that mention the template's tparams
-// (`.Some(x): Opt_T`); substitute them and re-mangle so the spliced copy is concrete (`Opt_i32`).
+// Substitute and remangle generic-enum ctors/tags inside template bodies.
 subst_mkenum = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Ptr<Expr> {
     (etargs.len > 0).match ({
         true  => a.cenode(a.subst_mkenum_g(tparams, targs, ety, etargs, variant, p)),
@@ -1017,12 +843,10 @@ subst_tag_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: 
     nt := a.subst_targs(tparams, targs, etargs)
     mktagg(ety, mangle_str(ety, nt), nt, variant)
 }
-// a tparam name appearing as a VALUE — only `sizeof(T)` — becomes the concrete type's C name, so a
-// generic allocator's `slice(malloc(n * sizeof(T)), n)` monomorphizes to `sizeof(Expr)`. Other Vars
-// (params, locals) are never named like a tparam, so they pass through unchanged.
+// `sizeof(T)` uses the tparam name as a value; rewrite it to the concrete C type name.
 subst_tparam_var = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], v: VarData, e: Ptr<Expr>) Ptr<Expr> {
     i := tparams.param_index(v.name)
-    (i < 0).match ({ true => e, false => a.revar(v, ty_cname(targs[i])) })   // DERIVED from the source `T` — keep its pos
+    (i < 0).match ({ true => e, false => a.revar(v, ty_cname(targs[i])) })
 }
 subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
@@ -1040,7 +864,7 @@ subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<E
         .Loop(l)      => a.cenode(eloop(a.subst_expr(tparams, targs, l.seq), l.idx, l.elem, tparams.subst_ty(targs, l.elemTy), a.subst_body(tparams, targs, l.body), l.h)),
         .SliceLit(sd) => a.cenode(slit(tparams.subst_ty(targs, sd.elem), a.subst_exprs(tparams, targs, sd.items))),
         .Block(b)     => a.cenode(block(a.subst_body(tparams, targs, b.stmts))),
-        _             => e                                // Int/Byte/Var/StrLit/Lambda — no types to substitute
+        _             => e
     })
 }
 subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
@@ -1059,12 +883,9 @@ subst_body = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt
     body.loop((h, i, st) { buf[i] = a.subst_stmt(tparams, targs, st) })
     buf
 }
-// a Ty that no real value ever has: the empty-named struct, reused (like global_ty's marker) as an
-// "in-progress" sentinel — here, "this generic template is currently being inlined on an ancestor frame".
+// Empty Named marks a generic template currently being inlined.
 is_empty_named = (t: Ty) bool { t.match ({ .Named(n) => eq(n, ""), _ => false }) }
-// is generic template `name` already mid-inline up the call stack? Walk the WHOLE env: inline_template
-// marks the in-progress template with (name, empty-Named); a real local of the same name binds a
-// concrete type, so it can never be mistaken for the sentinel. Used to break recursive-generic inlining.
+// Break recursive-generic inlining by noticing an in-progress template in the env.
 is_inlining = (v: Ptr<VList>, name: str) bool {
     v.match ({
         .VNil     => false,
@@ -1073,21 +894,20 @@ is_inlining = (v: Ptr<VList>, name: str) bool {
 }
 inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     tf   := decls.the_func(name)
-    ienv := a.vcons(name, tnamed(""), env)          // mark `name` in-progress so a recursive call to it stops (is_inlining)
-    body := (tf.tparams.len > 0).match ({           // a generic fn: substitute its type params in the body first
+    ienv := a.vcons(name, tnamed(""), env)
+    body := (tf.tparams.len > 0).match ({
         true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, cargs, env, decls), tf.body),
         false => tf.body
     })
     a.blockify(a.xform_body(decls, body, tf.params, cargs, ienv))
 }
-// `c` is the ORIGINAL CallData (pos source): a kept call rebuilds via recall, so it can't lose it
 maybe_template = (a: Ptr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     decls.is_template_call(c.fn).match ({
         true  => env.is_inlining(c.fn).match ({
-            true  => a.recall(c, c.fn, cargs),   // `c.fn` already inlining up-stack — a self/mutually-recursive generic (only malformed/non-terminating input recurses here); stop to avoid a resolver stack overflow
+            true  => a.recall(c, c.fn, cargs),
             false => (decls.the_func(c.fn).params.len == cargs.len).match ({
                 true  => a.inline_template(decls, c.fn, cargs, env),
-                false => a.recall(c, c.fn, cargs)   // wrong ARITY: don't inline a half-bound template (it checked ok then segfaulted, census gap 13) — leave the call for the validator's arity reject
+                false => a.recall(c, c.fn, cargs)
             })
         }),
         false => a.recall(c, c.fn, cargs)
@@ -1095,7 +915,7 @@ maybe_template = (a: Ptr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env
 }
 xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     cargs := a.xform_args(decls, c.args, params, fargs, env)
-    fi    := params.param_index(c.fn)                     // is the callee one of this frame's FnT params?
+    fi    := params.param_index(c.fn)
     (fi < 0).match ({
         true  => a.maybe_template(decls, c, cargs, env),
         false => params[fi].ty.is_fnt().match ({
@@ -1129,7 +949,7 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
         .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs, env), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs, env), l.h)),
         .SliceLit(sd) => a.cenode(slit(sd.elem, a.xform_args(decls, sd.items, params, fargs, env))),
         .Block(b)     => a.cenode(block(a.xform_body(decls, b.stmts, params, fargs, env))),
-        _             => e                            // Int/StrLit/Tag/Lambda: no params inside
+        _             => e
     })
 }
 xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>) Stmt {
@@ -1143,8 +963,7 @@ xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [
         .IndexSet(x) => sidxset(a.xform_expr(decls, x.seq, params, fargs, env), a.xform_expr(decls, x.idx, params, fargs, env), x.elem, a.xform_expr(decls, x.value, params, fargs, env))
     })
 }
-// thread an env of local types through the body, so a `Var` arg to a generic call resolves. A `let`
-// binding is in scope for the statements that FOLLOW it (its light type seeds the env).
+// Thread local light types so generic call args can infer from Vars.
 xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
     st.match ({ .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({ true => l.value.light_ty(env, decls), false => l.ty }), env), _ => env })
 }
@@ -1164,18 +983,12 @@ inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
     })
 }
 
-// ── trait DEFAULT-METHOD instantiation ──────────────────────────────────────────────────────────
-// A `Trait*: { m = (params) ret { … } }` parses to a DTraitDefault(trname, fn). Before resolving, we
-// materialize, for every `Type.impl(Trait, {…})` that OMITS m, a concrete DFunc `impl_<Trait>_<Type>_m`
-// whose param/ret types have Self→Type (reusing subst_ty with the single tparam `Self`) and whose body
-// is the default's. The normal resolve passes then lower member/arrow + UFCS in that body against the
-// concrete receiver — so the default dispatches exactly like a hand-written impl. The DTraitDefault is
-// KEPT in the list (genModule ignores it; the validator reads it to know the default exists).
+// Trait default methods are materialized for impls that omit them.
 pbuf = (a: Ptr<Malloc>, n: i64) [Param] { slice(malloc(n * sizeof(Param) + sizeof(Param)), n) }
 tybuf1 = (a: Ptr<Malloc>) [Ty] { slice(malloc(sizeof(Ty)), 1) }
 self_param = (a: Ptr<Malloc>) [Param] { buf := a.pbuf(1)  buf[0] = param("Self", tvoid())  buf }
 self_arg = (a: Ptr<Malloc>, tyname: str) [Ty] { buf := a.tybuf1()  buf[0] = tnamed(tyname)  buf }
-// the default Func specialized to `tyname`: name mangled to the impl C name, Self substituted away.
+// Specialize default Func to a concrete impl type.
 default_for_type = (a: Ptr<Malloc>, td: TraitDefData, tyname: str) Func {
     sp := a.self_param()
     ag := a.self_arg(tyname)
@@ -1184,13 +997,12 @@ default_for_type = (a: Ptr<Malloc>, td: TraitDefData, tyname: str) Func {
     Func( name: impl_cname(td.trname, tyname, td.fn.name), params: ps,
            ret: sp.subst_ty(ag, td.fn.ret), tparams: td.fn.tparams, body: td.fn.body )
 }
-// is method name `m` among a [Param] of bare method names?
 param_names_have = (names: [Param], m: str) bool {
     found := false
     names.loop((h, i, p) { found = eq(p.name, m).match ({ true => true, false => found }) })
     found
 }
-// does a `Type.impl(Trait, {…})` for (tyname,trname) already PROVIDE method m? (then no default for it)
+// Does this impl already provide method m?
 def_provided = (decls: [Decl], tyname: str, trname: str, m: str) bool {
     found := false
     decls.loop((h, i, d) { found = d.match ({
@@ -1200,7 +1012,6 @@ def_provided = (decls: [Decl], tyname: str, trname: str, m: str) bool {
         _ => found }) })
     found
 }
-// number of (impl-that-omits-this-default) pairs across all DTraitDefaults — the expansion's growth.
 default_expansion_count = (decls: [Decl]) i64 {
     n := 0
     decls.loop((h, i, d) { d.match ({ .DTraitDefault(td) => decls.loop((h2, j, e) { e.match ({
@@ -1208,7 +1019,6 @@ default_expansion_count = (decls: [Decl]) i64 {
         _ => {} }) }), _ => {} }) })
     n
 }
-// append, after `j`, one DFunc per impl of td.trname that omits td.fn.name. Returns the next free slot.
 emit_defaults_for = (a: Ptr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
     k := j
     decls.loop((h, i, d) { d.match ({
@@ -1224,39 +1034,28 @@ expand_defaults = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
         true  => decls,
         false => {
             buf := a.dbuf(decls.len + extra)
-            decls.loop((h, i, d) { buf[i] = d })                       // keep every original decl (incl. DTraitDefault)
+            decls.loop((h, i, d) { buf[i] = d })
             k := decls.len
             decls.loop((h, i, d) { d.match ({ .DTraitDefault(td) => { k = a.emit_defaults_for(decls, td, buf, k) }, _ => {} }) })
             buf
         }
     })
 }
-// resolve a whole module, then splice every template call. Pass 0 instantiates trait default bodies.
-// Pass 1 fills enum match enames + constructor types; pass 2 inlines templates (using their now-resolved
-// bodies). The template decls stay in the list but genModule skips them (genc.is_template).
-// pass 3 re-resolves AFTER inlining so that types which were generic in a template body
-// (a `.loop` over `[T]`, an index) re-infer against the now-CONCRETE arguments spliced in at the
-// call site — that's what lets a generic template like `fold<T>` run once monomorphized by use.
+// Resolve module: defaults, resolve, inline templates, then re-resolve concrete inline residue.
 resolve_module* = (a: Ptr<Malloc>, raw: [Decl]) [Decl] {
-    decls := a.expand_defaults(raw)                       // pass 0: materialize trait-default impl funcs
+    decls := a.expand_defaults(raw)
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
     inl := a.dbuf(buf.len)
     buf.loop((h, i, d) { inl[i] = a.inline_decl(buf, d) })
     out := a.dbuf(inl.len)
-    inl.loop((h, i, d) { out[i] = a.resolve_decl(inl, d) })   // re-infer concrete types post-inline
+    inl.loop((h, i, d) { out[i] = a.resolve_decl(inl, d) })
     out
 }
 
-// ── the type lattice: fits(given, want) ───────────────────────────────────────────────
-// Goal C Phase 1. genc's Ty is monomorphic (no pointer direction, no Option, no closures),
-// so the lattice is just: numeric WIDENING (u8 <= i32 <= i64) for the scalar ranks, and
-// structural EQUALITY otherwise (Named by name, Ptr by pointee, Bool/Str/Void exact). This
-// is the `fits` a self-hosted checker calls at every assignment / argument / return slot.
-// F64 is DELIBERATELY rank -1: it does NOT join the int widening chain, so an f64 never
-// implicitly mixes with an int in either direction — `fits` falls through to ty_eq's exact
-// F64 == F64, and every int<->float crossing needs an explicit to_f64/to_i64/to_i32 cast.
-ty_rank* = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }   // -1 = non-numeric (incl. f64)
+// Type lattice: integer widening u8 <= i32 <= i64; all else exact structural equality.
+// f64 is intentionally outside the integer rank chain.
+ty_rank* = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }
 is_f64_ty* = (t: Ty) bool { t.match ({ .F64 => true, _ => false }) }
 ty_eq* = (g: Ty, w: Ty) bool {
     g.match ({
@@ -1268,24 +1067,21 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Void     => w.match ({ .Void => true, _ => false }),
         .Str      => w.match ({ .Str => true, _ => false }),
         .Named(a) => w.match ({ .Named(b) => eq(a, b), .Generic(gb) => eq(a, gb.mangled), _ => false }),
-        .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),  // pointee invariant
+        .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),
         .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }),
-        .FnT(fa)  => false,                      // a function type is a template param — never equality-checked
-        .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), .Named(b) => eq(ga.mangled, b), _ => false })   // same instance
+        .FnT(fa)  => false,
+        .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), .Named(b) => eq(ga.mangled, b), _ => false })
     })
 }
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
     numeric.match ({
-        true  => g.ty_rank() <= w.ty_rank(),   // u8 <= i32 <= i64
-        false => g.ty_eq(w)                     // non-numeric: exact structural match
+        true  => g.ty_rank() <= w.ty_rank(),
+        false => g.ty_eq(w)
     })
 }
 
-// ── shared helpers used by BOTH resolve_module (above) and check_module (in compiler.check_validate) ──
-// `empty_params` builds the_func's sentinel + an inline_decl's empty param list; `fn_params` reads a
-// callee's params at a call site; `is_void_ty` is the void test threaded through inference + the
-// validator. They live here because the resolver needs them, and check_validate imports them.
-empty_params* = () [Param] { slice(malloc(0), 0) }    // an empty [Param] without a `[]` literal (self-hostable)
-fn_params* = (decls: [Decl], fn: str) [Param] { decls.the_func(fn).params }   // sentinel.params is empty
+// Shared by resolve_module and check_validate.
+empty_params* = () [Param] { slice(malloc(0), 0) }
+fn_params* = (decls: [Decl], fn: str) [Param] { decls.the_func(fn).params }
 is_void_ty* = (t: Ty) bool { t.match ({ .Void => true, _ => false }) }

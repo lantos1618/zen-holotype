@@ -1,26 +1,25 @@
-// compiler.genc_emit — the C backend: gen_* emitters + the public entry points (genC, genModule,
-// gen_sexpr), split out of compiler.genc.
-//
-// It walks an AST (ordinary lowered structs + enums — runtime values) and emits C source into a
-// heap String. The emitters are written in fluent UFCS style: `s.append(a).append(b)` is just
-// `append(append(s, a), b)`, and `s.gen_expr(e)` is `gen_expr(s, e)` — String flows left-to-right.
-//
-// The AST types + constructors + type helpers (gen_ty, ty_cname, …) live in the base compiler.genc;
-// genModule's monomorphize pass lives in compiler.genc_mono. So: genc ← genc_mono ← genc_emit.
+// compiler.genc_emit — C emission over the shared genc AST. Pipeline: genc -> mono -> genc_emit.
 
 { String, new, append, push, finish } = std.string
 { is_empty, eq } = std.str
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
   BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
   gen_ty, is_template, is_trait, call, lit, arm, block, param, field } = compiler.genc
-{ monomorphize } = compiler.genc_mono
+{ monomorphize } = compiler.mono
 { malloc } = std.alloc
 
-// ── int -> decimal digits (byte access, no view/slice — so genc.zen self-hosts) ────────
+// Integer rendering stays byte-only so this self-hosts.
 sbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
 digit = (d: i64) u8 { sbyte("0123456789", d) }
+// Walk negative values directly so INT64_MIN does not overflow on `0 - n`.
+gen_int_neg = (s: String, n: i64) String {
+    (n > 0 - 10).match ({
+        true  => s.push(digit(0 - n)),
+        false => s.gen_int_neg(n / 10).push(digit(0 - (n % 10)))
+    })
+}
 gen_int = (s: String, n: i64) String {
-    (n < 0).match ({ true => s.append("-").gen_int(0 - n), false => s.gen_int_nat(n) }) }
+    (n < 0).match ({ true => s.append("-").gen_int_neg(n), false => s.gen_int_nat(n) }) }
 gen_int_nat = (s: String, n: i64) String {
     (n < 10).match ({
         true  => s.push(digit(n)),
@@ -28,19 +27,17 @@ gen_int_nat = (s: String, n: i64) String {
     })
 }
 
-// does any variant carry a payload? (no payloads -> emit no union, like lower.py)
 any_payload = (vs: [VariantDef]) bool {
     found := false
     vs.loop((h, i, v) { found = v.payload.match ({ .Void => found, _ => true }) })
     found
 }
 
-// ── emit an expression (recursive) ──────────────────────────────────────────
 gen_expr* = (s: String, e: Ptr<Expr>) String {
-    e.match ({                                       // match auto-derefs the Ptr<Expr>
+    e.match ({
         .Int(n)  => s.gen_int(n),
-        .Byte(n) => s.gen_int(n),       // a char literal — the same C integer, just typed u8 in check
-        .FloatLit(ft) => s.append(ft),  // a float literal — its source text IS a C double literal
+        .Byte(n) => s.gen_int(n),
+        .FloatLit(ft) => s.append(ft),
         .Var(v)  => s.append(v.name),
         .Bin(b)  => s.gen_bin(b),
         .Call(c) => s.gen_call(c),
@@ -55,12 +52,11 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .SliceLit(sd) => s.gen_slicelit(sd),
         .Index(ix) => s.gen_index(ix),
         .Loop(l) => s.gen_loop(l),
-        .Lambda(lm) => s.append("0"),       // unreachable: a lambda is inlined where its FnT param is called
-        .Block(b) => s.gen_blockexpr(b)     // a statement-expression `({ … })`
+        .Lambda(lm) => s.append("zen__unlowered_lambda"),
+        .Block(b) => s.gen_blockexpr(b)
     })
 }
-// `({ s1 s2 … })` — a GCC statement-expression; its value is the last statement's. A trailing
-// `return e;` is emitted as a bare `e;` (a `return` would escape the enclosing function, not yield).
+// GCC statement-expression; trailing return becomes the yielded expression.
 gen_blockexpr = (s: String, b: BlockData) String {
     out := s.append("({ ")
     b.stmts.loop((h, i, st) { out = out.gen_block_one(st, i == b.stmts.len - 1).append(" ") })
@@ -72,12 +68,7 @@ gen_block_one = (s: String, st: Stmt, last: bool) String {
         false => s.gen_stmt(st)
     })
 }
-// xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
-// sequence is bound once (_seq); i is the index, x the element (cast from the fat pointer).
-// `h.break` / `h.continue` — the loop-handler controls — emit the bare C keyword (they affect the
-// nearest enclosing loop). `break`/`continue` are C keywords, so lexeme mangles them to
-// `break_zk`/`continue_zk` — and for the same reason no real struct field can ever carry the
-// unmangled names: a field spelled `break` IS the loop control. Everything else is `.field`.
+// Loop handler fields `break`/`continue` emit C control flow; other fields emit normally.
 gen_member = (s: String, m: MemberData) String {
     eq(m.field, "break_zk").match ({
         true  => s.append("break"),
@@ -97,7 +88,7 @@ gen_loop_body = (s: String, body: [Stmt]) String {
     body.loop((h, i, st) { out = out.gen_stmt(st).append(" ") })
     out
 }
-// [a, b, c] of element T  ->  (zslice){ .ptr = (T[]){ a, b, c }, .len = N }
+// Slice literal -> zslice over a compound literal.
 gen_slicelit = (s: String, sd: SliceData) String {
     head := s.append("(zslice){ .ptr = (").gen_ty(sd.elem.addr()).append("[]){ ").gen_args(sd.items).append(" }, .len = ")
     head.gen_int(slice_count(sd.items)).append(" }")
@@ -107,7 +98,6 @@ slice_count = (items: [Expr]) i32 {
     items.loop((h, i, it) { n = n + 1 })
     n
 }
-// seq[idx] of element T  ->  ((T*)(seq).ptr)[idx]   (cast the fat pointer's void* ptr)
 gen_index = (s: String, ix: IndexData) String {
     s.append("((").gen_ty(ix.elem.addr()).append("*)(").gen_expr(ix.seq).append(").ptr)[").gen_expr(ix.idx).append("]")
 }
@@ -116,42 +106,67 @@ gen_bin = (s: String, b: BinData) String {
     s.append("(").gen_expr(b.lhs).append(" ").append(b.op).append(" ").gen_expr(b.rhs).append(")")
 }
 
-// a call. The memory INTRINSICS (load/store/offset/addr/cstr) are not real C functions —
-// they erase to raw pointer ops in this backend. Everything else is an
-// ordinary `fn(args)`. (sizeof/slice need a type argument and are left for the slice/generic
-// work — they don't appear in the scanner core.)
-// BOUNDS-SAFE positional intrinsic args. The gen_call intrinsics (load/offset/store/slice/…) read fixed
-// arg positions; a MALFORMED program can name an intrinsic with too FEW args (only the validator checks
-// intrinsic arity, and the EMIT path doesn't run it), so a raw c.args[0]/c.args[1] reads PAST the args
-// buffer — a heap-buffer-overflow. A missing arg degrades to a literal 0 (emits "0", valid C). A
-// correct-arity call always takes the in-bounds branch, so valid output is byte-identical.
+// Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to a literal 0.
 earg_buf = () [Expr] { slice(malloc(sizeof(Expr)), 1) }
 zero_arg = () Ptr<Expr> {
     b := earg_buf()
     b[0] = lit(0)
     b[0].addr()
 }
-arg_at = (c: CallData, i: i32) Ptr<Expr> { (i < c.args.len).match ({ true => c.args[i].addr(), false => zero_arg() }) }
+arg_at = (c: CallData, i: i32) Ptr<Expr> {
+    (i < c.args.len).match ({
+        true  => c.args[i].addr(),
+        false => zero_arg()
+    })
+}
 arg0 = (c: CallData) Ptr<Expr> { c.arg_at(0) }
 arg1 = (c: CallData) Ptr<Expr> { c.arg_at(1) }
+
+EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | Addr | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64
+
+call_kind = (name: str) EmitCallKind {
+    kind := EmitCallKind.Normal()
+    eq(name, "__str_eq").match ({ true => { kind = EmitCallKind.StrEq() }, _ })
+    eq(name, "__str_ne").match ({ true => { kind = EmitCallKind.StrNe() }, _ })
+    eq(name, "load").match ({ true => { kind = EmitCallKind.Load() }, _ })
+    eq(name, "offset").match ({ true => { kind = EmitCallKind.Offset() }, _ })
+    eq(name, "store").match ({ true => { kind = EmitCallKind.Store() }, _ })
+    eq(name, "load_i64").match ({ true => { kind = EmitCallKind.LoadI64() }, _ })
+    eq(name, "store_i64").match ({ true => { kind = EmitCallKind.StoreI64() }, _ })
+    eq(name, "atomic_add_i64").match ({ true => { kind = EmitCallKind.AtomicAddI64() }, _ })
+    eq(name, "addr").match ({ true => { kind = EmitCallKind.Addr() }, _ })
+    eq(name, "cstr").match ({ true => { kind = EmitCallKind.CStr() }, _ })
+    eq(name, "slice").match ({ true => { kind = EmitCallKind.Slice() }, _ })
+    eq(name, "null_ptr").match ({ true => { kind = EmitCallKind.NullPtr() }, _ })
+    eq(name, "to_i32").match ({ true => { kind = EmitCallKind.ToI32() }, _ })
+    eq(name, "to_i64").match ({ true => { kind = EmitCallKind.ToI64() }, _ })
+    eq(name, "to_u8").match ({ true => { kind = EmitCallKind.ToU8() }, _ })
+    eq(name, "to_f64").match ({ true => { kind = EmitCallKind.ToF64() }, _ })
+    kind
+}
+gen_call_default = (s: String, c: CallData) String {
+    s.append(c.fn).append("(").gen_args(c.args).append(")")
+}
 gen_call = (s: String, c: CallData) String {
-    eq(c.fn, "__str_eq").match ({ true => s.append("eq(").gen_expr(c.arg0()).append(", ").gen_expr(c.arg1()).append(")"), false =>      // zenrt's strcmp-backed eq
-    eq(c.fn, "__str_ne").match ({ true => s.append("(!eq(").gen_expr(c.arg0()).append(", ").gen_expr(c.arg1()).append("))"), false =>
-    eq(c.fn, "load").match   ({ true => s.append("(*(").gen_expr(c.arg0()).append("))"), false =>
-    eq(c.fn, "offset").match ({ true => s.append("((uint8_t*)(").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"), false =>
-    eq(c.fn, "store").match  ({ true => s.append("(*(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"), false =>
-    eq(c.fn, "load_i64").match  ({ true => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append("))"), false =>        // typed i64 read at a byte ptr
-    eq(c.fn, "store_i64").match ({ true => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"), false =>   // typed i64 write
-    eq(c.fn, "atomic_add_i64").match ({ true => s.append("__atomic_add_fetch((int64_t*)(").gen_expr(c.arg0()).append("), (").gen_expr(c.arg1()).append("), 5)"), false =>   // atomic add, returns new value (5 = __ATOMIC_SEQ_CST)
-    eq(c.fn, "addr").match   ({ true => s.append("(&(").gen_expr(c.arg0()).append("))"), false =>
-    eq(c.fn, "cstr").match   ({ true => s.append("((const char*)(").gen_expr(c.arg0()).append("))"), false =>
-    eq(c.fn, "slice").match  ({ true => s.append("(zslice){ .ptr = (void*)(").gen_expr(c.arg0()).append("), .len = (").gen_expr(c.arg1()).append(") }"), false =>
-    eq(c.fn, "null_ptr").match ({ true => s.append("0"), false =>      // a null pointer constant (valid in a static initializer)
-    eq(c.fn, "to_i32").match ({ true => s.append("((int32_t)(").gen_expr(c.arg0()).append("))"), false =>   // explicit narrowing cast
-    eq(c.fn, "to_i64").match ({ true => s.append("((int64_t)(").gen_expr(c.arg0()).append("))"), false =>   // explicit widening cast
-    eq(c.fn, "to_u8").match  ({ true => s.append("((uint8_t)(").gen_expr(c.arg0()).append("))"), false =>   // explicit byte cast
-    eq(c.fn, "to_f64").match ({ true => s.append("((double)(").gen_expr(c.arg0()).append("))"), false =>   // explicit int -> float cast (to_i32/to_i64 above truncate a double the C way)
-    s.append(c.fn).append("(").gen_args(c.args).append(")") }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    c.fn.call_kind().match ({
+        .StrEq => s.append("eq(").gen_expr(c.arg0()).append(", ").gen_expr(c.arg1()).append(")"),
+        .StrNe => s.append("(!eq(").gen_expr(c.arg0()).append(", ").gen_expr(c.arg1()).append("))"),
+        .Load => s.append("(*(").gen_expr(c.arg0()).append("))"),
+        .Offset => s.append("((uint8_t*)(").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"),
+        .Store => s.append("(*(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"),
+        .LoadI64 => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append("))"),
+        .StoreI64 => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"),
+        .AtomicAddI64 => s.append("__atomic_add_fetch((int64_t*)(").gen_expr(c.arg0()).append("), (").gen_expr(c.arg1()).append("), 5)"),
+        .Addr => s.append("(&(").gen_expr(c.arg0()).append("))"),
+        .CStr => s.append("((const char*)(").gen_expr(c.arg0()).append("))"),
+        .Slice => s.append("(zslice){ .ptr = (void*)(").gen_expr(c.arg0()).append("), .len = (").gen_expr(c.arg1()).append(") }"),
+        .NullPtr => s.append("0"),
+        .ToI32 => s.append("((int32_t)(").gen_expr(c.arg0()).append("))"),
+        .ToI64 => s.append("((int64_t)(").gen_expr(c.arg0()).append("))"),
+        .ToU8 => s.append("((uint8_t)(").gen_expr(c.arg0()).append("))"),
+        .ToF64 => s.append("((double)(").gen_expr(c.arg0()).append("))"),
+        .Normal => s.gen_call_default(c)
+    })
 }
 
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
@@ -179,7 +194,7 @@ gen_sexpr* = (s: String, e: Ptr<Expr>) String {
         .FloatLit(ft) => s.append(ft),
         .Var(v) => s.append(v.name),
         .Bin(b) => s.append("(").append(b.op).append(" ").gen_sexpr(b.lhs).append(" ").gen_sexpr(b.rhs).append(")"),
-        .Call(c) => s.append("(").append(c.fn).gen_sargs(c.args).append(")"),
+        .Call(c) => c.raw.match ({ true => s.append("(@").append(c.fn).gen_sargs(c.args).append(")"), false => s.append("(").append(c.fn).gen_sargs(c.args).append(")") }),
         .Lambda(lm) => s.gen_lam_sexpr(lm),
         _ => s.append("?")
     })
@@ -243,25 +258,90 @@ gen_armbody = (s: String, subj: str, sep: str, a: ArmData) String {
         false => s.gen_armbind(subj, sep, a)
     })
 }
-// one tag test:  `(subj.tag == E_V ? <body> : `   (the chain closes its `)` after the rest)
-gen_test = (s: String, subj: str, sep: str, ename: str, a: ArmData) String {
-    s.append("(").append(subj).append(sep).append("tag == ").append(ename).append("_").append(a.variant).append(" ? ").gen_armbody(subj, sep, a).append(" : ")
+// `1 ? X : X` makes an ARRAY-typed first arm (a string literal is char[N]) decay to a pointer, so
+// the later `_out = arm` assignments compile; structs/scalars pass through unchanged, and __typeof__
+// still evaluates nothing.
+gen_match_out_decl = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("__typeof__(1 ? ").gen_armbody(subj, sep, a).append(" : ").gen_armbody(subj, sep, a).append(") _out; ")
 }
-// emit arms[i:] as a nested ternary; the last arm is the default (no test)
-gen_arms = (s: String, subj: str, sep: str, ename: str, arms: [ArmData], i: i64) String {
-    (i == arms.len - 1).match ({
-        true  => s.gen_armbody(subj, sep, arms[i]),
-        false => s.gen_test(subj, sep, ename, arms[i]).gen_arms(subj, sep, ename, arms, i + 1).append(")")
+gen_switch_body = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("{ _out = ").gen_armbody(subj, sep, a).append("; break; } ")
+}
+gen_switch_stmt_body = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("{ ").gen_armbody(subj, sep, a).append("; break; } ")
+}
+gen_switch_case = (s: String, subj: str, sep: str, ename: str, a: ArmData) String {
+    s.append("case ").append(ename).append("_").append(a.variant).append(": ").gen_switch_body(subj, sep, a)
+}
+gen_switch_default = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("default: ").gen_switch_body(subj, sep, a)
+}
+gen_switch_stmt_case = (s: String, subj: str, sep: str, ename: str, a: ArmData) String {
+    s.append("case ").append(ename).append("_").append(a.variant).append(": ").gen_switch_stmt_body(subj, sep, a)
+}
+gen_switch_stmt_default = (s: String, subj: str, sep: str, a: ArmData) String {
+    s.append("default: ").gen_switch_stmt_body(subj, sep, a)
+}
+gen_switch_arm = (s: String, subj: str, sep: str, ename: str, a: ArmData, last: bool) String {
+    eq(a.variant, "_").match ({
+        true  => s.gen_switch_default(subj, sep, a),
+        false => {
+            out := s.gen_switch_case(subj, sep, ename, a)
+            last.match ({ true => out.gen_switch_default(subj, sep, a), false => out })
+        }
     })
 }
-// the subject can be any expression, so bind it once to a temp (a GCC statement-expression),
-// then the tag-test chain reads that temp — no re-evaluation, and `sc.tok.kind.match {…}` works.
+gen_switch_stmt_arm = (s: String, subj: str, sep: str, ename: str, a: ArmData, last: bool) String {
+    eq(a.variant, "_").match ({
+        true  => s.gen_switch_stmt_default(subj, sep, a),
+        false => {
+            out := s.gen_switch_stmt_case(subj, sep, ename, a)
+            last.match ({ true => out.gen_switch_stmt_default(subj, sep, a), false => out })
+        }
+    })
+}
+gen_switch_arms = (s: String, subj: str, sep: str, ename: str, arms: [ArmData], i: i64) String {
+    (i >= arms.len).match ({
+        true  => s,
+        false => {
+            out := s.gen_switch_arm(subj, sep, ename, arms[i], i == arms.len - 1)
+            eq(arms[i].variant, "_").match ({ true => out, false => out.gen_switch_arms(subj, sep, ename, arms, i + 1) })
+        }
+    })
+}
+gen_switch_stmt_arms = (s: String, subj: str, sep: str, ename: str, arms: [ArmData], i: i64) String {
+    (i >= arms.len).match ({
+        true  => s,
+        false => {
+            out := s.gen_switch_stmt_arm(subj, sep, ename, arms[i], i == arms.len - 1)
+            eq(arms[i].variant, "_").match ({ true => out, false => out.gen_switch_stmt_arms(subj, sep, ename, arms, i + 1) })
+        }
+    })
+}
+// the subject can be any expression, so bind it once to a temp. Enum matches emit as a switch inside a
+// GCC statement-expression; `__typeof__(first_arm)` gives us the result type without evaluating an arm.
 gen_match = (s: String, m: MatchData) String {
     sep := m.ptr.match ({ true => "->", false => "." })
-    s.append("({ __auto_type _subj = ").gen_expr(m.subj).append("; ").gen_arms("_subj", sep, m.ename, m.arms, 0).append("; })")
+    s.append("({ __auto_type _subj = ").gen_expr(m.subj).append("; ").gen_match_out_decl("_subj", sep, m.arms[0]).append("switch (_subj").append(sep).append("tag) { ").gen_switch_arms("_subj", sep, m.ename, m.arms, 0).append("} _out; })")
+}
+gen_match_stmt = (s: String, m: MatchData) String {
+    sep := m.ptr.match ({ true => "->", false => "." })
+    s.append("{ __auto_type _subj = ").gen_expr(m.subj).append("; switch (_subj").append(sep).append("tag) { ").gen_switch_stmt_arms("_subj", sep, m.ename, m.arms, 0).append("} }")
 }
 
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
+gen_expr_stmt = (s: String, e: Ptr<Expr>) String {
+    e.match ({
+        .Match(m) => s.gen_match_stmt(m),
+        _         => s.gen_expr(e).append(";")
+    })
+}
+gen_void_return = (s: String, e: Ptr<Expr>) String {
+    e.match ({
+        .Match(m) => s.gen_match_stmt(m).append(" return;"),
+        _         => s.gen_expr(e).append("; return;")
+    })
+}
 gen_stmt = (s: String, st: Stmt) String {
     st.match ({
         .Let(l)    => l.ty.match ({ .Void => s.append("__auto_type ").append(l.name).append(" = ").gen_expr(l.value).append(";"), _ => s.gen_ty(l.ty.addr()).append(" ").append(l.name).append(" = ").gen_expr(l.value).append(";") }),   // an annotation emits the REAL C type (an `a: i64 := 0` accumulator IS int64_t); .Void = unannotated (no cross-layer is_void_ty here)
@@ -273,11 +353,28 @@ gen_stmt = (s: String, st: Stmt) String {
         .IndexSet(x) => s.append("((").gen_ty(x.elem.addr()).append("*)(").gen_expr(x.seq).append(").ptr)[").gen_expr(x.idx).append("] = ").gen_expr(x.value).append(";")
     })
 }
+gen_stmt_effect = (s: String, st: Stmt) String {
+    st.match ({
+        .ExprStmt(e) => s.gen_expr_stmt(e),
+        _            => s.gen_stmt(st)
+    })
+}
+gen_stmt_void = (s: String, st: Stmt) String {
+    st.match ({
+        .Return(e) => s.gen_void_return(e),
+        _          => s.gen_stmt_effect(st)
+    })
+}
 
 // emit a brace-wrapped block: `{ s1; s2; … }`
 gen_block = (s: String, body: [Stmt]) String {
     open := s.append("{ ")
-    body.loop((h, i, st) { open = open.gen_stmt(st).append(" ") })
+    body.loop((h, i, st) { open = open.gen_stmt_effect(st).append(" ") })
+    open.append("}")
+}
+gen_block_void = (s: String, body: [Stmt]) String {
+    open := s.append("{ ")
+    body.loop((h, i, st) { open = open.gen_stmt_void(st).append(" ") })
     open.append("}")
 }
 
@@ -318,9 +415,12 @@ gen_sig = (s: String, f: Func) String {
 }
 gen_func* = (s: String, f: Func) String {
     eq(f.name, "main").match ({
-        true  => s.gen_sig(f).append(" { zen__init_globals(); ").gen_block(f.body).append(" }"),   // run global inits first; body keeps its own block (returns valid)
-        false => s.gen_sig(f).append(" ").gen_block(f.body)
+        true  => s.gen_sig(f).append(" { zen__init_globals(); ").gen_func_body(f).append(" }"),   // run global inits first; body keeps its own block (returns valid)
+        false => s.gen_sig(f).append(" ").gen_func_body(f)
     })
+}
+gen_func_body = (s: String, f: Func) String {
+    f.ret.match ({ .Void => s.gen_block_void(f.body), _ => s.gen_block(f.body) })
 }
 // a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
 gen_proto = (s: String, d: Decl) String {
@@ -391,22 +491,16 @@ gen_decl* = (s: String, d: Decl) String {
         .DImport(im) => s,                              // an import — modules link separately, emits nothing
         .DGenStruct(g) => s,                            // a generic template — monomorphize replaced it
         .DGenEnum(g)   => s,
-        .DGlobal(g)    => s,                            // a module global — emitted by gen_global, not here
-        .DTraitDefault(td) => s                         // a trait default — resolve_module made it into impl DFuncs
+        .DGlobal(g)    => s,
+        .DTraitDefault(td) => s
     })
 }
 
-// genC: an AST in, C source out — at runtime.
 genC* = (f: Func) String { new().gen_func(f) }
 
-// ── type dependency ordering (topo-sort by depth) ──────────────────────────────────────
-// A struct/enum that holds another type BY VALUE must be defined AFTER it (a Ptr<T> field
-// needs only the forward decl). Define a type's DEPTH = 0 if it has no by-value type deps,
-// else 1 + the max depth of its deps; emitting types in increasing depth order is a valid
-// topological order. Depth is a pure function of the decls (the by-value graph is a DAG —
-// Ptr breaks every cycle), so no mutable visited set is needed.
+// Type dependency ordering: by-value contained types must emit before their users.
 maxi = (a: i32, b: i32) i32 { (a >= b).match ({ true => a, false => b }) }
-slen = (decls: [Decl]) i32 {                       // decl count (an i32 upper bound on type depth)
+slen = (decls: [Decl]) i32 {
     n := 0
     decls.loop((h, i, d) { n = n + 1 })
     n
@@ -414,17 +508,9 @@ slen = (decls: [Decl]) i32 {                       // decl count (an i32 upper b
 is_type_named = (d: Decl, name: str) bool {
     d.match ({ .DStruct(sd) => eq(sd.name, name), .DEnum(ed) => eq(ed.name, name), _ => false })
 }
-// ── by-value type-nesting depth, MEMOIZED (cache indexed by decl position) ──
-// Each named struct/enum has depth = 1 + max by-value field/payload depth (a Ptr or primitive slot is 0),
-// so in C a type is emitted AFTER the types it contains by value. The depth is computed ONCE per type into
-// `cache`: 0-1 = not yet computed, 0-2 = currently on the recursion stack, else the memoized depth. The
-// on-stack marker breaks a MALFORMED by-value CYCLE (struct A holds B by value, B holds A — an
-// infinite-size type) by contributing 0, which both terminates the walk AND stops an EXPONENTIAL blow-up:
-// an unmemoized walk recomputes every shared/cyclic subgraph, which on a branching cycle is 2^depth work —
-// a real compiler hang. Memoizing makes it linear. For a valid (acyclic) graph the marker never fires and
-// the depths — hence the emit order, hence the emitted bytes — match a plain recursive walk exactly.
-DepthMemo*: { d: i32 }                                          // one per-type depth cell: 0-1 unvisited, 0-2 on-stack, else memoized depth
-ty_idx = (decls: [Decl], name: str) i32 {                       // position of the type named `name`, or -1
+// Depth memo: -1 unvisited, -2 on-stack, >=0 memoized depth.
+DepthMemo*: { d: i32 }
+ty_idx = (decls: [Decl], name: str) i32 {
     found := 0 - 1
     decls.loop((h, i, d) { found = is_type_named(d, name).match ({ true => i, false => found }) })
     found
@@ -450,30 +536,29 @@ decl_body_depth = (decls: [Decl], cache: [DepthMemo], d: Decl) i32 {
     d.match ({ .DStruct(sd) => decls.struct_depth(cache, sd), .DEnum(ed) => decls.enum_depth(cache, ed), _ => 0 })
 }
 compute_idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
-    cache[idx] = DepthMemo( d: 0 - 2 )                        // mark on-stack (so a cycle back here yields 0)
+    cache[idx] = DepthMemo( d: 0 - 2 )
     r := decls.decl_body_depth(cache, decls[idx])
-    cache[idx] = DepthMemo( d: r )                            // memoize
+    cache[idx] = DepthMemo( d: r )
     r
 }
 idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
     (idx < 0).match ({
-        true  => 0,                                            // unknown type name → contributes nothing
+        true  => 0,
         false => (cache[idx].d >= 0).match ({
-            true  => cache[idx].d,                             // already memoized
+            true  => cache[idx].d,
             false => (cache[idx].d == (0 - 2)).match ({
-                true  => 0,                                    // on the stack → by-value cycle, contributes 0
-                false => decls.compute_idx_depth(cache, idx)   // not yet computed → compute once
+                true  => 0,
+                false => decls.compute_idx_depth(cache, idx)
             })
         })
     })
 }
-dmemo_buf = (n: i64) [DepthMemo] { slice(malloc(n * sizeof(DepthMemo)), n) }   // typed alloc (return type fixes the element type)
-depth_cache = (decls: [Decl]) [DepthMemo] {                     // a fresh per-type depth memo, all unvisited
+dmemo_buf = (n: i64) [DepthMemo] { slice(malloc(n * sizeof(DepthMemo)), n) }
+depth_cache = (decls: [Decl]) [DepthMemo] {
     c := dmemo_buf(decls.slen())
     c.loop((h, i, x) { c[i] = DepthMemo( d: 0 - 1 ) })
     c
 }
-// emit the TYPE definitions whose depth == k (in their original relative order)
 gen_types_at = (s: String, decls: [Decl], cache: [DepthMemo], k: i32) String {
     out := s
     decls.loop((h, i, d) {
@@ -488,19 +573,16 @@ gen_types_at = (s: String, decls: [Decl], cache: [DepthMemo], k: i32) String {
 gen_types_upto = (s: String, decls: [Decl], cache: [DepthMemo], k: i32, n: i32) String {
     (k < n).match ({ true => s.gen_types_at(decls, cache, k).gen_types_upto(decls, cache, k + 1, n), false => s })
 }
-// then functions + verbatim raw, in original order (all types are now fully defined above)
 gen_funcs = (s: String, decls: [Decl]) String {
     out := s
     decls.loop((h, i, d) { out = d.is_template().match ({
-        true  => out,                                   // a template: inlined at call sites, not emitted
+        true  => out,
         false => d.match ({ .DFunc(f) => out.gen_decl(d).append(" "), .DRaw(c) => out.gen_decl(d).append(" "), _ => out })
     }) })
     out
 }
 
-// is a global's initializer a C CONSTANT (emittable in a `static … = init;`)? Literals, null_ptr (a
-// constant 0), and constant arithmetic are; anything else (a call, a struct literal with calls, a var)
-// must be hoisted to the runtime init fn below (census #10: `g := mk()` emitted invalid C).
+// Constant globals can initialize statically; other globals are assigned in zen__init_globals.
 is_const_init = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Int(n)    => true,
@@ -512,9 +594,6 @@ is_const_init = (e: Ptr<Expr>) bool {
         _          => false
     })
 }
-// a module-level mutable global. A C-constant init emits `static <ty> name = <init>;`; a RUNTIME init
-// emits just `static <ty> name;` (zero-init) — its assignment goes into zen__init_globals(), which the
-// emitted `main` runs first. [Goal Z E1 + census #10]
 gen_global = (s: String, d: Decl) String {
     d.match ({
         .DGlobal(g) => g.init.is_const_init().match ({
@@ -524,9 +603,6 @@ gen_global = (s: String, d: Decl) String {
         _ => s
     })
 }
-// the runtime-init fn: one `name = <init>;` per NON-constant global, in decl order. Always emitted (an
-// empty fn when every global is constant) so `main`'s unconditional call always links; the compiler's
-// own gen.c has no `main`, so its copy is just an unused static.
 gen_global_inits = (s: String, decls: [Decl]) String {
     out := s.append("static void zen__init_globals(void) { ")
     decls.loop((h, i, d) { out = d.match ({
@@ -538,17 +614,14 @@ gen_global_inits = (s: String, decls: [Decl]) String {
     }) })
     out.append("} ")
 }
-// NB trait default-method bodies (DTraitDefault) are instantiated into concrete `impl_<Trait>_<Type>_m`
-// DFuncs by compiler.check.resolve_module BEFORE genModule runs — so here they are ordinary DFuncs, and a
-// DTraitDefault itself emits nothing (the resolver substitutes Self→Type and resolves member/arrow).
-// genModule: a whole translation unit — a list of decls (structs + globals + functions).
+// Whole translation unit emission.
 genModule* = (raw: [Decl]) String {
-    decls := raw.monomorphize()                         // pass 0: instantiate generic structs per use
-    s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")   // the [T] fat pointer
-    decls.loop((h, i, d) { s = s.gen_fwd(d) })          // pass 1: forward-declare every type tag
-    decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
-    s = s.gen_types_upto(decls, depth_cache(decls), 0, slen(decls))   // pass 3: type defs in dependency order (memoized depths)
-    decls.loop((h, i, d) { s = s.gen_global(d) })       // pass 3.5: module globals (after their type, before fns)
-    s = s.gen_global_inits(decls)                       // pass 3.6: runtime init for non-constant globals
-    s.gen_funcs(decls)                                  // pass 4: functions + raw
+    decls := raw.monomorphize()
+    s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")
+    decls.loop((h, i, d) { s = s.gen_fwd(d) })
+    decls.loop((h, i, d) { s = s.gen_proto(d) })
+    s = s.gen_types_upto(decls, depth_cache(decls), 0, slen(decls))
+    decls.loop((h, i, d) { s = s.gen_global(d) })
+    s = s.gen_global_inits(decls)
+    s.gen_funcs(decls)
 }

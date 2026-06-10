@@ -3,13 +3,14 @@
 // test (test_differential); direct import coverage is still pending.
 //
 // std.coroutine — stackful coroutines (fibers) over libc ucontext, THE one irreducible primitive for
-// Goal Z's no-color async. A coroutine runs on its own allocator-placed stack; yield() suspends it
-// back to whoever resumed it, and resume() continues it (returning 0 once its work fn returns). The
+// Goal Z's no-color async. A coroutine runs on its own allocator-placed stack; raw yield() suspends it
+// back to whoever resumed it, and resume() continues it (returning 0 once its work fn returns). Public
+// code should reach suspension through Runtime.suspend, not by importing yield directly. The
 // COMPILER has zero async machinery — "sync vs async" is purely a stdlib choice of Runtime (std.runtime
 // picks suspend = noop vs = yield over this). The struct is opaque here, so we poke its fields by
 // raw byte offset — but those offsets are NOT magic numbers: they are the documented glibc
 // x86-64 ucontext_t ABI, named below (UC_LINK_OFF / UC_SS_SP_OFF / UC_SS_SIZE_OFF / UC_CTX_SIZE).
-{ malloc } = std.alloc
+{ Allocator, default_allocator } = std.alloc
 
 getcontext  = (ctx: RawPtr<u8>) i32
 makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void   // fn becomes a real C `void(*)()`
@@ -29,7 +30,7 @@ UC_SS_SIZE_OFF := 32      // offsetof(ucontext_t, uc_stack.ss_size)
 UC_CTX_SIZE    := 1024    // >= glibc-x86-64 sizeof(ucontext_t) (968), rounded up
 CORO_STACK     := 65536   // per-coroutine stack: 64 KiB
 
-// The running coroutine's context, the resumer's context, and a yield flag. yield() runs INSIDE the
+// The running coroutine's context, the resumer's context, and a yield flag. Raw yield() runs INSIDE the
 // work fn (no args), so it finds the contexts here; resume() reads the flag to tell a yield from a
 // final return. Module-mutable globals (E1); the RawPtr ones start null via the null_ptr() constant.
 cur  := null_ptr()
@@ -38,18 +39,32 @@ flag := 0
 
 Coro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
 
-// spawn `work` on a fresh 64 KiB stack. When work returns, uc_link (= the saved resumer context)
-// brings control back with the flag clear, so resume reports completion.
-spawn* = (work: () void) Coro {
-    stack := malloc(CORO_STACK)
-    ctx := malloc(UC_CTX_SIZE)
-    lnk := malloc(UC_CTX_SIZE)
+// spawn `work` on a fresh 64 KiB stack from `alloc`. When work returns, uc_link
+// (= the saved resumer context) brings control back with the flag clear, so
+// resume reports completion.
+spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
+    stack := alloc.acquire(CORO_STACK)
+    ctx := alloc.acquire(UC_CTX_SIZE)
+    lnk := alloc.acquire(UC_CTX_SIZE)
     getcontext(ctx)
     store_i64(ctx.offset(UC_SS_SP_OFF), stack)        // uc_stack.ss_sp  = the new stack
     store_i64(ctx.offset(UC_SS_SIZE_OFF), CORO_STACK) // uc_stack.ss_size
     store_i64(ctx.offset(UC_LINK_OFF), lnk)           // uc_link -> the resumer's context
     makecontext(ctx, work, 0)
     Coro( ctx: ctx, link: lnk, stack: stack )
+}
+spawn* = (work: () void) Coro {
+    alloc := default_allocator()
+    alloc.addr().spawn_in(work)
+}
+destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
+    alloc.release(c.stack)
+    alloc.release(c.ctx)
+    alloc.release(c.link)
+}
+destroy* = (c: Coro) void {
+    alloc := default_allocator()
+    alloc.addr().destroy_in(c)
 }
 // resume (or start) the coroutine; returns 1 if it yielded (alive), 0 once work() has returned.
 resume* = (c: Coro) i32 {
@@ -61,9 +76,9 @@ resume* = (c: Coro) i32 {
     flag
 }
 // suspend the current coroutine back to whoever resumed it; execution continues here on next resume.
-// OUTSIDE any coroutine (cur unset), yield is a NO-OP — the keystone of ambient time: any code may
-// call yield() unconditionally; under a scheduler it interleaves, standalone it just falls through
-// ("everything is a Future that is already done"). Was: swapcontext on null → segfault.
+// OUTSIDE any coroutine (cur unset), yield is a NO-OP, which lets Runtime.suspend be colorless:
+// under a scheduler it interleaves, standalone it just falls through ("already done").
+// Was: swapcontext on null → segfault.
 yield* = () void {
     is_null(cur).match ({
         true  => {},

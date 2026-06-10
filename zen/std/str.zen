@@ -7,6 +7,7 @@
 //   owned := dup("hello")        // a heap [u8] you own (release(owned.ptr))
 
 { new_u8 } = std.mem
+{ Result, Opt } = std.result
 
 strlen = (s: str) i64
 strcmp = (a: str, b: str) i32
@@ -40,9 +41,20 @@ dup* = (s: str) [u8] {
 
 // do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
 has_at = (sv: [u8], pv: [u8], at: i64) bool {
-    j: i64 := 0
-    @while (j < pv.len && sv[at + j] == pv[j]) { j = j + 1 }
-    j == pv.len
+    ok := true
+    pv.loop((h, i, b) {
+        ok.match ({
+            true => (sv[at + i] == b).match ({
+                true  => {},
+                false => {
+                    ok = false
+                    h.break
+                }
+            }),
+            false => { h.break }
+        })
+    })
+    ok
 }
 
 // byte index of the first occurrence of `needle` in `s`, -1 if absent.
@@ -50,13 +62,25 @@ has_at = (sv: [u8], pv: [u8], at: i64) bool {
 find* = (s: str, needle: str) i64 {
     sv := view(s)
     pv := view(needle)
-    found: i64 := -1
-    i: i64 := 0
-    @while (found < 0 && i + pv.len <= sv.len) {
-        sv.has_at(pv, i).match ({ true => { found = i }, _ => {} })
-        i = i + 1
-    }
-    found
+    (pv.len == 0).match ({
+        true  => 0,
+        false => {
+            found: i64 := -1
+            sv.loop((h, i, b) {
+                (i + pv.len > sv.len).match ({
+                    true  => { h.break },
+                    false => sv.has_at(pv, i).match ({
+                        true => {
+                            found = i
+                            h.break
+                        },
+                        _ => {}
+                    })
+                })
+            })
+            found
+        }
+    })
 }
 
 // does `s` contain `needle`? (the empty needle is contained in everything)
@@ -88,11 +112,12 @@ substr* = (s: str, start: i64, n: i64) str {
     lo := start.pin(0, sv.len)
     m := n.pin(0, sv.len - lo)
     out := new_u8(m + 1)
-    i: i64 := 0
-    @while (i < m) {
-        out[i] = sv[lo + i]
-        i = i + 1
-    }
+    out.loop((h, i, b) {
+        (i < m).match ({
+            true  => { out[i] = sv[lo + i] },
+            false => { h.break }
+        })
+    })
     out[m] = 0
     cstr(out.ptr)
 }
@@ -112,11 +137,70 @@ char_at* = (s: str, i: i64) u8 {
 parse_int* = (s: str) i64 {
     sv := view(s)
     neg := sv.len > 0 && sv[0] == '-'
-    i: i64 := neg.match ({ true => 1, false => 0 })
+    start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
-    @while (i < sv.len && sv[i] >= '0' && sv[i] <= '9') {
-        acc = acc * 10 + to_i64(sv[i] - '0')
-        i = i + 1
-    }
+    sv.loop((h, i, b) {
+        (i < start).match ({
+            true  => {},
+            false => (b >= '0' && b <= '9').match ({
+                true  => { acc = acc * 10 + to_i64(b - '0') },
+                false => { h.break }
+            })
+        })
+    })
     neg.match ({ true => 0 - acc, false => acc })
+}
+
+// ── the VALUE-shaped variants: a miss/garbage must be `.match`ed, not guessed at ─────────────
+
+// find, as a value: `.Some(index)` or `.None`. find's raw -1 sentinel compounds badly when
+// unchecked — substr(s, find(s, n), k) silently clamps the -1 to index 0 via pin.
+some_at = (i: i64) Opt<i64> { .Some(i) }
+no_hit  = () Opt<i64> { .None }
+find_opt* = (s: str, needle: str) Opt<i64> {
+    i := find(s, needle)
+    (i >= 0).match ({ true => some_at(i), false => no_hit() })
+}
+
+// what made try_parse_int refuse: nothing to parse, a non-digit in the tail (the byte carried),
+// or a magnitude past i64. parse_int (above) keeps its documented never-errors behavior.
+ParseError*: NoDigits | Trailing(u8) | Overflow
+
+I64_MAX_DIV10 := 922337203685477580    // i64 max / 10: the pre-multiply overflow bound
+
+parse_ok  = (v: i64) Result<i64, ParseError> { .Ok(v) }
+parse_err = (e: ParseError) Result<i64, ParseError> { .Err(e) }
+e_nodigits = () ParseError { .NoDigits }
+e_trailing = (b: u8) ParseError { .Trailing(b) }
+e_overflow = () ParseError { .Overflow }
+
+// parse_int, honestly: "zen" and "12ab" are errors, not 0 and 12. An optional leading '-', then
+// digits to the very end; the magnitude must fit i64 (|INT64_MIN| itself counts as overflow).
+try_parse_int* = (s: str) Result<i64, ParseError> {
+    sv := view(s)
+    neg := sv.len > 0 && sv[0] == '-'
+    start: i64 := neg.match ({ true => 1, false => 0 })
+    acc: i64 := 0
+    nd:  i64 := 0                       // digits consumed
+    bad: u8  := 0                       // the first non-digit byte hit (0 = none)
+    over := false
+    sv.loop((h, i, b) {
+        (i < start).match ({
+            true  => {},
+            false => (b >= '0' && b <= '9').match ({
+                true  => {
+                    d := to_i64(b - '0')
+                    ((acc > I64_MAX_DIV10) || ((acc == I64_MAX_DIV10) && (d > 7))).match ({
+                        true  => { over = true  h.break },
+                        false => { acc = acc * 10 + d  nd = nd + 1 }
+                    })
+                },
+                false => { bad = b  h.break }
+            })
+        })
+    })
+    over.match ({ true => { return parse_err(e_overflow()) }, false => {} })
+    (nd == 0).match ({ true => { return parse_err(e_nodigits()) }, false => {} })
+    (bad != 0).match ({ true => { return parse_err(e_trailing(bad)) }, false => {} })
+    parse_ok(neg.match ({ true => 0 - acc, false => acc }))
 }

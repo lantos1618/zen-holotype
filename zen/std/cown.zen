@@ -29,18 +29,19 @@
 //     is now governed by the same Drop machinery as any Zen-native value.
 //
 //   So the shape is always:   raw := c_alloc(…)            // RawPtr<T> — boundary marker, unowned
-//                              w   := Own.new(Wrap{ raw }) // wrap → discipline re-established
+//                              w   := own_new(Wrap{ raw }) // wrap → discipline re-established
 //                              … use w (borrow / clone) …
-//                              w.release()                 // at count 0: Wrap.drop → c_free(raw)
+//                              w.own_release()             // at count 0: Wrap.drop → c_free(raw)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // The two raw externs below (free, close) are exactly the scattered, hand-re-prototyped libc symbols
 // that N1 (std.c's `libc()`) and N2 (a qualified `c.free`) gather behind ONE namespace — here we
 // declare just the few this convention needs, bodyless, as the FLOOR they are.
 
-{ Own, Drop, new, clone, release, own_get, own_ptr, count } = std.drop
+{ Own, Drop, own_new, own_clone, own_release, own_get, own_ptr, own_count } = std.drop
 { malloc } = std.alloc
 { open, close, O_RDONLY } = std.io
+{ Result, IoError, ok_if } = std.result
 
 // ── the raw FFI floor: a C allocator/closer we get a RawPtr from / must hand a RawPtr back to ──
 // `free` lives in libc; `close` is the POSIX descriptor closer std.io already binds. Both are the
@@ -65,14 +66,14 @@ Buf*: { p: RawPtr<u8>, len: i64 }
 // allocate `n` bytes through the C boundary and IMMEDIATELY re-establish discipline: the `RawPtr<u8>`
 // malloc returns is wrapped in a `Buf` and handed to `Own.new`, so the very value you get back already
 // owns its free. This is the one place the raw pointer is visible; after it, ownership is in force.
-buf_alloc* = (n: i64) Own<Buf> { new(Buf( p: malloc(n), len: n )) }
+buf_alloc* = (n: i64) Own<Buf> { own_new(Buf( p: malloc(n), len: n )) }
 
 // borrow the i'th byte of an owned buffer (read side — no ownership transfer).
 buf_get* = (o: Own<Buf>, i: i64) u8 { load(o.own_get().p.offset(i)) }
 // write the i'th byte of an owned buffer (mutation through a borrow).
 buf_set* = (o: Own<Buf>, i: i64, v: u8) void { store(o.own_get().p.offset(i), v) }
 
-// Buf's destructor: free the RAW pointer the boundary handed us. Reached as `addr(buf).drop()` →
+// Buf's destructor: free the RAW pointer the boundary handed us. Reached as `buf.addr().drop()` →
 // impl_Drop_Buf_drop, fired by Own<Buf>.release at count zero — the matching `free` for the `malloc`.
 Buf.impl(Drop, { drop = (b: MutPtr<Buf>) void { free(b.p) } })
 
@@ -89,8 +90,17 @@ Buf.impl(Drop, { drop = (b: MutPtr<Buf>) void { free(b.p) } })
 File*: { fd: i32 }
 
 // open `path` read-only at the boundary, then re-establish discipline by wrapping the raw fd in an
-// owning `Own<File>` — the returned value already owes (and will fire) its own close.
-file_open* = (path: str) Own<File> { new(File( fd: open(path, O_RDONLY, 0) )) }
+// owning `Own<File>` — the returned value already owes (and will fire) its own close. The raw -1
+// sentinel is lifted into a Result HERE, per this module's own FFI rule: only a real fd is ever
+// wrapped (was: a failed open yielded a 'valid' Own<File> whose Drop later closed fd -1).
+file_ok = (o: Own<File>) Result<Own<File>, IoError> { .Ok(o) }
+file_err = (e: IoError) Result<Own<File>, IoError> { .Err(e) }
+file_open* = (path: str) Result<Own<File>, IoError> {
+    ok_if(open(path, O_RDONLY, 0)).match ({
+        .Ok(fd)  => file_ok(own_new(File( fd: fd ))),
+        .Err(e)  => file_err(e),
+    })
+}
 
 // borrow the underlying fd (e.g. to read/write through std.io) without giving up ownership.
 file_fd* = (o: Own<File>) i32 { o.own_get().fd }

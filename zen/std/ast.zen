@@ -8,36 +8,17 @@
 //     var("x").dot("a").eqx(var("y").dot("a"))         // builds the AST for `x.a == y.a`
 //
 // Why builders and not genc's raw ctors? genc's ctors return VALUES whose slice/pointer children
-// (`Bin.lhs: Ptr<Expr>`, `Func.body: [Stmt]`) are STACK-allocated by `addr()` / `[a, b]` literals —
-// fine within one frame, but a generator that RETURNS the AST it built would dangle. `node`/`dupx`/
-// `concat` HEAP-allocate every node and copy every slice (one generic copier each, monomorphized by
-// use), so generated AST safely outlives the function that built it and you never write `addr()`.
+// (`Bin.lhs: Ptr<Expr>`, `Func.body: [Stmt]`) are STACK-allocated by `.addr()` / `[a, b]` literals —
+// fine within one frame, but a generator that RETURNS the AST it built would dangle. `std.slice`
+// heap-allocates every node and copies every slice (one generic copier each, monomorphized by
+// use), so generated AST safely outlives the function that built it and you never write `.addr()`.
 
 { malloc } = std.alloc
+{ nbuf, node, dupx, concat } = std.slice
 { Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl,
   vref, lit, bin, call, member, mkstruct, finit, FieldInit,
   slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
   tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = compiler.genc
-
-// ── heap copies (the keystone): generic over the node type, so ONE of each replaces the old
-//    per-type ebuf/tnode/… zoo. The `[T]` return slot is what tells `slice` its element type, so
-//    every raw alloc goes through `nbuf` (the `like` witness only binds T to the caller's type).
-//    (`dupx`/`eqx`, not `dup`/`eq` — std.str defines both and sits in this module's flat closure via
-//    compiler.genc → std.str; the loader's per-name dedup keeps ONE decl per name, so these take the
-//    same x-suffix collision dodge `callx` already uses against genc's `call`.) ──
-nbuf*<T> = (n: i64, like: [T]) [T] { slice(malloc(n * sizeof(T)), n) }   // a fresh, uninit heap [T] of length n
-node*<T>   = (v: T) Ptr<T> { dupx([v])[0].addr() }                      // box one value: a heap Ptr<T> holding v
-dupx*<T>   = (xs: [T]) [T] {                                           // a heap copy of a (stack) slice, safe to return
-    buf := nbuf(xs.len, xs)
-    xs.loop((h, i, x) { buf[i] = x })
-    buf
-}
-concat*<T> = (xs: [T], ys: [T]) [T] {               // xs ++ ys (assemble a module: handwritten ++ generated)
-    buf := nbuf(xs.len + ys.len, xs)
-    xs.loop((h, i, x) { buf[i] = x })
-    ys.loop((h, i, y) { buf[xs.len + i] = y })
-    buf
-}
 
 // ── expressions: fluent builders returning Ptr<Expr>, so they chain — `var("n").add(int(1))` ──
 var*    = (name: str) Ptr<Expr>          { vref(name).node() }                  // a variable reference

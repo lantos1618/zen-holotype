@@ -95,7 +95,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   (`var("x").dot("a").eq(…)`). `libc()` above is exactly this shape — a function that
   returns its bindings as AST.
 - **Raw memory intrinsics** (handled inline by the backend — never declared or imported):
-  `addr(x)`, `load(p)`, `store(p, v)`, `offset(p, i)`, `load_i64`/`store_i64`,
+  `x.addr()`, `load(p)`, `store(p, v)`, `offset(p, i)`, `load_i64`/`store_i64`,
   `atomic_add_i64`, `slice(ptr, len)`, **`sizeof(T)`** (byte size of a named type), and
   **`cstr(p)`** (reinterpret a NUL-terminated byte pointer as a runtime `str`).
   `load`/`offset` also read a `str`'s bytes raw (a `str` is a `const char*`), so source
@@ -133,12 +133,12 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   allocator). Nothing hides a `malloc`.
 - **`std.vec`** — a growable array that threads the allocator explicitly: `a.vec(cap)` /
   `v.push(a, x)` (grows via `a.resize`) / `v.items()` / `v.vfree(a)`.
-- **`compiler.genc` (+ `genc_emit` / `genc_mono`) — the C backend, in Zen, AND the compiler's own
+- **`compiler.genc` (+ `mono` / `genc_emit`) — shared AST + monomorphization, then the C backend, in Zen, AND the compiler's own
   codegen.** It defines the **one AST** the whole pipeline shares — expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond`/`Member`/`Arrow`/`MakeEnum`/`Tag`/`Match`/`StrLit`, statements
   `Let`/`Assign`/`Return`/`If`/`While`, `Struct`/`Enum`/`DRaw` decls, typed `[Param]` + a `Ty` enum
   — and walks it to C in a `String`: `genModule([Decl])` for a whole translation unit
-  (forward-declared so recursive types compile), with `genc_mono` doing generic
+  (forward-declared so recursive types compile), with `compiler.mono` doing generic
   monomorphization. `If`/`While` here are backend/internal structured target forms; the Zen
   source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
   not a demo.
@@ -184,7 +184,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   ```
 
   The builders heap-allocate every node and copy every slice, so generated AST safely
-  outlives the function that built it (no dangling `addr()` of a stack literal).
+  outlives the function that built it (no dangling `.addr()` of a stack literal).
 - **The header is a function** — `zen/std/c.zen`'s `libc() [Decl]` is exactly this shape: a
   function that returns the libc foreign bindings as AST, emitted by `genModule(libc())`.
   Bindings live in Zen, as data, never as compiler-special-cased C logic.
@@ -202,8 +202,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - The same resolver understands `compiler.X` for internal compiler/std dependencies, but
   normal user-facing library imports live under `std.X`.
 - Plain emit mode (`zenc file.zen` or stdin) remains flat and unvalidated: it expects an
-  already-flattened module and writes C to stdout. `tools/loader/` still packages the same
-  resolver as a standalone runnable driver.
+  already-flattened module and writes C to stdout.
 
 ## Diagnostics
 - Checked CLI modes reject on any type error and report the source path, total error count,

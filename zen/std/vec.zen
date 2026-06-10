@@ -1,26 +1,10 @@
-// @self-hosted-only — uses generic struct literals (`Vec<T>{…}`) and is validated by the self-hosted
-// source acid gate plus focused run_value cases instead of the bootstrap std closure.
+// std.vec — generic growable Vec<T> with explicit allocator-threaded storage.
+// @self-hosted-only: generic struct literals are covered by self-hosted tests.
 //
-// std.vec — a growable GENERIC vector `Vec<T>` with an EXPLICIT allocator (Zig/Zen style). Every op that
-// allocates takes the allocator as a parameter, so WHERE the memory comes from (libc `Malloc`, an arena, a
-// fixed buffer) is visible in the signature — nothing here hides a malloc. `Vec<T>` stays a plain
-// `(ptr, len, cap)` value; the allocator is threaded per-op as `a: Ptr<A>` and reached through std.alloc's
-// `Allocator` trait (acquire/resize/release), monomorphized per allocator type at zero cost. `Vec<i32>`
-// and `Vec<Ptr<u8>>` are distinct C types sharing this one source.
-//
-//   m := Malloc(_: 0)
-//   v := addr(m).vec_of([10, 20])     // a Vec<i32>, backed by m; T inferred from the slice, A from `a`
-//   v  = addr(m).vpush(v, 30)         // grows (resize, double+1) through m when full
-//   total := v.get(0) + v.get(2)
-//   addr(m).free_vec(v)               // hand the buffer back to m
-//
-// The mutators are v-prefixed (vpush/vlen/vgrow) because Zen has a FLAT name space with no overloading:
-// a bare `push`/`len`/`grow` would clash with std.string's same-named String ops when both are imported
-// (e.g. a program that uses a Vec AND println). The principled fix — a shared Seq trait both Vec and
-// String impl, so `x.push(…)` dispatches by receiver type — is tracked separately; this keeps the names
-// globally unique today. `get`/`buf`/`vec_of`/`free_vec` don't clash, so they keep their plain names.
+// Mutators are v-prefixed until receiver-scoped methods can avoid flat-name clashes
+// with std.string's push/len/grow.
 
-{ Allocator } = std.alloc        // the explicit-allocator trait (acquire/resize/release), NOT raw malloc
+{ Allocator } = std.alloc
 
 Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }    // ptr -> a buffer of `cap` T's; len = live count
 
@@ -31,28 +15,30 @@ vlen*<T> = (v: Vec<T>) i64 { v.len }
 get*<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }
 
 // a `Vec<T>` seeded from a slice (copies `xs`), its buffer acquired from `a`. T inferred from `xs`, A from `a`.
-vec_of*<T, A> = (a: Ptr<A>, xs: [T]) Vec<T> {
+vec_of*<T, A> = (a: MutPtr<A>, xs: [T]) Vec<T> {
     v := Vec<T>( ptr: a.acquire(xs.len * sizeof(T)), len: xs.len, cap: xs.len )
     b := v.buf()
     xs.loop((h, i, x) { b[i] = x })
     v
 }
 
-// grow (double + 1) by RESIZING the buffer through `a` — keeps the live bytes, leaks nothing. (The
-// pre-allocator version malloc'd a fresh buffer and never released the old one — a leak on every grow.)
-vgrow*<T, A> = (a: Ptr<A>, v: Vec<T>) Vec<T> {
+// grow by resizing through `a`, preserving live bytes
+vgrow*<T, A> = (a: MutPtr<A>, v: Vec<T>) Vec<T> {
     ncap := (v.cap * 2) + 1
     Vec<T>( ptr: a.resize(v.ptr, ncap * sizeof(T)), len: v.len, cap: ncap )
 }
 
 // push x, growing through `a` if full; returns the updated Vec
-vpush*<T, A> = (a: Ptr<A>, v: Vec<T>, x: T) Vec<T> {
+vpush*<T, A> = (a: MutPtr<A>, v: Vec<T>, x: T) Vec<T> {
+    // force x FIRST: the inliner substitutes argument expressions by NAME (re-evaluated at each
+    // use), so a caller's `v.get(0)`-shaped element arg would otherwise be evaluated after the
+    // grow below — reading v's buffer AFTER resize freed it (see std.map's mappend)
+    vpx := x
     r := (v.len < v.cap).match ({ true => v, false => a.vgrow(v) })
     b := r.buf()
-    b[r.len] = x
+    b[r.len] = vpx
     Vec<T>( ptr: r.ptr, len: r.len + 1, cap: r.cap )
 }
 
-// hand the buffer back to `a`. Vec finally has a deallocator (named free_vec, not free, to avoid clashing
-// with std.alloc/std.mem's libc `free`).
-free_vec*<T, A> = (a: Ptr<A>, v: Vec<T>) void { a.release(v.ptr) }
+// hand the buffer back to `a`
+free_vec*<T, A> = (a: MutPtr<A>, v: Vec<T>) void { a.release(v.ptr) }

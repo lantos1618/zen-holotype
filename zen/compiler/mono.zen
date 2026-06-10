@@ -1,7 +1,7 @@
-// compiler.genc_mono — the monomorphization pass (genModule's pass 0), split out of compiler.genc.
+// compiler.mono — the shared monomorphization pass, split out of compiler.genc.
 //
-// A `Box<T>: {…}` (DGenStruct) / `Opt<T>: …` (DGenEnum) emits no C of its own; instead, for
-// every distinct concrete instance the module uses, this pass emits one concrete StructDecl/
+// A `Box<T>: {…}` (DGenStruct) / `Opt<T>: …` (DGenEnum) is a template; instead, for
+// every distinct concrete instance the module uses, this pass creates one concrete StructDecl/
 // EnumDecl with tparam→arg substituted. Instances are DISCOVERED from typed positions AND from
 // struct/enum LITERALS in expression bodies, then transitively closed. The AST types + the
 // type-substitution helpers (subst_ty, find_genenum, the constructors) live in the base, compiler.genc.
@@ -9,12 +9,13 @@
 { String, new, append, push, finish } = std.string
 { view, is_empty, eq } = std.str
 { malloc } = std.alloc
+{ panic } = std.result
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, GenStructDecl, EnumDecl, VariantDef, GenericData, FieldInit, ArmData, TagData, MakeStructData, MakeEnumData,
   field, param, dstruct, denum, subst_ty, find_genenum, is_generic_fn } = compiler.genc
 
-// ── monomorphization: instantiate generic structs per concrete use (Goal Arc 3) ─────────
-// genModule's pass 0. A `Box<T>: {…}` decl (DGenStruct) emits no C; instead, for every distinct
-// `Box<concrete>` the module uses, we emit one concrete StructDecl `Box_i32` with tparam→arg
+// ── monomorphization: instantiate generic structs/enums per concrete use ─────────
+// Backend prepass. A `Box<T>: {…}` decl (DGenStruct) emits no concrete type by itself; instead, for
+// every distinct `Box<concrete>` the module uses, we create one concrete StructDecl `Box_i32` with tparam→arg
 // substituted in the field types. Instances are DISCOVERED from typed positions — function params,
 // returns, and struct fields (so a generic used through a typed API is found); a generic struct
 // LITERAL already carries its monomorphized name (MakeStruct.mty), so it just references the result.
@@ -47,6 +48,10 @@ is_genstruct_name = (decls: [Decl], name: str) bool {
     decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => true, false => found }), _ => found }) })
     found
 }
+// An unknown generic name falls through to mono_enum, whose empty find_genenum sentinel emits a
+// HOLLOW decl. That is deliberate for the emit-only pipeline (the acid gate feeds real stdlib files
+// whose imported generics aren't loaded); the CHECKED pipeline rejects an undefined generic ctor
+// up front (check_validate's mkenum_err/KUNDEFINED), so a hollow decl never reaches a user build.
 mono_inst = (decls: [Decl], g: GenericData) Decl {
     decls.is_genstruct_name(g.name).match ({ true => decls.mono_struct(g), false => decls.mono_enum(g) })
 }
@@ -79,9 +84,17 @@ add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     // fires and the worklist would grow forever — overrunning this fixed buffer and overflowing
     // expand_insts' stack. (1) drop an instance whose type-arg nesting is absurdly deep (a well-formed
     // instance is shallow; only the runaway one passes the limit) and (2) never write past the buffer.
-    // Neither bound is reachable by a well-formed program; dropping the degenerate deep instance turns the
-    // crash into bounded, finite work.
-    ((1 + g.args.tys_max_depth()) > 24 || cnt >= buf.len).match ({ true => cnt, false => { buf[cnt] = g  cnt + 1 } })
+    // The depth bound is unreachable by a well-formed program; dropping the degenerate deep instance
+    // turns the crash into bounded, finite work. The CAPACITY bound is different: a large VALID
+    // program can have many distinct instances, and silently dropping one emits C that is missing a
+    // struct/enum definition — so a full buffer fails LOUDLY instead.
+    ((1 + g.args.tys_max_depth()) > 24).match ({ true => { return cnt }, false => {} })
+    (cnt >= buf.len).match ({
+        true  => panic("zenc: too many distinct generic instances (mono_gbuf cap; raise it in compiler.mono)\n"),
+        false => {}
+    })
+    buf[cnt] = g
+    cnt + 1
 }
 collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
     t.match ({
@@ -184,7 +197,7 @@ collect_body = (buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
 }
 GBufEnd*: { buf: [GenericData], count: i32 }
 collect_insts = (decls: [Decl]) GBufEnd {
-    buf := mono_gbuf(256)
+    buf := mono_gbuf(2048)
     cnt := 0
     decls.loop((h, i, d) { cnt = buf.collect_decl(cnt, d) })
     GBufEnd( buf: buf, count: cnt )

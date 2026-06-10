@@ -1,12 +1,18 @@
-// std.alloc — an explicit allocator, Zig-style. Nothing in here hides a malloc:
-// a function that allocates takes the allocator as a parameter, so you choose WHERE
-// memory comes from (libc, an arena, a fixed buffer) and allocation is visible in the
-// signature. Because zen monomorphizes a `<A: Allocator>` bound, the dispatch is
-// zero-cost — `acquire(a, n)` compiles straight to the chosen allocator's code.
+// std.alloc — explicit allocators, Zig-style. Nothing in here hides a malloc:
+// a function that allocates takes a mutable allocator as a parameter, so you choose
+// WHERE memory comes from and allocation is visible in the signature. Because Zen
+// monomorphizes the generic allocator calls, dispatch is zero-cost — `a.acquire(n)`
+// compiles straight to the chosen allocator's code.
 //
 //   m := Malloc(_: 0)
-//   p := acquire(addr(m), 64)      // explicit: this allocation came from `m`
-//   release(addr(m), p)
+//   p := m.addr().acquire(64)       // explicit: this allocation came from `m`
+//   m.addr().release(p)
+//
+// Allocation failure is not special control flow. The raw methods preserve the
+// old fail-fast/no-check ergonomics for bootstrap code; the `try_*` wrappers lift
+// a NULL pointer into `Result<RawPtr<u8>, IoError>` for normal code.
+
+{ Result, IoError, ok_ptr } = std.result
 
 // the libc primitives, declared bodyless and PUBLIC: explicit allocation, no wrapper hides them.
 // Code that wants the default allocator without threading an `Allocator` bound calls these directly
@@ -17,15 +23,28 @@ free* = (p: RawPtr<u8>) void
 
 // the interface: acquire n bytes, resize a block, release it. Self = the allocator.
 Allocator*: {
-    acquire: (Ptr<Self>, i64) RawPtr<u8>,
-    resize:  (Ptr<Self>, RawPtr<u8>, i64) RawPtr<u8>,
-    release: (Ptr<Self>, RawPtr<u8>) void
+    acquire: (MutPtr<Self>, i64) RawPtr<u8>,
+    resize:  (MutPtr<Self>, RawPtr<u8>, i64) RawPtr<u8>,
+    release: (MutPtr<Self>, RawPtr<u8>) void
 }
 
 // the default: a stateless allocator backed by libc malloc/realloc/free.
 Malloc*: { _: i32 }
+default_allocator* = () Malloc { Malloc(_: 0) }
+
 Malloc.impl(Allocator, {
-    acquire = (s: Ptr<Malloc>, n: i64) RawPtr<u8> { malloc(n) }
-    resize  = (s: Ptr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
-    release = (s: Ptr<Malloc>, p: RawPtr<u8>) void { free(p) }
+    acquire = (s: MutPtr<Malloc>, n: i64) RawPtr<u8> { malloc(n) }
+    resize  = (s: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+    release = (s: MutPtr<Malloc>, p: RawPtr<u8>) void { free(p) }
 })
+
+try_malloc* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(malloc(n)) }
+try_realloc* = (p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(realloc(p, n)) }
+
+try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
+    ok_ptr(a.acquire(n))
+}
+
+try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
+    ok_ptr(a.resize(p, n))
+}

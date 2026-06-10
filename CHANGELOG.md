@@ -35,7 +35,7 @@ multiple modules, all in Zen:
 - **`std.resolve`** — the self-hosted **module loader**: reads a program's `{ … } = std.X` import
   edges, gathers the transitive closure, strips imports, and concatenates each module body once
   (per-module dedup breaks cycles; a per-name pass keeps the first definition of each top-level
-  name) into one flat module for `zenc`. `tools/loader/` packages it as a runnable driver.
+  name) into one flat module for `zenc`.
 
 **Self-hosted — Python and tree-sitter removed.** The compiler is now the `zenc` binary alone:
 `cc` builds it from `bootstrap/{zenc.gen.c,zenrt.c,main.c}`, and `zenc --build-self` regenerates

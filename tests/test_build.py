@@ -230,6 +230,28 @@ def test_zenc_run_prints_text_and_ints():
     assert r.stdout == "answer:\n42\n", repr(r.stdout)
 
 
+def test_zenc_run_prints_str_and_string():
+    """std.fmt prints borrowed str and owned String without forcing String.finish()."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println, println_str, print_string, println_string } = std.fmt\n"
+        "{ new, append } = std.string\n"
+        "main = () i32 {\n"
+        "  println(\"borrowed\")\n"
+        "  println_str(\"alias\")\n"
+        "  s := new().append(\"owned\")\n"
+        "  print_string(s)\n"
+        "  println(\"!\")\n"
+        "  println_string(s)\n"
+        "  0\n"
+        "}\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "borrowed\nalias\nowned!\nowned\n", repr(r.stdout)
+
+
 def test_zenc_run_int_to_str_negatives_and_zero():
     """int→string handles 0, negatives (leading '-'), and multi-digit — the itoa edge cases."""
     zenc = _zenc()
@@ -255,10 +277,10 @@ def test_zenc_run_vec_explicit_allocator():
         "{ vec_of, vpush, get, free_vec } = std.vec\n"
         "main = () i32 {\n"
         "  m := Malloc(_: 0)\n"
-        "  v := addr(m).vec_of([10, 20])\n"
-        "  v2 := addr(m).vpush(v, 30)\n"         # len==cap → grows via a.resize
+        "  v := m.addr().vec_of([10, 20])\n"
+        "  v2 := m.addr().vpush(v, 30)\n"         # len==cap → grows via a.resize
         "  total := v2.get(0) + v2.get(2)\n"
-        "  addr(m).free_vec(v2)\n"
+        "  m.addr().free_vec(v2)\n"
         "  total\n"
         "}\n"
     )
@@ -269,13 +291,13 @@ def test_zenc_run_vec_growth_resizes():
     """Repeated push past capacity forces several a.resize grows; live elements survive each grow."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
-    pushes = "".join(f"  v{i} := addr(m).vpush(v{i-1}, {i+1})\n" for i in range(1, 6))
+    pushes = "".join(f"  v{i} := m.addr().vpush(v{i-1}, {i+1})\n" for i in range(1, 6))
     gets = " + ".join(f"v5.get({i})" for i in range(6))
     (d / "p.zen").write_text(
         "{ vec_of, vpush, get } = std.vec\n"
         "main = () i32 {\n"
         "  m := Malloc(_: 0)\n"
-        "  v0 := addr(m).vec_of([1])\n"
+        "  v0 := m.addr().vec_of([1])\n"
         f"{pushes}"
         f"  {gets}\n"
         "}\n"
@@ -294,8 +316,8 @@ def test_zenc_run_vec_and_print_together():
         "{ println_int } = std.fmt\n"
         "main = () i32 {\n"
         "  m := Malloc(_: 0)\n"
-        "  v := addr(m).vec_of([10, 20])\n"
-        "  v2 := addr(m).vpush(v, 30)\n"
+        "  v := m.addr().vec_of([10, 20])\n"
+        "  v2 := m.addr().vpush(v, 30)\n"
         "  println_int(v2.get(0))\n"              # 10
         "  println_int(v2.get(2))\n"              # 30
         "  0\n"
@@ -304,6 +326,32 @@ def test_zenc_run_vec_and_print_together():
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "10\n30\n", repr(r.stdout)
+
+
+def test_zenc_run_string_explicit_allocator_and_result():
+    """String has the same allocator story as Vec: explicit MutPtr<A> variants, plus Result-returning
+    allocation checks for code that wants errors as values instead of raw NULL."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ default_allocator } = std.alloc\n"
+        "{ new_in, append_in, free_in, try_with_cap, try_append } = std.string\n"
+        "main = () i32 {\n"
+        "  m := default_allocator()\n"
+        "  s := m.addr().new_in()\n"
+        "  s = m.addr().append_in(s, \"abc\")\n"
+        "  n := s.len\n"
+        "  m.addr().free_in(s)\n"
+        "  m.addr().try_with_cap(2).match({\n"
+        "    .Ok(t0) => m.addr().try_append(t0, \"hello\").match({\n"
+        "      .Ok(t)  => { tn := t.len  m.addr().free_in(t)  to_i32(n + tn) },\n"
+        "      .Err(e) => 90\n"
+        "    }),\n"
+        "    .Err(e) => 91\n"
+        "  })\n"
+        "}\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 8
 
 
 # ── CAPSTONE: a real program (examples/stats.zen) composing Vec + generics + enums + match + fmt ──────
@@ -355,6 +403,33 @@ def test_zenc_check_keeps_match_payload_bindings_in_scope():
         "main = () i32 { r := .Ok(7)  r.match({ .Ok(v) => v, .Err => 0 }) }\n"
     )
     r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_zenc_emit_switches_enum_matches_but_keeps_bool_ternary():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "enum.zen").write_text(
+        "R*: Ok(i32) | Err\n"
+        "f* = (r: R) i32 { r.match({ .Ok(v) => v + 1, .Err => 0 }) }\n"
+    )
+    r = subprocess.run([zenc, "emit", str(d / "enum.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "switch (_subj.tag)" in r.stdout
+    assert "case R_Ok:" in r.stdout
+
+    (d / "bool.zen").write_text("f* = (b: bool) i32 { b.match({ true => 1, false => 0 }) }\n")
+    r = subprocess.run([zenc, "emit", str(d / "bool.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "return (b ? 1 : 0);" in r.stdout
+    assert "switch" not in r.stdout
+
+    (d / "run.zen").write_text(
+        "R*: Ok(i32) | Err\n"
+        "f = (r: R) i32 { r.match({ .Ok(v) => { x := v + 1  x }, .Err => 0 }) }\n"
+        "main = () i32 { (f(.Ok(6)) == 7).match({ true => 0, false => 1 }) }\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "run.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
@@ -430,6 +505,21 @@ def test_zenc_int_cast_intrinsics():
     assert subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True).returncode == 2
 
 
+def test_zenc_raw_intrinsics_have_at_spelling():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println_int } = std.fmt\n"
+        "main = () i32 { x := 41  p := @addr(x)  println_int(@load(p) + 1)  0 }\n")
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "42\n"
+    (d / "bad.zen").write_text("main = () i32 { p := @malloc(8)  0 }\n")
+    r = subprocess.run([zenc, "check", str(d / "bad.zen")], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert "undefined name" in r.stderr
+
+
 # ── census #8: C-keyword identifiers are mangled (fn `double` emitted verbatim → cc explosion) ───────
 def test_zenc_c_keyword_identifiers():
     zenc = _zenc()
@@ -455,7 +545,7 @@ def test_zenc_2000_decl_program():
 def test_all_examples_run():
     zenc = _zenc()
     names = sorted(p.stem for p in (ROOT / "examples").glob("*.zen"))
-    assert {"hello", "fizzbuzz", "bank", "shapes", "stats"} <= set(names)
+    assert {"hello", "shapes", "stats", "actor_demo"} <= set(names)
     for name in names:
         r = subprocess.run([zenc, "run", str(ROOT / "examples" / f"{name}.zen")], capture_output=True, text=True)
         assert r.returncode == 0, (name, r.returncode, r.stderr)
@@ -605,10 +695,10 @@ def test_zenc_run_map_wordfreq():
     (d / "p.zen").write_text(
         '{ map_new, mput, mget, mhas, mlen, free_map } = std.map\n'
         '{ println_int } = std.fmt\n'
-        'bump = (a: Ptr<Malloc>, m: Map<i32>, w: str) Map<i32> { a.mput(m, w, m.mget(w, 0) + 1) }\n'
+        'bump = (a: MutPtr<Malloc>, m: Map<i32>, w: str) Map<i32> { a.mput(m, w, m.mget(w, 0) + 1) }\n'
         'main = () i32 {\n'
         '    m := Malloc(_: 0)\n'
-        '    a := addr(m)\n'
+        '    a := m.addr()\n'
         '    w := a.map_new("the", 1)\n'                     # "the cat sat on the mat the cat"
         '    w = a.bump(w, "cat")\n'
         '    w = a.bump(w, "sat")\n'
@@ -644,7 +734,7 @@ def test_zenc_run_map_growth_and_second_value_type():
         '{ println, println_int } = std.fmt\n'
         'main = () i32 {\n'
         '    m := Malloc(_: 0)\n'
-        '    a := addr(m)\n'
+        '    a := m.addr()\n'
         '    w := a.map_new("k0", 0)\n'
         f'{puts}'
         '    println_int(w.mlen())\n'                        # 9
@@ -666,16 +756,90 @@ def test_zenc_run_map_growth_and_second_value_type():
     assert r.stdout == "9\n0\n80\nPARIS\nmiss\n2\n", repr(r.stdout)
 
 
-# ── ambient time (#107 v3 keystone): yield() NO-OPS outside a coroutine, still yields inside ────────
-def test_yield_is_ambient():
+def test_zenc_run_map_try_result_paths():
+    """Fallible map allocation returns Result errors; failed growth leaves the old map valid."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
-    (d / "a.zen").write_text("{ yield } = std.coroutine\n{ println_int } = std.fmt\nmain = () i32 { yield()  println_int(42)  yield()  0 }\n")
+    (d / "p.zen").write_text(
+        '{ Allocator, default_allocator, malloc, free } = std.alloc\n'
+        '{ Result, IoError } = std.result\n'
+        '{ try_map_new, try_mput, mget, free_map } = std.map\n'
+        'LimitAlloc: { left: i32 }\n'
+        'LimitAlloc.impl(Allocator, {\n'
+        '    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {\n'
+        '        (a.left > 0).match ({\n'
+        '            true => {\n'
+        '                a.left = a.left - 1\n'
+        '                malloc(n)\n'
+        '            },\n'
+        '            false => null_ptr()\n'
+        '        })\n'
+        '    }\n'
+        '    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n'
+        '    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { free(p) }\n'
+        '})\n'
+        'success = () i32 {\n'
+        '    m := default_allocator()\n'
+        '    a := m.addr()\n'
+        '    r0: Result<Map<i32>, IoError> := a.try_map_new("x", 1)\n'
+        '    r0.match ({\n'
+        '        .Ok(w0) => {\n'
+        '            r1: Result<Map<i32>, IoError> := a.try_mput(w0, "y", 2)\n'
+        '            r1.match ({\n'
+        '                .Ok(w) => {\n'
+        '                    n := w.mget("x", 0) + w.mget("y", 0)\n'
+        '                    a.free_map(w)\n'
+        '                    n\n'
+        '                },\n'
+        '                .Err(e) => 90\n'
+        '            })\n'
+        '        },\n'
+        '        .Err(e) => 91\n'
+        '    })\n'
+        '}\n'
+        'failure = () i32 {\n'
+        '    lim := LimitAlloc(left: 2)\n'
+        '    a := lim.addr()\n'
+        '    r0: Result<Map<i32>, IoError> := a.try_map_new("a", 4)\n'
+        '    r0.match ({\n'
+        '        .Ok(w) => {\n'
+        '            r1: Result<Map<i32>, IoError> := a.try_mput(w, "b", 5)\n'
+        '            r1.match ({\n'
+        '                .Ok(w2) => {\n'
+        '                    a.free_map(w2)\n'
+        '                    80\n'
+        '                },\n'
+        '                .Err(e) => {\n'
+        '                    n := w.mget("a", 0)\n'
+        '                    a.free_map(w)\n'
+        '                    n\n'
+        '                }\n'
+        '            })\n'
+        '        },\n'
+        '        .Err(e) => 81\n'
+        '    })\n'
+        '}\n'
+        'main = () i32 {\n'
+        '    n := success() + failure()\n'
+        '    (n == 7).match ({ true => 0, false => n })\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+# ── colorless suspension: runtime.suspend no-ops outside a coroutine and yields inside one ──────────
+def test_runtime_suspend_is_colorless():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "a.zen").write_text(
+        "{ async_runtime } = std.runtime\n{ println_int } = std.fmt\n"
+        "main = () i32 { rt := async_runtime(1024)  rt.addr().suspend()  println_int(42)  rt.addr().suspend()  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "a.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "42\n", (r.returncode, r.stdout, r.stderr)   # was SIGSEGV
     (d / "b.zen").write_text(
-        "{ spawn, resume, yield } = std.coroutine\n{ println_int } = std.fmt\n"
-        "work = () void { println_int(1)  yield()  println_int(3) }\n"
-        "main = () i32 { co := spawn(work)  resume(co)  println_int(2)  resume(co)  0 }\n")
+        "{ default_allocator } = std.alloc\n{ spawn_in, resume, destroy_in } = std.coroutine\n{ async_runtime } = std.runtime\n{ println_int } = std.fmt\n"
+        "work = () void { rt := async_runtime(1024)  println_int(1)  rt.addr().suspend()  println_int(3) }\n"
+        "main = () i32 { alloc := default_allocator()  co := alloc.addr().spawn_in(work)  resume(co)  println_int(2)  resume(co)  alloc.addr().destroy_in(co)  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "b.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "1\n2\n3\n", (r.returncode, r.stdout, r.stderr)

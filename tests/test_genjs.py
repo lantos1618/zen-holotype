@@ -30,7 +30,8 @@ NODE = shutil.which("node")
 # the frontend the genjs driver needs: the shared AST + mono + the C emitter (genModule is unused
 # but genc_emit defines helpers genjs leans on via the shared module), the lexer/parser, the checker
 # (resolve_module lives in parse/resolve path), PLUS compiler/genjs.zen — the backend under test.
-_GENJS_SOURCES = ["zen/compiler/genc.zen", "zen/compiler/genc_mono.zen", "zen/compiler/genc_emit.zen",
+_GENJS_SOURCES = ["zen/compiler/genc.zen", "zen/std/result.zen", "zen/compiler/mono.zen", "zen/compiler/genc_emit.zen",
+                  "zen/std/bytes.zen",
                   "zen/compiler/lex.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_type.zen",
                   "zen/compiler/parse_stmt.zen", "zen/compiler/parse.zen", "zen/compiler/check.zen",
                   "zen/compiler/genjs.zen"]
@@ -142,6 +143,12 @@ LET = "test* = () i32 { x := 6\n  y := 7\n  x * y }\n"    # 42 — let-bindings 
 # f64: JS numbers ARE doubles, so this is the one backend where the FloatLit text is native; the
 # to_i32 cast emits Math.trunc, so the C and JS backends compute the same integer.
 FLOAT = "test* = () i32 { x := 1.5\n  to_i32((x + 0.25) * 4.0) }\n"   # 7
+SLICE = "test* = () i32 { xs := [10, 20, 12]\n  xs[1] + xs.len + xs[2] }\n"  # 35
+LOOP = "test* = () i32 { xs := [3, 4, 5]\n  total := 0\n  xs.loop((h, i, x) { total = total + x + to_i32(i) })\n  total }\n"  # 15
+BLOCK = "test* = () i32 { v := { a := 2\n  a + 5 }\n  v * 3 }\n"  # 21
+HOF = ("apply = (f: (i32) i32, x: i32) i32 { f(x) }\n"
+       "twice = (n: i32) i32 { n * 2 }\n"
+       "test* = () i32 { apply(twice, 11) + apply((n){ n + 9 }, 11) }\n")  # 42
 
 CASES = [
     ("fac",    FAC,    120),
@@ -153,6 +160,10 @@ CASES = [
     ("enum",   ENUM,   40),
     ("let",    LET,    42),
     ("float",  FLOAT,  7),
+    ("slice",  SLICE,  35),
+    ("loop",   LOOP,   15),
+    ("block",  BLOCK,  21),
+    ("hof",    HOF,    42),
 ]
 
 
@@ -194,3 +205,23 @@ def test_genjs_enum_match_is_tagged_object():
 def test_genjs_emits_text_for_core_cases():
     # This is useful even when node is present: it pins backend text for key lowering decisions.
     assert "function fac(n)" in emit_js(FAC)
+
+
+def test_genjs_emits_slice_and_loop_as_js_values():
+    js = emit_js(SLICE + LOOP.replace("test*", "loop_test*"))
+    assert "ptr: [10, 20, 12]" in js
+    assert ".ptr[1]" in js
+    assert "for (let i = 0; i < _seq.len;" in js
+
+
+def test_genjs_marks_raw_primitive_calls():
+    js = emit_js("test* = () i32 { x := 1\n  @addr(x)\n  0 }\n")
+    assert "unsupported-in-js: raw @addr" in js
+    assert "unsupported-in-js: intrinsic addr" not in js
+
+
+def test_genjs_plain_malloc_is_not_magic():
+    js = emit_js("malloc = (n: i32) i32 { n + 1 }\ntest* = () i32 { malloc(4) }\n")
+    assert "function malloc(n)" in js
+    assert "malloc(4)" in js
+    assert "unsupported-in-js: intrinsic malloc" not in js

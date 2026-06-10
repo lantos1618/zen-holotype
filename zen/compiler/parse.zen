@@ -1,37 +1,25 @@
-// compiler.parse — the public parser entry: parse_module + the declaration parsers
-// (parse_decl/parse_fn_body/parse_struct/parse_enum/imports/impl + tparams + the
-// decl-classification dispatch). The bulk of the expression/statement/type parsers now
-// live in compiler.parse_expr / compiler.parse_stmt / compiler.parse_type, which this file imports.
-//
-// parse_module is the PUBLIC entry the compiler driver (bootstrap/main.c) and the tests use,
-// so it stays here, importable from compiler.parse.
-//
-// Style: UFCS throughout — `src.scan(pos)` is `scan(src, pos)`, `a.enode(v)` is `enode(a, v)`.
+// Public parser entry and declaration parsers.
+// Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
 { Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, lit, ti32, tvoid } = compiler.genc
-{ Token, Scan, scan, byte_at } = compiler.lex
+{ Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
+{ byte_at } = std.bytes
 { Malloc, malloc } = std.alloc
 { parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get } = compiler.parse_type
 
-// ── a whole function DECLARATION — `name* = (params) RetType { body }` ──────────────
-// The leading Ident is the name; the typed parameter list parses into a heap [Param]; the
-// return-type token (after `)`) maps via ty_of; the brace body is parsed. parse_decl_at
-// also reports where the decl ENDS (past `}`), so a module can parse the next one.
-// `foreign` is true when the decl has NO body — `name = (params) RetType` with no `{ … }` after
-// the return type, a foreign binding (libc etc.). It becomes a DForeign (a C prototype) instead
-// of a DFunc, and `next` resumes at the next decl (NOT past a brace it doesn't have).
+// `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: { func: Func, next: i32, foreign: bool }
-no_body = (a: Ptr<Malloc>) [Stmt] { slice(malloc(0), 0) }   // an empty [Stmt] for a bodyless decl
+no_body = (a: Ptr<Malloc>) [Stmt] { slice(malloc(0), 0) }
 parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
-    nt     := src.scan(pos)                              // the function name
+    nt     := src.scan(pos)
     name   := a.lexeme(src, nt.tok)
-    tp     := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (a generic fn)
+    tp     := a.parse_tparams(src, src.skip_name_star(pos))
     buf    := a.param_buf()
-    pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)   // params + pos past ')'
-    rt     := a.parse_ty(src, pe.next)                  // return type + pos just past it
+    pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)
+    rt     := a.parse_ty(src, pe.next)
     params := buf.take_params(pe.count)
-    src.is_lbrace(src.scan(rt.next).tok).match ({       // a '{' here → a body; otherwise foreign
+    src.is_lbrace(src.scan(rt.next).tok).match ({
         true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next)),
         false => DeclEnd( func: Func( name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body() ),
                            next: rt.next, foreign: true )
@@ -43,15 +31,9 @@ parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], tparams: 
 }
 parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 
-// ── a STRUCT declaration — `name*: { field: Type, … }` ──────────────────────────────
-// The field list is `name: Type` pairs (the same shape as a parameter list) terminated by
-// `}` instead of `)`. Lowers to genc's StructDecl (typedef struct). parse_struct_at also
-// reports where the decl ENDS (past `}`), so a module can parse the next one.
-StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32, defaults: [Func] }   // ntp>0 -> generic; defaults = default-bodied trait methods
-// type parameters `<T, U>` after a struct name — collected as name-only Params (no sizeof(str)), the
-// same idiom imports/impl-methods use. `<` skipped by the caller's skip_to_brace; here they're captured.
+StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32, defaults: [Func] }
 no_tparams = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
-skip_name_star = (src: str, pos: i32) i32 {              // pos at the name; returns pos past name + optional '*'
+skip_name_star = (src: str, pos: i32) i32 {
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
     src.is_star(a1.tok).match ({ true => a1.next, false => nt.next })
@@ -64,7 +46,7 @@ parse_tparams = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {
         false => TParamEnd( names: a.no_tparams(), count: 0, next: pos )
     })
 }
-parse_tparam_list = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {   // pos just past '<'
+parse_tparam_list = (a: Ptr<Malloc>, src: str, pos: i32) TParamEnd {
     buf := a.param_buf()
     te  := a.fill_tparams(src, pos, buf, 0)
     TParamEnd( names: buf.take_params(te.count), count: te.count, next: te.next )
@@ -76,105 +58,100 @@ record_tparam = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd 
 fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },   // unterminated `<…`: flag, don't recurse forever
+        .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },
         _    => src.is_rangle(sc.tok).match ({
             true  => PEnd( count: i, next: sc.next ),
-            false => is_ident_tok(sc.tok).match ({       // an ident is a tparam; commas are skipped
+            false => is_ident_tok(sc.tok).match ({
                 true  => a.record_tparam(src, sc, buf, i),
                 false => a.fill_tparams(src, sc.next, buf, i)
             })
         })
     })
 }
-field_buf = (a: Ptr<Malloc>) [Field] { slice(malloc(1024 * sizeof(Field)), 1024) }   // cap 1024
-take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }                           // exact length
-dfn_buf = (a: Ptr<Malloc>) [Func] { slice(malloc(256 * sizeof(Func)), 256) }   // default-bodied trait methods, cap 256
+field_buf = (a: Ptr<Malloc>) [Field] { slice(malloc(1024 * sizeof(Field)), 1024) }
+take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
+dfn_buf = (a: Ptr<Malloc>) [Func] { slice(malloc(256 * sizeof(Func)), 256) }
 take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
-// a single '=' after a field name -> the field carries a DEFAULT method body (`m = (…) ret {…}`)
-// vs the usual `m: type`. NB '==' / '=>' never appear in a field-marker slot, so a leading '=' here
-// is always the default marker.
+// `m = (...) Ret {}` inside a trait is a default method, not a field type.
 is_eq_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
-// fields + any default method bodies. `dbuf`/`dn` accumulate the default Funcs in parallel; a struct
-// with dn>0 is a trait declaring defaults (its DStruct is followed by one DTraitDefault per default).
 FieldsEnd*: { count: i32, ndef: i32, next: i32 }
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => { perr_set()  FieldsEnd( count: i, ndef: dn, next: sc.next ) },   // unterminated `{ …` field list
+        .Eof => { perr_set()  FieldsEnd( count: i, ndef: dn, next: sc.next ) },
         _    => src.is_rbrace(sc.tok).match ({ true => FieldsEnd( count: i, ndef: dn, next: sc.next ), false => a.fill_field(src, pos, buf, i, dbuf, dn) })
     })
 }
-// a DEFAULT-bodied trait method `m = (params) ret { body }`: parse it as a whole function decl, store
-// the Func (for instantiation per impl), and give the field the method's FnT signature (so conformance
-// reads it like a normal `m: (params) ret` declaration). Resumes after the body's '}'.
+// Default methods store both the FnT requirement and the reusable body.
 fill_field_default = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32, nm: str) FieldsEnd {
-    de := a.parse_decl_at(src, pos)                      // parses `m = (params) ret { body }`
-    buf[i]  = field(nm, fnt_from_func(de.func))          // the FnT signature, for conformance
-    dbuf[dn] = de.func                                   // the default body, instantiated per impl
-    after := src.scan(de.next)                           // ',' (optional) OR the next method / '}'
-    nxt := src.is_comma(after.tok).match ({ true => after.next, false => de.next })   // methods are comma- OR newline-separated
-    a.fill_fields(src, nxt, buf, i + 1, dbuf, dn + 1)    // fill_fields handles '}' or the next field/method
+    de := a.parse_decl_at(src, pos)
+    buf[i]  = field(nm, fnt_from_func(de.func))
+    dbuf[dn] = de.func
+    after := src.scan(de.next)
+    nxt := src.is_comma(after.tok).match ({ true => after.next, false => de.next })
+    a.fill_fields(src, nxt, buf, i + 1, dbuf, dn + 1)
 }
 fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
-    nt    := src.scan(pos)                               // field name
+    // Guard both field and default-method buffers.
+    ((i >= buf.len) || (dn >= dbuf.len)).match ({ true => { perr_set()  return FieldsEnd( count: i, ndef: dn, next: pos ) }, false => {} })
+    nt    := src.scan(pos)
     nm    := a.lexeme(src, nt.tok)
-    mk    := src.scan(nt.next)                           // ':' (signature) or '=' (default body)
+    mk    := src.scan(nt.next)
     src.is_eq_tok(mk.tok).match ({
-        true  => a.fill_field_default(src, pos, buf, i, dbuf, dn, nm),   // `m = (…) ret {…}`
+        true  => a.fill_field_default(src, pos, buf, i, dbuf, dn, nm),
         false => {
-            te    := a.parse_ty(src, mk.next)            // the type (may be Ptr<…>)
+            te    := a.parse_ty(src, mk.next)
             buf[i] = field(nm, te.ty)
-            after := src.scan(te.next)                   // ',' or '}'
+            after := src.scan(te.next)
             src.is_comma(after.tok).match ({
                 true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
-                false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )  // '}'
+                false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )
             })
         }
     })
 }
 parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
-    nt     := src.scan(pos)                              // the struct name
+    nt     := src.scan(pos)
     name   := a.lexeme(src, nt.tok)
-    tp     := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (empty for a plain struct)
-    bstart := src.skip_to_brace(nt.next)                // pos just past '{' (skips `* <…> :`)
+    tp     := a.parse_tparams(src, src.skip_name_star(pos))
+    bstart := src.skip_to_brace(nt.next)
     buf    := a.field_buf()
     dbuf   := a.dfn_buf()
-    fe     := a.fill_fields(src, bstart, buf, 0, dbuf, 0)   // fields (+ any default bodies) + pos past '}'
+    fe     := a.fill_fields(src, bstart, buf, 0, dbuf, 0)
     StructEnd( sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) )
 }
 parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
-// ── an ENUM declaration — `name*: Red | Green | Blue` or `Circle(i32) | Square(i32)` ──
-// A `|`-separated variant list after `:`. Each variant is a bare name (Void payload) or
-// `Name(Type)` (a typed payload). Unlike a struct, there's no closing brace — the list
-// ends at the first token that isn't `|`. Lowers to genc's EnumDecl (a tagged union).
-EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }   // ntp>0 -> a generic enum
-VPay*:    { ty: Ty, next: i32 }                          // a variant's payload Ty + pos past it
+// Enum variants end at the first token that is not `|`.
+EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }
+VPay*:    { ty: Ty, next: i32 }
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false }) }
-variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(malloc(1024 * sizeof(VariantDef)), 1024) }   // cap 1024
-take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }                            // exact length
-// `(Type)` after a variant name -> the payload Ty; pos is just past the '('
+variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(malloc(1024 * sizeof(VariantDef)), 1024) }
+take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
 variant_payload = (a: Ptr<Malloc>, src: str, pos: i32) VPay {
-    te := a.parse_ty(src, pos)                           // the payload type (may be Ptr<…>)
-    rp := src.scan(te.next)                              // ')'
+    te := a.parse_ty(src, pos)
+    rp := src.scan(te.next)
+    src.is_rparen(rp.tok).match ({ true => {}, false => perr_set() })
     VPay( ty: te.ty, next: rp.next )
 }
 fill_variants = (a: Ptr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
-    nt := src.scan(pos)                                  // variant name
+    nt := src.scan(pos)
     nt.tok.kind.match ({
-        .Eof => { perr_set()  PEnd( count: i, next: nt.next ) },   // `name:` / a trailing `|` at EOF: a truncated enum
+        .Eof => { perr_set()  PEnd( count: i, next: nt.next ) },
         _    => a.fill_variant(src, nt, buf, i)
     })
 }
 fill_variant = (a: Ptr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32) PEnd {
+    // Guard the variant buffer.
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: nt.next ) }, false => {} })
     nm   := a.lexeme(src, nt.tok)
-    pk   := src.scan(nt.next)                            // '(' (payload), '|', or the next decl
+    pk   := src.scan(nt.next)
     vp   := src.is_lparen(pk.tok).match ({ true => a.variant_payload(src, pk.next), false => VPay( ty: tvoid(), next: nt.next ) })
     buf[i] = vdef(nm, vp.ty)
-    after := src.scan(vp.next)                           // '|' continues the list, else it ends
+    after := src.scan(vp.next)
     src.is_bar(after.tok).match ({
         true  => a.fill_variants(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: vp.next )     // enum done; resume after the last variant
+        false => PEnd( count: i + 1, next: vp.next )
     })
 }
 skip_to_colon = (src: str, pos: i32) i32 {
@@ -182,29 +159,25 @@ skip_to_colon = (src: str, pos: i32) i32 {
     src.is_colon(sc.tok).match ({ true => sc.next, false => src.skip_to_colon(sc.next) })
 }
 parse_enum_at = (a: Ptr<Malloc>, src: str, pos: i32) EnumEnd {
-    nt   := src.scan(pos)                                // the enum name
+    nt   := src.scan(pos)
     name := a.lexeme(src, nt.tok)
-    tp   := a.parse_tparams(src, src.skip_name_star(pos))   // optional `<T, …>` (empty for a plain enum)
-    cpos := src.skip_to_colon(nt.next)                   // pos just past ':' (skips `* <…>`)
+    tp   := a.parse_tparams(src, src.skip_name_star(pos))
+    cpos := src.skip_to_colon(nt.next)
     buf  := a.variant_buf()
-    ve   := a.fill_variants(src, cpos, buf, 0)           // variants + pos after the last one
+    ve   := a.fill_variants(src, cpos, buf, 0)
     EnumEnd( ed: edef(name, buf.take_variants(ve.count)), tparams: tp.names, ntp: tp.count, next: ve.next )
 }
 parse_enum* = (a: Ptr<Malloc>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
 
-// after the decl name (and an optional `*` public marker) comes `=` for a function or `:`
-// for a type declaration; `: {` is a struct, `: Variant…` is an enum.
 is_star = (src: str, t: Token) bool { src.is_op(t, '*') }
 is_colon = (src: str, t: Token) bool { src.is_op(t, ':') }
-decl_marker = (src: str, pos: i32) Scan {               // the Scan of `=` or `:` (skips name, `*`, `<T…>`)
+decl_marker = (src: str, pos: i32) Scan {
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
     a2 := src.is_star(a1.tok).match ({ true => src.scan(a1.next), false => a1 })
-    src.is_langle(a2.tok).match ({ true => src.scan_tyargs(a2), false => a2 })   // skip `<T…>`
+    src.is_langle(a2.tok).match ({ true => src.scan_tyargs(a2), false => a2 })
 }
-// `<…>` after a decl name: skip past the matching `>` and return the marker Scan there. On MALFORMED
-// type args tyargs_end returns -1 (not a real `<T…>`, e.g. token soup); guard it so scan() is never
-// called with a negative pos (a byte_at read before the buffer) — fall back to the `<` token itself.
+// Malformed `<...>` falls back to the `<` token so scan never receives a negative pos.
 scan_tyargs = (src: str, a2: Scan) Scan {
     te := src.tyargs_end(a2.next, 1)
     (te < 0).match ({ true => a2, false => src.scan(te) })
@@ -213,48 +186,40 @@ decl_is_struct = (src: str, pos: i32) bool {
     m := src.decl_marker(pos)
     src.is_colon(m.tok).match ({ true => src.is_lbrace(src.scan(m.next).tok), false => false })
 }
-decl_is_enum = (src: str, pos: i32) bool {              // `:` but NOT `{` -> an enum variant list
+decl_is_enum = (src: str, pos: i32) bool {
     m := src.decl_marker(pos)
     src.is_colon(m.tok).match ({ true => src.is_lbrace(src.scan(m.next).tok).match ({ true => false, false => true }), false => false })
 }
-// `name := init` — a module-level mutable GLOBAL (Goal Z E1). The marker is the two-byte `:=` symbol
-// (is_colon also matches it via the leading ':', so decl_is_global MUST be checked before struct/enum).
+// Check `:=` before struct/enum because `is_colon` matches its leading ':'.
 is_walrus = (src: str, t: Token) bool {
     t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == ':') && (src.byte_at(t.start + 1) == '='), _ => false })
 }
 decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).tok) }
 
-// ── a whole MODULE — every top-level function declaration, into a heap [Decl] ────────
-// `inc* = (x: i32) i32 { x + 1 }\n dbl* = (x: i32) i32 { x + x }`  ->  [DFunc inc, DFunc dbl]
-// which genModule lowers to a translation unit. Parses decls until Eof.
-decl_buf = (a: Ptr<Malloc>) [Decl] { slice(malloc(16384 * sizeof(Decl)), 16384) }   // cap 16384 — the loader flattens the WHOLE std closure + user program into one module, so this is the cap that real programs can approach (census #11; was 1024 with SILENT truncation)
+decl_buf = (a: Ptr<Malloc>) [Decl] { slice(malloc(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
-// ── imports ──────────────────────────────────────────────────────────────────────
-// `{ A, B } = std.x` — a destructuring import. It carries no code (modules resolve at link time,
-// so genc emits nothing for it), but the parser RECORDS the imported NAMES into a DImport so the
-// checker can tell an imported call from an undefined one. It collects the brace-list idents, then
-// skips the `=` and the dotted module path. This lets a real file (imports first) parse + check.
+// Imports carry no code, but their names become DImport records for the checker.
 decl_is_import = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
-skip_path = (src: str, pos: i32) i32 {                  // a dotted path `compiler.genc`: ident (`.` ident)*
+skip_path = (src: str, pos: i32) i32 {
     id  := src.scan(pos)
     dot := src.scan(id.next)
     src.is_dot(dot.tok).match ({ true => src.skip_path(dot.next), false => id.next })
 }
-// imported names are stored as name-only Params (matching genc's ImportData) in a dedicated buffer
-// (cap 256 — an import list can be long, e.g. parse's own 60-name `compiler.genc` import).
 import_buf = (a: Ptr<Malloc>) [Param] { slice(malloc(256 * sizeof(Param)), 256) }
-ImportEnd*: { count: i32, next: i32 }                   // how many names collected, and pos past '}'
+ImportEnd*: { count: i32, next: i32 }
 record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportEnd {
-    buf[i] = param(a.lexeme(src, sc.tok), tvoid())      // name-only (type Void = an unknown signature)
+    // Guard the import-name buffer.
+    (i >= buf.len).match ({ true => { perr_set()  return ImportEnd( count: i, next: sc.next ) }, false => {} })
+    buf[i] = param(a.lexeme(src, sc.tok), tvoid())
     a.fill_import_names(src, sc.next, buf, i + 1)
 }
 fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) ImportEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => { perr_set()  ImportEnd( count: i, next: sc.next ) },  // unterminated `{ … `: flag, don't recurse forever
-        _    => src.is_rbrace(sc.tok).match ({           // '}' ends the import list
+        .Eof => { perr_set()  ImportEnd( count: i, next: sc.next ) },
+        _    => src.is_rbrace(sc.tok).match ({
             true  => ImportEnd( count: i, next: sc.next ),
-            false => is_ident_tok(sc.tok).match ({       // an ident is a name; commas are skipped
+            false => is_ident_tok(sc.tok).match ({
                 true  => a.record_name(src, sc, buf, i),
                 false => a.fill_import_names(src, sc.next, buf, i)
             })
@@ -262,40 +227,31 @@ fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) I
     })
 }
 
-// metaprogramming in Zen is done as ordinary VALUES, not a pragma: a generator is a function that
-// builds AST and returns it (see std.ast), emitted by genModule. (There is no `@emit` special form.)
 fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
-    // OVERFLOW GUARD: at the buffer's last slot, stop and plant the syntax-error sentinel instead of
-    // writing past the heap buffer (was: silent truncation + corruption past the cap, census #11).
+    // Leave one slot for the syntax-error sentinel.
     (i >= buf.len - 1).match ({ true => { perr_set()  buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  return i + 1 }, false => {} })
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,
         _    => src.decl_is_import(pos).match ({
-            true  => a.fill_import(src, pos, buf, i),    // record an import's names as a DImport
+            true  => a.fill_import(src, pos, buf, i),
             false => sc.tok.kind.match ({
-                // every top-level decl starts with an IDENTIFIER (a name / Type). Anything else — stray
-                // punctuation, a number, leftover garbage — used to fall into fill_func, which consumed
-                // an arbitrary span (silently swallowing the decls AFTER it, so a truncated file checked
-                // 'ok' with `main` dropped). Flag the parse + emit a SYNTAX-ERROR sentinel decl (the
-                // validator rejects it as KPARSE), skip ONE token, and keep parsing so later decls still check.
+                // Bad top-level tokens become syntax sentinels, then parsing resumes.
                 .Ident => a.fill_decl(src, pos, buf, i),
                 _      => { perr_set()  buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  a.fill_decls(src, sc.next, buf, i + 1) }
             })
         })
     })
 }
-// a top-level decl is an impl block (`Type.impl(Trait, { … })`), a struct (`name: { … }`),
-// an enum (`name: A | B`), or a function.
-decl_is_impl = (src: str, pos: i32) bool {              // `Name.impl(` — a method-providing block
-    nt  := src.scan(pos)                                // the type name
-    dot := src.scan(nt.next)                            // '.'
+decl_is_impl = (src: str, pos: i32) bool {
+    nt  := src.scan(pos)
+    dot := src.scan(nt.next)
     src.is_dot(dot.tok).match ({ true => src.tok_eq(src.scan(dot.next).tok, "impl"), false => false })
 }
 fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     src.decl_is_impl(pos).match ({
         true  => a.fill_impl(src, pos, buf, i),
-        false => src.decl_is_global(pos).match ({           // `name := init` — a module-level global
+        false => src.decl_is_global(pos).match ({
             true  => a.fill_global(src, pos, buf, i),
             false => src.decl_is_struct(pos).match ({
                 true  => a.fill_struct(src, pos, buf, i),
@@ -307,61 +263,56 @@ fill_decl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
-// `name := init` -> a DGlobal (mutable module-level global). The init is parsed as a full expression;
-// its TYPE is left void here and filled by resolve from the inferred init type. Emitted as a C
-// `static <ty> name = <init>;` (init must be a C-constant). [Goal Z E1]
 fill_global = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
-    nt := src.scan(pos)                                     // the global's name
+    nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
-    mk := src.decl_marker(pos)                              // the `:=` (skips name, `*`, `<…>`)
-    pe := a.parse_or(src, mk.next)                          // the init expression
+    mk := src.decl_marker(pos)
+    pe := a.parse_or(src, mk.next)
     buf[i] = dglobal(nm, tvoid(), pe.expr)
     a.fill_decls(src, pe.next, buf, i + 1)
 }
-// `Type.impl(Trait, { m1 = (…){…}  m2 = (…){…} })` — each method becomes an ordinary top-level
-// function (named by the method), so a UFCS call `x.m1(a)` -> `m1(x, a)` resolves to one
-// (monomorphic static dispatch). A DImpl record (the Type, the Trait, and the names of the methods
-// THIS impl defines) is emitted after them, so the checker can verify the impl provides every method
-// the Trait declares. The methods fill the decl buffer; their names fill `mbuf` in parallel.
+// Impl methods become mangled functions plus one DImpl conformance record.
 ImplEnd*: { decls: i32, methods: i32, next: i32 }
 fill_impl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
-    tnt    := src.scan(pos)                                  // the Type name
+    tnt    := src.scan(pos)
     tyname := a.lexeme(src, tnt.tok)
-    dot    := src.scan(tnt.next)                             // '.'
-    kw     := src.scan(dot.next)                             // 'impl'
-    lp     := src.scan(kw.next)                              // '('
-    trt    := src.scan(lp.next)                              // the Trait name
+    dot    := src.scan(tnt.next)
+    kw     := src.scan(dot.next)
+    lp     := src.scan(kw.next)
+    trt    := src.scan(lp.next)
     trname := a.lexeme(src, trt.tok)
-    bstart := src.skip_to_brace(pos)                         // past the '{' of `impl(Trait, { … })` (now inside the parens)
-    mbuf   := a.param_buf()                                  // the impl's method names (name-only Params)
+    bstart := src.skip_to_brace(pos)
+    mbuf   := a.param_buf()
     ie     := a.fill_impl_methods(src, bstart, buf, i, mbuf, 0, tyname, trname)
-    buf[ie.decls] = dimpl(tyname, trname, mbuf.take_params(ie.methods))   // the record, after its methods
-    rp     := src.scan(ie.next)                              // the ')' closing `impl(Trait, { … })`
+    buf[ie.decls] = dimpl(tyname, trname, mbuf.take_params(ie.methods))
+    rp     := src.scan(ie.next)
     a.fill_decls(src, rp.next, buf, ie.decls + 1)
 }
 fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => { perr_set()  ImplEnd( decls: i, methods: m, next: sc.next ) },   // unterminated `impl(… { …`: flag, don't recurse forever
-        _    => src.is_comma(sc.tok).match ({                            // optional ',' OR newline between methods (struct-literal ergonomics)
+        .Eof => { perr_set()  ImplEnd( decls: i, methods: m, next: sc.next ) },
+        _    => src.is_comma(sc.tok).match ({
             true  => a.fill_impl_methods(src, sc.next, buf, i, mbuf, m, tyname, trname),
             false => src.is_rbrace(sc.tok).match ({
-                true  => ImplEnd( decls: i, methods: m, next: sc.next ),   // '}' ends the impl block
+                true  => ImplEnd( decls: i, methods: m, next: sc.next ),
                 false => a.fill_impl_one(src, pos, buf, i, mbuf, m, tyname, trname)
             })
         })
     })
 }
 fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
-    de := a.parse_decl_at(src, pos)                          // one method is just a function decl
-    cn := impl_cname(trname, tyname, de.func.name)           // mangle: a DISTINCT C fn per (trait, type, method)
+    // Impl methods fill both decl and method-name buffers.
+    ((i >= buf.len - 1) || (m >= mbuf.len)).match ({ true => { perr_set()  return ImplEnd( decls: i, methods: m, next: pos ) }, false => {} })
+    de := a.parse_decl_at(src, pos)
+    cn := impl_cname(trname, tyname, de.func.name)
     buf[i]  = dfunc(Func( name: cn, params: de.func.params, ret: de.func.ret, tparams: de.func.tparams, body: de.func.body ))
-    mbuf[m] = param(de.func.name, tvoid())                  // the BARE method name, for conformance + dispatch
+    mbuf[m] = param(de.func.name, tvoid())
     a.fill_impl_methods(src, de.next, buf, i + 1, mbuf, m + 1, tyname, trname)
 }
 fill_enum = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)
-    buf[i] = (ee.ntp > 0).match ({                       // tparams present -> a generic enum template
+    buf[i] = (ee.ntp > 0).match ({
         true  => dgenenum(genumdef(ee.ed.name, ee.tparams, ee.ed.variants)),
         false => denum(ee.ed)
     })
@@ -372,8 +323,6 @@ fill_func = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     buf[i] = de.foreign.match ({ true => dforeign(de.func), false => dfunc(de.func) })
     a.fill_decls(src, de.next, buf, i + 1)
 }
-// append one DTraitDefault per default-bodied method onto the decl buffer (after the trait's DStruct),
-// each tagged with the trait name so codegen can instantiate it for the implementing types.
 fill_defaults = (a: Ptr<Malloc>, trname: str, defaults: [Func], buf: [Decl], i: i32, j: i32) i32 {
     (j == defaults.len).match ({
         true  => i,
@@ -382,40 +331,36 @@ fill_defaults = (a: Ptr<Malloc>, trname: str, defaults: [Func], buf: [Decl], i: 
 }
 fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
-    buf[i] = (se.ntp > 0).match ({                       // tparams present -> a generic struct template
+    buf[i] = (se.ntp > 0).match ({
         true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
         false => dstruct(se.sd)
     })
-    ni := a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)   // emit DTraitDefault per default body
+    ni := a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
     a.fill_decls(src, se.next, buf, ni)
 }
-// record `{ names } = std.mod` as a DImport (the names, for the checker), then resume past the path.
 fill_import = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     nbuf := a.import_buf()
-    ie   := a.fill_import_names(src, src.scan(pos).next, nbuf, 0)   // collect names (start past '{')
+    ie   := a.fill_import_names(src, src.scan(pos).next, nbuf, 0)
     buf[i] = dimport(nbuf.take_params(ie.count))
-    eq   := src.scan(ie.next)                                      // '='
-    a.fill_decls(src, src.skip_path(eq.next), buf, i + 1)          // resume past the module path
+    eq   := src.scan(ie.next)
+    a.fill_decls(src, src.skip_path(eq.next), buf, i + 1)
 }
 parse_module* = (a: Ptr<Malloc>, src: str) [Decl] {
-    perr_reset()                                         // a fresh parse: clear the module-wide failure flag
+    perr_reset()
+    lerr_reset()
     buf := a.decl_buf()
     n   := a.fill_decls(src, 0, buf, 0)
-    perr_get().match ({
-        true  => a.prepend_syntax_error(buf, n),         // PARSER TOTALITY: a flagged parse rejects the MODULE
+    (perr_get() || lerr_get()).match ({
+        true  => a.prepend_syntax_error(buf, n),
         false => buf.take_decls(n)
     })
 }
-// PARSER TOTALITY: any flagged parse failure — an unclosed `{`/`(`/`[`/string, a desynced match-arm
-// record, a token no rule accepts — plants the `__syntax_error` sentinel decl FIRST, so the validator
-// counts it and classifies the module KPARSE before any knock-on error in the salvaged tree. (Was: the
-// parser silently stopped/resynced and the checker misreported the truncation as a position-less type
-// error — or the program RAN with the garbage dropped.)
+// Parser totality: any parse/lex failure plants a leading syntax sentinel.
 prepend_syntax_error = (a: Ptr<Malloc>, buf: [Decl], n: i32) [Decl] {
-    (n >= buf.len).match ({                              // the overflow guard already planted a sentinel at the cap
+    (n >= buf.len).match ({
         true  => buf.take_decls(n),
         false => {
-            i := n                                       // shift right one slot; the sentinel takes slot 0
+            i := n
             @while(i > 0) {
                 buf[i] = buf[i - 1]
                 i = i - 1
@@ -426,17 +371,7 @@ prepend_syntax_error = (a: Ptr<Malloc>, buf: [Decl], n: i32) [Decl] {
     })
 }
 
-// ── the decl-boundary ORACLE (for std.resolve's per-name dedup) ────────────────────────
-// decl_span reports the top-level decl at/after `pos` as a byte SPAN of the source — its
-// NAME (for named decls), where its first token starts, and the position just past it —
-// by REUSING the real decl parsers (parse_decl_at / parse_struct_at / parse_enum_at /
-// fill_impl_methods / parse_or). The module loader keeps/drops whole spans of the original
-// text, so "what is a decl" has exactly ONE definition: this parser. (The loader used to
-// re-implement it as a column-0 line scanner, which diverged from the grammar three times:
-// generic `<T>` heads, column-0 impl methods, multi-line imports.)
-//   named=true  → a fn/foreign/struct/enum/global decl called `name` (dedup applies)
-//   named=false → an impl block / import / unparseable token (kept verbatim; name is "")
-//   eof=true    → no decl: only trivia remains after `pos`
+// decl_span is std.resolve's boundary oracle; it reuses the real decl parsers.
 DeclSpan*: { name: str, named: bool, eof: bool, start: i32, next: i32 }
 decl_span* = (a: Ptr<Malloc>, src: str, pos: i32) DeclSpan {
     sc := src.scan(pos)
@@ -446,14 +381,11 @@ decl_span* = (a: Ptr<Malloc>, src: str, pos: i32) DeclSpan {
             true  => DeclSpan( name: "", named: false, eof: false, start: sc.tok.start, next: src.import_span_end(pos) ),
             false => sc.tok.kind.match ({
                 .Ident => a.named_span(src, pos, sc.tok.start),
-                // garbage (mirrors fill_decls' syntax-error sentinel): the span is ONE token
                 _      => DeclSpan( name: "", named: false, eof: false, start: sc.tok.start, next: sc.next ),
             })
         })
     })
 }
-// an Ident-headed decl: classify exactly as fill_decl does and take the END from the same
-// sub-parser fill_* takes it from. An impl block is unnamed (always kept by the loader).
 named_span = (a: Ptr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
     nm := a.lexeme(src, src.scan(pos).tok)
     src.decl_is_impl(pos).match ({
@@ -470,16 +402,12 @@ named_span = (a: Ptr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
         })
     })
 }
-// past a whole `Type.impl(Trait, { … })` block — fill_impl's walk, into scratch buffers (the
-// methods are parsed for their EXTENT only). Scratch cap 1024 matches param_buf, the method-count
-// bound the real fill_impl path already lives under.
+// Parse impl methods into scratch buffers only to find the block end.
 impl_scratch = (a: Ptr<Malloc>) [Decl] { slice(malloc(1024 * sizeof(Decl)), 1024) }
 impl_span_end = (a: Ptr<Malloc>, src: str, pos: i32) i32 {
     ie := a.fill_impl_methods(src, src.skip_to_brace(pos), a.impl_scratch(), 0, a.param_buf(), 0, "", "")
-    src.scan(ie.next).next                               // past the ')' closing `impl(Trait, { … })`
+    src.scan(ie.next).next
 }
-// past a whole `{ names } = mod.path` import — fill_import's walk without recording the names:
-// skip to the '}' (Eof-guarded, like fill_import_names), then the '=', then the dotted path.
 import_close = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
@@ -491,21 +419,12 @@ import_span_end = (src: str, pos: i32) i32 {
     src.skip_path(src.scan(src.import_close(src.scan(pos).next)).next)
 }
 
-// ── whole-string entry points ──────────────────────────────────────────────────────
-// the public single-source-string entries (kept here so compiler.parse's surface is stable —
-// the expression/statement parsers they delegate to live in compiler.parse_expr / compiler.parse_stmt).
-// parse a whole source string to an expression tree (the loosest level is `||`)
 parse* = (a: Ptr<Malloc>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
-// ── a function BODY under a caller-chosen name (the source is just the statements) ──
-// `x := 1 + 2\n y := x * 2\n y - 1`  ->  int32_t f(){ int32_t x=…; int32_t y=…; return …; }
-// an empty [Param] without a `[]` literal — empty slices have no element type to infer here, so the
-// compiler source uses an explicit zero-length slice.
 no_params = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
 parse_fn* = (a: Ptr<Malloc>, src: str, fname: str) Func {
     Func( name: fname, params: a.no_params(), ret: ti32(), tparams: a.no_params(), body: a.build_body(src, 0) )
 }
 
-// ── eval: interpret the tree (proof the parse is right) ───────────────────────────
 eval_bin = (b: BinData) i64 {
     o := b.op.byte_at(0)
     l := b.lhs.eval()

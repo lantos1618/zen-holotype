@@ -5,7 +5,8 @@
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
 { Param, Ty, param, fntype, mangle_str, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tnamed, tptr, tslice } = compiler.genc
-{ Token, Scan, scan, byte_at } = compiler.lex
+{ Token, Scan, scan } = compiler.lex
+{ byte_at } = std.bytes
 { Malloc, malloc } = std.alloc
 { is_op, is_lparen, lexeme } = compiler.parse_expr
 
@@ -40,6 +41,35 @@ span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
     })
 }
 tok_eq* = (src: str, t: Token, kw: str) bool { src.span_eq(t.start, t.len, kw, 0) }
+tok_word_end = (words: str, p: i32) bool { (words.byte_at(p) == 0) || (words.byte_at(p) == '|') }
+tok_word_next = (words: str, p: i32) i32 {
+    (words.byte_at(p) == 0).match ({
+        true  => p,
+        false => (words.byte_at(p) == '|').match ({
+            true  => p + 1,
+            false => words.tok_word_next(p + 1)
+        })
+    })
+}
+tok_word_eq = (src: str, t: Token, words: str, p: i32, i: i32) bool {
+    (i == t.len).match ({
+        true  => words.tok_word_end(p + i),
+        false => words.tok_word_end(p + i).match ({
+            true  => false,
+            false => (src.byte_at(t.start + i) == words.byte_at(p + i)) && src.tok_word_eq(t, words, p, i + 1)
+        })
+    })
+}
+tok_in_from = (src: str, t: Token, words: str, p: i32) bool {
+    (words.byte_at(p) == 0).match ({
+        true  => false,
+        false => src.tok_word_eq(t, words, p, 0).match ({
+            true  => true,
+            false => src.tok_in_from(t, words, words.tok_word_next(p))
+        })
+    })
+}
+tok_in* = (src: str, t: Token, words: str) bool { src.tok_in_from(t, words, 0) }
 // a single type token -> genc's Ty: a primitive keyword, else a Named type (the lexeme).
 ty_of = (a: Ptr<Malloc>, src: str, t: Token) Ty {
     src.tok_eq(t, "i32").match ({ true => ti32(), false =>
@@ -91,6 +121,8 @@ parse_tyargs* = (a: Ptr<Malloc>, src: str, pos: i32) TyArgs {   // pos just past
     TyArgs( args: buf.take_tys(ae.count), next: ae.next )
 }
 fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   // `>`-terminated type list
+    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     te    := a.parse_ty(src, pos)
     buf[i] = te.ty
     after := src.scan(te.next)                           // ',' or '>'
@@ -113,6 +145,8 @@ fill_tys = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_ty(src, pos, buf, i) })
 }
 fill_ty = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
+    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     te    := a.parse_ty(src, pos)                        // one parameter type
     buf[i] = te.ty
     after := src.scan(te.next)                           // ',' or ')'
@@ -129,7 +163,7 @@ parse_fn_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '(
 }
 // `Ptr`, `MutPtr`, and `RawPtr` all lower to `T*` today, so all three parse through the same pointer
 // type node. Mutability/aliasing remains a checker-level policy, not a C type distinction.
-is_ptr_kw = (src: str, t: Token) bool { src.tok_eq(t, "Ptr") || src.tok_eq(t, "MutPtr") || src.tok_eq(t, "RawPtr") }
+is_ptr_kw = (src: str, t: Token) bool { src.tok_in(t, "Ptr|MutPtr|RawPtr") }
 parse_slice_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
     inner := a.parse_ty(src, pos)                        // the element type
     rb    := src.scan(inner.next)                        // ']'
@@ -163,6 +197,8 @@ fill_params* = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     })
 }
 fill_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     nt    := src.scan(pos)                               // param name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'

@@ -42,7 +42,7 @@ def test_graph_covers_every_module_and_resolves_known_edges():
     assert set(edges) == set(ALL_MODULES)
     # spot-check a few real edges: compiler/check_validate imports from compiler and std modules.
     assert set(edges["compiler/check_validate"]) >= {
-        "compiler/genc", "compiler/check", "compiler/lex", "std/alloc", "std/str"
+        "compiler/genc", "compiler/check", "std/bytes", "std/alloc", "std/str"
     }
     # and per-name origin: check_validate's `eq` comes from std/str (NOT std/ast, which also defines eq).
     assert origin["compiler/check_validate"]["eq"] == "std/str"
@@ -68,11 +68,11 @@ def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
 
 
 def test_reachable_is_the_transitive_closure():
-    # compiler/check_validate -> compiler/check -> {compiler/genc, std/str, std/string, compiler/lex, std/mem, std/alloc}; the closure is transitive,
+    # compiler/check_validate -> compiler/check -> {compiler/genc, std/str, std/string, std/bytes, std/mem, std/alloc}; the closure is transitive,
     # so `string`/`mem` appear though check_validate imports neither directly.
     reach = set(_resolver.reachable("check_validate"))
     assert {"compiler/genc", "compiler/check", "std/str", "std/string",
-            "compiler/lex", "std/mem", "std/alloc"} <= reach
+            "std/bytes", "std/mem", "std/alloc"} <= reach
     assert "compiler/check_validate" not in reach               # a module is not in its own closure
 
 

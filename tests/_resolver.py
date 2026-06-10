@@ -43,10 +43,10 @@ STD = ROOT / "zen" / "std"
 COMPILER = ROOT / "zen" / "compiler"
 
 _IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*(?P<ns>std|compiler)\.(?P<mod>\w+)", re.S)
-# A decl head is `name[<tparams>][*] =/:` — the optional `<…>` is a GENERIC head (`Own<T>:`,
-# `new<T>* =`, `own_get<T>* =`); without it the generic stdlib exports (Own/new/clone/release/…)
-# were invisible to split_decls, so a cross-module CONSUMER of them saw them as undefined.
-_DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(<[^>]*>)?(\*?)\s*[=:]")
+# A decl head is `name[*][<tparams>][*] =/:` — the optional `<…>` is a GENERIC head. The language
+# accepts both public-generic spellings used in the tree (`Vec*<T>:` and older `new<T>* =`), so the
+# splitter must keep both. Without this, generic stdlib exports are invisible to cross-module checks.
+_DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\*?)(<[^>]*>)?(\*?)\s*[=:]")
 # A method-impl head `Type.impl(Trait, { … })` is ALSO a top-level decl, but it has no `name =/:` head so
 # _DECL_HEAD_RE misses it. It must survive resolution: a cross-module CONSUMER of a trait method (e.g.
 # std.vec calling `a.acquire(…)` on an explicit Allocator, where acquire lives in std.alloc's
@@ -270,7 +270,8 @@ def split_decls(src):
         if not m:
             i += 1
             continue
-        name, star = m.group(1), m.group(3)      # group(2) is the optional <tparams>, group(3) the `*`
+        name = m.group(1)
+        star = (m.group(2) == "*") or (m.group(4) == "*")   # public marker before or after <tparams>
         start = i
         depth, seen_brace = 0, False
         while i < n:
@@ -281,9 +282,15 @@ def split_decls(src):
             i += 1
             if seen_brace and depth <= 0:
                 break
-            if not seen_brace:           # a braceless single-line decl (foreign sig)
+            if not seen_brace:           # a braceless decl (foreign sig / enum)
+                # absorb indented `| Variant(…)` continuation lines: an enum may wrap, e.g.
+                #   Expr*: Int(i64) | … | Arrow(ArrowData)
+                #        | MakeEnum(MakeEnumData) | …
+                # (was: only the head line survived, silently truncating the variant list)
+                while i < n and lines[i][:1].isspace() and lines[i].lstrip().startswith("|"):
+                    i += 1
                 break
-        decls.append((name, star == "*", "\n".join(lines[start:i])))
+        decls.append((name, star, "\n".join(lines[start:i])))
     return decls
 
 
@@ -464,5 +471,4 @@ def _scc_graph_order(modules):
 
 def _bootstrap_graph_order():
     return _scc_graph_order(_bootstrap_source_set())
-
 
