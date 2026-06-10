@@ -298,7 +298,12 @@ gen_params = (s: String, ps: [Param]) String {
 gen_sig = (s: String, f: Func) String {
     s.gen_ty(f.ret.addr()).append(" ").append(f.name).append("(").gen_params(f.params).append(")")
 }
-gen_func* = (s: String, f: Func) String { s.gen_sig(f).append(" ").gen_block(f.body) }
+gen_func* = (s: String, f: Func) String {
+    eq(f.name, "main").match ({
+        true  => s.gen_sig(f).append(" { zen__init_globals(); ").gen_block(f.body).append(" }"),   // run global inits first; body keeps its own block (returns valid)
+        false => s.gen_sig(f).append(" ").gen_block(f.body)
+    })
+}
 // a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
 gen_proto = (s: String, d: Decl) String {
     d.is_template().match ({                            // templates are inlined, never emitted
@@ -475,12 +480,44 @@ gen_funcs = (s: String, decls: [Decl]) String {
     out
 }
 
-// a module-level mutable global: `static <ty> name = <init>;` (init must be a C-constant). [Goal Z E1]
+// is a global's initializer a C CONSTANT (emittable in a `static … = init;`)? Literals, null_ptr (a
+// constant 0), and constant arithmetic are; anything else (a call, a struct literal with calls, a var)
+// must be hoisted to the runtime init fn below (census #10: `g := mk()` emitted invalid C).
+is_const_init = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Int(n)    => true,
+        .Byte(b)   => true,
+        .StrLit(t) => true,
+        .Bin(b)    => b.lhs.is_const_init() && b.rhs.is_const_init(),
+        .Call(c)   => eq(c.fn, "null_ptr"),
+        _          => false
+    })
+}
+// a module-level mutable global. A C-constant init emits `static <ty> name = <init>;`; a RUNTIME init
+// emits just `static <ty> name;` (zero-init) — its assignment goes into zen__init_globals(), which the
+// emitted `main` runs first. [Goal Z E1 + census #10]
 gen_global = (s: String, d: Decl) String {
     d.match ({
-        .DGlobal(g) => s.append("static ").gen_ty(g.ty.addr()).append(" ").append(g.name).append(" = ").gen_expr(g.init).append("; "),
+        .DGlobal(g) => g.init.is_const_init().match ({
+            true  => s.append("static ").gen_ty(g.ty.addr()).append(" ").append(g.name).append(" = ").gen_expr(g.init).append("; "),
+            false => s.append("static ").gen_ty(g.ty.addr()).append(" ").append(g.name).append("; ")
+        }),
         _ => s
     })
+}
+// the runtime-init fn: one `name = <init>;` per NON-constant global, in decl order. Always emitted (an
+// empty fn when every global is constant) so `main`'s unconditional call always links; the compiler's
+// own gen.c has no `main`, so its copy is just an unused static.
+gen_global_inits = (s: String, decls: [Decl]) String {
+    out := s.append("static void zen__init_globals(void) { ")
+    decls.loop((h, i, d) { out = d.match ({
+        .DGlobal(g) => g.init.is_const_init().match ({
+            true  => out,
+            false => out.append(g.name).append(" = ").gen_expr(g.init).append("; ")
+        }),
+        _ => out
+    }) })
+    out.append("} ")
 }
 // NB trait default-method bodies (DTraitDefault) are instantiated into concrete `impl_<Trait>_<Type>_m`
 // DFuncs by compiler.check.resolve_module BEFORE genModule runs — so here they are ordinary DFuncs, and a
@@ -493,5 +530,6 @@ genModule* = (raw: [Decl]) String {
     decls.loop((h, i, d) { s = s.gen_proto(d) })        // pass 2: forward-declare every function
     s = s.gen_types_upto(decls, depth_cache(decls), 0, slen(decls))   // pass 3: type defs in dependency order (memoized depths)
     decls.loop((h, i, d) { s = s.gen_global(d) })       // pass 3.5: module globals (after their type, before fns)
+    s = s.gen_global_inits(decls)                       // pass 3.6: runtime init for non-constant globals
     s.gen_funcs(decls)                                  // pass 4: functions + raw
 }
