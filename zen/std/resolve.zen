@@ -16,6 +16,8 @@
 // (std templates aren't emitted into a stand-alone test binary). acid checks THIS file as-is.
 
 { byte_at } = compiler.lex
+{ decl_span } = compiler.parse
+{ Malloc } = std.alloc
 { String, push, append, with_cap, finish } = std.string
 { read_file } = std.io
 
@@ -218,16 +220,10 @@ import_id = (out: String, s: str, p: i32) String {
 //      is the first seen and wins (str.eq survives, mem.free survives over string.free) — the current
 //      resolver's "nearest defining module wins" rule.
 //
-// HOW per-name dedup splits decls with only ONE brace-counted construct: after imports are stripped,
-// every top-level decl in the stdlib begins at a COLUMN-0 decl-head line — `name[*] =`/`name[*]:`/
-// `Name.impl(...`. The only other column-0 lines are `}` (a decl's closing brace), `//` comments /
-// blanks — which all attach to the decl they sit in/before — and METHOD lines inside a multi-line
-// `Type.impl(Trait, { … })` BODY (std.runtime writes its `suspend = …` methods at column 0). So a
-// plain decl runs from one column-0 head to JUST BEFORE the next column-0 head with no brace counting;
-// an IMPL block alone is consumed brace-BALANCED (impl_end, the Zen twin of _resolver._brace_delta's
-// impl capture) so its column-0 method lines are never mistaken for top-level decl heads — that mistake
-// silently DROPPED a later same-named method (two impls of one trait both have `suspend = …` lines;
-// the second was deduped away → "impl does not satisfy the trait").
+// HOW per-name dedup splits decls: it does NOT — the PARSER does. compiler.parse.decl_span reuses the
+// real decl parsers to hand dedup each top-level decl's name + byte span, so the loader carries no
+// second definition of "what is a decl" (the line-based scanner it replaced diverged from the grammar
+// three times: generic `<T>` heads, column-0 impl-method lines, multi-line imports).
 
 // ── a String byte accessor + a module-name SET over a flat String ───────────────────────────────────
 // The SET is just a String holding each seen module name as a `name\n` line (set starts empty, so every
@@ -326,182 +322,69 @@ load_imports = (root: str, src: str, p: i32, c: Closure) Closure {
 }
 
 // ── PER-NAME DEDUP: keep the first top-level decl of each name ───────────────────────────────────────
-// dedup_decls(flat) walks the per-module-flattened source line by line, classifying each COLUMN-0 line:
-//   • a decl HEAD `name[*] =/:`  → the name's FIRST occurrence is kept (emit + record name); a later
-//     same-named head starts a DROPPED decl (its body lines, dropped too — see `keeping`).
-//   • a `.impl(...)` head        → a method-impl block: a decl boundary, but ALWAYS kept (impls don't
-//     collide by name — many traits per type), never recorded. Its WHOLE brace-balanced body is
-//     consumed as one unit (impl_end) — method lines inside may sit at column 0 and are NOT decls.
-//   • anything else at column 0 (`}`, `//` comment, blank) or any INDENTED line → a continuation of the
-//     current decl: emitted iff the current decl is being kept (`keeping`). A `}` closing a dropped decl
-//     is thus correctly dropped with it.
-// State threaded: out (the kept source), seen (names already emitted), keeping (is the current decl kept).
+// dedup_decls used to RE-IMPLEMENT "what is a decl" as a column-0 line scanner (decl-head shapes,
+// generic `<T>` skipping, brace-balanced impl bodies with string/char/comment special cases…) — a second
+// parser that diverged from the real grammar three separate times. It now asks THE parser instead:
+// compiler.parse.decl_span reuses the real decl parsers to report each top-level decl's NAME and byte
+// span [start, next), and dedup keeps/drops whole SPANS of the original text — kept source stays
+// byte-identical (the driver's error-position line mapping depends on that), and decl boundaries can
+// no longer desync from the grammar.
+//
+// KEEP/DROP per named decl, in flat order (ns-bound module bodies, the MAIN program, then imported
+// module closures, dependency-first):
+//   • MAIN region [bodystart, bodylen): ALWAYS kept (a same-file duplicate survives to the validator,
+//     which rejects it as dup-fn) and recorded in BOTH sets.
+//   • an unseen imported name: kept + recorded (the defining module comes first, so it wins).
+//   • an imported name another IMPORT already defined: dropped (first-wins — std.string's `free`
+//     yields to std.mem's, the classic cross-module clash).
+//   • an imported name the MAIN program also defines: KEPT, so the validator reports "duplicate
+//     top-level definition". Silently shadowing a std decl the program (transitively) imported was a
+//     miscompile trap — the std module's own internal calls would rebind to the user's decl.
+// Impl blocks and anything unnamed are kept verbatim (impls don't collide by name — many traits per
+// type), and trivia between decls (comments, blank lines) always survives with its neighbors.
 
-// the column of the first byte of the line at p — actually we only need: is byte p the line's first AND
-// non-space? A column-0 decl head starts with an identifier byte at p with no leading space.
-is_head_start = (flat: str, p: i32) bool {
-    b := flat.byte_at(p)
-    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_')
-}
-
-// at position `p` (just past a candidate name's ident run), is this a top-level decl head? — optional
-// '*', optional spaces, then '=' or ':'  (e.g. `name =`, `name* =`, `Name:`, `Name*: {`).
-after_name_is_decl = (flat: str, p: i32) bool {
-    b := flat.byte_at(p)
-    (b == '<').match ({
-        true  => flat.after_name_is_decl(flat.skip_angles(p + 1, 1)),   // a GENERIC head `name<T, A>* =` — skip the tparams (was: bailed at '<', so generic decls were invisible to dedup → rc/arc/drop + fmt all "duplicate top-level")
-        false => (b == '*').match ({
-        true  => flat.after_name_is_decl(p + 1),
-        false => (b == ' ').match ({
-            true  => flat.after_name_is_decl(p + 1),
-            false => (b == '=') || (b == ':')
-        })
-        })
-    })
-}
-// past the matching '>' of an already-open angle group (depth = open count); stops at NUL/newline.
-skip_angles = (flat: str, p: i32, depth: i32) i32 {
-    b := flat.byte_at(p)
-    ((b == 0) || (b == 10)).match ({
-        true  => p,
-        false => (b == '<').match ({
-            true  => flat.skip_angles(p + 1, depth + 1),
-            false => (b == '>').match ({
-                true  => (depth == 1).match ({ true => p + 1, false => flat.skip_angles(p + 1, depth - 1) }),
-                false => flat.skip_angles(p + 1, depth)
-            })
-        })
-    })
-}
-// at position `p` (just past an ident run), is this a `.impl(` method-impl head?
-after_name_is_impl = (flat: str, p: i32) bool {
-    (flat.byte_at(p) == '.') && (flat.byte_at(p + 1) == 'i') && (flat.byte_at(p + 2) == 'm')
-        && (flat.byte_at(p + 3) == 'p') && (flat.byte_at(p + 4) == 'l')
-}
-// end of the identifier run starting at p (first non-ident byte).
+// end of the identifier run starting at p (first non-ident byte) — used by the ns-qualifier scan below.
 res_ident_end = (flat: str, p: i32) i32 {
     flat.byte_at(p).is_ident_byte().match ({ true => flat.res_ident_end(p + 1), false => p })
 }
-
-// ── the impl-body skipper: a `Type.impl(Trait, { … })` block is consumed brace-BALANCED ─────────────
-// A multi-line impl body holds METHOD lines at column 0 (std.runtime's `suspend = (s: …) void { … }`);
-// line-by-line dd misread those as top-level decl heads, recorded the first `suspend`, and silently
-// DROPPED the second impl's `suspend` line as a "duplicate" → the flattened module lost a method and
-// the checker said "impl does not satisfy the trait". So an impl head consumes its WHOLE block here.
-
-// the net `{`/`}` balance of the LINE at p (to its '\n'/NUL), threading the running balance `d`.
-// Braces inside "…" strings, '…' char literals or behind a `//` comment don't count — the Zen twin
-// of tests/_resolver._brace_delta (the compiler's emitter sources are full of brace literals).
-line_delta = (flat: str, p: i32, d: i32) i32 {
-    b := flat.byte_at(p)
-    ((b == 0) || (b == 10)).match ({
-        true  => d,
-        false => ((b == '/') && (flat.byte_at(p + 1) == '/')).match ({
-            true  => d,                                                     // `//`: the rest of the line is comment text
-            false => (b == '\'').match ({
-                true  => flat.line_delta(flat.skip_char_lit(p + 1), d),    // a '…' char literal ('{' must not count)
-                false => (b == '"').match ({
-                    true  => flat.line_delta(flat.skip_str_lit(p + 1), d), // a "…" string literal
-                    false => {
-                        step := (b == '{').match ({ true => 1, false => (b == '}').match ({ true => 0 - 1, false => 0 }) })
-                        flat.line_delta(p + 1, d + step)
-                    }
-                })
-            })
-        })
-    })
-}
-// past a char literal's closing quote — p is just past the opening `'`: one `\.` escape or one byte,
-// then the closing quote (a malformed literal stops without consuming what follows).
-skip_char_lit = (flat: str, p: i32) i32 {
-    p2 := (flat.byte_at(p) == '\\').match ({ true => p + 2, false => p + 1 })
-    (flat.byte_at(p2) == '\'').match ({ true => p2 + 1, false => p2 })
-}
-// past a string literal's closing quote — p is just past the opening `"`; a `\"` escape doesn't close,
-// and an unterminated string stops at the line end (strings don't span lines).
-skip_str_lit = (flat: str, p: i32) i32 {
-    b := flat.byte_at(p)
-    ((b == 0) || (b == 10)).match ({
-        true  => p,
-        false => (b == '"').match ({
-            true  => p + 1,
-            false => (b == '\\').match ({ true => flat.skip_str_lit(p + 2), false => flat.skip_str_lit(p + 1) })
-        })
-    })
-}
-// past the END of the impl block whose HEAD line is at p: a one-line impl (head balance 0) is just its
-// own line; a multi-line one runs until the body's braces balance shut (impl_close). NUL-guarded.
-impl_end = (flat: str, p: i32) i32 {
-    d := flat.line_delta(p, 0)
-    n := flat.next_line(p)
-    (d > 0).match ({ true => flat.impl_close(n, d), false => n })
-}
-impl_close = (flat: str, p: i32, depth: i32) i32 {
-    (flat.byte_at(p) == 0).match ({
-        true  => p,
-        false => {
-            d := depth + flat.line_delta(p, 0)
-            n := flat.next_line(p)
-            (d <= 0).match ({ true => n, false => flat.impl_close(n, d) })
-        }
-    })
-}
-
-// dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
-// the per-name pass; resolve_program runs it over its per-module-flattened output.
-dedup_decls* = (flat: str, bodystart: i64, bodylen: i64) str { with_cap(4096).dd(flat, 0, with_cap(256), true, bodystart, bodylen).finish() }
-
-// the worker: `out` accumulates kept lines, `set` the names kept so far, `keeping` whether the decl whose
-// body we're inside is being emitted. `bodylen` = byte length of the MAIN file body (it occupies [0, bodylen)
-// of `flat`; imported module bodies follow). A decl head in the main region [0, bodylen) is ALWAYS kept (so
-// a same-file duplicate survives to the validator, which rejects it as dup-fn) but still recorded so an
-// import colliding with a main name is still dropped (main wins). Imported decls dedup as before. (bodylen=0
-// reproduces full dedup for the public dedup_decls path.) Recurses line by line to the NUL.
-dd = (out: String, flat: str, p: i32, set: String, keeping: bool, bodystart: i64, bodylen: i64) String {
-    (flat.byte_at(p) == 0).match ({
-        true  => out,
-        false => flat.is_head_start(p).match ({
-            // a COLUMN-0 ident line: a decl head, an impl head, or (rarely) something else.
-            true  => {
-                ie := flat.res_ident_end(p)
-                flat.after_name_is_impl(ie).match ({
-                    true  => {
-                        e := flat.impl_end(p)                                             // impl: always keep — the WHOLE
-                        out.append_span(flat, p, e).dd(flat, e, set, true, bodystart, bodylen)   // brace-balanced block, so column-0 method lines inside are never decl heads
-                    },
-                    false => flat.after_name_is_decl(ie).match ({
-                        true  => {
-                            nm   := import_name_span(with_cap(16), flat, p, ie)               // the decl's NAME
-                            keep := ((p >= bodystart) && (p < bodylen)).match ({ true => true, false => set.seen(nm).match ({ true => false, false => true }) })   // MAIN-FILE region only: always keep (same-file dups survive). Namespace-bound module bodies sit BEFORE bodystart and dedup like imports (was: counted as main → `c = std.c` died on duplicate-toplevel)
-                            keep.match ({
-                                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set.add_name(nm), true, bodystart, bodylen),
-                                false => out.dd(flat, flat.next_line(p), set, false, bodystart, bodylen)          // drop this decl
-                            })
-                        },
-                        // a column-0 ident line that is NOT a decl/impl head (shouldn't occur post-strip):
-                        // treat as a continuation of the current decl.
-                        false => keeping.match ({
-                            true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen),
-                            false => out.dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen)
-                        })
-                    })
-                })
-            },
-            // a continuation line (`}`, indented, `//` comment, blank): emit iff the current decl is kept.
-            false => keeping.match ({
-                true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen),
-                false => out.dd(flat, flat.next_line(p), set, keeping, bodystart, bodylen)
-            })
-        })
-    })
-}
-// append the line [p, next) of `flat` to `out` INCLUDING its trailing '\n' (next_line lands past the
-// '\n'; copying [p, next) keeps the newline, so kept lines stay separated).
-emit_line = (out: String, flat: str, p: i32) String { out.append_span(flat, p, flat.next_line(p)) }
 // append the ident span [p, e) of `flat` (a decl name) to `out` — like import_module's take_name but for
 // an explicit [p, e) range rather than scanning the charset (the caller already found the end).
 import_name_span = (out: String, flat: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.push(flat.byte_at(p)).import_name_span(flat, p + 1, e) })
+}
+// append everything from p to the terminating NUL (the trailing trivia after the last decl).
+append_to_nul = (out: String, s: str, p: i32) String {
+    (s.byte_at(p) == 0).match ({ true => out, false => out.push(s.byte_at(p)).append_to_nul(s, p + 1) })
+}
+
+// dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
+// the per-name pass; resolve_program runs it over its per-module-flattened output. The allocator feeds
+// the parser the spans are read with.
+dedup_decls* = (a: Ptr<Malloc>, flat: str, bodystart: i64, bodylen: i64) str {
+    a.dd(with_cap(4096), flat, 0, with_cap(256), with_cap(64), bodystart, bodylen).finish()
+}
+
+// the worker: one decl_span per step. `out` accumulates kept bytes; `set` = every name emitted so far;
+// `mainset` = the names the MAIN region defined. A span keeps its leading trivia [p, start) either way.
+dd = (a: Ptr<Malloc>, out: String, flat: str, p: i32, set: String, mainset: String, bodystart: i64, bodylen: i64) String {
+    sp := a.decl_span(flat, p)
+    (sp.eof || (sp.next <= p)).match ({                  // done — or NO PROGRESS on malformed soup:
+        true  => out.append_to_nul(flat, p),             // keep the rest verbatim and let the parser/validator judge it
+        false => sp.named.match ({
+            true  => {
+                nm     := with_cap(16).append(sp.name)
+                inmain := (sp.start >= bodystart) && (sp.start < bodylen)
+                keep   := inmain.match ({ true => true, false => set.seen(nm).match ({ true => mainset.seen(nm), false => true }) })
+                s2     := set.seen(nm).match ({ true => set, false => set.add_name(nm) })
+                m2     := inmain.match ({ true => mainset.add_name(nm), false => mainset })
+                keep.match ({
+                    true  => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, s2, m2, bodystart, bodylen),
+                    false => a.dd(out.append_span(flat, p, sp.start), flat, sp.next, s2, m2, bodystart, bodylen)   // drop [start, next)
+                })
+            },
+            false => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, set, mainset, bodystart, bodylen)   // impl/import/other: keep verbatim
+        })
+    })
 }
 
 // ── QUALIFIED NAMESPACE ACCESS (N2b): `c = std.c` then `c.malloc(8)` ──────────────────────────────────
@@ -647,7 +530,7 @@ strip_ns_into = (out: String, s: str, p: i32, quals: String, first: bool) String
 // closure with a cross-module name clash (string.free vs mem.free) still yields a clash-free single
 // module — and `malloc` arriving from BOTH a namespace bind and an import collapses to one. Returns the
 // finished (NUL-terminated) flat source.
-resolve_program* = (root: str, mainsrc: str) str {
+resolve_program* = (a: Ptr<Malloc>, root: str, mainsrc: str) str {
     ns   := collect_ns(root, mainsrc, 0, NsScan( quals: with_cap(64), c: Closure( seen: with_cap(256), out: with_cap(4096) ) ))
     // `first` ⇒ the first kept main line gets NO leading '\n'; only true when no namespace-bound module
     // body precedes it (else it would glue onto that body's last line — load_closure prefixes each body
@@ -655,5 +538,5 @@ resolve_program* = (root: str, mainsrc: str) str {
     nsl  := ns.c.out.len                                     // ns-bound module bodies end here; the MAIN file follows
     body := ns.c.out.strip_ns_into(mainsrc, 0, ns.quals, ns.c.out.len == 0)
     cN   := load_imports(root, mainsrc, 0, Closure( seen: ns.c.seen, out: body ))
-    dedup_decls(cN.out.finish(), nsl, body.len)
+    a.dedup_decls(cN.out.finish(), nsl, body.len)
 }

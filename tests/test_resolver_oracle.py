@@ -50,8 +50,12 @@ def test_graph_covers_every_module_and_resolves_known_edges():
 
 def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
     order, cycle = _resolver.topo_order()
-    # the parse_* modules import each other -> a genuine cycle; everything else is a DAG.
-    assert set(cycle) == {"compiler/parse", "compiler/parse_expr", "compiler/parse_stmt", "compiler/parse_type"}
+    # the parse_* modules import each other -> a genuine cycle; everything else is a DAG. Kahn's
+    # leftover set also holds any module DOWNSTREAM of the cycle: std/resolve imports compiler/parse
+    # (the loader's per-name dedup uses the parser's decl_span as its decl-boundary oracle), so it
+    # can never reach in-degree 0 — it is unorderable, not itself cyclic.
+    assert set(cycle) == {"compiler/parse", "compiler/parse_expr", "compiler/parse_stmt",
+                          "compiler/parse_type", "std/resolve"}
     assert set(order) | set(cycle) == set(ALL_MODULES)        # every module accounted for exactly once
     assert not (set(order) & set(cycle))
     edges, _ = _resolver.module_graph()

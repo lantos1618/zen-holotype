@@ -13,7 +13,7 @@ int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, 
  * contains zen/std/ and zen/compiler/) + the program source, returns the flat single-module source with
  * the transitive import closure spliced in (per-module + per-name dedup; N2b qualified `c.x` too).
  * build/run/check call it BEFORE parse_module so a program that imports the stdlib resolves from disk. */
-const char* resolve_program(const char* root, const char* src);
+const char* resolve_program(Malloc* a, const char* root, const char* src);
 
 /* ── normal mode: read one flat .zen (argv[1] or stdin), emit C to stdout ──────────────────────── */
 static char* read_all(FILE* in, size_t* out_len){
@@ -324,7 +324,7 @@ static int build_program(const char* argv0, const char* in_path, const char* out
      * resolve_program returns the flat single-module source; on a program with no imports it is a pass-
      * through. The returned str is borrowed from the loader's arena — don't free it. */
     char dir[4096]; bin_dir(argv0, dir, sizeof dir);
-    const char* flat = resolve_program(dir, buf);
+    const char* flat = resolve_program(&m, dir, buf);
     zslice decls = resolve_module(&m, parse_module(&m, flat));
     if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); free(buf); return 1; }  /* U2 */
     if (type_check(&m, decls, in_path, flat, buf) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
@@ -411,7 +411,7 @@ int main(int argc, char** argv){
         Malloc m = { 0 };
         /* U1.3: resolve std.X imports from disk before checking, same as build_program. */
         char dir[4096]; bin_dir(argv[0], dir, sizeof dir);
-        const char* flat = resolve_program(dir, buf);
+        const char* flat = resolve_program(&m, dir, buf);
         zslice decls = resolve_module(&m, parse_module(&m, flat));
         /* U2: reject gross parse failure (zero decls). NOTE: a missing `main` is NOT enforced in `check`
          * — a library module (std.*) legitimately has no main; build/run enforce it instead. */
