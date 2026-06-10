@@ -326,3 +326,15 @@ def test_zenc_no_leading_paren_statement_glue():
     )
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "7\n", (r.returncode, r.stdout, r.stderr)
+
+
+# ── census #5: bitwise operators & | ^ << >> (were SILENT wrong-answers via statement-glue) ──────────
+def test_zenc_bitwise_operators():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text("main = () i32 { (12 & 10) + (12 | 3) * 10 + (12 ^ 10) * 100 + (1 << 4) - (64 >> 2) }\n")
+    # 8 + 150 + 600 + 16 - 16 = 758 % 256 = 246
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 246
+    # bitwise binds TIGHTER than comparison: 6 & 3 == 2 → (6&3)==2 → true
+    (d / "q.zen").write_text("main = () i32 { (6 & 3 == 2).match ({ true => 1, false => 0 }) }\n")
+    assert subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True).returncode == 1

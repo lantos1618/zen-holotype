@@ -173,8 +173,13 @@ struct_field = (decls: [Decl], sname: str, fname: str) Ty {
 }
 // a comparison / logical operator (== < > <= >= && || !=) yields bool; an arithmetic one its operand
 is_cmp_op = (op: str) bool {
-    b := op.byte_at(0)
-    (b == '=') || (b == '<') || (b == '>') || (b == '&') || (b == '|') || (b == '!')
+    // bool-RESULT ops: == != < <= > >= && || !. NOT the bitwise ops, which keep the lhs type:
+    // `<<`/`>>` (b1 == b0 for </>) and the 1-byte `&`/`|`/`^` (the 2-byte && / || ARE bool).
+    b  := op.byte_at(0)
+    b1 := op.byte_at(1)
+    (b == '=') || (b == '!')
+        || (((b == '<') || (b == '>')) && (b1 != b))
+        || (((b == '&') || (b == '|')) && (b1 == b))
 }
 bin_ty = (op: str, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
 // is `e` a purely-LITERAL numeric expression? Such a value is polymorphic — it fits any numeric
