@@ -57,10 +57,17 @@ resume* = (c: Coro) i32 {
     back = c.link
     flag = 0
     swapcontext(c.link, c.ctx)
+    cur = null_ptr()                  // we are back OUTSIDE: a top-level yield() must no-op again
     flag
 }
 // suspend the current coroutine back to whoever resumed it; execution continues here on next resume.
+// OUTSIDE any coroutine (cur unset), yield is a NO-OP — the keystone of ambient time: any code may
+// call yield() unconditionally; under a scheduler it interleaves, standalone it just falls through
+// ("everything is a Future that is already done"). Was: swapcontext on null → segfault.
 yield* = () void {
-    flag = 1
-    swapcontext(cur, back)
+    is_null(cur).match ({
+        true  => {},
+        false => { flag = 1  swapcontext(cur, back) }
+    })
 }
+is_null = (p: RawPtr<u8>) bool { p == null_ptr() }

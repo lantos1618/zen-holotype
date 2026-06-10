@@ -664,3 +664,18 @@ def test_zenc_run_map_growth_and_second_value_type():
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "9\n0\n80\nPARIS\nmiss\n2\n", repr(r.stdout)
+
+
+# ── ambient time (#107 v3 keystone): yield() NO-OPS outside a coroutine, still yields inside ────────
+def test_yield_is_ambient():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "a.zen").write_text("{ yield } = std.coroutine\n{ println_int } = std.fmt\nmain = () i32 { yield()  println_int(42)  yield()  0 }\n")
+    r = subprocess.run([zenc, "run", str(d / "a.zen")], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == "42\n", (r.returncode, r.stdout, r.stderr)   # was SIGSEGV
+    (d / "b.zen").write_text(
+        "{ spawn, resume, yield } = std.coroutine\n{ println_int } = std.fmt\n"
+        "work = () void { println_int(1)  yield()  println_int(3) }\n"
+        "main = () i32 { co := spawn(work)  resume(co)  println_int(2)  resume(co)  0 }\n")
+    r = subprocess.run([zenc, "run", str(d / "b.zen")], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == "1\n2\n3\n", (r.returncode, r.stdout, r.stderr)
