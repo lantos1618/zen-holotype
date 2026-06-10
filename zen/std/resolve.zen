@@ -218,12 +218,16 @@ import_id = (out: String, s: str, p: i32) String {
 //      is the first seen and wins (str.eq survives, mem.free survives over string.free) — the current
 //      resolver's "nearest defining module wins" rule.
 //
-// HOW per-name dedup splits decls WITHOUT a brace counter: after imports are stripped, every top-level
-// decl in the stdlib begins at a COLUMN-0 decl-head line — `name[*] =`/`name[*]:`/`Name.impl(...`. The
-// only other column-0 lines are `}` (a decl's closing brace) and `//` comments / blanks, which all attach
-// to the decl they sit in/before. So a decl runs from one column-0 head to JUST BEFORE the next column-0
-// head — no need to count braces (and thus no need to special-case '{' char literals or brace-mentioning
-// comments, the trap _resolver._brace_delta works around). This holds for the whole committed stdlib.
+// HOW per-name dedup splits decls with only ONE brace-counted construct: after imports are stripped,
+// every top-level decl in the stdlib begins at a COLUMN-0 decl-head line — `name[*] =`/`name[*]:`/
+// `Name.impl(...`. The only other column-0 lines are `}` (a decl's closing brace), `//` comments /
+// blanks — which all attach to the decl they sit in/before — and METHOD lines inside a multi-line
+// `Type.impl(Trait, { … })` BODY (std.runtime writes its `suspend = …` methods at column 0). So a
+// plain decl runs from one column-0 head to JUST BEFORE the next column-0 head with no brace counting;
+// an IMPL block alone is consumed brace-BALANCED (impl_end, the Zen twin of _resolver._brace_delta's
+// impl capture) so its column-0 method lines are never mistaken for top-level decl heads — that mistake
+// silently DROPPED a later same-named method (two impls of one trait both have `suspend = …` lines;
+// the second was deduped away → "impl does not satisfy the trait").
 
 // ── a String byte accessor + a module-name SET over a flat String ───────────────────────────────────
 // The SET is just a String holding each seen module name as a `name\n` line (set starts empty, so every
@@ -326,7 +330,8 @@ load_imports = (root: str, src: str, p: i32, c: Closure) Closure {
 //   • a decl HEAD `name[*] =/:`  → the name's FIRST occurrence is kept (emit + record name); a later
 //     same-named head starts a DROPPED decl (its body lines, dropped too — see `keeping`).
 //   • a `.impl(...)` head        → a method-impl block: a decl boundary, but ALWAYS kept (impls don't
-//     collide by name — many traits per type), never recorded.
+//     collide by name — many traits per type), never recorded. Its WHOLE brace-balanced body is
+//     consumed as one unit (impl_end) — method lines inside may sit at column 0 and are NOT decls.
 //   • anything else at column 0 (`}`, `//` comment, blank) or any INDENTED line → a continuation of the
 //     current decl: emitted iff the current decl is being kept (`keeping`). A `}` closing a dropped decl
 //     is thus correctly dropped with it.
@@ -378,6 +383,70 @@ res_ident_end = (flat: str, p: i32) i32 {
     flat.byte_at(p).is_ident_byte().match ({ true => flat.res_ident_end(p + 1), false => p })
 }
 
+// ── the impl-body skipper: a `Type.impl(Trait, { … })` block is consumed brace-BALANCED ─────────────
+// A multi-line impl body holds METHOD lines at column 0 (std.runtime's `suspend = (s: …) void { … }`);
+// line-by-line dd misread those as top-level decl heads, recorded the first `suspend`, and silently
+// DROPPED the second impl's `suspend` line as a "duplicate" → the flattened module lost a method and
+// the checker said "impl does not satisfy the trait". So an impl head consumes its WHOLE block here.
+
+// the net `{`/`}` balance of the LINE at p (to its '\n'/NUL), threading the running balance `d`.
+// Braces inside "…" strings, '…' char literals or behind a `//` comment don't count — the Zen twin
+// of tests/_resolver._brace_delta (the compiler's emitter sources are full of brace literals).
+line_delta = (flat: str, p: i32, d: i32) i32 {
+    b := flat.byte_at(p)
+    ((b == 0) || (b == 10)).match ({
+        true  => d,
+        false => ((b == '/') && (flat.byte_at(p + 1) == '/')).match ({
+            true  => d,                                                     // `//`: the rest of the line is comment text
+            false => (b == '\'').match ({
+                true  => flat.line_delta(flat.skip_char_lit(p + 1), d),    // a '…' char literal ('{' must not count)
+                false => (b == '"').match ({
+                    true  => flat.line_delta(flat.skip_str_lit(p + 1), d), // a "…" string literal
+                    false => {
+                        step := (b == '{').match ({ true => 1, false => (b == '}').match ({ true => 0 - 1, false => 0 }) })
+                        flat.line_delta(p + 1, d + step)
+                    }
+                })
+            })
+        })
+    })
+}
+// past a char literal's closing quote — p is just past the opening `'`: one `\.` escape or one byte,
+// then the closing quote (a malformed literal stops without consuming what follows).
+skip_char_lit = (flat: str, p: i32) i32 {
+    p2 := (flat.byte_at(p) == '\\').match ({ true => p + 2, false => p + 1 })
+    (flat.byte_at(p2) == '\'').match ({ true => p2 + 1, false => p2 })
+}
+// past a string literal's closing quote — p is just past the opening `"`; a `\"` escape doesn't close,
+// and an unterminated string stops at the line end (strings don't span lines).
+skip_str_lit = (flat: str, p: i32) i32 {
+    b := flat.byte_at(p)
+    ((b == 0) || (b == 10)).match ({
+        true  => p,
+        false => (b == '"').match ({
+            true  => p + 1,
+            false => (b == '\\').match ({ true => flat.skip_str_lit(p + 2), false => flat.skip_str_lit(p + 1) })
+        })
+    })
+}
+// past the END of the impl block whose HEAD line is at p: a one-line impl (head balance 0) is just its
+// own line; a multi-line one runs until the body's braces balance shut (impl_close). NUL-guarded.
+impl_end = (flat: str, p: i32) i32 {
+    d := flat.line_delta(p, 0)
+    n := flat.next_line(p)
+    (d > 0).match ({ true => flat.impl_close(n, d), false => n })
+}
+impl_close = (flat: str, p: i32, depth: i32) i32 {
+    (flat.byte_at(p) == 0).match ({
+        true  => p,
+        false => {
+            d := depth + flat.line_delta(p, 0)
+            n := flat.next_line(p)
+            (d <= 0).match ({ true => n, false => flat.impl_close(n, d) })
+        }
+    })
+}
+
 // dedup_decls(flat): the flat source with every later duplicate top-level decl removed. Public entry for
 // the per-name pass; resolve_program runs it over its per-module-flattened output.
 dedup_decls* = (flat: str, bodystart: i64, bodylen: i64) str { with_cap(4096).dd(flat, 0, with_cap(256), true, bodystart, bodylen).finish() }
@@ -396,7 +465,10 @@ dd = (out: String, flat: str, p: i32, set: String, keeping: bool, bodystart: i64
             true  => {
                 ie := flat.res_ident_end(p)
                 flat.after_name_is_impl(ie).match ({
-                    true  => out.emit_line(flat, p).dd(flat, flat.next_line(p), set, true, bodystart, bodylen),   // impl: always keep
+                    true  => {
+                        e := flat.impl_end(p)                                             // impl: always keep — the WHOLE
+                        out.append_span(flat, p, e).dd(flat, e, set, true, bodystart, bodylen)   // brace-balanced block, so column-0 method lines inside are never decl heads
+                    },
                     false => flat.after_name_is_decl(ie).match ({
                         true  => {
                             nm   := import_name_span(with_cap(16), flat, p, ie)               // the decl's NAME
