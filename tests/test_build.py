@@ -338,3 +338,13 @@ def test_zenc_bitwise_operators():
     # bitwise binds TIGHTER than comparison: 6 & 3 == 2 → (6&3)==2 → true
     (d / "q.zen").write_text("main = () i32 { (6 & 3 == 2).match ({ true => 1, false => 0 }) }\n")
     assert subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True).returncode == 1
+
+
+# ── census #6: explicit int casts to_i32/to_i64/to_u8 (no narrowing path existed at all) ─────────────
+def test_zenc_int_cast_intrinsics():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text('{ len } = std.str\nmain = () i32 { n := len("hello")  to_i32(n) }\n')
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 5
+    (d / "q.zen").write_text("main = () i32 { big := 4294967298  to_i32(big) }\n")   # 2^32+2 truncates to 2
+    assert subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True).returncode == 2
