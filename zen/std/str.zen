@@ -35,3 +35,88 @@ dup* = (s: str) [u8] {
     src.loop((h, i, b) { out[i] = b })
     out
 }
+
+// ── search ──────────────────────────────────────────────────────────────────
+
+// do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
+has_at = (sv: [u8], pv: [u8], at: i64) bool {
+    j: i64 := 0
+    @while (j < pv.len && sv[at + j] == pv[j]) { j = j + 1 }
+    j == pv.len
+}
+
+// byte index of the first occurrence of `needle` in `s`, -1 if absent.
+// the empty needle matches at 0 (the strstr convention).
+find* = (s: str, needle: str) i64 {
+    sv := view(s)
+    pv := view(needle)
+    found: i64 := -1
+    i: i64 := 0
+    @while (found < 0 && i + pv.len <= sv.len) {
+        sv.has_at(pv, i).match ({ true => { found = i }, _ => {} })
+        i = i + 1
+    }
+    found
+}
+
+// does `s` contain `needle`? (the empty needle is contained in everything)
+contains* = (s: str, needle: str) bool { s.find(needle) >= 0 }
+
+// does `s` begin with `prefix`? (every str starts with the empty prefix)
+starts_with* = (s: str, prefix: str) bool {
+    sv := view(s)
+    pv := view(prefix)
+    pv.len <= sv.len && sv.has_at(pv, 0)
+}
+
+// ── slicing & indexing ──────────────────────────────────────────────────────
+
+// pin `x` into [lo, hi] — the substr clamp
+pin = (x: i64, lo: i64, hi: i64) i64 {
+    (x < lo).match ({
+        true  => lo,
+        false => (x > hi).match ({ true => hi, false => x }),
+    })
+}
+
+// a fresh NUL-terminated copy of `n` bytes of `s` from byte `start`. Out-of-range is
+// CLAMPED, not an error: start pins to [0, len], n to [0, len - start] — so
+// substr("hi", 1, 99) == "i" and substr("hi", 5, 2) == "". The caller owns the copy
+// (free: release(view(it).ptr)).
+substr* = (s: str, start: i64, n: i64) str {
+    sv := view(s)
+    lo := start.pin(0, sv.len)
+    m := n.pin(0, sv.len - lo)
+    out := new_u8(m + 1)
+    i: i64 := 0
+    @while (i < m) {
+        out[i] = sv[lo + i]
+        i = i + 1
+    }
+    out[m] = 0
+    cstr(out.ptr)
+}
+
+// the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
+char_at* = (s: str, i: i64) u8 {
+    sv := view(s)
+    (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
+}
+
+// ── numbers ─────────────────────────────────────────────────────────────────
+
+// the i64 value of the decimal text in `s`: an optional leading '-', then a run of
+// digits. Parsing stops at the first non-digit and never errors: no leading digits
+// (empty str, garbage, a bare '-') parse as 0 — parse_int("42") == 42,
+// parse_int("-7") == -7, parse_int("12ab") == 12, parse_int("zen") == 0.
+parse_int* = (s: str) i64 {
+    sv := view(s)
+    neg := sv.len > 0 && sv[0] == '-'
+    i: i64 := neg.match ({ true => 1, false => 0 })
+    acc: i64 := 0
+    @while (i < sv.len && sv[i] >= '0' && sv[i] <= '9') {
+        acc = acc * 10 + to_i64(sv[i] - '0')
+        i = i + 1
+    }
+    neg.match ({ true => 0 - acc, false => acc })
+}

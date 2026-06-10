@@ -446,3 +446,68 @@ def test_typed_local_annotations_honored():
     (d / "c.zen").write_text('main = () i32 { x: i32 := "nope"  0 }\n')
     r = subprocess.run([zenc, "check", str(d / "c.zen")], capture_output=True, text=True)
     assert r.returncode != 0 and "does not fit" in r.stderr
+
+
+# ── std.str search/slice/parse: find/contains/substr/parse_int/starts_with/char_at ───────────────────
+def test_zenc_run_str_ops_edges():
+    """The new std.str ops, hammered on edges: find at head/end/absent/empty-needle, substr CLAMPS
+    out-of-range (start and n, both directions), char_at is 0 past either end, parse_int handles
+    '-'/garbage-tail/all-garbage/empty (documented: no leading digits → 0) and i64-sized values."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ find, contains, substr, parse_int, starts_with, char_at, eq, len } = std.str\n'
+        '{ println_int } = std.fmt\n'
+        'bi = (b: bool) i64 { b.match ({ true => 1, false => 0 }) }\n'
+        'main = () i32 {\n'
+        '  println_int(find("hello world", "world"))   // 6: needle flush at the end\n'
+        '  println_int(find("hello world", "x"))       // -1: absent\n'
+        '  println_int(find("hello world", ""))        // 0: empty needle (strstr convention)\n'
+        '  println_int(find("aaab", "aab"))            // 1: overlapping-prefix scan\n'
+        '  println_int(bi(contains("hello", "ell")) + bi(starts_with("hello", "he")))   // 2\n'
+        '  println_int(bi(starts_with("he", "hello"))) // 0: prefix longer than s\n'
+        '  println_int(bi(eq(substr("hello world", 6, 5), "world")))   // 1\n'
+        '  println_int(bi(eq(substr("hi", 1, 99), "i")))   // 1: n clamped to the tail\n'
+        '  println_int(len(substr("hi", 5, 2)))            // 0: start past the end -> ""\n'
+        '  println_int(bi(eq(substr("hi", -3, 1), "h")))   // 1: negative start pinned to 0\n'
+        '  println_int(to_i64(char_at("abc", 2)) - \'c\')  // 0: last byte\n'
+        '  println_int(to_i64(char_at("abc", 3)) + to_i64(char_at("abc", -1)))   // 0: both ends\n'
+        '  println_int(parse_int("-7"))            // -7\n'
+        '  println_int(parse_int("12ab"))          // 12: stops at the first non-digit\n'
+        '  println_int(parse_int("zen") + parse_int("") + parse_int("-"))   // 0: no digits -> 0\n'
+        '  println_int(parse_int("123456789012"))  // i64-sized\n'
+        '  0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "6\n-1\n0\n1\n2\n0\n1\n1\n0\n1\n0\n0\n-7\n12\n0\n123456789012\n", repr(r.stdout)
+
+
+def test_zenc_run_str_tokenizer():
+    """THE acceptance program: tokenize a hardcoded sentence — find each space, substr the word out,
+    parse_int the numeric tokens (incl. a negative) — composed UFCS-style with recursion."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ find, substr, parse_int, len } = std.str\n'
+        '{ println, println_int } = std.fmt\n'
+        '// print the words of s[from..] (split on \' \'), each followed by its parse_int\n'
+        'words = (s: str, from: i64) i64 {\n'
+        '  rest := s.substr(from, s.len() - from)\n'
+        '  sp := rest.find(" ")\n'
+        '  (sp < 0).match ({\n'
+        '    true  => { println(rest)  println_int(rest.parse_int())  0 },\n'
+        '    false => {\n'
+        '      w := rest.substr(0, sp)\n'
+        '      println(w)\n'
+        '      println_int(w.parse_int())\n'
+        '      s.words(from + sp + 1)\n'
+        '    },\n'
+        '  })\n'
+        '}\n'
+        'main = () i32 { words("zen has 3 frontends and -1 regrets", 0)  0 }\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ("zen\n0\nhas\n0\n3\n3\nfrontends\n0\nand\n0\n-1\n-1\nregrets\n0\n"), repr(r.stdout)
