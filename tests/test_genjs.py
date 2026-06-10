@@ -139,6 +139,9 @@ ENUM = ("Shape*: Circle(i32) | Square(i32) | Other\n"
         "}\n"
         "test* = () i32 { area(.Square(6)) + area(.Circle(2)) + area(.Other) }\n")   # 36 + 4 + 1? -> 36+4+0=40; with Other=0 -> 40; we assert below
 LET = "test* = () i32 { x := 6\n  y := 7\n  x * y }\n"    # 42 — let-bindings + trailing expr
+# f64: JS numbers ARE doubles, so this is the one backend where the FloatLit text is native; the
+# to_i32 cast emits Math.trunc, so the C and JS backends compute the same integer.
+FLOAT = "test* = () i32 { x := 1.5\n  to_i32((x + 0.25) * 4.0) }\n"   # 7
 
 CASES = [
     ("fac",    FAC,    120),
@@ -149,6 +152,7 @@ CASES = [
     ("struct", STRUCT, 25),
     ("enum",   ENUM,   40),
     ("let",    LET,    42),
+    ("float",  FLOAT,  7),
 ]
 
 
@@ -171,6 +175,13 @@ def test_genjs_emits_function_and_no_typedef():
 def test_genjs_division_truncates():
     # integer division must emit Math.trunc — JS `/` alone would yield a float.
     assert "Math.trunc(" in emit_js(DIV)
+
+
+def test_genjs_float_literal_is_native():
+    # a FloatLit's source text is emitted verbatim (a JS number IS a double); to_i32 -> Math.trunc.
+    js = emit_js(FLOAT)
+    assert "1.5" in js and "0.25" in js
+    assert "Math.trunc(" in js
 
 
 def test_genjs_enum_match_is_tagged_object():

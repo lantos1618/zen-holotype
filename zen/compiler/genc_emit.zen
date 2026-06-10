@@ -40,6 +40,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
     e.match ({                                       // match auto-derefs the Ptr<Expr>
         .Int(n)  => s.gen_int(n),
         .Byte(n) => s.gen_int(n),       // a char literal — the same C integer, just typed u8 in check
+        .FloatLit(ft) => s.append(ft),  // a float literal — its source text IS a C double literal
         .Var(v)  => s.append(v.name),
         .Bin(b)  => s.gen_bin(b),
         .Call(c) => s.gen_call(c),
@@ -149,7 +150,8 @@ gen_call = (s: String, c: CallData) String {
     eq(c.fn, "to_i32").match ({ true => s.append("((int32_t)(").gen_expr(c.arg0()).append("))"), false =>   // explicit narrowing cast
     eq(c.fn, "to_i64").match ({ true => s.append("((int64_t)(").gen_expr(c.arg0()).append("))"), false =>   // explicit widening cast
     eq(c.fn, "to_u8").match  ({ true => s.append("((uint8_t)(").gen_expr(c.arg0()).append("))"), false =>   // explicit byte cast
-    s.append(c.fn).append("(").gen_args(c.args).append(")") }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    eq(c.fn, "to_f64").match ({ true => s.append("((double)(").gen_expr(c.arg0()).append("))"), false =>   // explicit int -> float cast (to_i32/to_i64 above truncate a double the C way)
+    s.append(c.fn).append("(").gen_args(c.args).append(")") }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
 }
 
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
@@ -174,6 +176,7 @@ gen_sexpr* = (s: String, e: Ptr<Expr>) String {
     e.match ({
         .Int(n) => s.gen_int(n),
         .Byte(n) => s.gen_int(n),
+        .FloatLit(ft) => s.append(ft),
         .Var(v) => s.append(v.name),
         .Bin(b) => s.append("(").append(b.op).append(" ").gen_sexpr(b.lhs).append(" ").gen_sexpr(b.rhs).append(")"),
         .Call(c) => s.append("(").append(c.fn).gen_sargs(c.args).append(")"),
@@ -502,6 +505,7 @@ is_const_init = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Int(n)    => true,
         .Byte(b)   => true,
+        .FloatLit(ft) => true,
         .StrLit(t) => true,
         .Bin(b)    => b.lhs.is_const_init() && b.rhs.is_const_init(),
         .Call(c)   => eq(c.fn, "null_ptr"),

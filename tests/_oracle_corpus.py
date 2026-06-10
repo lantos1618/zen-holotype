@@ -151,6 +151,18 @@ VALUE_CASES = [
     ('test* = () i32 { v := (1 < 2).match ({ false => 5, _ => 9, })  v }', 9),                          # bool + `_ => body`, trailing comma
     ('test* = () i32 { (2).match ({ 1 => 10, 2 => 20, _ => 99, }) }', 20),                              # literal arms, trailing comma
     ('C*: A | B\ntest* = () i32 { c := C.B()  c.match ({ .A => 1, .B => 2, }) }', 2),                   # variant arms, trailing comma
+# --- f64 floats (Goal R): a literal carries its TEXT through the compiler (the compiler itself has
+#     no float values); f64 op f64 only for + - * / and comparisons; the int<->float boundary is
+#     crossed ONLY by the explicit to_f64 / to_i64 / to_i32 casts (C truncation toward zero). ---
+    ('test* = () i32 { to_i32(1.5 * 4.0) }', 6),
+    ('test* = () i32 {\n  x := 2.5\n  y := x + 0.25\n  to_i32(y * 4.0)\n}', 11),
+    ('test* = () i32 { (1.5 > 1.25).match({ true => 1, false => 0 }) }', 1),
+    ('test* = () i32 { to_i32(to_f64(7) * 0.5 * 2.0) }', 7),                                  # to_f64 widens an int
+    ('test* = () i32 { to_i32(-2.5 * -2.0) }', 5),                                            # prefix `-` on f64 (the 0.0 - x lowering)
+    ('half* = (x: f64) f64 { x / 2.0 }\ntest* = () i32 { to_i32(half(9.0) * 2.0) }', 9),      # f64 params + returns
+    ('test* = () i64 { to_i64(2.9) }', 2),                                                    # to_i64 truncates a double the C way
+    ('test* = () i32 {\n  x := 0.25\n  x.match ({ 0.25 => 1, 1.5 => 2, _ => 9 })\n}', 1),     # a float-literal match is an `==` chain
+    ('g := 1.5\ntest* = () i32 { to_i32(g * 2.0) }', 3),                                      # a module-global f64 (constant init)
 ]
 
 # (src, verdict) the check binary must produce.
@@ -352,6 +364,25 @@ VERDICT_CASES = [
     ('f* = (b: bool) i32 { b.match { true => 1, false => 2 } }\ntest* = () i32 { f(true) }', 'reject'),    # bare-brace match (no parens)
     ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1, 5 => 2 }) }\ntest* = () i32 { f(C.A()) }', 'reject'),  # a literal arm in a variant match (was: silently taken as `_`)
     ('f* = (b: bool) i32 { b.match ({ true => 1, 0 => 2 }) }\ntest* = () i32 { f(true) }', 'reject'),      # a non-bool label in a bool match (was: silently accepted)
+
+    # --- f64 floats: STRICT — no implicit int<->float mixing in EITHER direction (literals included),
+    #     and no float `%`, bitwise, or shifts. f64 op f64 (+ - * / and the comparisons) accepts. ---
+    ('test* = () f64 { 1.5 * 2.0 }', 'accept'),
+    ('test* = () i32 { (0.5 <= 0.5).match({ true => 1, false => 0 }) }', 'accept'),
+    ('test* = () i32 { to_i32(1.5 + 1.0) }', 'accept'),
+    ('test* = () f64 { 1.5 + 1 }', 'reject'),                            # int<->float mix
+    ('test* = () f64 { x := 2.0\n x + 1 }', 'reject'),                   # the mix through a local
+    ('test* = () f64 { 1.5 % 2.0 }', 'reject'),                          # no float modulo
+    ('test* = () f64 { 1.5 & 2.0 }', 'reject'),                          # no float bitwise
+    ('test* = () f64 { 1.5 << 1 }', 'reject'),                           # no float shifts
+    ('test* = () i32 { x: u8 := 1.5\n to_i32(x) }', 'reject'),           # a float literal never fits an int slot
+    ('test* = () i32 { x: i32 := 1.5\n x }', 'reject'),
+    ('test* = () f64 { x: f64 := 1\n x }', 'reject'),                    # an int literal never floats — write 1.0
+    ('test* = () f64 { 1 }', 'reject'),                                  # return-fit: i32 ⊀ f64
+    ('test* = () i32 { 1.5 }', 'reject'),                                # return-fit: f64 ⊀ i32
+    ('test* = () i32 { b := 1.5 == 1\n 0 }', 'reject'),                  # mixed equality is the mix too
+    ('eat* = (x: f64) f64 { x }\ntest* = () f64 { eat(2) }', 'reject'),  # int arg ⊀ f64 param
+    ('test* = () i32 { x := 3\n x.match ({ 0.25 => 1, _ => 9 }) }', 'reject'),   # a float label on an int subject
 ]
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -471,4 +502,11 @@ VERDICT_KIND_CASES = [
     ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1 .B => 2 }) }\ntest* = () i32 { f(C.A()) }', 'parse'),  # variant arms need ','
     ('f* = (b: bool) i32 { b.match { true => 1, false => 2 } }\ntest* = () i32 { f(true) }', 'parse'),     # bare-brace match (parens required)
     ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1, 5 => 2 }) }\ntest* = () i32 { f(C.A()) }', 'parse'),  # a literal arm in a variant match (was: silently the `_` catch-all)
+
+    # --- f64: a mix / a float operator outside the f64 surface pins to operand-type; a float
+    #     into an int slot (and vice versa) pins to the fit kinds — never a misreported kind. ---
+    ('test* = () f64 { 1.5 + 1 }', 'operand-type'),
+    ('test* = () f64 { 1.5 % 2.0 }', 'operand-type'),
+    ('test* = () i32 { x: u8 := 1.5\n to_i32(x) }', 'assign-fit'),
+    ('test* = () i32 { 1.5 }', 'return-fit'),
 ]

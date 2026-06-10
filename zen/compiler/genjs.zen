@@ -47,6 +47,7 @@ js_expr* = (s: String, e: Ptr<Expr>) String {
     e.match ({                                       // match auto-derefs the Ptr<Expr>
         .Int(n)  => s.js_int(n),
         .Byte(n) => s.js_int(n),       // a char literal — the same integer, just typed u8 in check
+        .FloatLit(ft) => s.append(ft), // a JS number IS a double — the literal's text is native here
         .Var(v)  => s.append(v.name),
         .Bin(b)  => s.js_bin(b),
         .Call(c) => s.js_call(c),
@@ -86,10 +87,16 @@ is_intrinsic = (fn: str) bool {
 js_call = (s: String, c: CallData) String {
     eq(c.fn, "__str_eq").match ({ true => s.append("(").js_expr(c.args[0].addr()).append(" === ").js_expr(c.args[1].addr()).append(")"), false =>
     eq(c.fn, "__str_ne").match ({ true => s.append("(").js_expr(c.args[0].addr()).append(" !== ").js_expr(c.args[1].addr()).append(")"), false =>
+    // the numeric casts: JS numbers are doubles, so to_f64 is identity and the int casts truncate
+    // toward zero (Math.trunc — C cast semantics); to_u8 masks to a byte like C's (uint8_t).
+    eq(c.fn, "to_f64").match ({ true => s.append("(").js_expr(c.args[0].addr()).append(")"), false =>
+    eq(c.fn, "to_i32").match ({ true => s.append("Math.trunc(").js_expr(c.args[0].addr()).append(")"), false =>
+    eq(c.fn, "to_i64").match ({ true => s.append("Math.trunc(").js_expr(c.args[0].addr()).append(")"), false =>
+    eq(c.fn, "to_u8").match  ({ true => s.append("((").js_expr(c.args[0].addr()).append(") & 255)"), false =>
     is_intrinsic(c.fn).match ({
         true  => s.append("/* unsupported-in-js: intrinsic ").append(c.fn).append(" */"),
         false => s.append(c.fn).append("(").js_args(c.args).append(")")
-    }) }) })
+    }) }) }) }) }) }) })
 }
 
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)

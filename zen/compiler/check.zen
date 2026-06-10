@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname, bin, cond, call, call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname, bin, cond, call, call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -275,6 +275,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .Int(n)        => ((n > 2147483647) || (n < 0 - 2147483648)).match ({ true => ti64(), false => ti32() }),   // an out-of-i32-range literal IS an i64 (so `x: i32 := 4294967296` rejects instead of running as 0)
         .Block(b)      => env.block_ty(b),
         .Byte(n)       => tu8(),                             // a char literal is a byte
+        .FloatLit(ft)  => tf64(),                            // a float literal IS an f64 (never an int — no int<->float mixing)
         .Var(v)        => env.var_or_global(v.name),
         .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
         .Call(c)       => env.infer_call(c),
@@ -377,13 +378,15 @@ infer_call = (env: Env, c: CallData) Ty {
             true  => ti64(),                                            // to_i64(x): explicit widening cast
             false => eq(c.fn, "to_u8").match ({
             true  => tu8(),                                             // to_u8(x): explicit cast (truncating)
+            false => eq(c.fn, "to_f64").match ({
+            true  => tf64(),                                            // to_f64(x): explicit int -> float cast
             false => eq(c.fn, "null_ptr").match ({
                 true  => tptr(env.a.tnode(tu8())),                      // null_ptr(): a null RawPtr<u8> (a constant 0)
                 false => eq(c.fn, "addr").match ({
                     true  => tptr(env.a.tnode(env.arg0_ty(c))),         // addr(x): Ptr<typeof(x)>, so x.m() dispatches on x's type
                     false => env.gen_call_ret(c)
                 })
-            }) }) }) })
+            }) }) }) }) })
             })
         })
     }) }) })
@@ -591,7 +594,17 @@ resolve_bin = (a: Ptr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     cmp := eq(b.op, "==") || eq(b.op, "!=")
     (cmp && env.infer_expr(lhs).is_str_t() && env.infer_expr(rhs).is_str_t()).match ({
         true  => a.cenode(call(eq(b.op, "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))),
-        false => a.cenode(bin(b.op, lhs, rhs))
+        false => a.resolve_f64_neg(env, b.op, lhs, rhs)
+    })
+}
+// prefix `-x` parses as `(0 - x)` (parse_neg has no Unary node). When x is an f64, that synthesized
+// int 0 would be the int<->float MIX the operand check rejects — so the zero becomes the f64
+// literal 0.0 here. A user-written `0 - x` takes the same rewrite (same value, now well-typed).
+is_int_zero = (e: Ptr<Expr>) bool { load(e).match ({ .Int(n) => n == 0, _ => false }) }
+resolve_f64_neg = (a: Ptr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>) Ptr<Expr> {
+    (eq(op, "-") && lhs.is_int_zero() && env.infer_expr(rhs).is_f64_ty()).match ({
+        true  => a.cenode(bin(op, a.cenode(flit("0.0")), rhs)),
+        false => a.cenode(bin(op, lhs, rhs))
     })
 }
 resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
@@ -907,6 +920,7 @@ light_ty = (e: Ptr<Expr>, env: Ptr<VList>, decls: [Decl]) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Byte(n)       => tu8(),
+        .FloatLit(ft)  => tf64(),
         .StrLit(s)     => tstr(),
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
         .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),   // a generic-enum ctor unifies a tparam (`Opt<i32>` → T)
@@ -1239,12 +1253,17 @@ resolve_module* = (a: Ptr<Malloc>, raw: [Decl]) [Decl] {
 // so the lattice is just: numeric WIDENING (u8 <= i32 <= i64) for the scalar ranks, and
 // structural EQUALITY otherwise (Named by name, Ptr by pointee, Bool/Str/Void exact). This
 // is the `fits` a self-hosted checker calls at every assignment / argument / return slot.
-ty_rank* = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }   // -1 = non-numeric
+// F64 is DELIBERATELY rank -1: it does NOT join the int widening chain, so an f64 never
+// implicitly mixes with an int in either direction — `fits` falls through to ty_eq's exact
+// F64 == F64, and every int<->float crossing needs an explicit to_f64/to_i64/to_i32 cast.
+ty_rank* = (t: Ty) i32 { t.match ({ .U8 => 0, .I32 => 1, .I64 => 2, _ => 0 - 1 }) }   // -1 = non-numeric (incl. f64)
+is_f64_ty* = (t: Ty) bool { t.match ({ .F64 => true, _ => false }) }
 ty_eq* = (g: Ty, w: Ty) bool {
     g.match ({
         .I32      => w.match ({ .I32 => true, _ => false }),
         .I64      => w.match ({ .I64 => true, _ => false }),
         .U8       => w.match ({ .U8 => true, _ => false }),
+        .F64      => w.match ({ .F64 => true, _ => false }),
         .Bool     => w.match ({ .Bool => true, _ => false }),
         .Void     => w.match ({ .Void => true, _ => false }),
         .Str      => w.match ({ .Str => true, _ => false }),

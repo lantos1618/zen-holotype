@@ -6,7 +6,7 @@
 // against real signatures. It depends ONE-WAY on compiler.check (inference + the type lattice + the env);
 // compiler.check never imports this module back.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
-{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Env, infer_expr, fits, ty_eq, ty_rank, is_f64_ty, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.alloc
 { byte_at } = compiler.lex
 { eq, is_empty } = std.str
@@ -124,9 +124,10 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "null_ptr").match  ({ true => true, false =>
     eq(fn, "__str_eq").match ({ true => true, false =>          // lowered str content equality (resolve_bin)
     eq(fn, "__str_ne").match ({ true => true, false =>
-    eq(fn, "to_i32").match ({ true => true, false =>             // explicit narrowing/widening casts
+    eq(fn, "to_i32").match ({ true => true, false =>             // explicit narrowing/widening casts (also accept f64 — C truncation)
     eq(fn, "to_i64").match ({ true => true, false =>
-    eq(fn, "to_u8").match  ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    eq(fn, "to_u8").match  ({ true => true, false =>
+    eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })   // explicit int -> f64 cast
 }
 // each intrinsic's fixed arity — store/offset/slice take 2 operands (gen_call reads arg1), the rest
 // (load/addr/cstr/malloc/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
@@ -139,7 +140,7 @@ intrinsic_arity = (fn: str) i32 {
     eq(fn, "slice").match     ({ true => 2, false =>
     eq(fn, "null_ptr").match  ({ true => 0, false =>                 // null_ptr() takes no operands
     eq(fn, "atomic_add_i64").match ({ true => 2, false =>            // atomic_add_i64(p, delta) -> new value
-    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof = 1
+    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof/to_* (incl. to_f64) = 1
 }
 // A UFCS call `x.m(…)` whose name `m` is a TRAIT METHOD but whose (Named) receiver type has no in-scope
 // impl providing it — e.g. a generic template's `a.release(…)` on `a: Ptr<A>`, A an abstract tparam —
@@ -293,9 +294,9 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
 // auto-derefs). SOUND — only a KNOWN, concrete (non-generic) struct is checked; an uninferable
 // receiver, an enum, or a monomorphized-only generic name is skipped.
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
-    obj.is_lit_numeric().match ({                                   // `3.14` lexes as Int(3).Member("14") — a member
-        true  => 1,                                                 // access on a numeric literal is never valid (also
-        false => {                                                  // the only way a stray float literal reaches codegen)
+    obj.is_lit_numeric().match ({                                   // a member access on a numeric literal — `(3).x`
+        true  => 1,                                                 // (or `3.x`, which lexes as Int(3).Member("x")) —
+        false => {                                                  // is never valid. (`3.14` is ONE Float token now.)
             sname := env.infer_expr(obj).enum_name()                // struct name (sees through a Ptr)
             env.decls.is_struct(sname).match ({
                 true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
@@ -374,12 +375,42 @@ non_bool = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
     env.unknown_ty(t).match ({ true => false, false => t.is_bool_ty().match ({ true => false, false => true }) })
 }
+// ── the f64 operator surface (strict, no implicit int<->float mixing) ──
+// f64 op f64 is legal for `+ - * /` and the comparisons; `%`, bitwise and shifts NEVER take an
+// f64; an f64 against a KNOWN non-f64 operand is the int<->float mix — rejected (`1.5 + 1`).
+is_eq_op_v = (op: str) bool { eq(op, "==") || eq(op, "!=") }
+f64_op_ok = (op: str) bool { eq(op, "+") || eq(op, "-") || eq(op, "*") || eq(op, "/") || op.is_cmp_op_v() }
+// one side of an f64 operation: an f64, or an uninferable type (skipped — the same sound-lenient
+// rule every judgment here applies). A KNOWN non-f64 side is the rejected mix.
+f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
+f64_operand_err = (env: Env, op: str, lt: Ty, rt: Ty) i32 {
+    (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({ true => 0, false => 1 })
+}
+// an arith/bitwise/strict-cmp Bin: any f64 side routes to the f64 surface above; otherwise the
+// integer rule (numeric operands) as before.
+num_operand_err = (env: Env, b: BinData) i32 {
+    lt := env.infer_expr(b.lhs)
+    rt := env.infer_expr(b.rhs)
+    (lt.is_f64_ty() || rt.is_f64_ty()).match ({
+        true  => env.f64_operand_err(b.op, lt, rt),
+        false => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 })
+    })
+}
+// `==`/`!=` accept any matching operand pair — EXCEPT an f64 against a known non-f64 (the mix).
+eq_mix_err = (env: Env, b: BinData) i32 {
+    lt := env.infer_expr(b.lhs)
+    rt := env.infer_expr(b.rhs)
+    (lt.is_f64_ty() || rt.is_f64_ty()).match ({
+        true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).match ({ true => 0, false => 1 }),
+        false => 0
+    })
+}
 operand_err = (env: Env, b: BinData) i32 {
     b.op.is_logic_op().match ({
         true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
         false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
-            true  => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 }),
-            false => 0
+            true  => env.num_operand_err(b),
+            false => b.op.is_eq_op_v().match ({ true => env.eq_mix_err(b), false => 0 })
         })
     })
 }
