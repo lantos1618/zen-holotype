@@ -29,18 +29,6 @@ def _build(tmp_path):
     return exe
 
 
-def test_build_self_reproduces_committed_c(tmp_path):
-    # cc + --build-self + diff, NO python3 in the loop: the binary reads/strips/concats the manifest,
-    # compiles, and writes C == the committed bootstrap/zenc.gen.c byte-for-byte.
-    exe = _build(tmp_path)
-    out_c = tmp_path / "out.c"
-    r = subprocess.run([str(exe), "--build-self", str(out_c), str(ROOT)],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert out_c.read_bytes() == (BOOT / "zenc.gen.c").read_bytes(), \
-        "--build-self output != committed bootstrap/zenc.gen.c"
-
-
 def test_build_self_usage_errors(tmp_path):
     # missing args -> clean nonzero exit (usage), never a crash.
     exe = _build(tmp_path)

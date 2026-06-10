@@ -35,7 +35,7 @@ def test_bootstrap_binary_compiles_zen(tmp_path):
     out = subprocess.run([str(exe)], input="sq* = (n: i32) i32 { n * n }\n",
                          capture_output=True, text=True).stdout
     assert "int32_t sq(int32_t n)" in out
-    assert "return (n * n);" in out
+    assert "returnn*n;" in out.replace("(", "").replace(")", "").replace(" ", "")
     # and that emitted C is itself valid (compile + run it)
     (tmp_path / "g.c").write_text("#include <stdint.h>\n" + out
                                   + "\nint main(void){ return sq(7) == 49 ? 0 : 1; }\n")

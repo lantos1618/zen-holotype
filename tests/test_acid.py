@@ -13,11 +13,12 @@ oracle tests. What this gate DOES cover is parse + resolve + codegen over the fu
 stdlib; the compiler's own files additionally self-host (tests/test_bootstrap.py), and the
 per-construct CHECK/value behavior is gated by the oracle corpus (tests/test_oracle.py).
 """
+import re
 from pathlib import Path
 
 import pytest
 
-from _oracle import HEAD, emit_c_for
+from _oracle import HEAD, emit_c_for, emit_rc
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_FILES = sorted([str(p.relative_to(ROOT)) for p in (ROOT / "zen" / "std").glob("*.zen")] +
@@ -28,10 +29,20 @@ def _source(path):
     return (ROOT / path).read_text()   # the real file, imports included — no stripping
 
 
+# top-level non-generic, non-exported decls — generic `name = <T>(` decls don't match, and
+# exported `name* = (` decls are excluded too (some inline at use, e.g. fn-typed params),
+# so this pins a conservative subset whose names MUST survive into the C.
+_DECL_RE = re.compile(r"^([a-zA-Z_]\w*)\s*=\s*\(", re.M)
+
+
 @pytest.mark.parametrize("path", SOURCE_FILES, ids=[p.split("/")[-1] for p in SOURCE_FILES])
 def test_self_hosted_frontend_reads_source_file(path):
-    out = emit_c_for(_source(path))
-    # it must emit the zslice header plus at least one declaration (or, for an all-templates
-    # file like iter.zen, just the header — templates inline at use, nothing standalone).
+    src = _source(path)
+    assert emit_rc(src) == 0
+    out = emit_c_for(src)
+    # the emission must at least start with the zslice header (an all-templates file like
+    # iter.zen may emit only the header — templates inline at use, nothing standalone) ...
     assert out.startswith(HEAD)
-    assert len(out) >= 50
+    # ... and every top-level non-generic declaration must survive into the emitted C.
+    for name in _DECL_RE.findall(src):
+        assert name in out, name

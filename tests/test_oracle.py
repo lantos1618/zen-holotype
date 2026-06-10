@@ -61,12 +61,9 @@ def test_oracle_catches_wrong_kind():
 
 def test_oracle_catches_regression():
     # The NET IS NOT HOLLOW: feed WRONG golden expectations, assert the oracle REJECTS them.
-    with pytest.raises(AssertionError):                                   # real value is 42
-        assert self_side("test* = () i32 { 40 + 2 }")["value"] == 43
-    with pytest.raises(AssertionError):                                   # really rejects
-        assert self_side("test* = () i32 {  }")["verdict"] == "accept"
-    with pytest.raises(AssertionError):                                   # really accepts
-        assert self_side("test* = () i32 { 1 + 1 }")["verdict"] == "reject"
+    assert self_side("test* = () i32 { 40 + 2 }")["value"] != 43          # real value is 42
+    assert self_side("test* = () i32 {  }")["verdict"] != "accept"        # really rejects
+    assert self_side("test* = () i32 { 1 + 1 }")["verdict"] != "reject"   # really accepts
 
 
 def test_oracle_has_no_python_frontend_dependency():

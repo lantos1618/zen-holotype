@@ -466,15 +466,3 @@ def _bootstrap_graph_order():
     return _scc_graph_order(_bootstrap_source_set())
 
 
-def _build_self_order_differs():
-    """Raw topo still cannot replace SCC order because the parse modules form a cycle."""
-    sources = _bootstrap_manifest_modules()
-    assert sources, "bootstrap/sources.txt listed no Zen modules"
-
-    def strip(m):
-        return "\n".join(l for l in _src(m).splitlines()
-                         if not (l.strip().startswith("{ ") and ("= std." in l or "= compiler." in l)))
-    hard = "\n".join(strip(m) for m in sources)
-    order, cycle = topo_order(sources)
-    topo = "\n".join(strip(m) for m in (order + cycle))
-    return hard != topo

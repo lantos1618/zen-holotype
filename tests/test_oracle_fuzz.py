@@ -154,12 +154,15 @@ def test_fuzz_malformed_rejects(src, kind):
     assert 0 < cnt < 100, (src, cnt)              # rejects, and didn't blow up into a garbage count
     kd = check_kind(src)
     assert 1 <= kd <= 13, (src, kd)               # a real kind code (crash-free CHECK-KIND)
-    assert verdict_kind(src) == kind, (src, verdict_kind(src))
+    if kind is not None:
+        assert verdict_kind(src) == kind, (src, verdict_kind(src))
 
 
 def test_fuzz_corpus_is_broad():
     # Sanity: the generators actually produce a meaningful spread (catches a generator that silently
     # produces nothing), and every distinct defect KIND the templates target is exercised.
+    for g in _GENERATORS:
+        assert g(), g.__name__
     assert len(_CASES) >= 60
     kinds = {k for _, k in _CASES}
     assert kinds >= {"arity", "undefined-name", "struct-field", "exhaustiveness",

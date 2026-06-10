@@ -45,20 +45,16 @@ def test_zenc_run_struct_program():
 
 def test_zenc_build_bad_file():
     zenc = _zenc()
-    r = subprocess.run([zenc, "build", "/no/such/file.zen", "-o", "/tmp/x"], capture_output=True, text=True)
-    assert r.returncode != 0  # clean failure, not a crash
-
-
-def test_zenc_check_rejects_undefined_name():
-    """U1.2: the binary now type-checks — the killer case (undefined name was emit-exit-0)."""
-    zenc = _zenc()
     d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text("main = () i32 { undefined_fn(1, 2) }\n")
-    r = subprocess.run([zenc, "check", str(d / "p.zen")], capture_output=True, text=True)
-    assert r.returncode != 0 and "undefined name" in r.stderr, r.stderr
+    out = d / "x"
+    r = subprocess.run([zenc, "build", "/no/such/file.zen", "-o", str(out)], capture_output=True, text=True)
+    assert r.returncode == 1, r.returncode  # clean failure (exit 1), not a signal death
+    assert "cannot open" in r.stderr, r.stderr
+    assert not out.exists()
 
 
 def test_zenc_check_reports_error_count_and_first_kind():
+    """U1.2: the binary now type-checks — the killer case (undefined name was emit-exit-0)."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     src = d / "p.zen"
@@ -374,10 +370,11 @@ def test_zenc_2000_decl_program():
 # ── outsider kit: every example must build and run (the quickstart points at these) ──────────────────
 def test_all_examples_run():
     zenc = _zenc()
-    expect = {"hello": 0, "fizzbuzz": 0, "bank": 0, "shapes": 0, "stats": 0}
-    for name, code in expect.items():
+    names = sorted(p.stem for p in (ROOT / "examples").glob("*.zen"))
+    assert {"hello", "fizzbuzz", "bank", "shapes", "stats"} <= set(names)
+    for name in names:
         r = subprocess.run([zenc, "run", str(ROOT / "examples" / f"{name}.zen")], capture_output=True, text=True)
-        assert r.returncode == code, (name, r.returncode, r.stderr)
+        assert r.returncode == 0, (name, r.returncode, r.stderr)
 
 
 def test_zenc_help_version_and_zen_root():

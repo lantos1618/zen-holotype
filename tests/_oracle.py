@@ -345,8 +345,10 @@ def check_linked_count_src(target_src, lib_src):
 
 
 def emit_c_for(src):
-    """The C the self-hosted EMIT binary produces for `src` (raises on a non-zero compile of the C)."""
-    return subprocess.run([str(_build_emit())], input=src, capture_output=True, text=True).stdout
+    """The C (stdout) the self-hosted EMIT binary produces for `src`, returned regardless of the
+    binary's exit code — callers that need crash gating use emit_rc. Raises TimeoutExpired on a hang."""
+    return subprocess.run([str(_build_emit())], input=src, capture_output=True, text=True,
+                          timeout=60).stdout
 
 
 def emit_rc(src):

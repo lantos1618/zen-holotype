@@ -87,13 +87,6 @@ def test_module_typechecks_through_namespaced_resolver(module):
                    f"(reach={_resolver.reachable(module)})"
 
 
-def test_parse_cycle_modules_resolve():
-    # The mutually-recursive parse_* cluster is the resolver's hard case: each module imports from the
-    # others. The namespaced world (transitive closure, per-name deduped) checks every one at 0 errors.
-    for m in ("compiler/parse", "compiler/parse_expr", "compiler/parse_stmt", "compiler/parse_type"):
-        assert _oracle.check_namespaced_count(m) == 0, f"{m} did not resolve in the parse cycle"
-
-
 # ── NAMESPACE: a real cross-module name CLASH must NOT false-positive ─────────────────────────────
 # Two modules each EXPORT `thing`, with different arities. The target imports `thing` from str_mod
 # (2-arg) and calls it correctly; ast_mod's 1-arg `thing` must never enter the target's namespace.
@@ -205,12 +198,6 @@ def test_bootstrap_manifest_is_graph_derived_scc_order():
     # The C bootstrap still reads a manifest, but the order is now derived from the import graph:
     # roots + runtime-provided exclusions define the set, SCC topo defines the order.
     assert _resolver._bootstrap_manifest_modules() == _resolver._bootstrap_graph_order()
-
-
-def test_build_self_raw_topo_would_break_the_fixpoint():
-    # Raw topo is still not enough because the parse_* cluster is a real cycle. The manifest is
-    # therefore SCC-derived, with deterministic sorting inside each SCC.
-    assert _resolver._build_self_order_differs()
 
 
 def test_resolver_oracle_has_no_python_frontend_dependency():

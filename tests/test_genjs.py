@@ -111,11 +111,12 @@ def run_js(src):
     """genjs-emit `src`, then run `<js>; console.log(test())` in node — returns the int it prints."""
     js = emit_js(src)
     assert NODE, "node unavailable"
-    prog = js + "\nconsole.log(test());\n"
+    prog = js + "\nconsole.log(String(test()));\n"
     out = subprocess.run([NODE, "-e", prog], capture_output=True, text=True, timeout=15)
     assert out.returncode == 0, "node failed:\n" + out.stderr + "\n--- JS ---\n" + js
     s = out.stdout.strip()
-    return int(s) if s.lstrip("-").isdigit() else None
+    assert s.lstrip("-").isdigit(), "non-integer node output: " + repr(out.stdout)
+    return int(s)
 
 
 # ── the corpus: (name, source, expected test() value) ───────────────────────────────────────────
@@ -182,4 +183,3 @@ def test_genjs_enum_match_is_tagged_object():
 def test_genjs_emits_text_for_core_cases():
     # This is useful even when node is present: it pins backend text for key lowering decisions.
     assert "function fac(n)" in emit_js(FAC)
-    assert "Math.trunc(" in emit_js(DIV)

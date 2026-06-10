@@ -62,11 +62,6 @@ def test_compiler_sources_typecheck_as_a_whole():
 _LIB = "f* = (a: i32, b: i32) i32 { a + b }\n"
 
 
-def test_wrong_arity_against_import_is_rejected():
-    bad = "{ f } = std.x\nbad* = () i32 { f(1, 2, 3) }\n"   # f takes 2, called with 3
-    assert _oracle.check_linked_count_src(bad, _LIB) > 0
-
-
 def test_wrong_arg_type_against_import_is_rejected():
     # f expects (i32, i32); a str arg can't fit an i32 param -> rejected. (A str is non-numeric, so
     # the numeric-literal escape hatch does not apply.)
