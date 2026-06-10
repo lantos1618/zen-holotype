@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, ty_cname, bin, cond, call, call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname, bin, cond, call, call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -43,6 +43,17 @@ cenode = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
     buf[0] = v
     buf[0].addr()
 }
+// ── pos-preserving rebuilds (structural, not conventional) ──────────────────────────────
+// Call/Var carry `pos` (the byte offset errors are reported at; 0 = synthesized). The resolver/
+// inliner REBUILDS those nodes in many places (resolve_call, subst_expr, xform_call/maybe_template,
+// inline_lambda, …), and ONE rebuild site using the pos-0 ctor silently zeroes the position of
+// every call the pass walks — that bug shipped once. So a rebuild takes the ORIGINAL node's data
+// and copies its pos ITSELF: a site written with recall/revar/var_call cannot drop it. The bare
+// call()/vref() ctors remain for SYNTHESIZED nodes only — lowering glue with no source location
+// (the tag-const refs in lower_match_arms, parse-time sentinels).
+recall   = (a: Ptr<Malloc>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(call_at(fn, args, c.pos)) }
+revar    = (a: Ptr<Malloc>, v: VarData, name: str) Ptr<Expr> { a.cenode(vref_at(name, v.pos)) }
+var_call = (a: Ptr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }   // a Call derived from a VAR (a named fn passed as a HOF arg, called at the splice site)
 abuf = (a: Ptr<Malloc>, n: i64) [ArmData] { slice(malloc(n * sizeof(ArmData)), n) }
 sbuf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(malloc(n * sizeof(Stmt)), n) }
 dbuf* = (a: Ptr<Malloc>, n: i64) [Decl] { slice(malloc(n * sizeof(Decl)), n) }
@@ -592,7 +603,7 @@ resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    a.cenode(call_at(dn, buf, c.pos))
+    a.recall(c, dn, buf)
 }
 // resolve each arm body, binding a payload arm's `e` to the variant's CONCRETE payload type so a
 // nested `e.match(…)` resolves the inner enum's ename (an empty bind threads env unchanged).
@@ -856,7 +867,7 @@ xform_arms = (a: Ptr<Malloc>, decls: [Decl], arms: [ArmData], params: [Param], f
 inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
         .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs, env)),
-        .Var(v)     => a.cenode(call_at(v.name, cargs, v.pos)),     // a NAMED fn passed as the HOF arg (`apply(twice, 21)`): a direct call `twice(21)` (was: kept the bare var → `return twice;` bad C)
+        .Var(v)     => a.var_call(v, cargs),              // a NAMED fn passed as the HOF arg (`apply(twice, 21)`): a direct call `twice(21)` at the Var's pos (was: kept the bare var → `return twice;` bad C)
         _           => a.cenode(lamx)                     // anything else (shouldn't happen) — keep
     })
 }
@@ -995,18 +1006,18 @@ subst_tag_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: 
 // a tparam name appearing as a VALUE — only `sizeof(T)` — becomes the concrete type's C name, so a
 // generic allocator's `slice(malloc(n * sizeof(T)), n)` monomorphizes to `sizeof(Expr)`. Other Vars
 // (params, locals) are never named like a tparam, so they pass through unchanged.
-subst_tparam_var = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], name: str, e: Ptr<Expr>) Ptr<Expr> {
-    i := tparams.param_index(name)
-    (i < 0).match ({ true => e, false => a.cenode(vref(ty_cname(targs[i]))) })
+subst_tparam_var = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], v: VarData, e: Ptr<Expr>) Ptr<Expr> {
+    i := tparams.param_index(v.name)
+    (i < 0).match ({ true => e, false => a.revar(v, ty_cname(targs[i])) })   // DERIVED from the source `T` — keep its pos
 }
 subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
-        .Var(v)       => a.subst_tparam_var(tparams, targs, v.name, e),
+        .Var(v)       => a.subst_tparam_var(tparams, targs, v, e),
         .Bin(b)       => a.cenode(bin(b.op, a.subst_expr(tparams, targs, b.lhs), a.subst_expr(tparams, targs, b.rhs))),
         .Cond(d)      => a.cenode(cond(a.subst_expr(tparams, targs, d.c), a.subst_expr(tparams, targs, d.t), a.subst_expr(tparams, targs, d.e))),
         .Member(m)    => a.cenode(member(a.subst_expr(tparams, targs, m.obj), m.field)),
         .Arrow(ar)    => a.cenode(arrow(a.subst_expr(tparams, targs, ar.obj), ar.field)),
-        .Call(c)      => a.cenode(call_at(c.fn, a.subst_exprs(tparams, targs, c.args), c.pos)),
+        .Call(c)      => a.recall(c, c.fn, a.subst_exprs(tparams, targs, c.args)),
         .MakeEnum(mk) => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(tparams, targs, mk.payload)),
         .Tag(t)       => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant),
         .MakeStruct(m)=> a.cenode(a.subst_genlit(tparams, targs, m)),
@@ -1055,26 +1066,27 @@ inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env:
     })
     a.blockify(a.xform_body(decls, body, tf.params, cargs, ienv))
 }
-maybe_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>, at: i32) Ptr<Expr> {
-    decls.is_template_call(name).match ({
-        true  => env.is_inlining(name).match ({
-            true  => a.cenode(call_at(name, cargs, at)),   // `name` already inlining up-stack — a self/mutually-recursive generic (only malformed/non-terminating input recurses here); stop to avoid a resolver stack overflow
-            false => (decls.the_func(name).params.len == cargs.len).match ({
-                true  => a.inline_template(decls, name, cargs, env),
-                false => a.cenode(call_at(name, cargs, at))   // wrong ARITY: don't inline a half-bound template (it checked ok then segfaulted, census gap 13) — leave the call for the validator's arity reject
+// `c` is the ORIGINAL CallData (pos source): a kept call rebuilds via recall, so it can't lose it
+maybe_template = (a: Ptr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+    decls.is_template_call(c.fn).match ({
+        true  => env.is_inlining(c.fn).match ({
+            true  => a.recall(c, c.fn, cargs),   // `c.fn` already inlining up-stack — a self/mutually-recursive generic (only malformed/non-terminating input recurses here); stop to avoid a resolver stack overflow
+            false => (decls.the_func(c.fn).params.len == cargs.len).match ({
+                true  => a.inline_template(decls, c.fn, cargs, env),
+                false => a.recall(c, c.fn, cargs)   // wrong ARITY: don't inline a half-bound template (it checked ok then segfaulted, census gap 13) — leave the call for the validator's arity reject
             })
         }),
-        false => a.cenode(call_at(name, cargs, at))
+        false => a.recall(c, c.fn, cargs)
     })
 }
 xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     cargs := a.xform_args(decls, c.args, params, fargs, env)
     fi    := params.param_index(c.fn)                     // is the callee one of this frame's FnT params?
     (fi < 0).match ({
-        true  => a.maybe_template(decls, c.fn, cargs, env, c.pos),
+        true  => a.maybe_template(decls, c, cargs, env),
         false => params[fi].ty.is_fnt().match ({
             true  => a.inline_lambda(decls, fargs[fi], cargs, env),
-            false => a.maybe_template(decls, c.fn, cargs, env, c.pos)
+            false => a.maybe_template(decls, c, cargs, env)
         })
     })
 }

@@ -77,6 +77,57 @@ def test_zenc_check_position_survives_import_flattening():
     assert r.stderr == f"zenc: {src}:4:5: error: undefined name\n"
 
 
+# ── pos-preserving rebuilds (check.zen recall/revar/var_call): the resolver/inliner REBUILDS every
+# Call/Var it walks, copying the ORIGINAL node's pos structurally. These lock the chosen semantics:
+# an error inside a generic template body / a lambda spliced at a HOF call site reports the byte
+# offset of the offending name ITSELF (template-internal positions survive subst_expr + xform_call
+# + inline_lambda) — NOT a callsite fallback, and NOT pos 0 ("unknown"), which a single rebuild
+# site using the pos-0 ctor once caused for EVERY call the inliner walked. ─────────────────────────
+def test_zenc_check_position_survives_generic_instantiation():
+    """Undefined name INSIDE a generic fn body, instantiated at a call site (the subst/xform
+    inline paths): `oops` sits at 1:21 in the template body and is reported there."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "p.zen"
+    src.write_text("wrap = (x: T) i32 { oops(x) }\nmain = () i32 { wrap(41) }\n")
+    r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert f"{src}:1:21: error: undefined name" in r.stderr, r.stderr
+
+
+def test_zenc_check_position_survives_lambda_body_inlining():
+    """Undefined name inside a LAMBDA spliced by HOF inlining (inline_lambda/xform_body):
+    `bad` sits at 3:17 inside the lambda literal and is reported there."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "p.zen"
+    src.write_text(
+        "apply = (f: (i32) i32, x: i32) i32 { f(x) }\n"
+        "main = () i32 {\n"
+        "    apply((n) { bad(n) }, 41)\n"
+        "}\n")
+    r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert f"{src}:3:17: error: undefined name" in r.stderr, r.stderr
+
+
+def test_zenc_check_position_after_lambda_hof_inlining():
+    """Undefined name AFTER a lambda-HOF call in the same body (the inliner rebuilt the whole
+    body around it): `nope` sits at 4:5 and is reported there."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "p.zen"
+    src.write_text(
+        "apply = (f: (i32) i32, x: i32) i32 { f(x) }\n"
+        "main = () i32 {\n"
+        "    r := apply((n) { n + 1 }, 41)\n"
+        "    nope(r)\n"
+        "}\n")
+    r = subprocess.run([zenc, "check", str(src)], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert r.stderr == f"zenc: {src}:4:5: error: undefined name\n"
+
+
 def test_zenc_check_rejects_source_if():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
