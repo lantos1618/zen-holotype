@@ -504,7 +504,7 @@ resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
 resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.keep_elem(l.elemTy, l.seq)   // keep a concrete element type (a generic inline substituted it)
     env2 := Env( vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a )
-    a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body)))
+    a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
 }
 fbuf = (a: Ptr<Malloc>, n: i64) [FieldInit] { slice(malloc(n * sizeof(FieldInit)), n) }
 resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
@@ -976,7 +976,7 @@ subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<E
         .MakeStruct(m)=> a.cenode(a.subst_genlit(tparams, targs, m)),
         .Match(mm)    => a.subst_match(tparams, targs, mm),
         .Index(ix)    => a.cenode(eindex(a.subst_expr(tparams, targs, ix.seq), a.subst_expr(tparams, targs, ix.idx), tparams.subst_ty(targs, ix.elem))),
-        .Loop(l)      => a.cenode(eloop(a.subst_expr(tparams, targs, l.seq), l.idx, l.elem, tparams.subst_ty(targs, l.elemTy), a.subst_body(tparams, targs, l.body))),
+        .Loop(l)      => a.cenode(eloop(a.subst_expr(tparams, targs, l.seq), l.idx, l.elem, tparams.subst_ty(targs, l.elemTy), a.subst_body(tparams, targs, l.body), l.h)),
         .SliceLit(sd) => a.cenode(slit(tparams.subst_ty(targs, sd.elem), a.subst_exprs(tparams, targs, sd.items))),
         .Block(b)     => a.cenode(block(a.subst_body(tparams, targs, b.stmts))),
         _             => e                                // Int/Byte/Var/StrLit/Lambda — no types to substitute
@@ -1061,7 +1061,7 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
         .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, sd.inits, params, fargs, env))),
         .Match(m)     => a.xform_match(decls, m, params, fargs, env),
         .Index(ix)    => a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs, env), a.xform_expr(decls, ix.idx, params, fargs, env), ix.elem)),
-        .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs, env), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs, env))),
+        .Loop(l)      => a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs, env), l.idx, l.elem, l.elemTy, a.xform_body(decls, l.body, params, fargs, env), l.h)),
         .SliceLit(sd) => a.cenode(slit(sd.elem, a.xform_args(decls, sd.items, params, fargs, env))),
         .Block(b)     => a.cenode(block(a.xform_body(decls, b.stmts, params, fargs, env))),
         _             => e                            // Int/StrLit/Tag/Lambda: no params inside

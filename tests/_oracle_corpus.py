@@ -72,6 +72,11 @@ VALUE_CASES = [
     ('f = (n: i32) i32 {\n r := 0\n (n > 0).match ({ true => { r = n }, false => { r = 1 }, })\n r + 100\n}\ntest* = () i32 { f(5) }', 105),
     ('f = (n: i32) i32 { (n > 10).match ({ true => { return 1 }, false => 0, })  n * 2 }\ntest* = () i32 { f(20) * 10 + f(3) }', 16),
     ('test* = () i32 {\n i := 0\n @while (i < 5) {\n  (i > 2).match ({ true => { i = i + 2 }, false => { i = i + 1 }, })\n }\n i * 10\n}', 50),
+# the loop HANDLER controls (user-decided design 2026-06-10): `h.break` / `h.continue` in a .loop
+# body lower to C break/continue (nearest enclosing loop). No bare keywords — match-only stays.
+    ('test* = () i32 {\n acc := 0\n [1, 2, 3, 4, 5].loop((h, i, x) {\n  (x > 3).match ({ true => { h.break }, false => { acc = acc + x } })\n })\n acc\n}', 6),
+    ('test* = () i32 {\n acc := 0\n [1, 2, 3, 4, 5].loop((h, i, x) {\n  (x == 3).match ({ true => { h.continue }, false => {} })\n  acc = acc + x\n })\n acc\n}', 12),
+    ('test* = () i32 {\n acc := 0\n [1, 2].loop((h, i, x) {\n  [10, 20, 30].loop((g, j, y) {\n   (y > 10).match ({ true => { g.break }, false => { acc = acc + y } })\n  })\n })\n acc\n}', 20),
 # std.cown — the FFI MEMORY CONVENTION (Goal N3): a raw boundary pointer/handle is re-owned via a
 # wrapper type + impl(Drop, { … free/close … }); Own<T> fires the matching release EXACTLY ONCE at
 # refcount zero (observable via the g_freed/g_closed counters). Buf: v(65)+mid(0)*100+end(1)*10 = 75;

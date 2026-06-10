@@ -11,7 +11,7 @@
 { String, new, append, push, finish } = std.string
 { is_empty, eq } = std.str
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
-  BinData, CallData, CondData, MatchData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
+  BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
   gen_ty, is_template, is_trait, call, lit, arm, block, param, field } = compiler.genc
 { monomorphize } = compiler.genc_mono
 { malloc } = std.alloc
@@ -44,7 +44,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Bin(b)  => s.gen_bin(b),
         .Call(c) => s.gen_call(c),
         .Cond(d) => s.gen_cond(d),
-        .Member(m) => s.gen_expr(m.obj).append(".").append(m.field),
+        .Member(m) => s.gen_member(m),
         .Arrow(a) => s.gen_expr(a.obj).append("->").append(a.field),
         .MakeEnum(m) => s.gen_mkenum(m),
         .MakeStruct(m) => s.gen_mkstruct(m),
@@ -73,6 +73,19 @@ gen_block_one = (s: String, st: Stmt, last: bool) String {
 }
 // xs.loop((h, i, x) { body })  ->  a void statement-expression wrapping a C for-loop. The
 // sequence is bound once (_seq); i is the index, x the element (cast from the fat pointer).
+// `h.break` / `h.continue` — the loop-handler controls — emit the bare C keyword (they affect the
+// nearest enclosing loop). `break`/`continue` are C keywords, so lexeme mangles them to
+// `break_zk`/`continue_zk` — and for the same reason no real struct field can ever carry the
+// unmangled names: a field spelled `break` IS the loop control. Everything else is `.field`.
+gen_member = (s: String, m: MemberData) String {
+    eq(m.field, "break_zk").match ({
+        true  => s.append("break"),
+        false => eq(m.field, "continue_zk").match ({
+            true  => s.append("continue"),
+            false => s.gen_expr(m.obj).append(".").append(m.field)
+        })
+    })
+}
 gen_loop = (s: String, l: LoopData) String {
     head := s.append("({ __auto_type _seq = ").gen_expr(l.seq).append("; for (int64_t ").append(l.idx).append(" = 0; ").append(l.idx).append(" < _seq.len; ").append(l.idx).append(" = ").append(l.idx).append(" + 1) { __auto_type ").append(l.elem).append(" = ((").gen_ty(l.elemTy.addr()).append("*)_seq.ptr)[").append(l.idx).append("]; ")
     body := head.gen_loop_body(l.body)

@@ -1,7 +1,7 @@
 " Vim syntax for Zen (zen-lang). Install: copy editor/vim/* into ~/.vim/ (or your runtimepath).
 if exists("b:current_syntax") | finish | endif
 
-syn keyword zenKeyword return match loop impl break continue
+syn keyword zenKeyword return match loop impl
 syn match   zenAtWhile "@while"
 syn keyword zenType i32 i64 u8 bool str void Self Ptr MutPtr RawPtr Vec Opt Result String
 syn keyword zenBool true false

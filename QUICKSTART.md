@@ -58,10 +58,13 @@ area = (s: Shape) i32 {
 id<T> = (v: T) T { v }
 seven := 7.id()
 
-// loops: slice .loop (with break/continue), @while, or recursion.
+// loops: slice .loop, @while, or recursion. The loop HANDLER `h` carries the
+// controls: `h.break` stops the loop, `h.continue` skips to the next element.
 sum = (xs: [i32]) i32 {
     acc := 0
-    xs.loop((h, i, v) { acc = acc + v })
+    xs.loop((h, i, v) {
+        (v < 0).match ({ true => { h.break }, false => { acc = acc + v } })
+    })
     acc
 }
 
