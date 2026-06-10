@@ -434,13 +434,22 @@ parse_bool_rest = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr
         false => a.parse_bool_pair(src, subj, first, a0, comma)     // the complementary bool arm
     })
 }
-// the full two-arm form — `{ true => X, false => Y }` (either order)
+// the full two-arm form — `{ true => X, false => Y[,] }` (either order). The trailing ',' is
+// tolerated like the wild/literal arms — without that, the old `close := scan` SILENTLY took the
+// comma as the record's end, the statement parser then read the record's `}` as the END OF THE
+// FUNCTION, and every statement after the match was swallowed (the match became the fn's return —
+// a wrong-value/hang miscompile triggered by the house trailing-comma style). The record close is
+// now VERIFIED: anything but `}` rejects instead of desyncing.
 parse_bool_pair = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, comma: Scan) PExpr {
     a1    := a.parse_arm(src, comma.next)                           // second arm body
-    close := src.scan(a1.next)                                      // '}'
-    src.tok_eq(first.tok, "true").match ({
-        true  => PExpr( expr: a.enode(cond(subj.expr, a0.expr, a1.expr)), next: close.next ),
-        false => PExpr( expr: a.enode(cond(subj.expr, a1.expr, a0.expr)), next: close.next )
+    c0    := src.scan(a1.next)                                      // '}' — or a trailing ',' before it
+    close := src.is_comma(c0.tok).match ({ true => src.scan(c0.next), false => c0 })
+    src.is_rbrace(close.tok).match ({
+        true  => src.tok_eq(first.tok, "true").match ({
+            true  => PExpr( expr: a.enode(cond(subj.expr, a0.expr, a1.expr)), next: close.next ),
+            false => PExpr( expr: a.enode(cond(subj.expr, a1.expr, a0.expr)), next: close.next )
+        }),
+        false => a.reject_match(close.next)                         // a desynced arm record — reject, never swallow
     })
 }
 // the partial form — `{ false => X, _ }` / `{ true => X, _ }`. The `_` arm is an empty-block no-op;
