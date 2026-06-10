@@ -348,3 +348,15 @@ def test_zenc_int_cast_intrinsics():
     assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 5
     (d / "q.zen").write_text("main = () i32 { big := 4294967298  to_i32(big) }\n")   # 2^32+2 truncates to 2
     assert subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True).returncode == 2
+
+
+# ── census #8: C-keyword identifiers are mangled (fn `double` emitted verbatim → cc explosion) ───────
+def test_zenc_c_keyword_identifiers():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "double = (n: i32) i32 { n * 2 }\n"
+        "P*: { int: i32 }\n"
+        "main = () i32 { short := P(int: double(20))  short.int + 2 }\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 42

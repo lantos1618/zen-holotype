@@ -32,11 +32,39 @@ copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
         i = i + 1
     }
 }
+// is the token a C KEYWORD? Zen compiles to C, so an identifier like `double` or `short` would emit
+// verbatim into the C and explode in cc (census #8: a fn named `double` → 5 raw cc errors). Mangled
+// HERE — the single chokepoint every identifier flows through — so defs, refs, calls, fields and
+// params all rename consistently (`double` → `double_zk`) and the rest of the compiler never knows.
+// (Zen's own contextual keywords — match/loop/impl/return — are token-text checks, unaffected.)
+is_c_kw = (src: str, t: Token) bool {
+    src.tok_eq(t, "double") || src.tok_eq(t, "short") || src.tok_eq(t, "long") || src.tok_eq(t, "int")
+        || src.tok_eq(t, "char") || src.tok_eq(t, "float") || src.tok_eq(t, "unsigned") || src.tok_eq(t, "signed")
+        || src.tok_eq(t, "union") || src.tok_eq(t, "struct") || src.tok_eq(t, "enum") || src.tok_eq(t, "typedef")
+        || src.tok_eq(t, "static") || src.tok_eq(t, "extern") || src.tok_eq(t, "const") || src.tok_eq(t, "volatile")
+        || src.tok_eq(t, "register") || src.tok_eq(t, "auto") || src.tok_eq(t, "inline") || src.tok_eq(t, "restrict")
+        || src.tok_eq(t, "if") || src.tok_eq(t, "else") || src.tok_eq(t, "for") || src.tok_eq(t, "while")
+        || src.tok_eq(t, "do") || src.tok_eq(t, "switch") || src.tok_eq(t, "case") || src.tok_eq(t, "default")
+        || src.tok_eq(t, "goto") || src.tok_eq(t, "void") || src.tok_eq(t, "continue") || src.tok_eq(t, "break")
+}
 lexeme* = (a: Ptr<Malloc>, src: str, t: Token) str {
-    p := malloc(t.len + 1)
-    src.copy_span(t.start, p, t.len)
-    store(offset(p, t.len), 0)              // NUL terminator
-    cstr(p)
+    src.is_c_kw(t).match ({
+        true  => {
+            p := malloc(t.len + 4)
+            src.copy_span(t.start, p, t.len)
+            store(offset(p, t.len), '_')                // `_zk` suffix: keep the C identifier legal
+            store(offset(p, t.len + 1), 'z')
+            store(offset(p, t.len + 2), 'k')
+            store(offset(p, t.len + 3), 0)
+            cstr(p)
+        },
+        false => {
+            p := malloc(t.len + 1)
+            src.copy_span(t.start, p, t.len)
+            store(offset(p, t.len), 0)              // NUL terminator
+            cstr(p)
+        }
+    })
 }
 
 // ── token helpers ────────────────────────────────────────────────────────────────
