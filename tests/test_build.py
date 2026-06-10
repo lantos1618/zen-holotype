@@ -398,3 +398,21 @@ def test_zenc_help_version_and_zen_root():
     import os
     env = dict(os.environ, ZEN_ROOT=str(ROOT))
     assert subprocess.run([str(moved), "run", str(d / "p.zen")], capture_output=True, env=env).returncode == 42
+
+
+# ── P3 / #100: the `_ => body` bool-guard parsed as if bare — swallowed the rest of the function ─────
+def test_bool_guard_wild_with_body():
+    """`(c).match({ true => { return X }, _ => {} })` — parse_bool_wild assumed a BARE `_` and resumed
+    parsing inside the arm, silently dropping every statement after the match. All forms must work."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    for arm in ["_ => 0", "_ => {}", "_ => {},", "_"]:
+        (d / "p.zen").write_text(
+            "{ println_int } = std.fmt\n"
+            "f = (n: i32) i32 {\n"
+            f"  (n == 0).match ({{ true => {{ return 100 }}, {arm} }})\n"
+            "  println_int(50)\n  n\n}\n"
+            "main = () i32 { println_int(f(0))  println_int(f(7))  0 }\n"
+        )
+        r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout == "100\n50\n7\n", (arm, r.returncode, r.stdout, r.stderr)

@@ -446,11 +446,24 @@ parse_bool_pair = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr
 // the partial form — `{ false => X, _ }` / `{ true => X, _ }`. The `_` arm is an empty-block no-op;
 // it goes opposite the first arm (the first arm's bool value gets X, the other gets the no-op).
 parse_bool_wild = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, wild: Scan) PExpr {
-    close := src.scan(wild.next)                                    // '}' (the `_` has no `=> body`)
-    noop  := a.enode(block(a.no_arm_stmts()))
+    nx := src.scan(wild.next)                                       // '=>' (an explicit `_ => body`) or '}' (bare `_`)
+    src.is_fat_arrow(nx.tok).match ({
+        true  => a.parse_bool_wild_body(src, subj, first, a0, nx),  // `_ => body` — the catch-all HAS a body (was: assumed bare and resumed parsing INSIDE the arm, swallowing the statements after the match)
+        false => a.bool_wild_done(src, subj, first, a0, a.enode(block(a.no_arm_stmts())), wild.next)
+    })
+}
+parse_bool_wild_body = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, arrow: Scan) PExpr {
+    body := a.parse_arm_body(src, arrow.next)
+    a.bool_wild_done(src, subj, first, a0, body.expr, body.next)
+}
+// assemble the cond, with the `_` arm's body in the slot the FIRST arm didn't name; `pos` is just past
+// the catch-all (a '}' — or a trailing ',' before it, tolerated like the literal arms).
+bool_wild_done = (a: Ptr<Malloc>, src: str, subj: PExpr, first: Scan, a0: PExpr, wb: Ptr<Expr>, pos: i32) PExpr {
+    c0    := src.scan(pos)
+    close := src.is_comma(c0.tok).match ({ true => src.scan(c0.next), false => c0 })   // optional trailing ','
     src.tok_eq(first.tok, "true").match ({
-        true  => PExpr( expr: a.enode(cond(subj.expr, a0.expr, noop)), next: close.next ),   // true => X, _  -> subj ? X : {}
-        false => PExpr( expr: a.enode(cond(subj.expr, noop, a0.expr)), next: close.next )    // false => X, _ -> subj ? {} : X
+        true  => PExpr( expr: a.enode(cond(subj.expr, a0.expr, wb)), next: close.next ),   // true => X, _ [=> Y]  -> subj ? X : Y/{}
+        false => PExpr( expr: a.enode(cond(subj.expr, wb, a0.expr)), next: close.next )    // false => X, _ [=> Y] -> subj ? Y/{} : X
     })
 }
 // a NON-bool, non-variant match `(n).match({ 0 => A, 1 => B, _ => C })` — an integer/literal match.
