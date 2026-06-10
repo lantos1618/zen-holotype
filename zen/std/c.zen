@@ -22,10 +22,12 @@
 
 // a generic heap copy of a (stack) `[…]` literal — the keystone of std.ast's builders, inlined here so
 // this header stays self-contained (deps: genc + alloc only). A function that RETURNS the AST it built
-// from `[…]` literals would dangle (the literal has automatic storage); `dup` copies it onto the heap.
+// from `[…]` literals would dangle (the literal has automatic storage); `dupx` copies it onto the heap.
 // The `[T]` return slot binds T (so `nbuf`'s alloc gets the element size); `like` only witnesses T.
+// (`dupx`, not `dup`: std.str's `dup` sits in this module's flat closure — via compiler.genc → std.str —
+// and the loader's per-name dedup keeps only ONE; the x-suffix is std.ast's `callx` collision dodge.)
 nbuf<T> = (n: i64, like: [T]) [T] { slice(malloc(n * sizeof(T)), n) }
-dup<T>  = (xs: [T]) [T] {
+dupx<T> = (xs: [T]) [T] {
     buf := nbuf(xs.len, xs)
     xs.loop((h, i, x) { buf[i] = x })
     buf
@@ -55,7 +57,7 @@ rawptr = () Ty { tptr(tynode(tu8())) }
 // one foreign binding: a bodyless function declaration `name(ps) ret` — emitted as the C prototype.
 // `ps` arrives as a `[…]` literal (stack storage), so heap-copy it — the Decl outlives this call.
 ffi = (name: str, ps: [Param], ret: Ty) Decl {
-    dforeign(Func( name: name, params: ps.dup(), ret: ret, tparams: no_params(), body: no_stmts() ))
+    dforeign(Func( name: name, params: ps.dupx(), ret: ret, tparams: no_params(), body: no_stmts() ))
 }
 
 // ── the libc surface the stdlib uses ─────────────────────────────────────────────────────────────────
@@ -65,7 +67,7 @@ ffi = (name: str, ps: [Param], ret: Ty) Decl {
 //   process  — abort/exit                                           (fail-fast primitives)
 // This is the ONE canonical libc binding list — it absorbs what the old static `bindings/libc.zen`
 // declared, so there is a single source of truth as data. Returns the foreign DECLARATIONS as `[Decl]`;
-// `genModule(libc())` emits their C prototypes. The `[…]` decl literal has stack storage, so `.dup()`
+// `genModule(libc())` emits their C prototypes. The `[…]` decl literal has stack storage, so `.dupx()`
 // heap-copies it — safe to return and walk later.
 libc* = () [Decl] {
     [ ffi("malloc",  [param("n", ti64())],                                       rawptr()),
@@ -81,5 +83,5 @@ libc* = () [Decl] {
       ffi("getchar", no_params(),                                                ti32()),
       ffi("puts",    [param("s", tstr())],                                       ti32()),
       ffi("abort",   no_params(),                                                tvoid()),
-      ffi("exit",    [param("code", ti32())],                                    tvoid()) ].dup()
+      ffi("exit",    [param("code", ti32())],                                    tvoid()) ].dupx()
 }
