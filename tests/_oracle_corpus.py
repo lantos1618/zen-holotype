@@ -77,6 +77,12 @@ VALUE_CASES = [
     ('test* = () i32 {\n acc := 0\n [1, 2, 3, 4, 5].loop((h, i, x) {\n  (x > 3).match ({ true => { h.break }, false => { acc = acc + x } })\n })\n acc\n}', 6),
     ('test* = () i32 {\n acc := 0\n [1, 2, 3, 4, 5].loop((h, i, x) {\n  (x == 3).match ({ true => { h.continue }, false => {} })\n  acc = acc + x\n })\n acc\n}', 12),
     ('test* = () i32 {\n acc := 0\n [1, 2].loop((h, i, x) {\n  [10, 20, 30].loop((g, j, y) {\n   (y > 10).match ({ true => { g.break }, false => { acc = acc + y } })\n  })\n })\n acc\n}', 20),
+# soundness batch (census gaps 2/5): str == is CONTENT equality (was pointer identity); u8
+# arithmetic truncates at the inferred-u8 let (was typed u8 but run as the un-truncated C int);
+# an out-of-i32-range literal IS an i64.
+    ('eqs = (a: str, b: str) bool { a == b }\ntest* = () i32 { eqs("ab", "ab").match ({ true => 11, false => 21 }) }', 11),
+    ('test* = () i32 {\n a: u8 := 200\n b: u8 := 100\n c := a + b\n to_i32(c)\n}', 44),
+    ('test* = () i32 { x: i64 := 4294967296\n ((x / 1073741824) == 4).match ({ true => 1, false => 0 }) }', 1),
 # std.cown — the FFI MEMORY CONVENTION (Goal N3): a raw boundary pointer/handle is re-owned via a
 # wrapper type + impl(Drop, { … free/close … }); Own<T> fires the matching release EXACTLY ONCE at
 # refcount zero (observable via the g_freed/g_closed counters). Buf: v(65)+mid(0)*100+end(1)*10 = 75;
@@ -141,6 +147,12 @@ VALUE_CASES = [
 
 # (src, verdict) the check binary must produce.
 VERDICT_CASES = [
+    # --- soundness batch rejects (census gaps 5/6/13): literal out of range, comparison chains,
+    # --- generic-call arity (used to check ok then segfault: the half-bound template was inlined)
+    ('test* = () i32 { a: u8 := 300  to_i32(a) }', 'reject'),
+    ('test* = () i32 { x: i32 := 4294967296  to_i32(x) }', 'reject'),
+    ('test* = () i32 { x := 50  (1 < x < 10).match ({ true => 1, false => 0 }) }', 'reject'),
+    ('pick<T> = (xs: [T], a: T) T { a }\ntest* = () i32 { pick([1, 2]) }', 'reject'),
     # --- test_self_hosted_rejects ---
     ('test* = () i32 {  }', 'reject'),
     ('test* = () i32 {\n  x := 5\n}', 'reject'),

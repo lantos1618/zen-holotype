@@ -52,11 +52,23 @@ fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
     // (sound — never false-reject; a gross mismatch is caught by the C compiler).
     (env.unknown_ty(argty) || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
 }
+// a numeric literal fits any numeric slot — but only when its VALUE is in the target's RANGE:
+// `a: u8 := 300` and `x: i32 := 4294967296` were accepted and ran as the C-truncated value.
+lit_fits = (e: Ptr<Expr>, t: Ty) bool {
+    load(e).match ({
+        .Int(n) => t.match ({
+            .U8  => (n >= 0) && (n <= 255),
+            .I32 => (n >= 0 - 2147483648) && (n <= 2147483647),
+            _    => true
+        }),
+        _ => true
+    })
+}
 arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
     // a polymorphic numeric literal (`0`, `10`) fits ANY numeric param — `0` is a valid u8/i32/i64 —
     // so skip the narrowing check for it, mirroring ret_err's lit_to_num (the return-position rule).
     (i < params.len).match ({
-        true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0).match ({
+        true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0 && ar.addr().lit_fits(params[i].ty)).match ({
             true  => 0,
             false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
         }),
@@ -110,20 +122,24 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "store_i64").match ({ true => true, false =>
     eq(fn, "atomic_add_i64").match ({ true => true, false =>
     eq(fn, "null_ptr").match  ({ true => true, false =>
+    eq(fn, "__str_eq").match ({ true => true, false =>          // lowered str content equality (resolve_bin)
+    eq(fn, "__str_ne").match ({ true => true, false =>
     eq(fn, "to_i32").match ({ true => true, false =>             // explicit narrowing/widening casts
     eq(fn, "to_i64").match ({ true => true, false =>
-    eq(fn, "to_u8").match  ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    eq(fn, "to_u8").match  ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
 }
 // each intrinsic's fixed arity — store/offset/slice take 2 operands (gen_call reads arg1), the rest
 // (load/addr/cstr/malloc/sizeof) take 1. A misarity'd call must be rejected: the emitter dereferences
 // `c.args[1]` unconditionally for the 2-arg ops, so `store(p)` would otherwise read a garbage Expr.
 intrinsic_arity = (fn: str) i32 {
+    eq(fn, "__str_eq").match  ({ true => 2, false =>
+    eq(fn, "__str_ne").match  ({ true => 2, false =>
     eq(fn, "store").match     ({ true => 2, false =>
     eq(fn, "offset").match    ({ true => 2, false =>
     eq(fn, "slice").match     ({ true => 2, false =>
     eq(fn, "null_ptr").match  ({ true => 0, false =>                 // null_ptr() takes no operands
     eq(fn, "atomic_add_i64").match ({ true => 2, false =>            // atomic_add_i64(p, delta) -> new value
-    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof = 1
+    eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) })   // load_i64/load/addr/cstr/malloc/sizeof = 1
 }
 // A UFCS call `x.m(…)` whose name `m` is a TRAIT METHOD but whose (Named) receiver type has no in-scope
 // impl providing it — e.g. a generic template's `a.release(…)` on `a: Ptr<A>`, A an abstract tparam —
@@ -344,6 +360,10 @@ is_arith_op = (op: str) bool {
     (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')   // distinct from &|=<>!
 }
 is_logic_op = (op: str) bool { eq(op, "&&") || eq(op, "||") }
+// the strict comparisons — `<` `>` `<=` `>=` (NOT ==/!=, which compare any matching pair, and NOT
+// the shifts: exact-string match). Their operands must be numeric: `1 < x < 10` parses as
+// `(1 < x) < 10` — a bool operand — and was silently accepted as always-true (census gap 6).
+is_cmp_op_v = (op: str) bool { eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
 is_bitwise_op = (op: str) bool { eq(op, "&") || eq(op, "|") || eq(op, "^") || eq(op, "<<") || eq(op, ">>") }
 is_bool_ty = (t: Ty) bool { t.match ({ .Bool => true, _ => false }) }
 non_numeric = (env: Env, e: Ptr<Expr>) bool {
@@ -357,7 +377,7 @@ non_bool = (env: Env, e: Ptr<Expr>) bool {
 operand_err = (env: Env, b: BinData) i32 {
     b.op.is_logic_op().match ({
         true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
-        false => (b.op.is_arith_op() || b.op.is_bitwise_op()).match ({
+        false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
             true  => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 }),
             false => 0
         })
@@ -447,7 +467,7 @@ ret_err = (env: Env, r: Ptr<Expr>) i32 {
     // skip when uninferable, OR when a polymorphic literal is returned to a numeric type (`10` as
     // u8 is fine). Otherwise fits() — which catches BOTH a category mismatch (str/bool/struct where
     // another is declared) AND a computed numeric narrowing (an i64-returning call declared i32).
-    lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0)
+    lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0) && r.lit_fits(env.exp)
     (env.unknown_ty(rt) || env.unknown_ty(env.exp) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, env.exp).match ({ true => 0, false => 1 })
@@ -458,7 +478,7 @@ ret_err = (env: Env, r: Ptr<Expr>) i32 {
 assign_err = (env: Env, x: AssignData) i32 {
     vt := env.infer_expr(x.target)
     rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0)
+    lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0) && x.value.lit_fits(vt)
     (env.unknown_ty(vt) || env.unknown_ty(rt) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, vt).match ({ true => 0, false => 1 })
@@ -468,7 +488,7 @@ assign_err = (env: Env, x: AssignData) i32 {
 // ret_err/assign_err (skip uninferable + a polymorphic literal to a numeric element).
 idxset_err = (env: Env, x: IndexSetData) i32 {
     rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0)
+    lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0) && x.value.lit_fits(x.elem)
     (env.unknown_ty(rt) || env.unknown_ty(x.elem) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, x.elem).match ({ true => 0, false => 1 })
@@ -481,7 +501,7 @@ let_fit_err = (env: Env, l: LetData) i32 {
         true  => 0,
         false => {
             vt := env.infer_expr(l.value)
-            lit_to_num := l.value.is_lit_numeric() && (l.ty.ty_rank() >= 0)
+            lit_to_num := l.value.is_lit_numeric() && (l.ty.ty_rank() >= 0) && l.value.lit_fits(l.ty)
             (env.unknown_ty(vt) || env.unknown_ty(l.ty) || lit_to_num).match ({
                 true  => 0,
                 false => fits(vt, l.ty).match ({ true => 0, false => 1 })

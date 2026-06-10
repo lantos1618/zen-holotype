@@ -394,7 +394,10 @@ def emit_value(src):
         return None
     body = c[len(HEAD):] if c.startswith(HEAD) else c
     d = Path(tempfile.mkdtemp())
-    prog = "#include <stdint.h>\n#include <stdbool.h>\n" + HEAD + "\n" + body + (_RUNNER % ())
+    # the standalone runner links no zenrt.c, so provide the one runtime piece lowered code can
+    # reach: `eq` (str content equality — `a == b` on strs lowers to __str_eq -> eq(a, b)).
+    shim = "static bool eq(const char* a, const char* b){ for (; *a && *a == *b; a++, b++); return *a == *b; }\n"
+    prog = "#include <stdint.h>\n#include <stdbool.h>\n" + shim + HEAD + "\n" + body + (_RUNNER % ())
     (d / "g.c").write_text(prog)
     if subprocess.run(_CC + [str(d / "g.c"), "-o", str(d / "g")],
                       capture_output=True, text=True).returncode != 0:
