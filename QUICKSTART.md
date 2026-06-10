@@ -31,6 +31,35 @@ EOF
 `zenc run` type-checks, compiles via cc, and runs. `zenc build hello.zen -o hello` makes a binary;
 `zenc check` type-checks only.
 
+## Multiple files
+
+A bare module name imports a **sibling file**: `{ helper } = geometry` loads `geometry.zen` from the
+importing program's own directory (dotted names stay reserved for `std.` / `compiler.`). Helpers can
+import the stdlib and other siblings; cycles are fine.
+
+```sh
+cat > geometry.zen <<'EOF'
+{ println_int } = std.fmt
+
+area*  = (w: i32, h: i32) i32 { w * h }       // `*` exports the name
+show*  = (n: i32) i64 { println_int(n) }
+EOF
+
+cat > main.zen <<'EOF'
+{ area, show } = geometry
+
+main = () i32 {
+    show(area(6, 7))
+    0
+}
+EOF
+./zenc run main.zen           # prints 42
+```
+
+Importing a module that doesn't exist, a name the module doesn't define, or the same name from two
+sibling files is a compile error (`zenc: main.zen: error: unknown module 'geometr' (no geometr.zen
+next to main.zen)`), not a linker failure.
+
 ## The language on one page
 
 ```zen
