@@ -393,6 +393,71 @@ parse_module* = (a: Ptr<Malloc>, src: str) [Decl] {
     buf.take_decls(a.fill_decls(src, 0, buf, 0))
 }
 
+// ── the decl-boundary ORACLE (for std.resolve's per-name dedup) ────────────────────────
+// decl_span reports the top-level decl at/after `pos` as a byte SPAN of the source — its
+// NAME (for named decls), where its first token starts, and the position just past it —
+// by REUSING the real decl parsers (parse_decl_at / parse_struct_at / parse_enum_at /
+// fill_impl_methods / parse_or). The module loader keeps/drops whole spans of the original
+// text, so "what is a decl" has exactly ONE definition: this parser. (The loader used to
+// re-implement it as a column-0 line scanner, which diverged from the grammar three times:
+// generic `<T>` heads, column-0 impl methods, multi-line imports.)
+//   named=true  → a fn/foreign/struct/enum/global decl called `name` (dedup applies)
+//   named=false → an impl block / import / unparseable token (kept verbatim; name is "")
+//   eof=true    → no decl: only trivia remains after `pos`
+DeclSpan*: { name: str, named: bool, eof: bool, start: i32, next: i32 }
+decl_span* = (a: Ptr<Malloc>, src: str, pos: i32) DeclSpan {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => DeclSpan( name: "", named: false, eof: true, start: sc.tok.start, next: sc.next ),
+        _    => src.decl_is_import(pos).match ({
+            true  => DeclSpan( name: "", named: false, eof: false, start: sc.tok.start, next: src.import_span_end(pos) ),
+            false => sc.tok.kind.match ({
+                .Ident => a.named_span(src, pos, sc.tok.start),
+                // garbage (mirrors fill_decls' syntax-error sentinel): the span is ONE token
+                _      => DeclSpan( name: "", named: false, eof: false, start: sc.tok.start, next: sc.next ),
+            })
+        })
+    })
+}
+// an Ident-headed decl: classify exactly as fill_decl does and take the END from the same
+// sub-parser fill_* takes it from. An impl block is unnamed (always kept by the loader).
+named_span = (a: Ptr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
+    nm := a.lexeme(src, src.scan(pos).tok)
+    src.decl_is_impl(pos).match ({
+        true  => DeclSpan( name: nm, named: false, eof: false, start: start, next: a.impl_span_end(src, pos) ),
+        false => src.decl_is_global(pos).match ({
+            true  => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_or(src, src.decl_marker(pos).next).next ),
+            false => src.decl_is_struct(pos).match ({
+                true  => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_struct_at(src, pos).next ),
+                false => src.decl_is_enum(pos).match ({
+                    true  => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_enum_at(src, pos).next ),
+                    false => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_decl_at(src, pos).next ),
+                })
+            })
+        })
+    })
+}
+// past a whole `Type.impl(Trait, { … })` block — fill_impl's walk, into scratch buffers (the
+// methods are parsed for their EXTENT only). Scratch cap 1024 matches param_buf, the method-count
+// bound the real fill_impl path already lives under.
+impl_scratch = (a: Ptr<Malloc>) [Decl] { slice(malloc(1024 * sizeof(Decl)), 1024) }
+impl_span_end = (a: Ptr<Malloc>, src: str, pos: i32) i32 {
+    ie := a.fill_impl_methods(src, src.skip_to_brace(pos), a.impl_scratch(), 0, a.param_buf(), 0, "", "")
+    src.scan(ie.next).next                               // past the ')' closing `impl(Trait, { … })`
+}
+// past a whole `{ names } = mod.path` import — fill_import's walk without recording the names:
+// skip to the '}' (Eof-guarded, like fill_import_names), then the '=', then the dotted path.
+import_close = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => sc.next,
+        _    => src.is_rbrace(sc.tok).match ({ true => sc.next, false => src.import_close(sc.next) })
+    })
+}
+import_span_end = (src: str, pos: i32) i32 {
+    src.skip_path(src.scan(src.import_close(src.scan(pos).next)).next)
+}
+
 // ── whole-string entry points ──────────────────────────────────────────────────────
 // the public single-source-string entries (kept here so compiler.parse's surface is stable —
 // the expression/statement parsers they delegate to live in compiler.parse_expr / compiler.parse_stmt).

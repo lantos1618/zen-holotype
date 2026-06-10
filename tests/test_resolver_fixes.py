@@ -91,6 +91,24 @@ def test_std_ast_imports_clean():
     assert r.returncode == 0, r.stderr
 
 
+def test_user_shadow_of_imported_std_name_is_an_error():
+    """A program decl that collides with a name in its imported std closure used to be a SILENT
+    shadow (the std decl was deduped away — so the std module's own internal calls rebound to the
+    user's decl, a miscompile trap). The decl-span dedup keeps both and the validator rejects."""
+    r = _check("{ println } = std.fmt\n"
+               "eq = (a: i32, b: i32) bool { a == b }\n"   # std.str (in fmt's closure) owns `eq`
+               "main = () i32 { 0 }\n")
+    assert r.returncode != 0
+    assert "duplicate top-level definition" in r.stderr
+
+
+def test_import_vs_import_collision_still_first_wins():
+    """Two IMPORTED modules sharing a name (std.string `free(String)` vs std.mem `free(RawPtr)`)
+    still dedup silently — dependency-first, the defining module wins; no false dup error."""
+    r = _check("{ String, with_cap, finish } = std.string\nmain = () i32 { 0 }\n")
+    assert r.returncode == 0, r.stderr
+
+
 def test_std_ast_builders_usable():
     """Beyond importing: the renamed builders (dupx/eqx — the std.str collision dodge) actually run."""
     d = Path(tempfile.mkdtemp())
