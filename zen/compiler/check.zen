@@ -453,6 +453,13 @@ resolve_mktag_fresh = (a: Ptr<Malloc>, env: Env, variant: str) Ptr<Expr> {
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty {
     existing.is_void_ty().match ({ true => env.infer_expr(seq).elem_of(), false => existing })
 }
+// an IndexSet's element type: the stored/seq-inferred elem, else fall back to the assigned VALUE's
+// type — `buf := slice(malloc(8), 1)` has an unknowable elem (void), but `buf[0] = P(x: 42)` tells us
+// exactly what is being stored, so the emit cast is `(P*)` not the invalid `(void*)` (census #9).
+set_elem = (env: Env, existing: Ty, seq: Ptr<Expr>, value: Ptr<Expr>) Ty {
+    e := env.keep_elem(existing, seq)
+    e.is_void_ty().match ({ true => env.infer_expr(value), false => e })
+}
 // ── rebuild an expression, filling enum match enames + constructor types ───────────────
 resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
@@ -713,7 +720,7 @@ resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
         }),
         .If(f)     => sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)),
         .While(w)  => swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body)),
-        .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.keep_elem(x.elem, x.seq), a.resolve_expr(env.clr_exp(), x.value))
+        .IndexSet(x) => sidxset(a.resolve_expr(env.clr_exp(), x.seq), a.resolve_expr(env.clr_exp(), x.idx), env.set_elem(x.elem, x.seq, x.value), a.resolve_expr(env.clr_exp(), x.value))
     })
 }
 // resolve a statement sequence, THREADING the environment: a `let` adds its binding (the
