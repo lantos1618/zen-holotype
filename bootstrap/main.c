@@ -10,10 +10,16 @@ String genModule(zslice decls);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
 int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, U1.4: packed kind + pos*16 (0 = ok) */
 /* U1.3: the Zen module loader (zen/std/resolve.zen, now a SOURCE). Given the project root (the dir that
- * contains zen/std/ and zen/compiler/) + the program source, returns the flat single-module source with
- * the transitive import closure spliced in (per-module + per-name dedup; N2b qualified `c.x` too).
- * build/run/check call it BEFORE parse_module so a program that imports the stdlib resolves from disk. */
-const char* resolve_program(Malloc* a, const char* root, const char* src);
+ * contains zen/std/ and zen/compiler/), the PROGRAM's own directory (for sibling `{ f } = b` imports;
+ * "" when the source has no file), the input path (error-message prefix) + the program source, returns
+ * the flat single-module source with the transitive import closure spliced in (per-module + per-name
+ * dedup; N2b qualified `c.x` too). build/run/check call it BEFORE parse_module so a program that
+ * imports the stdlib or a sibling file resolves from disk. ERROR CHANNEL: a loader error (unknown
+ * module / unknown imported name / sibling duplicate / sibling-from-stdin) prints one
+ * `zenc: <file>: error: …` line to stderr and exits 1 inside the loader — it never returns. */
+const char* resolve_program(Malloc* a, const char* root, const char* progdir, const char* inpath, const char* src);
+/* the first sibling-module name `src` imports ("" if none) — the stdin-mode guard below. */
+const char* first_user_import(const char* src);
 
 /* ── normal mode: read one flat .zen (argv[1] or stdin), emit C to stdout ──────────────────────── */
 static char* read_all(FILE* in, size_t* out_len){
@@ -28,6 +34,17 @@ static int compile_stdin_or_file(int argc, char** argv){
     FILE* in = stdin;
     if (argc > 1){ in = fopen(argv[1], "r"); if (!in){ fprintf(stderr, "zenc: cannot open %s\n", argv[1]); return 1; } }
     char* buf = read_all(in, NULL);
+    /* piped stdin has no directory: a sibling import `{ f } = b` cannot resolve, so error cleanly
+     * instead of emitting C that references names no one defines (std imports stay as-is — the raw
+     * filter mode never resolved them either, and the oracle depends on that). */
+    if (in == stdin){
+        const char* sib = first_user_import(buf);
+        if (sib && sib[0]){
+            fprintf(stderr, "zenc: <stdin>: error: sibling import '%s' needs a source file on disk "
+                            "(stdin has no directory); use `zenc build <file.zen>`\n", sib);
+            return 1;
+        }
+    }
     Malloc m = { 0 };
     String out = genModule(resolve_module(&m, parse_module(&m, buf)));
     fwrite(out.ptr, 1, out.len, stdout);
@@ -232,6 +249,17 @@ static void bin_dir(const char* argv0, char* out, size_t n){
     memcpy(out, argv0, len); out[len] = 0;
 }
 
+/* the PROGRAM's directory (sibling `{ f } = b` imports resolve to <progdir>/b.zen): the bytes of
+ * in_path before its last '/', "." if it has none, "/" if it IS the root. */
+static void prog_dir(const char* in_path, char* out, size_t n){
+    const char* slash = strrchr(in_path, '/');
+    if (!slash){ snprintf(out, n, "."); return; }
+    size_t len = (size_t)(slash - in_path);
+    if (len == 0) len = 1;                      /* "/p.zen" -> "/" */
+    if (len >= n) len = n - 1;
+    memcpy(out, in_path, len); out[len] = 0;
+}
+
 /* the 13 validator error KINDs (check_module_kind's 1..13 return) → human-readable names. */
 static const char* const KIND_NAME[] = {
     "ok", "arity", "arg-type", "undefined-name", "struct-field", "exhaustiveness",
@@ -319,12 +347,14 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     char* buf = slurp(in_path, &len);
     if (!buf) return 1;
     Malloc m = { 0 };
-    /* U1.3: resolve `{ … } = std.X` / `compiler.X` imports from disk before parsing, so a program that
-     * imports the stdlib builds. root = dir of the zenc binary (holds zen/std and zen/compiler).
+    /* U1.3: resolve `{ … } = std.X` / `compiler.X` / sibling `{ … } = b` imports from disk before
+     * parsing, so a program that imports the stdlib or a neighboring file builds. root = dir of the
+     * zenc binary (holds zen/std and zen/compiler); progdir = dir of the program (holds its siblings).
      * resolve_program returns the flat single-module source; on a program with no imports it is a pass-
      * through. The returned str is borrowed from the loader's arena — don't free it. */
     char dir[4096]; bin_dir(argv0, dir, sizeof dir);
-    const char* flat = resolve_program(&m, dir, buf);
+    char pdir[4096]; prog_dir(in_path, pdir, sizeof pdir);
+    const char* flat = resolve_program(&m, dir, pdir, in_path, buf);
     zslice decls = resolve_module(&m, parse_module(&m, flat));
     if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); free(buf); return 1; }  /* U2 */
     if (type_check(&m, decls, in_path, flat, buf) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
@@ -409,9 +439,10 @@ int main(int argc, char** argv){
         char* buf = slurp(argv[2], NULL);
         if (!buf) return 1;
         Malloc m = { 0 };
-        /* U1.3: resolve std.X imports from disk before checking, same as build_program. */
+        /* U1.3: resolve std.X / sibling imports from disk before checking, same as build_program. */
         char dir[4096]; bin_dir(argv[0], dir, sizeof dir);
-        const char* flat = resolve_program(&m, dir, buf);
+        char pdir[4096]; prog_dir(argv[2], pdir, sizeof pdir);
+        const char* flat = resolve_program(&m, dir, pdir, argv[2], buf);
         zslice decls = resolve_module(&m, parse_module(&m, flat));
         /* U2: reject gross parse failure (zero decls). NOTE: a missing `main` is NOT enforced in `check`
          * — a library module (std.*) legitimately has no main; build/run enforce it instead. */
