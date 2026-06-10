@@ -20,7 +20,12 @@ from _oracle_corpus import VALUE_CASES, VERDICT_CASES, VERDICT_KIND_CASES
 @pytest.mark.parametrize("src,want", VALUE_CASES)
 def test_oracle_value(src, want):
     # the self-hosted binary must COMPUTE `want` (silent-miscompile guard) — no Python in the loop.
-    assert self_side(src)["value"] == want, src
+    # BOTH halves of the oracle contract are asserted: the checker must ACCEPT the program (a value
+    # case is a valid program — asserting only the value let 8 checker false-rejects hide for
+    # months) AND the binary must compute `want`.
+    side = self_side(src)
+    assert side["verdict"] == "accept", src
+    assert side["value"] == want, src
 
 
 @pytest.mark.parametrize("src,verdict", VERDICT_CASES)

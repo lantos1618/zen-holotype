@@ -5,8 +5,8 @@
 // and trait conformance. check_linked layers a cross-module header on so an imported call is checked
 // against real signatures. It depends ONE-WAY on compiler.check (inference + the type lattice + the env);
 // compiler.check never imports this module back.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
-{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.alloc
 { byte_at } = compiler.lex
 { eq, is_empty } = std.str
@@ -25,11 +25,32 @@ is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
 is_uninferable = (t: Ty) bool {
     t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(p) => load(p).is_void_ty(), _ => false })
 }
-fit_err = (argty: Ty, pty: Ty) i32 {
+// a Named type that names NO declared struct/enum (nor a generic template) can only be a generic
+// fn's tparam leaking through a STORED type the template-env erasure can't reach (a `[T]` index's
+// stored elem, `Self` in a trait default body) — judged uninferable, the same sound-leaning skip.
+// In a monomorphic module every Named type a judgment sees is declared.
+named_declared = (decls: [Decl], n: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({
+        .DStruct(sd)   => eq(sd.name, n).match ({ true => true, false => found }),
+        .DEnum(ed)     => eq(ed.name, n).match ({ true => true, false => found }),
+        .DGenStruct(g) => eq(g.name, n).match ({ true => true, false => found }),
+        .DGenEnum(g)   => eq(g.name, n).match ({ true => true, false => found }),
+        _              => found
+    }) })
+    found
+}
+unknown_ty = (env: Env, t: Ty) bool {
+    t.is_uninferable().match ({
+        true  => true,
+        false => t.match ({ .Named(n) => env.decls.named_declared(n).match ({ true => false, false => true }), _ => false })
+    })
+}
+fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
     // a function-POINTER parameter (an extern callback like makecontext's `void(*)()`) accepts a
     // function/lambda arg; the validator doesn't model FnT compatibility structurally, so skip it
     // (sound — never false-reject; a gross mismatch is caught by the C compiler).
-    (argty.is_uninferable() || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
+    (env.unknown_ty(argty) || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
 }
 arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
     // a polymorphic numeric literal (`0`, `10`) fits ANY numeric param — `0` is a valid u8/i32/i64 —
@@ -37,7 +58,7 @@ arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
     (i < params.len).match ({
         true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0).match ({
             true  => 0,
-            false => fit_err(env.infer_expr(ar.addr()), params[i].ty)
+            false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
         }),
         false => 0
     })
@@ -234,7 +255,7 @@ field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
     fty := fields.field_in(fi.name)
     (fi.value.is_lit_numeric() && fty.ty_rank() >= 0).match ({       // polymorphic literal -> any numeric field
         true  => 0,
-        false => fit_err(env.infer_expr(fi.value), fty)
+        false => env.fit_err(env.infer_expr(fi.value), fty)
     })
 }
 init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
@@ -327,11 +348,11 @@ is_bitwise_op = (op: str) bool { eq(op, "&") || eq(op, "|") || eq(op, "^") || eq
 is_bool_ty = (t: Ty) bool { t.match ({ .Bool => true, _ => false }) }
 non_numeric = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
-    t.is_uninferable().match ({ true => false, false => (t.ty_rank() >= 0).match ({ true => false, false => true }) })
+    env.unknown_ty(t).match ({ true => false, false => (t.ty_rank() >= 0).match ({ true => false, false => true }) })
 }
 non_bool = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
-    t.is_uninferable().match ({ true => false, false => t.is_bool_ty().match ({ true => false, false => true }) })
+    env.unknown_ty(t).match ({ true => false, false => t.is_bool_ty().match ({ true => false, false => true }) })
 }
 operand_err = (env: Env, b: BinData) i32 {
     b.op.is_logic_op().match ({
@@ -347,7 +368,7 @@ operand_err = (env: Env, b: BinData) i32 {
 is_slice_ty = (t: Ty) bool { t.match ({ .Slice(e) => true, _ => false }) }
 non_slice = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
-    t.is_uninferable().match ({ true => false, false => t.is_slice_ty().match ({ true => false, false => true }) })
+    env.unknown_ty(t).match ({ true => false, false => t.is_slice_ty().match ({ true => false, false => true }) })
 }
 index_err = (env: Env, ix: IndexData) i32 {
     (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
@@ -383,10 +404,24 @@ check_block = (env: Env, stmts: [Stmt]) i32 {
 var_err = (env: Env, name: str) i32 {
     // `true`/`false` are boolean-literal VALUES lexed as identifiers (genc emits them as C bools), so they
     // reach here as bare Vars — accept them. Then: a bound local/global, a fn-as-value, an import, a trait
-    // method, or an intrinsic. Anything else is undefined.
+    // method, an intrinsic, or a lowered enum tag constant. Anything else is undefined.
     (eq(name, "true") || eq(name, "false")
         || env.is_bound(name) || env.decls.is_known_fn(name) || env.decls.is_imported(name)
-        || env.decls.is_trait_method(name) || name.is_intrinsic()).match ({ true => 0, false => 1 })
+        || env.decls.is_trait_method(name) || name.is_intrinsic()
+        || env.decls.is_tag_const(name)).match ({ true => 0, false => 1 })
+}
+// resolve lowers a statement-position match into an if-chain testing `subj.tag == Ename_Variant`
+// (lower_match_stmt) — that tag constant is a real name in the EMITTED C, not an undefined Zen
+// var. Tried LAST in var_err, so it only runs on otherwise-unknown names.
+variant_tags_has = (vs: [VariantDef], ename: str, name: str) bool {
+    found := false
+    vs.loop((h, i, v) { found = eq(name, tag_const(ename, v.name)).match ({ true => true, false => found }) })
+    found
+}
+is_tag_const = (decls: [Decl], name: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.variants.variant_tags_has(ed.name, name).match ({ true => true, false => found }), _ => found }) })
+    found
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
@@ -413,7 +448,7 @@ ret_err = (env: Env, r: Ptr<Expr>) i32 {
     // u8 is fine). Otherwise fits() — which catches BOTH a category mismatch (str/bool/struct where
     // another is declared) AND a computed numeric narrowing (an i64-returning call declared i32).
     lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0)
-    (rt.is_uninferable() || env.exp.is_uninferable() || lit_to_num).match ({
+    (env.unknown_ty(rt) || env.unknown_ty(env.exp) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, env.exp).match ({ true => 0, false => 1 })
     })
@@ -424,7 +459,7 @@ assign_err = (env: Env, x: AssignData) i32 {
     vt := env.infer_expr(x.target)
     rt := env.infer_expr(x.value)
     lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0)
-    (vt.is_uninferable() || rt.is_uninferable() || lit_to_num).match ({
+    (env.unknown_ty(vt) || env.unknown_ty(rt) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, vt).match ({ true => 0, false => 1 })
     })
@@ -434,7 +469,7 @@ assign_err = (env: Env, x: AssignData) i32 {
 idxset_err = (env: Env, x: IndexSetData) i32 {
     rt := env.infer_expr(x.value)
     lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0)
-    (rt.is_uninferable() || x.elem.is_uninferable() || lit_to_num).match ({
+    (env.unknown_ty(rt) || env.unknown_ty(x.elem) || lit_to_num).match ({
         true  => 0,
         false => fits(rt, x.elem).match ({ true => 0, false => 1 })
     })
@@ -447,7 +482,7 @@ let_fit_err = (env: Env, l: LetData) i32 {
         false => {
             vt := env.infer_expr(l.value)
             lit_to_num := l.value.is_lit_numeric() && (l.ty.ty_rank() >= 0)
-            (vt.is_uninferable() || lit_to_num).match ({
+            (env.unknown_ty(vt) || env.unknown_ty(l.ty) || lit_to_num).match ({
                 true  => 0,
                 false => fits(vt, l.ty).match ({ true => 0, false => 1 })
             })
