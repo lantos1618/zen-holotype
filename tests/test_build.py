@@ -388,8 +388,7 @@ def test_zenc_help_version_and_zen_root():
     assert v.returncode == 0 and "zenc" in v.stdout
     # bare `zenc` is TTY-gated: on a TERMINAL it prints usage (exit 2); with PIPED stdin it stays the
     # classic source→C filter the oracle depends on. Under pytest stdin is a pipe, so exercise the filter.
-    bare = subprocess.run([zenc], capture_output=True, text=True, input="test* = () i32 { 1 }
-")
+    bare = subprocess.run([zenc], capture_output=True, text=True, input="test* = () i32 { 1 }\n")
     assert bare.returncode == 0 and "zslice" in bare.stdout
     # a relocated binary works when ZEN_ROOT points at the checkout
     d = Path(tempfile.mkdtemp())
