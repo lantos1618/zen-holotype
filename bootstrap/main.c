@@ -353,7 +353,9 @@ static void usage(FILE* to){
 int main(int argc, char** argv){
     if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)){ usage(stdout); return 0; }
     if (argc >= 2 && strcmp(argv[1], "--version") == 0){ printf("zenc 0.1.0-dev (self-hosted; C backend)\n"); return 0; }
-    if (argc < 2){ usage(stderr); return 2; }   /* bare `zenc` used to silently read stdin — print usage instead */
+    /* bare `zenc` on a TTY prints usage; with PIPED stdin it stays the classic filter (read source on
+     * stdin, emit C on stdout) — the oracle and scripts depend on that mode. */
+    if (argc < 2 && isatty(0)){ usage(stderr); return 2; }
     if (argc >= 2 && strcmp(argv[1], "emit") == 0){
         if (argc < 3){ fprintf(stderr, "usage: %s emit <in.zen>\n", argv[0]); return 2; }
         char* shifted[2] = { argv[0], argv[2] };
