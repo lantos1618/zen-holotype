@@ -143,6 +143,14 @@ VALUE_CASES = [
     ('Result<T, E>: Ok(T) | Err(E)\nIoError*: NotFound | Denied | Errno(i32)\nmkErr<T, E> = (ok: T, x: E) Result<T, E> { .Err(x) }\ntest* = () i32 {\n  r := mkErr(0, .Errno(7))\n  r.match({ .Ok(v) => v, .Err(e) => e.match({ .NotFound => 1, .Denied => 2, .Errno(n) => n }) })\n}', 7),
 # the same idiom on a single-tparam generic enum (Box<T> wrapping the inner enum)
     ('IoError*: NotFound | Denied | Errno(i32)\nBox<T>: B(T)\nmkBox<T> = (x: T) Box<T> { .B(x) }\ntest* = () i32 {\n  r := mkBox(.Denied)\n  r.match({ .B(e) => e.match({ .NotFound => 1, .Denied => 2, .Errno(n) => n }) })\n}', 2),
+# --- arm-record unification: the TRAILING comma is tolerated on the LAST arm of every match form,
+#     in VALUE position too (the house match-arm style). The bool record used to be four hand-rolled
+#     paths and the pair form once swallowed everything after the match on a trailing comma — these
+#     pin all four record shapes through the ONE unified walker. ---
+    ('test* = () i32 { b := 2 < 3  v := b.match ({ true => { 7 }, false => { 0 }, })  v + 10 }', 17),   # bool pair, trailing comma
+    ('test* = () i32 { v := (1 < 2).match ({ false => 5, _ => 9, })  v }', 9),                          # bool + `_ => body`, trailing comma
+    ('test* = () i32 { (2).match ({ 1 => 10, 2 => 20, _ => 99, }) }', 20),                              # literal arms, trailing comma
+    ('C*: A | B\ntest* = () i32 { c := C.B()  c.match ({ .A => 1, .B => 2, }) }', 2),                   # variant arms, trailing comma
 ]
 
 # (src, verdict) the check binary must produce.
@@ -325,6 +333,25 @@ VERDICT_CASES = [
 
     # --- BARE bool literal `true`/`false` parses as a Var -> uninferable -> the lenient (accept) path ---
     ('test* = () i32 { true }', 'accept'),
+
+    # --- PARSER TOTALITY: garbage/truncated input REJECTS — never a silent stop (a truncated module
+    #     the checker misreads) and never a wrong-value run. Each of these used to slip through as a
+    #     misleading position-less type error or, worse, RUN (`x := 1 @@ 2` ran and returned 2). The
+    #     parse-failure flag plants the `__syntax_error` sentinel; kinds are pinned in
+    #     VERDICT_KIND_CASES below. ---
+    ('f = () i32 {\ntest* = () i32 { 42 }', 'reject'),                # unclosed `{` after a fn header
+    ('f = () i32 {', 'reject'),                                       # unclosed `{` at EOF
+    ('test* = () i32 { x := (1 + 2  x }', 'reject'),                  # unclosed `(`
+    ('test* = () i32 { s := "abc  0 }', 'reject'),                    # unterminated string
+    ('test* = () i32 { x := * 3  x }', 'reject'),                     # no expression starts with `*`
+    ('test* = () i32 { x := 1 @@ 2  x }', 'reject'),                  # mid-expr garbage (ran as 2!)
+    ('test* = () i32 { x := 1  $ ?  x }', 'reject'),                  # garbage statement mid-block (ran as 1!)
+    ('f = () i32 { 0 .match ({ 1 => 2', 'reject'),                    # unterminated match record
+    ('f* = (b: bool) i32 { b.match ({ true => 1 false => 2 }) }\ntest* = () i32 { f(true) }', 'reject'),   # arms need ','
+    ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1 .B => 2 }) }\ntest* = () i32 { f(C.A()) }', 'reject'),
+    ('f* = (b: bool) i32 { b.match { true => 1, false => 2 } }\ntest* = () i32 { f(true) }', 'reject'),    # bare-brace match (no parens)
+    ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1, 5 => 2 }) }\ntest* = () i32 { f(C.A()) }', 'reject'),  # a literal arm in a variant match (was: silently taken as `_`)
+    ('f* = (b: bool) i32 { b.match ({ true => 1, 0 => 2 }) }\ntest* = () i32 { f(true) }', 'reject'),      # a non-bool label in a bool match (was: silently accepted)
 ]
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -427,4 +454,21 @@ VERDICT_KIND_CASES = [
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 'value-pos-return'),
     ('f* = (b: bool) i32 {\n v := b.match({ true => { return 7  9 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 'value-pos-return'),
     ('f* = (n: i32) i32 {\n v := n.match({ 0 => { return 1  2 }, _ => 9 })\n v\n}\ntest* = () i32 { f(0) }', 'value-pos-return'),
+
+    # --- parse (KPARSE): PARSER TOTALITY — garbage/truncated input is rejected AS A PARSE ERROR (the
+    #     `__syntax_error` sentinel, planted first), not misreported as a knock-on type error from the
+    #     truncated tree. Each shape used to surface as a position-less return-fit/undefined-name — or
+    #     silently RUN with a wrong value (`x := 1 @@ 2` returned 2; `$ ?` was dropped). ---
+    ('f = () i32 {\ntest* = () i32 { 42 }', 'parse'),                 # unclosed `{` after a fn header (was undefined-name)
+    ('f = () i32 {', 'parse'),                                        # unclosed `{` at EOF (was return-fit)
+    ('test* = () i32 { x := (1 + 2  x }', 'parse'),                   # unclosed `(` (was return-fit)
+    ('test* = () i32 { s := "abc  0 }', 'parse'),                     # unterminated string (was return-fit)
+    ('test* = () i32 { x := * 3  x }', 'parse'),                      # no expression starts with `*` (was return-fit)
+    ('test* = () i32 { x := 1 @@ 2  x }', 'parse'),                   # mid-expr garbage (was ACCEPTED, ran as 2)
+    ('test* = () i32 { x := 1  $ ?  x }', 'parse'),                   # garbage statement mid-block (was ACCEPTED, ran as 1)
+    ('f = () i32 { 0 .match ({ 1 => 2', 'parse'),                     # unterminated match record (was undefined-name)
+    ('f* = (b: bool) i32 { b.match ({ true => 1 false => 2 }) }\ntest* = () i32 { f(true) }', 'parse'),    # bool arms need ','
+    ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1 .B => 2 }) }\ntest* = () i32 { f(C.A()) }', 'parse'),  # variant arms need ','
+    ('f* = (b: bool) i32 { b.match { true => 1, false => 2 } }\ntest* = () i32 { f(true) }', 'parse'),     # bare-brace match (parens required)
+    ('C*: A | B\nf* = (c: C) i32 { c.match ({ .A => 1, 5 => 2 }) }\ntest* = () i32 { f(C.A()) }', 'parse'),  # a literal arm in a variant match (was: silently the `_` catch-all)
 ]

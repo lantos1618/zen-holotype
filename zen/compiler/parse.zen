@@ -12,7 +12,7 @@
 { Malloc, malloc } = std.alloc
 { parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
-{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd } = compiler.parse_type
+{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get } = compiler.parse_type
 
 // ── a whole function DECLARATION — `name* = (params) RetType { body }` ──────────────
 // The leading Ident is the name; the typed parameter list parses into a heap [Param]; the
@@ -76,7 +76,7 @@ record_tparam = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd 
 fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => PEnd( count: i, next: sc.next ),        // unterminated `<…`: stop at EOF, don't recurse forever
+        .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },   // unterminated `<…`: flag, don't recurse forever
         _    => src.is_rangle(sc.tok).match ({
             true  => PEnd( count: i, next: sc.next ),
             false => is_ident_tok(sc.tok).match ({       // an ident is a tparam; commas are skipped
@@ -99,7 +99,10 @@ is_eq_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && 
 FieldsEnd*: { count: i32, ndef: i32, next: i32 }
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     sc := src.scan(pos)
-    src.is_rbrace(sc.tok).match ({ true => FieldsEnd( count: i, ndef: dn, next: sc.next ), false => a.fill_field(src, pos, buf, i, dbuf, dn) })
+    sc.tok.kind.match ({
+        .Eof => { perr_set()  FieldsEnd( count: i, ndef: dn, next: sc.next ) },   // unterminated `{ …` field list
+        _    => src.is_rbrace(sc.tok).match ({ true => FieldsEnd( count: i, ndef: dn, next: sc.next ), false => a.fill_field(src, pos, buf, i, dbuf, dn) })
+    })
 }
 // a DEFAULT-bodied trait method `m = (params) ret { body }`: parse it as a whole function decl, store
 // the Func (for instantiation per impl), and give the field the method's FnT signature (so conformance
@@ -157,7 +160,13 @@ variant_payload = (a: Ptr<Malloc>, src: str, pos: i32) VPay {
     VPay( ty: te.ty, next: rp.next )
 }
 fill_variants = (a: Ptr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
-    nt   := src.scan(pos)                                // variant name
+    nt := src.scan(pos)                                  // variant name
+    nt.tok.kind.match ({
+        .Eof => { perr_set()  PEnd( count: i, next: nt.next ) },   // `name:` / a trailing `|` at EOF: a truncated enum
+        _    => a.fill_variant(src, nt, buf, i)
+    })
+}
+fill_variant = (a: Ptr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32) PEnd {
     nm   := a.lexeme(src, nt.tok)
     pk   := src.scan(nt.next)                            // '(' (payload), '|', or the next decl
     vp   := src.is_lparen(pk.tok).match ({ true => a.variant_payload(src, pk.next), false => VPay( ty: tvoid(), next: nt.next ) })
@@ -242,7 +251,7 @@ record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportE
 fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) ImportEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => ImportEnd( count: i, next: sc.next ),  // unterminated `{ … `: stop at EOF, don't recurse forever
+        .Eof => { perr_set()  ImportEnd( count: i, next: sc.next ) },  // unterminated `{ … `: flag, don't recurse forever
         _    => src.is_rbrace(sc.tok).match ({           // '}' ends the import list
             true  => ImportEnd( count: i, next: sc.next ),
             false => is_ident_tok(sc.tok).match ({       // an ident is a name; commas are skipped
@@ -258,7 +267,7 @@ fill_import_names = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) I
 fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     // OVERFLOW GUARD: at the buffer's last slot, stop and plant the syntax-error sentinel instead of
     // writing past the heap buffer (was: silent truncation + corruption past the cap, census #11).
-    (i >= buf.len - 1).match ({ true => { buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  return i + 1 }, false => {} })
+    (i >= buf.len - 1).match ({ true => { perr_set()  buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  return i + 1 }, false => {} })
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,
@@ -268,10 +277,10 @@ fill_decls = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
                 // every top-level decl starts with an IDENTIFIER (a name / Type). Anything else — stray
                 // punctuation, a number, leftover garbage — used to fall into fill_func, which consumed
                 // an arbitrary span (silently swallowing the decls AFTER it, so a truncated file checked
-                // 'ok' with `main` dropped). Emit a SYNTAX-ERROR sentinel decl (the validator rejects it
-                // as kind 14 "syntax error"), skip ONE token, and keep parsing so later decls still check.
+                // 'ok' with `main` dropped). Flag the parse + emit a SYNTAX-ERROR sentinel decl (the
+                // validator rejects it as KPARSE), skip ONE token, and keep parsing so later decls still check.
                 .Ident => a.fill_decl(src, pos, buf, i),
-                _      => { buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  a.fill_decls(src, sc.next, buf, i + 1) }
+                _      => { perr_set()  buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  a.fill_decls(src, sc.next, buf, i + 1) }
             })
         })
     })
@@ -333,7 +342,7 @@ fill_impl = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 fill_impl_methods = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => ImplEnd( decls: i, methods: m, next: sc.next ),         // unterminated `impl(… { …`: stop at EOF, don't recurse forever
+        .Eof => { perr_set()  ImplEnd( decls: i, methods: m, next: sc.next ) },   // unterminated `impl(… { …`: flag, don't recurse forever
         _    => src.is_comma(sc.tok).match ({                            // optional ',' OR newline between methods (struct-literal ergonomics)
             true  => a.fill_impl_methods(src, sc.next, buf, i, mbuf, m, tyname, trname),
             false => src.is_rbrace(sc.tok).match ({
@@ -389,8 +398,32 @@ fill_import = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     a.fill_decls(src, src.skip_path(eq.next), buf, i + 1)          // resume past the module path
 }
 parse_module* = (a: Ptr<Malloc>, src: str) [Decl] {
+    perr_reset()                                         // a fresh parse: clear the module-wide failure flag
     buf := a.decl_buf()
-    buf.take_decls(a.fill_decls(src, 0, buf, 0))
+    n   := a.fill_decls(src, 0, buf, 0)
+    perr_get().match ({
+        true  => a.prepend_syntax_error(buf, n),         // PARSER TOTALITY: a flagged parse rejects the MODULE
+        false => buf.take_decls(n)
+    })
+}
+// PARSER TOTALITY: any flagged parse failure — an unclosed `{`/`(`/`[`/string, a desynced match-arm
+// record, a token no rule accepts — plants the `__syntax_error` sentinel decl FIRST, so the validator
+// counts it and classifies the module KPARSE before any knock-on error in the salvaged tree. (Was: the
+// parser silently stopped/resynced and the checker misreported the truncation as a position-less type
+// error — or the program RAN with the garbage dropped.)
+prepend_syntax_error = (a: Ptr<Malloc>, buf: [Decl], n: i32) [Decl] {
+    (n >= buf.len).match ({                              // the overflow guard already planted a sentinel at the cap
+        true  => buf.take_decls(n),
+        false => {
+            i := n                                       // shift right one slot; the sentinel takes slot 0
+            @while(i > 0) {
+                buf[i] = buf[i - 1]
+                i = i - 1
+            }
+            buf[0] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
+            buf.take_decls(n + 1)
+        }
+    })
 }
 
 // ── the decl-boundary ORACLE (for std.resolve's per-name dedup) ────────────────────────

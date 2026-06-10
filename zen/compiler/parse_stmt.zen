@@ -8,7 +8,7 @@
 { Token, scan, byte_at } = compiler.lex
 { Malloc, malloc } = std.alloc
 { enode, lexeme, is_op, is_dot, is_field_colon, parse_atom, parse_or } = compiler.parse_expr
-{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty } = compiler.parse_type
+{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set } = compiler.parse_type
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -71,7 +71,7 @@ is_set_here = (src: str, pos: i32) bool {
 skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => sc.next,                                   // unterminated '[': stop at EOF, don't recurse forever
+        .Eof => { perr_set()  sc.next },                  // unterminated '[': flag, stop at EOF, don't recurse forever
         _    => src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) })
     })
 }
@@ -227,7 +227,7 @@ BlockEnd*: { list: Ptr<SList>, next: i32 }
 parse_block* = (a: Ptr<Malloc>, src: str, pos: i32) BlockEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => BlockEnd( list: a.snil(), next: sc.next ),        // unterminated `{ …`: stop at EOF, don't recurse forever
+        .Eof => { perr_set()  BlockEnd( list: a.snil(), next: sc.next ) },   // unterminated `{ …`: flag, don't recurse forever
         _    => src.is_rbrace(sc.tok).match ({
             true  => BlockEnd( list: a.snil(), next: sc.next ),   // '}' — block done
             false => a.block_stmt(src, pos)
