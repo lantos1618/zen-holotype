@@ -369,3 +369,30 @@ def test_zenc_2000_decl_program():
     fns = "\n".join(f"f{i} = () i32 {{ {i % 100} }}" for i in range(2000))
     (d / "p.zen").write_text(fns + "\nmain = () i32 { f1999() }\n")
     assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 99
+
+
+# ── outsider kit: every example must build and run (the quickstart points at these) ──────────────────
+def test_all_examples_run():
+    zenc = _zenc()
+    expect = {"hello": 0, "fizzbuzz": 0, "bank": 0, "shapes": 0, "stats": 0}
+    for name, code in expect.items():
+        r = subprocess.run([zenc, "run", str(ROOT / "examples" / f"{name}.zen")], capture_output=True, text=True)
+        assert r.returncode == code, (name, r.returncode, r.stderr)
+
+
+def test_zenc_help_version_and_zen_root():
+    zenc = _zenc()
+    h = subprocess.run([zenc, "--help"], capture_output=True, text=True)
+    assert h.returncode == 0 and "usage:" in h.stdout
+    v = subprocess.run([zenc, "--version"], capture_output=True, text=True)
+    assert v.returncode == 0 and "zenc" in v.stdout
+    bare = subprocess.run([zenc], capture_output=True, text=True)
+    assert bare.returncode == 2 and "usage:" in bare.stderr   # no more silent stdin mode
+    # a relocated binary works when ZEN_ROOT points at the checkout
+    d = Path(tempfile.mkdtemp())
+    moved = d / "zenc-moved"
+    moved.write_bytes(Path(zenc).read_bytes()); moved.chmod(0o755)
+    (d / "p.zen").write_text("main = () i32 { 42 }\n")
+    import os
+    env = dict(os.environ, ZEN_ROOT=str(ROOT))
+    assert subprocess.run([str(moved), "run", str(d / "p.zen")], capture_output=True, env=env).returncode == 42

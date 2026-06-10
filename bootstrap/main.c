@@ -219,9 +219,12 @@ static int build_self(const char* out_path, const char* srcroot){
  * A Zen `main = () i32 { … }` emits as C `int32_t main()` — the program's entry, no separate runner.
  * zenrt.{c,h} are found relative to the zenc binary: <dir(argv0)>/bootstrap. */
 
-/* directory of argv[0]: everything up to the last '/', or "." if none. zenc lives at <root>/zenc, so
- * this is <root>, and <root>/bootstrap holds zenrt.{c,h}. */
+/* the project ROOT: $ZEN_ROOT if set (a relocated/installed zenc points it at a checkout containing
+ * zen/std + bootstrap/zenrt.{c,h}), else the directory of argv[0] (zenc lives at <root>/zenc). Without
+ * this a copied binary failed with raw cc/loader errors (census #34). */
 static void bin_dir(const char* argv0, char* out, size_t n){
+    const char* env = getenv("ZEN_ROOT");
+    if (env && env[0]){ snprintf(out, n, "%s", env); return; }
     const char* slash = strrchr(argv0, '/');
     if (!slash){ snprintf(out, n, "."); return; }
     size_t len = (size_t)(slash - argv0);
@@ -334,7 +337,28 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     return 0;
 }
 
+static void usage(FILE* to){
+    fprintf(to,
+        "zenc — the Zen compiler (self-hosted)\n"
+        "\n"
+        "usage:\n"
+        "  zenc run   <file.zen>            type-check, build and run (exit = the program's exit code)\n"
+        "  zenc build <file.zen> [-o out]   type-check and link a native binary (default a.out)\n"
+        "  zenc check <file.zen>            type-check only (libraries allowed: no main required)\n"
+        "  zenc emit  <file.zen>            emit the generated C to stdout\n"
+        "  zenc --version | --help\n"
+        "\n"
+        "ZEN_ROOT: a relocated zenc finds zen/std + bootstrap/ at $ZEN_ROOT (default: the binary's directory).\n");
+}
 int main(int argc, char** argv){
+    if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)){ usage(stdout); return 0; }
+    if (argc >= 2 && strcmp(argv[1], "--version") == 0){ printf("zenc 0.1.0-dev (self-hosted; C backend)\n"); return 0; }
+    if (argc < 2){ usage(stderr); return 2; }   /* bare `zenc` used to silently read stdin — print usage instead */
+    if (argc >= 2 && strcmp(argv[1], "emit") == 0){
+        if (argc < 3){ fprintf(stderr, "usage: %s emit <in.zen>\n", argv[0]); return 2; }
+        char* shifted[2] = { argv[0], argv[2] };
+        return compile_stdin_or_file(2, shifted);
+    }
     if (argc >= 2 && strcmp(argv[1], "--build-self") == 0){
         if (argc < 4){ fprintf(stderr, "usage: %s --build-self <out.c> <srcroot>\n", argv[0]); return 2; }
         return build_self(argv[2], argv[3]);
