@@ -5,7 +5,7 @@
 // and trait conformance. check_linked layers a cross-module header on so an imported call is checked
 // against real signatures. It depends ONE-WAY on compiler.check (inference + the type lattice + the env);
 // compiler.check never imports this module back.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.alloc
 { byte_at } = compiler.lex
@@ -439,9 +439,24 @@ idxset_err = (env: Env, x: IndexSetData) i32 {
         false => fits(rt, x.elem).match ({ true => 0, false => 1 })
     })
 }
+// an ANNOTATED let (`x: T := e`): the init must fit the declared T (numeric-literal widening allowed,
+// uninferable skipped — the same leniencies as assign_err). Unannotated lets (ty = void) are unchecked.
+let_fit_err = (env: Env, l: LetData) i32 {
+    l.ty.is_void_ty().match ({
+        true  => 0,
+        false => {
+            vt := env.infer_expr(l.value)
+            lit_to_num := l.value.is_lit_numeric() && (l.ty.ty_rank() >= 0)
+            (vt.is_uninferable() || lit_to_num).match ({
+                true  => 0,
+                false => fits(vt, l.ty).match ({ true => 0, false => 1 })
+            })
+        }
+    })
+}
 check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)    => env.check_expr(l.value),
+        .Let(l)    => env.check_expr(l.value) + env.let_fit_err(l),
         .Assign(x) => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
         .Return(r) => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
@@ -720,7 +735,7 @@ kv_idxset_kind = (env: Env, x: IndexSetData) i32 { env.idxset_err(x).kv_one(KASS
 // mirrors check_stmt: the statement's sub-expressions, then its own fit check.
 kv_check_stmt_kind = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)    => env.kv_check_expr_kind(l.value),
+        .Let(l)    => env.kv_check_expr_kind(l.value).kv_kor(env.let_fit_err(l).kv_one(KASSIGNFIT())),
         .Assign(x) => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
         .Return(r) => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),

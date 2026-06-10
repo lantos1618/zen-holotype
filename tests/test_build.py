@@ -416,3 +416,23 @@ def test_bool_guard_wild_with_body():
         )
         r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
         assert r.returncode == 0 and r.stdout == "100\n50\n7\n", (arm, r.returncode, r.stdout, r.stderr)
+
+
+# ── P3 / census #7: typed-local annotations are REAL (checked + drive inference + emit the C type) ───
+def test_typed_local_annotations_honored():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    # (1) an i64 accumulator IS int64_t: 2^32 survives, (a+2^32)/2^30 = 4
+    (d / "a.zen").write_text("main = () i32 { a: i64 := 0  a = a + 4294967296  to_i32(a / 1073741824) }\n")
+    assert subprocess.run([zenc, "run", str(d / "a.zen")], capture_output=True).returncode == 4
+    # (2) the fuzz-#7 escape hatch: an annotation gives a bare .None its enum
+    (d / "b.zen").write_text(
+        "Opt<T>: Some(T) | None\n"
+        "u<T> = (o: Opt<T>) i32 { o.match ({ .Some(x) => x, .None => 7 }) }\n"
+        "main = () i32 { o: Opt<i32> := .None  u(o) }\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "b.zen")], capture_output=True).returncode == 7
+    # (3) a mismatching init is REJECTED
+    (d / "c.zen").write_text('main = () i32 { x: i32 := "nope"  0 }\n')
+    r = subprocess.run([zenc, "check", str(d / "c.zen")], capture_output=True, text=True)
+    assert r.returncode != 0 and "does not fit" in r.stderr

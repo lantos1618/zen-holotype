@@ -10,7 +10,7 @@
 // The genc AST's child pointers are read-only `Ptr<Expr>` (they come from addr()), so we
 // can't mutate in place — instead we REBUILD: each resolve_* returns a fresh node, reusing
 // unchanged leaves by their original pointer. Allocation goes through the parser's allocator.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, ty_cname, bin, cond, call, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, ti32, ti64, tu8, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Malloc, malloc } = std.alloc
 { eq, is_empty } = std.str
 { String, new, append, finish } = std.string
@@ -29,6 +29,9 @@ VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: Ptr<Malloc> }   // a = allocator (heap-alloc in infer)
 with_exp = (env: Env, t: Ty) Env { Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
+// the env for a LET's value: an annotated `x: T := e` makes T the EXPECTED type (drives `.None`/ctor
+// resolution exactly like a param/return position); unannotated stays expectation-free.
+let_exp = (env: Env, t: Ty) Env { t.is_void_ty().match ({ true => env.clr_exp(), false => Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }) }
 
 // heap-allocate fresh nodes (the same pattern the parser uses). Named cebuf/cenode (not
 // ebuf/enode) so they don't collide with parse.zen's identically-purposed helpers when the
@@ -705,7 +708,7 @@ lower_stmt_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
 // match/cond is lowered to `if` STATEMENTS so an arm's `return` actually leaves the function.
 resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     st.match ({
-        .Let(l)    => slet(l.name, a.resolve_expr(env.clr_exp(), l.value)),
+        .Let(l)    => slett(l.name, l.ty, a.resolve_expr(env.let_exp(l.ty), l.value)),   // an annotation becomes the value's EXPECTED type (so `o: Opt<i32> := .None` resolves)
         .Assign(x) => sassign(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value)),
         .Return(r) => sret(a.resolve_expr(env, r)),          // env.exp = the function's return type
         .ExprStmt(e) => last.match ({
@@ -742,7 +745,7 @@ fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
 }
 extend_env* = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
-        .Let(l) => Env( vars: a.vcons(l.name, env.infer_expr(l.value), env.vars), decls: env.decls, exp: env.exp, a: env.a ),
+        .Let(l) => Env( vars: a.vcons(l.name, l.ty.is_void_ty().match ({ true => env.infer_expr(l.value), false => l.ty }), env.vars), decls: env.decls, exp: env.exp, a: env.a ),   // a declared annotation WINS over inference
         _       => env
     })
 }
@@ -981,7 +984,7 @@ subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<E
 }
 subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
     st.match ({
-        .Let(l)      => slet(l.name, a.subst_expr(tparams, targs, l.value)),
+        .Let(l)      => slett(l.name, tparams.subst_ty(targs, l.ty), a.subst_expr(tparams, targs, l.value)),
         .Assign(x)   => sassign(a.subst_expr(tparams, targs, x.target), a.subst_expr(tparams, targs, x.value)),
         .Return(r)   => sret(a.subst_expr(tparams, targs, r)),
         .ExprStmt(e) => sexpr(a.subst_expr(tparams, targs, e)),
@@ -1066,7 +1069,7 @@ xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], farg
 }
 xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>) Stmt {
     st.match ({
-        .Let(l)      => slet(l.name, a.xform_expr(decls, l.value, params, fargs, env)),
+        .Let(l)      => slett(l.name, l.ty, a.xform_expr(decls, l.value, params, fargs, env)),
         .Assign(x)   => sassign(a.xform_expr(decls, x.target, params, fargs, env), a.xform_expr(decls, x.value, params, fargs, env)),
         .Return(r)   => sret(a.xform_expr(decls, r, params, fargs, env)),
         .ExprStmt(e) => sexpr(a.xform_expr(decls, e, params, fargs, env)),
@@ -1078,7 +1081,7 @@ xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [
 // thread an env of local types through the body, so a `Var` arg to a generic call resolves. A `let`
 // binding is in scope for the statements that FOLLOW it (its light type seeds the env).
 xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
-    st.match ({ .Let(l) => a.vcons(l.name, l.value.light_ty(env, decls), env), _ => env })
+    st.match ({ .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({ true => l.value.light_ty(env, decls), false => l.ty }), env), _ => env })
 }
 xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>) [Stmt] {
     buf := a.sbuf(body.len)
