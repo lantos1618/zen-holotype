@@ -3,9 +3,11 @@
 
 { byte_at } = std.text.bytes
 { decl_span } = compiler.parse
+// Parser APIs still take Ptr<Malloc>; Malloc also implements Allocator for resolver-owned buffers.
 { Malloc } = std.mem.alloc
+{ Result, IoError } = std.core.result
 { String, push, append, with_cap, finish } = std.text.string
-{ read_file, open, close, write, O_RDONLY } = std.io.file
+{ read_file_in, open, close, write, O_RDONLY } = std.io.file
 { view } = std.text.str
 
 is_ws = (b: u8) bool { (b == ' ') || (b == 9) }
@@ -232,8 +234,11 @@ fail_unreadable = (inpath: str, path: str) str {
     exit(1)
     ""
 }
-read_module = (inpath: str, path: str) str {
-    read_file(path).match ({
+read_module_file = (a: Ptr<Malloc>, path: str) Result<str, IoError> {
+    a.read_file_in(path)
+}
+read_module = (a: Ptr<Malloc>, inpath: str, path: str) str {
+    a.read_module_file(path).match ({
         .Ok(s)  => s,
         .Err(e) => fail_unreadable(inpath, path),
     })
@@ -280,7 +285,7 @@ load_closure* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: Strin
         false => {
             path := module_path(root, progdir, id)
             guard_module(progdir, inpath, id, path)
-            src := read_module(inpath, path)
+            src := a.read_module(inpath, path)
             u2  := id.id_is_user().match ({
                 true  => a.user_decls_into(c.useen, src, 0, id, inpath),
                 false => c.useen
@@ -348,7 +353,7 @@ provided_names = (a: Ptr<Malloc>, src: str) String {
 }
 
 check_import_names = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, id: String) i32 {
-    provided := a.provided_names(read_module(inpath, module_path(root, progdir, id)))
+    provided := a.provided_names(a.read_module(inpath, module_path(root, progdir, id)))
     src.check_head(src.lstrip(p) + 1, provided, id, inpath)
 }
 check_head = (src: str, p: i32, provided: String, id: String, inpath: str) i32 {
