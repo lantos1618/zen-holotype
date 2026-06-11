@@ -1,4 +1,4 @@
-// @self-hosted-only — the TRACING half of ORC (Goal Z's "ARC/ORC" memory family). std.drop gives
+// @self-hosted-only — the TRACING half of ORC (Goal Z's "ARC/ORC" memory family). std.mem.own gives
 // DETERMINISTIC destruction (Own<T>/Rc<T> fire a payload's Drop at refcount zero); but two refcounted
 // nodes that point at each other never reach zero — a CYCLE leaks. This module collects those cycles
 // with a synchronous Bacon–Rajan trial-deletion (the classic "Recycler" algorithm), built entirely in
@@ -10,7 +10,7 @@
 //
 // THE GENERIC-DISPATCH KEYSTONE, again. A node's children are reached through `trace`, dispatched to the
 // payload type's `impl_Trace_<T>_trace` — the SAME monomorphize-then-re-dispatch machinery that lets
-// std.drop's Own<T> route a generic `.drop()` to the concrete impl. Here `do_trace<T>`/`do_drop<T>` are
+// std.mem.own's Own<T> route a generic `.drop()` to the concrete impl. Here `do_trace<T>`/`do_drop<T>` are
 // the generic shims: T flows in from the `Rc<T>` argument, and the bare `.trace()`/`.drop()` re-resolves
 // to the concrete impl after Rc<T> is monomorphized. So a GENERIC refcounted pointer routes BOTH halves
 // of ORC — destruction (Drop) and cycle tracing (Trace) — to a concrete payload with zero per-type code.
@@ -23,7 +23,7 @@
 //     (3) COLLECT    : every white node is pure garbage — finalize (Drop) + free it.
 //   the decrement/restore is what distinguishes a self-sustaining cycle (all-internal refs → white) from
 //   a live subgraph (some external ref keeps a count > 0 → black).
-{ malloc, realloc, free } = std.alloc
+{ malloc, realloc, free } = std.mem.alloc
 
 // trial-deletion colors. BLACK = in use / done, GRAY = trial-deleted (being examined), WHITE = garbage.
 BLACK := 0
@@ -32,7 +32,7 @@ WHITE := 2
 
 // ── pointer slots in a raw byte block: store a pointer as an i64 cell, load it back RE-TYPED. The
 // loaded i64 is re-pointered by `.offset(0)` (a no-op address-of-byte) so the checker types it as a
-// RawPtr rather than an i64 — the same store_i64/load_i64-as-pointer idiom std.coroutine uses for ucontext.
+// RawPtr rather than an i64 — the same store_i64/load_i64-as-pointer idiom std.concurrent.coroutine uses for ucontext.
 store_ptr* = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }
 load_ptr*  = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
 
@@ -66,7 +66,7 @@ roots_clear* = () void { store_i64(roots_list().offset(0), 0) }
 // the white set built during a collection (block pointers found to be pure cycle garbage).
 white := null_ptr()
 
-// ── the two ORC traits. Trace visits each child Rc, Drop finalizes a dying value (see std.drop). ──
+// ── the two ORC traits. Trace visits each child Rc, Drop finalizes a dying value (see std.mem.own). ──
 Tracer*: { op: i32 }                                  // which sub-pass to apply per visited child
 Trace*:  { trace: (Ptr<Self>, MutPtr<Tracer>) void }  // a type visits each child Rc it holds
 Drop*:   { drop: (MutPtr<Self>) void }                // a destructor, run once at reclaim

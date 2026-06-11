@@ -30,8 +30,8 @@ NODE = shutil.which("node")
 # the frontend the genjs driver needs: the shared AST + mono + the C emitter (genModule is unused
 # but genc_emit defines helpers genjs leans on via the shared module), the lexer/parser, the checker
 # (resolve_module lives in parse/resolve path), PLUS compiler/genjs.zen — the backend under test.
-_GENJS_SOURCES = ["zen/compiler/genc.zen", "zen/std/result.zen", "zen/compiler/mono.zen", "zen/compiler/genc_emit.zen",
-                  "zen/std/bytes.zen",
+_GENJS_SOURCES = ["zen/compiler/genc.zen", "zen/std/core/result.zen", "zen/compiler/mono.zen", "zen/compiler/genc_emit.zen",
+                  "zen/std/text/bytes.zen",
                   "zen/compiler/lex.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_type.zen",
                   "zen/compiler/parse_stmt.zen", "zen/compiler/parse.zen", "zen/compiler/check.zen",
                   "zen/compiler/genjs.zen"]

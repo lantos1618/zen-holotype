@@ -7,8 +7,8 @@ import _oracle
 ROOT = _oracle.ROOT
 
 RAW_YIELD_ALLOWED = {
-    Path("zen/std/coroutine.zen"),
-    Path("zen/std/runtime.zen"),
+    Path("zen/std/concurrent/coroutine.zen"),
+    Path("zen/std/concurrent/runtime.zen"),
 }
 
 ATWHILE_ALLOWED = {
@@ -17,7 +17,7 @@ ATWHILE_ALLOWED = {
     Path("zen/compiler/parse_stmt.zen"),
     # Temporary low-level string scanner. Once std gets a loop primitive that can
     # express condition-driven scans, this should move off @while too.
-    Path("zen/std/str.zen"),
+    Path("zen/std/text/str.zen"),
 }
 
 EXAMPLE_PRIMITIVES = {
@@ -77,7 +77,7 @@ def test_raw_yield_stays_behind_coroutine_and_runtime():
         if rel not in RAW_YIELD_ALLOWED and (yield_call.search(src) or yield_import.search(src)):
             hits.append(str(rel))
 
-    assert not hits, "call runtime.addr().suspend(); raw yield is only for std.coroutine/std.runtime:\n" + "\n".join(hits)
+    assert not hits, "call runtime.addr().suspend(); raw yield is only for std.concurrent.coroutine/std.concurrent.runtime:\n" + "\n".join(hits)
 
 
 def test_atwhile_stays_in_compiler_or_named_low_level_substrate():

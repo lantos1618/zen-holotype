@@ -20,19 +20,19 @@ All notable changes to **zen**. The format loosely follows
 **Explicit foreign & module boundaries** — the foundation for binding to C and spanning
 multiple modules, all in Zen:
 
-- **`std.c`** — the libc foreign bindings as a **built AST namespace**: `libc() [Decl]` is a
+- **`std.io.c`** — the libc foreign bindings as a **built AST namespace**: `libc() [Decl]` is a
   function that returns the bodyless `malloc`/`calloc`/`memcpy`/`free`/`strlen`/`strcmp`/`abort`
   declarations, which `genModule` emits as C prototypes. The "header is a function" — one source
   of truth instead of the same externs re-prototyped in every module that frees.
-- **`std.result`** — errors as **values**: generic `Result<T, E>` / `Opt<T>`, the FFI error enum
+- **`std.core.result`** — errors as **values**: generic `Result<T, E>` / `Opt<T>`, the FFI error enum
   `IoError`, boundary checkers (`ok_if` / `ok_ptr`) that lift a raw C sentinel into a `Result`,
   and `panic` (the explicit, greppable abort). No exceptions, no unwinding — `.match` is the catch
   and `return .Err(e)` propagates.
-- **`std.cown`** — the FFI memory convention, in code: FFI is the raw floor below the allocator
+- **`std.concurrent.cown`** — the FFI memory convention, in code: FFI is the raw floor below the allocator
   discipline; a C allocator hands back a `RawPtr<T>` (the "wrap me" marker), which gets wrapped in
-  a `Drop`-implementing owner behind `Own<T>` (`std.drop`) so the matching `free`/`close` fires
+  a `Drop`-implementing owner behind `Own<T>` (`std.mem.own`) so the matching `free`/`close` fires
   exactly once at refcount zero (`Buf`/`malloc` and `File`/`open` worked examples).
-- **`std.resolve`** — the self-hosted **module loader**: reads a program's `{ … } = std.X` import
+- **`std.internal.resolve`** — the self-hosted **module loader**: reads a program's `{ … } = std.X` import
   edges, gathers the transitive closure, strips imports, and concatenates each module body once
   (per-module dedup breaks cycles; a per-name pass keeps the first definition of each top-level
   name) into one flat module for `zenc`.

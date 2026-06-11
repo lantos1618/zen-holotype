@@ -42,20 +42,20 @@ def test_graph_covers_every_module_and_resolves_known_edges():
     assert set(edges) == set(ALL_MODULES)
     # spot-check a few real edges: compiler/check_validate imports from compiler and std modules.
     assert set(edges["compiler/check_validate"]) >= {
-        "compiler/genc", "compiler/check", "std/bytes", "std/alloc", "std/str"
+        "compiler/genc", "compiler/check", "std/text/bytes", "std/mem/alloc", "std/text/str"
     }
-    # and per-name origin: check_validate's `eq` comes from std/str (NOT std/ast, which also defines eq).
-    assert origin["compiler/check_validate"]["eq"] == "std/str"
+    # and per-name origin: check_validate's `eq` comes from std/text/str (NOT std/internal/ast).
+    assert origin["compiler/check_validate"]["eq"] == "std/text/str"
 
 
 def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
     order, cycle = _resolver.topo_order()
     # the parse_* modules import each other -> a genuine cycle; everything else is a DAG. Kahn's
-    # leftover set also holds any module DOWNSTREAM of the cycle: std/resolve imports compiler/parse
+    # leftover set also holds any module DOWNSTREAM of the cycle: std/internal/resolve imports compiler/parse
     # (the loader's per-name dedup uses the parser's decl_span as its decl-boundary oracle), so it
     # can never reach in-degree 0 — it is unorderable, not itself cyclic.
     assert set(cycle) == {"compiler/parse", "compiler/parse_expr", "compiler/parse_stmt",
-                          "compiler/parse_type", "std/resolve"}
+                          "compiler/parse_type", "std/internal/resolve"}
     assert set(order) | set(cycle) == set(ALL_MODULES)        # every module accounted for exactly once
     assert not (set(order) & set(cycle))
     edges, _ = _resolver.module_graph()
@@ -68,11 +68,11 @@ def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
 
 
 def test_reachable_is_the_transitive_closure():
-    # compiler/check_validate -> compiler/check -> {compiler/genc, std/str, std/string, std/bytes, std/mem, std/alloc}; the closure is transitive,
+    # compiler/check_validate -> compiler/check reaches text + memory std modules transitively.
     # so `string`/`mem` appear though check_validate imports neither directly.
     reach = set(_resolver.reachable("check_validate"))
-    assert {"compiler/genc", "compiler/check", "std/str", "std/string",
-            "std/bytes", "std/mem", "std/alloc"} <= reach
+    assert {"compiler/genc", "compiler/check", "std/text/str", "std/text/string",
+            "std/text/bytes", "std/mem/raw", "std/mem/alloc"} <= reach
     assert "compiler/check_validate" not in reach               # a module is not in its own closure
 
 
@@ -82,7 +82,7 @@ def test_module_typechecks_through_namespaced_resolver(module):
     # The full S1 result: every std module composes with its REAL TRANSITIVE imports, resolved with
     # per-module namespacing (no clash), to 0 cross-module type errors. Covers the parse_* cycle that
     # the direct-import driver only passed by accident of its import sets, AND a module that CALLS a
-    # cross-module generic (std.cown -> std.drop's Own<T>/new<T>/own_get<T>): check_validate.call_errs
+    # cross-module generic (std.concurrent.cown -> std.mem.own's Own<T>/new<T>/own_get<T>): check_validate.call_errs
     # now skips the strict arg-TYPE check for an imported generic (its param types still carry the
     # unbound tparam `T`, which is uninferable here), exactly as a LOCAL generic call is monomorphized
     # away before this pass. Arity is still enforced, so a wrong-arity imported generic call is rejected.

@@ -14,7 +14,7 @@ returns the int `test()` computes (silent-miscompile guard: assert == want).
 How the CHECK binary stays Python-free: the committed EMIT binary compiles the compiler sources
 PLUS check_validate.zen (which the emit-only binary leaves out) into check-mode C, which `cc`
 links with check_main.c. So `cc` + the committed `zenc` binary build BOTH — Python never runs.
-(The import-strip+concat used to assemble the check-mode source is the same transform std.resolve
+(The import-strip+concat used to assemble the check-mode source is the same transform std.internal.resolve
 reproduces byte-for-byte; here it's done in this harness's setup, OUTSIDE the per-test loop.)
 """
 import subprocess
@@ -242,7 +242,7 @@ def _build_check_linked():
 
 def imports_of(path):
     """The modules `path` imports — every `{ … } = std.X` / `compiler.X` head as `namespace/name`.
-    This is exactly the import classification std.resolve.is_import_line makes, read here to assemble
+    This is exactly the import classification std.internal.resolve.is_import_line makes, read here to assemble
     the lib header. Returns module ids in first-seen order, de-duplicated."""
     seen, out = set(), []
     for l in (ROOT / path).read_text().splitlines():
@@ -251,8 +251,8 @@ def imports_of(path):
             marker = "= " + ns + "."
             if s.startswith("{ ") and marker in s:
                 mod = s.split(marker, 1)[1].strip().split()[0].rstrip()
-                mod = "".join(ch for ch in mod if ch.isalnum() or ch == "_")
-                mid = ns + "/" + mod
+                mod = "".join(ch for ch in mod if ch.isalnum() or ch in "_.")
+                mid = ns + "/" + mod.replace(".", "/")
                 if mod and mid not in seen:
                     seen.add(mid)
                     out.append(mid)
@@ -267,7 +267,7 @@ def _module_relpath(module_id):
 
 
 # (Removed: imports_a_cross_module_generic — the marker the two cross-module oracle tests used to SKIP a
-# module that calls an imported generic, e.g. std.cown -> std.drop's new<T>/own_get<T>. That checker gap
+# module that calls an imported generic, e.g. std.concurrent.cown -> std.mem.own's new<T>/own_get<T>. That checker gap
 # is FIXED: check_validate.call_errs now skips the strict arg-TYPE check for an imported generic call —
 # its param types still carry the unbound tparam `T`, uninferable at the call site — exactly as a LOCAL
 # generic call is monomorphized away before the validating pass; arity is still enforced. cown now

@@ -1,12 +1,12 @@
 // @self-hosted-only
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 
-{ byte_at } = std.bytes
+{ byte_at } = std.text.bytes
 { decl_span } = compiler.parse
-{ Malloc } = std.alloc
-{ String, push, append, with_cap, finish } = std.string
-{ read_file, open, close, write, O_RDONLY } = std.io
-{ view } = std.str
+{ Malloc } = std.mem.alloc
+{ String, push, append, with_cap, finish } = std.text.string
+{ read_file, open, close, write, O_RDONLY } = std.io.file
+{ view } = std.text.str
 
 is_ws = (b: u8) bool { (b == ' ') || (b == 9) }
 
@@ -129,13 +129,23 @@ is_ident_byte = (b: u8) bool {
 take_name = (out: String, s: str, p: i32) String {
     s.byte_at(p).is_ident_byte().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
 }
-import_module* = (out: String, s: str, p: i32) String { out.take_name(s, s.module_name_pos(p)) }
+import_module* = (out: String, s: str, p: i32) String { out.take_module_path(s, s.module_name_pos(p)) }
+
+take_module_path = (out: String, s: str, p: i32) String {
+    s.byte_at(p).is_ident_byte().match ({
+        true  => out.push(s.byte_at(p)).take_module_path(s, p + 1),
+        false => (s.byte_at(p) == '.').match ({
+            true  => out.push('/').take_module_path(s, p + 1),
+            false => out
+        })
+    })
+}
 
 import_id = (out: String, s: str, p: i32) String {
     s.is_std_marker_at(p).match ({
-        true  => out.append("std/").take_name(s, p + STD_MARKER_LEN),
+        true  => out.append("std/").take_module_path(s, p + STD_MARKER_LEN),
         false => s.is_compiler_marker_at(p).match ({
-            true  => out.append("compiler/").take_name(s, p + COMPILER_MARKER_LEN),
+            true  => out.append("compiler/").take_module_path(s, p + COMPILER_MARKER_LEN),
             false => s.is_user_marker_at(p).match ({
                 true  => out.append("u/").take_name(s, p + USER_MARKER_LEN),
                 false => out.import_id(s, p + 1)
@@ -426,7 +436,7 @@ dd = (a: Ptr<Malloc>, out: String, flat: str, p: i32, set: String, mainset: Stri
     })
 }
 
-// Namespace binds load `c = std.c` and rewrite `c.malloc` to `malloc`.
+// Namespace binds load `c = std.io.c` and rewrite `c.malloc` to `malloc`.
 is_ns_line* = (s: str, p: i32) bool {
     ls := s.lstrip(p)
     s.byte_at(ls).is_ident_byte().match ({

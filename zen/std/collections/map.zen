@@ -1,5 +1,5 @@
-// std.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the std.vec mold.
-// Every op that allocates takes the allocator as `a: MutPtr<A>` and goes through std.alloc's `Allocator`
+// std.collections.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the std.collections.vec mold.
+// Every op that allocates takes the allocator as `a: MutPtr<A>` and goes through std.mem.alloc's `Allocator`
 // trait — nothing here hides a malloc. The plain `map_new`/`mput` path is fail-fast like Vec; the
 // `try_*` variants return Result<Map<T>, IoError> so callers can handle allocation failure as a value.
 // Lookup is a LINEAR SCAN (v1: fine for the small maps the compiler and examples need; hashing can land
@@ -7,8 +7,8 @@
 //
 // Layout: two PARALLEL buffers of `cap` slots — `keys` holds `str` key pointers, `vals` holds T's —
 // plus `len` live entries. Keys are BORROWED `str` pointers: the map stores the pointer, not a copy,
-// so a key must outlive the map (string literals always do; `dup` one from std.str otherwise). Key
-// comparison is byte-wise `eq` from std.str, never pointer `==`.
+// so a key must outlive the map (string literals always do; `dup` one from std.text.str otherwise). Key
+// comparison is byte-wise `eq` from std.text.str, never pointer `==`.
 //
 //   m := Malloc(_: 0)
 //   w := m.addr().map_new("the", 1)        // fail-fast Map<i32>; T inferred from the seed
@@ -19,8 +19,8 @@
 //   m.addr().free_map(w)                   // hand both buffers back to m
 //
 // Names are m-prefixed (map_new/mput/mget/mhas/mlen/mgrow) because Zen's namespace is FLAT with no
-// overloading — a bare `put`/`get`/`len`/`new` would clash with std.string/std.vec/std.str when
-// imported together (`get` is std.vec's, `len` is std.str's, `new` is std.string's).
+// overloading — a bare `put`/`get`/`len`/`new` would clash with std.text.string/std.collections.vec/std.text.str when
+// imported together (`get` is std.collections.vec's, `len` is std.text.str's, `new` is std.text.string's).
 //
 // LOCALS in the generic bodies are mk-prefixed (mkm/mkr/mkks/mkvs/mkcap) on purpose: generic mono
 // INLINES these bodies into the caller and substitutes argument EXPRESSIONS textually, without
@@ -28,12 +28,12 @@
 // (silent mis-dispatch; see the capture repro in this module's PR). Distinctive names dodge it.
 // For the same reason no generic body here uses `return` (the inliner hoists it into the CALLER's
 // frame) and every value-returning branch is a whole-body match — the two body shapes the inliner
-// lowers soundly in any context (proven by std.vec): a single match/call EXPRESSION, or statements
+// lowers soundly in any context (proven by std.collections.vec): a single match/call EXPRESSION, or statements
 // followed by a trailing variable/constructor.
 
-{ Allocator } = std.alloc        // explicit allocator trait
-{ Result, IoError } = std.result
-{ eq } = std.str                 // byte-wise str equality (`==` on str compares POINTERS)
+{ Allocator } = std.mem.alloc        // explicit allocator trait
+{ Result, IoError } = std.core.result
+{ eq } = std.text.str                 // byte-wise str equality (`==` on str compares POINTERS)
 
 // one key slot: a borrowed `str`. Exists for its size — `sizeof(str)` doesn't lower to C (str is no
 // C type name), `sizeof(MKey)` does, and a one-pointer struct is exactly one key slot.
@@ -265,5 +265,5 @@ mget*<T> = (m: Map<T>, k: str, dflt: T) T { m.mget_at(m.mfind(k), dflt) }
 // is k present?
 mhas*<T> = (m: Map<T>, k: str) bool { m.mfind(k) >= 0 }
 
-// hand both buffers back to `a` (free_map, not free — std.alloc/std.mem own that name)
+// hand both buffers back to `a` (free_map, not free — std.mem.alloc/std.mem.raw own that name)
 free_map*<T, A> = (a: MutPtr<A>, m: Map<T>) void { a.release(m.keys)  a.release(m.vals) }

@@ -17,7 +17,7 @@ make -f bootstrap/Makefile zenc     # cc compiles the committed C seed → ./zen
 
 ```sh
 cat > hello.zen <<'EOF'
-{ println, println_int } = std.fmt
+{ println, println_int } = std.text.fmt
 
 main = () i32 {
     println("hello, zen")
@@ -39,7 +39,7 @@ import the stdlib and other siblings; cycles are fine.
 
 ```sh
 cat > geometry.zen <<'EOF'
-{ println_int } = std.fmt
+{ println_int } = std.text.fmt
 
 area*  = (w: i32, h: i32) i32 { w * h }       // `*` exports the name
 show*  = (n: i32) i64 { println_int(n) }
@@ -71,7 +71,7 @@ x = x + 1
 // 0.001). STRICT: no implicit int<->float mixing, even for literals — `1.5 + 1` and
 // `x: f64 := 1` are type errors; cross explicitly with to_f64 / to_i64 / to_i32 (C truncation).
 // f64 supports + - * / and comparisons; % / bitwise / shifts reject. Matching on a float
-// literal works but is just an `==` chain — use with care. std.fmt prints them (%g-style:
+// literal works but is just an `==` chain — use with care. std.text.fmt prints them (%g-style:
 // whole values drop the point, -3.0 prints "-3").
 h := 1.5
 area := h * h * 0.5                  // f64 * f64 — fine

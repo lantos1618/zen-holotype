@@ -9,7 +9,7 @@ zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
 int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, U1.4: packed kind + pos*16 (0 = ok) */
-/* U1.3: the Zen module loader (zen/std/resolve.zen, now a SOURCE). Given the project root (the dir that
+/* U1.3: the Zen module loader (zen/std/internal/resolve.zen, now a SOURCE). Given the project root (the dir that
  * contains zen/std/ and zen/compiler/), the PROGRAM's own directory (for sibling `{ f } = b` imports;
  * "" when the source has no file), the input path (error-message prefix) + the program source, returns
  * the flat single-module source with the transitive import closure spliced in (per-module + per-name
@@ -197,7 +197,7 @@ static String build_self_source(const char* srcroot){
  * via zenrt.h instead, so we swap the head for the include. */
 static const char HEAD[] = "typedef struct { void* ptr; int64_t len; } zslice; ";
 static const char HEAD_REPL[] = "#include \"zenrt.h\"\n";
-/* The build/run path uses this variant instead: a built program that imports std.string emits its OWN
+/* The build/run path uses this variant instead: a built program that imports std.text.string emits its OWN
  * String + builders (strong, they override zenrt.c's weak copies at link), so define ZEN_NO_STRING to
  * suppress zenrt.h's String and avoid the struct clash (#98). NOTE the compiler's own gen.c (build_self,
  * above) uses the plain HEAD_REPL — it relies on zenrt's String (its gen.c strips std imports, emits

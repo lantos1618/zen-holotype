@@ -2,7 +2,7 @@
 // Direct std-import coverage is still pending; until then its mechanics are validated by an equivalent
 // self-contained test (test_differential).
 //
-// std.rc — a single-threaded REFERENCE-COUNTED pointer `Rc<T>`: shared ownership of a heap value, freed
+// std.mem.rc — a single-threaded REFERENCE-COUNTED pointer `Rc<T>`: shared ownership of a heap value, freed
 // automatically when the last reference goes away. This is the RC in Goal Z's "ARC/ORC" memory family
 // (ARC = atomic Rc for threads — needs an atomic add; ORC = +cycle collection via Trace — both deferred
 // until atomics and a Drop/Trace trait exist).
@@ -10,8 +10,8 @@
 // Layout: one heap block `[ count:i64 | value:T ]`. The i64 refcount lives in the first 8 bytes; the
 // value follows. `clone` bumps the count, `drop` decrements it and frees the block at zero. The count
 // is read/written with the store_i64/load_i64 intrinsics; the value through a `[T]` slice over its slot
-// (the element type T flows in from the Rc<T> receiver, the way std.vec threads it through `buf`).
-{ malloc, free } = std.alloc
+// (the element type T flows in from the Rc<T> receiver, the way std.collections.vec threads it through `buf`).
+{ malloc, free } = std.mem.alloc
 
 Rc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T ]
 
@@ -37,7 +37,7 @@ rc_clone<T> = (r: Rc<T>) Rc<T> {
 // drop: release this reference — decrement the count, and free the block once it hits zero.
 // NB: only the [count|value] BLOCK is freed; the payload's own Drop is NOT run (Zen has no
 // conditional `T: Drop` dispatch yet, and most Rc payloads are POD). A payload that owns heap
-// memory or a handle (String, Vec, a fd) belongs in std.drop's Own<T>, whose release DOES
+// memory or a handle (String, Vec, a fd) belongs in std.mem.own's Own<T>, whose release DOES
 // finalize-then-free — putting one behind a bare Rc leaks its buffers at the last drop.
 rc_drop<T> = (r: Rc<T>) void {
     n := load_i64(r.base) - 1

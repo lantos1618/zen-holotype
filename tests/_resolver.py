@@ -42,14 +42,14 @@ ROOT = Path(__file__).resolve().parent.parent
 STD = ROOT / "zen" / "std"
 COMPILER = ROOT / "zen" / "compiler"
 
-_IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*(?P<ns>std|compiler)\.(?P<mod>\w+)", re.S)
+_IMPORT_RE = re.compile(r"^\s*\{(?P<names>[^}]*)\}\s*=\s*(?P<ns>std|compiler)\.(?P<mod>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)", re.S)
 # A decl head is `name[*][<tparams>][*] =/:` — the optional `<…>` is a GENERIC head. The language
 # accepts both public-generic spellings used in the tree (`Vec*<T>:` and older `new<T>* =`), so the
 # splitter must keep both. Without this, generic stdlib exports are invisible to cross-module checks.
 _DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\*?)(<[^>]*>)?(\*?)\s*[=:]")
 # A method-impl head `Type.impl(Trait, { … })` is ALSO a top-level decl, but it has no `name =/:` head so
 # _DECL_HEAD_RE misses it. It must survive resolution: a cross-module CONSUMER of a trait method (e.g.
-# std.vec calling `a.acquire(…)` on an explicit Allocator, where acquire lives in std.alloc's
+# std.collections.vec calling `a.acquire(…)` on an explicit Allocator, where acquire lives in std.mem.alloc's
 # `Malloc.impl(Allocator, …)`) needs the impl present so the checker's is_trait_method resolves the call —
 # otherwise the method reads as undefined-name. The real loader (resolve.zen) always keeps impls; this
 # mirrors that. Keyed per (Type, Trait) so two impls (many traits per type / many types per trait) never
@@ -58,15 +58,15 @@ _IMPL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\.impl\(\s*([A-Za-z_][A-Za
 
 
 def _module_id(ns, mod):
-    return ns + "/" + mod
+    return ns + "/" + mod.replace(".", "/")
 
 
 def _real_id(mod):
     """Normalize a real on-disk module name to `std/name` or `compiler/name`."""
     if "/" in mod:
         return mod
-    if (STD / (mod + ".zen")).exists():
-        return _module_id("std", mod)
+    for p in STD.rglob(mod + ".zen"):
+        return "std/" + p.relative_to(STD).with_suffix("").as_posix()
     if (COMPILER / (mod + ".zen")).exists():
         return _module_id("compiler", mod)
     return mod
@@ -92,7 +92,7 @@ def _normalize_modules(modules):
 
 def all_modules():
     """Every real std/compiler module id, sorted — the universe the graph is built over."""
-    return sorted([_module_id("std", p.stem) for p in STD.glob("*.zen")] +
+    return sorted(["std/" + p.relative_to(STD).with_suffix("").as_posix() for p in STD.rglob("*.zen")] +
                   [_module_id("compiler", p.stem) for p in COMPILER.glob("*.zen")])
 
 
@@ -102,7 +102,7 @@ def _src(mod):
 
 def import_edges(mod):
     """The `{ a, b } = std.X` / `compiler.X` imports of `mod`, as a list of
-    (imported_name, source_module_id) pairs in source order. This is exactly std.resolve.is_import_line's
+    (imported_name, source_module_id) pairs in source order. This is exactly std.internal.resolve.is_import_line's
     classification, parsed for its names + target module — the per-name edge the graph needs."""
     out = []
     lines = _src(mod).splitlines()
@@ -306,7 +306,7 @@ def _import_edges_src(src):
             for nm in m.group("names").split(","):
                 nm = nm.strip()
                 if nm:
-                    out.append((nm, m.group("mod")))
+                    out.append((nm, m.group("mod").replace(".", "/")))
     return out
 
 
@@ -375,8 +375,8 @@ def resolve(target, modules=None):
 # source SET from bootstrap roots + runtime-provided std exclusions, then derive the expected ORDER by
 # SCC-condensing the import graph and sorting deterministically inside each SCC.
 
-_BOOTSTRAP_ROOTS = ["compiler/genc_emit", "compiler/parse", "compiler/check_validate", "std/resolve"]
-_BOOTSTRAP_RUNTIME_MODULES = {"std/alloc", "std/mem", "std/str", "std/string"}
+_BOOTSTRAP_ROOTS = ["compiler/genc_emit", "compiler/parse", "compiler/check_validate", "std/internal/resolve"]
+_BOOTSTRAP_RUNTIME_MODULES = {"std/mem/alloc", "std/mem/raw", "std/text/str", "std/text/string"}
 
 
 def _bootstrap_manifest_modules():
@@ -386,8 +386,8 @@ def _bootstrap_manifest_modules():
         if not rel or rel.startswith("#"):
             continue
         p = Path(rel)
-        if len(p.parts) == 3 and p.parts[0] == "zen" and p.parts[1] in ("std", "compiler") and p.suffix == ".zen":
-            mods.append(p.parts[1] + "/" + p.stem)
+        if len(p.parts) >= 3 and p.parts[0] == "zen" and p.parts[1] in ("std", "compiler") and p.suffix == ".zen":
+            mods.append(p.parts[1] + "/" + Path(*p.parts[2:]).with_suffix("").as_posix())
     return mods
 
 
@@ -471,4 +471,3 @@ def _scc_graph_order(modules):
 
 def _bootstrap_graph_order():
     return _scc_graph_order(_bootstrap_source_set())
-

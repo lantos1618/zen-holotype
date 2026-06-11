@@ -1,19 +1,19 @@
 """The resolver triple-fix, acceptance-tested through the BINARY (the empirical census's 8 bullets).
 
-Three localized zen/std/resolve.zen bugs broke whole regions of the stdlib import surface:
+Three localized zen/std/internal/resolve.zen bugs broke whole regions of the stdlib import surface:
   1. GENERIC HEADS INVISIBLE TO DEDUP — after_name_is_decl bailed at '<', so `new<T> = …` was never
      recorded/deduped: any two modules sharing a generic-decl dep died on "duplicate top-level
-     definition" (fmt+rc, vec+rc, fmt+arc, fmt+drop; std.c / std.cown alone).
-  2. NS-BIND DEAD — `c = std.c` loaded the bound module's closure into the dedup region that is
+     definition" (fmt+rc, vec+rc, fmt+arc, fmt+drop; std.io.c / std.concurrent.cown alone).
+  2. NS-BIND DEAD — `c = std.io.c` loaded the bound module's closure into the dedup region that is
      always kept (the main-file region started at 0, ns bodies sit before the main body), so the
      closure never deduped → duplicate-toplevel.
-  3. LINE-BASED SCAN vs MULTI-LINE CONSTRUCTS — std.ast's 5-line `{ … } = compiler.genc` import
+  3. LINE-BASED SCAN vs MULTI-LINE CONSTRUCTS — std.internal.ast's 5-line `{ … } = compiler.genc` import
      wasn't recognized (lines leaked into the flat source), and a multi-line `Type.impl(Trait, {…})`
-     body with column-0 method lines (std.runtime's `suspend = …`) had its SECOND `suspend` line
+     body with column-0 method lines (std.concurrent.runtime's `suspend = …`) had its SECOND `suspend` line
      silently deduped away as a "duplicate decl" → "impl does not satisfy the trait".
-Residue of the same census: std.c/std.ast redefined `dup`/`eq`, names std.str (in their own flat
+Residue of the same census: std.io.c/std.internal.ast redefined `dup`/`eq`, names std.text.str (in their own flat
 closure via compiler.genc) already owns — per-name first-wins dedup kept the str ones and broke
-every call site; the builders now carry std.ast's x-suffix dodge (`dupx`/`eqx`, like `callx`).
+every call site; the builders now carry std.internal.ast's x-suffix dodge (`dupx`/`eqx`, like `callx`).
 """
 import subprocess
 import tempfile
@@ -42,10 +42,10 @@ def _check(src):
 
 # ── bug 1: co-imports whose closures share generic decls (`new<T>`, `release<T>*`, `dup<T>`) ─────────
 @pytest.mark.parametrize("imports", [
-    pytest.param("{ println } = std.fmt\n{ rc_val } = std.rc\n", id="fmt+rc"),
-    pytest.param("{ vec_of } = std.vec\n{ rc_val } = std.rc\n", id="vec+rc"),
-    pytest.param("{ println } = std.fmt\n{ arc_val } = std.arc\n", id="fmt+arc"),
-    pytest.param("{ println } = std.fmt\n{ own_get } = std.drop\n", id="fmt+drop"),
+    pytest.param("{ println } = std.text.fmt\n{ rc_val } = std.mem.rc\n", id="fmt+rc"),
+    pytest.param("{ vec_of } = std.collections.vec\n{ rc_val } = std.mem.rc\n", id="vec+rc"),
+    pytest.param("{ println } = std.text.fmt\n{ arc_val } = std.mem.arc\n", id="fmt+arc"),
+    pytest.param("{ println } = std.text.fmt\n{ own_get } = std.mem.own\n", id="fmt+drop"),
 ])
 def test_generic_decl_co_imports_check_ok(imports):
     r = _check(imports + "main = () i32 { 0 }\n")
@@ -53,19 +53,19 @@ def test_generic_decl_co_imports_check_ok(imports):
 
 
 @pytest.mark.parametrize("imports", [
-    pytest.param("{ libc } = std.c\n", id="std.c"),
-    pytest.param("{ buf_alloc } = std.cown\n", id="std.cown"),
+    pytest.param("{ libc } = std.io.c\n", id="std.io.c"),
+    pytest.param("{ buf_alloc } = std.concurrent.cown\n", id="std.concurrent.cown"),
 ])
 def test_generic_heavy_module_alone_checks_ok(imports):
     r = _check(imports + "main = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 
 
-# ── bug 2: namespace bind `c = std.c` + qualified access compiles AND runs ───────────────────────────
+# ── bug 2: namespace bind `c = std.io.c` + qualified access compiles AND runs ───────────────────────────
 def test_ns_bind_qualified_call_runs():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "c = std.c\n"
+        "c = std.io.c\n"
         "main = () i32 {\n"
         "    p := c.malloc(8)\n"
         "    store_i64(p, 37)\n"
@@ -75,19 +75,19 @@ def test_ns_bind_qualified_call_runs():
     assert r.returncode == 37, r.stderr
 
 
-# ── bug 3: multi-line imports (std.ast) and multi-line impl bodies (std.runtime) ─────────────────────
+# ── bug 3: multi-line imports (std.internal.ast) and multi-line impl bodies (std.concurrent.runtime) ─────────────────────
 def test_std_runtime_imports_clean():
     """The two Runtime impls both hold a column-0 `suspend = …` METHOD line; the line-based dedup
     used to treat the second as a duplicate top-level decl and silently drop it — the flattened
     AsyncRuntime impl then lacked `suspend` ("impl does not satisfy the trait")."""
-    r = _check("{ sync_runtime } = std.runtime\nmain = () i32 { 0 }\n")
+    r = _check("{ sync_runtime } = std.concurrent.runtime\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 
 
 def test_std_ast_imports_clean():
-    """std.ast's import of compiler.genc spans 5 lines; the line-local import scan missed it, leaked
+    """std.internal.ast's import of compiler.genc spans 5 lines; the line-local import scan missed it, leaked
     the continuation lines into the flat source, and lost the imported types (unknown type 'Expr')."""
-    r = _check("{ var } = std.ast\nmain = () i32 { 0 }\n")
+    r = _check("{ var } = std.internal.ast\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 
 
@@ -95,25 +95,25 @@ def test_user_shadow_of_imported_std_name_is_an_error():
     """A program decl that collides with a name in its imported std closure used to be a SILENT
     shadow (the std decl was deduped away — so the std module's own internal calls rebound to the
     user's decl, a miscompile trap). The decl-span dedup keeps both and the validator rejects."""
-    r = _check("{ println } = std.fmt\n"
-               "eq = (a: i32, b: i32) bool { a == b }\n"   # std.str (in fmt's closure) owns `eq`
+    r = _check("{ println } = std.text.fmt\n"
+               "eq = (a: i32, b: i32) bool { a == b }\n"   # std.text.str (in fmt's closure) owns `eq`
                "main = () i32 { 0 }\n")
     assert r.returncode != 0
     assert "duplicate top-level definition" in r.stderr
 
 
 def test_import_vs_import_collision_still_first_wins():
-    """Two IMPORTED modules sharing a name (std.string `free(String)` vs std.mem `free(RawPtr)`)
+    """Two IMPORTED modules sharing a name (std.text.string `free(String)` vs std.mem.raw `free(RawPtr)`)
     still dedup silently — dependency-first, the defining module wins; no false dup error."""
-    r = _check("{ String, with_cap, finish } = std.string\nmain = () i32 { 0 }\n")
+    r = _check("{ String, with_cap, finish } = std.text.string\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 
 
 def test_std_ast_builders_usable():
-    """Beyond importing: the renamed builders (dupx/eqx — the std.str collision dodge) actually run."""
+    """Beyond importing: the renamed builders (dupx/eqx — the std.text.str collision dodge) actually run."""
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "{ var, dot, eqx } = std.ast\n"
+        "{ var, dot, eqx } = std.internal.ast\n"
         "main = () i32 {\n"
         '    e := var("x").dot("a").eqx(var("y").dot("a"))\n'
         "    0\n"
