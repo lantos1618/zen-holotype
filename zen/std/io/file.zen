@@ -18,10 +18,15 @@ system = (cmd: str) i32
 STDOUT := 1
 
 // Writes a str without the trailing NUL and returns the byte count.
-print* = (s: str) i64 { v := s.view()  STDOUT.write(v.ptr, v.len) }
+print* = (s: str) i64 {
+    v := s.view()
+    STDOUT.write(v.ptr, v.len)
+}
 
 // Writes length-tracked bytes without requiring a trailing NUL.
-print_bytes* = (bytes: [u8]) i64 { STDOUT.write(bytes.ptr, bytes.len) }
+print_bytes* = (bytes: [u8]) i64 {
+    STDOUT.write(bytes.ptr, bytes.len)
+}
 
 // Linux x86-64 POSIX constants used by read_file/write_file.
 O_RDONLY := 0
@@ -55,14 +60,39 @@ write_file_err = (e: IoError) Result<i64, IoError> { .Err(e) }
 // Reads a whole file into an allocator-owned NUL-terminated buffer.
 read_file_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> {
     fd := path.open(O_RDONLY, 0)
-    (fd < 0).match ({ true => { return read_file_err(.NotFound) }, false => {} })
+    (fd < 0).match ({
+        true  => { return read_file_err(.NotFound) },
+        false => {}
+    })
+
     n := fd.file_size()
-    (n < 0).match ({ true => { fd.close()  return read_file_err(.Errno(0 - 1)) }, false => {} })
+    (n < 0).match ({
+        true  => {
+            fd.close()
+            return read_file_err(.Errno(0 - 1))
+        },
+        false => {}
+    })
+
     buf := a.acquire(n + 1)
-    (buf == null_ptr()).match ({ true => { fd.close()  return read_file_err(.Errno(ENOMEM)) }, false => {} })
+    (buf == null_ptr()).match ({
+        true  => {
+            fd.close()
+            return read_file_err(.Errno(ENOMEM))
+        },
+        false => {}
+    })
+
     got := fd.read_all(buf, 0, n)
     fd.close()
-    (got == n).match ({ true => {}, false => { a.release(buf)  return read_file_err(.Eof) } })
+    (got == n).match ({
+        true  => {},
+        false => {
+            a.release(buf)
+            return read_file_err(.Eof)
+        }
+    })
+
     buf.offset(n).store(0)
     out: Result<str, IoError> := .Ok(cstr(buf))
     out
@@ -76,13 +106,23 @@ read_file* = (path: str) Result<str, IoError> {
 // Writes a str's bytes to a file, creating/truncating it.
 write_file* = (path: str, data: str, n: i64) Result<i64, IoError> {
     fd := path.open(O_WRTRUNC, MODE_644)
-    (fd < 0).match ({ true => { return write_file_err(.Denied) }, false => {} })
+    (fd < 0).match ({
+        true  => { return write_file_err(.Denied) },
+        false => {}
+    })
+
     w := fd.write(data.view().ptr, n)
     fd.close()
-    (w == n).match ({ true => {}, false => { return write_file_err(.Eof) } })
+    (w == n).match ({
+        true  => {},
+        false => { return write_file_err(.Eof) }
+    })
+
     out: Result<i64, IoError> := .Ok(w)
     out
 }
 
 // Runs a shell command and returns its exit status.
-run_cmd* = (cmd: str) i32 { cmd.system() }
+run_cmd* = (cmd: str) i32 {
+    cmd.system()
+}
