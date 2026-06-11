@@ -1,0 +1,79 @@
+// Numeric text formatting helpers.
+// These build decimal strings; math predicates and arithmetic belong elsewhere.
+
+{ String, new, push, append, finish } = std.text.string
+
+udigits = (out: String, n: i64) String {
+    (n < 10).match ({
+        true  => out.push('0' + n),
+        false => out.udigits(n / 10).push('0' + (n % 10))
+    })
+}
+
+// Append digits for a negative i64 without negating INT64_MIN.
+ndigits = (out: String, n: i64) String {
+    (n > 0 - 10).match ({
+        true  => out.push('0' + (0 - n)),
+        false => out.ndigits(n / 10).push('0' + (0 - (n % 10)))
+    })
+}
+
+int_string* = (n: i64) String {
+    (n < 0).match ({
+        true  => new().push('-').ndigits(n),
+        false => new().udigits(n)
+    })
+}
+
+int_to_str* = (n: i64) str { n.int_string().finish() }
+
+// Small %g-like f64 formatter: six fractional digits, rounded, trailing zeroes trimmed.
+// It avoids snprintf so generated C does not collide with host stdio prototypes.
+fpad = (out: String, n: i64, w: i64) String {
+    (w == 1).match ({
+        true  => out.push('0' + (n % 10)),
+        false => out.fpad(n / 10, w - 1).push('0' + (n % 10))
+    })
+}
+frac_digits = (out: String, n: i64, w: i64) String {
+    ((n % 10 == 0) && (w > 1)).match ({
+        true  => out.frac_digits(n / 10, w - 1),
+        false => out.fpad(n, w)
+    })
+}
+fparts = (out: String, ip: i64, scaled: i64) String {
+    (scaled == 0).match ({
+        true  => out.udigits(ip),
+        false => out.udigits(ip).push('.').frac_digits(scaled, 6)
+    })
+}
+fabs_digits = (out: String, x: f64) String {
+    ip     := to_i64(x)
+    scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
+    (scaled >= 1000000).match ({
+        true  => out.fparts(ip + 1, 0),
+        false => out.fparts(ip, scaled)
+    })
+}
+
+F64_DIGIT_MAX := 9000000000000000000.0    // just inside i64; beyond it to_i64 is UB
+f64_special* = (x: f64) str {
+    (x != x).match ({ true => { return "nan" }, false => {} })
+    (x > F64_DIGIT_MAX).match ({ true => { return "inf" }, false => {} })
+    (x < 0.0 - F64_DIGIT_MAX).match ({ true => { return "-inf" }, false => {} })
+    ""
+}
+is_special_text = (s: str) bool { s.offset(0).load() != '\0' }
+
+float_string* = (x: f64) String {
+    sp := x.f64_special()
+    sp.is_special_text().match ({
+        true  => new().append(sp),
+        false => (x < 0.0).match ({
+            true  => new().push('-').fabs_digits(0.0 - x),
+            false => new().fabs_digits(x)
+        })
+    })
+}
+
+float_to_str* = (x: f64) str { x.float_string().finish() }

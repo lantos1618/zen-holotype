@@ -3,7 +3,8 @@
 // Numeric formatting builds temporary String buffers and releases them after printing.
 
 { print, print_bytes } = std.io.file
-{ String, new, push, finish, bytes } = std.text.string
+{ String, bytes } = std.text.string
+{ int_string, int_to_str, float_string, float_to_str } = std.text.num
 // Use raw release for temporary String buffers; `free` has multiple std providers in flattened builds.
 { release } = std.mem.raw
 
@@ -11,79 +12,6 @@ Display*: {
     fmt_print: (Self) i64,
     fmt_println: (Self) i64
 }
-
-// Append decimal digits for a non-negative i64.
-udigits = (out: String, n: i64) String {
-    (n < 10).match ({
-        true  => out.push('0' + n),
-        false => out.udigits(n / 10).push('0' + (n % 10))
-    })
-}
-
-// Append digits for a negative i64 without negating INT64_MIN.
-ndigits = (out: String, n: i64) String {
-    (n > 0 - 10).match ({
-        true  => out.push('0' + (0 - n)),
-        false => out.ndigits(n / 10).push('0' + (0 - (n % 10)))
-    })
-}
-
-int_string = (n: i64) String {
-    (n < 0).match ({
-        true  => new().push('-').ndigits(n),
-        false => new().udigits(n)
-    })
-}
-
-int_to_str* = (n: i64) str { int_string(n).finish() }
-
-// Small %g-like f64 formatter: six fractional digits, rounded, trailing zeroes trimmed.
-// It avoids snprintf so the generated C does not collide with host stdio prototypes.
-fpad = (out: String, n: i64, w: i64) String {
-    (w == 1).match ({
-        true  => out.push('0' + (n % 10)),
-        false => out.fpad(n / 10, w - 1).push('0' + (n % 10))
-    })
-}
-frac_digits = (out: String, n: i64, w: i64) String {
-    ((n % 10 == 0) && (w > 1)).match ({
-        true  => out.frac_digits(n / 10, w - 1),
-        false => out.fpad(n, w)
-    })
-}
-fparts = (out: String, ip: i64, scaled: i64) String {
-    (scaled == 0).match ({
-        true  => out.udigits(ip),
-        false => out.udigits(ip).push('.').frac_digits(scaled, 6)
-    })
-}
-fabs_digits = (out: String, x: f64) String {
-    ip     := to_i64(x)
-    scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
-    (scaled >= 1000000).match ({
-        true  => out.fparts(ip + 1, 0),
-        false => out.fparts(ip, scaled)
-    })
-}
-F64_DIGIT_MAX := 9000000000000000000.0    // just inside i64 (9.22e18): beyond it to_i64 is UB
-f64_special = (x: f64) str {
-    (x != x).match ({ true => { return "nan" }, false => {} })
-    (x > F64_DIGIT_MAX).match ({ true => { return "inf" }, false => {} })
-    (x < 0.0 - F64_DIGIT_MAX).match ({ true => { return "-inf" }, false => {} })
-    ""
-}
-float_string = (x: f64) String {
-    (x < 0.0).match ({
-        true  => new().push('-').fabs_digits(0.0 - x),
-        false => new().fabs_digits(x)
-    })
-}
-float_to_str* = (x: f64) str {
-    sp := x.f64_special()
-    is_special(sp).match ({ true => { return sp }, false => {} })
-    float_string(x).finish()
-}
-is_special = (sp: str) bool { sp.offset(0).load() != '\0' }
 
 // Print an owned temporary String and release its buffer.
 print_owned = (t: String) i64 {
@@ -97,13 +25,10 @@ print_string*   = (s: String) i64 { print_bytes(s.bytes()) }
 println_string* = (s: String) i64 { s.print_string()  print("\n") }
 print_int*   = (n: i64) i64 { print_owned(int_string(n)) }
 println_int* = (n: i64) i64 { n.print_int()  print("\n") }
-print_float* = (x: f64) i64 {
-    sp := x.f64_special()
-    is_special(sp).match ({ true => { return print(sp) }, false => {} })
-    print_owned(float_string(x))
-}
+print_float* = (x: f64) i64 { print_owned(float_string(x)) }
 println_float* = (x: f64) i64 { x.print_float()  print("\n") }
 
+// Display is the current type-directed print surface; real overload sets can replace the typed aliases later.
 println*<T> = (x: T) i64 { x.fmt_println() }
 
 str.impl(Display, {

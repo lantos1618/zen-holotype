@@ -153,18 +153,18 @@ def test_zenc_build_rejects_illtyped_no_binary():
 
 
 def test_zenc_run_prints_floats():
-    """f64 end-to-end: float literals, arithmetic, and std.text.fmt's println_float (the %g-flavoured
-    Zen-side formatter) — exact stdout pinned, so the formatting can't silently drift."""
+    """f64 end-to-end: float literals, arithmetic, and std.text.fmt's generic println.
+    Exact stdout is pinned so formatting cannot silently drift."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "{ println_float } = std.text.fmt\n\n"
+        "{ println } = std.text.fmt\n\n"
         "main = () i32 {\n"
-        "  println_float(1.5)\n"
-        "  println_float(0.25)\n"
-        "  println_float(-3.0)\n"
-        "  println_float(0.001)\n"
-        "  println_float(1.5 + 0.25 * 2.0)\n"   # precedence: 1.5 + 0.5 = 2
+        "  println(1.5)\n"
+        "  println(0.25)\n"
+        "  println(-3.0)\n"
+        "  println(0.001)\n"
+        "  println(1.5 + 0.25 * 2.0)\n"   # precedence: 1.5 + 0.5 = 2
         "  0\n"
         "}\n")
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
