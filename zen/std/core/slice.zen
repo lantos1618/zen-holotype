@@ -1,20 +1,46 @@
-// Heap-backed slice helpers for values that must outlive stack literals.
+// Allocator-backed slice helpers for values that must outlive stack literals.
+// The plain helpers use the default heap allocator; `*_in` lets callers choose
+// an arena, heap, or other Allocator.
 
-{ malloc } = std.mem.alloc
+{ Allocator, default_allocator } = std.mem.alloc
 
-nbuf*<T> = (n: i64, like: [T]) [T] { slice(malloc(n * sizeof(T)), n) }
+nbuf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] {
+    slice(a.acquire(n * sizeof(T)), n)
+}
 
-dupx*<T> = (xs: [T]) [T] {
-    buf := nbuf(xs.len, xs)
+dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
+    buf := a.nbuf_in(xs.len, xs)
     xs.loop((h, i, x) { buf[i] = x })
     buf
 }
 
-node*<T> = (v: T) Ptr<T> { dupx([v])[0].addr() }
+node_in*<A, T> = (a: MutPtr<A>, v: T) Ptr<T> {
+    a.dupx_in([v])[0].addr()
+}
 
-concat*<T> = (xs: [T], ys: [T]) [T] {
-    buf := nbuf(xs.len + ys.len, xs)
+concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) [T] {
+    buf := a.nbuf_in(xs.len + ys.len, xs)
     xs.loop((h, i, x) { buf[i] = x })
     ys.loop((h, i, y) { buf[xs.len + i] = y })
     buf
+}
+
+nbuf*<T> = (n: i64, like: [T]) [T] {
+    a := default_allocator()
+    a.addr().nbuf_in(n, like)
+}
+
+dupx*<T> = (xs: [T]) [T] {
+    a := default_allocator()
+    a.addr().dupx_in(xs)
+}
+
+node*<T> = (v: T) Ptr<T> {
+    a := default_allocator()
+    a.addr().node_in(v)
+}
+
+concat*<T> = (xs: [T], ys: [T]) [T] {
+    a := default_allocator()
+    a.addr().concat_in(xs, ys)
 }

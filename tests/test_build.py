@@ -265,6 +265,29 @@ def test_zenc_run_int_to_str_negatives_and_zero():
     assert r.stdout == "0\n-7\n1000000\n", repr(r.stdout)
 
 
+def test_zenc_run_core_slice_explicit_allocator():
+    """std.core.slice exposes allocator-backed helpers; callers can place copied slices in an arena."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ nbuf_in, dupx_in, node_in, concat_in } = std.core.slice\n"
+        "{ arena_new, arena_free } = std.mem.arena\n"
+        "main = () i32 {\n"
+        "  a := arena_new(1024)\n"
+        "  xs := a.addr().dupx_in([1, 2, 3])\n"
+        "  ys := a.addr().concat_in(xs, [4, 5])\n"
+        "  p := a.addr().node_in(9)\n"
+        "  zs := a.addr().nbuf_in(2, xs)\n"
+        "  zs[0] = load(p)\n"
+        "  zs[1] = ys[4]\n"
+        "  out := zs[0] + zs[1]\n"
+        "  a.addr().arena_free()\n"
+        "  out\n"
+        "}\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 14
+
+
 # ── U3: std.collections.vec — a growable Vec<T> with an EXPLICIT allocator (acquire/resize/release), no hidden malloc ─
 # (mutators are v-prefixed — vpush/vlen/vgrow — so they don't clash with std.text.string's push/len/grow in a
 #  flat namespace; get/vec_of/free_vec don't clash and keep plain names.)
