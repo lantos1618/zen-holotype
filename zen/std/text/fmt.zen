@@ -4,8 +4,8 @@
 // String. `str` is borrowed/NUL-terminated; `String` is owned/length-tracked and
 // prints by length, without forcing `finish()`.
 //
-//   { println, println_string, println_int, println_float } = std.text.fmt
-//   main = () i32 { println("answer:")  println_int(42)  println_float(1.5)  0 }
+//   { println } = std.text.fmt
+//   main = () i32 { println("answer:")  println(42)  println(1.5)  0 }
 //
 // @self-hosted-only — like std.io.file it's not a fixpoint SOURCE; it rides on read_file/print's libc FFI.
 
@@ -15,6 +15,11 @@
 // and std.mem.alloc (the raw extern), and the flatten's per-name dedup makes a call ambiguous;
 // `release` has one provider once std.mem.own's verbs carry their own_ prefix.
 { release } = std.mem.raw
+
+Display*: {
+    fmt_print: (Self) i64,
+    fmt_println: (Self) i64
+}
 
 // append the decimal digits of a NON-negative i64 to `out`, most-significant first. The recursion
 // unwinds high→low: the high part (n/10) is appended before this frame's low digit (n%10), so the
@@ -116,16 +121,52 @@ print_owned = (t: String) i64 {
     release(t.ptr)
     w
 }
-print_str*   = (s: str) i64 { print(s) }                        // a borrowed str, no newline
-println_str* = (s: str) i64 { print(s)  print("\n") }            // a borrowed str, then a newline
-print_string*   = (s: String) i64 { print_bytes(s.bytes()) }     // an owned String, no newline
-println_string* = (s: String) i64 { s.print_string()  print("\n") }  // an owned String, then a newline
-print_int*   = (n: i64) i64 { print_owned(int_string(n)) }       // an int, no newline
-println*     = (s: str) i64 { s.println_str() }                  // existing shorthand for println_str
-println_int* = (n: i64) i64 { n.print_int()  print("\n") }       // an int, then a newline
-print_float* = (x: f64) i64 {                                    // an f64, no newline
+print_str*   = (s: str) i64 { print(s) }
+println_str* = (s: str) i64 { print(s)  print("\n") }
+print_string*   = (s: String) i64 { print_bytes(s.bytes()) }
+println_string* = (s: String) i64 { s.print_string()  print("\n") }
+print_int*   = (n: i64) i64 { print_owned(int_string(n)) }
+println_int* = (n: i64) i64 { n.print_int()  print("\n") }
+print_float* = (x: f64) i64 {
     sp := x.f64_special()
     is_special(sp).match ({ true => { return print(sp) }, false => {} })
     print_owned(float_string(x))
 }
-println_float* = (x: f64) i64 { x.print_float()  print("\n") }   // an f64, then a newline
+println_float* = (x: f64) i64 { x.print_float()  print("\n") }
+
+println*<T> = (x: T) i64 { x.fmt_println() }
+
+str.impl(Display, {
+    fmt_print = (s: str) i64 { s.print_str() }
+    fmt_println = (s: str) i64 { s.println_str() }
+})
+
+String.impl(Display, {
+    fmt_print = (s: String) i64 { s.print_string() }
+    fmt_println = (s: String) i64 { s.println_string() }
+})
+
+i32.impl(Display, {
+    fmt_print = (n: i32) i64 { to_i64(n).print_int() }
+    fmt_println = (n: i32) i64 { to_i64(n).println_int() }
+})
+
+i64.impl(Display, {
+    fmt_print = (n: i64) i64 { n.print_int() }
+    fmt_println = (n: i64) i64 { n.println_int() }
+})
+
+u8.impl(Display, {
+    fmt_print = (n: u8) i64 { to_i64(n).print_int() }
+    fmt_println = (n: u8) i64 { to_i64(n).println_int() }
+})
+
+f64.impl(Display, {
+    fmt_print = (x: f64) i64 { x.print_float() }
+    fmt_println = (x: f64) i64 { x.println_float() }
+})
+
+bool.impl(Display, {
+    fmt_print = (b: bool) i64 { b.match ({ true => print("true"), false => print("false") }) }
+    fmt_println = (b: bool) i64 { b.fmt_print()  print("\n") }
+})

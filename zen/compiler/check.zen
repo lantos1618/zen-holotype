@@ -84,6 +84,15 @@ global_bound = (decls: [Decl], name: str) bool {
 }
 is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.global_bound(name) }
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
+recv_name* = (t: Ty) str {
+    t.match ({
+        .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str",
+        .Named(n)   => n,
+        .Generic(g) => g.mangled,
+        .Ptr(p)     => load(p).recv_name(),
+        _           => ""
+    })
+}
 enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }
 ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
 elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }
@@ -262,7 +271,7 @@ dispatch_recv = (decls: [Decl], fn: str, tyname: str) str {
 }
 dispatch_name = (env: Env, c: CallData) str {
     (c.args.len > 0).match ({
-        true  => env.decls.dispatch_recv(c.fn, env.infer_expr(c.args[0].addr()).enum_name()),
+        true  => env.decls.dispatch_recv(c.fn, env.infer_expr(c.args[0].addr()).recv_name()),
         false => c.fn
     })
 }

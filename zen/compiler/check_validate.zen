@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, tnamed, tptr, tslice, tvoid } = compiler.genc
-{ Env, infer_expr, fits, ty_eq, ty_rank, is_f64_ty, enum_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Env, infer_expr, fits, ty_eq, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Malloc, malloc } = std.mem.alloc
 { byte_at } = std.text.bytes
 { eq, is_empty } = std.text.str
@@ -118,7 +118,7 @@ is_unresolved_trait_call = (env: Env, c: CallData) bool {
             false => false,
             true  => eq(env.dispatch_name(c), c.fn).match ({
                 false => false,
-                true  => env.infer_expr(c.args[0].addr()).enum_name().is_empty().match ({ true => false, false => true })
+                true  => env.infer_expr(c.args[0].addr()).recv_name().is_empty().match ({ true => false, false => true })
             })
         })
     })
@@ -533,9 +533,17 @@ has_method = (methods: [Param], name: str) bool {
     found
 }
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
+impl_ty = (tyname: str) Ty {
+    eq(tyname, "i32").match ({ true => ti32(), false =>
+    eq(tyname, "i64").match ({ true => ti64(), false =>
+    eq(tyname, "u8").match ({ true => tu8(), false =>
+    eq(tyname, "f64").match ({ true => tf64(), false =>
+    eq(tyname, "bool").match ({ true => tbool(), false =>
+    eq(tyname, "str").match ({ true => tstr(), false => tnamed(tyname) }) }) }) }) }) })
+}
 subst_self = (a: Ptr<Malloc>, t: Ty, tyname: str) Ty {
     t.match ({
-        .Named(n)  => eq(n, "Self").match ({ true => tnamed(tyname), false => t }),
+        .Named(n)  => eq(n, "Self").match ({ true => impl_ty(tyname), false => t }),
         .Ptr(p)    => tptr(a.tnode(a.subst_self(load(p), tyname))),
         .Slice(p)  => tslice(a.tnode(a.subst_self(load(p), tyname))),
         _          => t

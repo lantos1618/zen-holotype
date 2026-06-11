@@ -218,16 +218,16 @@ def test_zenc_check_resolves_std_import():
 # This also locks in the #98 fix: std.text.fmt pulls std.text.string, so a built program emits its own `String`,
 # which must NOT clash with zenrt.h's (the build path defines ZEN_NO_STRING to suppress the latter).
 def test_zenc_run_prints_text_and_ints():
-    """`println`/`println_int` from std.text.fmt actually write to stdout — text, then a formatted int."""
+    """Generic `println` from std.text.fmt writes text and primitive values."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "{ println, println_int } = std.text.fmt\n"
-        "main = () i32 { println(\"answer:\")  println_int(42)  0 }\n"
+        "{ println } = std.text.fmt\n"
+        "main = () i32 { b: bool := true  println(\"answer:\")  println(42)  println(b)  0 }\n"
     )
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "answer:\n42\n", repr(r.stdout)
+    assert r.stdout == "answer:\n42\ntrue\n", repr(r.stdout)
 
 
 def test_zenc_run_prints_str_and_string():

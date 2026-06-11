@@ -24,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BOOT = ROOT / "bootstrap"
 HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
+ZENRT_CHECK_HEAD = '#define ZEN_NO_MALLOC 1\n#include "zenrt.h"\n'
 _CC = ["cc", "-std=gnu11", "-w"]
 _RUNNER = "\n#include <stdio.h>\nint main(void){ printf(\"%%lld\", (long long)(test())); return 0; }\n"
 
@@ -185,7 +186,7 @@ def _build_check():
         (d / "checksrc.zen").write_text("\n".join(_strip_imports(p) for p in _CHECK_SOURCES))
         c = subprocess.run([str(emit), str(d / "checksrc.zen")], capture_output=True, text=True).stdout
         assert c.startswith(HEAD), c[:80]
-        (d / "checkc.gen.c").write_text('#include "zenrt.h"\n' + c[len(HEAD):])
+        (d / "checkc.gen.c").write_text(ZENRT_CHECK_HEAD + c[len(HEAD):])
         (d / "check_main.c").write_text(_CHECK_MAIN)
         exe = d / "zenc-check"
         r = subprocess.run(_CC + ["-I", str(BOOT), str(d / "checkc.gen.c"), str(BOOT / "zenrt.c"),
@@ -207,7 +208,7 @@ def _build_check_kind():
         (d / "checksrc.zen").write_text("\n".join(_strip_imports(p) for p in _CHECK_SOURCES))
         c = subprocess.run([str(emit), str(d / "checksrc.zen")], capture_output=True, text=True).stdout
         assert c.startswith(HEAD), c[:80]
-        (d / "checkc.gen.c").write_text('#include "zenrt.h"\n' + c[len(HEAD):])
+        (d / "checkc.gen.c").write_text(ZENRT_CHECK_HEAD + c[len(HEAD):])
         (d / "check_kind_main.c").write_text(_CHECK_KIND_MAIN)
         exe = d / "zenc-check-kind"
         r = subprocess.run(_CC + ["-I", str(BOOT), str(d / "checkc.gen.c"), str(BOOT / "zenrt.c"),
@@ -229,7 +230,7 @@ def _build_check_linked():
         (d / "checksrc.zen").write_text("\n".join(_strip_imports(p) for p in _CHECK_SOURCES))
         c = subprocess.run([str(emit), str(d / "checksrc.zen")], capture_output=True, text=True).stdout
         assert c.startswith(HEAD), c[:80]
-        (d / "checkc.gen.c").write_text('#include "zenrt.h"\n' + c[len(HEAD):])
+        (d / "checkc.gen.c").write_text(ZENRT_CHECK_HEAD + c[len(HEAD):])
         (d / "check_linked_main.c").write_text(_CHECK_LINKED_MAIN)
         exe = d / "zenc-check-linked"
         r = subprocess.run(_CC + ["-I", str(BOOT), str(d / "checkc.gen.c"), str(BOOT / "zenrt.c"),

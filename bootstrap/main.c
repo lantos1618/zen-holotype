@@ -196,12 +196,11 @@ static String build_self_source(const char* srcroot){
 /* genModule emits this zslice typedef at the head of every module; bootstrap/zenc.gen.c provides it
  * via zenrt.h instead, so we swap the head for the include. */
 static const char HEAD[] = "typedef struct { void* ptr; int64_t len; } zslice; ";
-static const char HEAD_REPL[] = "#include \"zenrt.h\"\n";
+static const char HEAD_REPL[] = "#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n";
 /* The build/run path uses this variant instead: a built program that imports std.text.string emits its OWN
  * String + builders (strong, they override zenrt.c's weak copies at link), so define ZEN_NO_STRING to
- * suppress zenrt.h's String and avoid the struct clash (#98). NOTE the compiler's own gen.c (build_self,
- * above) uses the plain HEAD_REPL — it relies on zenrt's String (its gen.c strips std imports, emits
- * none of its own). A built program that doesn't use String is unaffected (zenrt's String fns unreferenced). */
+ * suppress zenrt.h's String and avoid the struct clash (#98). The compiler's own gen.c now also
+ * suppresses zenrt's Malloc because std.mem.alloc is part of the bootstrap source manifest. */
 static const char HEAD_REPL_PROG[] = "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n";
 
 static void trim_trailing_ws(String* s){

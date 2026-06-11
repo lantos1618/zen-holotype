@@ -376,7 +376,7 @@ def resolve(target, modules=None):
 # SCC-condensing the import graph and sorting deterministically inside each SCC.
 
 _BOOTSTRAP_ROOTS = ["compiler/genc_emit", "compiler/parse", "compiler/check_validate", "std/internal/resolve"]
-_BOOTSTRAP_RUNTIME_MODULES = {"std/mem/alloc", "std/mem/raw", "std/text/str", "std/text/string"}
+_BOOTSTRAP_RUNTIME_MODULES = {"std/mem/raw", "std/text/str", "std/text/string"}
 
 
 def _bootstrap_manifest_modules():
