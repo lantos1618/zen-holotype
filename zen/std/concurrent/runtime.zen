@@ -1,48 +1,26 @@
-// @self-hosted-only — uses trait impls + generic-over-trait dispatch + a coroutine import (from the
-// self-hosted-only std.concurrent.coroutine), so it stays behind @self-hosted-only. Validated by an equivalent
-// self-contained test (test_differential).
-//
-// std.concurrent.runtime — the COLORLESS sync/async abstraction, the heart of Goal Z. ONE Runtime trait decides
-// BOTH how memory is allocated and what `suspend` means — and that pair is the only difference between
-// synchronous and asynchronous execution:
-//
-//   • SyncRuntime  : alloc = the heap;        suspend = a no-op   → code runs straight through, blocking.
-//   • AsyncRuntime : alloc = its own arena;   suspend = a coroutine yield → the SAME code cooperatively
-//                                                                            yields to a scheduler.
-//
-// Generic code written over a Runtime-shaped type (it calls `r.alloc(n)` at allocation points and `r.suspend()`
-// at await points) is authored ONCE and runs either way purely by the Runtime value handed to it. There
-// is no function coloring, no async/await keywords, and ZERO async machinery in the compiler — async is
-// a library: std.concurrent.coroutine (the one irreducible primitive) + trait dispatch + module-mutable globals.
-//
-//   step*<RuntimeT> = (r: MutPtr<RuntimeT>, …) … { p := r.alloc(64) … r.suspend() … }
-//   step(sync_runtime().addr(), …)        // blocks, heap-allocates
-//   step(async_runtime(4096).addr(), …)   // yields, arena-allocates — same `step`
+// @self-hosted-only: colorless runtime policy for allocation and suspension.
+// SyncRuntime uses heap + no-op suspend; AsyncRuntime uses arena + coroutine yield.
 { malloc, free } = std.mem.alloc
 { yield } = std.concurrent.coroutine
 
 Runtime*: {
     alloc: (MutPtr<Self>, i64) RawPtr<u8>,
     suspend: (MutPtr<Self>) void,
-    // hand one allocation back. DEFAULT: a no-op — right for arena-backed runtimes (AsyncRuntime
-    // reclaims wholesale via reset/free of the arena), and existing Runtime impls stay conformant.
-    // A heap-backed runtime overrides it (SyncRuntime → libc free) so generic code can return
-    // memory without knowing which world it runs in — the colorless story, allocation side.
+    // Default no-op release fits arena runtimes; heap runtimes override it.
     release = (s: MutPtr<Self>, p: RawPtr<u8>) void {}
 }
 
 SyncRuntime*: { _: i32 }
-AsyncRuntime*: { buf: RawPtr<u8>, off: i64, cap: i64 }    // bump-allocates from its own arena
+AsyncRuntime*: { buf: RawPtr<u8>, off: i64, cap: i64 }
 
 SyncRuntime.impl(Runtime, {
     alloc = (s: MutPtr<SyncRuntime>, n: i64) RawPtr<u8> { malloc(n) }
     suspend = (s: MutPtr<SyncRuntime>) void {}
-    release = (s: MutPtr<SyncRuntime>, p: RawPtr<u8>) void { free(p) }   // heap-backed: a real free
+    release = (s: MutPtr<SyncRuntime>, p: RawPtr<u8>) void { free(p) }
 })
 
 AsyncRuntime.impl(Runtime, {
-    // a bump cursor like std.mem.arena's: 8-byte rounded advances (so handed-out pointers are safe for
-    // store_i64/load_i64), and an advance past `cap` returns null_ptr instead of a pointer past the block.
+    // Bump allocation rounds to 8 bytes and returns null_ptr past capacity.
     alloc = (s: MutPtr<AsyncRuntime>, n: i64) RawPtr<u8> {
         rounded := ((n + 7) / 8) * 8
         (s.off + rounded > s.cap).match ({

@@ -1,37 +1,29 @@
-// std.mem.alloc — explicit allocators, Zig-style. Nothing in here hides a malloc:
-// a function that allocates takes a mutable allocator as a parameter, so you choose
-// WHERE memory comes from and allocation is visible in the signature. Because Zen
-// monomorphizes the generic allocator calls, dispatch is zero-cost — `a.acquire(n)`
-// compiles straight to the chosen allocator's code.
-//
-//   m := Malloc(_: 0)
-//   p := m.addr().acquire(64)       // explicit: this allocation came from `m`
-//   m.addr().release(p)
-//
-// Allocation failure is not special control flow. The raw methods preserve the
-// old fail-fast/no-check ergonomics for bootstrap code; the `try_*` wrappers lift
-// a NULL pointer into `Result<RawPtr<u8>, IoError>` for normal code.
+// Explicit allocator interface. Heap, arena, and other allocators share this trait.
+// Raw malloc/free stay visible for bootstrap and FFI boundary code.
 
 { Result, IoError, ok_ptr } = std.core.result
 
-// the libc primitives, declared bodyless and PUBLIC: explicit allocation, no wrapper hides them.
-// Code that wants the default allocator without threading an `Allocator` bound calls these directly
-// (the self-hosted compiler does — its source stays monomorphic, so genc needs no generics to lower it).
 malloc* = (n: i64) RawPtr<u8>
 realloc* = (p: RawPtr<u8>, n: i64) RawPtr<u8>
 free* = (p: RawPtr<u8>) void
 
-// the interface: acquire n bytes, resize a block, release it. Self = the allocator.
 Allocator*: {
     acquire: (MutPtr<Self>, i64) RawPtr<u8>,
     resize:  (MutPtr<Self>, RawPtr<u8>, i64) RawPtr<u8>,
     release: (MutPtr<Self>, RawPtr<u8>) void
 }
 
-// the default: a stateless allocator backed by libc malloc/realloc/free.
+Heap*: { _: i32 }
 Malloc*: { _: i32 }
-default_allocator* = () Malloc { Malloc(_: 0) }
+default_allocator* = () Heap { Heap(_: 0) }
 
+Heap.impl(Allocator, {
+    acquire = (s: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) }
+    resize  = (s: MutPtr<Heap>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+    release = (s: MutPtr<Heap>, p: RawPtr<u8>) void { free(p) }
+})
+
+// Bootstrap compatibility: compiler entrypoints still take Ptr<Malloc>.
 Malloc.impl(Allocator, {
     acquire = (s: MutPtr<Malloc>, n: i64) RawPtr<u8> { malloc(n) }
     resize  = (s: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }

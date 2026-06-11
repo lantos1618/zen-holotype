@@ -127,10 +127,10 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   buffer is `realloc`'d underneath, so `s := s.append("…")` threads it. This is the keystone for
   **runtime code generation** — a backend can emit source as a value the running program builds.
 - **`std.mem.alloc` — an explicit, Zig-style allocator.** An `Allocator` trait
-  (`acquire`/`resize`/`release`) + a stateless libc-backed `Malloc`. A function that allocates
+  (`acquire`/`resize`/`release`) + a stateless libc-backed `Heap`. A function that allocates
   takes the allocator as a parameter, so allocation is visible in the signature; a `<A: Allocator>`
   bound monomorphizes, so dispatch is zero-cost (`a.acquire(n)` compiles straight to the chosen
-  allocator). Nothing hides a `malloc`.
+  allocator). `Arena` also implements the trait; nothing hides a `malloc`.
 - **`std.collections.vec`** — a growable array that threads the allocator explicitly: `a.vec(cap)` /
   `v.push(a, x)` (grows via `a.resize`) / `v.items()` / `v.vfree(a)`.
 - **`compiler.genc` (+ `mono` / `genc_emit`) — shared AST + monomorphization, then the C backend, in Zen, AND the compiler's own

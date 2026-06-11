@@ -50,7 +50,7 @@ _DECL_HEAD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\*?)(<[^>]*>)?(\*?)\s*[=:
 # A method-impl head `Type.impl(Trait, { … })` is ALSO a top-level decl, but it has no `name =/:` head so
 # _DECL_HEAD_RE misses it. It must survive resolution: a cross-module CONSUMER of a trait method (e.g.
 # std.collections.vec calling `a.acquire(…)` on an explicit Allocator, where acquire lives in std.mem.alloc's
-# `Malloc.impl(Allocator, …)`) needs the impl present so the checker's is_trait_method resolves the call —
+# `Heap.impl(Allocator, …)`) needs the impl present so the checker's is_trait_method resolves the call —
 # otherwise the method reads as undefined-name. The real loader (resolve.zen) always keeps impls; this
 # mirrors that. Keyed per (Type, Trait) so two impls (many traits per type / many types per trait) never
 # dedup each other away, while a re-import of the SAME module's impl still collapses to one.

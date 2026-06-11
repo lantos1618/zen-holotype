@@ -108,7 +108,7 @@ sum = (xs: [i32]) i32 {
 }
 
 // collections take an EXPLICIT allocator — nothing hides a malloc.
-// m := Malloc(_: 0)
+// m := default_allocator()
 // v := m.addr().vec_of([1, 2, 3])      // Vec<i32> backed by m
 // v2 := m.addr().vpush(v, 4)
 ```
