@@ -1,19 +1,10 @@
-// std.text.fmt — minimal formatted OUTPUT: the "show my result" primitive a normal program needs.
-//
-// This is the daily-driver layer over stdout writes plus std.text.string's growable
-// String. `str` is borrowed/NUL-terminated; `String` is owned/length-tracked and
-// prints by length, without forcing `finish()`.
-//
-//   { println } = std.text.fmt
-//   main = () i32 { println("answer:")  println(42)  println(1.5)  0 }
-//
-// @self-hosted-only — like std.io.file it's not a fixpoint SOURCE; it rides on read_file/print's libc FFI.
+// @self-hosted-only
+// Minimal formatted stdout output for Display values.
+// Numeric formatting builds temporary String buffers and releases them after printing.
 
 { print, print_bytes } = std.io.file
 { String, new, push, finish, bytes } = std.text.string
-// std.mem.raw's release, NOT string's `free`: `free` is provided by BOTH std.text.string (String-typed)
-// and std.mem.alloc (the raw extern), and the flatten's per-name dedup makes a call ambiguous;
-// `release` has one provider once std.mem.own's verbs carry their own_ prefix.
+// Use raw release for temporary String buffers; `free` has multiple std providers in flattened builds.
 { release } = std.mem.raw
 
 Display*: {
@@ -21,9 +12,7 @@ Display*: {
     fmt_println: (Self) i64
 }
 
-// append the decimal digits of a NON-negative i64 to `out`, most-significant first. The recursion
-// unwinds high→low: the high part (n/10) is appended before this frame's low digit (n%10), so the
-// digits land in reading order. '0' is the byte 48, so '0' + d is the ASCII digit byte.
+// Append decimal digits for a non-negative i64.
 udigits = (out: String, n: i64) String {
     (n < 10).match ({
         true  => out.push('0' + n),
@@ -31,8 +20,7 @@ udigits = (out: String, n: i64) String {
     })
 }
 
-// the digits of a NEGATIVE n, via negated remainders — so INT64_MIN, whose `0 - n` overflows
-// (it printed "-0"), emits correctly without ever negating the whole value.
+// Append digits for a negative i64 without negating INT64_MIN.
 ndigits = (out: String, n: i64) String {
     (n > 0 - 10).match ({
         true  => out.push('0' + (0 - n)),
@@ -40,7 +28,6 @@ ndigits = (out: String, n: i64) String {
     })
 }
 
-// the digits of any i64 into an OWNED String (the caller frees/prints-and-frees).
 int_string = (n: i64) String {
     (n < 0).match ({
         true  => new().push('-').ndigits(n),
@@ -48,39 +35,28 @@ int_string = (n: i64) String {
     })
 }
 
-// the decimal text of an i64 (a leading '-' for negatives), as a fresh NUL-terminated str.
-// The buffer is the caller's (release it via std.mem.raw once done); print_int below frees its own.
 int_to_str* = (n: i64) str { int_string(n).finish() }
 
-// ── floats: the decimal text of an f64, %g-flavoured ────────────────────────────────────────────
-// Hand-rolled in Zen (no snprintf extern — a libc prototype here would collide with a host
-// <stdio.h> in linked C), to SIX fractional digits, rounded, trailing zeros trimmed; a whole
-// value prints with no point at all (1.5 -> "1.5", 0.001 -> "0.001", -3.0 -> "-3"). Limits:
-// |x| must fit an i64, and tiny magnitudes below 5e-7 round to "0".
-
-// the fraction digits of `scaled` (0 <= scaled < 10^w), zero-padded to width w, high digit first
+// Small %g-like f64 formatter: six fractional digits, rounded, trailing zeroes trimmed.
+// It avoids snprintf so the generated C does not collide with host stdio prototypes.
 fpad = (out: String, n: i64, w: i64) String {
     (w == 1).match ({
         true  => out.push('0' + (n % 10)),
         false => out.fpad(n / 10, w - 1).push('0' + (n % 10))
     })
 }
-// drop the trailing zero digits first (0.250000 -> 0.25), then pad what remains
 frac_digits = (out: String, n: i64, w: i64) String {
     ((n % 10 == 0) && (w > 1)).match ({
         true  => out.frac_digits(n / 10, w - 1),
         false => out.fpad(n, w)
     })
 }
-// integer part + (non-empty) fraction; a zero fraction prints as a bare integer (like %g)
 fparts = (out: String, ip: i64, scaled: i64) String {
     (scaled == 0).match ({
         true  => out.udigits(ip),
         false => out.udigits(ip).push('.').frac_digits(scaled, 6)
     })
 }
-// digits of a NON-negative x: split at the point (to_i64 truncates), scale the fraction to six
-// digits (+0.5 rounds), and carry a fraction that rounded up to 1.0 into the integer part.
 fabs_digits = (out: String, x: f64) String {
     ip     := to_i64(x)
     scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
@@ -89,9 +65,6 @@ fabs_digits = (out: String, x: f64) String {
         false => out.fparts(ip, scaled)
     })
 }
-// the f64 SPECIALS, matched before the digit path (whose to_i64 is UB on them): NaN is the one
-// value that differs from itself; magnitudes past i64's range print as infinities, like %g.
-// Returns "" for a finite, in-range value (the digit path's job).
 F64_DIGIT_MAX := 9000000000000000000.0    // just inside i64 (9.22e18): beyond it to_i64 is UB
 f64_special = (x: f64) str {
     (x != x).match ({ true => { return "nan" }, false => {} })
@@ -99,7 +72,6 @@ f64_special = (x: f64) str {
     (x < 0.0 - F64_DIGIT_MAX).match ({ true => { return "-inf" }, false => {} })
     ""
 }
-// the digits of a finite f64 into an OWNED String (the caller frees/prints-and-frees).
 float_string = (x: f64) String {
     (x < 0.0).match ({
         true  => new().push('-').fabs_digits(0.0 - x),
@@ -113,9 +85,7 @@ float_to_str* = (x: f64) str {
 }
 is_special = (sp: str) bool { sp.offset(0).load() != '\0' }
 
-// ── the print verbs (return the byte count, like POSIX write / printf; used as statements) ──────────
-// The int/float verbs format into an owned String, print its BYTES, and release the buffer —
-// they run in loops, and leaking one heap String per call grew without bound (the daily-driver leak).
+// Print an owned temporary String and release its buffer.
 print_owned = (t: String) i64 {
     w := print_bytes(t.bytes())
     t.ptr.release()
