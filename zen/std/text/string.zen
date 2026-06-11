@@ -6,8 +6,8 @@
 // header is a small value passed by copy; the byte buffer is realloc'd underneath, so
 // a builder reads `s := s.push('x')` — threading the header, sharing the buffer.
 //
-// The short `new/push/append/finish/free` names use the process heap for bootstrap/compiler code.
-// Normal runtime/library code should prefer the explicit allocator variants:
+// The short `new/push/append/finish/free` names use the default allocator for bootstrap/compiler code.
+// Normal runtime/library code can pass an arena, heap, or custom allocator explicitly:
 //
 //   m := default_allocator()
 //   s := m.addr().new_in().append_in("hello")
@@ -17,41 +17,42 @@
 //
 //   m.addr().try_with_cap(64).match({ .Ok(s) => ..., .Err(e) => ... })
 
-{ copy, release } = std.mem.raw
 { len, view } = std.text.str
-{ malloc, realloc, Allocator, try_acquire, try_resize } = std.mem.alloc
+{ default_allocator, Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError } = std.core.result
 
 String*: { ptr: RawPtr<u8>, len: i64, cap: i64 }
 
-// an empty String with room for `cap` bytes, backed by the process heap
-with_cap* = (cap: i64) String { String( ptr: malloc(cap), len: 0, cap: cap ) }
+copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: str) void {
+    src := t.view()
+    src.loop((h, i, b) { dst.offset(at + i).store(b) })
+}
+
+// an empty String with room for `cap` bytes, backed by the default allocator
+with_cap* = (cap: i64) String {
+    a := default_allocator()
+    a.addr().with_cap_in(cap)
+}
 new* = () String { with_cap(16) }
 
-// grow the buffer to exactly `ncap` bytes (ncap >= len)
-grow = (s: String, ncap: i64) String { String( ptr: s.ptr.realloc(ncap), len: s.len, cap: ncap ) }
+grow = (s: String, ncap: i64) String {
+    a := default_allocator()
+    a.addr().grow_in(s, ncap)
+}
 
-// ensure room for `need` more bytes — doubles (+ need) so N appends cost O(N) total
 reserve = (s: String, need: i64) String {
-    (s.len + need > s.cap).match ({
-        true  => s.grow((s.cap + need) * 2),
-        false => s
-    })
+    a := default_allocator()
+    a.addr().reserve_in(s, need)
 }
 
-// append one byte
 push* = (s: String, b: u8) String {
-    r := s.reserve(1)
-    r.ptr.offset(r.len).store(b)
-    String( ptr: r.ptr, len: r.len + 1, cap: r.cap )
+    a := default_allocator()
+    a.addr().push_in(s, b)
 }
 
-// append a str's bytes
 append* = (s: String, t: str) String {
-    n := t.len()
-    r := s.reserve(n)
-    r.ptr.offset(r.len).copy(t.view().ptr, n)
-    String( ptr: r.ptr, len: r.len + n, cap: r.cap )
+    a := default_allocator()
+    a.addr().append_in(s, t)
 }
 
 // the bytes as a read-only [u8] view (borrows the buffer)
@@ -59,10 +60,15 @@ bytes* = (s: String) [u8] { s.ptr.slice(s.len) }
 
 // NUL-terminate and reinterpret the buffer as a `str` — the bridge from a built-at-runtime String
 // to a C string (used e.g. to build a monomorphized type's mangled name like `Box_i32`).
-finish* = (s: String) str { cstr(s.push(0).ptr) }
+finish* = (s: String) str {
+    a := default_allocator()
+    a.addr().finish_in(s)
+}
 
-// hand the buffer back to the allocator
-free* = (s: String) void { s.ptr.release() }
+free* = (s: String) void {
+    a := default_allocator()
+    a.addr().free_in(s)
+}
 
 // ── explicit allocator variants ─────────────────────────────────────────────
 
@@ -94,7 +100,7 @@ append_in*<A> = (a: MutPtr<A>, s: String, t: str) String {
     skt := t
     n := skt.len()
     r := a.reserve_in(s, n)
-    r.ptr.offset(r.len).copy(skt.view().ptr, n)
+    r.ptr.copy_str_bytes(r.len, skt)
     String( ptr: r.ptr, len: r.len + n, cap: r.cap )
 }
 finish_in*<A> = (a: MutPtr<A>, s: String) str { cstr(a.push_in(s, 0).ptr) }
@@ -104,8 +110,8 @@ free_in*<A> = (a: MutPtr<A>, s: String) void { a.release(s.ptr) }
 
 string_ok = (s: String) Result<String, IoError> { .Ok(s) }
 string_err = (e: IoError) Result<String, IoError> { .Err(e) }
-str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-str_err = (e: IoError) Result<str, IoError> { .Err(e) }
+string_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
+string_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
 
 try_with_cap*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
     a.try_acquire(cap).match ({
@@ -142,7 +148,7 @@ try_append*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
     n := skt.len()
     a.try_reserve(s, n).match ({
         .Ok(r) => {
-            r.ptr.offset(r.len).copy(skt.view().ptr, n)
+            r.ptr.copy_str_bytes(r.len, skt)
             string_ok(String( ptr: r.ptr, len: r.len + n, cap: r.cap ))
         },
         .Err(e) => string_err(e)
@@ -150,7 +156,7 @@ try_append*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
 }
 try_finish*<A> = (a: MutPtr<A>, s: String) Result<str, IoError> {
     a.try_push(s, 0).match ({
-        .Ok(done) => str_ok(cstr(done.ptr)),
-        .Err(e)   => str_err(e)
+        .Ok(done) => string_str_ok(cstr(done.ptr)),
+        .Err(e)   => string_str_err(e)
     })
 }

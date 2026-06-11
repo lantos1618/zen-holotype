@@ -69,10 +69,11 @@ def test_topo_order_is_dependency_first_and_reports_the_parse_cycle():
 
 def test_reachable_is_the_transitive_closure():
     # compiler/check_validate -> compiler/check reaches text + memory std modules transitively.
-    # so `string`/`mem` appear though check_validate imports neither directly.
+    # so `string`/allocator modules appear though check_validate imports neither directly.
     reach = set(_resolver.reachable("check_validate"))
     assert {"compiler/genc", "compiler/check", "std/text/str", "std/text/string",
-            "std/text/bytes", "std/mem/raw", "std/mem/alloc"} <= reach
+            "std/text/bytes", "std/mem/alloc"} <= reach
+    assert "std/mem/raw" not in reach
     assert "compiler/check_validate" not in reach               # a module is not in its own closure
 
 
