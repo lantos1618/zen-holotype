@@ -1,40 +1,53 @@
-// std.text.str — operations on strings. A `str` is a C string (NUL-terminated `const
-// char*`); an owned, length-tracked string is a heap `[u8]` (a byte slice) the
-// caller owns. `view` borrows a str's bytes; `dup` copies them onto the heap.
-//
-//   { len, eq, dup } = std.text.str
-//   n := len("hello")            // 5
-//   owned := dup("hello")        // a heap [u8] you own (release(owned.ptr))
+// std.text.str — borrowed `str` helpers plus owned byte copies.
+// `dup`/`substr` use the default allocator; `*_in` takes an allocator explicitly; `try_*_in`
+// returns Result so allocation failure stays in the value flow.
 
-{ new_u8 } = std.mem.raw
-{ Result, Opt } = std.core.result
+{ default_allocator, Allocator, try_acquire } = std.mem.alloc
+{ Result, Opt, IoError } = std.core.result
 
 strlen = (s: str) i64
 strcmp = (a: str, b: str) i32
 
-// number of bytes, excluding the NUL terminator
 len* = (s: str) i64 { s.strlen() }
-
-// is the string empty?
 is_empty* = (s: str) bool { s.strlen().match ({ 0 => true, _ => false }) }
-
-// byte-wise equality
 eq* = (a: str, b: str) bool { a.strcmp(b).match ({ 0 => true, _ => false }) }
-
-// byte-wise inequality
 ne* = (a: str, b: str) bool { a.eq(b).match ({ true => false, false => true }) }
 
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 
-// a read-only [u8] view of a str's bytes — shares the str's memory (don't mutate)
 view* = (s: str) [u8] { s.slice(s.strlen()) }
 
-// an owned heap copy of a str's bytes — the caller owns it (free: release(it.ptr))
-dup* = (s: str) [u8] {
-    src := s.view()
-    out := new_u8(src.len)
+alloc_size = (n: i64) i64 { (n == 0).match ({ true => 1, false => n }) }
+
+copy_bytes = (src: [u8], out: [u8]) void {
     src.loop((h, i, b) { out[i] = b })
+}
+
+bytes_ok = (b: [u8]) Result<[u8], IoError> { .Ok(b) }
+bytes_err = (e: IoError) Result<[u8], IoError> { .Err(e) }
+str_ok = (s: str) Result<str, IoError> { .Ok(s) }
+str_err = (e: IoError) Result<str, IoError> { .Err(e) }
+
+dup_in*<A> = (a: MutPtr<A>, s: str) [u8] {
+    src := s.view()
+    out := a.acquire(src.len.alloc_size()).slice(src.len)
+    src.copy_bytes(out)
     out
+}
+dup* = (s: str) [u8] {
+    a := default_allocator()
+    a.addr().dup_in(s)
+}
+try_dup_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
+    src := s.view()
+    a.try_acquire(src.len.alloc_size()).match ({
+        .Ok(p) => {
+            out := p.slice(src.len)
+            src.copy_bytes(out)
+            bytes_ok(out)
+        },
+        .Err(e) => bytes_err(e)
+    })
 }
 
 // ── search ──────────────────────────────────────────────────────────────────
@@ -103,15 +116,7 @@ pin = (x: i64, lo: i64, hi: i64) i64 {
     })
 }
 
-// a fresh NUL-terminated copy of `n` bytes of `s` from byte `start`. Out-of-range is
-// CLAMPED, not an error: start pins to [0, len], n to [0, len - start] — so
-// substr("hi", 1, 99) == "i" and substr("hi", 5, 2) == "". The caller owns the copy
-// (free: release(view(it).ptr)).
-substr* = (s: str, start: i64, n: i64) str {
-    sv := s.view()
-    lo := start.pin(0, sv.len)
-    m := n.pin(0, sv.len - lo)
-    out := new_u8(m + 1)
+copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out.loop((h, i, b) {
         (i < m).match ({
             true  => { out[i] = sv[lo + i] },
@@ -119,7 +124,33 @@ substr* = (s: str, start: i64, n: i64) str {
         })
     })
     out[m] = 0
+}
+
+// Out-of-range is clamped: substr("hi", 1, 99) == "i"; substr("hi", 5, 2) == "".
+substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str {
+    sv := s.view()
+    lo := start.pin(0, sv.len)
+    m := n.pin(0, sv.len - lo)
+    out := a.acquire(m + 1).slice(m + 1)
+    sv.copy_substr(out, lo, m)
     cstr(out.ptr)
+}
+substr* = (s: str, start: i64, n: i64) str {
+    a := default_allocator()
+    a.addr().substr_in(s, start, n)
+}
+try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> {
+    sv := s.view()
+    lo := start.pin(0, sv.len)
+    m := n.pin(0, sv.len - lo)
+    a.try_acquire(m + 1).match ({
+        .Ok(p) => {
+            out := p.slice(m + 1)
+            sv.copy_substr(out, lo, m)
+            str_ok(cstr(out.ptr))
+        },
+        .Err(e) => str_err(e)
+    })
 }
 
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)

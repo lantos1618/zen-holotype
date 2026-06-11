@@ -677,6 +677,38 @@ def test_zenc_run_str_ops_edges():
     assert r.stdout == "6\n-1\n0\n1\n2\n0\n1\n1\n0\n1\n0\n0\n-7\n12\n0\n123456789012\n", repr(r.stdout)
 
 
+def test_zenc_run_str_allocator_result_variants():
+    """std.text.str owns allocation through std.mem.alloc, with Result-returning variants for fallible paths."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ default_allocator } = std.mem.alloc\n'
+        '{ dup, dup_in, try_dup_in, substr_in, try_substr_in } = std.text.str\n'
+        '{ println_str, println_int } = std.text.fmt\n'
+        'main = () i32 {\n'
+        '  a := default_allocator()\n'
+        '  plain := dup("xy")\n'
+        '  println_int(to_i64(plain.len))\n'
+        '  owned := a.addr().dup_in("abc")\n'
+        '  println_int(to_i64(owned.len))\n'
+        '  println_int(to_i64(owned[0]))\n'
+        '  println_str(a.addr().substr_in("hello", 1, 3))\n'
+        '  a.addr().try_dup_in("").match ({\n'
+        '    .Ok(bytes) => println_int(to_i64(bytes.len)),\n'
+        '    .Err(e) => println_int(99)\n'
+        '  })\n'
+        '  a.addr().try_substr_in("world", 1, 2).match ({\n'
+        '    .Ok(s) => println_str(s),\n'
+        '    .Err(e) => println_str("err")\n'
+        '  })\n'
+        '  0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "2\n3\n97\nell\n0\nor\n", repr(r.stdout)
+
+
 def test_zenc_run_str_tokenizer():
     """THE acceptance program: tokenize a hardcoded sentence — find each space, substr the word out,
     parse_int the numeric tokens (incl. a negative) — composed UFCS-style with recursion."""
