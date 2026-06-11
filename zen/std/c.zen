@@ -18,20 +18,8 @@
 // is N2). N1 proves the shape and gives the bindings one place to live.
 
 { malloc } = std.alloc
+{ nbuf, dupx, node } = std.slice
 { Decl, Func, Param, Stmt, Ty, dforeign, tptr, param, ti32, ti64, tu8, tstr, tvoid } = compiler.genc
-
-// a generic heap copy of a (stack) `[…]` literal — the keystone of std.ast's builders, inlined here so
-// this header stays self-contained (deps: genc + alloc only). A function that RETURNS the AST it built
-// from `[…]` literals would dangle (the literal has automatic storage); `dupx` copies it onto the heap.
-// The `[T]` return slot binds T (so `nbuf`'s alloc gets the element size); `like` only witnesses T.
-// (`dupx`, not `dup`: std.str's `dup` sits in this module's flat closure — via compiler.genc → std.str —
-// and the loader's per-name dedup keeps only ONE; the x-suffix is std.ast's `callx` collision dodge.)
-nbuf<T> = (n: i64, like: [T]) [T] { slice(malloc(n * sizeof(T)), n) }
-dupx<T> = (xs: [T]) [T] {
-    buf := nbuf(xs.len, xs)
-    xs.loop((h, i, x) { buf[i] = x })
-    buf
-}
 
 // ── empty AST sub-slices, built without a `[]` literal so this self-hosts (the same `slice(malloc(0),
 //    0)` idiom compiler.genc.no_tys / compiler.check.empty_params use). A foreign binding has no type params and
@@ -40,15 +28,8 @@ no_params = () [Param] { slice(malloc(0), 0) }                  // an empty [Par
 no_stmts  = () [Stmt]  { slice(malloc(0), 0) }                  // an empty [Stmt]  (no body)
 
 // a heap-stable Ptr<Ty>, so a Ty returned from here (e.g. inside `tptr`) doesn't dangle: `.addr()` of a
-// local would point into this frame, so box the value on the heap first (one slot of a fresh [Ty]).
-// (Mirrors compiler.genc.mono_tynode / compiler.parse_type.tynode — both private, so c.zen carries its own.)
-// `tybuf`'s `[Ty]` RETURN type is what fixes the element type (so `buf[0]` reads a Ty, not a void*).
-tybuf  = (n: i64) [Ty] { slice(malloc(n * sizeof(Ty)), n) }
-tynode = (t: Ty) Ptr<Ty> {
-    buf := tybuf(1)
-    buf[0] = t
-    buf[0].addr()
-}
+// local would point into this frame, so box the value on the heap first.
+tynode = (t: Ty) Ptr<Ty> { t.node() }
 // `RawPtr<u8>` lowers to `uint8_t*` — a pointer to u8. (compiler.parse_type erases Ptr/MutPtr/RawPtr to a
 // bare `T*`; compiler.check builds a null RawPtr<u8> as exactly `tptr(tnode(tu8()))`.) This is how the libc
 // allocation symbols spell their pointer arg/return type.
