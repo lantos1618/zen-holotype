@@ -13,25 +13,25 @@ strlen = (s: str) i64
 strcmp = (a: str, b: str) i32
 
 // number of bytes, excluding the NUL terminator
-len* = (s: str) i64 { strlen(s) }
+len* = (s: str) i64 { s.strlen() }
 
 // is the string empty?
-is_empty* = (s: str) bool { (strlen(s)).match ({ 0 => true, _ => false }) }
+is_empty* = (s: str) bool { s.strlen().match ({ 0 => true, _ => false }) }
 
 // byte-wise equality
-eq* = (a: str, b: str) bool { (strcmp(a, b)).match ({ 0 => true, _ => false }) }
+eq* = (a: str, b: str) bool { a.strcmp(b).match ({ 0 => true, _ => false }) }
 
 // byte-wise inequality
-ne* = (a: str, b: str) bool { (eq(a, b)).match ({ true => false, false => true }) }
+ne* = (a: str, b: str) bool { a.eq(b).match ({ true => false, false => true }) }
 
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 
 // a read-only [u8] view of a str's bytes — shares the str's memory (don't mutate)
-view* = (s: str) [u8] { slice(s, strlen(s)) }
+view* = (s: str) [u8] { s.slice(s.strlen()) }
 
 // an owned heap copy of a str's bytes — the caller owns it (free: release(it.ptr))
 dup* = (s: str) [u8] {
-    src := view(s)
+    src := s.view()
     out := new_u8(src.len)
     src.loop((h, i, b) { out[i] = b })
     out
@@ -60,8 +60,8 @@ has_at = (sv: [u8], pv: [u8], at: i64) bool {
 // byte index of the first occurrence of `needle` in `s`, -1 if absent.
 // the empty needle matches at 0 (the strstr convention).
 find* = (s: str, needle: str) i64 {
-    sv := view(s)
-    pv := view(needle)
+    sv := s.view()
+    pv := needle.view()
     (pv.len == 0).match ({
         true  => 0,
         false => {
@@ -88,8 +88,8 @@ contains* = (s: str, needle: str) bool { s.find(needle) >= 0 }
 
 // does `s` begin with `prefix`? (every str starts with the empty prefix)
 starts_with* = (s: str, prefix: str) bool {
-    sv := view(s)
-    pv := view(prefix)
+    sv := s.view()
+    pv := prefix.view()
     pv.len <= sv.len && sv.has_at(pv, 0)
 }
 
@@ -108,7 +108,7 @@ pin = (x: i64, lo: i64, hi: i64) i64 {
 // substr("hi", 1, 99) == "i" and substr("hi", 5, 2) == "". The caller owns the copy
 // (free: release(view(it).ptr)).
 substr* = (s: str, start: i64, n: i64) str {
-    sv := view(s)
+    sv := s.view()
     lo := start.pin(0, sv.len)
     m := n.pin(0, sv.len - lo)
     out := new_u8(m + 1)
@@ -124,7 +124,7 @@ substr* = (s: str, start: i64, n: i64) str {
 
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
 char_at* = (s: str, i: i64) u8 {
-    sv := view(s)
+    sv := s.view()
     (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
 }
 
@@ -135,7 +135,7 @@ char_at* = (s: str, i: i64) u8 {
 // (empty str, garbage, a bare '-') parse as 0 — parse_int("42") == 42,
 // parse_int("-7") == -7, parse_int("12ab") == 12, parse_int("zen") == 0.
 parse_int* = (s: str) i64 {
-    sv := view(s)
+    sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
@@ -158,7 +158,7 @@ parse_int* = (s: str) i64 {
 some_at = (i: i64) Opt<i64> { .Some(i) }
 no_hit  = () Opt<i64> { .None }
 find_opt* = (s: str, needle: str) Opt<i64> {
-    i := find(s, needle)
+    i := s.find(needle)
     (i >= 0).match ({ true => some_at(i), false => no_hit() })
 }
 
@@ -177,7 +177,7 @@ e_overflow = () ParseError { .Overflow }
 // parse_int, honestly: "zen" and "12ab" are errors, not 0 and 12. An optional leading '-', then
 // digits to the very end; the magnitude must fit i64 (|INT64_MIN| itself counts as overflow).
 try_parse_int* = (s: str) Result<i64, ParseError> {
-    sv := view(s)
+    sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0

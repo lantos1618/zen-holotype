@@ -13,10 +13,10 @@ Buf*: { p: RawPtr<u8>, len: i64 }
 
 buf_alloc* = (n: i64) Own<Buf> { own_new(Buf( p: malloc(n), len: n )) }
 
-buf_get* = (o: Own<Buf>, i: i64) u8 { load(o.own_get().p.offset(i)) }
-buf_set* = (o: Own<Buf>, i: i64, v: u8) void { store(o.own_get().p.offset(i), v) }
+buf_get* = (o: Own<Buf>, i: i64) u8 { o.own_get().p.offset(i).load() }
+buf_set* = (o: Own<Buf>, i: i64, v: u8) void { o.own_get().p.offset(i).store(v) }
 
-Buf.impl(Drop, { drop = (b: MutPtr<Buf>) void { free(b.p) } })
+Buf.impl(Drop, { drop = (b: MutPtr<Buf>) void { b.p.free() } })
 
 // POSIX open returns a raw descriptor; File closes it through Drop.
 File*: { fd: i32 }
@@ -24,7 +24,7 @@ File*: { fd: i32 }
 file_ok = (o: Own<File>) Result<Own<File>, IoError> { .Ok(o) }
 file_err = (e: IoError) Result<Own<File>, IoError> { .Err(e) }
 file_open* = (path: str) Result<Own<File>, IoError> {
-    ok_if(open(path, O_RDONLY, 0)).match ({
+    path.open(O_RDONLY, 0).ok_if().match ({
         .Ok(fd)  => file_ok(own_new(File( fd: fd ))),
         .Err(e)  => file_err(e),
     })
@@ -32,4 +32,4 @@ file_open* = (path: str) Result<Own<File>, IoError> {
 
 file_fd* = (o: Own<File>) i32 { o.own_get().fd }
 
-File.impl(Drop, { drop = (f: MutPtr<File>) void { close(f.fd) } })
+File.impl(Drop, { drop = (f: MutPtr<File>) void { f.fd.close() } })

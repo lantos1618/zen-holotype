@@ -29,40 +29,40 @@ with_cap* = (cap: i64) String { String( ptr: malloc(cap), len: 0, cap: cap ) }
 new* = () String { with_cap(16) }
 
 // grow the buffer to exactly `ncap` bytes (ncap >= len)
-grow = (s: String, ncap: i64) String { String( ptr: realloc(s.ptr, ncap), len: s.len, cap: ncap ) }
+grow = (s: String, ncap: i64) String { String( ptr: s.ptr.realloc(ncap), len: s.len, cap: ncap ) }
 
 // ensure room for `need` more bytes — doubles (+ need) so N appends cost O(N) total
 reserve = (s: String, need: i64) String {
     (s.len + need > s.cap).match ({
-        true  => grow(s, (s.cap + need) * 2),
+        true  => s.grow((s.cap + need) * 2),
         false => s
     })
 }
 
 // append one byte
 push* = (s: String, b: u8) String {
-    r := reserve(s, 1)
-    store(offset(r.ptr, r.len), b)
+    r := s.reserve(1)
+    r.ptr.offset(r.len).store(b)
     String( ptr: r.ptr, len: r.len + 1, cap: r.cap )
 }
 
 // append a str's bytes
 append* = (s: String, t: str) String {
-    n := len(t)
-    r := reserve(s, n)
-    copy(offset(r.ptr, r.len), view(t).ptr, n)
+    n := t.len()
+    r := s.reserve(n)
+    r.ptr.offset(r.len).copy(t.view().ptr, n)
     String( ptr: r.ptr, len: r.len + n, cap: r.cap )
 }
 
 // the bytes as a read-only [u8] view (borrows the buffer)
-bytes* = (s: String) [u8] { slice(s.ptr, s.len) }
+bytes* = (s: String) [u8] { s.ptr.slice(s.len) }
 
 // NUL-terminate and reinterpret the buffer as a `str` — the bridge from a built-at-runtime String
 // to a C string (used e.g. to build a monomorphized type's mangled name like `Box_i32`).
 finish* = (s: String) str { cstr(s.push(0).ptr) }
 
 // hand the buffer back to the allocator
-free* = (s: String) void { release(s.ptr) }
+free* = (s: String) void { s.ptr.release() }
 
 // ── explicit allocator variants ─────────────────────────────────────────────
 
@@ -87,14 +87,14 @@ reserve_in<A> = (a: MutPtr<A>, s: String, need: i64) String {
 push_in*<A> = (a: MutPtr<A>, s: String, b: u8) String {
     skb := b
     r := a.reserve_in(s, 1)
-    store(offset(r.ptr, r.len), skb)
+    r.ptr.offset(r.len).store(skb)
     String( ptr: r.ptr, len: r.len + 1, cap: r.cap )
 }
 append_in*<A> = (a: MutPtr<A>, s: String, t: str) String {
     skt := t
-    n := len(skt)
+    n := skt.len()
     r := a.reserve_in(s, n)
-    copy(offset(r.ptr, r.len), view(skt).ptr, n)
+    r.ptr.offset(r.len).copy(skt.view().ptr, n)
     String( ptr: r.ptr, len: r.len + n, cap: r.cap )
 }
 finish_in*<A> = (a: MutPtr<A>, s: String) str { cstr(a.push_in(s, 0).ptr) }
@@ -131,7 +131,7 @@ try_push*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
     skb := b
     a.try_reserve(s, 1).match ({
         .Ok(r) => {
-            store(offset(r.ptr, r.len), skb)
+            r.ptr.offset(r.len).store(skb)
             string_ok(String( ptr: r.ptr, len: r.len + 1, cap: r.cap ))
         },
         .Err(e) => string_err(e)
@@ -139,10 +139,10 @@ try_push*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
 }
 try_append*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
     skt := t
-    n := len(skt)
+    n := skt.len()
     a.try_reserve(s, n).match ({
         .Ok(r) => {
-            copy(offset(r.ptr, r.len), view(skt).ptr, n)
+            r.ptr.offset(r.len).copy(skt.view().ptr, n)
             string_ok(String( ptr: r.ptr, len: r.len + n, cap: r.cap ))
         },
         .Err(e) => string_err(e)

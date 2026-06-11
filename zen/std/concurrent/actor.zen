@@ -23,14 +23,14 @@ mailbox* = (cap: i64) Mailbox {
 // the oldest unconsumed message — the caller's `.match` on the result is the back-pressure point.
 mailbox_send* = (m: MutPtr<Mailbox>, v: i64) bool {
     (m.tail - m.head >= m.cap).match ({ true => { return false }, false => {} })
-    store_i64(m.buf.offset((m.tail % m.cap) * 8), v)
+    m.buf.offset((m.tail % m.cap) * 8).store_i64(v)
     m.tail = m.tail + 1
     true
 }
 
 // release the ring's buffer; the mailbox is dead afterwards (cap 0 refuses every send).
 mailbox_free* = (m: MutPtr<Mailbox>) void {
-    free(m.buf)
+    m.buf.free()
     m.buf = null_ptr()
     m.head = 0
     m.tail = 0
@@ -38,7 +38,7 @@ mailbox_free* = (m: MutPtr<Mailbox>) void {
 }
 
 mailbox_recv* = (m: MutPtr<Mailbox>) i64 {
-    v := load_i64(m.buf.offset((m.head % m.cap) * 8))
+    v := m.buf.offset((m.head % m.cap) * 8).load_i64()
     m.head = m.head + 1
     v
 }
@@ -57,8 +57,8 @@ context*<M> = (message: M) Context<M> { Context<M>(message: message) }
 actor_system*<M, RuntimeT> = (runtime: MutPtr<RuntimeT>, seed: M, cap: i64) ActorSystem<M> {
     hp := runtime.alloc(8)
     tp := runtime.alloc(8)
-    store_i64(hp, 0)
-    store_i64(tp, 0)
+    hp.store_i64(0)
+    tp.store_i64(0)
     ActorSystem<M>(buf: runtime.alloc(cap * sizeof(M)), headp: hp, tailp: tp, cap: cap)
 }
 
@@ -74,8 +74,8 @@ actor_system_free*<M, RuntimeT> = (runtime: MutPtr<RuntimeT>, sys: ActorSystem<M
     runtime.release(sys.tailp)
 }
 
-sys_messages<M> = (sys: ActorSystem<M>) [M] { slice(sys.buf, sys.cap) }
-ref_messages<M> = (ref: ActorRef<M>) [M] { slice(ref.buf, ref.cap) }
+sys_messages<M> = (sys: ActorSystem<M>) [M] { sys.buf.slice(sys.cap) }
+ref_messages<M> = (ref: ActorRef<M>) [M] { ref.buf.slice(ref.cap) }
 
 // send: REFUSED (false) when the ring is full — pending == cap — instead of silently overwriting
 // the oldest unconsumed message; the caller's `.match` on the result is the back-pressure point.
@@ -83,27 +83,27 @@ ref_messages<M> = (ref: ActorRef<M>) [M] { slice(ref.buf, ref.cap) }
 // see std.collections.map's note), and the value is a TRAILING PLAIN EXPRESSION, not a value-position match
 // (a stmt-lowered if inside the inlined statement-expression would yield void).
 send*<M> = (ref: ActorRef<M>, message: M) bool {
-    tail := load_i64(ref.tailp)
+    tail := ref.tailp.load_i64()
     sent := false
-    (tail - load_i64(ref.headp) >= ref.cap).match ({
+    (tail - ref.headp.load_i64() >= ref.cap).match ({
         true  => {},
         false => {
             ms := ref.ref_messages()
             ms[tail % ref.cap] = message
-            store_i64(ref.tailp, tail + 1)
+            ref.tailp.store_i64(tail + 1)
             sent = true
         },
     })
     sent
 }
 
-has_messages*<M> = (sys: ActorSystem<M>) bool { load_i64(sys.headp) < load_i64(sys.tailp) }
+has_messages*<M> = (sys: ActorSystem<M>) bool { sys.headp.load_i64() < sys.tailp.load_i64() }
 
 next_message*<M> = (sys: ActorSystem<M>) M {
     ms := sys.sys_messages()
-    head := load_i64(sys.headp)
+    head := sys.headp.load_i64()
     message := ms[head % sys.cap]
-    store_i64(sys.headp, head + 1)
+    sys.headp.store_i64(head + 1)
     message
 }
 
