@@ -200,8 +200,16 @@ last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
     stmts[stmts.len - 1].match ({ .ExprStmt(e) => env.infer_expr(e), .Return(r) => env.infer_expr(r), _ => tvoid() })
 }
 block_ty = (env: Env, b: BlockData) Ty {
-    // Keep as one expression; older frontends glued a `.len` line to a following call.
-    (b.stmts.len == 0).match ({ true => tvoid(), false => env.last_stmt_ty(b.stmts) })
+    env.block_ty_from(b.stmts, 0)
+}
+block_ty_from = (env: Env, stmts: [Stmt], i: i32) Ty {
+    (i >= stmts.len).match ({
+        true  => tvoid(),
+        false => (i == stmts.len - 1).match ({
+            true  => env.last_stmt_ty(stmts),
+            false => env.a.extend_env(env, stmts[i]).block_ty_from(stmts, i + 1)
+        })
+    })
 }
 // Prefer a concrete stored index element type; generic inlining may make re-inference lose it.
 index_elem = (env: Env, ix: IndexData) Ty {
@@ -306,9 +314,12 @@ infer_call = (env: Env, c: CallData) Ty {
             true  => tf64(),
             false => eq(c.fn, "null_ptr").match ({
                 true  => tptr(env.a.tnode(tu8())),
-                false => eq(c.fn, "addr").match ({
+                false => eq(c.fn, "cstr").match ({
+                    true  => tstr(),
+                    false => eq(c.fn, "addr").match ({
                     true  => tptr(env.a.tnode(env.arg0_ty(c))),
                     false => env.gen_call_ret(c)
+                    })
                 })
             }) }) }) }) })
             })
@@ -343,10 +354,17 @@ gen_struct_field = (a: Ptr<Malloc>, decls: [Decl], gname: str, fname: str, targs
     found
 }
 ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => t }) }
+slice_member = (a: Ptr<Malloc>, field: str) Ty {
+    eq(field, "len").match ({
+        true  => ti64(),
+        false => eq(field, "ptr").match ({ true => tptr(a.tnode(tu8())), false => tvoid() })
+    })
+}
 infer_member = (env: Env, m: MemberData) Ty {
     oty := env.infer_expr(m.obj)
     oty.ty_under_ptr().match ({
         .Generic(g) => env.a.gen_struct_field(env.decls, g.name, m.field, g.args),
+        .Slice(e)   => env.a.slice_member(m.field),
         _           => env.decls.struct_field(oty.enum_name(), m.field)
     })
 }
@@ -615,10 +633,17 @@ lower_stmt_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
 }
 
 // Resolve statements, preserving expected type only for value-producing tail expressions.
+store_local_ty = (t: Ty) Ty {
+    t.match ({
+        .Void => tvoid(),
+        .FnT(ft) => tvoid(),
+        _ => t
+    })
+}
 resolve_let = (a: Ptr<Malloc>, env: Env, l: LetData) Stmt {
     v := a.resolve_expr(env.let_exp(l.ty), l.value)
     ty := l.ty.is_void_ty().match ({
-        true  => env.infer_expr(v).match ({ .U8 => tu8(), _ => tvoid() }),
+        true  => env.infer_expr(v).store_local_ty(),
         false => l.ty
     })
     slett(l.name, ty, v)
@@ -730,6 +755,15 @@ inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: 
 // Generic template calls infer type args at the call site before splicing.
 // Light types are enough to unify tparams, including local Var args.
 lty_node = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> { a.tnode(t) }
+light_sl_elem = (a: Ptr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl]) Ty {
+    (items.len == 0).match ({ true => tvoid(), false => items[0].addr().light_ty(a, env, decls) })
+}
+light_slice = (a: Ptr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl]) Ty {
+    sd.elem.is_void_ty().match ({
+        true  => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls))),
+        false => tslice(a.lty_node(sd.elem))
+    })
+}
 // Light call type mirrors infer_call for template-splice inference.
 light_one = (params: [Param], a: Ptr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     found := tvoid()
@@ -742,24 +776,49 @@ light_targs = (f: Func, a: Ptr<Malloc>, args: [Expr], env: Ptr<VList>, decls: [D
     buf
 }
 light_call_ty = (decls: [Decl], a: Ptr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
-    f := decls.the_func(c.fn)
-    (f.tparams.len > 0).match ({
-        true  => a.subst_ty_in(f.tparams, f.light_targs(a, c.args, env, decls), f.ret),
-        false => f.ret
+    eq(c.fn, "cstr").match ({
+        true  => tstr(),
+        false => {
+            f := decls.the_func(c.fn)
+            (f.tparams.len > 0).match ({
+                true  => a.subst_ty_in(f.tparams, f.light_targs(a, c.args, env, decls), f.ret),
+                false => f.ret
+            })
+        }
     })
+}
+light_last_stmt_ty = (a: Ptr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl]) Ty {
+    stmts[stmts.len - 1].match ({ .ExprStmt(e) => e.light_ty(a, env, decls), .Return(r) => r.light_ty(a, env, decls), _ => tvoid() })
+}
+light_extend = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
+    st.match ({ .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({ true => l.value.light_ty(a, env, decls), false => l.ty }), env), _ => env })
+}
+light_block_ty_from = (a: Ptr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], i: i32) Ty {
+    (i >= stmts.len).match ({
+        true  => tvoid(),
+        false => (i == stmts.len - 1).match ({
+            true  => a.light_last_stmt_ty(stmts, env, decls),
+            false => a.light_block_ty_from(stmts, a.light_extend(env, stmts[i], decls), decls, i + 1)
+        })
+    })
+}
+light_block_ty = (a: Ptr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl]) Ty {
+    a.light_block_ty_from(b.stmts, env, decls, 0)
 }
 light_ty = (e: Ptr<Expr>, a: Ptr<Malloc>, env: Ptr<VList>, decls: [Decl]) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
+        .Block(b)      => a.light_block_ty(b, env, decls),
         .Byte(n)       => tu8(),
         .FloatLit(ft)  => tf64(),
         .StrLit(s)     => tstr(),
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
         .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),
         .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
-        .SliceLit(sd)  => tslice(a.lty_node(sd.elem)),
+        .SliceLit(sd)  => a.light_slice(sd, env, decls),
         .Var(v)        => env.lookup_var(v.name),
         .Call(c)       => decls.light_call_ty(a, c, env),
+        .Member(m)     => m.obj.light_ty(a, env, decls).ty_under_ptr().match ({ .Slice(e) => a.slice_member(m.field), _ => tvoid() }),
         .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(a, env, decls)),
         .Cond(d)       => d.t.light_ty(a, env, decls),
         _              => tvoid()

@@ -17,11 +17,11 @@ make -f bootstrap/Makefile zenc     # cc compiles the committed C seed → ./zen
 
 ```sh
 cat > hello.zen <<'EOF'
-{ println, println_int } = std.text.fmt
+{ println } = std.text.fmt
 
 main = () i32 {
     println("hello, zen")
-    println_int(6 * 7)
+    println(6 * 7)
     0                              // main's value is the exit code
 }
 EOF
@@ -39,10 +39,10 @@ import the stdlib and other siblings; cycles are fine.
 
 ```sh
 cat > geometry.zen <<'EOF'
-{ println_int } = std.text.fmt
+{ println } = std.text.fmt
 
 area*  = (w: i32, h: i32) i32 { w * h }       // `*` exports the name
-show*  = (n: i32) i64 { println_int(n) }
+show*  = (n: i32) i64 { println(n) }
 EOF
 
 cat > main.zen <<'EOF'

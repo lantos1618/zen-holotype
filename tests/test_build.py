@@ -273,8 +273,8 @@ def test_zenc_run_int_to_str_negatives_and_zero():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "{ println_int } = std.text.fmt\n"
-        "main = () i32 { println_int(0)  println_int(-7)  println_int(1000000)  0 }\n"
+        "{ println } = std.text.fmt\n"
+        "main = () i32 { println(0)  println(-7)  println(1000000)  0 }\n"
     )
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -339,14 +339,14 @@ def test_zenc_run_vec_and_print_together():
     (d / "p.zen").write_text(
         "{ system_allocator } = std.mem.alloc\n"
         "{ vec_of, vpush, get } = std.collections.vec\n"
-        "{ println_int } = std.text.fmt\n"
+        "{ println } = std.text.fmt\n"
         "main = () i32 {\n"
         "  alloc := system_allocator()\n"
         "  a := alloc.addr()\n"
         "  v := a.vec_of([10, 20])\n"
         "  v2 := a.vpush(v, 30)\n"
-        "  println_int(v2.get(0))\n"              # 10
-        "  println_int(v2.get(2))\n"              # 30
+        "  println(v2.get(0))\n"              # 10
+        "  println(v2.get(2))\n"              # 30
         "  0\n"
         "}\n"
     )
@@ -483,9 +483,9 @@ def test_zenc_no_leading_paren_statement_glue():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "{ println_int } = std.text.fmt\n"
+        "{ println } = std.text.fmt\n"
         "id = (n: i64) i64 { n }\n"
-        "main = () i32 {\n  b := id\n  (4)\n  println_int(7)\n  0\n}\n"
+        "main = () i32 {\n  b := id\n  (4)\n  println(7)\n  0\n}\n"
     )
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "7\n", (r.returncode, r.stdout, r.stderr)
@@ -541,8 +541,8 @@ def test_zenc_raw_intrinsics_have_at_spelling():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
-        "{ println_int } = std.text.fmt\n"
-        "main = () i32 { x := 41  p := @addr(x)  println_int(@load(p) + 1)  0 }\n")
+        "{ println } = std.text.fmt\n"
+        "main = () i32 { x := 41  p := @addr(x)  println(@load(p) + 1)  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "42\n"
@@ -611,11 +611,11 @@ def test_bool_guard_wild_with_body():
     d = Path(tempfile.mkdtemp())
     for arm in ["_ => 0", "_ => {}", "_ => {},", "_"]:
         (d / "p.zen").write_text(
-            "{ println_int } = std.text.fmt\n"
+            "{ println } = std.text.fmt\n"
             "f = (n: i32) i32 {\n"
             f"  (n == 0).match ({{ true => {{ return 100 }}, {arm} }})\n"
-            "  println_int(50)\n  n\n}\n"
-            "main = () i32 { println_int(f(0))  println_int(f(7))  0 }\n"
+            "  println(50)\n  n\n}\n"
+            "main = () i32 { println(f(0))  println(f(7))  0 }\n"
         )
         r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
         assert r.returncode == 0 and r.stdout == "100\n50\n7\n", (arm, r.returncode, r.stdout, r.stderr)
@@ -647,7 +647,7 @@ def test_drop_and_fmt_coimport():
     at '<'), so std.mem.own + std.text.fmt co-import died on "duplicate top-level". Now dedup sees them."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text("{ println_int } = std.text.fmt\n{ Own } = std.mem.own\nmain = () i32 { println_int(7)  0 }\n")
+    (d / "p.zen").write_text("{ println } = std.text.fmt\n{ Own } = std.mem.own\nmain = () i32 { println(7)  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "7\n", (r.returncode, r.stdout, r.stderr)
 # ── std.text.str search/slice/parse: find/contains/substr/parse_int/starts_with/char_at ───────────────────
@@ -676,17 +676,17 @@ def test_zenc_run_str_tokenizer():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
         '{ find, substr, parse_int, len } = std.text.str\n'
-        '{ println, println_int } = std.text.fmt\n'
+        '{ println } = std.text.fmt\n'
         '// print the words of s[from..] (split on \' \'), each followed by its parse_int\n'
         'words = (s: str, from: i64) i64 {\n'
         '  rest := s.substr(from, s.len() - from)\n'
         '  sp := rest.find(" ")\n'
         '  (sp < 0).match ({\n'
-        '    true  => { println(rest)  println_int(rest.parse_int())  0 },\n'
+        '    true  => { println(rest)  println(rest.parse_int())  0 },\n'
         '    false => {\n'
         '      w := rest.substr(0, sp)\n'
         '      println(w)\n'
-        '      println_int(w.parse_int())\n'
+        '      println(w.parse_int())\n'
         '      s.words(from + sp + 1)\n'
         '    },\n'
         '  })\n'
@@ -720,21 +720,21 @@ def test_zenc_run_map_growth_and_second_value_type():
     (d / "p.zen").write_text(
         '{ system_allocator } = std.mem.alloc\n'
         '{ map_new, mput, mget, mlen, free_map } = std.collections.map\n'
-        '{ println, println_int } = std.text.fmt\n'
+        '{ println } = std.text.fmt\n'
         'main = () i32 {\n'
         '    alloc := system_allocator()\n'
         '    a := alloc.addr()\n'
         '    w := a.map_new("k0", 0)\n'
         f'{puts}'
-        '    println_int(w.mlen())\n'                        # 9
-        '    println_int(w.mget("k0", -1))\n'                # 0: the seed survived 3 grows
-        '    println_int(w.mget("k8", -1))\n'                # 80
+        '    println(w.mlen())\n'                        # 9
+        '    println(w.mget("k0", -1))\n'                # 0: the seed survived 3 grows
+        '    println(w.mget("k8", -1))\n'                # 80
         '    caps := a.map_new("uk", "london")\n'            # a Map<str> beside the Map<i32>
         '    caps = a.mput(caps, "fr", "paris")\n'
         '    caps = a.mput(caps, "fr", "PARIS")\n'           # upsert overwrites in place
         '    println(caps.mget("fr", "?"))\n'                # PARIS
         '    println(caps.mget("de", "miss"))\n'             # miss
-        '    println_int(caps.mlen())\n'                     # 2
+        '    println(caps.mlen())\n'                     # 2
         '    a.free_map(w)\n'
         '    a.free_map(caps)\n'
         '    0\n'
@@ -822,13 +822,13 @@ def test_runtime_checkpoint_is_colorless():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "a.zen").write_text(
-        "{ async_arena, async_arena_free } = std.concurrent.runtime\n{ println_int } = std.text.fmt\n"
-        "main = () i32 { rt := async_arena(1024)  rt.addr().checkpoint()  println_int(42)  rt.addr().checkpoint()  rt.addr().async_arena_free()  0 }\n")
+        "{ async_arena, async_arena_free } = std.concurrent.runtime\n{ println } = std.text.fmt\n"
+        "main = () i32 { rt := async_arena(1024)  rt.addr().checkpoint()  println(42)  rt.addr().checkpoint()  rt.addr().async_arena_free()  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "a.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "42\n", (r.returncode, r.stdout, r.stderr)   # was SIGSEGV
     (d / "b.zen").write_text(
-        "{ spawn, resume, destroy } = std.concurrent.coroutine\n{ run } = std.concurrent.sched\n{ sync_arena, sync_arena_free, async_arena, async_arena_free } = std.concurrent.runtime\n{ println_int } = std.text.fmt\n"
-        "work = () void { rt := async_arena(1024)  println_int(1)  rt.addr().checkpoint()  println_int(3)  rt.addr().async_arena_free() }\n"
-        "main = () i32 { alloc := sync_arena(131072)  co := alloc.addr().spawn(work)  resume(co)  println_int(2)  alloc.addr().run([co])  alloc.addr().destroy(co)  alloc.addr().sync_arena_free()  0 }\n")
+        "{ spawn, resume, destroy } = std.concurrent.coroutine\n{ run } = std.concurrent.sched\n{ sync_arena, sync_arena_free, async_arena, async_arena_free } = std.concurrent.runtime\n{ println } = std.text.fmt\n"
+        "work = () void { rt := async_arena(1024)  println(1)  rt.addr().checkpoint()  println(3)  rt.addr().async_arena_free() }\n"
+        "main = () i32 { alloc := sync_arena(131072)  co := alloc.addr().spawn(work)  resume(co)  println(2)  alloc.addr().run([co])  alloc.addr().destroy(co)  alloc.addr().sync_arena_free()  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "b.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "1\n2\n3\n", (r.returncode, r.stdout, r.stderr)
