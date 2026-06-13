@@ -1,40 +1,42 @@
-// @self-hosted-only: colorless runtime policy for allocation and suspension.
-// SyncRuntime uses heap + no-op suspend; AsyncRuntime uses arena + coroutine yield.
-{ malloc, free } = std.mem.alloc
+// @self-hosted-only: runtime allocators. The allocator is the execution mode:
+// SyncArena.suspend is a no-op; AsyncArena.suspend yields the current coroutine.
+{ Allocator } = std.mem.alloc
+{ Arena, arena_new, arena_free } = std.mem.arena
 { yield } = std.concurrent.coroutine
 
 Runtime*: {
-    alloc: (MutPtr<Self>, i64) RawPtr<u8>,
-    suspend: (MutPtr<Self>) void,
-    // Default no-op release fits arena runtimes; heap runtimes override it.
-    release = (s: MutPtr<Self>, p: RawPtr<u8>) void {}
+    suspend: (MutPtr<Self>) void
 }
 
-SyncRuntime*: { _: i32 }
-AsyncRuntime*: { buf: RawPtr<u8>, off: i64, cap: i64 }
+SyncArena*: { mem: Arena }
+AsyncArena*: { mem: Arena }
 
-SyncRuntime.impl(Runtime, {
-    alloc = (s: MutPtr<SyncRuntime>, n: i64) RawPtr<u8> { malloc(n) }
-    suspend = (s: MutPtr<SyncRuntime>) void {}
-    release = (s: MutPtr<SyncRuntime>, p: RawPtr<u8>) void { p.free() }
+SyncArena.impl(Runtime, {
+    suspend = (s: MutPtr<SyncArena>) void {}
 })
 
-AsyncRuntime.impl(Runtime, {
-    // Bump allocation rounds to 8 bytes and returns null_ptr past capacity.
-    alloc = (s: MutPtr<AsyncRuntime>, n: i64) RawPtr<u8> {
-        rounded := ((n + 7) / 8) * 8
-        (s.off + rounded > s.cap).match ({
-            true  => null_ptr(),
-            false => {
-                p := s.buf.offset(s.off)
-                s.off = s.off + rounded
-                p
-            },
-        })
-    }
-
-    suspend = (s: MutPtr<AsyncRuntime>) void { yield() }
+AsyncArena.impl(Runtime, {
+    suspend = (s: MutPtr<AsyncArena>) void { yield() }
 })
 
-sync_runtime* = () SyncRuntime { SyncRuntime(_: 0) }
-async_runtime* = (cap: i64) AsyncRuntime { AsyncRuntime(buf: malloc(cap), off: 0, cap: cap) }
+SyncArena.impl(Allocator, {
+    acquire = (s: MutPtr<SyncArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
+    resize  = (s: MutPtr<SyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
+    release = (s: MutPtr<SyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
+})
+
+AsyncArena.impl(Allocator, {
+    acquire = (s: MutPtr<AsyncArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
+    resize  = (s: MutPtr<AsyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
+    release = (s: MutPtr<AsyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
+})
+
+sync_arena* = (cap: i64) SyncArena { SyncArena(mem: arena_new(cap)) }
+async_arena* = (cap: i64) AsyncArena { AsyncArena(mem: arena_new(cap)) }
+
+sync_arena_free* = (runtime: MutPtr<SyncArena>) void {
+    runtime.mem.addr().arena_free()
+}
+async_arena_free* = (runtime: MutPtr<AsyncArena>) void {
+    runtime.mem.addr().arena_free()
+}

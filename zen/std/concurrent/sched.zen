@@ -1,5 +1,5 @@
 // @self-hosted-only: cooperative round-robin scheduler over stackful coroutines.
-{ malloc, free } = std.mem.alloc
+{ Allocator, system_allocator } = std.mem.alloc
 { Coro, resume } = std.concurrent.coroutine
 
 flag_slot = (flags: RawPtr<u8>, i: i32) RawPtr<u8> { flags.offset(i * 8) }
@@ -35,10 +35,14 @@ drive = (coros: [Coro], flags: RawPtr<u8>, n: i32) void {
         false => {}
     })
 }
-run* = (coros: [Coro]) void {
+run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
     n := coros.len
-    flags := malloc(n * 8)
+    flags := alloc.acquire(n * 8)
     flags.init_flags(0, n)
     coros.drive(flags, n)
-    flags.free()
+    alloc.release(flags)
+}
+run* = (coros: [Coro]) void {
+    alloc := system_allocator()
+    alloc.addr().run_in(coros)
 }
