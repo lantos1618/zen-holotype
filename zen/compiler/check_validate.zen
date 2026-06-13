@@ -1,8 +1,8 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
-{ Malloc, malloc } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 { byte_at } = std.text.bytes
 { eq, is_empty } = std.text.str
 
@@ -186,7 +186,7 @@ check_inits = (env: Env, inits: [FieldInit]) i32 {
     acc
 }
 // Struct literals check known fields and value fits; imported/generic literals stay lenient.
-no_fields = () [Field] { slice(malloc(0), 0) }
+no_fields = () [Field] { slice(null_ptr(), 0) }
 is_struct = (decls: [Decl], name: str) bool {
     f := false
     decls.loop((h, i, d) { f = d.match ({ .DStruct(sd) => eq(sd.name, name).match ({ true => true, false => f }), _ => f }) })
@@ -242,7 +242,7 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
     })
 }
 // Enum matches must be exhaustive and have no duplicate arms.
-no_variants = () [VariantDef] { slice(malloc(0), 0) }
+no_variants = () [VariantDef] { slice(null_ptr(), 0) }
 enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     found := no_variants()
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants, false => found }), _ => found }) })
@@ -583,7 +583,7 @@ method_err = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
     f.ty.match ({
         .FnT(fd) => im.methods.has_method(f.name).match ({
             false => decls.trait_has_default(im.trname, f.name).match ({ true => 0, false => 1 }),   // omitted: OK iff defaulted
-            true  => a.sig_matches(fd, decls.the_func(impl_cname(im.trname, im.ty, f.name)), im.ty).match ({ true => 0, false => 1 })
+            true  => a.sig_matches(fd, decls.the_func(a.impl_cname_in(im.trname, im.ty, f.name)), im.ty).match ({ true => 0, false => 1 })
         }),
         _ => 0
     })

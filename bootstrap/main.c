@@ -7,6 +7,7 @@
 zslice parse_module(Malloc* a, const char* src);
 zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
+String genModuleIn(Malloc* a, zslice decls);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
 int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, U1.4: packed kind + pos*16 (0 = ok) */
 /* U1.3: the Zen module loader (zen/std/internal/resolve.zen, now a SOURCE). Given the project root (the dir that
@@ -46,7 +47,7 @@ static int compile_stdin_or_file(int argc, char** argv){
         }
     }
     Malloc m = { 0 };
-    String out = genModule(resolve_module(&m, parse_module(&m, buf)));
+    String out = genModuleIn(&m, resolve_module(&m, parse_module(&m, buf)));
     fwrite(out.ptr, 1, out.len, stdout);
     return 0;
 }
@@ -58,7 +59,7 @@ static int compile_stdin_or_file(int argc, char** argv){
  *   strip_imports(p)  = "\n".join(l for l in TEXT.splitlines()
  *                                 if not (l.strip().startswith("{ ")
  *                                         and ("= std." in l or "= compiler." in l)))
- * then feeds that flat source through the SAME parse_module->resolve_module->genModule path the
+ * then feeds that flat source through the SAME parse_module->resolve_module->genModuleIn path the
  * normal mode uses, and writes the emitted C to <out.c>. ZERO Python participates.
  *
  * The source list lives in bootstrap/sources.txt (paths relative to the <srcroot> argument).
@@ -212,7 +213,7 @@ static int build_self(const char* out_path, const char* srcroot){
     if (src.ptr == NULL){ return 1; }  /* a source file could not be read */
     const char* flat = finish(src);    /* NUL-terminate the flat source for the parser */
     Malloc m = { 0 };
-    String out = genModule(resolve_module(&m, parse_module(&m, flat)));
+    String out = genModuleIn(&m, resolve_module(&m, parse_module(&m, flat)));
     trim_trailing_ws(&out);
 
     size_t hlen = sizeof(HEAD) - 1;
@@ -230,7 +231,7 @@ static int build_self(const char* out_path, const char* srcroot){
 }
 
 /* ── build/run mode (Goal U / U1 Step 1): compile a .zen to a runnable native binary ───────────────
- * Emits the program's C (genModule), swaps the leading HEAD typedef for #include "zenrt.h" (== the
+ * Emits the program's C (genModuleIn), swaps the leading HEAD typedef for #include "zenrt.h" (== the
  * gen_c_file form), writes it to a temp .c, and links it with bootstrap/zenrt.c into `-o <out>` via cc.
  * A Zen `main = () i32 { … }` emits as C `int32_t main()` — the program's entry, no separate runner.
  * zenrt.{c,h} are found relative to the zenc binary: <dir(argv0)>/bootstrap. */
@@ -357,7 +358,7 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     zslice decls = resolve_module(&m, parse_module(&m, flat));
     if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); free(buf); return 1; }  /* U2 */
     if (type_check(&m, decls, in_path, flat, buf) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
-    String out = genModule(decls);
+    String out = genModuleIn(&m, decls);
     free(buf);
     if (!emits_main(out)){ fprintf(stderr, "zenc: %s: no `main` entry point (need `main = () i32 { … }`)\n", in_path); return 1; }  /* U2 */
 

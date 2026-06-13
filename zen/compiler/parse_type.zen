@@ -4,10 +4,10 @@
 // (is_lbrace/is_comma/is_rparen/…/tok_eq) and the param buffer used by both expr and decl parsers.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Param, Ty, param, fntype, mangle_str, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tnamed, tptr, tslice } = compiler.genc
+{ Param, Ty, param, fntype, mangle_str_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tnamed, tptr, tslice } = compiler.genc
 { Token, Scan, scan } = compiler.lex
 { byte_at } = std.text.bytes
-{ Malloc, malloc } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 { is_op, is_lparen, lexeme } = compiler.parse_expr
 
 // ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
@@ -85,7 +85,7 @@ ty_of = (a: Ptr<Malloc>, src: str, t: Token) Ty {
 // `Ptr<Inner>` -> genc's Ptr(Inner) (heap Ptr<Ty>, recursive so `Ptr<Ptr<T>>` works); any
 // other token is a leaf type via ty_of. This is what lets params/fields/returns be pointers.
 TyEnd*: { ty: Ty, next: i32 }
-tybuf = (a: Ptr<Malloc>) [Ty] { slice(malloc(sizeof(Ty)), 1) }
+tybuf = (a: Ptr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
 tynode = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tybuf()
     buf[0] = t
@@ -134,11 +134,11 @@ fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   /
 parse_generic_ty = (a: Ptr<Malloc>, src: str, nameTok: Scan, pos: i32) TyEnd {   // pos just past '<'
     name := a.lexeme(src, nameTok.tok)
     ta   := a.parse_tyargs(src, pos)
-    TyEnd( ty: tgeneric(name, ta.args, mangle_str(name, ta.args)), next: ta.next )
+    TyEnd( ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)), next: ta.next )
 }
 // a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
-ty_buf = (a: Ptr<Malloc>) [Ty] { slice(malloc(256 * sizeof(Ty)), 256) }   // cap 256
+ty_buf = (a: Ptr<Malloc>) [Ty] { slice(a.acquire(256 * sizeof(Ty)), 256) }   // cap 256
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
 fill_tys = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     sc := src.scan(pos)
@@ -187,7 +187,7 @@ skip_to_lparen* = (src: str, pos: i32) i32 {
         _    => src.is_lparen(sc.tok).match ({ true => sc.next, false => src.skip_to_lparen(sc.next) })
     })
 }
-param_buf* = (a: Ptr<Malloc>) [Param] { slice(malloc(1024 * sizeof(Param)), 1024) }   // cap 1024
+param_buf* = (a: Ptr<Malloc>) [Param] { slice(a.acquire(1024 * sizeof(Param)), 1024) }   // cap 1024
 take_params* = (buf: [Param], n: i32) [Param] { slice(buf.ptr, n) }                            // exact length
 fill_params* = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)

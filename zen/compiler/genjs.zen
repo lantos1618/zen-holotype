@@ -31,7 +31,6 @@
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
   BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData,
   IndexData, IndexSetData, LoopData, LambdaData, BlockData, IfData, FnTData, lit } = compiler.genc
-{ malloc } = std.mem.alloc
 
 // ── int -> decimal digits (byte access only, mirroring genc_emit so genjs self-hosts) ───────
 jsbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
@@ -155,30 +154,21 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") ||
     eq(fn, "slice") || eq(fn, "null_ptr")
 }
-// BOUNDS-SAFE positional intrinsic args, ported from genc_emit's arg_at/zero_arg: only the
-// validator checks intrinsic arity and the EMIT path doesn't run it, so a malformed call with too
-// few args must not read past the args buffer (was a heap-buffer-overflow READ under ASan). A
-// missing arg degrades to a literal 0; a correct-arity call emits byte-identical output.
-jearg_buf = () [Expr] { slice(malloc(sizeof(Expr)), 1) }
-jzero_arg = () Ptr<Expr> {
-    b := jearg_buf()
-    b[0] = lit(0)
-    b[0].addr()
+// BOUNDS-SAFE positional intrinsic args: malformed calls with too few args degrade to literal 0.
+js_arg_at = (s: String, c: CallData, i: i32) String {
+    (i < c.args.len).match ({ true => s.js_expr(c.args[i].addr()), false => s.append("0") })
 }
-jarg_at = (c: CallData, i: i32) Ptr<Expr> { (i < c.args.len).match ({ true => c.args[i].addr(), false => jzero_arg() }) }
-jarg0 = (c: CallData) Ptr<Expr> { c.jarg_at(0) }
-jarg1 = (c: CallData) Ptr<Expr> { c.jarg_at(1) }
 js_call = (s: String, c: CallData) String {
     c.raw.match ({ true => s.append("/* unsupported-in-js: raw @").append(c.fn).append(" */"), false =>
-    eq(c.fn, "__str_eq").match ({ true => s.append("(").js_expr(c.jarg0()).append(" === ").js_expr(c.jarg1()).append(")"), false =>
-    eq(c.fn, "__str_ne").match ({ true => s.append("(").js_expr(c.jarg0()).append(" !== ").js_expr(c.jarg1()).append(")"), false =>
+    eq(c.fn, "__str_eq").match ({ true => s.append("(").js_arg_at(c, 0).append(" === ").js_arg_at(c, 1).append(")"), false =>
+    eq(c.fn, "__str_ne").match ({ true => s.append("(").js_arg_at(c, 0).append(" !== ").js_arg_at(c, 1).append(")"), false =>
     // the numeric casts: JS numbers are doubles, so to_f64 is identity and the int casts truncate
     // toward zero (Math.trunc — C cast semantics); to_u8 masks to a byte like C's (uint8_t).
-    eq(c.fn, "to_f64").match ({ true => s.append("(").js_expr(c.jarg0()).append(")"), false =>
-    eq(c.fn, "to_i32").match ({ true => s.append("Math.trunc(").js_expr(c.jarg0()).append(")"), false =>
-    eq(c.fn, "to_i64").match ({ true => s.append("Math.trunc(").js_expr(c.jarg0()).append(")"), false =>
-    eq(c.fn, "to_u8").match  ({ true => s.append("((").js_expr(c.jarg0()).append(") & 255)"), false =>
-    eq(c.fn, "slice").match  ({ true => s.append("({ptr: ").js_expr(c.jarg0()).append(", len: ").js_expr(c.jarg1()).append("})"), false =>
+    eq(c.fn, "to_f64").match ({ true => s.append("(").js_arg_at(c, 0).append(")"), false =>
+    eq(c.fn, "to_i32").match ({ true => s.append("Math.trunc(").js_arg_at(c, 0).append(")"), false =>
+    eq(c.fn, "to_i64").match ({ true => s.append("Math.trunc(").js_arg_at(c, 0).append(")"), false =>
+    eq(c.fn, "to_u8").match  ({ true => s.append("((").js_arg_at(c, 0).append(") & 255)"), false =>
+    eq(c.fn, "slice").match  ({ true => s.append("({ptr: ").js_arg_at(c, 0).append(", len: ").js_arg_at(c, 1).append("})"), false =>
     is_intrinsic(c.fn).match ({
         true  => s.append("/* unsupported-in-js: intrinsic ").append(c.fn).append(" */"),
         false => s.append(c.fn).append("(").js_args(c.args).append(")")
