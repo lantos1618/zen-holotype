@@ -1,0 +1,532 @@
+// @self-hosted-only
+// Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
+
+{ byte_at } = std.text.bytes
+{ decl_span } = compiler.parse
+// Parser APIs still take Ptr<Malloc>; Malloc also implements Allocator for resolver-owned buffers.
+{ Malloc } = std.mem.alloc
+{ Result, IoError } = std.core.result
+{ String, push, append, with_cap, finish } = std.text.string
+{ read_file_in, open, close, write, O_RDONLY } = std.io.file
+{ view } = std.text.str
+
+is_ws = (b: u8) bool { (b == ' ') || (b == 9) }
+
+lstrip = (s: str, p: i32) i32 {
+    byte_at(s, p).is_ws().match ({ true => s.lstrip(p + 1), false => p })
+}
+
+opens_import = (s: str, p: i32) bool {
+    (s.byte_at(p) == '{') && (s.byte_at(p + 1) == ' ')
+}
+
+import_marker_from = (s: str, p: i32) i32 {
+    b := s.byte_at(p)
+    (b == 0).match ({
+        true  => 0 - 1,
+        false => (b == '}').match ({
+            true  => s.marker_after_close(p + 1),
+            false => s.import_marker_from(p + 1)
+        })
+    })
+}
+marker_after_close = (s: str, p: i32) i32 {
+    (s.byte_at(p) == ' ').match ({
+        true  => s.marker_after_close(p + 1),
+        false => s.is_any_marker_at(p).match ({ true => p, false => 0 - 1 })
+    })
+}
+has_import_marker = (s: str, p: i32) bool { s.import_marker_from(p) >= 0 }
+
+resolve_span_eq = (s: str, p: i32, lit: str, i: i32) bool {
+    (lit.byte_at(i) == 0).match ({
+        true  => true,
+        false => (s.byte_at(p + i) == lit.byte_at(i)) && s.resolve_span_eq(p, lit, i + 1)
+    })
+}
+is_std_marker_at = (s: str, p: i32) bool { s.resolve_span_eq(p, "= std.", 0) }
+is_compiler_marker_at = (s: str, p: i32) bool { s.resolve_span_eq(p, "= compiler.", 0) }
+
+is_marker_at = (s: str, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
+
+is_user_marker_at = (s: str, p: i32) bool {
+    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && s.byte_at(p + 2).is_ident_start()
+        && (s.byte_at(s.res_ident_end(p + 2)) != '.')
+}
+is_any_marker_at = (s: str, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
+
+is_import_line* = (s: str, p: i32) bool {
+    ls := s.lstrip(p)
+    s.opens_import(ls).match ({ true => s.has_import_marker(ls), false => false })
+}
+
+import_end = (s: str, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
+
+next_line = (s: str, p: i32) i32 {
+    b := s.byte_at(p)
+    (b == 0).match ({
+        true  => p,
+        false => (b == 10).match ({
+            true  => p + 1,
+            false => s.next_line(p + 1)
+        })
+    })
+}
+
+strip_count* = (s: str, p: i32, n: i32) i32 {
+    (s.byte_at(p) == 0).match ({
+        true  => n,
+        false => s.is_import_line(p).match ({
+            true  => s.strip_count(s.import_end(p), n),
+            false => s.strip_count(s.next_line(p), n + 1)
+        })
+    })
+}
+
+line_end = (s: str, p: i32) i32 {
+    b := s.byte_at(p)
+    ((b == 0) || (b == 10)).match ({ true => p, false => s.line_end(p + 1) })
+}
+
+append_span = (out: String, s: str, p: i32, e: i32) String {
+    (p == e).match ({ true => out, false => out.push(s.byte_at(p)).append_span(s, p + 1, e) })
+}
+
+strip_into = (out: String, s: str, p: i32, first: bool) String {
+    (s.byte_at(p) == 0).match ({
+        true  => out,
+        false => s.is_import_line(p).match ({
+            true  => out.strip_into(s, s.import_end(p), first),
+            false => first.match ({
+                true  => out.append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false),
+                false => out.push(10).append_span(s, p, s.line_end(p)).strip_into(s, s.next_line(p), false)
+            })
+        })
+    })
+}
+
+strip_imports* = (out: String, s: str) String { out.strip_into(s, 0, true) }
+
+concat_files* = (out: String, a: str, b: str) String { out.append(a).push(10).append(b) }
+
+STD_MARKER_LEN := 6
+COMPILER_MARKER_LEN := 11
+USER_MARKER_LEN := 2
+
+module_name_pos = (s: str, p: i32) i32 {
+    s.is_std_marker_at(p).match ({
+        true  => p + STD_MARKER_LEN,
+        false => s.is_compiler_marker_at(p).match ({
+            true  => p + COMPILER_MARKER_LEN,
+            false => s.is_user_marker_at(p).match ({
+                true  => p + USER_MARKER_LEN,
+                false => s.module_name_pos(p + 1)
+            })
+        })
+    })
+}
+is_ident_byte = (b: u8) bool {
+    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || ((b >= '0') && (b <= '9')) || (b == '_')
+}
+take_name = (out: String, s: str, p: i32) String {
+    s.byte_at(p).is_ident_byte().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
+}
+import_module* = (out: String, s: str, p: i32) String { out.take_module_path(s, s.module_name_pos(p)) }
+
+take_module_path = (out: String, s: str, p: i32) String {
+    s.byte_at(p).is_ident_byte().match ({
+        true  => out.push(s.byte_at(p)).take_module_path(s, p + 1),
+        false => (s.byte_at(p) == '.').match ({
+            true  => out.push('/').take_module_path(s, p + 1),
+            false => out
+        })
+    })
+}
+
+import_id = (out: String, s: str, p: i32) String {
+    s.is_std_marker_at(p).match ({
+        true  => out.append("std/").take_module_path(s, p + STD_MARKER_LEN),
+        false => s.is_compiler_marker_at(p).match ({
+            true  => out.append("compiler/").take_module_path(s, p + COMPILER_MARKER_LEN),
+            false => s.is_user_marker_at(p).match ({
+                true  => out.append("u/").take_name(s, p + USER_MARKER_LEN),
+                false => out.import_id(s, p + 1)
+            })
+        })
+    })
+}
+id_is_user = (id: String) bool { (id.len >= 2) && (id.res_sbyte(0) == 'u') && (id.res_sbyte(1) == '/') }
+
+// String-backed line set: `name\n` entries, scanned without per-name allocation.
+
+res_sbyte = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
+
+line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
+    (j == m).match ({
+        true  => set.res_sbyte(i) == 10,
+        false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
+            true  => set.line_eq(i + 1, name, j + 1, m),
+            false => false
+        })
+    })
+}
+
+seen_scan = (set: String, name: String, i: i64) bool {
+    (i >= set.len).match ({
+        true  => false,
+        false => set.line_eq(i, name, 0, name.len).match ({
+            true  => true,
+            false => set.seen_scan(name, set.snext_line(i))
+        })
+    })
+}
+snext_line = (set: String, i: i64) i64 {
+    (i >= set.len).match ({
+        true  => set.len,
+        false => (set.res_sbyte(i) == 10).match ({ true => i + 1, false => set.snext_line(i + 1) })
+    })
+}
+
+seen* = (set: String, name: String) bool { set.seen_scan(name, 0) }
+
+add_name = (set: String, name: String) String { set.append_string(name).push(10) }
+append_string = (out: String, src: String) String { out.copy_from(src, 0) }
+copy_from = (out: String, src: String, i: i64) String {
+    (i >= src.len).match ({ true => out, false => out.push(src.res_sbyte(i)).copy_from(src, i + 1) })
+}
+
+Closure*: { seen: String, out: String, useen: String }
+
+exit = (code: i32) i32
+eprint = (s: str) i64 { v := view(s)  write(2, v.ptr, v.len) }
+
+// Probe first so missing modules get a distinct error from unreadable modules.
+file_exists = (path: str) bool {
+    fd := open(path, O_RDONLY, 0)
+    (fd >= 0).match ({ true => { close(fd)  true }, false => false })
+}
+
+append_id_name = (out: String, id: String) String {
+    id.id_is_user().match ({ true => out.copy_from(id, 2), false => out.copy_id_dotted(id, 0) })
+}
+copy_id_dotted = (out: String, id: String, i: i64) String {
+    (i >= id.len).match ({
+        true  => out,
+        false => (id.res_sbyte(i) == '/').match ({
+            true  => out.push('.').copy_id_dotted(id, i + 1),
+            false => out.push(id.res_sbyte(i)).copy_id_dotted(id, i + 1)
+        })
+    })
+}
+
+fail_unknown_module = (inpath: str, id: String, path: str) i32 {
+    msg := with_cap(160).append("zenc: ").append(inpath).append(": error: unknown module '").append_id_name(id)
+    m2  := id.id_is_user().match ({
+        true  => msg.append("' (no ").copy_from(id, 2).append(".zen next to ").append(inpath).append(")"),
+        false => msg.append("' (no ").append(path).append(")")
+    })
+    eprint(m2.push(10).finish())
+    exit(1)
+    0
+}
+fail_unreadable = (inpath: str, path: str) str {
+    eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: cannot read module file ").append(path).push(10).finish())
+    exit(1)
+    ""
+}
+read_module_file = (a: Ptr<Malloc>, path: str) Result<str, IoError> {
+    a.read_file_in(path)
+}
+read_module = (a: Ptr<Malloc>, inpath: str, path: str) str {
+    a.read_module_file(path).match ({
+        .Ok(s)  => s,
+        .Err(e) => fail_unreadable(inpath, path),
+    })
+}
+fail_unknown_name = (inpath: str, nm: String, id: String) i32 {
+    eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: unknown name '").append_string(nm)
+        .append("' in module '").append_id_name(id).append("' (no such top-level definition)").push(10).finish())
+    exit(1)
+    0
+}
+fail_dup_user = (inpath: str, id: String, nm: String) i32 {
+    eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: duplicate top-level definition '")
+        .append_string(nm).append("' (module '").append_id_name(id)
+        .append("' redefines a name another imported module already defines)").push(10).finish())
+    exit(1)
+    0
+}
+fail_no_progdir = (inpath: str, id: String) i32 {
+    eprint(with_cap(160).append("zenc: ").append(inpath).append(": error: sibling import '").append_id_name(id)
+        .append("' needs a source file on disk (stdin has no directory to load it from)").push(10).finish())
+    exit(1)
+    0
+}
+
+module_path = (root: str, progdir: str, id: String) str {
+    id.id_is_user().match ({
+        true  => with_cap(64).append(progdir).append("/").copy_from(id, 2).append(".zen").finish(),
+        false => with_cap(64).append(root).append("/zen/").append_string(id).append(".zen").finish()
+    })
+}
+
+guard_module = (progdir: str, inpath: str, id: String, path: str) i32 {
+    (id.id_is_user() && (progdir.byte_at(0) == 0)).match ({
+        true  => fail_no_progdir(inpath, id),
+        false => 0
+    })
+    file_exists(path).match ({ true => 0, false => fail_unknown_module(inpath, id, path) })
+}
+
+// Recursive transitive loader; dependencies are loaded before each module body.
+load_closure* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, c: Closure) Closure {
+    c.seen.seen(id).match ({
+        true  => c,
+        false => {
+            path := module_path(root, progdir, id)
+            guard_module(progdir, inpath, id, path)
+            src := a.read_module(inpath, path)
+            u2  := id.id_is_user().match ({
+                true  => a.user_decls_into(c.useen, src, 0, id, inpath),
+                false => c.useen
+            })
+            c2  := Closure( seen: c.seen.add_name(id), out: c.out, useen: u2 )
+            c3  := a.load_imports(root, progdir, inpath, src, 0, id.id_is_user(), c2)
+            Closure( seen: c3.seen, out: c3.out.push(10).strip_into(src, 0, true), useen: c3.useen )
+        }
+    })
+}
+
+load_imports = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, validate: bool, c: Closure) Closure {
+    (src.byte_at(p) == 0).match ({
+        true  => c,
+        false => src.is_import_line(p).match ({
+            true  => {
+                id := import_id(with_cap(24), src, p)
+                c2 := a.load_closure(root, progdir, inpath, id, c)
+                validate.match ({
+                    true  => a.check_import_names(root, progdir, inpath, src, p, id),
+                    false => 0
+                })
+                a.load_imports(root, progdir, inpath, src, src.import_end(p), validate, c2)
+            },
+            false => a.load_imports(root, progdir, inpath, src, src.next_line(p), validate, c)
+        })
+    })
+}
+
+// Import-head validation: `{ f, g } = m` must be provided by `m`.
+decl_names_into = (a: Ptr<Malloc>, set: String, src: str, p: i32) String {
+    sp := a.decl_span(src, p)
+    (sp.eof || (sp.next <= p)).match ({
+        true  => set,
+        false => sp.named.match ({
+            true  => a.decl_names_into(set.add_name(with_cap(16).append(sp.name)), src, sp.next),
+            false => a.decl_names_into(set, src, sp.next)
+        })
+    })
+}
+head_names_into = (set: String, src: str, p: i32) String {
+    b := src.byte_at(p)
+    ((b == '}') || (b == 0)).match ({
+        true  => set,
+        false => b.is_ident_start().match ({
+            true  => {
+                ie := src.res_ident_end(p)
+                set.add_name(import_name_span(with_cap(16), src, p, ie)).head_names_into(src, ie)
+            },
+            false => set.head_names_into(src, p + 1)
+        })
+    })
+}
+import_heads_into = (set: String, src: str, p: i32) String {
+    (src.byte_at(p) == 0).match ({
+        true  => set,
+        false => src.is_import_line(p).match ({
+            true  => set.head_names_into(src, src.lstrip(p) + 1).import_heads_into(src, src.import_end(p)),
+            false => set.import_heads_into(src, src.next_line(p))
+        })
+    })
+}
+provided_names = (a: Ptr<Malloc>, src: str) String {
+    a.decl_names_into(with_cap(256), src, 0).import_heads_into(src, 0)
+}
+
+check_import_names = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, id: String) i32 {
+    provided := a.provided_names(a.read_module(inpath, module_path(root, progdir, id)))
+    src.check_head(src.lstrip(p) + 1, provided, id, inpath)
+}
+check_head = (src: str, p: i32, provided: String, id: String, inpath: str) i32 {
+    b := src.byte_at(p)
+    ((b == '}') || (b == 0)).match ({
+        true  => 0,
+        false => b.is_ident_start().match ({
+            true  => {
+                ie := src.res_ident_end(p)
+                nm := import_name_span(with_cap(16), src, p, ie)
+                provided.seen(nm).match ({ true => 0, false => fail_unknown_name(inpath, nm, id) })
+                src.check_head(ie, provided, id, inpath)
+            },
+            false => src.check_head(p + 1, provided, id, inpath)
+        })
+    })
+}
+
+user_decls_into = (a: Ptr<Malloc>, useen: String, src: str, p: i32, id: String, inpath: str) String {
+    sp := a.decl_span(src, p)
+    (sp.eof || (sp.next <= p)).match ({
+        true  => useen,
+        false => sp.named.match ({
+            true  => {
+                nm := with_cap(16).append(sp.name)
+                useen.seen(nm).match ({ true => fail_dup_user(inpath, id, nm), false => 0 })
+                a.user_decls_into(useen.add_name(nm), src, sp.next, id, inpath)
+            },
+            false => a.user_decls_into(useen, src, sp.next, id, inpath)
+        })
+    })
+}
+
+first_user_import* = (src: str) str { fui_scan(with_cap(16), src, 0).finish() }
+fui_scan = (out: String, src: str, p: i32) String {
+    (src.byte_at(p) == 0).match ({
+        true  => out,
+        false => src.is_import_line(p).match ({
+            true  => {
+                mk := src.import_marker_from(src.lstrip(p))
+                src.is_user_marker_at(mk).match ({
+                    true  => out.take_name(src, mk + USER_MARKER_LEN),
+                    false => out.fui_scan(src, src.import_end(p))
+                })
+            },
+            false => out.fui_scan(src, src.next_line(p))
+        })
+    })
+}
+
+// Per-name dedup keeps the first dependency decl; main decls stay for validation.
+
+res_ident_end = (flat: str, p: i32) i32 {
+    flat.byte_at(p).is_ident_byte().match ({ true => flat.res_ident_end(p + 1), false => p })
+}
+import_name_span = (out: String, flat: str, p: i32, e: i32) String {
+    (p == e).match ({ true => out, false => out.push(flat.byte_at(p)).import_name_span(flat, p + 1, e) })
+}
+append_to_nul = (out: String, s: str, p: i32) String {
+    (s.byte_at(p) == 0).match ({ true => out, false => out.push(s.byte_at(p)).append_to_nul(s, p + 1) })
+}
+
+dedup_decls* = (a: Ptr<Malloc>, flat: str, bodystart: i64, bodylen: i64) str {
+    a.dd(with_cap(4096), flat, 0, with_cap(256), with_cap(64), bodystart, bodylen).finish()
+}
+
+dd = (a: Ptr<Malloc>, out: String, flat: str, p: i32, set: String, mainset: String, bodystart: i64, bodylen: i64) String {
+    sp := a.decl_span(flat, p)
+    (sp.eof || (sp.next <= p)).match ({
+        true  => out.append_to_nul(flat, p),
+        false => sp.named.match ({
+            true  => {
+                nm     := with_cap(16).append(sp.name)
+                inmain := (sp.start >= bodystart) && (sp.start < bodylen)
+                keep   := inmain.match ({ true => true, false => set.seen(nm).match ({ true => mainset.seen(nm), false => true }) })
+                s2     := set.seen(nm).match ({ true => set, false => set.add_name(nm) })
+                m2     := inmain.match ({ true => mainset.add_name(nm), false => mainset })
+                keep.match ({
+                    true  => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, s2, m2, bodystart, bodylen),
+                    false => a.dd(out.append_span(flat, p, sp.start), flat, sp.next, s2, m2, bodystart, bodylen)
+                })
+            },
+            false => a.dd(out.append_span(flat, p, sp.next), flat, sp.next, set, mainset, bodystart, bodylen)
+        })
+    })
+}
+
+// Namespace binds load `c = std.io.c` and rewrite `c.malloc` to `malloc`.
+is_ns_line* = (s: str, p: i32) bool {
+    ls := s.lstrip(p)
+    s.byte_at(ls).is_ident_byte().match ({
+        true  => s.is_marker_at(s.lstrip(s.res_ident_end(ls))),
+        false => false
+    })
+}
+
+ns_qualifier* = (out: String, s: str, p: i32) String {
+    ls := s.lstrip(p)
+    out.import_name_span(s, ls, s.res_ident_end(ls))
+}
+
+NsScan*: { quals: String, c: Closure }
+
+collect_ns* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, st: NsScan) NsScan {
+    (src.byte_at(p) == 0).match ({
+        true  => st,
+        false => src.is_ns_line(p).match ({
+            true  => {
+                modid   := import_id(with_cap(24), src, p)
+                c2      := a.load_closure(root, progdir, inpath, modid, st.c)
+                q2      := st.quals.add_name(ns_qualifier(with_cap(16), src, p))
+                a.collect_ns(root, progdir, inpath, src, src.next_line(p), NsScan( quals: q2, c: c2 ))
+            },
+            false => a.collect_ns(root, progdir, inpath, src, src.next_line(p), st)
+        })
+    })
+}
+
+is_ident_start = (b: u8) bool {
+    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_')
+}
+
+is_qual_access = (s: str, p: i32, ie: i32, quals: String) bool {
+    ((s.byte_at(ie) == '.') && s.byte_at(ie + 1).is_ident_start()).match ({
+        true  => quals.seen(import_name_span(with_cap(16), s, p, ie)),
+        false => false
+    })
+}
+
+rewrite_quals = (out: String, s: str, p: i32, quals: String) String {
+    b := s.byte_at(p)
+    (b == 0).match ({
+        true  => out,
+        false => (b.is_ident_start() && ((p == 0) || (!s.byte_at(p - 1).is_ident_byte()))).match ({
+            true  => {
+                ie := s.res_ident_end(p)
+                s.is_qual_access(p, ie, quals).match ({
+                    true  => out.rewrite_quals(s, ie + 1, quals),
+                    false => out.append_span(s, p, ie).rewrite_quals(s, ie, quals)
+                })
+            },
+            false => out.push(b).rewrite_quals(s, p + 1, quals)
+        })
+    })
+}
+
+line_slice = (s: str, p: i32, e: i32) str { with_cap(64).append_span(s, p, e).finish() }
+
+strip_ns_into = (out: String, s: str, p: i32, quals: String, first: bool) String {
+    (s.byte_at(p) == 0).match ({
+        true  => out,
+        false => s.is_import_line(p).match ({
+            true  => out.strip_ns_into(s, s.import_end(p), quals, first),
+            false => s.is_ns_line(p).match ({
+                true  => out.strip_ns_into(s, s.next_line(p), quals, first),
+                false => first.match ({
+                    true  => out.rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
+                                .strip_ns_into(s, s.next_line(p), quals, false),
+                    false => out.push(10).rewrite_quals(line_slice(s, p, s.line_end(p)), 0, quals)
+                                .strip_ns_into(s, s.next_line(p), quals, false)
+                })
+            })
+        })
+    })
+}
+
+// Public loader entry: collect namespace binds, strip imports/binds from the main
+// source, load transitive imports, then dedup names across the flat program.
+resolve_program* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) str {
+    ns   := a.collect_ns(root, progdir, inpath, mainsrc, 0,
+                NsScan( quals: with_cap(64), c: Closure( seen: with_cap(256), out: with_cap(4096), useen: with_cap(64) ) ))
+    nsl  := ns.c.out.len
+    body := ns.c.out.strip_ns_into(mainsrc, 0, ns.quals, ns.c.out.len == 0)
+    cN   := a.load_imports(root, progdir, inpath, mainsrc, 0, true, Closure( seen: ns.c.seen, out: body, useen: ns.c.useen ))
+    a.dedup_decls(cN.out.finish(), nsl, body.len)
+}

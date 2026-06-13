@@ -1,0 +1,36 @@
+// @self-hosted-only — uses generic struct literals (`Arc<T>{…}`) and atomic intrinsics. Validated by
+// an equivalent self-contained test (test_differential).
+//
+// std.mem.arc — an ATOMICALLY reference-counted pointer `Arc<T>`: the thread-safe sibling of [[std.mem.rc]].
+// Identical layout ([ count:i64 | value:T ]) and API, but clone/drop adjust the refcount with the
+// `atomic_add_i64` intrinsic (a sequentially-consistent fetch-add) instead of a plain load/store, so
+// two threads sharing an Arc can clone/drop it without a data race. This is the ARC in Goal Z's
+// "ARC/ORC" family; ORC (cycle collection) additionally needs a Drop/Trace trait, still to come.
+// (Arc is only USEFUL once threads exist — zenc has no thread spawn yet — but the atomic primitive
+// it is built on is the foundation every lock-free structure needs.)
+{ malloc, free } = std.mem.alloc
+
+Arc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T ]
+
+arc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }
+
+arc_new<T> = (x: T) Arc<T> {
+    base := malloc(8 + sizeof(T))
+    store_i64(base, 1)                                // initial count — no other thread sees it yet
+    r := Arc<T>( base: base )
+    s := r.arc_val()
+    s[0] = x
+    r
+}
+arc_get<T> = (r: Arc<T>) T  { r.arc_val()[0] }
+arc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }
+
+// clone/drop are the thread-safe operations: an atomic fetch-add publishes the new count to all threads.
+arc_clone<T> = (r: Arc<T>) Arc<T> {
+    atomic_add_i64(r.base, 1)
+    Arc<T>( base: r.base )
+}
+arc_drop<T> = (r: Arc<T>) void {
+    // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
+    (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} })
+}

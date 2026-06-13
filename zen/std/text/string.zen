@@ -1,0 +1,162 @@
+// std.text.string — a growable, owned, heap byte String, ASSEMBLED at runtime.
+//
+// `str` is a comptime C-string literal; a `String` is built while the program runs —
+// the keystone for runtime code generation (a backend that emits source as a value).
+// The API is functional: each op returns the updated String. The (ptr, len, cap)
+// header is a small value passed by copy; the byte buffer is realloc'd underneath, so
+// a builder reads `s := s.push('x')` — threading the header, sharing the buffer.
+//
+// The short `new/push/append/finish/free` names use the default allocator for bootstrap/compiler code.
+// Normal runtime/library code can pass an arena, heap, or custom allocator explicitly:
+//
+//   m := default_allocator()
+//   s := m.addr().new_in().append_in("hello")
+//   m.addr().free_in(s)
+//
+// Fallible variants return Result and make allocation errors visible:
+//
+//   m.addr().try_with_cap(64).match({ .Ok(s) => ..., .Err(e) => ... })
+
+{ len, view } = std.text.str
+{ default_allocator, Allocator, try_acquire, try_resize } = std.mem.alloc
+{ Result, IoError } = std.core.result
+
+String*: { ptr: RawPtr<u8>, len: i64, cap: i64 }
+
+copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: str) void {
+    src := t.view()
+    src.loop((h, i, b) { dst.offset(at + i).store(b) })
+}
+
+// an empty String with room for `cap` bytes, backed by the default allocator
+with_cap* = (cap: i64) String {
+    a := default_allocator()
+    a.addr().with_cap_in(cap)
+}
+new* = () String { with_cap(16) }
+
+grow = (s: String, ncap: i64) String {
+    a := default_allocator()
+    a.addr().grow_in(s, ncap)
+}
+
+reserve = (s: String, need: i64) String {
+    a := default_allocator()
+    a.addr().reserve_in(s, need)
+}
+
+push* = (s: String, b: u8) String {
+    a := default_allocator()
+    a.addr().push_in(s, b)
+}
+
+append* = (s: String, t: str) String {
+    a := default_allocator()
+    a.addr().append_in(s, t)
+}
+
+// the bytes as a read-only [u8] view (borrows the buffer)
+bytes* = (s: String) [u8] { s.ptr.slice(s.len) }
+
+// NUL-terminate and reinterpret the buffer as a `str` — the bridge from a built-at-runtime String
+// to a C string (used e.g. to build a monomorphized type's mangled name like `Box_i32`).
+finish* = (s: String) str {
+    a := default_allocator()
+    a.addr().finish_in(s)
+}
+
+free* = (s: String) void {
+    a := default_allocator()
+    a.addr().free_in(s)
+}
+
+// ── explicit allocator variants ─────────────────────────────────────────────
+
+with_cap_in*<A> = (a: MutPtr<A>, cap: i64) String {
+    String( ptr: a.acquire(cap), len: 0, cap: cap )
+}
+new_in*<A> = (a: MutPtr<A>) String { a.with_cap_in(16) }
+
+grow_in<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
+    String( ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap )
+}
+reserve_in<A> = (a: MutPtr<A>, s: String, need: i64) String {
+    (s.len + need > s.cap).match ({
+        true  => a.grow_in(s, (s.cap + need) * 2),
+        false => s
+    })
+}
+// the sk-forced locals below (skb/skt): the inliner substitutes argument expressions by NAME
+// (re-evaluated at each use), so a caller's value arg that reads s's own buffer (e.g.
+// `a.push_in(s, s.bytes()[0])`) would otherwise be evaluated AFTER reserve_in realloc-freed it —
+// a use-after-free. Force the arg before reserving, like std.collections.map's mappend.
+push_in*<A> = (a: MutPtr<A>, s: String, b: u8) String {
+    skb := b
+    r := a.reserve_in(s, 1)
+    r.ptr.offset(r.len).store(skb)
+    String( ptr: r.ptr, len: r.len + 1, cap: r.cap )
+}
+append_in*<A> = (a: MutPtr<A>, s: String, t: str) String {
+    skt := t
+    n := skt.len()
+    r := a.reserve_in(s, n)
+    r.ptr.copy_str_bytes(r.len, skt)
+    String( ptr: r.ptr, len: r.len + n, cap: r.cap )
+}
+finish_in*<A> = (a: MutPtr<A>, s: String) str { cstr(a.push_in(s, 0).ptr) }
+free_in*<A> = (a: MutPtr<A>, s: String) void { a.release(s.ptr) }
+
+// ── fallible explicit allocator variants ────────────────────────────────────
+
+string_ok = (s: String) Result<String, IoError> { .Ok(s) }
+string_err = (e: IoError) Result<String, IoError> { .Err(e) }
+string_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
+string_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
+
+try_with_cap*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
+    a.try_acquire(cap).match ({
+        .Ok(p)  => string_ok(String( ptr: p, len: 0, cap: cap )),
+        .Err(e) => string_err(e)
+    })
+}
+try_new*<A> = (a: MutPtr<A>) Result<String, IoError> { a.try_with_cap(16) }
+
+try_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) Result<String, IoError> {
+    a.try_resize(s.ptr, ncap).match ({
+        .Ok(p)  => string_ok(String( ptr: p, len: s.len, cap: ncap )),
+        .Err(e) => string_err(e)
+    })
+}
+try_reserve<A> = (a: MutPtr<A>, s: String, need: i64) Result<String, IoError> {
+    (s.len + need > s.cap).match ({
+        true  => a.try_grow(s, (s.cap + need) * 2),
+        false => string_ok(s)
+    })
+}
+try_push*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
+    skb := b
+    a.try_reserve(s, 1).match ({
+        .Ok(r) => {
+            r.ptr.offset(r.len).store(skb)
+            string_ok(String( ptr: r.ptr, len: r.len + 1, cap: r.cap ))
+        },
+        .Err(e) => string_err(e)
+    })
+}
+try_append*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
+    skt := t
+    n := skt.len()
+    a.try_reserve(s, n).match ({
+        .Ok(r) => {
+            r.ptr.copy_str_bytes(r.len, skt)
+            string_ok(String( ptr: r.ptr, len: r.len + n, cap: r.cap ))
+        },
+        .Err(e) => string_err(e)
+    })
+}
+try_finish*<A> = (a: MutPtr<A>, s: String) Result<str, IoError> {
+    a.try_push(s, 0).match ({
+        .Ok(done) => string_str_ok(cstr(done.ptr)),
+        .Err(e)   => string_str_err(e)
+    })
+}

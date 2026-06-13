@@ -1,0 +1,237 @@
+// std.text.str — borrowed `str` helpers plus owned byte copies.
+// `dup`/`substr` use the default allocator; `*_in` takes an allocator explicitly; `try_*_in`
+// returns Result so allocation failure stays in the value flow.
+
+{ default_allocator, Allocator, try_acquire } = std.mem.alloc
+{ Result, Opt, IoError } = std.core.result
+
+strlen = (s: str) i64
+strcmp = (a: str, b: str) i32
+
+len* = (s: str) i64 { s.strlen() }
+is_empty* = (s: str) bool { s.strlen().match ({ 0 => true, _ => false }) }
+eq* = (a: str, b: str) bool { a.strcmp(b).match ({ 0 => true, _ => false }) }
+ne* = (a: str, b: str) bool { a.eq(b).match ({ true => false, false => true }) }
+
+// ── bytes: borrow or own ────────────────────────────────────────────────────
+
+view* = (s: str) [u8] { s.slice(s.strlen()) }
+
+alloc_size = (n: i64) i64 { (n == 0).match ({ true => 1, false => n }) }
+
+copy_bytes = (src: [u8], out: [u8]) void {
+    src.loop((h, i, b) { out[i] = b })
+}
+
+bytes_ok = (b: [u8]) Result<[u8], IoError> { .Ok(b) }
+bytes_err = (e: IoError) Result<[u8], IoError> { .Err(e) }
+str_ok = (s: str) Result<str, IoError> { .Ok(s) }
+str_err = (e: IoError) Result<str, IoError> { .Err(e) }
+
+dup_in*<A> = (a: MutPtr<A>, s: str) [u8] {
+    src := s.view()
+    out := a.acquire(src.len.alloc_size()).slice(src.len)
+    src.copy_bytes(out)
+    out
+}
+dup* = (s: str) [u8] {
+    a := default_allocator()
+    a.addr().dup_in(s)
+}
+try_dup_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
+    src := s.view()
+    a.try_acquire(src.len.alloc_size()).match ({
+        .Ok(p) => {
+            out := p.slice(src.len)
+            src.copy_bytes(out)
+            bytes_ok(out)
+        },
+        .Err(e) => bytes_err(e)
+    })
+}
+
+// ── search ──────────────────────────────────────────────────────────────────
+
+// do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
+has_at = (sv: [u8], pv: [u8], at: i64) bool {
+    ok := true
+    pv.loop((h, i, b) {
+        ok.match ({
+            true => (sv[at + i] == b).match ({
+                true  => {},
+                false => {
+                    ok = false
+                    h.break
+                }
+            }),
+            false => { h.break }
+        })
+    })
+    ok
+}
+
+// byte index of the first occurrence of `needle` in `s`, -1 if absent.
+// the empty needle matches at 0 (the strstr convention).
+find* = (s: str, needle: str) i64 {
+    sv := s.view()
+    pv := needle.view()
+    (pv.len == 0).match ({
+        true  => 0,
+        false => {
+            found: i64 := -1
+            sv.loop((h, i, b) {
+                (i + pv.len > sv.len).match ({
+                    true  => { h.break },
+                    false => sv.has_at(pv, i).match ({
+                        true => {
+                            found = i
+                            h.break
+                        },
+                        _ => {}
+                    })
+                })
+            })
+            found
+        }
+    })
+}
+
+// does `s` contain `needle`? (the empty needle is contained in everything)
+contains* = (s: str, needle: str) bool { s.find(needle) >= 0 }
+
+// does `s` begin with `prefix`? (every str starts with the empty prefix)
+starts_with* = (s: str, prefix: str) bool {
+    sv := s.view()
+    pv := prefix.view()
+    pv.len <= sv.len && sv.has_at(pv, 0)
+}
+
+// ── slicing & indexing ──────────────────────────────────────────────────────
+
+// pin `x` into [lo, hi] — the substr clamp
+pin = (x: i64, lo: i64, hi: i64) i64 {
+    (x < lo).match ({
+        true  => lo,
+        false => (x > hi).match ({ true => hi, false => x }),
+    })
+}
+
+copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
+    out.loop((h, i, b) {
+        (i < m).match ({
+            true  => { out[i] = sv[lo + i] },
+            false => { h.break }
+        })
+    })
+    out[m] = 0
+}
+
+// Out-of-range is clamped: substr("hi", 1, 99) == "i"; substr("hi", 5, 2) == "".
+substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str {
+    sv := s.view()
+    lo := start.pin(0, sv.len)
+    m := n.pin(0, sv.len - lo)
+    out := a.acquire(m + 1).slice(m + 1)
+    sv.copy_substr(out, lo, m)
+    cstr(out.ptr)
+}
+substr* = (s: str, start: i64, n: i64) str {
+    a := default_allocator()
+    a.addr().substr_in(s, start, n)
+}
+try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> {
+    sv := s.view()
+    lo := start.pin(0, sv.len)
+    m := n.pin(0, sv.len - lo)
+    a.try_acquire(m + 1).match ({
+        .Ok(p) => {
+            out := p.slice(m + 1)
+            sv.copy_substr(out, lo, m)
+            str_ok(cstr(out.ptr))
+        },
+        .Err(e) => str_err(e)
+    })
+}
+
+// the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
+char_at* = (s: str, i: i64) u8 {
+    sv := s.view()
+    (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
+}
+
+// ── numbers ─────────────────────────────────────────────────────────────────
+
+// the i64 value of the decimal text in `s`: an optional leading '-', then a run of
+// digits. Parsing stops at the first non-digit and never errors: no leading digits
+// (empty str, garbage, a bare '-') parse as 0 — parse_int("42") == 42,
+// parse_int("-7") == -7, parse_int("12ab") == 12, parse_int("zen") == 0.
+parse_int* = (s: str) i64 {
+    sv := s.view()
+    neg := sv.len > 0 && sv[0] == '-'
+    start: i64 := neg.match ({ true => 1, false => 0 })
+    acc: i64 := 0
+    sv.loop((h, i, b) {
+        (i < start).match ({
+            true  => {},
+            false => (b >= '0' && b <= '9').match ({
+                true  => { acc = acc * 10 + to_i64(b - '0') },
+                false => { h.break }
+            })
+        })
+    })
+    neg.match ({ true => 0 - acc, false => acc })
+}
+
+// ── the VALUE-shaped variants: a miss/garbage must be `.match`ed, not guessed at ─────────────
+
+// find, as a value: `.Some(index)` or `.None`. find's raw -1 sentinel compounds badly when
+// unchecked — substr(s, find(s, n), k) silently clamps the -1 to index 0 via pin.
+some_at = (i: i64) Opt<i64> { .Some(i) }
+no_hit  = () Opt<i64> { .None }
+find_opt* = (s: str, needle: str) Opt<i64> {
+    i := s.find(needle)
+    (i >= 0).match ({ true => some_at(i), false => no_hit() })
+}
+
+// what made try_parse_int refuse: nothing to parse, a non-digit in the tail (the byte carried),
+// or a magnitude past i64. parse_int (above) keeps its documented never-errors behavior.
+ParseError*: NoDigits | Trailing(u8) | Overflow
+
+I64_MAX_DIV10 := 922337203685477580    // i64 max / 10: the pre-multiply overflow bound
+
+parse_ok  = (v: i64) Result<i64, ParseError> { .Ok(v) }
+parse_err = (e: ParseError) Result<i64, ParseError> { .Err(e) }
+e_nodigits = () ParseError { .NoDigits }
+e_trailing = (b: u8) ParseError { .Trailing(b) }
+e_overflow = () ParseError { .Overflow }
+
+// parse_int, honestly: "zen" and "12ab" are errors, not 0 and 12. An optional leading '-', then
+// digits to the very end; the magnitude must fit i64 (|INT64_MIN| itself counts as overflow).
+try_parse_int* = (s: str) Result<i64, ParseError> {
+    sv := s.view()
+    neg := sv.len > 0 && sv[0] == '-'
+    start: i64 := neg.match ({ true => 1, false => 0 })
+    acc: i64 := 0
+    nd:  i64 := 0                       // digits consumed
+    bad: u8  := 0                       // the first non-digit byte hit (0 = none)
+    over := false
+    sv.loop((h, i, b) {
+        (i < start).match ({
+            true  => {},
+            false => (b >= '0' && b <= '9').match ({
+                true  => {
+                    d := to_i64(b - '0')
+                    ((acc > I64_MAX_DIV10) || ((acc == I64_MAX_DIV10) && (d > 7))).match ({
+                        true  => { over = true  h.break },
+                        false => { acc = acc * 10 + d  nd = nd + 1 }
+                    })
+                },
+                false => { bad = b  h.break }
+            })
+        })
+    })
+    over.match ({ true => { return parse_err(e_overflow()) }, false => {} })
+    (nd == 0).match ({ true => { return parse_err(e_nodigits()) }, false => {} })
+    (bad != 0).match ({ true => { return parse_err(e_trailing(bad)) }, false => {} })
+    parse_ok(neg.match ({ true => 0 - acc, false => acc }))
+}

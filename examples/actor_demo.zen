@@ -1,12 +1,11 @@
 // actor_demo.zen - one chat-room actor, run sync or async by changing the runtime.
 //   $ zenc run examples/actor_demo.zen
 
-{ Context, ActorRef, actor_system, actor_ref, send, run_actor } = std.actor
-{ sync_runtime, async_runtime } = std.runtime
-{ default_allocator } = std.alloc
-{ spawn_in, destroy_in } = std.coroutine
-{ run } = std.sched
-{ println, println_int } = std.fmt
+{ Context, ActorRef, actor_system, actor_system_free, actor_ref, send, run_actor } = std.concurrent.actor
+{ sync_arena, sync_arena_free, async_arena, async_arena_free } = std.concurrent.runtime
+{ spawn_in, destroy_in } = std.concurrent.coroutine
+{ run_in } = std.concurrent.sched
+{ println } = std.text.fmt
 
 ChatRoomMessage*: Join(str) | Say(str) | Leave(str) | Stats
 
@@ -45,9 +44,9 @@ ChatRoom.impl(Receiver, {
             },
             .Stats      => {
                 println("online")
-                println_int(room.online)
+                println(to_i64(room.online))
                 println("posted")
-                println_int(room.posted)
+                println(to_i64(room.posted))
             }
         })
     }
@@ -80,34 +79,36 @@ simulate_chat = (room: ActorRef<ChatRoomMessage>) void {
     room.send(.Stats)
 }
 
-run_chat<RuntimeT, AllocT> = (runtime: MutPtr<RuntimeT>, alloc: MutPtr<AllocT>) void {
+run_chat<RuntimeT> = (runtime: MutPtr<RuntimeT>) void {
     sys := runtime.actor_system(.Stats, to_i64(16))
     room_ref := sys.actor_ref()
 
     room_ref.simulate_chat()
 
-    actor := chat_room_new(alloc)
+    actor := chat_room_new(runtime)
     runtime.run_actor(actor.addr(), sys, receive_chat)
-    actor.addr().chat_room_deinit(alloc)
+    actor.addr().chat_room_deinit(runtime)
+    runtime.actor_system_free(sys)
 }
 
 async_chat = () void {
-    alloc := default_allocator()
-    runtime := async_runtime(4096)
-    runtime.addr().run_chat(alloc.addr())
+    runtime := async_arena(4096)
+    runtime.addr().run_chat()
+    runtime.addr().async_arena_free()
 }
 
 main = () i32 {
-    alloc := default_allocator()
-
     println("==== Sync Run ====")
-    sync_rt := sync_runtime()
-    sync_rt.addr().run_chat(alloc.addr())
+    sync_rt := sync_arena(4096)
+    sync_rt.addr().run_chat()
+    sync_rt.addr().sync_arena_free()
 
     println("==== Async Run ====")
-    task := alloc.addr().spawn_in(async_chat)
-    run([task])
-    alloc.addr().destroy_in(task)
+    scheduler := sync_arena(131072)
+    task := scheduler.addr().spawn_in(async_chat)
+    scheduler.addr().run_in([task])
+    scheduler.addr().destroy_in(task)
+    scheduler.addr().sync_arena_free()
 
     0
 }

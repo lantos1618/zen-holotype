@@ -1,0 +1,67 @@
+// @self-hosted-only
+// Minimal formatted stdout output for Display values.
+// Numeric formatting builds temporary String buffers and releases them after printing.
+
+{ print, print_bytes } = std.io.file
+{ String, bytes } = std.text.string
+{ int_string, int_to_str, float_string, float_to_str } = std.text.num
+// Use raw release for temporary String buffers; `free` has multiple std providers in flattened builds.
+{ release } = std.mem.raw
+
+Display*: {
+    fmt_print: (Self) i64,
+    fmt_println: (Self) i64
+}
+
+// Print an owned temporary String and release its buffer.
+print_owned = (t: String) i64 {
+    w := print_bytes(t.bytes())
+    t.ptr.release()
+    w
+}
+print_str*   = (s: str) i64 { print(s) }
+println_str* = (s: str) i64 { print(s)  print("\n") }
+print_string*   = (s: String) i64 { print_bytes(s.bytes()) }
+println_string* = (s: String) i64 { s.print_string()  print("\n") }
+print_int*   = (n: i64) i64 { print_owned(int_string(n)) }
+println_int* = (n: i64) i64 { n.print_int()  print("\n") }
+print_float* = (x: f64) i64 { print_owned(float_string(x)) }
+println_float* = (x: f64) i64 { x.print_float()  print("\n") }
+
+// Display is the current type-directed print surface; real overload sets can replace the typed aliases later.
+println*<T> = (x: T) i64 { x.fmt_println() }
+
+str.impl(Display, {
+    fmt_print = (s: str) i64 { s.print_str() }
+    fmt_println = (s: str) i64 { s.println_str() }
+})
+
+String.impl(Display, {
+    fmt_print = (s: String) i64 { s.print_string() }
+    fmt_println = (s: String) i64 { s.println_string() }
+})
+
+i32.impl(Display, {
+    fmt_print = (n: i32) i64 { to_i64(n).print_int() }
+    fmt_println = (n: i32) i64 { to_i64(n).println_int() }
+})
+
+i64.impl(Display, {
+    fmt_print = (n: i64) i64 { n.print_int() }
+    fmt_println = (n: i64) i64 { n.println_int() }
+})
+
+u8.impl(Display, {
+    fmt_print = (n: u8) i64 { to_i64(n).print_int() }
+    fmt_println = (n: u8) i64 { to_i64(n).println_int() }
+})
+
+f64.impl(Display, {
+    fmt_print = (x: f64) i64 { x.print_float() }
+    fmt_println = (x: f64) i64 { x.println_float() }
+})
+
+bool.impl(Display, {
+    fmt_print = (b: bool) i64 { b.match ({ true => print("true"), false => print("false") }) }
+    fmt_println = (b: bool) i64 { b.fmt_print()  print("\n") }
+})

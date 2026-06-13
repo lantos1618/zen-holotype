@@ -1,0 +1,48 @@
+// @self-hosted-only: cooperative round-robin scheduler over stackful coroutines.
+{ Allocator, system_allocator } = std.mem.alloc
+{ Coro, resume } = std.concurrent.coroutine
+
+flag_slot = (flags: RawPtr<u8>, i: i32) RawPtr<u8> { flags.offset(i * 8) }
+mark_alive = (flags: RawPtr<u8>, i: i32) void { flags.flag_slot(i).store_i64(1) }
+is_alive = (flags: RawPtr<u8>, i: i32) bool { flags.flag_slot(i).load_i64() == 1 }
+set_alive = (flags: RawPtr<u8>, i: i32, alive: i32) void { flags.flag_slot(i).store_i64(alive) }
+
+init_flags = (flags: RawPtr<u8>, i: i32, n: i32) void {
+    (i < n).match({
+        true  => { flags.mark_alive(i)  flags.init_flags(i + 1, n) },
+        false => {}
+    })
+}
+tick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 {
+    flags.is_alive(i).match({
+        true  => {
+            alive := coros[i].resume()
+            flags.set_alive(i, alive)
+            alive
+        },
+        false => 0
+    })
+}
+pass = (coros: [Coro], flags: RawPtr<u8>, i: i32, n: i32) i32 {
+    (i < n).match({
+        true  => coros.tick(flags, i) + coros.pass(flags, i + 1, n),
+        false => 0
+    })
+}
+drive = (coros: [Coro], flags: RawPtr<u8>, n: i32) void {
+    (coros.pass(flags, 0, n) > 0).match({
+        true  => coros.drive(flags, n),
+        false => {}
+    })
+}
+run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
+    n := coros.len
+    flags := alloc.acquire(n * 8)
+    flags.init_flags(0, n)
+    coros.drive(flags, n)
+    alloc.release(flags)
+}
+run* = (coros: [Coro]) void {
+    alloc := system_allocator()
+    alloc.addr().run_in(coros)
+}

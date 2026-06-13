@@ -1,0 +1,62 @@
+// std.collections.iter - slice iteration helpers.
+//
+// `fold`, `each`, `map_into`, and `filter_into` allocate nothing. Allocating
+// `[i32]` helpers come in explicit-allocator form (`map_in`,
+// `filter_in`) plus default wrappers (`map`, `filter`) for simple programs.
+// For other element types, use the generic `_into` forms with your own buffer.
+
+{ Allocator, default_allocator } = std.mem.alloc
+
+fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
+    acc := init
+    xs.loop((h, i, x) { acc = f(acc, x) })
+    acc
+}
+
+each*<T> = (xs: [T], f: (T) void) void {
+    xs.loop((h, i, x) { f(x) })
+}
+
+// map/filter into a caller-provided output slice. The caller owns `out`, so
+// these allocate nothing; they just transform.
+// `out` must be at least as long as `xs` (map) or hold the kept elements (filter).
+
+map_into*<T, U> = (xs: [T], out: [U], f: (T) U) void {
+    xs.loop((h, i, x) { out[i] = f(x) })
+}
+
+// Keep the elements that satisfy `keep`, packed into `out`; returns how many.
+filter_into*<T> = (xs: [T], out: [T], keep: (T) bool) i64 {
+    n := 0
+    xs.loop((h, i, x) {
+        out[n] = x
+        n = n + (keep(x)).match ({ true => 1, false => 0 })
+    })
+    n
+}
+
+map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] {
+    out := slice(a.acquire(xs.len * 4), xs.len)
+    xs.loop((h, i, x) { out[i] = f(x) })
+    out
+}
+
+filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
+    buf := slice(a.acquire(xs.len * 4), xs.len)
+    n := 0
+    xs.loop((h, i, x) {
+        buf[n] = x
+        n = n + (keep(x)).match ({ true => 1, false => 0 })
+    })
+    slice(buf[0].addr(), n)
+}
+
+map* = (xs: [i32], f: (i32) i32) [i32] {
+    a := default_allocator()
+    a.addr().map_in(xs, f)
+}
+
+filter* = (xs: [i32], keep: (i32) bool) [i32] {
+    a := default_allocator()
+    a.addr().filter_in(xs, keep)
+}

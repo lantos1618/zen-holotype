@@ -1,0 +1,60 @@
+// Heap-stable builders over compiler.genc's AST values.
+// Pointer and slice children are copied so returned ASTs do not dangle.
+
+{ malloc } = std.mem.alloc
+{ node, dupx } = std.core.slice
+{ Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl,
+  vref, lit, bin, call, member, mkstruct, finit, FieldInit,
+  slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
+  tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = compiler.genc
+
+// Expressions
+var*    = (name: str) Ptr<Expr> { vref(name).node() }
+int*    = (n: i32) Ptr<Expr> { lit(n).node() }
+dot*    = (o: Ptr<Expr>, f: str) Ptr<Expr> { member(o, f).node() }
+binop*  = (l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { bin(op, l, r).node() }
+add*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("+", r) }
+eqx*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("==", r) }
+and*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("&&", r) }
+callx*  = (fn: str, args: [Expr]) Ptr<Expr> { call(fn, args.dupx()).node() }
+estruct* = (ty: str, fi: [FieldInit]) Ptr<Expr> { mkstruct(ty, fi.dupx()).node() }
+
+// Types
+named*  = (name: str) Ty { tnamed(name) }
+ptrto*  = (inner: Ty) Ty { tptr(inner.node()) }
+i32t*   = () Ty { ti32() }
+
+// Statements
+ret*    = (e: Ptr<Expr>) Stmt { sret(e) }
+asstmt* = (e: Ptr<Expr>) Stmt { sexpr(e) }
+letb*   = (name: str, v: Ptr<Expr>) Stmt { slet(name, v) }
+set*    = (name: str, v: Ptr<Expr>) Stmt { sassign(var(name), v) }
+
+// Declarations
+func*   = (name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
+    dfunc(Func( name: name, params: ps.dupx(), ret: ret, body: body.dupx() ))
+}
+struct* = (name: str, fs: [Field]) Decl { dstruct(StructDecl( name: name, fields: fs.dupx() )) }
+
+accessor = (sname: str, f: Field) Decl {
+    func(f.name, [param("s", named(sname).ptrto())], f.ty, [var("s").dot(f.name).ret()])
+}
+dbuf = (n: i64) [Decl] { slice(malloc(n * sizeof(Decl)), n) }
+derive_accessors* = (sd: StructDecl) [Decl] {
+    buf := dbuf(sd.fields.len)
+    sd.fields.loop((h, i, f) { buf[i] = accessor(sd.name, f) })
+    buf
+}
+
+field_eq = (fname: str) Ptr<Expr> { var("x").dot(fname).eqx(var("y").dot(fname)) }
+and_fields = (fields: [Field], i: i32, acc: Ptr<Expr>) Ptr<Expr> {
+    (i == fields.len).match ({
+        true  => acc,
+        false => and_fields(fields, i + 1, acc.and(field_eq(fields[i].name)))
+    })
+}
+derive_eq* = (name: str, sd: StructDecl) Decl {
+    pty  := named(sd.name).ptrto()
+    body := and_fields(sd.fields, 0, var("true"))
+    func(name, [param("x", pty), param("y", pty)], tbool(), [body.ret()])
+}

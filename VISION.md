@@ -257,7 +257,7 @@ generator:  () → [Decl]  (in Zen)        // a function that BUILDS AST and ret
   and target-native branches, but never re-checks, because the kernel already did. **New
   target = new backend.**
 - **Metaprogramming is Zen, as values** (not pragmas). A generator is an ordinary function
-  that builds AST values and returns `[Decl]`, emitted by `compiler.genc.genModule`; `std.ast`
+  that builds AST values and returns `[Decl]`, emitted by `compiler.genc.genModule`; `std.internal.ast`
   gives the fluent builders. There is no `@emit` and no comptime evaluator — code is data, so
   generating it is just a function over data. **New feature = new generator**, not compiler
   code.
@@ -272,7 +272,7 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
    (`compiler.lex` / `compiler.parse*` / `compiler.check`). ✅ The compiler compiles itself to C and reproduces
    its committed C byte-for-byte (the fixpoint); Python and tree-sitter are gone.
 2. **Metaprogramming as values** — generators that build `[Decl]` and emit via `genModule`,
-   with `std.ast`'s builders. ✅ (`std.c`'s `libc()` is the canonical example: a function that
+   with `std.internal.ast`'s builders. ✅ (`std.io.c`'s `libc()` is the canonical example: a function that
    returns its bindings as AST.) *Remaining: grow the self-hosted checker to full language parity.*
 3. **the one-structure grammar** — collapse the current multi-form surface into the single `decl` shape
    (fold struct/enum/trait/impl/visibility into the trie). Same back end, same `fits()`.
@@ -286,7 +286,7 @@ shape too (the AST), so one checker + a row of emitters is the entire compiler.
   emit       :     genModule(libc())  ─►  C prototypes for the whole binding set
 ```
 
-A generator is **ordinary Zen** (`std.c`, built on `std.ast`/`compiler.genc`): it reads or builds
+A generator is **ordinary Zen** (`std.io.c`, built on `std.internal.ast`/`compiler.genc`): it reads or builds
 structure and returns AST values, which `genModule` lowers to C — the same backend that lowers
 hand-written code. The shape of every node — `Int`, `Bin`, `Struct`, `Func`, the field/param
 lists — is **defined in Zen** (`compiler.genc`). New generator = new Zen function, not compiler code.

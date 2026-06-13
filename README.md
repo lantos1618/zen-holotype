@@ -88,7 +88,7 @@ and invariant pointer pointees.
 Folding name-resolution, type-checking, and pointer-safety toward one `fits()` relation
 isn't just tidy — it buys real things:
 
-- **Imports are becoming structural.** Today `std.resolve` flattens the `std`/`compiler`
+- **Imports are becoming structural.** Today `std.internal.resolve` flattens the `std`/`compiler`
   import closure, dedups by module and top-level name, and gives deterministic
   first-definition behavior. The trie/path model is the direction.
 - **Pointer safety is moving into type-checking.** Numeric widening and invariant pointer
@@ -120,7 +120,7 @@ main.zen         { Vec } = core.vec    ─┴─►  both resolve to that ONE no
 target conflict?  two files both define  core.vec.Vec
 ```
 
-The trie model is the direction for names and imports. Today `std.resolve` is the
+The trie model is the direction for names and imports. Today `std.internal.resolve` is the
 self-hosted loader that walks a program's `{ … } = std.X` imports, gathers the
 transitive closure, dedups module/name collisions, and hands `zenc` one flat module —
 see [Modules & imports](#modules--imports).
@@ -219,20 +219,20 @@ what you must *import*. Keeping that boundary explicit is the point.
   with no `{ … }` body binds the libc symbol `malloc`; the checker learns the signature and
   the backend emits a forward declaration. libc symbols (`malloc`, `putchar`, `strlen`, …)
   then **just link** — the system headers define them. No `extern` keyword.
-- **The header *is* a function.** `zen/std/c.zen`'s `libc() [Decl]` builds those bodyless
+- **The header *is* a function.** `zen/std/io/c.zen`'s `libc() [Decl]` builds those bodyless
   bindings *as AST* and `compiler.genc.genModule(libc())` emits exactly the C prototypes a TU
   needs — the bindings live in **one** Zen module instead of being re-prototyped in every
-  file. (`std.mem`, `std.io`, `std.cown`, `std.result` still re-declare the handful of
-  symbols they each need at the top, which is the scatter `std.c` is gathering.)
-- **std modules — you must import them.** `std.mem`, `std.str`, `std.string`, `std.alloc`,
-  `std.vec`, `std.iter`, … are ordinary Zen you bring in with `{ … } = std.X`; they are
+  file. (`std.mem.raw`, `std.io.file`, `std.concurrent.cown`, `std.core.result` still re-declare the handful of
+  symbols they each need at the top, which is the scatter `std.io.c` is gathering.)
+- **std modules — you must import them.** `std.mem.raw`, `std.text.str`, `std.text.string`, `std.mem.alloc`,
+  `std.collections.vec`, `std.collections.iter`, … are ordinary Zen you bring in with `{ … } = std.X`; they are
   checked and lowered like your own code.
 
-The FFI memory rule (`zen/std/cown.zen`): FFI is the **raw floor below** the allocator
+The FFI memory rule (`zen/std/concurrent/cown.zen`): FFI is the **raw floor below** the allocator
 discipline. A C function that allocates hands you a `RawPtr<T>` — the type-system marker
 for *"the discipline does not reach here — wrap me."* Re-establish ownership the instant
 the pointer crosses back in: wrap the raw handle in a struct that `impl(Drop, …)` and put
-it behind `Own<T>` (`std.drop`), so the matching `free`/`close` fires **exactly once**, at
+it behind `Own<T>` (`std.mem.own`), so the matching `free`/`close` fires **exactly once**, at
 refcount zero. See **[FEATURES.md](FEATURES.md)** for the full bindings/errors/memory
 inventory.
 
@@ -240,7 +240,7 @@ inventory.
 
 Imports are a destructuring of a module path: `{ a, b } = std.X` binds `a` and `b` from
 `zen/std/X.zen`. The checked CLI modes (`zenc check`, `zenc build`, `zenc run`) call
-`zen/std/resolve.zen` before parsing, so std imports resolve from disk and the program is
+`zen/std/internal/resolve.zen` before parsing, so std imports resolve from disk and the program is
 then checked as one flattened module:
 
 - it reads the program's `{ … } = std.X` import lines, follows each edge to
@@ -254,13 +254,13 @@ then checked as one flattened module:
 The bare emit form (`zenc file.zen` or stdin) remains lower-level: it expects the source to
 already be flat and emits C without the `std` import-loading/check/build wrapper.
 The resolver also understands `compiler.X` for internal compiler/std dependencies such as
-`std.ast` building values from `compiler.genc`; normal user-facing imports should stay in
+`std.internal.ast` building values from `compiler.genc`; normal user-facing imports should stay in
 the `std` namespace.
 
 ## Errors are values
 
 Zen is `.match`-only — **no exceptions, no stack unwinding** (hidden control flow is
-banned). A fallible call returns a `Result<T, E>` (`std.result`): `.Ok(T)` or `.Err(E)`,
+banned). A fallible call returns a `Result<T, E>` (`std.core.result`): `.Ok(T)` or `.Err(E)`,
 which the caller `.match`es. `.match` *is* the catch; `return .Err(e)` propagates by value.
 An optional value is `Opt<T>` (`.Some` / `.None`); the standard FFI error is `IoError`. The
 boundary helpers `ok_if` / `ok_ptr` lift a raw C sentinel (a negative rc, a null pointer)
@@ -282,7 +282,7 @@ return type and it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` 
 `Option`, `i32`/`i64`/`u8`/`bool` with widening, the full operator set
 (`+ - * / %  ==  < > <= >=  && ||  !`, each operand-checked), `x := v` let-bindings, the
 single `loop` iteration construct, mutation, slices `[T]`, a heap-allocating `String`/`Vec`
-on an explicit allocator, and **metaprogramming as values** (build AST with `std.ast` →
+on an explicit allocator, and **metaprogramming as values** (build AST with `std.internal.ast` →
 emit with `compiler.genc.genModule` — no `@emit` pragma). Checked CLI errors report the
 source path, error count, and first validator kind; source spans and caret diagnostics are
 still future work.

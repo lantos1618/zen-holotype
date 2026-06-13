@@ -1,5 +1,5 @@
 """USER MULTI-FILE IMPORTS (Goal R, #1 outsider blocker): `{ helper } = b` loads b.zen from the
-importing program's OWN directory — a SIBLING file — through the same std.resolve loader that handles
+importing program's OWN directory — a SIBLING file — through the same std.internal.resolve loader that handles
 `{ … } = std.X` (transitive closure, per-module dedup/cycle break, per-name dedup).
 
 Before this, a sibling import TYPECHECKED (the checker trusts DImport names) and then died in raw
@@ -43,9 +43,9 @@ def test_sibling_import_builds_and_runs():
 
 
 def test_sibling_helper_importing_std_is_transitive():
-    """b.zen's own `{ println } = std.fmt` edge is loaded into the same closure."""
+    """b.zen's own `{ println } = std.text.fmt` edge is loaded into the same closure."""
     d = _program({
-        "h.zen": '{ println } = std.fmt\nshout* = (s: str) i64 { println(s) }\n',
+        "h.zen": '{ println } = std.text.fmt\nshout* = (s: str) i64 { println(s) }\n',
         "p.zen": '{ shout } = h\nmain = () i32 { shout("from helper") 0 }\n',
     })
     r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
@@ -95,10 +95,10 @@ def test_unknown_name_in_sibling_module_names_both():
 
 
 def test_unknown_name_validation_covers_std_imports_too():
-    d = _program({"p.zen": "{ nosuchname } = std.fmt\nmain = () i32 { 0 }\n"})
+    d = _program({"p.zen": "{ nosuchname } = std.text.fmt\nmain = () i32 { 0 }\n"})
     r = subprocess.run([_zenc(), "check", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 1
-    assert "unknown name 'nosuchname' in module 'std.fmt'" in r.stderr
+    assert "unknown name 'nosuchname' in module 'std.text.fmt'" in r.stderr
 
 
 def test_unknown_std_module_is_clean_too():

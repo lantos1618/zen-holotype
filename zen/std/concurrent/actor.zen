@@ -1,0 +1,133 @@
+// @self-hosted-only — imports the self-hosted-only std.concurrent.coroutine. Its mechanics are validated by an
+// equivalent self-contained test (test_differential).
+//
+// std.concurrent.actor — typed actor handles over the coroutine substrate.
+//
+// User code defines a message enum and a receiver, then sends typed messages through ActorRef<M>.
+// The queue, Context<M>, drain loop, and colorless suspend live here instead of in examples.
+// Allocation is still caller-owned: actor_system takes an allocator from program setup.
+// The `seed` passed to actor_system is only a type witness until Zen has explicit generic call args /
+// return-type generic inference.
+{ Allocator, system_allocator } = std.mem.alloc
+{ Runtime } = std.concurrent.runtime
+
+Mailbox*: { buf: RawPtr<u8>, head: i64, tail: i64, cap: i64 }    // ring of `cap` i64 slots
+
+mailbox_in*<A> = (alloc: MutPtr<A>, cap: i64) Mailbox {
+    Mailbox(buf: alloc.acquire(cap * 8), head: 0, tail: 0, cap: cap)
+}
+mailbox* = (cap: i64) Mailbox {
+    alloc := system_allocator()
+    alloc.addr().mailbox_in(cap)
+}
+
+// send/recv mutate the cursors (so they take MutPtr); the SLOT index wraps at cap (`% cap`) so the
+// cursors can grow unbounded as i64 while the buffer access stays in [0, cap) — a true ring, never OOB.
+// A bounded queue: a send to a FULL ring is REFUSED (returns false) rather than silently overwriting
+// the oldest unconsumed message — the caller's `.match` on the result is the back-pressure point.
+mailbox_send* = (m: MutPtr<Mailbox>, v: i64) bool {
+    (m.tail - m.head >= m.cap).match ({ true => { return false }, false => {} })
+    m.buf.offset((m.tail % m.cap) * 8).store_i64(v)
+    m.tail = m.tail + 1
+    true
+}
+
+// release the ring's buffer; the mailbox is dead afterwards (cap 0 refuses every send).
+mailbox_free_in*<A> = (alloc: MutPtr<A>, m: MutPtr<Mailbox>) void {
+    alloc.release(m.buf)
+    m.buf = null_ptr()
+    m.head = 0
+    m.tail = 0
+    m.cap = 0
+}
+mailbox_free* = (m: MutPtr<Mailbox>) void {
+    alloc := system_allocator()
+    alloc.addr().mailbox_free_in(m)
+}
+
+mailbox_recv* = (m: MutPtr<Mailbox>) i64 {
+    v := m.buf.offset((m.head % m.cap) * 8).load_i64()
+    m.head = m.head + 1
+    v
+}
+
+mailbox_pending* = (m: Ptr<Mailbox>) i64 { m.tail - m.head }
+
+Context*<M>: { message: M }
+// ActorSystem's three blocks come from the caller's allocator. Runtime remains only the suspension
+// policy; allocation stays explicit at program setup.
+ActorSystem*<M>: { buf: RawPtr<u8>, headp: RawPtr<u8>, tailp: RawPtr<u8>, cap: i64 }
+ActorRef*<M>: { buf: RawPtr<u8>, headp: RawPtr<u8>, tailp: RawPtr<u8>, cap: i64 }
+
+context*<M> = (message: M) Context<M> { Context<M>(message: message) }
+
+actor_system*<M, A> = (alloc: MutPtr<A>, seed: M, cap: i64) ActorSystem<M> {
+    hp := alloc.acquire(8)
+    tp := alloc.acquire(8)
+    hp.store_i64(0)
+    tp.store_i64(0)
+    ActorSystem<M>(buf: alloc.acquire(cap * sizeof(M)), headp: hp, tailp: tp, cap: cap)
+}
+
+actor_ref*<M> = (sys: ActorSystem<M>) ActorRef<M> {
+    ActorRef<M>(buf: sys.buf, headp: sys.headp, tailp: sys.tailp, cap: sys.cap)
+}
+
+// hand the system's three blocks back to the allocator used by actor_system. Refs into the system are
+// dead after this.
+actor_system_free*<M, A> = (alloc: MutPtr<A>, sys: ActorSystem<M>) void {
+    alloc.release(sys.buf)
+    alloc.release(sys.headp)
+    alloc.release(sys.tailp)
+}
+
+sys_messages<M> = (sys: ActorSystem<M>) [M] { sys.buf.slice(sys.cap) }
+ref_messages<M> = (ref: ActorRef<M>) [M] { ref.buf.slice(ref.cap) }
+
+// send: REFUSED (false) when the ring is full — pending == cap — instead of silently overwriting
+// the oldest unconsumed message; the caller's `.match` on the result is the back-pressure point.
+// Inliner-safe shape: NO early return (a generic body's `return` hoists into the CALLER's frame —
+// see std.collections.map's note), and the value is a TRAILING PLAIN EXPRESSION, not a value-position match
+// (a stmt-lowered if inside the inlined statement-expression would yield void).
+send*<M> = (ref: ActorRef<M>, message: M) bool {
+    tail := ref.tailp.load_i64()
+    sent := false
+    (tail - ref.headp.load_i64() >= ref.cap).match ({
+        true  => {},
+        false => {
+            ms := ref.ref_messages()
+            ms[tail % ref.cap] = message
+            ref.tailp.store_i64(tail + 1)
+            sent = true
+        },
+    })
+    sent
+}
+
+has_messages*<M> = (sys: ActorSystem<M>) bool { sys.headp.load_i64() < sys.tailp.load_i64() }
+
+next_message*<M> = (sys: ActorSystem<M>) M {
+    ms := sys.sys_messages()
+    head := sys.headp.load_i64()
+    message := ms[head % sys.cap]
+    sys.headp.store_i64(head + 1)
+    message
+}
+
+run_actor*<A, M, RuntimeT> = (
+    runtime: MutPtr<RuntimeT>,
+    actor: MutPtr<A>,
+    sys: ActorSystem<M>,
+    receive: (MutPtr<A>, Context<M>) void
+) void {
+    sys.sys_messages().loop((h, i, slot) {
+        sys.has_messages().match({
+            true => {
+                message: M := sys.next_message()
+                receive(actor, Context<M>(message: message))
+                runtime.suspend()
+            },
+            false => { h.break }
+        })
+    })
+}

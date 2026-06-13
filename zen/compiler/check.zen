@@ -2,10 +2,10 @@
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname, bin, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, slet, slett, sassign, sret, sexpr, sif, swhile, sidxset, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty, mangle_str, impl_cname, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
-{ Malloc, malloc } = std.alloc
-{ eq, is_empty } = std.str
-{ String, new, append, finish } = std.string
-{ byte_at } = std.bytes
+{ Malloc, malloc } = std.mem.alloc
+{ eq, is_empty } = std.text.str
+{ String, new, append, finish } = std.text.string
+{ byte_at } = std.text.bytes
 
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
@@ -84,6 +84,15 @@ global_bound = (decls: [Decl], name: str) bool {
 }
 is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.global_bound(name) }
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
+recv_name* = (t: Ty) str {
+    t.match ({
+        .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str",
+        .Named(n)   => n,
+        .Generic(g) => g.mangled,
+        .Ptr(p)     => load(p).recv_name(),
+        _           => ""
+    })
+}
 enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }
 ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
 elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }
@@ -262,7 +271,7 @@ dispatch_recv = (decls: [Decl], fn: str, tyname: str) str {
 }
 dispatch_name = (env: Env, c: CallData) str {
     (c.args.len > 0).match ({
-        true  => env.decls.dispatch_recv(c.fn, env.infer_expr(c.args[0].addr()).enum_name()),
+        true  => env.decls.dispatch_recv(c.fn, env.infer_expr(c.args[0].addr()).recv_name()),
         false => c.fn
     })
 }

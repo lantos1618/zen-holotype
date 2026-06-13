@@ -11,7 +11,7 @@ gather the EXPORTED signatures of every std.x it imports (parse those modules; m
 each `name* = (params) ret { … }` to a bodyless DForeign), layer that header on, and run
 check_module. An imported call now resolves to its REAL signature in `the_func`, so check_call ->
 call_errs verifies arity AND arg types exactly like a local call. The import discovery is the same
-`{ ` + `= std.` classification std.resolve makes. Driven by tests/_oracle.check_linked_count, which
+`{ ` + `= std.` classification std.internal.resolve makes. Driven by tests/_oracle.check_linked_count, which
 builds a CHECK_LINKED binary from the committed `zenc` binary + cc — NO Python compiler in the loop.
 
 POSITIVE: every real std/*.zen, checked WITH its imports, must report 0 errors (the stdlib IS a
@@ -28,10 +28,8 @@ import _oracle
 ROOT = Path(__file__).resolve().parent.parent
 STD = ROOT / "zen" / "std"
 
-# Every real std module. Each is type-checked against the REAL signatures of the modules it imports;
-# the well-typed stdlib must report 0 cross-module errors. (Discovered, not hardcoded, so a new
-# module is covered the moment it lands.)
-ALL_MODULES = sorted(p.name for p in STD.glob("*.zen"))
+# Every real std module. Each is type-checked against the REAL signatures of the modules it imports.
+ALL_MODULES = sorted(p.relative_to(STD).as_posix() for p in STD.rglob("*.zen"))
 
 
 @pytest.mark.parametrize("module", ALL_MODULES)
@@ -40,7 +38,7 @@ def test_module_typechecks_against_its_imports(module):
     # signature (layered via check_linked's module_header), not waved through as "imported". 0 errors
     # == this module composes with its imports as a well-typed inter-module unit.
     path = "zen/std/" + module
-    # A call to a cross-module GENERIC (e.g. std.cown calling std.drop's `new<T>`/`own_get<T>`) is now
+    # A call to a cross-module GENERIC (e.g. std.concurrent.cown calling std.mem.own's `new<T>`/`own_get<T>`) is now
     # handled: check_validate.call_errs skips the strict arg-TYPE check for an imported generic (its
     # param types still carry the unbound tparam `T`, uninferable at the call site), mirroring how a
     # LOCAL generic call is monomorphized away before this pass. Arity is still enforced.

@@ -19,7 +19,7 @@ emitted C to `cc`.
 
 ```
 .zen source
-  → resolve imports (loader: std.X/compiler.X graph → one flat module)   zen/std/resolve.zen
+  → resolve imports (loader: std.X/compiler.X graph → one flat module)   zen/std/internal/resolve.zen
   → scan       (lexer: source → tokens, slice-free)               zen/compiler/lex.zen
   → parse      (recursive-descent → compiler.genc Expr/Stmt/Decl)  zen/compiler/parse{,_expr,_stmt,_type}.zen
   → check      (resolve refs, infer types, fits() each call)      zen/compiler/check.zen + check_validate.zen
@@ -35,11 +35,11 @@ IR backend-neutral yet.
 
 Checked CLI modes reject on any type error before linking.
 The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one
-already-flat module, skips `std.resolve`/`check_validate`, and writes C to stdout.
+already-flat module, skips `std.internal.resolve`/`check_validate`, and writes C to stdout.
 
 ## Multi-module programs: the loader
 
-Programs that span files with `{ … } = std.X` imports use **`zen/std/resolve.zen`** — the
+Programs that span files with `{ … } = std.X` imports use **`zen/std/internal/resolve.zen`** — the
 self-hosted loader. It reads a program's import edges, gathers the transitive closure of
 `zen/std/<name>.zen` modules, and also understands `compiler.X` for internal compiler/std
 dependencies. It strips import lines and concatenates each module body exactly once into one
@@ -117,8 +117,8 @@ compiler covers today.
 
 There is **no `@emit` pragma and no comptime evaluator** in the self-hosted compiler. You
 metaprogram by building AST values and emitting them: an ordinary function returns
-`[Decl]`, and `compiler.genc.genModule` lowers it to C — `std.ast` gives fluent heap-allocating
-builders (`var("x").dot("a").eq(…)`), and `zen/std/c.zen`'s `libc()` is exactly this shape
+`[Decl]`, and `compiler.genc.genModule` lowers it to C — `std.internal.ast` gives fluent heap-allocating
+builders (`var("x").dot("a").eq(…)`), and `zen/std/io/c.zen`'s `libc()` is exactly this shape
 (a function that returns the libc bindings as `[Decl]`). The AST is data; a generator is a
 function over data.
 

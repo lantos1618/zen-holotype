@@ -1,0 +1,60 @@
+// @self-hosted-only: stackful coroutines over glibc x86-64 ucontext.
+// Public code should suspend through Runtime.suspend; yield is the raw primitive.
+{ Allocator, system_allocator } = std.mem.alloc
+
+getcontext  = (ctx: RawPtr<u8>) i32
+makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void
+swapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32
+
+// ucontext_t is opaque to Zen for now, so these are named glibc x86-64 ABI offsets.
+UC_LINK_OFF    := 8
+UC_SS_SP_OFF   := 16
+UC_SS_SIZE_OFF := 32
+UC_CTX_SIZE    := 1024
+CORO_STACK     := 65536
+
+cur  := null_ptr()
+back := null_ptr()
+flag := 0
+
+Coro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
+
+spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
+    stack := alloc.acquire(CORO_STACK)
+    ctx := alloc.acquire(UC_CTX_SIZE)
+    lnk := alloc.acquire(UC_CTX_SIZE)
+    getcontext(ctx)
+    ctx.offset(UC_SS_SP_OFF).store_i64(stack)        // uc_stack.ss_sp  = the new stack
+    ctx.offset(UC_SS_SIZE_OFF).store_i64(CORO_STACK) // uc_stack.ss_size
+    ctx.offset(UC_LINK_OFF).store_i64(lnk)           // uc_link -> the resumer's context
+    makecontext(ctx, work, 0)
+    Coro( ctx: ctx, link: lnk, stack: stack )
+}
+spawn* = (work: () void) Coro {
+    alloc := system_allocator()
+    alloc.addr().spawn_in(work)
+}
+destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
+    alloc.release(c.stack)
+    alloc.release(c.ctx)
+    alloc.release(c.link)
+}
+destroy* = (c: Coro) void {
+    alloc := system_allocator()
+    alloc.addr().destroy_in(c)
+}
+resume* = (c: Coro) i32 {
+    cur = c.ctx
+    back = c.link
+    flag = 0
+    swapcontext(c.link, c.ctx)
+    cur = null_ptr()
+    flag
+}
+yield* = () void {
+    is_null(cur).match ({
+        true  => {},
+        false => { flag = 1  swapcontext(cur, back) }
+    })
+}
+is_null = (p: RawPtr<u8>) bool { p == null_ptr() }

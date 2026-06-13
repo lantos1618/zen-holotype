@@ -1,0 +1,46 @@
+// @self-hosted-only — uses generic struct literals (`Rc<T>{…}`) and low-level refcount intrinsics.
+// Direct std-import coverage is still pending; until then its mechanics are validated by an equivalent
+// self-contained test (test_differential).
+//
+// std.mem.rc — a single-threaded REFERENCE-COUNTED pointer `Rc<T>`: shared ownership of a heap value, freed
+// automatically when the last reference goes away. This is the RC in Goal Z's "ARC/ORC" memory family
+// (ARC = atomic Rc for threads — needs an atomic add; ORC = +cycle collection via Trace — both deferred
+// until atomics and a Drop/Trace trait exist).
+//
+// Layout: one heap block `[ count:i64 | value:T ]`. The i64 refcount lives in the first 8 bytes; the
+// value follows. `clone` bumps the count, `drop` decrements it and frees the block at zero. The count
+// is read/written with the store_i64/load_i64 intrinsics; the value through a `[T]` slice over its slot
+// (the element type T flows in from the Rc<T> receiver, the way std.collections.vec threads it through `buf`).
+{ malloc, free } = std.mem.alloc
+
+Rc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T ]
+
+// the value slot as a 1-element [T] (T from the receiver) — typed access to the bytes after the count.
+rc_val<T> = (r: Rc<T>) [T] { slice(r.base.offset(8), 1) }
+
+rc_new<T> = (x: T) Rc<T> {
+    base := malloc(8 + sizeof(T))
+    store_i64(base, 1)                               // count starts at 1 (this reference)
+    r := Rc<T>( base: base )
+    s := r.rc_val()
+    s[0] = x                                         // move the value into the slot
+    r
+}
+rc_get<T> = (r: Rc<T>) T  { r.rc_val()[0] }           // borrow the shared value
+rc_count<T> = (r: Rc<T>) i64 { load_i64(r.base) }       // current reference count
+
+// clone: take another reference — bump the count and hand back a second handle to the SAME block.
+rc_clone<T> = (r: Rc<T>) Rc<T> {
+    store_i64(r.base, load_i64(r.base) + 1)
+    Rc<T>( base: r.base )
+}
+// drop: release this reference — decrement the count, and free the block once it hits zero.
+// NB: only the [count|value] BLOCK is freed; the payload's own Drop is NOT run (Zen has no
+// conditional `T: Drop` dispatch yet, and most Rc payloads are POD). A payload that owns heap
+// memory or a handle (String, Vec, a fd) belongs in std.mem.own's Own<T>, whose release DOES
+// finalize-then-free — putting one behind a bare Rc leaks its buffers at the last drop.
+rc_drop<T> = (r: Rc<T>) void {
+    n := load_i64(r.base) - 1
+    store_i64(r.base, n)
+    (n == 0).match({ true => free(r.base), false => {} })
+}
