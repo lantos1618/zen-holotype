@@ -222,19 +222,16 @@ what you must *import*. Keeping that boundary explicit is the point.
 - **The header *is* a function.** `zen/std/io/c.zen`'s `libc() [Decl]` builds those bodyless
   bindings *as AST* and `compiler.genc.genModule(libc())` emits exactly the C prototypes a TU
   needs — the bindings live in **one** Zen module instead of being re-prototyped in every
-  file. (`std.mem.raw`, `std.io.file`, `std.concurrent.cown`, `std.core.result` still re-declare the handful of
+  file. (`std.mem.raw`, `std.io.file`, `std.core.result` still re-declare the handful of
   symbols they each need at the top, which is the scatter `std.io.c` is gathering.)
 - **std modules — you must import them.** `std.mem.raw`, `std.text.str`, `std.text.string`, `std.mem.alloc`,
   `std.collections.vec`, `std.collections.iter`, … are ordinary Zen you bring in with `{ … } = std.X`; they are
   checked and lowered like your own code.
 
-The FFI memory rule (`zen/std/concurrent/cown.zen`): FFI is the **raw floor below** the allocator
-discipline. A C function that allocates hands you a `RawPtr<T>` — the type-system marker
-for *"the discipline does not reach here — wrap me."* Re-establish ownership the instant
-the pointer crosses back in: wrap the raw handle in a struct that `impl(Drop, …)` and put
-it behind `Own<T>` (`std.mem.own`), so the matching `free`/`close` fires **exactly once**, at
-refcount zero. See **[FEATURES.md](FEATURES.md)** for the full bindings/errors/memory
-inventory.
+The ownership rule (`zen/std/concurrent/cown.zen`): Zen-owned memory takes an explicit allocator
+from program setup; FFI handles sit below that allocator discipline and must be wrapped with the
+matching release operation as soon as they cross back in. See **[FEATURES.md](FEATURES.md)** for the
+full bindings/errors/memory inventory.
 
 ## Modules & imports
 

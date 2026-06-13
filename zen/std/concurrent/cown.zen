@@ -1,22 +1,23 @@
-// @self-hosted-only: FFI ownership examples built on Own<T> and Drop.
-// Raw C resources cross in as handles; wrap them immediately so Drop owns the matching release.
+// @self-hosted-only: allocator-owned buffers and Drop-owned C handles.
 
 { Own, Drop, own_new, own_clone, own_release, own_get, own_ptr, own_count } = std.mem.own
-{ malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { open, close, O_RDONLY } = std.io.file
 { Result, IoError, ok_if } = std.core.result
 
-free = (p: RawPtr<u8>) void
-
-// C malloc returns a raw pointer; Buf gives Own<T> a destructor boundary.
 Buf*: { p: RawPtr<u8>, len: i64 }
 
-buf_alloc* = (n: i64) Own<Buf> { own_new(Buf( p: malloc(n), len: n )) }
+buf_alloc*<A> = (alloc: MutPtr<A>, n: i64) Buf {
+    Buf(p: alloc.acquire(n), len: n)
+}
+buf_free*<A> = (alloc: MutPtr<A>, b: MutPtr<Buf>) void {
+    alloc.release(b.p)
+    b.p = null_ptr()
+    b.len = 0
+}
 
-buf_get* = (o: Own<Buf>, i: i64) u8 { o.own_get().p.offset(i).load() }
-buf_set* = (o: Own<Buf>, i: i64, v: u8) void { o.own_get().p.offset(i).store(v) }
-
-Buf.impl(Drop, { drop = (b: MutPtr<Buf>) void { b.p.free() } })
+buf_get* = (b: Ptr<Buf>, i: i64) u8 { b.p.offset(i).load() }
+buf_set* = (b: MutPtr<Buf>, i: i64, v: u8) void { b.p.offset(i).store(v) }
 
 // POSIX open returns a raw descriptor; File closes it through Drop.
 File*: { fd: i32 }

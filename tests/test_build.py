@@ -200,7 +200,7 @@ def test_zenc_run_resolves_std_import():
 
 
 def test_zenc_build_resolves_std_import():
-    """`zenc build` (not just run) of a std-importing program yields a runnable native binary."""
+    """`zenc build` (not just run) of a std-importing program produces a runnable native binary."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(_IMPORT_PROG % '"ab", "ab"')
@@ -217,6 +217,36 @@ def test_zenc_check_resolves_std_import():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(_IMPORT_PROG % '"ab", "ab"')
     assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
+
+
+def test_type_import_keeps_actor_methods_available():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ default_allocator } = std.mem.alloc\n"
+        "{ Context, Receiver, ActorRef, ReplyRef } = std.concurrent.actor\n"
+        "Msg*: Ping(ReplyRef<i32>)\n"
+        "Room*: { n: i32 }\n"
+        "Room.impl(Receiver<Msg>, {\n"
+        "    receive = (room: MutPtr<Room>, ctx: Context<Msg>) void {\n"
+        "        ctx.msg.match({ .Ping(reply_to) => reply_to.send(7) })\n"
+        "    }\n"
+        "})\n"
+        "main = () i32 {\n"
+        "    alloc := default_allocator()\n"
+        "    reply_to := alloc.addr().reply_ref()\n"
+        "    sys := alloc.addr().actor_system(Msg.Ping(reply_to), 4)\n"
+        "    ref: ActorRef<Msg> := sys.actor_ref()\n"
+        "    ref.tell(.Ping(reply_to))\n"
+        "    room := Room(n: 0)\n"
+        "    alloc.addr().run_actor(room.addr(), sys)\n"
+        "    out := alloc.addr().await(reply_to)\n"
+        "    alloc.addr().actor_system_free(sys)\n"
+        "    out\n"
+        "}\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 7, r.stderr
 
 
 # ── U3: std.text.fmt — a program can PRINT (output + int→string), via std.text.string ──────────────────────────
@@ -481,6 +511,30 @@ def test_zenc_int_cast_intrinsics():
     assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 5
     (d / "q.zen").write_text("main = () i32 { big := 4294967298  to_i32(big) }\n")   # 2^32+2 truncates to 2
     assert subprocess.run([zenc, "run", str(d / "q.zen")], capture_output=True).returncode == 2
+
+
+def test_integer_literal_fits_i64_parameter_without_cast():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "needs64 = (n: i64) i32 { (n == 16).match({ true => 0, false => 1 }) }\n"
+        "main = () i32 { needs64(16) }\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 0
+
+
+def test_struct_body_inherent_methods_dispatch_with_ufcs():
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "Box*: {\n"
+        "    n: i32\n"
+        "    inc = (b: Box) i32 { b.n + 1 }\n"
+        "    add = (b: Box, x: i32) i32 { b.n + x }\n"
+        "}\n"
+        "main = () i32 { b := Box(n: 2)  b.inc() + b.add(4) }\n"
+    )
+    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True).returncode == 9
 
 
 def test_zenc_raw_intrinsics_have_at_spelling():
@@ -763,18 +817,18 @@ def test_zenc_run_map_try_result_paths():
     assert r.returncode == 0, r.stderr
 
 
-# ── colorless suspension: runtime.suspend no-ops outside a coroutine and yields inside one ──────────
-def test_runtime_suspend_is_colorless():
+# ── colorless checkpoint: runtime.checkpoint no-ops outside a coroutine and pauses inside one ───────
+def test_runtime_checkpoint_is_colorless():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "a.zen").write_text(
         "{ async_arena, async_arena_free } = std.concurrent.runtime\n{ println_int } = std.text.fmt\n"
-        "main = () i32 { rt := async_arena(1024)  rt.addr().suspend()  println_int(42)  rt.addr().suspend()  rt.addr().async_arena_free()  0 }\n")
+        "main = () i32 { rt := async_arena(1024)  rt.addr().checkpoint()  println_int(42)  rt.addr().checkpoint()  rt.addr().async_arena_free()  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "a.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "42\n", (r.returncode, r.stdout, r.stderr)   # was SIGSEGV
     (d / "b.zen").write_text(
-        "{ spawn_in, resume, destroy_in } = std.concurrent.coroutine\n{ sync_arena, sync_arena_free, async_arena, async_arena_free } = std.concurrent.runtime\n{ println_int } = std.text.fmt\n"
-        "work = () void { rt := async_arena(1024)  println_int(1)  rt.addr().suspend()  println_int(3)  rt.addr().async_arena_free() }\n"
-        "main = () i32 { alloc := sync_arena(131072)  co := alloc.addr().spawn_in(work)  resume(co)  println_int(2)  resume(co)  alloc.addr().destroy_in(co)  alloc.addr().sync_arena_free()  0 }\n")
+        "{ spawn, resume, destroy } = std.concurrent.coroutine\n{ run } = std.concurrent.sched\n{ sync_arena, sync_arena_free, async_arena, async_arena_free } = std.concurrent.runtime\n{ println_int } = std.text.fmt\n"
+        "work = () void { rt := async_arena(1024)  println_int(1)  rt.addr().checkpoint()  println_int(3)  rt.addr().async_arena_free() }\n"
+        "main = () i32 { alloc := sync_arena(131072)  co := alloc.addr().spawn(work)  resume(co)  println_int(2)  alloc.addr().run([co])  alloc.addr().destroy(co)  alloc.addr().sync_arena_free()  0 }\n")
     r = subprocess.run([zenc, "run", str(d / "b.zen")], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == "1\n2\n3\n", (r.returncode, r.stdout, r.stderr)

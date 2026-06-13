@@ -28,10 +28,9 @@ multiple modules, all in Zen:
   `IoError`, boundary checkers (`ok_if` / `ok_ptr`) that lift a raw C sentinel into a `Result`,
   and `panic` (the explicit, greppable abort). No exceptions, no unwinding — `.match` is the catch
   and `return .Err(e)` propagates.
-- **`std.concurrent.cown`** — the FFI memory convention, in code: FFI is the raw floor below the allocator
-  discipline; a C allocator hands back a `RawPtr<T>` (the "wrap me" marker), which gets wrapped in
-  a `Drop`-implementing owner behind `Own<T>` (`std.mem.own`) so the matching `free`/`close` fires
-  exactly once at refcount zero (`Buf`/`malloc` and `File`/`open` worked examples).
+- **`std.concurrent.cown`** — allocator-owned buffers and C-handle ownership in code:
+  `Buf` takes an explicit allocator for memory, while `File` wraps the `open`/`close`
+  handle boundary.
 - **`std.internal.resolve`** — the self-hosted **module loader**: reads a program's `{ … } = std.X` import
   edges, gathers the transitive closure, strips imports, and concatenates each module body once
   (per-module dedup breaks cycles; a per-name pass keeps the first definition of each top-level

@@ -9,7 +9,7 @@ Three localized zen/std/internal/resolve.zen bugs broke whole regions of the std
      closure never deduped → duplicate-toplevel.
   3. LINE-BASED SCAN vs MULTI-LINE CONSTRUCTS — std.internal.ast's 5-line `{ … } = compiler.genc` import
      wasn't recognized (lines leaked into the flat source), and a multi-line `Type.impl(Trait, {…})`
-     body with column-0 method lines (std.concurrent.runtime's `suspend = …`) had its SECOND `suspend` line
+     body with column-0 method lines (std.concurrent.runtime's `checkpoint = …`) had its SECOND `checkpoint` line
      silently deduped away as a "duplicate decl" → "impl does not satisfy the trait".
 Residue of the same census: std.io.c/std.internal.ast redefined `dup`/`eq`, names std.text.str (in their own flat
 closure via compiler.genc) already owns — per-name first-wins dedup kept the str ones and broke
@@ -77,9 +77,9 @@ def test_ns_bind_qualified_call_runs():
 
 # ── bug 3: multi-line imports (std.internal.ast) and multi-line impl bodies (std.concurrent.runtime) ─────────────────────
 def test_std_runtime_imports_clean():
-    """The two Runtime impls both hold a column-0 `suspend = …` METHOD line; the line-based dedup
+    """The two Runtime impls both hold a column-0 `checkpoint = …` METHOD line; the line-based dedup
         used to treat the second as a duplicate top-level decl and silently drop it — the flattened
-        AsyncArena impl then lacked `suspend` ("impl does not satisfy the trait")."""
+        AsyncArena impl then lacked `checkpoint` ("impl does not satisfy the trait")."""
     r = _check("{ sync_arena } = std.concurrent.runtime\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 

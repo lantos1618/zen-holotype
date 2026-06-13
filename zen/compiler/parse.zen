@@ -72,7 +72,8 @@ field_buf = (a: Ptr<Malloc>) [Field] { slice(malloc(1024 * sizeof(Field)), 1024)
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
 dfn_buf = (a: Ptr<Malloc>) [Func] { slice(malloc(256 * sizeof(Func)), 256) }
 take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
-// `m = (...) Ret {}` inside a trait is a default method, not a field type.
+// `m = (...) Ret {}` inside a pure method record is a trait default; inside a data record
+// it is an inherent method attached to the struct.
 is_eq_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
 FieldsEnd*: { count: i32, ndef: i32, next: i32 }
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
@@ -105,7 +106,10 @@ fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [F
             after := src.scan(te.next)
             src.is_comma(after.tok).match ({
                 true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
-                false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )
+                false => is_ident_tok(after.tok).match ({
+                    true  => a.fill_fields(src, te.next, buf, i + 1, dbuf, dn),
+                    false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )
+                })
             })
         }
     })
@@ -121,6 +125,29 @@ parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
     StructEnd( sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) )
 }
 parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
+
+field_is_method = (f: Field) bool { f.ty.match ({ .FnT(fd) => true, _ => false }) }
+has_data_field = (fields: [Field]) bool {
+    found := false
+    fields.loop((h, i, f) { found = f.field_is_method().match ({ true => found, false => true }) })
+    found
+}
+data_field_count = (fields: [Field]) i32 {
+    n := 0
+    fields.loop((h, i, f) { f.field_is_method().match ({ true => {}, false => { n = n + 1 } }) })
+    n
+}
+data_fields = (a: Ptr<Malloc>, fields: [Field]) [Field] {
+    buf := a.field_buf()
+    j := 0
+    fields.loop((h, i, f) {
+        f.field_is_method().match ({
+            true  => {},
+            false => { buf[j] = f  j = j + 1 }
+        })
+    })
+    buf.take_fields(fields.data_field_count())
+}
 
 // Enum variants end at the first token that is not `|`.
 EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }
@@ -329,13 +356,40 @@ fill_defaults = (a: Ptr<Malloc>, trname: str, defaults: [Func], buf: [Decl], i: 
         false => { buf[i] = dtraitdef(trname, defaults[j])  a.fill_defaults(trname, defaults, buf, i + 1, j + 1) }
     })
 }
+fill_inherent_methods = (a: Ptr<Malloc>, tyname: str, methods: [Func], buf: [Decl], i: i32, mbuf: [Param], j: i32) i32 {
+    (j == methods.len).match ({
+        true  => i,
+        false => {
+            f := methods[j]
+            buf[i] = dfunc(Func( name: impl_cname(tyname, tyname, f.name), params: f.params, ret: f.ret, tparams: f.tparams, body: f.body ))
+            mbuf[j] = param(f.name, tvoid())
+            a.fill_inherent_methods(tyname, methods, buf, i + 1, mbuf, j + 1)
+        }
+    })
+}
+fill_inherent_struct = (a: Ptr<Malloc>, se: StructEnd, buf: [Decl], i: i32) i32 {
+    mbuf := a.param_buf()
+    buf[i] = (se.ntp > 0).match ({
+        true  => dgenstruct(gsdef(se.sd.name, se.tparams, a.data_fields(se.sd.fields))),
+        false => dstruct(sdef(se.sd.name, a.data_fields(se.sd.fields)))
+    })
+    next := a.fill_inherent_methods(se.sd.name, se.defaults, buf, i + 1, mbuf, 0)
+    buf[next] = dimpl(se.sd.name, se.sd.name, mbuf.take_params(se.defaults.len))
+    next + 1
+}
 fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
-    buf[i] = (se.ntp > 0).match ({
-        true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
-        false => dstruct(se.sd)
+    inherent := (se.defaults.len > 0) && se.sd.fields.has_data_field()
+    ni := inherent.match ({
+        true  => a.fill_inherent_struct(se, buf, i),
+        false => {
+            buf[i] = (se.ntp > 0).match ({
+                true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
+                false => dstruct(se.sd)
+            })
+            a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
+        }
     })
-    ni := a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
     a.fill_decls(src, se.next, buf, ni)
 }
 fill_import = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {

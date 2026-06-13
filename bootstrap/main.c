@@ -150,7 +150,7 @@ static int manifest_entry(const char* src, size_t p, size_t e, size_t* s_out, si
 
 /* Build the flat compiler source: for each path in bootstrap/sources.txt, append `\n` as a file
  * separator iff this is not the first file, then append that file's body with import lines dropped.
- * Lines are split on '\n' (Python splitlines: a trailing '\n' yields no extra empty line) and rejoined
+	 * Lines are split on '\n' (Python splitlines: a trailing '\n' produces no extra empty line) and rejoined
  * with '\n'. */
 static String build_self_source(const char* srcroot){
     String out = new();

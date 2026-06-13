@@ -1,114 +1,66 @@
-// actor_demo.zen - one chat-room actor, run sync or async by changing the runtime.
+// actor_demo.zen - typed chat-room actor with a one-shot reply channel.
 //   $ zenc run examples/actor_demo.zen
 
-{ Context, ActorRef, actor_system, actor_system_free, actor_ref, send, run_actor } = std.concurrent.actor
-{ sync_arena, sync_arena_free, async_arena, async_arena_free } = std.concurrent.runtime
-{ spawn_in, destroy_in } = std.concurrent.coroutine
-{ run_in } = std.concurrent.sched
-{ println } = std.text.fmt
+{ default_allocator } = std.mem.alloc
+{ to_exit } = std.core.bool
+{ Context, Receiver, ActorRef, ReplyRef } = std.concurrent.actor
 
-ChatRoomMessage*: Join(str) | Say(str) | Leave(str) | Stats
+SayArgs*: { from: str, text: str }
+ChatMsg*: Join(str) | Say(SayArgs) | GetStats(ReplyRef<i32>)
 
-Receiver*: {
-    receive: (MutPtr<Self>, Context<ChatRoomMessage>) void
+ChatRoom*: { online: i32, posted: i32 }
+ChatRoomRef*: {
+    ref: ActorRef<ChatMsg>
+
+    join = (room: ChatRoomRef, name: str) void {
+        room.ref.tell(.Join(name))
+    }
+
+    say = (room: ChatRoomRef, from: str, text: str) void {
+        room.ref.tell(.Say(SayArgs(from: from, text: text)))
+    }
+
+    request_stats = (room: ChatRoomRef, reply: ReplyRef<i32>) void {
+        room.ref.tell(.GetStats(reply))
+    }
+
+    simulate_chat = (room: ChatRoomRef, stats_reply: ReplyRef<i32>) void {
+        room.join("alice")
+        room.join("bob")
+        room.say("alice", "hey")
+        room.request_stats(stats_reply)
+    }
 }
 
-ChatRoom*: { online: i32, posted: i32, scratch: RawPtr<u8> }
-User*: { name: str, room: ActorRef<ChatRoomMessage> }
-
-chat_room_new<AllocT> = (alloc: MutPtr<AllocT>) ChatRoom {
-    ChatRoom(online: 0, posted: 0, scratch: alloc.acquire(8))
-}
-
-chat_room_deinit<AllocT> = (room: MutPtr<ChatRoom>, alloc: MutPtr<AllocT>) void {
-    alloc.release(room.scratch)
-}
-
-ChatRoom.impl(Receiver, {
-    receive = (room: MutPtr<ChatRoom>, ctx: Context<ChatRoomMessage>) void {
-        ctx.message.match({
+ChatRoom.impl(Receiver<ChatMsg>, {
+    receive = (room: MutPtr<ChatRoom>, ctx: Context<ChatMsg>) void {
+        ctx.msg.match({
             .Join(name) => {
                 room.online = room.online + 1
-                println("joined")
-                println(name)
             },
-            .Say(text)  => {
+            .Say(args) => {
                 room.posted = room.posted + 1
-                println("message")
-                println(text)
             },
-            .Leave(name) => {
-                room.online = room.online - 1
-                println("left")
-                println(name)
-            },
-            .Stats      => {
-                println("online")
-                println(to_i64(room.online))
-                println("posted")
-                println(to_i64(room.posted))
+            .GetStats(reply_to) => {
+                reply_to.send(room.online)
             }
         })
     }
 })
 
-receive_chat = (room: MutPtr<ChatRoom>, ctx: Context<ChatRoomMessage>) void {
-    room.receive(ctx)
-}
-
-join = (user: Ptr<User>) void {
-    user.room.send(.Join(user.name))
-}
-
-say = (user: Ptr<User>, text: str) void {
-    user.room.send(.Say(text))
-}
-
-leave = (user: Ptr<User>) void {
-    user.room.send(.Leave(user.name))
-}
-
-simulate_chat = (room: ActorRef<ChatRoomMessage>) void {
-    alice := User(name: "alice", room: room)
-    bob   := User(name: "bob", room: room)
-
-    alice.addr().join()
-    alice.addr().say("hey")
-    bob.addr().join()
-    bob.addr().leave()
-    room.send(.Stats)
-}
-
-run_chat<RuntimeT> = (runtime: MutPtr<RuntimeT>) void {
-    sys := runtime.actor_system(.Stats, to_i64(16))
-    room_ref := sys.actor_ref()
-
-    room_ref.simulate_chat()
-
-    actor := chat_room_new(runtime)
-    runtime.run_actor(actor.addr(), sys, receive_chat)
-    actor.addr().chat_room_deinit(runtime)
-    runtime.actor_system_free(sys)
-}
-
-async_chat = () void {
-    runtime := async_arena(4096)
-    runtime.addr().run_chat()
-    runtime.addr().async_arena_free()
-}
-
 main = () i32 {
-    println("==== Sync Run ====")
-    sync_rt := sync_arena(4096)
-    sync_rt.addr().run_chat()
-    sync_rt.addr().sync_arena_free()
+    alloc := default_allocator()
+    stats_reply := alloc.addr().reply_ref()
+    sys := alloc.addr().actor_system(ChatMsg.GetStats(stats_reply), 16)
+    room := ChatRoomRef(ref: sys.actor_ref())
 
-    println("==== Async Run ====")
-    scheduler := sync_arena(131072)
-    task := scheduler.addr().spawn_in(async_chat)
-    scheduler.addr().run_in([task])
-    scheduler.addr().destroy_in(task)
-    scheduler.addr().sync_arena_free()
+    room.simulate_chat(stats_reply)
 
-    0
+    actor := ChatRoom(online: 0, posted: 0)
+    alloc.addr().run_actor(actor.addr(), sys)
+    total := alloc.addr().await(stats_reply)
+
+    alloc.addr().actor_system_free(sys)
+
+    (total == 2).to_exit()
 }

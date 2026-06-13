@@ -1,22 +1,26 @@
 // @self-hosted-only: runtime allocators. The allocator is the execution mode:
-// SyncArena.suspend is a no-op; AsyncArena.suspend yields the current coroutine.
-{ Allocator } = std.mem.alloc
+// SyncArena.checkpoint is a no-op; AsyncArena.checkpoint pauses the current coroutine.
+{ Allocator, Heap } = std.mem.alloc
 { Arena, arena_new, arena_free } = std.mem.arena
-{ yield } = std.concurrent.coroutine
+{ checkpoint_current } = std.concurrent.coroutine
 
 Runtime*: {
-    suspend: (MutPtr<Self>) void
+    checkpoint: (MutPtr<Self>) void
 }
 
 SyncArena*: { mem: Arena }
 AsyncArena*: { mem: Arena }
 
 SyncArena.impl(Runtime, {
-    suspend = (s: MutPtr<SyncArena>) void {}
+    checkpoint = (s: MutPtr<SyncArena>) void {}
+})
+
+Heap.impl(Runtime, {
+    checkpoint = (s: MutPtr<Heap>) void {}
 })
 
 AsyncArena.impl(Runtime, {
-    suspend = (s: MutPtr<AsyncArena>) void { yield() }
+    checkpoint = (s: MutPtr<AsyncArena>) void { checkpoint_current() }
 })
 
 SyncArena.impl(Allocator, {

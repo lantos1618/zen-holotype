@@ -73,7 +73,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - **The header is a function** — `zen/std/io/c.zen`'s `libc() [Decl]` builds those bodyless
   bindings *as AST*, and `compiler.genc.genModule(libc())` emits exactly the C prototypes a
   translation unit needs. One source of truth for the libc surface, instead of the same
-  externs re-prototyped in every module (the scatter `std.mem.raw`/`std.io.file`/`std.concurrent.cown`/
+  externs re-prototyped in every module (the scatter `std.mem.raw`/`std.io.file`/
   `std.core.result` still have at the top, which `std.io.c` gathers).
 - **Errors are values** (`std.core.result`) — Zen is `.match`-only with **no `if`, no exceptions,
   and no unwinding**. A fallible call returns a `Result<T, E>` (`.Ok` / `.Err`) the caller
@@ -82,13 +82,11 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   checkers `ok_if` / `ok_ptr` lift a raw C sentinel (a negative rc, a null pointer) into a
   `Result`; `panic` is the explicit, greppable abort for invariant breaks (not the default
   path).
-- **FFI memory rule** (`zen/std/concurrent/cown.zen`) — FFI is the **raw floor below** the allocator
-  discipline (`std.mem.alloc` / `std.mem.own`). You do *not* thread an allocator through the C
-  boundary. A C function that allocates hands back a `RawPtr<T>` — the type-system marker
-  for *"the discipline does not reach here — wrap me."* Re-establish ownership the instant
-  the pointer crosses back: wrap the raw handle in a struct that `impl(Drop, { … })` and
-  put it behind `Own<T>`, so the matching `free`/`close` fires **exactly once**, at refcount
-  zero (worked examples: `Buf` over `malloc`/`free`, `File` over `open`/`close`).
+- **Allocator and FFI ownership rule** (`zen/std/concurrent/cown.zen`) — Zen-owned memory takes
+  an explicit allocator from program setup (`Buf` uses `alloc.acquire` / `alloc.release`).
+  FFI handles remain the raw floor below that discipline: a C descriptor or pointer crosses
+  back as a raw handle, then gets wrapped in a small type with the matching release operation
+  (`File` over `open`/`close`).
 - **Metaprogramming is values, not pragmas** — there is no `@emit` and no comptime
   evaluator. A generator is an ordinary function returning `[Decl]`, emitted by
   `compiler.genc.genModule`; `std.internal.ast` gives fluent heap-allocating builders
