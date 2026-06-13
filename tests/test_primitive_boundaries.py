@@ -6,7 +6,7 @@ import _oracle
 
 ROOT = _oracle.ROOT
 
-RAW_YIELD_ALLOWED = {
+RAW_CHECKPOINT_ALLOWED = {
     Path("zen/std/concurrent/coroutine.zen"),
     Path("zen/std/concurrent/runtime.zen"),
 }
@@ -22,7 +22,7 @@ ATWHILE_ALLOWED = {
 
 EXAMPLE_PRIMITIVES = {
     "raw addr": re.compile(r"(?<!\.)\baddr\s*\("),
-    "raw yield": re.compile(r"\byield\s*\("),
+    "raw checkpoint": re.compile(r"\bcheckpoint_current\s*\("),
     "@while": re.compile(r"@while\b"),
     "raw break": re.compile(r"\bbreak\b"),
     "raw continue": re.compile(r"\bcontinue\b"),
@@ -66,18 +66,18 @@ def test_examples_stay_above_raw_primitives():
     assert not hits, "examples should use stdlib/runtime APIs, not raw primitives:\n" + "\n".join(hits)
 
 
-def test_raw_yield_stays_behind_coroutine_and_runtime():
-    yield_call = re.compile(r"\byield\s*\(")
-    yield_import = re.compile(r"\{[^}\n]*\byield\b[^}\n]*\}\s*=\s*std\.coroutine")
+def test_raw_checkpoint_stays_behind_coroutine_and_runtime():
+    checkpoint_call = re.compile(r"\bcheckpoint_current\s*\(")
+    checkpoint_import = re.compile(r"\{[^}\n]*\bcheckpoint_current\b[^}\n]*\}\s*=\s*std\.concurrent\.coroutine")
     hits = []
 
     for path in _zen_files_under("examples", "tools", "zen/std", "zen/compiler"):
         rel = _rel(path)
         src = _code(path)
-        if rel not in RAW_YIELD_ALLOWED and (yield_call.search(src) or yield_import.search(src)):
+        if rel not in RAW_CHECKPOINT_ALLOWED and (checkpoint_call.search(src) or checkpoint_import.search(src)):
             hits.append(str(rel))
 
-    assert not hits, "call runtime.addr().suspend(); raw yield is only for std.concurrent.coroutine/std.concurrent.runtime:\n" + "\n".join(hits)
+    assert not hits, "call runtime.addr().checkpoint(); raw checkpoint_current is only for std.concurrent.coroutine/std.concurrent.runtime:\n" + "\n".join(hits)
 
 
 def test_atwhile_stays_in_compiler_or_named_low_level_substrate():

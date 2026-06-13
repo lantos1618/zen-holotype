@@ -7,7 +7,7 @@ corpus does that) but to fuzz MANY shapes through the validator and catch a cras
 regression on inputs the curated corpus doesn't enumerate. NO Python frontend — only the committed
 `zenc` binary + cc, exactly like the rest of the oracle.
 
-Each generator yields (src, expected_kind_or_None): when the defect pins a single deterministic kind
+Each generator produces (src, expected_kind_or_None): when the defect pins a single deterministic kind
 we assert it; when a template can produce several plausible first-errors we only require reject+kind.
 Every src is run through BOTH binaries; the run must not crash (returncode is the count/kind, never a
 signal) and must report an error.
@@ -110,7 +110,7 @@ def _index_type():
 
 
 def _return_fit():
-    """A trailing value of the wrong category / a body that yields no value -> 'return-fit'."""
+    """A trailing value of the wrong category / a body that produces no value -> 'return-fit'."""
     out = []
     out.append(("test* = () i32 {  }", "return-fit"))                # empty
     out.append(("test* = () i32 { x := 5 }", "return-fit"))          # trailing let

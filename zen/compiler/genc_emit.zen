@@ -6,7 +6,7 @@
   BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData,
   gen_ty, is_template, is_trait, call, lit, arm, block, param, field } = compiler.genc
 { monomorphize } = compiler.mono
-{ malloc } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 
 // Integer rendering stays byte-only so this self-hosts.
 sbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
@@ -56,7 +56,7 @@ gen_expr* = (s: String, e: Ptr<Expr>) String {
         .Block(b) => s.gen_blockexpr(b)
     })
 }
-// GCC statement-expression; trailing return becomes the yielded expression.
+// GCC statement-expression; trailing return becomes the result expression.
 gen_blockexpr = (s: String, b: BlockData) String {
     out := s.append("({ ")
     b.stmts.loop((h, i, st) { out = out.gen_block_one(st, i == b.stmts.len - 1).append(" ") })
@@ -106,21 +106,10 @@ gen_bin = (s: String, b: BinData) String {
     s.append("(").gen_expr(b.lhs).append(" ").append(b.op).append(" ").gen_expr(b.rhs).append(")")
 }
 
-// Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to a literal 0.
-earg_buf = () [Expr] { slice(malloc(sizeof(Expr)), 1) }
-zero_arg = () Ptr<Expr> {
-    b := earg_buf()
-    b[0] = lit(0)
-    b[0].addr()
+// Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to literal 0.
+gen_arg_at = (s: String, c: CallData, i: i32) String {
+    (i < c.args.len).match ({ true => s.gen_expr(c.args[i].addr()), false => s.append("0") })
 }
-arg_at = (c: CallData, i: i32) Ptr<Expr> {
-    (i < c.args.len).match ({
-        true  => c.args[i].addr(),
-        false => zero_arg()
-    })
-}
-arg0 = (c: CallData) Ptr<Expr> { c.arg_at(0) }
-arg1 = (c: CallData) Ptr<Expr> { c.arg_at(1) }
 
 EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | Addr | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64
 
@@ -149,22 +138,22 @@ gen_call_default = (s: String, c: CallData) String {
 }
 gen_call = (s: String, c: CallData) String {
     c.fn.call_kind().match ({
-        .StrEq => s.append("eq(").gen_expr(c.arg0()).append(", ").gen_expr(c.arg1()).append(")"),
-        .StrNe => s.append("(!eq(").gen_expr(c.arg0()).append(", ").gen_expr(c.arg1()).append("))"),
-        .Load => s.append("(*(").gen_expr(c.arg0()).append("))"),
-        .Offset => s.append("((uint8_t*)(").gen_expr(c.arg0()).append(") + (").gen_expr(c.arg1()).append("))"),
-        .Store => s.append("(*(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"),
-        .LoadI64 => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append("))"),
-        .StoreI64 => s.append("(*(int64_t*)(").gen_expr(c.arg0()).append(") = ").gen_expr(c.arg1()).append(")"),
-        .AtomicAddI64 => s.append("__atomic_add_fetch((int64_t*)(").gen_expr(c.arg0()).append("), (").gen_expr(c.arg1()).append("), 5)"),
-        .Addr => s.append("(&(").gen_expr(c.arg0()).append("))"),
-        .CStr => s.append("((const char*)(").gen_expr(c.arg0()).append("))"),
-        .Slice => s.append("(zslice){ .ptr = (void*)(").gen_expr(c.arg0()).append("), .len = (").gen_expr(c.arg1()).append(") }"),
+        .StrEq => s.append("eq(").gen_arg_at(c, 0).append(", ").gen_arg_at(c, 1).append(")"),
+        .StrNe => s.append("(!eq(").gen_arg_at(c, 0).append(", ").gen_arg_at(c, 1).append("))"),
+        .Load => s.append("(*(").gen_arg_at(c, 0).append("))"),
+        .Offset => s.append("((uint8_t*)(").gen_arg_at(c, 0).append(") + (").gen_arg_at(c, 1).append("))"),
+        .Store => s.append("(*(").gen_arg_at(c, 0).append(") = ").gen_arg_at(c, 1).append(")"),
+        .LoadI64 => s.append("(*(int64_t*)(").gen_arg_at(c, 0).append("))"),
+        .StoreI64 => s.append("(*(int64_t*)(").gen_arg_at(c, 0).append(") = ").gen_arg_at(c, 1).append(")"),
+        .AtomicAddI64 => s.append("__atomic_add_fetch((int64_t*)(").gen_arg_at(c, 0).append("), (").gen_arg_at(c, 1).append("), 5)"),
+        .Addr => s.append("(&(").gen_arg_at(c, 0).append("))"),
+        .CStr => s.append("((const char*)(").gen_arg_at(c, 0).append("))"),
+        .Slice => s.append("(zslice){ .ptr = (void*)(").gen_arg_at(c, 0).append("), .len = (").gen_arg_at(c, 1).append(") }"),
         .NullPtr => s.append("0"),
-        .ToI32 => s.append("((int32_t)(").gen_expr(c.arg0()).append("))"),
-        .ToI64 => s.append("((int64_t)(").gen_expr(c.arg0()).append("))"),
-        .ToU8 => s.append("((uint8_t)(").gen_expr(c.arg0()).append("))"),
-        .ToF64 => s.append("((double)(").gen_expr(c.arg0()).append("))"),
+        .ToI32 => s.append("((int32_t)(").gen_arg_at(c, 0).append("))"),
+        .ToI64 => s.append("((int64_t)(").gen_arg_at(c, 0).append("))"),
+        .ToU8 => s.append("((uint8_t)(").gen_arg_at(c, 0).append("))"),
+        .ToF64 => s.append("((double)(").gen_arg_at(c, 0).append("))"),
         .Normal => s.gen_call_default(c)
     })
 }
@@ -553,9 +542,9 @@ idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
         })
     })
 }
-dmemo_buf = (n: i64) [DepthMemo] { slice(malloc(n * sizeof(DepthMemo)), n) }
-depth_cache = (decls: [Decl]) [DepthMemo] {
-    c := dmemo_buf(decls.slen())
+dmemo_buf = (a: Ptr<Malloc>, n: i64) [DepthMemo] { slice(a.acquire(n * sizeof(DepthMemo)), n) }
+depth_cache = (a: Ptr<Malloc>, decls: [Decl]) [DepthMemo] {
+    c := a.dmemo_buf(decls.slen())
     c.loop((h, i, x) { c[i] = DepthMemo( d: 0 - 1 ) })
     c
 }
@@ -615,13 +604,17 @@ gen_global_inits = (s: String, decls: [Decl]) String {
     out.append("} ")
 }
 // Whole translation unit emission.
-genModule* = (raw: [Decl]) String {
-    decls := raw.monomorphize()
+genModuleIn* = (a: Ptr<Malloc>, raw: [Decl]) String {
+    decls := a.monomorphize(raw)
     s := new().append("typedef struct { void* ptr; int64_t len; } zslice; ")
     decls.loop((h, i, d) { s = s.gen_fwd(d) })
     decls.loop((h, i, d) { s = s.gen_proto(d) })
-    s = s.gen_types_upto(decls, depth_cache(decls), 0, slen(decls))
+    s = s.gen_types_upto(decls, a.depth_cache(decls), 0, slen(decls))
     decls.loop((h, i, d) { s = s.gen_global(d) })
     s = s.gen_global_inits(decls)
     s.gen_funcs(decls)
+}
+genModule* = (raw: [Decl]) String {
+    a := Malloc(_: 0)
+    a.addr().genModuleIn(raw)
 }

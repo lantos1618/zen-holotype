@@ -186,7 +186,7 @@ def test_splitter_covers_every_top_level_decl(module):
     impl_depth = 0   # >0 ⇒ inside a `Type.impl(Trait, {…})` body; its methods are NOT top-level decls
     for l in src.splitlines():
         if impl_depth > 0:                                   # skip the impl body (its method heads, e.g.
-            impl_depth += _resolver._brace_delta(l)          # runtime's column-0 `suspend = …`, aren't decls)
+            impl_depth += _resolver._brace_delta(l)          # runtime's column-0 `checkpoint = …`, aren't decls)
             continue
         if l and not l[0].isspace() and not l.lstrip().startswith("//") \
            and not (l.lstrip().startswith("{ ") and ("= std." in l or "= compiler." in l)):

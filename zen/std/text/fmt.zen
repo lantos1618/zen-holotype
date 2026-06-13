@@ -2,9 +2,10 @@
 // Minimal formatted stdout output for Display values.
 // Numeric formatting builds temporary String buffers and releases them after printing.
 
-{ print, print_bytes } = std.io.file
+{ write_stdout_bytes } = std.io.file
+{ view } = std.text.str
 { String, bytes } = std.text.string
-{ int_string, int_to_str, float_string, float_to_str } = std.text.num
+{ int_string, float_string } = std.text.num
 // Use raw release for temporary String buffers; `free` has multiple std providers in flattened builds.
 { release } = std.mem.raw
 
@@ -15,53 +16,51 @@ Display*: {
 
 // Print an owned temporary String and release its buffer.
 print_owned = (t: String) i64 {
-    w := print_bytes(t.bytes())
+    w := write_stdout_bytes(t.bytes())
     t.ptr.release()
     w
 }
-print_str*   = (s: str) i64 { print(s) }
-println_str* = (s: str) i64 { print(s)  print("\n") }
-print_string*   = (s: String) i64 { print_bytes(s.bytes()) }
-println_string* = (s: String) i64 { s.print_string()  print("\n") }
-print_int*   = (n: i64) i64 { print_owned(int_string(n)) }
-println_int* = (n: i64) i64 { n.print_int()  print("\n") }
-print_float* = (x: f64) i64 { print_owned(float_string(x)) }
-println_float* = (x: f64) i64 { x.print_float()  print("\n") }
+write_text = (s: str) i64 { write_stdout_bytes(s.view()) }
+newline = () i64 { "\n".write_text() }
+write_string = (s: String) i64 { write_stdout_bytes(s.bytes()) }
+write_int = (n: i64) i64 { print_owned(int_string(n)) }
+write_float = (x: f64) i64 { print_owned(float_string(x)) }
 
 // Display is the current type-directed print surface; real overload sets can replace the typed aliases later.
+print*<T> = (x: T) i64 { x.fmt_print() }
 println*<T> = (x: T) i64 { x.fmt_println() }
 
 str.impl(Display, {
-    fmt_print = (s: str) i64 { s.print_str() }
-    fmt_println = (s: str) i64 { s.println_str() }
+    fmt_print = (s: str) i64 { s.write_text() }
+    fmt_println = (s: str) i64 { s.write_text()  newline() }
 })
 
 String.impl(Display, {
-    fmt_print = (s: String) i64 { s.print_string() }
-    fmt_println = (s: String) i64 { s.println_string() }
+    fmt_print = (s: String) i64 { s.write_string() }
+    fmt_println = (s: String) i64 { s.write_string()  newline() }
 })
 
 i32.impl(Display, {
-    fmt_print = (n: i32) i64 { to_i64(n).print_int() }
-    fmt_println = (n: i32) i64 { to_i64(n).println_int() }
+    fmt_print = (n: i32) i64 { n.write_int() }
+    fmt_println = (n: i32) i64 { n.write_int()  newline() }
 })
 
 i64.impl(Display, {
-    fmt_print = (n: i64) i64 { n.print_int() }
-    fmt_println = (n: i64) i64 { n.println_int() }
+    fmt_print = (n: i64) i64 { n.write_int() }
+    fmt_println = (n: i64) i64 { n.write_int()  newline() }
 })
 
 u8.impl(Display, {
-    fmt_print = (n: u8) i64 { to_i64(n).print_int() }
-    fmt_println = (n: u8) i64 { to_i64(n).println_int() }
+    fmt_print = (n: u8) i64 { n.write_int() }
+    fmt_println = (n: u8) i64 { n.write_int()  newline() }
 })
 
 f64.impl(Display, {
-    fmt_print = (x: f64) i64 { x.print_float() }
-    fmt_println = (x: f64) i64 { x.println_float() }
+    fmt_print = (x: f64) i64 { x.write_float() }
+    fmt_println = (x: f64) i64 { x.write_float()  newline() }
 })
 
 bool.impl(Display, {
-    fmt_print = (b: bool) i64 { b.match ({ true => print("true"), false => print("false") }) }
-    fmt_println = (b: bool) i64 { b.fmt_print()  print("\n") }
+    fmt_print = (b: bool) i64 { b.match ({ true => "true".write_text(), false => "false".write_text() }) }
+    fmt_println = (b: bool) i64 { b.fmt_print()  newline() }
 })

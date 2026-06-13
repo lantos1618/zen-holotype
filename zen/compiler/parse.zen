@@ -1,16 +1,16 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func, impl_cname, lit, ti32, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, lit, ti32, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { byte_at } = std.text.bytes
-{ Malloc, malloc } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 { parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get } = compiler.parse_type
 
 // `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: { func: Func, next: i32, foreign: bool }
-no_body = (a: Ptr<Malloc>) [Stmt] { slice(malloc(0), 0) }
+no_body = (a: Ptr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 parse_decl_at = (a: Ptr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)
     name   := a.lexeme(src, nt.tok)
@@ -32,7 +32,7 @@ parse_fn_body = (a: Ptr<Malloc>, src: str, name: str, params: [Param], tparams: 
 parse_decl* = (a: Ptr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
 
 StructEnd*: { sd: StructDecl, tparams: [Param], ntp: i32, next: i32, defaults: [Func] }
-no_tparams = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
+no_tparams = (a: Ptr<Malloc>) [Param] { slice(null_ptr(), 0) }
 skip_name_star = (src: str, pos: i32) i32 {
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
@@ -68,11 +68,12 @@ fill_tparams = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
         })
     })
 }
-field_buf = (a: Ptr<Malloc>) [Field] { slice(malloc(1024 * sizeof(Field)), 1024) }
+field_buf = (a: Ptr<Malloc>) [Field] { slice(a.acquire(1024 * sizeof(Field)), 1024) }
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
-dfn_buf = (a: Ptr<Malloc>) [Func] { slice(malloc(256 * sizeof(Func)), 256) }
+dfn_buf = (a: Ptr<Malloc>) [Func] { slice(a.acquire(256 * sizeof(Func)), 256) }
 take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
-// `m = (...) Ret {}` inside a trait is a default method, not a field type.
+// `m = (...) Ret {}` inside a pure method record is a trait default; inside a data record
+// it is an inherent method attached to the struct.
 is_eq_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '='), _ => false }) }
 FieldsEnd*: { count: i32, ndef: i32, next: i32 }
 fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
@@ -85,7 +86,7 @@ fill_fields = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [
 // Default methods store both the FnT requirement and the reusable body.
 fill_field_default = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32, nm: str) FieldsEnd {
     de := a.parse_decl_at(src, pos)
-    buf[i]  = field(nm, fnt_from_func(de.func))
+    buf[i]  = field(nm, a.fnt_from_func_in(de.func))
     dbuf[dn] = de.func
     after := src.scan(de.next)
     nxt := src.is_comma(after.tok).match ({ true => after.next, false => de.next })
@@ -105,7 +106,10 @@ fill_field = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [F
             after := src.scan(te.next)
             src.is_comma(after.tok).match ({
                 true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
-                false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )
+                false => is_ident_tok(after.tok).match ({
+                    true  => a.fill_fields(src, te.next, buf, i + 1, dbuf, dn),
+                    false => FieldsEnd( count: i + 1, ndef: dn, next: after.next )
+                })
             })
         }
     })
@@ -122,11 +126,34 @@ parse_struct_at = (a: Ptr<Malloc>, src: str, pos: i32) StructEnd {
 }
 parse_struct* = (a: Ptr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
+field_is_method = (f: Field) bool { f.ty.match ({ .FnT(fd) => true, _ => false }) }
+has_data_field = (fields: [Field]) bool {
+    found := false
+    fields.loop((h, i, f) { found = f.field_is_method().match ({ true => found, false => true }) })
+    found
+}
+data_field_count = (fields: [Field]) i32 {
+    n := 0
+    fields.loop((h, i, f) { f.field_is_method().match ({ true => {}, false => { n = n + 1 } }) })
+    n
+}
+data_fields = (a: Ptr<Malloc>, fields: [Field]) [Field] {
+    buf := a.field_buf()
+    j := 0
+    fields.loop((h, i, f) {
+        f.field_is_method().match ({
+            true  => {},
+            false => { buf[j] = f  j = j + 1 }
+        })
+    })
+    buf.take_fields(fields.data_field_count())
+}
+
 // Enum variants end at the first token that is not `|`.
 EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }
 VPay*:    { ty: Ty, next: i32 }
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false }) }
-variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(malloc(1024 * sizeof(VariantDef)), 1024) }
+variant_buf = (a: Ptr<Malloc>) [VariantDef] { slice(a.acquire(1024 * sizeof(VariantDef)), 1024) }
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
 variant_payload = (a: Ptr<Malloc>, src: str, pos: i32) VPay {
     te := a.parse_ty(src, pos)
@@ -196,7 +223,7 @@ is_walrus = (src: str, t: Token) bool {
 }
 decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).tok) }
 
-decl_buf = (a: Ptr<Malloc>) [Decl] { slice(malloc(16384 * sizeof(Decl)), 16384) }
+decl_buf = (a: Ptr<Malloc>) [Decl] { slice(a.acquire(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // Imports carry no code, but their names become DImport records for the checker.
 decl_is_import = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
@@ -205,7 +232,7 @@ skip_path = (src: str, pos: i32) i32 {
     dot := src.scan(id.next)
     src.is_dot(dot.tok).match ({ true => src.skip_path(dot.next), false => id.next })
 }
-import_buf = (a: Ptr<Malloc>) [Param] { slice(malloc(256 * sizeof(Param)), 256) }
+import_buf = (a: Ptr<Malloc>) [Param] { slice(a.acquire(256 * sizeof(Param)), 256) }
 ImportEnd*: { count: i32, next: i32 }
 record_name = (a: Ptr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportEnd {
     // Guard the import-name buffer.
@@ -305,7 +332,7 @@ fill_impl_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: 
     // Impl methods fill both decl and method-name buffers.
     ((i >= buf.len - 1) || (m >= mbuf.len)).match ({ true => { perr_set()  return ImplEnd( decls: i, methods: m, next: pos ) }, false => {} })
     de := a.parse_decl_at(src, pos)
-    cn := impl_cname(trname, tyname, de.func.name)
+    cn := a.impl_cname_in(trname, tyname, de.func.name)
     buf[i]  = dfunc(Func( name: cn, params: de.func.params, ret: de.func.ret, tparams: de.func.tparams, body: de.func.body ))
     mbuf[m] = param(de.func.name, tvoid())
     a.fill_impl_methods(src, de.next, buf, i + 1, mbuf, m + 1, tyname, trname)
@@ -329,13 +356,40 @@ fill_defaults = (a: Ptr<Malloc>, trname: str, defaults: [Func], buf: [Decl], i: 
         false => { buf[i] = dtraitdef(trname, defaults[j])  a.fill_defaults(trname, defaults, buf, i + 1, j + 1) }
     })
 }
+fill_inherent_methods = (a: Ptr<Malloc>, tyname: str, methods: [Func], buf: [Decl], i: i32, mbuf: [Param], j: i32) i32 {
+    (j == methods.len).match ({
+        true  => i,
+        false => {
+            f := methods[j]
+            buf[i] = dfunc(Func( name: a.impl_cname_in(tyname, tyname, f.name), params: f.params, ret: f.ret, tparams: f.tparams, body: f.body ))
+            mbuf[j] = param(f.name, tvoid())
+            a.fill_inherent_methods(tyname, methods, buf, i + 1, mbuf, j + 1)
+        }
+    })
+}
+fill_inherent_struct = (a: Ptr<Malloc>, se: StructEnd, buf: [Decl], i: i32) i32 {
+    mbuf := a.param_buf()
+    buf[i] = (se.ntp > 0).match ({
+        true  => dgenstruct(gsdef(se.sd.name, se.tparams, a.data_fields(se.sd.fields))),
+        false => dstruct(sdef(se.sd.name, a.data_fields(se.sd.fields)))
+    })
+    next := a.fill_inherent_methods(se.sd.name, se.defaults, buf, i + 1, mbuf, 0)
+    buf[next] = dimpl(se.sd.name, se.sd.name, mbuf.take_params(se.defaults.len))
+    next + 1
+}
 fill_struct = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
-    buf[i] = (se.ntp > 0).match ({
-        true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
-        false => dstruct(se.sd)
+    inherent := (se.defaults.len > 0) && se.sd.fields.has_data_field()
+    ni := inherent.match ({
+        true  => a.fill_inherent_struct(se, buf, i),
+        false => {
+            buf[i] = (se.ntp > 0).match ({
+                true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
+                false => dstruct(se.sd)
+            })
+            a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
+        }
     })
-    ni := a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
     a.fill_decls(src, se.next, buf, ni)
 }
 fill_import = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
@@ -403,7 +457,7 @@ named_span = (a: Ptr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
     })
 }
 // Parse impl methods into scratch buffers only to find the block end.
-impl_scratch = (a: Ptr<Malloc>) [Decl] { slice(malloc(1024 * sizeof(Decl)), 1024) }
+impl_scratch = (a: Ptr<Malloc>) [Decl] { slice(a.acquire(1024 * sizeof(Decl)), 1024) }
 impl_span_end = (a: Ptr<Malloc>, src: str, pos: i32) i32 {
     ie := a.fill_impl_methods(src, src.skip_to_brace(pos), a.impl_scratch(), 0, a.param_buf(), 0, "", "")
     src.scan(ie.next).next
@@ -420,7 +474,7 @@ import_span_end = (src: str, pos: i32) i32 {
 }
 
 parse* = (a: Ptr<Malloc>, src: str) Ptr<Expr> { a.parse_or(src, 0).expr }
-no_params = (a: Ptr<Malloc>) [Param] { slice(malloc(0), 0) }
+no_params = (a: Ptr<Malloc>) [Param] { slice(null_ptr(), 0) }
 parse_fn* = (a: Ptr<Malloc>, src: str, fname: str) Func {
     Func( name: fname, params: a.no_params(), ret: ti32(), tparams: a.no_params(), body: a.build_body(src, 0) )
 }

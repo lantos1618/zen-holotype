@@ -1,19 +1,19 @@
 // @self-hosted-only: cooperative round-robin scheduler over stackful coroutines.
-{ Allocator, system_allocator } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { Coro, resume } = std.concurrent.coroutine
 
-flag_slot = (flags: RawPtr<u8>, i: i32) RawPtr<u8> { flags.offset(i * 8) }
-mark_alive = (flags: RawPtr<u8>, i: i32) void { flags.flag_slot(i).store_i64(1) }
-is_alive = (flags: RawPtr<u8>, i: i32) bool { flags.flag_slot(i).load_i64() == 1 }
-set_alive = (flags: RawPtr<u8>, i: i32, alive: i32) void { flags.flag_slot(i).store_i64(alive) }
+flag_slot = (flags: RawPtr<u8>, i: i64) RawPtr<u8> { flags.offset(i * 8) }
+mark_alive = (flags: RawPtr<u8>, i: i64) void { flags.flag_slot(i).store_i64(1) }
+is_alive = (flags: RawPtr<u8>, i: i64) bool { flags.flag_slot(i).load_i64() == 1 }
+set_alive = (flags: RawPtr<u8>, i: i64, alive: i32) void { flags.flag_slot(i).store_i64(alive) }
 
-init_flags = (flags: RawPtr<u8>, i: i32, n: i32) void {
+init_flags = (flags: RawPtr<u8>, i: i64, n: i64) void {
     (i < n).match({
         true  => { flags.mark_alive(i)  flags.init_flags(i + 1, n) },
-        false => {}
+        _
     })
 }
-tick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 {
+tick = (coros: [Coro], flags: RawPtr<u8>, i: i64) i32 {
     flags.is_alive(i).match({
         true  => {
             alive := coros[i].resume()
@@ -23,16 +23,16 @@ tick = (coros: [Coro], flags: RawPtr<u8>, i: i32) i32 {
         false => 0
     })
 }
-pass = (coros: [Coro], flags: RawPtr<u8>, i: i32, n: i32) i32 {
+pass = (coros: [Coro], flags: RawPtr<u8>, i: i64, n: i64) i32 {
     (i < n).match({
         true  => coros.tick(flags, i) + coros.pass(flags, i + 1, n),
         false => 0
     })
 }
-drive = (coros: [Coro], flags: RawPtr<u8>, n: i32) void {
+drive = (coros: [Coro], flags: RawPtr<u8>, n: i64) void {
     (coros.pass(flags, 0, n) > 0).match({
         true  => coros.drive(flags, n),
-        false => {}
+        _
     })
 }
 run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
@@ -42,7 +42,6 @@ run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
     coros.drive(flags, n)
     alloc.release(flags)
 }
-run* = (coros: [Coro]) void {
-    alloc := system_allocator()
-    alloc.addr().run_in(coros)
+run*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
+    alloc.run_in(coros)
 }

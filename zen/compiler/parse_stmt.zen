@@ -7,7 +7,7 @@
 { Stmt, slet, slett, sassign, sidxset, swhile, sret, sexpr, vref, tvoid } = compiler.genc
 { Token, scan } = compiler.lex
 { byte_at } = std.text.bytes
-{ Malloc, malloc } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 { enode, lexeme, is_op, is_dot, is_field_colon, parse_atom, parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set } = compiler.parse_type
 
@@ -21,7 +21,7 @@ SCell*: { head: Stmt, tail: Ptr<SList> }
 // ctor fns — a leading-dot enum can't infer its type passed straight into a generic call
 snil_val  = () SList { .SNil() }
 scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell( head: h, tail: t )) }
-slbuf = (a: Ptr<Malloc>) [SList] { slice(malloc(sizeof(SList)), 1) }
+slbuf = (a: Ptr<Malloc>) [SList] { slice(a.acquire(sizeof(SList)), 1) }
 slnode = (a: Ptr<Malloc>, v: SList) Ptr<SList> {
     buf := a.slbuf()
     buf[0] = v
@@ -195,7 +195,7 @@ parse_return_stmt = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<SList> {
 // ── @while loops ─────────────────────────────────────────────────────────────────
 // `@while(cond) { stmts }` — a `@` Sym, the `while` Ident, a parenthesized condition,
 // then a brace block of statements (let / assign / nested-while; NO trailing return — a
-// loop body yields no value, unlike a function body). Lowers to genc's While. The block
+// loop body produces no value, unlike a function body). Lowers to genc's While. The block
 // reuses the SList cons-list (materialized into a heap [Stmt]), terminated by `}` rather
 // than by a final expression.
 is_at         = (src: str, t: Token) bool { src.is_op(t, '@') }
@@ -310,7 +310,7 @@ sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
 }
 
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
-stmt_buf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(malloc(n * sizeof(Stmt)), n) }
+stmt_buf = (a: Ptr<Malloc>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
 
 // materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
 materialize* = (a: Ptr<Malloc>, stmts: Ptr<SList>) [Stmt] {

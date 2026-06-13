@@ -1,6 +1,7 @@
 // @self-hosted-only: stackful coroutines over glibc x86-64 ucontext.
-// Public code should suspend through Runtime.suspend; yield is the raw primitive.
-{ Allocator, system_allocator } = std.mem.alloc
+// Public code should checkpoint through Runtime.checkpoint; this module is substrate.
+{ Allocator } = std.mem.alloc
+{ is_null } = std.core.ptr
 
 getcontext  = (ctx: RawPtr<u8>) i32
 makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void
@@ -17,44 +18,54 @@ cur  := null_ptr()
 back := null_ptr()
 flag := 0
 
-Coro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
+CoroState: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
+Coro*: { state: RawPtr<u8> }
+
+coro_state = (c: Coro) [CoroState] { c.state.slice(1) }
+init_context = (ctx: RawPtr<u8>, stack: RawPtr<u8>, link: RawPtr<u8>) void {
+    ctx.offset(UC_SS_SP_OFF).store_i64(stack)
+    ctx.offset(UC_SS_SIZE_OFF).store_i64(CORO_STACK)
+    ctx.offset(UC_LINK_OFF).store_i64(link)
+}
 
 spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
     stack := alloc.acquire(CORO_STACK)
     ctx := alloc.acquire(UC_CTX_SIZE)
     lnk := alloc.acquire(UC_CTX_SIZE)
+    state := alloc.acquire(sizeof(CoroState))
     getcontext(ctx)
-    ctx.offset(UC_SS_SP_OFF).store_i64(stack)        // uc_stack.ss_sp  = the new stack
-    ctx.offset(UC_SS_SIZE_OFF).store_i64(CORO_STACK) // uc_stack.ss_size
-    ctx.offset(UC_LINK_OFF).store_i64(lnk)           // uc_link -> the resumer's context
+    ctx.init_context(stack, lnk)
     makecontext(ctx, work, 0)
-    Coro( ctx: ctx, link: lnk, stack: stack )
+    slot: [CoroState] := state.slice(1)
+    slot[0] = CoroState(ctx: ctx, link: lnk, stack: stack)
+    Coro(state: state)
 }
-spawn* = (work: () void) Coro {
-    alloc := system_allocator()
-    alloc.addr().spawn_in(work)
+spawn*<A> = (alloc: MutPtr<A>, work: () void) Coro {
+    alloc.spawn_in(work)
 }
 destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
-    alloc.release(c.stack)
-    alloc.release(c.ctx)
-    alloc.release(c.link)
+    state := c.coro_state()
+    cur_state := state[0]
+    alloc.release(cur_state.stack)
+    alloc.release(cur_state.ctx)
+    alloc.release(cur_state.link)
+    alloc.release(c.state)
 }
-destroy* = (c: Coro) void {
-    alloc := system_allocator()
-    alloc.addr().destroy_in(c)
+destroy*<A> = (alloc: MutPtr<A>, c: Coro) void {
+    alloc.destroy_in(c)
 }
 resume* = (c: Coro) i32 {
-    cur = c.ctx
-    back = c.link
+    cur_state := c.coro_state()[0]
+    cur = cur_state.ctx
+    back = cur_state.link
     flag = 0
-    swapcontext(c.link, c.ctx)
+    swapcontext(cur_state.link, cur_state.ctx)
     cur = null_ptr()
     flag
 }
-yield* = () void {
+checkpoint_current* = () void {
     is_null(cur).match ({
-        true  => {},
-        false => { flag = 1  swapcontext(cur, back) }
+        false => { flag = 1  swapcontext(cur, back) },
+        _
     })
 }
-is_null = (p: RawPtr<u8>) bool { p == null_ptr() }

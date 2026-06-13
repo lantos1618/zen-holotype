@@ -184,7 +184,7 @@ def test_genjs_emits_function_and_no_typedef():
 
 
 def test_genjs_division_truncates():
-    # integer division must emit Math.trunc — JS `/` alone would yield a float.
+    # integer division must emit Math.trunc — JS `/` alone would produce a float.
     assert "Math.trunc(" in emit_js(DIV)
 
 

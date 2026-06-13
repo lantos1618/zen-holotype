@@ -1,14 +1,14 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, flit, vref, vref_at, bin, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, flit, vref, vref_at, bin, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { byte_at, is_digit } = std.text.bytes
-{ Malloc, malloc } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 { is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
 
-ebuf = (a: Ptr<Malloc>) [Expr] { slice(malloc(sizeof(Expr)), 1) }
+ebuf = (a: Ptr<Malloc>) [Expr] { slice(a.acquire(sizeof(Expr)), 1) }
 enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.ebuf()
     buf[0] = v
@@ -34,7 +34,7 @@ is_c_kw = (src: str, t: Token) bool {
 lexeme* = (a: Ptr<Malloc>, src: str, t: Token) str {
     src.is_c_kw(t).match ({
         true  => {
-            p := malloc(t.len + 4)
+            p := a.acquire(t.len + 4)
             src.copy_span(t.start, p, t.len)
             store(offset(p, t.len), '_')
             store(offset(p, t.len + 1), 'z')
@@ -43,7 +43,7 @@ lexeme* = (a: Ptr<Malloc>, src: str, t: Token) str {
             cstr(p)
         },
         false => {
-            p := malloc(t.len + 1)
+            p := a.acquire(t.len + 1)
             src.copy_span(t.start, p, t.len)
             store(offset(p, t.len), 0)
             cstr(p)
@@ -105,7 +105,7 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
 }
 // Unterminated string tokens run to end-of-file.
 str_open = (src: str, t: Token) bool { (t.len < 2) || (src.byte_at(t.start + t.len - 1) != '"') }
-// Bad atom: flag, consume one token for progress, and yield a placeholder.
+// Bad atom: flag, consume one token for progress, and produce a placeholder.
 parse_garbage = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     perr_set()
     PExpr( expr: a.enode(lit(0)), next: sc.next )
@@ -139,7 +139,7 @@ char_val = (src: str, start: i32) i32 {
 }
 // String literal value: copy content and resolve escapes.
 str_val = (a: Ptr<Malloc>, src: str, t: Token) str {
-    p := malloc(t.len)
+    p := a.acquire(t.len)
     n := src.unescape(t.start + 1, t.start + t.len - 1, p, 0)
     store(offset(p, n), 0)
     cstr(p)
@@ -357,7 +357,7 @@ parse_match_arms = (a: Ptr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr {
 is_bool_label = (src: str, t: Token) bool { src.tok_eq(t, "true") || src.tok_eq(t, "false") }
 is_wild_label = (src: str, t: Token) bool { src.tok_eq(t, "_") }
 // Bad/non-exhaustive match forms become an unknown sentinel call for validation to reject.
-no_args = (a: Ptr<Malloc>) [Expr] { slice(malloc(0), 0) }
+no_args = (a: Ptr<Malloc>) [Expr] { slice(null_ptr(), 0) }
 reject_match = (a: Ptr<Malloc>, next: i32) PExpr {
     PExpr( expr: a.enode(call("__nonexhaustive_match", a.no_args())), next: next )
 }
@@ -471,7 +471,7 @@ parse_lit_arm_val = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd 
 subj_name = (e: Ptr<Expr>) str { load(e).match ({ .Var(v) => v.name, _ => "" }) }
 // Variant match arms; compiler.check fills the enum name.
 BindEnd*: { bind: str, next: i32 }
-arm_buf = (a: Ptr<Malloc>) [ArmData] { slice(malloc(1024 * sizeof(ArmData)), 1024) }
+arm_buf = (a: Ptr<Malloc>) [ArmData] { slice(a.acquire(1024 * sizeof(ArmData)), 1024) }
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
 arm_bind = (a: Ptr<Malloc>, src: str, pos: i32) BindEnd {
     bt := src.scan(pos)
@@ -510,7 +510,7 @@ fill_varm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
 is_fat_arrow = (src: str, t: Token) bool {
     t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '=') && (src.byte_at(t.start + 1) == '>'), _ => false })
 }
-no_arm_stmts = (a: Ptr<Malloc>) [Stmt] { slice(malloc(0), 0) }
+no_arm_stmts = (a: Ptr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 // Wildcard arm or terminal bare `_`; non-wild labels here are parse errors.
 fill_wild = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     us := src.scan(pos)
@@ -590,10 +590,10 @@ parse_generic_struct_lit = (a: Ptr<Malloc>, src: str, name: str, pos: i32) PExpr
     open := src.scan(ta.next)
     buf  := a.finit_buf()
     fe   := a.fill_pinits(src, open.next, buf, 0)
-    PExpr( expr: a.enode(mkstructg(name, mangle_str(name, ta.args), ta.args, buf.take_inits(fe.count))), next: fe.next )
+    PExpr( expr: a.enode(mkstructg(name, a.mangle_str_in(name, ta.args), ta.args, buf.take_inits(fe.count))), next: fe.next )
 }
 // Paren struct construction: `Name(field: value, ...)`.
-finit_buf = (a: Ptr<Malloc>) [FieldInit] { slice(malloc(1024 * sizeof(FieldInit)), 1024) }
+finit_buf = (a: Ptr<Malloc>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }
 take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }
 parse_paren_struct_lit = (a: Ptr<Malloc>, src: str, name: str, open: Scan) PExpr {
     buf := a.finit_buf()
@@ -619,8 +619,8 @@ fill_pinit = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd
     })
 }
 // Argument and slice-literal buffers; slice literals need more room for data tables.
-arg_buf = (a: Ptr<Malloc>) [Expr] { slice(malloc(256 * sizeof(Expr)), 256) }
-slit_buf = (a: Ptr<Malloc>) [Expr] { slice(malloc(2048 * sizeof(Expr)), 2048) }
+arg_buf = (a: Ptr<Malloc>) [Expr] { slice(a.acquire(256 * sizeof(Expr)), 256) }
+slit_buf = (a: Ptr<Malloc>) [Expr] { slice(a.acquire(2048 * sizeof(Expr)), 2048) }
 take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }
 parse_call = (a: Ptr<Malloc>, src: str, name: str, lp: Scan, at: i32) PExpr {
     buf := a.arg_buf()

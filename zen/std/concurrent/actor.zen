@@ -3,22 +3,22 @@
 //
 // std.concurrent.actor — typed actor handles over the coroutine substrate.
 //
-// User code defines a message enum and a receiver, then sends typed messages through ActorRef<M>.
-// The queue, Context<M>, drain loop, and colorless suspend live here instead of in examples.
-// Allocation is still caller-owned: actor_system takes an allocator from program setup.
+// User code defines a message enum and a receiver, then tells typed messages through ActorRef<M>.
+// The queue, Context<M>, ReplyRef<T>, drain loop, and colorless checkpoint live here instead of in examples.
+// Allocation is caller-owned: actor_system and reply refs take an allocator from program setup.
 // The `seed` passed to actor_system is only a type witness until Zen has explicit generic call args /
 // return-type generic inference.
-{ Allocator, system_allocator } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { Runtime } = std.concurrent.runtime
 
+ACTOR_STATE_SIZE := 32  // RawPtr<u8> buf + head/tail/cap i64 slots.
 Mailbox*: { buf: RawPtr<u8>, head: i64, tail: i64, cap: i64 }    // ring of `cap` i64 slots
 
 mailbox_in*<A> = (alloc: MutPtr<A>, cap: i64) Mailbox {
     Mailbox(buf: alloc.acquire(cap * 8), head: 0, tail: 0, cap: cap)
 }
-mailbox* = (cap: i64) Mailbox {
-    alloc := system_allocator()
-    alloc.addr().mailbox_in(cap)
+mailbox*<A> = (alloc: MutPtr<A>, cap: i64) Mailbox {
+    alloc.mailbox_in(cap)
 }
 
 // send/recv mutate the cursors (so they take MutPtr); the SLOT index wraps at cap (`% cap`) so the
@@ -26,7 +26,7 @@ mailbox* = (cap: i64) Mailbox {
 // A bounded queue: a send to a FULL ring is REFUSED (returns false) rather than silently overwriting
 // the oldest unconsumed message — the caller's `.match` on the result is the back-pressure point.
 mailbox_send* = (m: MutPtr<Mailbox>, v: i64) bool {
-    (m.tail - m.head >= m.cap).match ({ true => { return false }, false => {} })
+    (m.tail - m.head >= m.cap).match ({ true => { return false }, _ })
     m.buf.offset((m.tail % m.cap) * 8).store_i64(v)
     m.tail = m.tail + 1
     true
@@ -40,9 +40,8 @@ mailbox_free_in*<A> = (alloc: MutPtr<A>, m: MutPtr<Mailbox>) void {
     m.tail = 0
     m.cap = 0
 }
-mailbox_free* = (m: MutPtr<Mailbox>) void {
-    alloc := system_allocator()
-    alloc.addr().mailbox_free_in(m)
+mailbox_free*<A> = (alloc: MutPtr<A>, m: MutPtr<Mailbox>) void {
+    alloc.mailbox_free_in(m)
 }
 
 mailbox_recv* = (m: MutPtr<Mailbox>) i64 {
@@ -53,79 +52,133 @@ mailbox_recv* = (m: MutPtr<Mailbox>) i64 {
 
 mailbox_pending* = (m: Ptr<Mailbox>) i64 { m.tail - m.head }
 
-Context*<M>: { message: M }
-// ActorSystem's three blocks come from the caller's allocator. Runtime remains only the suspension
-// policy; allocation stays explicit at program setup.
-ActorSystem*<M>: { buf: RawPtr<u8>, headp: RawPtr<u8>, tailp: RawPtr<u8>, cap: i64 }
-ActorRef*<M>: { buf: RawPtr<u8>, headp: RawPtr<u8>, tailp: RawPtr<u8>, cap: i64 }
+Context*<M>: { msg: M }
+Receiver*<M>: {
+    receive: (MutPtr<Self>, Context<M>) void
+}
 
-context*<M> = (message: M) Context<M> { Context<M>(message: message) }
+// ActorSystem owns one allocator-backed state block plus one allocator-backed message buffer.
+// ActorRef shares the state; it never allocates or frees.
+ActorState*<M>: { buf: RawPtr<u8>, head: i64, tail: i64, cap: i64 }
+ActorSystem*<M>: { state: RawPtr<u8> }
+ActorRef*<M>: { state: RawPtr<u8> }
+ReplyRef*<T>: { value: RawPtr<u8>, ready: RawPtr<u8> }
 
-actor_system*<M, A> = (alloc: MutPtr<A>, seed: M, cap: i64) ActorSystem<M> {
-    hp := alloc.acquire(8)
-    tp := alloc.acquire(8)
-    hp.store_i64(0)
-    tp.store_i64(0)
-    ActorSystem<M>(buf: alloc.acquire(cap * sizeof(M)), headp: hp, tailp: tp, cap: cap)
+context*<M> = (msg: M) Context<M> { Context<M>(msg: msg) }
+
+reply_values<T> = (reply: ReplyRef<T>) [T] { reply.value.slice(1) }
+reply_with*<A, T> = (alloc: MutPtr<A>, seed: T) ReplyRef<T> {
+    value := alloc.acquire(sizeof(T))
+    ready := alloc.acquire(8)
+    ready.store_i64(0)
+    vals := value.slice(1)
+    vals[0] = seed
+    ReplyRef<T>(value: value, ready: ready)
+}
+reply_ref*<A> = (alloc: MutPtr<A>) ReplyRef<i32> {
+    value := alloc.acquire(4)
+    ready := alloc.acquire(8)
+    ready.store_i64(0)
+    vals := value.slice(1)
+    vals[0] = 0
+    ReplyRef<i32>(value: value, ready: ready)
+}
+reply_send*<T> = (reply: ReplyRef<T>, value: T) bool {
+    vals := reply.reply_values()
+    vals[0] = value
+    reply.ready.store_i64(1)
+    true
+}
+send* = (reply: ReplyRef<i32>, value: i32) bool {
+    vals := reply.reply_values()
+    vals[0] = value
+    reply.ready.store_i64(1)
+    true
+}
+await*<A, T> = (alloc: MutPtr<A>, reply: ReplyRef<T>) T {
+    vals := reply.reply_values()
+    value := vals[0]
+    alloc.release(reply.value)
+    alloc.release(reply.ready)
+    value
+}
+ready*<T> = (reply: ReplyRef<T>) bool { reply.ready.load_i64() == 1 }
+
+actor_state<M> = (sys: ActorSystem<M>) [ActorState<M>] { sys.state.slice(1) }
+ref_state<M> = (ref: ActorRef<M>) [ActorState<M>] { ref.state.slice(1) }
+
+actor_system*<A, M> = (alloc: MutPtr<A>, seed: M, cap: i64) ActorSystem<M> {
+    state := alloc.acquire(ACTOR_STATE_SIZE)
+    messages := alloc.acquire(cap * sizeof(M))
+    slot := state.slice(1)
+    slot[0] = ActorState<M>(buf: messages, head: 0, tail: 0, cap: cap)
+    ActorSystem<M>(state: state)
 }
 
 actor_ref*<M> = (sys: ActorSystem<M>) ActorRef<M> {
-    ActorRef<M>(buf: sys.buf, headp: sys.headp, tailp: sys.tailp, cap: sys.cap)
+    ActorRef<M>(state: sys.state)
 }
 
-// hand the system's three blocks back to the allocator used by actor_system. Refs into the system are
-// dead after this.
-actor_system_free*<M, A> = (alloc: MutPtr<A>, sys: ActorSystem<M>) void {
-    alloc.release(sys.buf)
-    alloc.release(sys.headp)
-    alloc.release(sys.tailp)
+// Refs into the system are dead after this.
+actor_system_free*<A, M> = (alloc: MutPtr<A>, sys: ActorSystem<M>) void {
+    state := sys.actor_state()
+    alloc.release(state[0].buf)
+    alloc.release(sys.state)
 }
 
-sys_messages<M> = (sys: ActorSystem<M>) [M] { sys.buf.slice(sys.cap) }
-ref_messages<M> = (ref: ActorRef<M>) [M] { ref.buf.slice(ref.cap) }
+sys_messages<M> = (sys: ActorSystem<M>) [M] {
+    state := sys.actor_state()
+    state[0].buf.slice(state[0].cap)
+}
 
-// send: REFUSED (false) when the ring is full — pending == cap — instead of silently overwriting
+// tell: REFUSED (false) when the ring is full — pending == cap — instead of silently overwriting
 // the oldest unconsumed message; the caller's `.match` on the result is the back-pressure point.
 // Inliner-safe shape: NO early return (a generic body's `return` hoists into the CALLER's frame —
 // see std.collections.map's note), and the value is a TRAILING PLAIN EXPRESSION, not a value-position match
-// (a stmt-lowered if inside the inlined statement-expression would yield void).
-send*<M> = (ref: ActorRef<M>, message: M) bool {
-    tail := ref.tailp.load_i64()
+// (a stmt-lowered if inside the inlined statement-expression would produce void).
+tell*<M> = (ref: ActorRef<M>, message: M) bool {
+    state := ref.ref_state()
+    cur := state[0]
+    tail := cur.tail
     sent := false
-    (tail - ref.headp.load_i64() >= ref.cap).match ({
-        true  => {},
+    (tail - cur.head >= cur.cap).match ({
         false => {
-            ms := ref.ref_messages()
-            ms[tail % ref.cap] = message
-            ref.tailp.store_i64(tail + 1)
+            ms: [M] := cur.buf.slice(cur.cap)
+            ms[tail % cur.cap] = message
+            state[0] = ActorState<M>(buf: cur.buf, head: cur.head, tail: tail + 1, cap: cur.cap)
             sent = true
         },
+        _
     })
     sent
 }
 
-has_messages*<M> = (sys: ActorSystem<M>) bool { sys.headp.load_i64() < sys.tailp.load_i64() }
+has_messages*<M> = (sys: ActorSystem<M>) bool {
+    state := sys.actor_state()
+    state[0].head < state[0].tail
+}
 
 next_message*<M> = (sys: ActorSystem<M>) M {
+    state := sys.actor_state()
+    cur := state[0]
     ms := sys.sys_messages()
-    head := sys.headp.load_i64()
-    message := ms[head % sys.cap]
-    sys.headp.store_i64(head + 1)
+    head := cur.head
+    message := ms[head % cur.cap]
+    state[0] = ActorState<M>(buf: cur.buf, head: head + 1, tail: cur.tail, cap: cur.cap)
     message
 }
 
 run_actor*<A, M, RuntimeT> = (
     runtime: MutPtr<RuntimeT>,
     actor: MutPtr<A>,
-    sys: ActorSystem<M>,
-    receive: (MutPtr<A>, Context<M>) void
+    sys: ActorSystem<M>
 ) void {
     sys.sys_messages().loop((h, i, slot) {
         sys.has_messages().match({
             true => {
                 message: M := sys.next_message()
-                receive(actor, Context<M>(message: message))
-                runtime.suspend()
+                actor.receive(Context<M>(msg: message))
+                runtime.checkpoint()
             },
             false => { h.break }
         })

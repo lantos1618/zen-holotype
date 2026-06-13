@@ -1,7 +1,7 @@
 // @self-hosted-only
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 
-{ byte_at } = std.text.bytes
+{ byte_at, is_alpha, is_alnum } = std.text.bytes
 { decl_span } = compiler.parse
 // Parser APIs still take Ptr<Malloc>; Malloc also implements Allocator for resolver-owned buffers.
 { Malloc } = std.mem.alloc
@@ -50,7 +50,7 @@ is_compiler_marker_at = (s: str, p: i32) bool { s.resolve_span_eq(p, "= compiler
 is_marker_at = (s: str, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
 
 is_user_marker_at = (s: str, p: i32) bool {
-    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && s.byte_at(p + 2).is_ident_start()
+    (s.byte_at(p) == '=') && (s.byte_at(p + 1) == ' ') && s.byte_at(p + 2).is_alpha()
         && (s.byte_at(s.res_ident_end(p + 2)) != '.')
 }
 is_any_marker_at = (s: str, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
@@ -125,16 +125,13 @@ module_name_pos = (s: str, p: i32) i32 {
         })
     })
 }
-is_ident_byte = (b: u8) bool {
-    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || ((b >= '0') && (b <= '9')) || (b == '_')
-}
 take_name = (out: String, s: str, p: i32) String {
-    s.byte_at(p).is_ident_byte().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
+    s.byte_at(p).is_alnum().match ({ true => out.push(s.byte_at(p)).take_name(s, p + 1), false => out })
 }
 import_module* = (out: String, s: str, p: i32) String { out.take_module_path(s, s.module_name_pos(p)) }
 
 take_module_path = (out: String, s: str, p: i32) String {
-    s.byte_at(p).is_ident_byte().match ({
+    s.byte_at(p).is_alnum().match ({
         true  => out.push(s.byte_at(p)).take_module_path(s, p + 1),
         false => (s.byte_at(p) == '.').match ({
             true  => out.push('/').take_module_path(s, p + 1),
@@ -330,7 +327,7 @@ head_names_into = (set: String, src: str, p: i32) String {
     b := src.byte_at(p)
     ((b == '}') || (b == 0)).match ({
         true  => set,
-        false => b.is_ident_start().match ({
+        false => b.is_alpha().match ({
             true  => {
                 ie := src.res_ident_end(p)
                 set.add_name(import_name_span(with_cap(16), src, p, ie)).head_names_into(src, ie)
@@ -360,7 +357,7 @@ check_head = (src: str, p: i32, provided: String, id: String, inpath: str) i32 {
     b := src.byte_at(p)
     ((b == '}') || (b == 0)).match ({
         true  => 0,
-        false => b.is_ident_start().match ({
+        false => b.is_alpha().match ({
             true  => {
                 ie := src.res_ident_end(p)
                 nm := import_name_span(with_cap(16), src, p, ie)
@@ -407,7 +404,7 @@ fui_scan = (out: String, src: str, p: i32) String {
 // Per-name dedup keeps the first dependency decl; main decls stay for validation.
 
 res_ident_end = (flat: str, p: i32) i32 {
-    flat.byte_at(p).is_ident_byte().match ({ true => flat.res_ident_end(p + 1), false => p })
+    flat.byte_at(p).is_alnum().match ({ true => flat.res_ident_end(p + 1), false => p })
 }
 import_name_span = (out: String, flat: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.push(flat.byte_at(p)).import_name_span(flat, p + 1, e) })
@@ -444,7 +441,7 @@ dd = (a: Ptr<Malloc>, out: String, flat: str, p: i32, set: String, mainset: Stri
 // Namespace binds load `c = std.io.c` and rewrite `c.malloc` to `malloc`.
 is_ns_line* = (s: str, p: i32) bool {
     ls := s.lstrip(p)
-    s.byte_at(ls).is_ident_byte().match ({
+    s.byte_at(ls).is_alnum().match ({
         true  => s.is_marker_at(s.lstrip(s.res_ident_end(ls))),
         false => false
     })
@@ -472,12 +469,8 @@ collect_ns* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p
     })
 }
 
-is_ident_start = (b: u8) bool {
-    ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_')
-}
-
 is_qual_access = (s: str, p: i32, ie: i32, quals: String) bool {
-    ((s.byte_at(ie) == '.') && s.byte_at(ie + 1).is_ident_start()).match ({
+    ((s.byte_at(ie) == '.') && s.byte_at(ie + 1).is_alpha()).match ({
         true  => quals.seen(import_name_span(with_cap(16), s, p, ie)),
         false => false
     })
@@ -487,7 +480,7 @@ rewrite_quals = (out: String, s: str, p: i32, quals: String) String {
     b := s.byte_at(p)
     (b == 0).match ({
         true  => out,
-        false => (b.is_ident_start() && ((p == 0) || (!s.byte_at(p - 1).is_ident_byte()))).match ({
+        false => (b.is_alpha() && ((p == 0) || (!s.byte_at(p - 1).is_alnum()))).match ({
             true  => {
                 ie := s.res_ident_end(p)
                 s.is_qual_access(p, ie, quals).match ({
