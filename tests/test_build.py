@@ -14,6 +14,7 @@ from pathlib import Path
 import _oracle
 
 ROOT = _oracle.ROOT
+ZEN_FIXTURES = ROOT / "tests" / "fixtures" / "zen"
 
 
 def _zenc():
@@ -21,6 +22,10 @@ def _zenc():
     subprocess.run(["make", "-f", "bootstrap/Makefile", "zenc"], cwd=str(ROOT),
                    check=True, capture_output=True)
     return str(ROOT / "zenc")
+
+
+def _run_fixture(zenc, name):
+    return subprocess.run([zenc, "run", str(ZEN_FIXTURES / name)], capture_output=True, text=True)
 
 
 def test_zenc_build_emits_runnable_binary():
@@ -220,12 +225,7 @@ def test_zenc_check_resolves_std_import():
 def test_zenc_run_prints_text_and_ints():
     """Generic `println` from std.text.fmt writes text and primitive values."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        "{ println } = std.text.fmt\n"
-        "main = () i32 { b: bool := true  println(\"answer:\")  println(42)  println(b)  0 }\n"
-    )
-    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    r = _run_fixture(zenc, "print_text_and_ints.zen")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "answer:\n42\ntrue\n", repr(r.stdout)
 
@@ -233,21 +233,7 @@ def test_zenc_run_prints_text_and_ints():
 def test_zenc_run_prints_str_and_string():
     """std.text.fmt prints borrowed str and owned String without forcing String.finish()."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        "{ println, println_str, print_string, println_string } = std.text.fmt\n"
-        "{ new, append } = std.text.string\n"
-        "main = () i32 {\n"
-        "  println(\"borrowed\")\n"
-        "  println_str(\"alias\")\n"
-        "  s := new().append(\"owned\")\n"
-        "  print_string(s)\n"
-        "  println(\"!\")\n"
-        "  println_string(s)\n"
-        "  0\n"
-        "}\n"
-    )
-    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    r = _run_fixture(zenc, "print_str_and_string.zen")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "borrowed\nalias\nowned!\nowned\n", repr(r.stdout)
 
@@ -268,24 +254,7 @@ def test_zenc_run_int_to_str_negatives_and_zero():
 def test_zenc_run_core_slice_explicit_allocator():
     """std.core.slice exposes allocator-backed helpers; callers can place copied slices in an arena."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        "{ nbuf_in, dupx_in, node_in, concat_in } = std.core.slice\n"
-        "{ arena_new, arena_free } = std.mem.arena\n"
-        "main = () i32 {\n"
-        "  a := arena_new(1024)\n"
-        "  xs := a.addr().dupx_in([1, 2, 3])\n"
-        "  ys := a.addr().concat_in(xs, [4, 5])\n"
-        "  p := a.addr().node_in(9)\n"
-        "  zs := a.addr().nbuf_in(2, xs)\n"
-        "  zs[0] = load(p)\n"
-        "  zs[1] = ys[4]\n"
-        "  out := zs[0] + zs[1]\n"
-        "  a.addr().arena_free()\n"
-        "  out\n"
-        "}\n"
-    )
-    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 14
+    assert _run_fixture(zenc, "core_slice_explicit_allocator.zen").returncode == 14
 
 
 # ── U3: std.collections.vec — a growable Vec<T> with an EXPLICIT allocator (acquire/resize/release), no hidden malloc ─
@@ -355,26 +324,7 @@ def test_zenc_run_string_explicit_allocator_and_result():
     """String has the same allocator story as Vec: explicit MutPtr<A> variants, plus Result-returning
     allocation checks for code that wants errors as values instead of raw NULL."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        "{ default_allocator } = std.mem.alloc\n"
-        "{ new_in, append_in, free_in, try_with_cap, try_append } = std.text.string\n"
-        "main = () i32 {\n"
-        "  m := default_allocator()\n"
-        "  s := m.addr().new_in()\n"
-        "  s = m.addr().append_in(s, \"abc\")\n"
-        "  n := s.len\n"
-        "  m.addr().free_in(s)\n"
-        "  m.addr().try_with_cap(2).match({\n"
-        "    .Ok(t0) => m.addr().try_append(t0, \"hello\").match({\n"
-        "      .Ok(t)  => { tn := t.len  m.addr().free_in(t)  to_i32(n + tn) },\n"
-        "      .Err(e) => 90\n"
-        "    }),\n"
-        "    .Err(e) => 91\n"
-        "  })\n"
-        "}\n"
-    )
-    assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 8
+    assert _run_fixture(zenc, "string_explicit_allocator_result.zen").returncode == 8
 
 
 # ── CAPSTONE: a real program (examples/stats.zen) composing Vec + generics + enums + match + fmt ──────
@@ -647,32 +597,7 @@ def test_zenc_run_str_ops_edges():
     out-of-range (start and n, both directions), char_at is 0 past either end, parse_int handles
     '-'/garbage-tail/all-garbage/empty (documented: no leading digits → 0) and i64-sized values."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        '{ find, contains, substr, parse_int, starts_with, char_at, eq, len } = std.text.str\n'
-        '{ println_int } = std.text.fmt\n'
-        'bi = (b: bool) i64 { b.match ({ true => 1, false => 0 }) }\n'
-        'main = () i32 {\n'
-        '  println_int(find("hello world", "world"))   // 6: needle flush at the end\n'
-        '  println_int(find("hello world", "x"))       // -1: absent\n'
-        '  println_int(find("hello world", ""))        // 0: empty needle (strstr convention)\n'
-        '  println_int(find("aaab", "aab"))            // 1: overlapping-prefix scan\n'
-        '  println_int(bi(contains("hello", "ell")) + bi(starts_with("hello", "he")))   // 2\n'
-        '  println_int(bi(starts_with("he", "hello"))) // 0: prefix longer than s\n'
-        '  println_int(bi(eq(substr("hello world", 6, 5), "world")))   // 1\n'
-        '  println_int(bi(eq(substr("hi", 1, 99), "i")))   // 1: n clamped to the tail\n'
-        '  println_int(len(substr("hi", 5, 2)))            // 0: start past the end -> ""\n'
-        '  println_int(bi(eq(substr("hi", -3, 1), "h")))   // 1: negative start pinned to 0\n'
-        '  println_int(to_i64(char_at("abc", 2)) - \'c\')  // 0: last byte\n'
-        '  println_int(to_i64(char_at("abc", 3)) + to_i64(char_at("abc", -1)))   // 0: both ends\n'
-        '  println_int(parse_int("-7"))            // -7\n'
-        '  println_int(parse_int("12ab"))          // 12: stops at the first non-digit\n'
-        '  println_int(parse_int("zen") + parse_int("") + parse_int("-"))   // 0: no digits -> 0\n'
-        '  println_int(parse_int("123456789012"))  // i64-sized\n'
-        '  0\n'
-        '}\n'
-    )
-    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    r = _run_fixture(zenc, "str_ops_edges.zen")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "6\n-1\n0\n1\n2\n0\n1\n1\n0\n1\n0\n0\n-7\n12\n0\n123456789012\n", repr(r.stdout)
 
@@ -680,31 +605,7 @@ def test_zenc_run_str_ops_edges():
 def test_zenc_run_str_allocator_result_variants():
     """std.text.str owns allocation through std.mem.alloc, with Result-returning variants for fallible paths."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        '{ default_allocator } = std.mem.alloc\n'
-        '{ dup, dup_in, try_dup_in, substr_in, try_substr_in } = std.text.str\n'
-        '{ println_str, println_int } = std.text.fmt\n'
-        'main = () i32 {\n'
-        '  a := default_allocator()\n'
-        '  plain := dup("xy")\n'
-        '  println_int(to_i64(plain.len))\n'
-        '  owned := a.addr().dup_in("abc")\n'
-        '  println_int(to_i64(owned.len))\n'
-        '  println_int(to_i64(owned[0]))\n'
-        '  println_str(a.addr().substr_in("hello", 1, 3))\n'
-        '  a.addr().try_dup_in("").match ({\n'
-        '    .Ok(bytes) => println_int(to_i64(bytes.len)),\n'
-        '    .Err(e) => println_int(99)\n'
-        '  })\n'
-        '  a.addr().try_substr_in("world", 1, 2).match ({\n'
-        '    .Ok(s) => println_str(s),\n'
-        '    .Err(e) => println_str("err")\n'
-        '  })\n'
-        '  0\n'
-        '}\n'
-    )
-    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    r = _run_fixture(zenc, "str_allocator_result.zen")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "2\n3\n97\nell\n0\nor\n", repr(r.stdout)
 
@@ -746,34 +647,7 @@ def test_zenc_run_map_wordfreq():
     The counting idiom is also the regression guard for the by-name-arg use-after-free: the value arg
     `m.mget(w, 0) + 1` must be evaluated BEFORE mput's grow resizes the buffers (mappend force-binds)."""
     zenc = _zenc()
-    d = Path(tempfile.mkdtemp())
-    (d / "p.zen").write_text(
-        '{ map_new, mput, mget, mhas, mlen, free_map } = std.collections.map\n'
-        '{ println_int } = std.text.fmt\n'
-        'bump = (a: MutPtr<Malloc>, m: Map<i32>, w: str) Map<i32> { a.mput(m, w, m.mget(w, 0) + 1) }\n'
-        'main = () i32 {\n'
-        '    m := Malloc(_: 0)\n'
-        '    a := m.addr()\n'
-        '    w := a.map_new("the", 1)\n'                     # "the cat sat on the mat the cat"
-        '    w = a.bump(w, "cat")\n'
-        '    w = a.bump(w, "sat")\n'
-        '    w = a.bump(w, "on")\n'
-        '    w = a.bump(w, "the")\n'
-        '    w = a.bump(w, "mat")\n'
-        '    w = a.bump(w, "the")\n'
-        '    w = a.bump(w, "cat")\n'
-        '    println_int(w.mget("the", 0))\n'                # 3
-        '    println_int(w.mget("cat", 0))\n'                # 2
-        '    println_int(w.mget("sat", 0))\n'                # 1
-        '    println_int(w.mget("dog", -1))\n'               # -1: miss -> the default
-        '    println_int(w.mhas("mat").match ({ true => 1, false => 0 }))\n'   # 1
-        '    println_int(w.mhas("dog").match ({ true => 1, false => 0 }))\n'   # 0
-        '    println_int(w.mlen())\n'                        # 5 distinct words
-        '    a.free_map(w)\n'
-        '    0\n'
-        '}\n'
-    )
-    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    r = _run_fixture(zenc, "map_wordfreq.zen")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "3\n2\n1\n-1\n1\n0\n5\n", repr(r.stdout)
 
