@@ -1,13 +1,13 @@
 // @self-hosted-only
 // Minimal formatted stdout output for Display values.
-// Numeric formatting builds temporary String buffers and releases them after printing.
+// Default numeric printing streams bytes directly; allocator-backed helpers remain available
+// when callers need an owned temporary String or fallible allocation path.
 
-{ write_stdout_bytes } = std.io.file
-{ view } = std.text.str
-{ String, bytes } = std.text.string
-{ int_string, float_string } = std.text.num
-// Use raw release for temporary String buffers; `free` has multiple std providers in flattened builds.
-{ release } = std.mem.raw
+{ out_bytes } = std.io.file
+{ view, at } = std.text.str
+{ String } = std.text.string
+{ integer_in, float_in, try_integer_in, try_float_in, f64_special } = std.text.num
+{ Result, IoError } = std.core.result
 
 Display*: {
     fmt_print: (Self) i64,
@@ -15,16 +15,95 @@ Display*: {
 }
 
 // Print an owned temporary String and release its buffer.
-print_owned = (t: String) i64 {
-    w := write_stdout_bytes(t.bytes())
-    t.ptr.release()
+print_owned_in<A> = (a: MutPtr<A>, t: String) i64 {
+    w := out_bytes(t.bytes())
+    t.free_in(a)
     w
 }
-write_text = (s: str) i64 { write_stdout_bytes(s.view()) }
+write_text = (s: str) i64 { out_bytes(s.view()) }
 newline = () i64 { "\n".write_text() }
-write_string = (s: String) i64 { write_stdout_bytes(s.bytes()) }
-write_int = (n: i64) i64 { print_owned(int_string(n)) }
-write_float = (x: f64) i64 { print_owned(float_string(x)) }
+write_string = (s: String) i64 { out_bytes(s.bytes()) }
+fmt_i64_ok = (n: i64) Result<i64, IoError> { .Ok(n) }
+fmt_i64_err = (e: IoError) Result<i64, IoError> { .Err(e) }
+
+write_int_in*<A> = (a: MutPtr<A>, n: i64) i64 {
+    t := a.integer_in(n)
+    print_owned_in(a, t)
+}
+write_float_in*<A> = (a: MutPtr<A>, x: f64) i64 {
+    t := a.float_in(x)
+    print_owned_in(a, t)
+}
+try_write_int_in*<A> = (a: MutPtr<A>, n: i64) Result<i64, IoError> {
+    a.try_integer_in(n).match ({
+        .Ok(t)  => fmt_i64_ok(print_owned_in(a, t)),
+        .Err(e) => fmt_i64_err(e)
+    })
+}
+try_write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError> {
+    a.try_float_in(x).match ({
+        .Ok(t)  => fmt_i64_ok(print_owned_in(a, t)),
+        .Err(e) => fmt_i64_err(e)
+    })
+}
+
+write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)) }
+write_uint = (n: i64) i64 {
+    (n < 10).match ({
+        true  => write_digit(n),
+        false => write_uint(n / 10) + write_digit(n % 10)
+    })
+}
+write_neg_digits = (n: i64) i64 {
+    (n > 0 - 10).match ({
+        true  => write_digit(0 - n),
+        false => write_neg_digits(n / 10) + write_digit(0 - (n % 10))
+    })
+}
+write_int = (n: i64) i64 {
+    (n < 0).match ({
+        true  => "-".write_text() + write_neg_digits(n),
+        false => write_uint(n)
+    })
+}
+
+write_fpad = (n: i64, w: i64) i64 {
+    (w == 1).match ({
+        true  => write_digit(n % 10),
+        false => write_fpad(n / 10, w - 1) + write_digit(n % 10)
+    })
+}
+write_frac_digits = (n: i64, w: i64) i64 {
+    ((n % 10 == 0) && (w > 1)).match ({
+        true  => write_frac_digits(n / 10, w - 1),
+        false => write_fpad(n, w)
+    })
+}
+write_fparts = (ip: i64, scaled: i64) i64 {
+    whole := write_uint(ip)
+    scaled.match ({
+        0 => whole,
+        _ => whole + ".".write_text() + write_frac_digits(scaled, 6)
+    })
+}
+write_fabs_digits = (x: f64) i64 {
+    ip     := to_i64(x)
+    scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
+    (scaled >= 1000000).match ({
+        true  => write_fparts(ip + 1, 0),
+        false => write_fparts(ip, scaled)
+    })
+}
+write_float = (x: f64) i64 {
+    sp := x.f64_special()
+    (sp.at(0) != '\0').match ({
+        true  => sp.write_text(),
+        false => (x < 0.0).match ({
+            true  => "-".write_text() + write_fabs_digits(0.0 - x),
+            false => write_fabs_digits(x)
+        })
+    })
+}
 
 // Display is the current type-directed print surface; real overload sets can replace the typed aliases later.
 print*<T> = (x: T) i64 { x.fmt_print() }

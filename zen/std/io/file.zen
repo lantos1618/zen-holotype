@@ -2,7 +2,7 @@
 // File and process I/O for the Zen-side build driver.
 // Uses POSIX descriptors directly so the compiler std closure stays small.
 
-{ Allocator, default_allocator } = std.mem.alloc
+{ Allocator, try_acquire } = std.mem.alloc
 { view } = std.text.str
 { Result, IoError } = std.core.result
 
@@ -17,18 +17,18 @@ system = (cmd: str) i32
 
 STDOUT := 1
 
-// Writes a str without the trailing NUL and returns the byte count.
-write_stdout* = (s: str) i64 {
+// Writes a str to stdout without the trailing NUL and returns the byte count.
+out* = (s: str) i64 {
     v := s.view()
     STDOUT.write(v.ptr, v.len)
 }
 
-// Writes length-tracked bytes without requiring a trailing NUL.
-write_stdout_bytes* = (bytes: [u8]) i64 {
+// Writes length-tracked bytes to stdout without requiring a trailing NUL.
+out_bytes* = (bytes: [u8]) i64 {
     STDOUT.write(bytes.ptr, bytes.len)
 }
 
-// Linux x86-64 POSIX constants used by read_file/write_file.
+// Linux x86-64 POSIX constants used by contents/save.
 O_RDONLY := 0
 O_WRTRUNC := 577
 MODE_644 := 420
@@ -44,85 +44,93 @@ file_size = (fd: i32) i64 {
 
 // Reads [off, n), handling short reads.
 read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
-    (off >= n).match ({ true => { return n }, false => {} })
-    r := fd.read(buf.offset(off), n - off)
-    (r <= 0).match ({
-        true  => off,
-        false => fd.read_all(buf, off + r, n)
+    (off >= n).match ({
+        true  => n,
+        false => {
+            r := fd.read(buf.offset(off), n - off)
+            (r <= 0).match ({
+                true  => off,
+                false => fd.read_all(buf, off + r, n)
+            })
+        }
     })
 }
 
 ENOMEM := 12
 
 read_file_err = (e: IoError) Result<str, IoError> { .Err(e) }
+read_file_ok = (buf: RawPtr<u8>) Result<str, IoError> { .Ok(cstr(buf)) }
 write_file_err = (e: IoError) Result<i64, IoError> { .Err(e) }
+write_file_ok = (n: i64) Result<i64, IoError> { .Ok(n) }
 
-// Reads a whole file into an allocator-owned NUL-terminated buffer.
-read_file_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> {
-    fd := path.open(O_RDONLY, 0)
-    (fd < 0).match ({
-        true  => { return read_file_err(.NotFound) },
-        false => {}
-    })
-
-    n := fd.file_size()
-    (n < 0).match ({
-        true  => {
-            fd.close()
-            return read_file_err(.Errno(0 - 1))
-        },
-        false => {}
-    })
-
-    buf := a.acquire(n + 1)
-    (buf == null_ptr()).match ({
-        true  => {
-            fd.close()
-            return read_file_err(.Errno(ENOMEM))
-        },
-        false => {}
-    })
-
+read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<str, IoError> {
     got := fd.read_all(buf, 0, n)
     fd.close()
-    (got == n).match ({
-        true  => {},
+    out: Result<str, IoError> := (got == n).match ({
+        true => {
+            buf.offset(n).store(0)
+            read_file_ok(buf)
+        },
         false => {
             a.release(buf)
-            return read_file_err(.Eof)
+            read_file_err(.Eof)
         }
     })
-
-    buf.offset(n).store(0)
-    out: Result<str, IoError> := .Ok(cstr(buf))
     out
 }
 
-read_file* = (path: str) Result<str, IoError> {
-    a := default_allocator()
-    a.addr().read_file_in(path)
+read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<str, IoError> {
+    a.try_acquire(n + 1).match ({
+        .Ok(buf) => a.read_file_finish(fd, buf, n),
+        .Err(e) => {
+            fd.close()
+            read_file_err(.Errno(ENOMEM))
+        }
+    })
 }
 
+read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<str, IoError> {
+    n := fd.file_size()
+    out: Result<str, IoError> := (n < 0).match ({
+        true => {
+            fd.close()
+            read_file_err(.Errno(0 - 1))
+        },
+        false => a.read_file_alloc(fd, n)
+    })
+    out
+}
+
+// Reads a whole file into an allocator-owned NUL-terminated buffer.
+contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> {
+    fd := path.open(O_RDONLY, 0)
+    out: Result<str, IoError> := (fd < 0).match ({
+        true  => read_file_err(.NotFound),
+        false => a.read_file_open(fd)
+    })
+    out
+}
+
+contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> { a.contents_in(path) }
+
 // Writes a str's bytes to a file, creating/truncating it.
-write_file* = (path: str, data: str, n: i64) Result<i64, IoError> {
+save* = (path: str, data: str, n: i64) Result<i64, IoError> {
     fd := path.open(O_WRTRUNC, MODE_644)
-    (fd < 0).match ({
-        true  => { return write_file_err(.Denied) },
-        false => {}
+    out: Result<i64, IoError> := (fd < 0).match ({
+        true  => write_file_err(.Denied),
+        false => {
+            w := fd.write(data.view().ptr, n)
+            fd.close()
+            (w == n).match ({
+                true  => write_file_ok(w),
+                false => write_file_err(.Eof)
+            })
+        }
     })
-
-    w := fd.write(data.view().ptr, n)
-    fd.close()
-    (w == n).match ({
-        true  => {},
-        false => { return write_file_err(.Eof) }
-    })
-
-    out: Result<i64, IoError> := .Ok(w)
     out
 }
 
 // Runs a shell command and returns its exit status.
-run_cmd* = (cmd: str) i32 {
+shell* = (cmd: str) i32 {
     cmd.system()
 }

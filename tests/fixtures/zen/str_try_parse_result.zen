@@ -1,0 +1,44 @@
+{ to_exit } = std.core.bool
+{ Result } = std.core.result
+{ try_parse_int, ParseError } = std.text.str
+
+ok_val = (s: str, want: i64) bool {
+    r: Result<i64, ParseError> := s.try_parse_int()
+    r.match({
+        .Ok(n) => n == want,
+        .Err(e) => false
+    })
+}
+
+no_digits = (s: str) bool {
+    r: Result<i64, ParseError> := s.try_parse_int()
+    r.match({
+        .Err(e) => e.match({ .NoDigits => true, _ => false }),
+        .Ok(n) => false
+    })
+}
+
+trailing = (s: str, want: u8) bool {
+    r: Result<i64, ParseError> := s.try_parse_int()
+    r.match({
+        .Err(e) => e.match({ .Trailing(b) => b == want, _ => false }),
+        .Ok(n) => false
+    })
+}
+
+overflow = (s: str) bool {
+    r: Result<i64, ParseError> := s.try_parse_int()
+    r.match({
+        .Err(e) => e.match({ .Overflow => true, _ => false }),
+        .Ok(n) => false
+    })
+}
+
+main = () i32 {
+    ok_values := ok_val("0", 0) && ok_val("-7", 0 - 7) && ok_val("9223372036854775807", 9223372036854775807)
+    empty_values := no_digits("") && no_digits("-") && no_digits("zen")
+    bad_values := trailing("12ab", 'a')
+    big_values := overflow("9223372036854775808") && overflow("-9223372036854775808")
+
+    (ok_values && empty_values && bad_values && big_values).to_exit()
+}

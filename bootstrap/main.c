@@ -3,13 +3,50 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 zslice parse_module(Malloc* a, const char* src);
 zslice resolve_module(Malloc* a, zslice decls);
 String genModule(zslice decls);
 String genModuleIn(Malloc* a, zslice decls);
+uint8_t* acquire(Malloc* a, int64_t n);
+uint8_t* resize(Malloc* a, uint8_t* p, int64_t n);
 int32_t check_module(Malloc* a, zslice decls);       /* U1.2: error count over resolved decls */
 int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, U1.4: packed kind + pos*16 (0 = ok) */
+int32_t check_module_ownership(Malloc* a, zslice decls);
+int32_t check_module_ownership_kind(Malloc* a, zslice decls);
+typedef struct CheckDiagnostic {
+    int32_t code;
+    const char* kind;
+    int32_t source_offset;
+    int32_t span_width;
+    int32_t count;
+    const char* message;
+    const char* hint;
+} CheckDiagnostic;
+CheckDiagnostic check_module_diagnostic(Malloc* a, zslice decls);
+CheckDiagnostic check_module_ownership_diagnostic(Malloc* a, zslice decls);
+CheckDiagnostic check_module_diagnostic_from_source(Malloc* a, zslice decls, const char* src);
+CheckDiagnostic check_module_ownership_diagnostic_from_source(Malloc* a, zslice decls, const char* src);
+typedef struct ModuleGraph {
+    zslice imports;
+    zslice symbols;
+} ModuleGraph;
+typedef struct ModuleEntry {
+    const char* id;
+    const char* path;
+    const char* source;
+    ModuleGraph graph;
+} ModuleEntry;
+typedef struct ModuleTable {
+    zslice modules;
+} ModuleTable;
+typedef struct ResolvedProgram {
+    ModuleTable table;
+    const char* flat;
+    int64_t body_start;
+    int64_t body_end;
+} ResolvedProgram;
 /* U1.3: the Zen module loader (zen/std/internal/resolve.zen, now a SOURCE). Given the project root (the dir that
  * contains zen/std/ and zen/compiler/), the PROGRAM's own directory (for sibling `{ f } = b` imports;
  * "" when the source has no file), the input path (error-message prefix) + the program source, returns
@@ -19,22 +56,66 @@ int32_t check_module_kind(Malloc* a, zslice decls);  /* U1.2: first-error KIND, 
  * module / unknown imported name / sibling duplicate / sibling-from-stdin) prints one
  * `zenc: <file>: error: …` line to stderr and exits 1 inside the loader — it never returns. */
 const char* resolve_program(Malloc* a, const char* root, const char* progdir, const char* inpath, const char* src);
+ResolvedProgram resolve_program_data(Malloc* a, const char* root, const char* progdir, const char* inpath, const char* src);
 /* the first sibling-module name `src` imports ("" if none) — the stdin-mode guard below. */
 const char* first_user_import(const char* src);
 
+static void* driver_alloc(Malloc* a, size_t n){
+    return acquire(a, (int64_t)n);
+}
+
+static void* driver_resize(Malloc* a, void* p, size_t n){
+    return resize(a, (uint8_t*)p, (int64_t)n);
+}
+
+static void driver_release(Malloc* a, void* p){
+    (void)a;
+    if (p) free(p);
+}
+
+static String driver_string_new_in(Malloc* a){
+    String s;
+    s.ptr = driver_alloc(a, 16);
+    s.len = 0;
+    s.cap = 16;
+    return s;
+}
+
+static String driver_string_reserve_in(Malloc* a, String s, int64_t need){
+    if (s.len + need > s.cap){
+        int64_t nc = (s.cap + need) * 2;
+        s.ptr = resize(a, s.ptr, nc);
+        s.cap = nc;
+    }
+    return s;
+}
+
+static String driver_string_push_in(Malloc* a, String s, uint8_t b){
+    String r = driver_string_reserve_in(a, s, 1);
+    r.ptr[r.len] = b;
+    r.len += 1;
+    return r;
+}
+
+static const char* driver_string_finish_in(Malloc* a, String s){
+    String r = driver_string_push_in(a, s, 0);
+    return (const char*)r.ptr;
+}
+
 /* ── normal mode: read one flat .zen (argv[1] or stdin), emit C to stdout ──────────────────────── */
-static char* read_all(FILE* in, size_t* out_len){
-    size_t cap = 1<<20, len = 0; char* buf = malloc(cap);
-    int c; while ((c = fgetc(in)) != EOF){ if (len + 1 >= cap){ cap *= 2; buf = realloc(buf, cap); } buf[len++] = (char)c; }
+static char* read_all(Malloc* a, FILE* in, size_t* out_len){
+    size_t cap = 1<<20, len = 0; char* buf = driver_alloc(a, cap);
+    int c; while ((c = fgetc(in)) != EOF){ if (len + 1 >= cap){ cap *= 2; buf = driver_resize(a, buf, cap); } buf[len++] = (char)c; }
     buf[len] = 0;
     if (out_len) *out_len = len;
     return buf;
 }
 
 static int compile_stdin_or_file(int argc, char** argv){
+    Malloc m = { 0 };
     FILE* in = stdin;
     if (argc > 1){ in = fopen(argv[1], "r"); if (!in){ fprintf(stderr, "zenc: cannot open %s\n", argv[1]); return 1; } }
-    char* buf = read_all(in, NULL);
+    char* buf = read_all(&m, in, NULL);
     /* piped stdin has no directory: a sibling import `{ f } = b` cannot resolve, so error cleanly
      * instead of emitting C that references names no one defines (std imports stay as-is — the raw
      * filter mode never resolved them either, and the oracle depends on that). */
@@ -46,7 +127,6 @@ static int compile_stdin_or_file(int argc, char** argv){
             return 1;
         }
     }
-    Malloc m = { 0 };
     String out = genModuleIn(&m, resolve_module(&m, parse_module(&m, buf)));
     fwrite(out.ptr, 1, out.len, stdout);
     return 0;
@@ -69,24 +149,38 @@ static int compile_stdin_or_file(int argc, char** argv){
 static const char SOURCE_MANIFEST[] = "bootstrap/sources.txt";
 
 /* read an entire file into a malloc'd, NUL-terminated buffer; returns NULL (and prints) on error. */
-static char* slurp(const char* path, size_t* out_len){
+static char* slurp(Malloc* a, const char* path, size_t* out_len){
     FILE* f = fopen(path, "rb");
     if (!f){ fprintf(stderr, "zenc: cannot open %s\n", path); return NULL; }
-    char* buf = read_all(f, out_len);
+    char* buf = read_all(a, f, out_len);
     fclose(f);
     return buf;
 }
 
-static char* join_root_path(const char* root, const char* rel){
+static char* join_root_path(Malloc* a, const char* root, const char* rel){
     size_t rootlen = strlen(root);
     int need_trailing_slash = (rootlen > 0 && root[rootlen-1] != '/');
     size_t plen = rootlen + (need_trailing_slash ? 1 : 0) + strlen(rel) + 1;
-    char* path = malloc(plen);
+    char* path = driver_alloc(a, plen);
     memcpy(path, root, rootlen);
     size_t pos = rootlen;
     if (need_trailing_slash) path[pos++] = '/';
     memcpy(path + pos, rel, strlen(rel) + 1);
     return path;
+}
+
+static char* dup_cstr(Malloc* a, const char* s){
+    size_t n = strlen(s) + 1;
+    char* out = driver_alloc(a, n);
+    memcpy(out, s, n);
+    return out;
+}
+
+static char* dup_range(Malloc* a, const char* s, size_t p, size_t e){
+    char* out = driver_alloc(a, e - p + 1);
+    memcpy(out, s + p, e - p);
+    out[e - p] = 0;
+    return out;
 }
 
 /* Python str.strip() whitespace set (ASCII): space, \t, \n, \r, \v, \f. */
@@ -115,9 +209,9 @@ static int is_import_line(const char* src, size_t p, size_t e){
     return 0;
 }
 
-static int append_stripped_file(String* out, const char* path){
+static int append_stripped_file(Malloc* a, String* out, const char* path){
     size_t len = 0;
-    char* src = slurp(path, &len);
+    char* src = slurp(a, path, &len);
     if (!src) return 1;
 
     /* scan physical lines; emit each kept line, '\n'-separated within this file. */
@@ -127,14 +221,14 @@ static int append_stripped_file(String* out, const char* path){
         size_t e = p;
         while (e < len && src[e] != '\n') e++;   /* [p, e) is the line body (no terminator) */
         if (!is_import_line(src, p, e)){
-            if (!first_kept) *out = push(*out, '\n');  /* "\n".join within file */
+            if (!first_kept) *out = driver_string_push_in(a, *out, '\n');  /* "\n".join within file */
             first_kept = 0;
-            for (size_t i = p; i < e; i++) *out = push(*out, (uint8_t)src[i]);
+            for (size_t i = p; i < e; i++) *out = driver_string_push_in(a, *out, (uint8_t)src[i]);
         }
         if (e >= len) break;  /* no terminator -> last line (splitlines drops trailing) */
         p = e + 1;            /* skip the '\n'; if it was the final byte, loop ends (p==len) */
     }
-    free(src);
+    driver_release(a, src);
     return 0;
 }
 
@@ -153,12 +247,12 @@ static int manifest_entry(const char* src, size_t p, size_t e, size_t* s_out, si
  * separator iff this is not the first file, then append that file's body with import lines dropped.
 	 * Lines are split on '\n' (Python splitlines: a trailing '\n' produces no extra empty line) and rejoined
  * with '\n'. */
-static String build_self_source(const char* srcroot){
-    String out = new();
-    char* manifest_path = join_root_path(srcroot, SOURCE_MANIFEST);
+static String build_self_source(Malloc* a, const char* srcroot){
+    String out = driver_string_new_in(a);
+    char* manifest_path = join_root_path(a, srcroot, SOURCE_MANIFEST);
     size_t manifest_len = 0;
-    char* manifest = slurp(manifest_path, &manifest_len);
-    free(manifest_path);
+    char* manifest = slurp(a, manifest_path, &manifest_len);
+    driver_release(a, manifest_path);
     if (!manifest){ out.ptr = NULL; return out; }
 
     int file_count = 0;
@@ -168,25 +262,25 @@ static String build_self_source(const char* srcroot){
         while (e < manifest_len && manifest[e] != '\n') e++;
         size_t s = 0, n = 0;
         if (manifest_entry(manifest, p, e, &s, &n)){
-            char* rel = malloc(n + 1);
+            char* rel = driver_alloc(a, n + 1);
             memcpy(rel, manifest + s, n);
             rel[n] = 0;
-            char* path = join_root_path(srcroot, rel);
-            free(rel);
-            if (file_count > 0) out = push(out, '\n');  /* "\n".join across files */
-            if (append_stripped_file(&out, path) != 0){
-                free(path);
-                free(manifest);
+            char* path = join_root_path(a, srcroot, rel);
+            driver_release(a, rel);
+            if (file_count > 0) out = driver_string_push_in(a, out, '\n');  /* "\n".join across files */
+            if (append_stripped_file(a, &out, path) != 0){
+                driver_release(a, path);
+                driver_release(a, manifest);
                 out.ptr = NULL;
                 return out;
             }
-            free(path);
+            driver_release(a, path);
             file_count++;
         }
         if (e >= manifest_len) break;
         p = e + 1;
     }
-    free(manifest);
+    driver_release(a, manifest);
     if (file_count == 0){
         fprintf(stderr, "zenc: no sources listed in %s\n", SOURCE_MANIFEST);
         out.ptr = NULL;
@@ -209,10 +303,10 @@ static void trim_trailing_ws(String* s){
 }
 
 static int build_self(const char* out_path, const char* srcroot){
-    String src = build_self_source(srcroot);
-    if (src.ptr == NULL){ return 1; }  /* a source file could not be read */
-    const char* flat = finish(src);    /* NUL-terminate the flat source for the parser */
     Malloc m = { 0 };
+    String src = build_self_source(&m, srcroot);
+    if (src.ptr == NULL){ return 1; }  /* a source file could not be read */
+    const char* flat = driver_string_finish_in(&m, src);    /* NUL-terminate the flat source for the parser */
     String out = genModuleIn(&m, resolve_module(&m, parse_module(&m, flat)));
     trim_trailing_ws(&out);
 
@@ -260,32 +354,35 @@ static void prog_dir(const char* in_path, char* out, size_t n){
     memcpy(out, in_path, len); out[len] = 0;
 }
 
-/* the 13 validator error KINDs (check_module_kind's 1..13 return) → human-readable names. */
-static const char* const KIND_NAME[] = {
-    "ok", "arity", "arg-type", "undefined-name", "struct-field", "exhaustiveness",
-    "dup-variant", "operand-type", "index", "return-fit", "assign-fit",
-    "conformance", "dup-fn", "value-pos-return", "parse",
-};
-/* U1.4 Phase 1A: a human-readable MESSAGE per kind (index-aligned to KIND_NAME / the K* codes). The bare
- * kind name was developer shorthand; this is what an outsider reads. (Phase 1B will splice in the offending
- * name/types; Phase 2 the file:line:col.) */
-static const char* const KIND_MSG[] = {
-    "ok",
-    "wrong number of arguments",
-    "argument type does not fit the parameter",
-    "undefined name",
-    "unknown struct field",
-    "non-exhaustive match (add the missing variants or a `_` arm)",
-    "duplicate match variant",
-    "operator applied to the wrong operand type",
-    "invalid index",
-    "returned value does not fit the declared return type",
-    "assigned value does not fit the variable's type",
-    "impl does not satisfy the trait",
-    "duplicate top-level definition",
-    "early `return` in a value-position match arm",
-    "syntax error: unparseable top-level input",
-};
+typedef struct {
+    int code;
+    long source_offset;
+    int span_width;
+    int count;
+    int line;
+    int col;
+    int end_line;
+    int end_col;
+    const char* kind;
+    const char* message;
+    const char* hint;
+} Diagnostic;
+
+static Diagnostic diagnostic_from_check(CheckDiagnostic cd){
+    Diagnostic d;
+    d.code = cd.code;
+    d.source_offset = cd.source_offset;
+    d.span_width = cd.span_width < 1 ? 1 : cd.span_width;
+    d.count = cd.count < 1 ? 1 : cd.count;
+    d.line = 0;
+    d.col = 0;
+    d.end_line = 0;
+    d.end_col = 0;
+    d.kind = cd.kind ? cd.kind : "type";
+    d.message = cd.message ? cd.message : "type error";
+    d.hint = cd.hint ? cd.hint : "";
+    return d;
+}
 
 /* U1.2: type-check resolved decls. Prints a Zen-LEVEL error (a count + the first error's KIND) to stderr
  * and returns the error count (0 = ok) — so a user finally sees `zenc: foo.zen: 1 error (first: undefined-name)`
@@ -306,9 +403,9 @@ static int emits_main(String out){
  * (kind + pos*16; pos 0 = unknown/synthesized). The offset is into the import-FLATTENED source, not
  * the user's file — resolve_program strips import lines and can rewrite `ns.name` quals — so map back
  * by the error LINE's text: take the flat line holding pos, find that exact line in the user's buffer,
- * and report its 1-based line + the column within it. A no-import program is a pass-through (exact);
- * a rewritten line or an error inside an imported std module doesn't match and falls back to the
- * position-less format. */
+ * and report its 1-based line + the column within it. A no-import program is a pass-through (exact).
+ * Namespace-bound calls rewrite `alias.name` to `alias__name`; if the exact line misses, try that
+ * inverse normalization before falling back to the position-less format. */
 static int user_line_of(const char* user, const char* ls, size_t llen){
     int line = 1;
     const char* p = user;
@@ -320,33 +417,288 @@ static int user_line_of(const char* user, const char* ls, size_t llen){
         p = e + 1; line++;
     }
 }
-static int type_check(Malloc* m, zslice decls, const char* in_path, const char* flat, const char* user){
-    int packed = check_module_kind(m, decls);
-    if (packed == 0) return 0;
-    int kind = packed & 15;
-    long pos = packed >> 4;
-    int count = check_module(m, decls);
-    if (count < 1) count = 1;
-    const char* msg = (kind >= 1 && kind <= 14) ? KIND_MSG[kind] : "type error";
-    char where[64] = "";
-    if (pos > 0 && flat && user && (size_t)pos < strlen(flat)){
-        const char* ls = flat + pos; while (ls > flat && ls[-1] != '\n') ls--;
-        const char* le = flat + pos; while (*le && *le != '\n') le++;
-        int uline = user_line_of(user, ls, (size_t)(le - ls));
-        if (uline > 0) snprintf(where, sizeof where, ":%d:%d", uline, (int)(flat + pos - ls) + 1);
-    }
-    if (count == 1)
-        fprintf(stderr, "zenc: %s%s: error: %s\n", in_path, where, msg);
-    else
-        fprintf(stderr, "zenc: %s%s: error: %s (+%d more error%s)\n", in_path, where, msg, count - 1, count - 1 == 1 ? "" : "s");
-    return count;
+
+typedef struct {
+    int line;
+    size_t remove_start;
+    size_t remove_len;
+} LineRewrite;
+
+static int line_matches_removed_span(const char* user, size_t ulen, const char* flat, size_t flen, size_t start, size_t n){
+    if (start + n > flen) return 0;
+    if (ulen != flen - n) return 0;
+    if (memcmp(user, flat, start) != 0) return 0;
+    return memcmp(user + start, flat + start + n, flen - start - n) == 0;
 }
 
-static int build_program(const char* argv0, const char* in_path, const char* out_path, int run){
+static LineRewrite user_line_of_alias_rewrite(const char* user, const char* ls, size_t llen){
+    LineRewrite miss = { 0, 0, 0 };
+    int line = 1;
+    const char* p = user;
+    for (;;){
+        const char* e = strchr(p, '\n');
+        size_t ulen = e ? (size_t)(e - p) : strlen(p);
+
+        size_t lead = 0;
+        while (lead < llen && (ls[lead] == ' ' || ls[lead] == '\t')) lead++;
+        for (size_t j = lead + 1; j + 1 < llen; j++){
+            if (ls[j] == '_' && ls[j + 1] == '_'){
+                size_t remove_len = j + 2 - lead;
+                if (line_matches_removed_span(p, ulen, ls, llen, lead, remove_len)){
+                    LineRewrite hit = { line, lead, remove_len };
+                    return hit;
+                }
+            }
+        }
+
+        if (!e) return miss;
+        p = e + 1; line++;
+    }
+}
+
+static int flat_offset_to_removed_col(size_t off, size_t start, size_t n){
+    if (off < start) return (int)off + 1;
+    if (off < start + n) return (int)start + 1;
+    return (int)(off - n) + 1;
+}
+
+static size_t normalize_ns_line(char* out, const char* src, size_t len){
+    size_t j = 0;
+    for (size_t i = 0; i < len; ){
+        if (i + 1 < len && src[i] == '_' && src[i + 1] == '_'){
+            out[j++] = '.';
+            i += 2;
+        } else {
+            out[j++] = src[i++];
+        }
+    }
+    return j;
+}
+
+static int flat_offset_to_normalized_col(const char* line, size_t len, size_t off){
+    if (off > len) off = len;
+    int col = 1;
+    for (size_t i = 0; i < off; ){
+        if (i + 1 < len && line[i] == '_' && line[i + 1] == '_'){
+            col++;
+            i += 2;
+        } else {
+            col++;
+            i++;
+        }
+    }
+    return col;
+}
+
+static void print_source_caret(FILE* out, const char* user, int line, int col, int end_col){
+    if (!user || line <= 0 || col <= 0) return;
+    const char* p = user;
+    for (int cur = 1; cur < line && *p; cur++){
+        const char* e = strchr(p, '\n');
+        if (!e) return;
+        p = e + 1;
+    }
+    const char* e = p;
+    while (*e && *e != '\n' && *e != '\r') e++;
+    fprintf(out, "  ");
+    fwrite(p, 1, (size_t)(e - p), out);
+    fputc('\n', out);
+    fprintf(out, "  ");
+    for (int i = 1; i < col; i++){
+        char c = p[i - 1];
+        fputc(c == '\t' ? '\t' : ' ', out);
+    }
+    int width = end_col >= col ? end_col - col + 1 : 1;
+    fputc('^', out);
+    for (int i = 1; i < width; i++) fputc('~', out);
+    fputc('\n', out);
+}
+
+static int diagnostic_attach_user_span(Malloc* a, Diagnostic* d, const char* flat, const char* user){
+    long pos = d->source_offset;
+    if (pos <= 0 || !flat || !user || (size_t)pos >= strlen(flat)) return 0;
+    const char* ls = flat + pos; while (ls > flat && ls[-1] != '\n') ls--;
+    const char* le = flat + pos; while (*le && *le != '\n') le++;
+    size_t llen = (size_t)(le - ls);
+    size_t rel = (size_t)(flat + pos - ls);
+    size_t end_rel = rel + (size_t)d->span_width - 1;
+    if (end_rel >= llen && llen > 0) end_rel = llen - 1;
+
+    int uline = user_line_of(user, ls, llen);
+    int col = (int)rel + 1;
+    int end_col = col + d->span_width - 1;
+    if (uline <= 0){
+        LineRewrite rw = user_line_of_alias_rewrite(user, ls, llen);
+        if (rw.line > 0){
+            uline = rw.line;
+            col = flat_offset_to_removed_col(rel, rw.remove_start, rw.remove_len);
+            end_col = flat_offset_to_removed_col(end_rel, rw.remove_start, rw.remove_len);
+        }
+    }
+    if (uline <= 0){
+        char* normalized = driver_alloc(a, llen + 1);
+        if (!normalized) return 0;
+        size_t nlen = normalize_ns_line(normalized, ls, llen);
+        normalized[nlen] = 0;
+        uline = user_line_of(user, normalized, nlen);
+        driver_release(a, normalized);
+        if (uline <= 0) return 0;
+        col = flat_offset_to_normalized_col(ls, llen, rel);
+        end_col = flat_offset_to_normalized_col(ls, llen, end_rel);
+    }
+    d->line = uline;
+    d->col = col;
+    d->end_line = d->line;
+    d->end_col = end_col;
+    return 1;
+}
+
+static void diagnostic_attach_resolved_span(
+    Malloc* a,
+    Diagnostic* d,
+    const char* flat,
+    const char* root_path,
+    const char* root_src,
+    const ResolvedProgram* resolved,
+    const char** render_path,
+    const char** render_src
+){
+    *render_path = root_path;
+    *render_src = root_src;
+    if (diagnostic_attach_user_span(a, d, flat, root_src)) return;
+    if (!resolved || !resolved->table.modules.ptr) return;
+
+    ModuleEntry* mods = (ModuleEntry*)resolved->table.modules.ptr;
+    for (int64_t i = 0; i < resolved->table.modules.len; i++){
+        if (!mods[i].source) continue;
+        Diagnostic trial = *d;
+        if (diagnostic_attach_user_span(a, &trial, flat, mods[i].source)){
+            *d = trial;
+            *render_path = mods[i].path ? mods[i].path : root_path;
+            *render_src = mods[i].source;
+            return;
+        }
+    }
+}
+
+static void diagnostic_where(const Diagnostic* d, char* out, size_t n){
+    out[0] = 0;
+    if (d->line > 0 && d->col > 0) snprintf(out, n, ":%d:%d", d->line, d->col);
+}
+
+static void diagnostic_render(FILE* out, const char* in_path, const char* user, const Diagnostic* d){
+    char where[64];
+    diagnostic_where(d, where, sizeof where);
+    if (d->count == 1)
+        fprintf(out, "zenc: %s%s: error[%s]: %s\n", in_path, where, d->kind, d->message);
+    else
+        fprintf(out, "zenc: %s%s: error[%s]: %s (+%d more error%s)\n", in_path, where, d->kind, d->message, d->count - 1, d->count - 1 == 1 ? "" : "s");
+    print_source_caret(out, user, d->line, d->col, d->end_col);
+    if (d->hint[0]) fprintf(out, "hint: %s\n", d->hint);
+}
+
+static int type_check(Malloc* m, zslice raw, zslice decls, const char* in_path, const char* flat, const char* user, const ResolvedProgram* resolved){
+    CheckDiagnostic cd = check_module_ownership_diagnostic_from_source(m, raw, flat);
+    if (cd.code == 0) cd = check_module_diagnostic_from_source(m, decls, flat);
+    if (cd.code == 0) return 0;
+    Diagnostic diag = diagnostic_from_check(cd);
+    const char* render_path = in_path;
+    const char* render_src = user;
+    diagnostic_attach_resolved_span(m, &diag, flat, in_path, user, resolved, &render_path, &render_src);
+    diagnostic_render(stderr, render_path, render_src, &diag);
+    return diag.count;
+}
+
+typedef struct {
+    char* source;
+    char* out;
+    char* ccflags;
+} ProjectSpec;
+
+static int path_is_dir(const char* path){
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int manifest_key_line(const char* src, size_t p, size_t e, const char* key, size_t* v0, size_t* v1){
+    size_t i = p;
+    while (i < e && py_isspace((unsigned char)src[i])) i++;
+    if (i >= e || src[i] == '#') return 0;
+    size_t klen = strlen(key);
+    if (i + klen > e || memcmp(src + i, key, klen) != 0) return 0;
+    i += klen;
+    while (i < e && py_isspace((unsigned char)src[i])) i++;
+    if (i >= e || src[i] != '=') return 0;
+    i++;
+    while (i < e && py_isspace((unsigned char)src[i])) i++;
+    if (i >= e || src[i] != '"') return 0;
+    i++;
+    size_t start = i;
+    while (i < e && src[i] != '"') i++;
+    if (i >= e) return 0;
+    *v0 = start;
+    *v1 = i;
+    return 1;
+}
+
+static char* manifest_value(Malloc* a, const char* src, size_t len, const char* key){
+    size_t p = 0;
+    while (p < len){
+        size_t e = p;
+        while (e < len && src[e] != '\n' && src[e] != '\r') e++;
+        size_t v0 = 0, v1 = 0;
+        if (manifest_key_line(src, p, e, key, &v0, &v1)) return dup_range(a, src, v0, v1);
+        if (e >= len) break;
+        if (src[e] == '\r' && e + 1 < len && src[e + 1] == '\n') p = e + 2;
+        else p = e + 1;
+    }
+    return NULL;
+}
+
+static ProjectSpec project_spec(Malloc* a, const char* project_dir){
+    ProjectSpec spec = { 0 };
+    char* manifest_path = join_root_path(a, project_dir, "zen.toml");
     size_t len = 0;
-    char* buf = slurp(in_path, &len);
-    if (!buf) return 1;
+    char* src = slurp(a, manifest_path, &len);
+    if (!src){ driver_release(a, manifest_path); return spec; }
+
+    char* package = manifest_value(a, src, len, "package");
+    char* root = manifest_value(a, src, len, "root");
+    char* main = manifest_value(a, src, len, "main");
+    char* out = manifest_value(a, src, len, "out");
+    char* ccflags = manifest_value(a, src, len, "ccflags");
+    if (!package || !root || !main){
+        fprintf(stderr, "zenc: %s: missing required package/root/main entries\n", manifest_path);
+    } else {
+        char* root_path = join_root_path(a, project_dir, root);
+        spec.source = join_root_path(a, root_path, main);
+        spec.out = out ? join_root_path(a, project_dir, out) : NULL;
+        spec.ccflags = ccflags ? dup_cstr(a, ccflags) : NULL;
+        driver_release(a, root_path);
+    }
+
+    driver_release(a, package);
+    driver_release(a, root);
+    driver_release(a, main);
+    driver_release(a, out);
+    driver_release(a, ccflags);
+    driver_release(a, src);
+    driver_release(a, manifest_path);
+    return spec;
+}
+
+static ProjectSpec input_spec(Malloc* a, const char* in_path){
+    if (path_is_dir(in_path)) return project_spec(a, in_path);
+    ProjectSpec spec = { 0 };
+    spec.source = dup_cstr(a, in_path);
+    return spec;
+}
+
+static int build_program(const char* argv0, const char* in_path, const char* out_path, const char* ccflags, int run){
     Malloc m = { 0 };
+    size_t len = 0;
+    char* buf = slurp(&m, in_path, &len);
+    if (!buf) return 1;
     /* U1.3: resolve `{ … } = std.X` / `compiler.X` / sibling `{ … } = b` imports from disk before
      * parsing, so a program that imports the stdlib or a neighboring file builds. root = dir of the
      * zenc binary (holds zen/std and zen/compiler); progdir = dir of the program (holds its siblings).
@@ -354,12 +706,14 @@ static int build_program(const char* argv0, const char* in_path, const char* out
      * through. The returned str is borrowed from the loader's arena — don't free it. */
     char dir[4096]; bin_dir(argv0, dir, sizeof dir);
     char pdir[4096]; prog_dir(in_path, pdir, sizeof pdir);
-    const char* flat = resolve_program(&m, dir, pdir, in_path, buf);
-    zslice decls = resolve_module(&m, parse_module(&m, flat));
-    if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); free(buf); return 1; }  /* U2 */
-    if (type_check(&m, decls, in_path, flat, buf) != 0){ free(buf); return 1; }  /* U1.2: don't build an ill-typed program */
+    ResolvedProgram resolved = resolve_program_data(&m, dir, pdir, in_path, buf);
+    const char* flat = resolved.flat;
+    zslice raw = parse_module(&m, flat);
+    zslice decls = resolve_module(&m, raw);
+    if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); driver_release(&m, buf); return 1; }  /* U2 */
+    if (type_check(&m, raw, decls, in_path, flat, buf, &resolved) != 0){ driver_release(&m, buf); return 1; }  /* U1.2: don't build an ill-typed program */
     String out = genModuleIn(&m, decls);
-    free(buf);
+    driver_release(&m, buf);
     if (!emits_main(out)){ fprintf(stderr, "zenc: %s: no `main` entry point (need `main = () i32 { … }`)\n", in_path); return 1; }  /* U2 */
 
     size_t hlen = sizeof(HEAD) - 1;
@@ -380,8 +734,8 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     if (run){ snprintf(binpath, sizeof binpath, "/tmp/zenc_run_%d", (int)getpid()); out_path = binpath; }
 
     char cmd[8192];
-    snprintf(cmd, sizeof cmd, "cc -std=gnu11 -w -I%s/bootstrap %s %s/bootstrap/zenrt.c -o %s",
-             dir, cpath, dir, out_path);
+    snprintf(cmd, sizeof cmd, "cc -std=gnu11 -w -I%s/bootstrap %s %s %s/bootstrap/zenrt.c -o %s",
+             dir, ccflags ? ccflags : "", cpath, dir, out_path);
     int rc = system(cmd);
     unlink(cpath);
     if (rc != 0){ fprintf(stderr, "zenc: cc failed to link %s\n", in_path); return 1; }
@@ -393,14 +747,265 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     return 0;
 }
 
+static int build_input(const char* argv0, const char* in_path, const char* out_path, int run){
+    Malloc m = { 0 };
+    ProjectSpec spec = input_spec(&m, in_path);
+    if (!spec.source) return 1;
+    const char* final_out = out_path;
+    if (!run && !final_out) final_out = spec.out ? spec.out : "a.out";
+    int rc = build_program(argv0, spec.source, final_out, spec.ccflags, run);
+    driver_release(&m, spec.source);
+    driver_release(&m, spec.out);
+    driver_release(&m, spec.ccflags);
+    return rc;
+}
+
+static int check_program(const char* argv0, const char* in_path){
+    Malloc m = { 0 };
+    char* buf = slurp(&m, in_path, NULL);
+    if (!buf) return 1;
+    /* U1.3: resolve std.X / sibling imports from disk before checking, same as build_program. */
+    char dir[4096]; bin_dir(argv0, dir, sizeof dir);
+    char pdir[4096]; prog_dir(in_path, pdir, sizeof pdir);
+    ResolvedProgram resolved = resolve_program_data(&m, dir, pdir, in_path, buf);
+    const char* flat = resolved.flat;
+    zslice raw = parse_module(&m, flat);
+    zslice decls = resolve_module(&m, raw);
+    /* U2: reject gross parse failure (zero decls). NOTE: a missing `main` is NOT enforced in `check`
+     * — a library module (std.*) legitimately has no main; build/run enforce it instead. */
+    if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", in_path); driver_release(&m, buf); return 1; }
+    int n = type_check(&m, raw, decls, in_path, flat, buf, &resolved);
+    driver_release(&m, buf);
+    if (n == 0) fprintf(stderr, "zenc: %s: ok\n", in_path);
+    return n == 0 ? 0 : 1;
+}
+
+static int check_input(const char* argv0, const char* in_path){
+    Malloc m = { 0 };
+    ProjectSpec spec = input_spec(&m, in_path);
+    if (!spec.source) return 1;
+    int rc = check_program(argv0, spec.source);
+    driver_release(&m, spec.source);
+    driver_release(&m, spec.out);
+    driver_release(&m, spec.ccflags);
+    return rc;
+}
+
+static int emit_file(const char* argv0, const char* in_path){
+    Malloc m = { 0 };
+    char* buf = slurp(&m, in_path, NULL);
+    if (!buf) return 1;
+    char dir[4096]; bin_dir(argv0, dir, sizeof dir);
+    char pdir[4096]; prog_dir(in_path, pdir, sizeof pdir);
+    const char* flat = resolve_program(&m, dir, pdir, in_path, buf);
+    String out = genModuleIn(&m, resolve_module(&m, parse_module(&m, flat)));
+    fwrite(out.ptr, 1, out.len, stdout);
+    driver_release(&m, buf);
+    return 0;
+}
+
+static int fmt_line_space(unsigned char c){
+    return c == ' ' || c == '\t' || c == '\r' || c == '\v' || c == '\f';
+}
+
+static void fmt_scan_depth(const char* src, size_t p, size_t e, int* depth, int* in_block){
+    int in_str = 0, in_char = 0, esc = 0;
+    for (size_t i = p; i < e; i++){
+        unsigned char c = (unsigned char)src[i];
+        if (*in_block){
+            if (c == '*' && i + 1 < e && src[i + 1] == '/'){
+                *in_block = 0;
+                i++;
+            }
+            continue;
+        }
+        if (in_str){
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '"') in_str = 0;
+            continue;
+        }
+        if (in_char){
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '\'') in_char = 0;
+            continue;
+        }
+        if (c == '/' && i + 1 < e && src[i + 1] == '/') break;
+        if (c == '/' && i + 1 < e && src[i + 1] == '*'){
+            *in_block = 1;
+            i++;
+            continue;
+        }
+        if (c == '"'){ in_str = 1; continue; }
+        if (c == '\''){ in_char = 1; continue; }
+        if (c == '{') (*depth)++;
+        else if (c == '}' && *depth > 0) (*depth)--;
+    }
+}
+
+static String fmt_source(Malloc* a, const char* src, size_t len){
+    String out = driver_string_new_in(a);
+    int depth = 0;
+    int in_block = 0;
+    size_t p = 0;
+    while (p < len){
+        size_t e = p;
+        while (e < len && src[e] != '\n' && src[e] != '\r') e++;
+
+        size_t s = p;
+        while (s < e && fmt_line_space((unsigned char)src[s])) s++;
+        size_t t = e;
+        while (t > s && fmt_line_space((unsigned char)src[t - 1])) t--;
+
+        if (s == t){
+            out = driver_string_push_in(a, out, '\n');
+        } else {
+            int indent = depth;
+            int line_starts_in_block = in_block;
+            if (!line_starts_in_block && src[s] == '}' && indent > 0) indent--;
+            for (int i = 0; i < indent * 4; i++) out = driver_string_push_in(a, out, ' ');
+            for (size_t i = s; i < t; i++) out = driver_string_push_in(a, out, (uint8_t)src[i]);
+            out = driver_string_push_in(a, out, '\n');
+            fmt_scan_depth(src, s, t, &depth, &in_block);
+        }
+
+        if (e >= len) break;
+        if (src[e] == '\r' && e + 1 < len && src[e + 1] == '\n') p = e + 2;
+        else p = e + 1;
+    }
+    return out;
+}
+
+static int write_file_bytes(const char* path, const char* data, size_t len){
+    FILE* f = fopen(path, "wb");
+    if (!f){ fprintf(stderr, "zenc: cannot write %s\n", path); return 1; }
+    size_t n = fwrite(data, 1, len, f);
+    int close_rc = fclose(f);
+    if (n != len || close_rc != 0){ fprintf(stderr, "zenc: failed to write %s\n", path); return 1; }
+    return 0;
+}
+
+static int fmt_file(const char* path, int check){
+    Malloc m = { 0 };
+    size_t len = 0;
+    char* src = slurp(&m, path, &len);
+    if (!src) return 1;
+    String out = fmt_source(&m, src, len);
+    size_t out_len = (size_t)out.len;
+    int changed = (len != out_len) || memcmp(src, out.ptr, out_len) != 0;
+    if (check){
+        if (changed) fprintf(stderr, "zenc: %s: needs formatting\n", path);
+        driver_release(&m, src);
+        return changed ? 1 : 0;
+    }
+    int rc = changed ? write_file_bytes(path, out.ptr, out_len) : 0;
+    driver_release(&m, src);
+    return rc;
+}
+
+static int starts_with(const char* s, const char* prefix){
+    return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static char* std_module_path(Malloc* a, const char* root, const char* mod){
+    const char* tail = mod + 4; /* after "std." */
+    size_t n = strlen("zen/std/") + strlen(tail) + strlen(".zen") + 1;
+    char* rel = driver_alloc(a, n);
+    size_t pos = 0;
+    memcpy(rel + pos, "zen/std/", strlen("zen/std/")); pos += strlen("zen/std/");
+    for (size_t i = 0; tail[i]; i++) rel[pos++] = (tail[i] == '.') ? '/' : tail[i];
+    memcpy(rel + pos, ".zen", strlen(".zen") + 1);
+    char* path = join_root_path(a, root, rel);
+    driver_release(a, rel);
+    return path;
+}
+
+static void string_append_range(Malloc* a, String* s, const char* src, size_t p, size_t e){
+    for (size_t i = p; i < e; i++) *s = driver_string_push_in(a, *s, (uint8_t)src[i]);
+}
+
+static int doc_is_blank(const char* src, size_t p, size_t e){
+    for (size_t i = p; i < e; i++) if (!fmt_line_space((unsigned char)src[i])) return 0;
+    return 1;
+}
+
+static int doc_is_comment(const char* src, size_t p, size_t e){
+    return p + 1 < e && src[p] == '/' && src[p + 1] == '/';
+}
+
+static int doc_is_public_decl(const char* src, size_t p, size_t e){
+    if (p >= e) return 0;
+    unsigned char c = (unsigned char)src[p];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) return 0;
+    for (size_t i = p; i < e; i++){
+        unsigned char b = (unsigned char)src[i];
+        if (b == '*') return 1;
+        if (b == '=' || b == ':') return 0;
+    }
+    return 0;
+}
+
+static int doc_source(const char* label, const char* src, size_t len){
+    printf("# %s\n", label);
+    Malloc m = { 0 };
+    String docs = driver_string_new_in(&m);
+    int found = 0;
+    size_t p = 0;
+    while (p < len){
+        size_t e = p;
+        while (e < len && src[e] != '\n' && src[e] != '\r') e++;
+
+        size_t t = e;
+        while (t > p && fmt_line_space((unsigned char)src[t - 1])) t--;
+
+        if (doc_is_comment(src, p, t)){
+            size_t s = p + 2;
+            if (s < t && src[s] == ' ') s++;
+            string_append_range(&m, &docs, src, s, t);
+            docs = driver_string_push_in(&m, docs, '\n');
+        } else if (doc_is_blank(src, p, t)){
+            docs.len = 0;
+        } else if (doc_is_public_decl(src, p, t)){
+            if (docs.len > 0) fwrite(docs.ptr, 1, docs.len, stdout);
+            fwrite(src + p, 1, t - p, stdout);
+            fputc('\n', stdout);
+            docs.len = 0;
+            found = 1;
+        } else {
+            docs.len = 0;
+        }
+
+        if (e >= len) break;
+        if (src[e] == '\r' && e + 1 < len && src[e + 1] == '\n') p = e + 2;
+        else p = e + 1;
+    }
+    return found ? 0 : 0;
+}
+
+static int doc_arg(const char* argv0, const char* arg){
+    Malloc m = { 0 };
+    char root[4096]; bin_dir(argv0, root, sizeof root);
+    char* path = starts_with(arg, "std.") ? std_module_path(&m, root, arg) : dup_cstr(&m, arg);
+    size_t len = 0;
+    char* src = slurp(&m, path, &len);
+    if (!src){ driver_release(&m, path); return 1; }
+    int rc = doc_source(arg, src, len);
+    driver_release(&m, src);
+    driver_release(&m, path);
+    return rc;
+}
+
 static void usage(FILE* to){
     fprintf(to,
         "zenc — the Zen compiler (self-hosted)\n"
         "\n"
         "usage:\n"
-        "  zenc run   <file.zen>            type-check, build and run (exit = the program's exit code)\n"
-        "  zenc build <file.zen> [-o out]   type-check and link a native binary (default a.out)\n"
-        "  zenc check <file.zen>            type-check only (libraries allowed: no main required)\n"
+        "  zenc run   <file.zen|dir>        type-check, build and run (exit = the program's exit code)\n"
+        "  zenc build <file.zen|dir> [-o out] type-check and link a native binary\n"
+        "  zenc check <file.zen|dir>        type-check only (libraries allowed: no main required)\n"
+        "  zenc fmt   [--check] <file.zen>  format a Zen source file, or verify formatting\n"
+        "  zenc doc   <std.mod|file.zen>    list public declarations and nearby docs\n"
         "  zenc emit  <file.zen>            emit the generated C to stdout\n"
         "  zenc --version | --help\n"
         "\n"
@@ -414,43 +1019,43 @@ int main(int argc, char** argv){
     if (argc < 2 && isatty(0)){ usage(stderr); return 2; }
     if (argc >= 2 && strcmp(argv[1], "emit") == 0){
         if (argc < 3){ fprintf(stderr, "usage: %s emit <in.zen>\n", argv[0]); return 2; }
-        char* shifted[2] = { argv[0], argv[2] };
-        return compile_stdin_or_file(2, shifted);
+        return emit_file(argv[0], argv[2]);
     }
     if (argc >= 2 && strcmp(argv[1], "--build-self") == 0){
         if (argc < 4){ fprintf(stderr, "usage: %s --build-self <out.c> <srcroot>\n", argv[0]); return 2; }
         return build_self(argv[2], argv[3]);
     }
     if (argc >= 2 && strcmp(argv[1], "build") == 0){
-        const char* in = NULL; const char* out = "a.out";
+        const char* in = NULL; const char* out = NULL;
         for (int i = 2; i < argc; i++){
             if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out = argv[++i];
             else in = argv[i];
         }
-        if (!in){ fprintf(stderr, "usage: %s build <in.zen> [-o out]\n", argv[0]); return 2; }
-        return build_program(argv[0], in, out, 0);
+        if (!in){ fprintf(stderr, "usage: %s build <file.zen|project-dir> [-o out]\n", argv[0]); return 2; }
+        return build_input(argv[0], in, out, 0);
     }
     if (argc >= 2 && strcmp(argv[1], "run") == 0){
-        if (argc < 3){ fprintf(stderr, "usage: %s run <in.zen>\n", argv[0]); return 2; }
-        return build_program(argv[0], argv[2], NULL, 1);
+        if (argc < 3){ fprintf(stderr, "usage: %s run <file.zen|project-dir>\n", argv[0]); return 2; }
+        return build_input(argv[0], argv[2], NULL, 1);
+    }
+    if (argc >= 2 && strcmp(argv[1], "fmt") == 0){
+        int check = 0;
+        const char* in = NULL;
+        for (int i = 2; i < argc; i++){
+            if (strcmp(argv[i], "--check") == 0) check = 1;
+            else if (!in) in = argv[i];
+            else { fprintf(stderr, "usage: %s fmt [--check] <in.zen>\n", argv[0]); return 2; }
+        }
+        if (!in){ fprintf(stderr, "usage: %s fmt [--check] <in.zen>\n", argv[0]); return 2; }
+        return fmt_file(in, check);
+    }
+    if (argc >= 2 && strcmp(argv[1], "doc") == 0){
+        if (argc < 3){ fprintf(stderr, "usage: %s doc <std.mod|file.zen>\n", argv[0]); return 2; }
+        return doc_arg(argv[0], argv[2]);
     }
     if (argc >= 2 && strcmp(argv[1], "check") == 0){  /* U1.2: type-check only, no build */
-        if (argc < 3){ fprintf(stderr, "usage: %s check <in.zen>\n", argv[0]); return 2; }
-        char* buf = slurp(argv[2], NULL);
-        if (!buf) return 1;
-        Malloc m = { 0 };
-        /* U1.3: resolve std.X / sibling imports from disk before checking, same as build_program. */
-        char dir[4096]; bin_dir(argv[0], dir, sizeof dir);
-        char pdir[4096]; prog_dir(argv[2], pdir, sizeof pdir);
-        const char* flat = resolve_program(&m, dir, pdir, argv[2], buf);
-        zslice decls = resolve_module(&m, parse_module(&m, flat));
-        /* U2: reject gross parse failure (zero decls). NOTE: a missing `main` is NOT enforced in `check`
-         * — a library module (std.*) legitimately has no main; build/run enforce it instead. */
-        if (decls.len == 0){ fprintf(stderr, "zenc: %s: could not parse (no declarations)\n", argv[2]); free(buf); return 1; }
-        int n = type_check(&m, decls, argv[2], flat, buf);
-        free(buf);
-        if (n == 0) fprintf(stderr, "zenc: %s: ok\n", argv[2]);
-        return n == 0 ? 0 : 1;
+        if (argc < 3){ fprintf(stderr, "usage: %s check <file.zen|project-dir>\n", argv[0]); return 2; }
+        return check_input(argv[0], argv[2]);
     }
     return compile_stdin_or_file(argc, argv);
 }

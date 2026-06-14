@@ -99,6 +99,7 @@ KIND_NAME = {
     5: "exhaustiveness", 6: "dup-variant", 7: "operand-type", 8: "index", 9: "return-fit",
     10: "assign-fit", 11: "conformance", 12: "dup-fn", 13: "value-pos-return",
     14: "parse",   # KPARSE — the parser's `__syntax_error` sentinel (parser-totality rejects)
+    15: "ownership",
 }
 
 # ── S1 CROSS-MODULE TYPE-CHECK driver (check_validate.check_linked) ─────────────────────────────

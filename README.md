@@ -90,7 +90,8 @@ isn't just tidy — it buys real things:
 
 - **Imports are becoming structural.** Today `std.internal.resolve` flattens the `std`/`compiler`
   import closure, dedups by module and top-level name, and gives deterministic
-  first-definition behavior. The trie/path model is the direction.
+  first-definition behavior. Namespace binds now prefix direct module exports so two bound
+  modules can safely share short names. The trie/path model is still the broader direction.
 - **Pointer safety is moving into type-checking.** Numeric widening and invariant pointer
   pointees are checked by `fits()` today. Pointer direction and nullability are spelled in
   source, but full enforcement of those axes is still pending.
@@ -184,6 +185,20 @@ modes for programs:
 `main`. A program with `{ … } = std.X` imports is flattened by the self-hosted loader inside
 those checked modes — see [Modules & imports](#modules--imports).
 
+`check`/`build`/`run` also accept a project directory containing `zen.toml`:
+
+```toml
+package = "hello"
+root = "src"
+main = "main.zen"
+out = "hello"
+ccflags = "native.c"
+```
+
+The compiler resolves that to `<project>/<root>/<main>`. `build <project-dir>` uses the
+manifest's `out` path when `-o` is omitted. `ccflags` is passed through to `cc`, so a project
+can add native support files or compiler/linker flags while this package layer is still small.
+
 **Regenerate the committed C** after editing any graph-listed bootstrap compiler source under
 `zen/compiler/{lex,parse*,check*,check_validate,genc*}.zen` or the loader sources
 `zen/std/{io,resolve}.zen` — the binary reads `bootstrap/sources.txt` and rebuilds its own C,
@@ -228,17 +243,18 @@ what you must *import*. Keeping that boundary explicit is the point.
   `std.collections.vec`, `std.collections.iter`, … are ordinary Zen you bring in with `{ … } = std.X`; they are
   checked and lowered like your own code.
 
-The ownership rule (`zen/std/concurrent/cown.zen`): Zen-owned memory takes an explicit allocator
-from program setup; FFI handles sit below that allocator discipline and must be wrapped with the
-matching release operation as soon as they cross back in. See **[FEATURES.md](FEATURES.md)** for the
-full bindings/errors/memory inventory.
+The ownership rule: Zen-owned memory takes an explicit allocator from program setup; FFI handles sit
+below that allocator discipline and must be wrapped with the matching release operation as soon as
+they cross back in. The checker now rejects same-body local use after `Own<T>.release_in(...)`,
+`Rc<T>.drop_in(...)`, or `Arc<T>.drop_in(...)`; see **[MEMORY_MODEL.md](MEMORY_MODEL.md)** for the exact current
+scope and remaining gaps.
 
 ## Modules & imports
 
 Imports are a destructuring of a module path: `{ a, b } = std.X` binds `a` and `b` from
-`zen/std/X.zen`. The checked CLI modes (`zenc check`, `zenc build`, `zenc run`) call
+`zen/std/X.zen`. The file-based CLI modes (`zenc check`, `zenc build`, `zenc run`, `zenc emit`) call
 `zen/std/internal/resolve.zen` before parsing, so std imports resolve from disk and the program is
-then checked as one flattened module:
+then parsed as one flattened module:
 
 - it reads the program's `{ … } = std.X` import lines, follows each edge to
   `zen/std/X.zen`, and gathers the **transitive closure**;
@@ -246,10 +262,15 @@ then checked as one flattened module:
   breaks import cycles; a final per-**name** pass keeps the first definition of each
   top-level name, so a cross-module clash like `string.free` vs `mem.free` resolves the same
   way "nearest defining module wins" would);
+- namespace binds such as `c = std.io.c` or `left = left` rewrite qualified calls to
+  alias-prefixed symbols, so bound modules can both export a natural name like `thing` or
+  `Box` without colliding in the flattened output;
 - the result is one flat module handed to the normal parse/check/codegen pipeline.
 
-The bare emit form (`zenc file.zen` or stdin) remains lower-level: it expects the source to
-already be flat and emits C without the `std` import-loading/check/build wrapper.
+The bare filter form (`zenc file.zen` or stdin) remains lower-level: it expects the source to
+already be flat and emits C without the `std` import-loading/check/build wrapper. Use
+`zenc emit <file.zen>` when inspecting generated C for normal source files with imports or
+namespace binds.
 The resolver also understands `compiler.X` for internal compiler/std dependencies such as
 `std.internal.ast` building values from `compiler.genc`; normal user-facing imports should stay in
 the `std` namespace.
@@ -281,10 +302,16 @@ return type and it's inferred from the body, across calls), `Ptr/MutPtr/RawPtr` 
 single `loop` iteration construct, mutation, slices `[T]`, a heap-allocating `String`/`Vec`
 on an explicit allocator, and **metaprogramming as values** (build AST with `std.internal.ast` →
 emit with `compiler.genc.genModule` — no `@emit` pragma). Checked CLI errors report the
-source path, error count, and first validator kind; source spans and caret diagnostics are
-still future work.
+source path, source location for expression errors and trait-conformance impl errors, a stable
+error kind (`error[arity]`), a message, a source-line caret when the source maps cleanly, and
+a hint; the checker now exposes the CLI-compatible
+`CheckDiagnostic { code, kind, source_offset, span_width, count, message, hint }` plus the
+first-class Zen value `Diagnostic { code, kind, span: SourceSpan, count, message, hint }`.
 
-See **[FEATURES.md](FEATURES.md)** for the full inventory,
+See **[SPEC.md](SPEC.md)** for the current language behavior,
+**[FEATURES.md](FEATURES.md)** for the full inventory,
+**[ERROR_POLICY.md](ERROR_POLICY.md)** for the stdlib Result/error contract,
+**[JS_BACKEND.md](JS_BACKEND.md)** for the experimental JavaScript backend scope,
 **[ARCHITECTURE.md](ARCHITECTURE.md)** for how the self-hosted compiler is structured,
 **[VISION.md](VISION.md)** for the why, and **[CHANGELOG.md](CHANGELOG.md)** for history.
 
@@ -296,7 +323,7 @@ See **[FEATURES.md](FEATURES.md)** for the full inventory,
 | `zen/compiler/parse.zen` + `parse_expr` / `parse_stmt` / `parse_type` | recursive-descent parser → `compiler.genc` AST |
 | `zen/compiler/check.zen` + `check_validate.zen` | resolver + the `fits()` validator |
 | `zen/compiler/genc.zen` + `mono` + `genc_emit` | shared AST + monomorphization + C backend |
-| `zen/compiler/genjs.zen` | a partial JavaScript backend over the *same* AST |
+| `zen/compiler/genjs.zen` | an experimental JavaScript backend over the *same* AST |
 | `zen/std/{mem,str,string,alloc,vec,iter}.zen` | the runtime stdlib (allocator, slices, strings, iterators) |
 | `zen/std/{c,result,cown,drop,io,resolve}.zen` | bindings, errors-as-values, FFI-memory rule, module loader |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked bootstrap manifest) + `zenrt.c`/`main.c`/`Makefile` |

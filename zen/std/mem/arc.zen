@@ -8,29 +8,50 @@
 // "ARC/ORC" family; ORC (cycle collection) additionally needs a Drop/Trace trait, still to come.
 // (Arc is only USEFUL once threads exist — zenc has no thread spawn yet — but the atomic primitive
 // it is built on is the foundation every lock-free structure needs.)
-{ malloc, free } = std.mem.alloc
+// `new_in` / `drop_in` use the caller's allocator.
+// `try_new_in` returns Result so allocation failure can stay in the value flow.
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
 
-Arc<T>: { base: RawPtr<u8> }                          // -> [ count:i64 | value:T ]
+Arc*<T>: {
+    base: RawPtr<u8>                          // -> [ count:i64 | value:T ]
+    val = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }
+    get = (r: Arc<T>) T  { r.val()[0] }
+    count = (r: Arc<T>) i64 { load_i64(r.base) }
+    clone = (r: Arc<T>) Arc<T> {
+        atomic_add_i64(r.base, 1)
+        Arc<T>( base: r.base )
+    }
+    drop_in<A> = (r: Arc<T>, a: MutPtr<A>) void {
+        // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
+        (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => a.release(r.base), false => {} })
+    }
+}
 
-arc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }
-
-arc_new<T> = (x: T) Arc<T> {
-    base := malloc(8 + sizeof(T))
-    store_i64(base, 1)                                // initial count — no other thread sees it yet
+new_in*<A, T> = (a: MutPtr<A>, x: T) Arc<T> {
+    base := a.acquire(8 + sizeof(T))
+    store_i64(base, 1)
     r := Arc<T>( base: base )
-    s := r.arc_val()
+    s := r.val()
     s[0] = x
     r
 }
-arc_get<T> = (r: Arc<T>) T  { r.arc_val()[0] }
-arc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }
+arc_ok<T> = (r: Arc<T>) Result<Arc<T>, IoError> { .Ok(r) }
+arc_err<T> = (e: IoError) Result<Arc<T>, IoError> { .Err(e) }
 
-// clone/drop are the thread-safe operations: an atomic fetch-add publishes the new count to all threads.
-arc_clone<T> = (r: Arc<T>) Arc<T> {
-    atomic_add_i64(r.base, 1)
-    Arc<T>( base: r.base )
-}
-arc_drop<T> = (r: Arc<T>) void {
-    // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
-    (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} })
+try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError> {
+    ax := x
+    a.try_acquire(8 + sizeof(T)).match ({
+        .Ok(base) => {
+            store_i64(base, 1)
+            r := Arc<T>( base: base )
+            s := r.val()
+            s[0] = ax
+            arc_ok(r)
+        },
+        .Err(e) => {
+            err: Result<Arc<T>, IoError> := .Err(e)
+            err
+        }
+    })
 }

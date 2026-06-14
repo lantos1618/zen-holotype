@@ -4,51 +4,65 @@
 // TLDR:
 // - `Drop` is the destructor trait: `drop(MutPtr<Self>) void`.
 // - `Own<T>` is a ref-counted owner with layout [count:i64 | value:T].
-// - `own_clone` bumps the count; `own_release` decrements it.
-// - At zero, `own_release` calls the payload's `.drop()` before freeing the block.
+// - `clone` bumps the count; `release` decrements it.
+// - At zero, `release` calls the payload's `.drop()` before freeing the block.
+// - `new_in` / `release_in` use the caller's allocator.
+// - `try_new_in` returns Result so allocation failure can stay in the value flow.
 // - `Resource` at the bottom is only a concrete fixture for tests/examples.
-//
-// The verbs are own_-prefixed ON PURPOSE: the resolver's flatten dedups top-level names per-NAME
-// across modules, so bare `new`/`release`/`count` here collided with std.text.string's `new` and
-// std.mem.raw's `release` the moment a program co-imported this module with the daily drivers
-// (fmt+drop broke with 8 arg-type errors). Qualified `ns.name` imports (N2) are the real fix;
-// until then ownership verbs carry their namespace in the name.
-{ malloc, free } = std.mem.alloc
+
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
 
 Drop*: { drop: (MutPtr<Self>) void }
 
-Own<T>: { base: RawPtr<u8> }
+Own*<T>: {
+    base: RawPtr<u8>
+    val = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }
+    get = (o: Own<T>) T { o.val()[0] }
+    ptr = (o: Own<T>) MutPtr<T> { o.val()[0].addr() }
+    count = (o: Own<T>) i64 { load_i64(o.base) }
+    clone = (o: Own<T>) Own<T> {
+        store_i64(o.base, load_i64(o.base) + 1)
+        Own<T>( base: o.base )
+    }
+    release_in<A> = (o: Own<T>, a: MutPtr<A>) void {
+        n := load_i64(o.base) - 1
+        store_i64(o.base, n)
+        (n == 0).match({ true => o.finalize_in(a), false => {} })
+    }
+    finalize_in<A> = (o: Own<T>, a: MutPtr<A>) void {
+        o.ptr().drop()
+        a.release(o.base)
+    }
+}
 
-own_val<T>* = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }
-own_get<T>* = (o: Own<T>) T { o.own_val()[0] }
-own_ptr<T>* = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }
-own_count<T>* = (o: Own<T>) i64 { load_i64(o.base) }
-
-own_new<T>* = (x: T) Own<T> {
-    base := malloc(8 + sizeof(T))
+new_in*<A, T> = (a: MutPtr<A>, x: T) Own<T> {
+    base := a.acquire(8 + sizeof(T))
     store_i64(base, 1)
     o := Own<T>( base: base )
-    s := o.own_val()
+    s := o.val()
     s[0] = x
     o
 }
+own_ok<T> = (o: Own<T>) Result<Own<T>, IoError> { .Ok(o) }
+own_err<T> = (e: IoError) Result<Own<T>, IoError> { .Err(e) }
 
-own_clone<T>* = (o: Own<T>) Own<T> {
-    store_i64(o.base, load_i64(o.base) + 1)
-    Own<T>( base: o.base )
+try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Own<T>, IoError> {
+    ox := x
+    a.try_acquire(8 + sizeof(T)).match ({
+        .Ok(base) => {
+            store_i64(base, 1)
+            o := Own<T>( base: base )
+            s := o.val()
+            s[0] = ox
+            own_ok(o)
+        },
+        .Err(e) => {
+            err: Result<Own<T>, IoError> := .Err(e)
+            err
+        }
+    })
 }
-
-own_release<T>* = (o: Own<T>) void {
-    n := load_i64(o.base) - 1
-    store_i64(o.base, n)
-    (n == 0).match({ true => finalize(o), false => {} })
-}
-
-finalize<T>* = (o: Own<T>) void {
-    o.own_ptr().drop()
-    free(o.base)
-}
-
 Resource*: { id: i32, slot: i32 }
 
 Resource.impl(Drop, { drop = (s: MutPtr<Resource>) void { s.slot = s.id } })

@@ -1,30 +1,46 @@
-// Bump allocator backed by one heap block. Individual releases are no-ops; reset frees the scope.
-{ malloc, free, Allocator } = std.mem.alloc
+// Bump allocator backed by one allocator-owned block. Individual releases are no-ops; reset frees the scope.
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
 
-Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }
+Arena*: {
+    buf: RawPtr<u8>,
+    off: i64,
+    cap: i64
 
-arena_new* = (cap: i64) Arena { Arena( buf: malloc(cap), off: 0, cap: cap ) }
-
-// Bump allocation rounds to 8 bytes and returns null_ptr past capacity.
-bump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> {
-    rounded := ((n + 7) / 8) * 8
-    (a.off + rounded > a.cap).match ({
-        true  => null_ptr(),
-        false => {
-            p := a.buf.offset(a.off)
-            a.off = a.off + rounded
-            p
-        },
-    })
+    bump = (a: MutPtr<Arena>, n: i64) RawPtr<u8> {
+        rounded := ((n + 7) / 8) * 8
+        (a.off + rounded > a.cap).match ({
+            true  => null_ptr(),
+            false => {
+                p := a.buf.offset(a.off)
+                a.off = a.off + rounded
+                p
+            },
+        })
+    }
+    reset = (a: MutPtr<Arena>) void { a.off = 0 }
+    used = (a: Ptr<Arena>) i64 { a.off }
+    free_in<A> = (a: MutPtr<Arena>, backing: MutPtr<A>) void {
+        backing.release(a.buf)
+        a.buf = null_ptr()
+        a.off = 0
+        a.cap = 0
+    }
+    free<A> = (a: MutPtr<Arena>, backing: MutPtr<A>) void { a.free_in(backing) }
 }
-reset* = (a: MutPtr<Arena>) void { a.off = 0 }
-used*  = (a: Ptr<Arena>) i64 { a.off }
 
-arena_free* = (a: MutPtr<Arena>) void {
-    free(a.buf)
-    a.buf = null_ptr()
-    a.off = 0
-    a.cap = 0
+new_in*<A> = (backing: MutPtr<A>, cap: i64) Arena {
+    Arena( buf: backing.acquire(cap), off: 0, cap: cap )
+}
+
+arena_ok = (a: Arena) Result<Arena, IoError> { .Ok(a) }
+arena_err = (e: IoError) Result<Arena, IoError> { .Err(e) }
+
+try_new_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError> {
+    backing.try_acquire(cap).match ({
+        .Ok(p)  => arena_ok(Arena( buf: p, off: 0, cap: cap )),
+        .Err(e) => arena_err(e)
+    })
 }
 
 Arena.impl(Allocator, {

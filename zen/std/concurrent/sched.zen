@@ -1,6 +1,7 @@
 // @self-hosted-only: cooperative round-robin scheduler over stackful coroutines.
-{ Allocator } = std.mem.alloc
-{ Coro, resume } = std.concurrent.coroutine
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
+{ Coro } = std.concurrent.coroutine
 
 flag_slot = (flags: RawPtr<u8>, i: i64) RawPtr<u8> { flags.offset(i * 8) }
 mark_alive = (flags: RawPtr<u8>, i: i64) void { flags.flag_slot(i).store_i64(1) }
@@ -44,4 +45,27 @@ run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
 }
 run*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
     alloc.run_in(coros)
+}
+
+run_ok = () Result<i32, IoError> { .Ok(0) }
+run_err = (e: IoError) Result<i32, IoError> { .Err(e) }
+
+try_run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError> {
+    n := coros.len
+    out: Result<i32, IoError> := (n <= 0).match({
+        true => run_ok(),
+        false => alloc.try_acquire(n * 8).match({
+            .Ok(flags) => {
+                flags.init_flags(0, n)
+                coros.drive(flags, n)
+                alloc.release(flags)
+                run_ok()
+            },
+            .Err(e) => run_err(e)
+        })
+    })
+    out
+}
+try_run*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError> {
+    alloc.try_run_in(coros)
 }

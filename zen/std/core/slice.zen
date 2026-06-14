@@ -1,46 +1,102 @@
 // Allocator-backed slice helpers for values that must outlive stack literals.
-// The plain helpers use the default heap allocator; `*_in` lets callers choose
-// an arena, heap, or other Allocator.
+// Plain helpers are fail-fast; `try_*` variants return allocation failure as Result.
+// Public constructors take an allocator first; `_in` aliases support UFCS on the allocator.
 
-{ Allocator, default_allocator } = std.mem.alloc
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
 
-nbuf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] {
+slice_ok<T> = (s: [T]) Result<[T], IoError> { .Ok(s) }
+slice_err<T> = (e: IoError) Result<[T], IoError> { .Err(e) }
+ptr_ok<T> = (p: Ptr<T>) Result<Ptr<T>, IoError> { .Ok(p) }
+ptr_err<T> = (e: IoError) Result<Ptr<T>, IoError> { .Err(e) }
+
+buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] {
     slice(a.acquire(n * sizeof(T)), n)
 }
 
-dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
-    buf := a.nbuf_in(xs.len, xs)
+try_buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> {
+    (n <= 0).match ({
+        true => slice_ok(slice(null_ptr(), 0)),
+        false => a.try_acquire(n * sizeof(T)).match ({
+            .Ok(p)  => slice_ok(p.slice(n)),
+            .Err(e) => slice_err(e)
+        })
+    })
+}
+
+dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
+    buf := a.buf_in(xs.len, xs)
     xs.loop((h, i, x) { buf[i] = x })
     buf
 }
 
+try_dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
+    a.try_buf_in(xs.len, xs).match ({
+        .Ok(buf) => {
+            xs.loop((h, i, x) { buf[i] = x })
+            slice_ok(buf)
+        },
+        .Err(e) => slice_err(e)
+    })
+}
+
+dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
+    a.dup_in(xs)
+}
+
+try_dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
+    a.try_dup_in(xs)
+}
+
 node_in*<A, T> = (a: MutPtr<A>, v: T) Ptr<T> {
-    a.dupx_in([v])[0].addr()
+    a.dup_in([v])[0].addr()
+}
+
+try_node_in*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> {
+    a.try_dup_in([v]).match ({
+        .Ok(buf) => {
+            vals: [T] := buf
+            p: Ptr<T> := vals[0].addr()
+            ptr_ok(p)
+        },
+        .Err(e)  => ptr_err(e)
+    })
 }
 
 concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) [T] {
-    buf := a.nbuf_in(xs.len + ys.len, xs)
+    buf := a.buf_in(xs.len + ys.len, xs)
     xs.loop((h, i, x) { buf[i] = x })
     ys.loop((h, i, y) { buf[xs.len + i] = y })
     buf
 }
 
-nbuf*<T> = (n: i64, like: [T]) [T] {
-    a := default_allocator()
-    a.addr().nbuf_in(n, like)
+try_concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> {
+    a.try_buf_in(xs.len + ys.len, xs).match ({
+        .Ok(buf) => {
+            xs.loop((h, i, x) { buf[i] = x })
+            ys.loop((h, i, y) { buf[xs.len + i] = y })
+            slice_ok(buf)
+        },
+        .Err(e) => slice_err(e)
+    })
 }
 
-dupx*<T> = (xs: [T]) [T] {
-    a := default_allocator()
-    a.addr().dupx_in(xs)
-}
+buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { a.buf_in(n, like) }
 
-node*<T> = (v: T) Ptr<T> {
-    a := default_allocator()
-    a.addr().node_in(v)
-}
+try_buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> { a.try_buf_in(n, like) }
 
-concat*<T> = (xs: [T], ys: [T]) [T] {
-    a := default_allocator()
-    a.addr().concat_in(xs, ys)
-}
+dup*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.dup_in(xs) }
+
+try_dup*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_dup_in(xs) }
+
+dupx*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.dupx_in(xs) }
+
+try_dupx*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_dupx_in(xs) }
+
+node*<A, T> = (a: MutPtr<A>, v: T) Ptr<T> { a.node_in(v) }
+
+try_node*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> { a.try_node_in(v) }
+
+concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) [T] { a.concat_in(xs, ys) }
+
+try_concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> { a.try_concat_in(xs, ys) }

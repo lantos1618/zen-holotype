@@ -1,15 +1,15 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, flit, vref, vref_at, bin, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
-{ byte_at, is_digit } = std.text.bytes
+{ at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
 { is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
 
-ebuf = (a: Ptr<Malloc>) [Expr] { slice(a.acquire(sizeof(Expr)), 1) }
-enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
+ebuf<A> = (a: MutPtr<A>) [Expr] { slice(a.acquire(sizeof(Expr)), 1) }
+enode*<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf := a.ebuf()
     buf[0] = v
     buf[0].addr()
@@ -19,7 +19,7 @@ enode* = (a: Ptr<Malloc>, v: Expr) Ptr<Expr> {
 copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
     i := 0
     @while(i < n) {
-        store(offset(dst, i), src.byte_at(start + i))
+        store(offset(dst, i), src.at(start + i))
         i = i + 1
     }
 }
@@ -31,7 +31,7 @@ is_c_kw = (src: str, t: Token) bool {
     src.tok_in(t, "do|switch|case|default|goto|void|continue|break").match ({ true => { return true }, _ => {} })
     false
 }
-lexeme* = (a: Ptr<Malloc>, src: str, t: Token) str {
+lexeme*<A> = (a: MutPtr<A>, src: str, t: Token) str {
     src.is_c_kw(t).match ({
         true  => {
             p := a.acquire(t.len + 4)
@@ -51,7 +51,7 @@ lexeme* = (a: Ptr<Malloc>, src: str, t: Token) str {
     })
 }
 
-is_op* = (src: str, t: Token, c: u8) bool { t.kind.match ({ .Sym => src.byte_at(t.start) == c, _ => false }) }
+is_op* = (src: str, t: Token, c: u8) bool { t.kind.match ({ .Sym => src.at(t.start) == c, _ => false }) }
 is_addsub = (src: str, t: Token) bool { src.is_op(t, '+') || src.is_op(t, '-') }
 is_muldiv = (src: str, t: Token) bool { src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%') }
 op_str = (b: u8) str {
@@ -65,7 +65,7 @@ op_str = (b: u8) str {
 }
 digit_val = (b: u8) i32 { b - '0' }
 to_int_from = (src: str, pos: i32, end: i32, acc: i64) i64 {
-    (pos < end).match ({ true => src.to_int_from(pos + 1, end, acc * 10 + src.byte_at(pos).digit_val()), false => acc })
+    (pos < end).match ({ true => src.to_int_from(pos + 1, end, acc * 10 + src.at(pos).digit_val()), false => acc })
 }
 hex_val = (b: u8) i32 {
     b.is_digit().match ({
@@ -74,7 +74,7 @@ hex_val = (b: u8) i32 {
     })
 }
 hex_from = (src: str, pos: i32, end: i32, acc: i64) i64 {
-    (pos < end).match ({ true => src.hex_from(pos + 1, end, acc * 16 + src.byte_at(pos).hex_val()), false => acc })
+    (pos < end).match ({ true => src.hex_from(pos + 1, end, acc * 16 + src.at(pos).hex_val()), false => acc })
 }
 // `0x...` parses base-16; otherwise decimal.
 to_int = (src: str, t: Token) i64 {
@@ -104,7 +104,7 @@ parse_base = (a: Ptr<Malloc>, src: str, pos: i32) PExpr {
     })
 }
 // Unterminated string tokens run to end-of-file.
-str_open = (src: str, t: Token) bool { (t.len < 2) || (src.byte_at(t.start + t.len - 1) != '"') }
+str_open = (src: str, t: Token) bool { (t.len < 2) || (src.at(t.start + t.len - 1) != '"') }
 // Bad atom: flag, consume one token for progress, and produce a placeholder.
 parse_garbage = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     perr_set()
@@ -134,11 +134,11 @@ esc_byte = (e: u8) u8 {
     })
 }
 char_val = (src: str, start: i32) i32 {
-    b := src.byte_at(start + 1)
-    (b == '\\').match ({ true => esc_byte(src.byte_at(start + 2)), false => b })
+    b := src.at(start + 1)
+    (b == '\\').match ({ true => esc_byte(src.at(start + 2)), false => b })
 }
 // String literal value: copy content and resolve escapes.
-str_val = (a: Ptr<Malloc>, src: str, t: Token) str {
+str_val<A> = (a: MutPtr<A>, src: str, t: Token) str {
     p := a.acquire(t.len)
     n := src.unescape(t.start + 1, t.start + t.len - 1, p, 0)
     store(offset(p, n), 0)
@@ -148,17 +148,17 @@ unescape = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     (pos < end).match ({ true => src.unescape_one(pos, end, dst, di), false => di })
 }
 unescape_one = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    (src.byte_at(pos) == '\\').match ({
+    (src.at(pos) == '\\').match ({
         true  => src.unescape_esc(pos, end, dst, di),
         false => src.unescape_plain(pos, end, dst, di)
     })
 }
 unescape_esc = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    store(offset(dst, di), esc_byte(src.byte_at(pos + 1)))
+    store(offset(dst, di), esc_byte(src.at(pos + 1)))
     src.unescape(pos + 2, end, dst, di + 1)
 }
 unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    store(offset(dst, di), src.byte_at(pos))
+    store(offset(dst, di), src.at(pos))
     src.unescape(pos + 1, end, dst, di + 1)
 }
 // Leading-dot enum constructor; compiler.check fills the enum type.
@@ -217,7 +217,7 @@ is_index_at = (src: str, pos: i32) bool {
 nl_between = (src: str, lo: i32, hi: i32) bool {       // a newline in the gap before the next token?
     (lo >= hi).match ({
         true  => false,
-        false => (src.byte_at(lo) == '\n').match ({ true => true, false => src.nl_between(lo + 1, hi) })
+        false => (src.at(lo) == '\n').match ({ true => true, false => src.nl_between(lo + 1, hi) })
     })
 }
 is_loop_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "loop"), _ => false }) }
@@ -270,7 +270,7 @@ parse_index = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
 is_upper_byte = (b: u8) bool { (b >= 'A') && (b <= 'Z') }
 is_qual_ctor  = (base: PExpr, name: str) bool {
     rn := subj_name(base.expr)
-    rn.byte_at(0).is_upper_byte() && name.byte_at(0).is_upper_byte()
+    rn.at(0).is_upper_byte() && name.at(0).is_upper_byte()
 }
 parse_field = (a: Ptr<Malloc>, src: str, base: PExpr) PExpr {
     dot  := src.scan(base.next)
@@ -471,7 +471,7 @@ parse_lit_arm_val = (a: Ptr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmEnd 
 subj_name = (e: Ptr<Expr>) str { load(e).match ({ .Var(v) => v.name, _ => "" }) }
 // Variant match arms; compiler.check fills the enum name.
 BindEnd*: { bind: str, next: i32 }
-arm_buf = (a: Ptr<Malloc>) [ArmData] { slice(a.acquire(1024 * sizeof(ArmData)), 1024) }
+arm_buf<A> = (a: MutPtr<A>) [ArmData] { slice(a.acquire(1024 * sizeof(ArmData)), 1024) }
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
 arm_bind = (a: Ptr<Malloc>, src: str, pos: i32) BindEnd {
     bt := src.scan(pos)
@@ -508,7 +508,7 @@ fill_varm = (a: Ptr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
 }
 // Distinguish `_ => body` from terminal bare `_`.
 is_fat_arrow = (src: str, t: Token) bool {
-    t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '=') && (src.byte_at(t.start + 1) == '>'), _ => false })
+    t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == '=') && (src.at(t.start + 1) == '>'), _ => false })
 }
 no_arm_stmts = (a: Ptr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 // Wildcard arm or terminal bare `_`; non-wild labels here are parse errors.
@@ -590,10 +590,12 @@ parse_generic_struct_lit = (a: Ptr<Malloc>, src: str, name: str, pos: i32) PExpr
     open := src.scan(ta.next)
     buf  := a.finit_buf()
     fe   := a.fill_pinits(src, open.next, buf, 0)
-    PExpr( expr: a.enode(mkstructg(name, a.mangle_str_in(name, ta.args), ta.args, buf.take_inits(fe.count))), next: fe.next )
+    mty   := a.mangle_str_in(name, ta.args)
+    inits := buf.take_inits(fe.count)
+    PExpr( expr: a.enode(mkstructg(name, mty, ta.args, inits)), next: fe.next )
 }
 // Paren struct construction: `Name(field: value, ...)`.
-finit_buf = (a: Ptr<Malloc>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }
+finit_buf<A> = (a: MutPtr<A>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }
 take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }
 parse_paren_struct_lit = (a: Ptr<Malloc>, src: str, name: str, open: Scan) PExpr {
     buf := a.finit_buf()
@@ -619,8 +621,8 @@ fill_pinit = (a: Ptr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd
     })
 }
 // Argument and slice-literal buffers; slice literals need more room for data tables.
-arg_buf = (a: Ptr<Malloc>) [Expr] { slice(a.acquire(256 * sizeof(Expr)), 256) }
-slit_buf = (a: Ptr<Malloc>) [Expr] { slice(a.acquire(2048 * sizeof(Expr)), 2048) }
+arg_buf<A> = (a: MutPtr<A>) [Expr] { slice(a.acquire(256 * sizeof(Expr)), 256) }
+slit_buf<A> = (a: MutPtr<A>) [Expr] { slice(a.acquire(2048 * sizeof(Expr)), 2048) }
 take_args = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }
 parse_call = (a: Ptr<Malloc>, src: str, name: str, lp: Scan, at: i32) PExpr {
     buf := a.arg_buf()
@@ -671,9 +673,9 @@ parse_paren = (a: Ptr<Malloc>, src: str, open: Scan) PExpr {
 is_minus = (src: str, t: Token) bool { src.is_op(t, '-') }
 parse_neg = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     inner := a.parse_atom(src, sc.next)
-    PExpr( expr: a.enode(bin("-", a.enode(lit(0)), inner.expr)), next: inner.next )
+    PExpr( expr: a.enode(bin_at("-", a.enode(lit(0)), inner.expr, sc.tok.start)), next: inner.next )
 }
-is_not = (src: str, t: Token) bool { t.kind.match ({ .Sym => (src.byte_at(t.start) == '!') && (t.len == 1), _ => false }) }
+is_not = (src: str, t: Token) bool { t.kind.match ({ .Sym => (src.at(t.start) == '!') && (t.len == 1), _ => false }) }
 parse_not = (a: Ptr<Malloc>, src: str, sc: Scan) PExpr {
     inner := a.parse_atom(src, sc.next)
     PExpr( expr: a.enode(cond(inner.expr, a.enode(vref("false")), a.enode(vref("true")))), next: inner.next )
@@ -752,7 +754,7 @@ term_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 term_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_atom(src, sc.next)
-    a.term_rest(src, PExpr( expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next ))
+    a.term_rest(src, PExpr( expr: a.enode(bin_at(src.at(sc.tok.start).op_str(), lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 
 parse_expr = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
@@ -762,14 +764,14 @@ expr_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 expr_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_term(src, sc.next)
-    a.expr_rest(src, PExpr( expr: a.enode(bin(src.byte_at(sc.tok.start).op_str(), lhs.expr, rhs.expr)), next: rhs.next ))
+    a.expr_rest(src, PExpr( expr: a.enode(bin_at(src.at(sc.tok.start).op_str(), lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 
 // Bitwise precedence is shift > & > ^ > |, tighter than comparison.
 is_shift = (src: str, t: Token) bool {
-    t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == src.byte_at(t.start + 1)) && ((src.byte_at(t.start) == '<') || (src.byte_at(t.start) == '>')), _ => false })
+    t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == src.at(t.start + 1)) && ((src.at(t.start) == '<') || (src.at(t.start) == '>')), _ => false })
 }
-shift_op_str = (src: str, t: Token) str { (src.byte_at(t.start) == '<').match ({ true => "<<", false => ">>" }) }
+shift_op_str = (src: str, t: Token) str { (src.at(t.start) == '<').match ({ true => "<<", false => ">>" }) }
 parse_shift = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.shift_rest(src, a.parse_expr(src, pos)) }
 shift_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
@@ -777,11 +779,11 @@ shift_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 shift_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_expr(src, sc.next)
-    a.shift_rest(src, PExpr( expr: a.enode(bin(src.shift_op_str(sc.tok), lhs.expr, rhs.expr)), next: rhs.next ))
+    a.shift_rest(src, PExpr( expr: a.enode(bin_at(src.shift_op_str(sc.tok), lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
-is_band = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '&'), _ => false }) }
-is_bxor = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '^'), _ => false }) }
-is_bbor = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.byte_at(t.start) == '|'), _ => false }) }
+is_band = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '&'), _ => false }) }
+is_bxor = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '^'), _ => false }) }
+is_bbor = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '|'), _ => false }) }
 parse_band = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.band_rest(src, a.parse_shift(src, pos)) }
 band_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
@@ -789,7 +791,7 @@ band_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 band_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_shift(src, sc.next)
-    a.band_rest(src, PExpr( expr: a.enode(bin("&", lhs.expr, rhs.expr)), next: rhs.next ))
+    a.band_rest(src, PExpr( expr: a.enode(bin_at("&", lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 parse_bxor = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.bxor_rest(src, a.parse_band(src, pos)) }
 bxor_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
@@ -798,7 +800,7 @@ bxor_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 bxor_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_band(src, sc.next)
-    a.bxor_rest(src, PExpr( expr: a.enode(bin("^", lhs.expr, rhs.expr)), next: rhs.next ))
+    a.bxor_rest(src, PExpr( expr: a.enode(bin_at("^", lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 parse_bor = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.bor_rest(src, a.parse_bxor(src, pos)) }
 bor_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
@@ -807,14 +809,14 @@ bor_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 bor_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_bxor(src, sc.next)
-    a.bor_rest(src, PExpr( expr: a.enode(bin("|", lhs.expr, rhs.expr)), next: rhs.next ))
+    a.bor_rest(src, PExpr( expr: a.enode(bin_at("|", lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 
 // Comparison excludes shifts and `=>`; `=` alone is assignment.
 is_cmp_byte = (b: u8, len: i32) bool { ((b == '=') && (len == 2)) || ((b == '!') && (len == 2)) || (b == '<') || (b == '>') }
-is_cmp = (src: str, t: Token) bool { t.kind.match ({ .Sym => src.byte_at(t.start).is_cmp_byte(t.len) && !src.is_shift(t) && !src.is_fat_arrow(t), _ => false }) }
+is_cmp = (src: str, t: Token) bool { t.kind.match ({ .Sym => src.at(t.start).is_cmp_byte(t.len) && !src.is_shift(t) && !src.is_fat_arrow(t), _ => false }) }
 cmp_op_str = (src: str, t: Token) str {
-    b0 := src.byte_at(t.start)
+    b0 := src.at(t.start)
     (b0 == '=').match ({ true => "==", false =>
     (b0 == '!').match ({ true => "!=", false =>
     (b0 == '<').match ({
@@ -829,12 +831,12 @@ cmp_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 cmp_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_bor(src, sc.next)
-    a.cmp_rest(src, PExpr( expr: a.enode(bin(src.cmp_op_str(sc.tok), lhs.expr, rhs.expr)), next: rhs.next ))
+    a.cmp_rest(src, PExpr( expr: a.enode(bin_at(src.cmp_op_str(sc.tok), lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 
 // Logic: && binds tighter than ||, both looser than comparison.
-is_and = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '&'), _ => false }) }
-is_or  = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.byte_at(t.start) == '|'), _ => false }) }
+is_and = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == '&'), _ => false }) }
+is_or  = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == '|'), _ => false }) }
 parse_and = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.and_rest(src, a.parse_cmp(src, pos)) }
 and_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
@@ -842,7 +844,7 @@ and_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 and_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_cmp(src, sc.next)
-    a.and_rest(src, PExpr( expr: a.enode(bin("&&", lhs.expr, rhs.expr)), next: rhs.next ))
+    a.and_rest(src, PExpr( expr: a.enode(bin_at("&&", lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }
 parse_or* = (a: Ptr<Malloc>, src: str, pos: i32) PExpr { a.or_rest(src, a.parse_and(src, pos)) }
 or_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
@@ -851,5 +853,5 @@ or_rest = (a: Ptr<Malloc>, src: str, lhs: PExpr) PExpr {
 }
 or_more = (a: Ptr<Malloc>, src: str, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_and(src, sc.next)
-    a.or_rest(src, PExpr( expr: a.enode(bin("||", lhs.expr, rhs.expr)), next: rhs.next ))
+    a.or_rest(src, PExpr( expr: a.enode(bin_at("||", lhs.expr, rhs.expr, sc.tok.start)), next: rhs.next ))
 }

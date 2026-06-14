@@ -40,7 +40,8 @@ Hollywood actor API
 That points toward this user shape:
 
 ```zen
-alloc := async_arena(1 << 20)
+rt := std.concurrent.runtime
+alloc := rt.async(1 << 20)
 engine := actor_engine(alloc.addr())
 
 room := engine.spawn(ChatRoom.new())
@@ -859,12 +860,12 @@ Possible Zen allocator/runtime families:
 
 ```zen
 alloc := sync_heap()
-alloc := sync_arena(1 << 20)
-alloc := async_arena(1 << 20)
+alloc := rt.sync(1 << 20)
+alloc := rt.async(1 << 20)
 alloc := async_pool(block_size, block_count)
 ```
 
-That is better than a vague `default_allocator()`, and it is less noisy than
+That is better than a vague default heap, and it is less noisy than
 threading separate `allocator` and `io` values through every example.
 
 ## Transactional Memory Family
@@ -1361,8 +1362,8 @@ Suggested modules:
 ```text
 std.mem
   sync_heap
-  sync_arena
-  async_arena
+  sync
+  async
   async_pool
 
 std.concurrent.engine
@@ -1383,7 +1384,8 @@ Preferred actor demo shape:
 
 ```zen
 main = () i32 {
-    alloc := async_arena(1 << 20)
+    rt := std.concurrent.runtime
+    alloc := rt.async(1 << 20)
     engine := actor_engine(alloc.addr())
 
     room := engine.spawn(ChatRoom.new())

@@ -1,15 +1,31 @@
 // @self-hosted-only: runtime allocators. The allocator is the execution mode:
 // SyncArena.checkpoint is a no-op; AsyncArena.checkpoint pauses the current coroutine.
 { Allocator, Heap } = std.mem.alloc
-{ Arena, arena_new, arena_free } = std.mem.arena
+{ Arena, new_in } = std.mem.arena
 { checkpoint_current } = std.concurrent.coroutine
 
 Runtime*: {
     checkpoint: (MutPtr<Self>) void
 }
 
-SyncArena*: { mem: Arena }
-AsyncArena*: { mem: Arena }
+SyncArena*: {
+    mem: Arena
+
+    free_in<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
+        runtime.mem.addr().free_in(backing)
+    }
+
+    free<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void { runtime.free_in(backing) }
+}
+AsyncArena*: {
+    mem: Arena
+
+    free_in<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void {
+        runtime.mem.addr().free_in(backing)
+    }
+
+    free<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void { runtime.free_in(backing) }
+}
 
 SyncArena.impl(Runtime, {
     checkpoint = (s: MutPtr<SyncArena>) void {}
@@ -23,6 +39,8 @@ AsyncArena.impl(Runtime, {
     checkpoint = (s: MutPtr<AsyncArena>) void { checkpoint_current() }
 })
 
+runtime_checkpoint = () void { checkpoint_current() }
+
 SyncArena.impl(Allocator, {
     acquire = (s: MutPtr<SyncArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
     resize  = (s: MutPtr<SyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
@@ -35,12 +53,8 @@ AsyncArena.impl(Allocator, {
     release = (s: MutPtr<AsyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
 })
 
-sync_arena* = (cap: i64) SyncArena { SyncArena(mem: arena_new(cap)) }
-async_arena* = (cap: i64) AsyncArena { AsyncArena(mem: arena_new(cap)) }
+sync_in*<A> = (backing: MutPtr<A>, cap: i64) SyncArena { SyncArena(mem: backing.new_in(cap)) }
+async_in*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena { AsyncArena(mem: backing.new_in(cap)) }
 
-sync_arena_free* = (runtime: MutPtr<SyncArena>) void {
-    runtime.mem.addr().arena_free()
-}
-async_arena_free* = (runtime: MutPtr<AsyncArena>) void {
-    runtime.mem.addr().arena_free()
-}
+sync*<A> = (backing: MutPtr<A>, cap: i64) SyncArena { backing.sync_in(cap) }
+async*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena { backing.async_in(cap) }

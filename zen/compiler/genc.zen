@@ -6,19 +6,18 @@
 // runs — the self-hosting direction made real on a subset. `genC(f) -> String` is
 // the seed of zen lowering itself.
 //
-// The emitters are written in fluent UFCS style: `s.append(a).append(b)` is just
-// `append(append(s, a), b)`, and `s.gen_expr(e)` is `gen_expr(s, e)` — String flows
-// left-to-right through the chain.
+// The emitters are written in fluent UFCS style while threading the owning allocator
+// explicitly: `s.gstr_append(a, x).gen_expr(a, e)` keeps String growth visible.
 
-{ String, new, append, push, finish } = std.text.string
+{ String } = std.text.string
 { view, is_empty, eq } = std.text.str
-{ Malloc, malloc } = std.mem.alloc
+{ Malloc, malloc, realloc } = std.mem.alloc
 
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
 // which needs only a forward decl, so the recursion closes.
 VarData*: { name: str, pos: i32 }                      // pos = byte offset of the name in the source (0 = synthesized)
-BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr> }   // lhs op rhs
+BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>, pos: i32 }   // lhs op rhs; pos = operator byte offset when source-backed
 CallData*: { fn: str, args: [Expr], pos: i32, raw: bool }  // fn(a, b, …) or @fn(a, b, …); pos = fn byte offset (0 = synthesized)
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
@@ -58,10 +57,10 @@ Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call
 
 // statements: `int32_t name = expr;`  and  `return expr;`
 LetData*: { name: str, ty: Ty, value: Ptr<Expr> }   // ty = the declared annotation (`x: T := e`), tvoid when unannotated
-AssignData*: { target: Ptr<Expr>, value: Ptr<Expr> }       // <lvalue> = expr;  (target: a Var/Member/Arrow)
+AssignData*: { target: Ptr<Expr>, value: Ptr<Expr>, pos: i32 }       // <lvalue> = expr; pos = lvalue byte offset (0 = synthesized)
 IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } else { els }
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
-IndexSetData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty, value: Ptr<Expr> }  // seq[idx] = value;
+IndexSetData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty, value: Ptr<Expr>, pos: i32 }  // seq[idx] = value; pos = seq byte offset
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData) | IndexSet(IndexSetData) | ExprStmt(Ptr<Expr>)
 // types + typed parameters
 // a function type `(A, T) R` — ONLY a parameter type. A function that takes one is an inline
@@ -93,7 +92,7 @@ GenEnumDecl*: { name: str, tparams: [Param], variants: [VariantDef] }
 // actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
 // functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
 // verify conformance (every method the Trait declares is one this impl provides). genModule skips it.
-ImplData*: { ty: str, trname: str, methods: [Param] }
+ImplData*: { ty: str, trname: str, methods: [Param], pos: i32 }
 // DForeign is a function DECLARATION with no body — a foreign binding like `malloc = (n: i64) …`.
 // It's emitted as a C prototype `ret name(params);` (the definition comes from libc / another TU),
 // so genModule emits its signature but no body, and the checker knows its full signature.
@@ -116,10 +115,13 @@ GlobalData*: { name: str, ty: Ty, init: Ptr<Expr> }
 TraitDefData*: { trname: str, fn: Func }
 Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)   // DRaw = verbatim C escape
 
-// Compiler-owned allocations flow through this shim so stripped bootstrap drivers that do not flatten
-// std.mem.alloc's trait impls still have a concrete UFCS target for `a.acquire(...)`.
+// Compiler-owned allocations flow through these shims so stripped bootstrap drivers that do not
+// flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
 acquire = (a: Ptr<Malloc>, n: i64) RawPtr<u8> {
     (n <= 0).match ({ true => null_ptr(), false => malloc(n) })
+}
+resize = (a: Ptr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    realloc(p, n)
 }
 
 write_str = (dst: RawPtr<u8>, at: i64, t: str) i64 {
@@ -140,6 +142,26 @@ finish_buf = (dst: RawPtr<u8>, n: i64) str {
     cstr(dst)
 }
 
+gstr_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
+    String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
+}
+gstr_reserve<A> = (a: MutPtr<A>, s: String, need: i64) String {
+    out := s
+    (s.len + need > s.cap).match ({ true => { out = a.gstr_grow(s, (s.cap + need) * 2) }, _ })
+    out
+}
+gstr_push<A> = (s: String, a: MutPtr<A>, b: u8) String {
+    r := a.gstr_reserve(s, 1)
+    r.ptr.offset(r.len).store(b)
+    String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
+}
+gstr_append<A> = (s: String, a: MutPtr<A>, t: str) String {
+    cur := s
+    bs: [u8] := t.view()
+    bs.loop((h, i, b) { cur = cur.gstr_push(a, b) })
+    cur
+}
+
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
 lit* = (n: i64) Expr { .Int(n) }
@@ -147,7 +169,8 @@ byte_lit* = (n: i32) Expr { .Byte(n) }   // a char literal's byte value (typed u
 flit* = (t: str) Expr { .FloatLit(t) }   // a float literal — its lexeme text, emitted verbatim (typed f64)
 vref* = (nm: str) Expr { .Var(VarData( name: nm, pos: 0 )) }
 vref_at* = (nm: str, p: i32) Expr { .Var(VarData( name: nm, pos: p )) }
-bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { .Bin(BinData( op: op, lhs: l, rhs: r )) }
+bin_at* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr { .Bin(BinData( op: op, lhs: l, rhs: r, pos: p )) }
+bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
 call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args, pos: 0, raw: false )) }
 call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: false )) }
 raw_call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: true )) }
@@ -199,8 +222,10 @@ slet*  = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: tvoid(), val
 slett* = (nm: str, t: Ty, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: t, value: v )) }   // a TYPED let
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }                  // a bare expression evaluated for effect
-sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt { .Assign(AssignData( target: tgt, value: v )) }
-sidxset* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>) Stmt { .IndexSet(IndexSetData( seq: seq, idx: i, elem: elem, value: v )) }
+sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt { .Assign(AssignData( target: tgt, value: v, pos: 0 )) }
+sassign_at* = (tgt: Ptr<Expr>, v: Ptr<Expr>, p: i32) Stmt { .Assign(AssignData( target: tgt, value: v, pos: p )) }
+sidxset* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>) Stmt { .IndexSet(IndexSetData( seq: seq, idx: i, elem: elem, value: v, pos: 0 )) }
+sidxset_at* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>, p: i32) Stmt { .IndexSet(IndexSetData( seq: seq, idx: i, elem: elem, value: v, pos: p )) }
 sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt { .If(IfData( c: c, then: t, els: e )) }
 swhile* = (c: Ptr<Expr>, b: [Stmt]) Stmt { .While(WhileData( c: c, body: b )) }
 ti32* = () Ty { .I32() }
@@ -212,15 +237,15 @@ tnamed* = (n: str) Ty { .Named(n) }
 tgeneric* = (nm: str, args: [Ty], mangled: str) Ty { .Generic(GenericData( name: nm, args: args, mangled: mangled )) }
 // the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` -> `Vec_ptr_u8`.
 // A C identifier fragment per arg (prims by name, a nested generic by its own mangled name).
-mangle_ty = (s: String, t: Ty) String {
+mangle_ty<A> = (s: String, a: MutPtr<A>, t: Ty) String {
     t.match ({
-        .I32 => s.append("i32"), .I64 => s.append("i64"), .U8 => s.append("u8"), .F64 => s.append("f64"),
-        .Bool => s.append("bool"), .Str => s.append("str"), .Void => s.append("void"),
-        .Named(n)   => s.append(n),
-        .Generic(g) => s.append(g.mangled),
-        .Ptr(p)     => s.append("ptr_").mangle_ty(load(p)),
-        .Slice(e)   => s.append("slice_").mangle_ty(load(e)),
-        .FnT(ft)    => s.append("fn")
+        .I32 => s.gstr_append(a, "i32"), .I64 => s.gstr_append(a, "i64"), .U8 => s.gstr_append(a, "u8"), .F64 => s.gstr_append(a, "f64"),
+        .Bool => s.gstr_append(a, "bool"), .Str => s.gstr_append(a, "str"), .Void => s.gstr_append(a, "void"),
+        .Named(n)   => s.gstr_append(a, n),
+        .Generic(g) => s.gstr_append(a, g.mangled),
+        .Ptr(p)     => s.gstr_append(a, "ptr_").mangle_ty(a, load(p)),
+        .Slice(e)   => s.gstr_append(a, "slice_").mangle_ty(a, load(e)),
+        .FnT(ft)    => s.gstr_append(a, "fn")
     })
 }
 
@@ -258,32 +283,24 @@ mangle_write_args = (dst: RawPtr<u8>, at: i64, args: [Ty]) i64 {
     })
     out
 }
-mangle_str_in* = (a: Ptr<Malloc>, base: str, args: [Ty]) str {
+mangle_str_in*<A> = (a: MutPtr<A>, base: str, args: [Ty]) str {
     n   := base.view().len + args.mangle_args_len()
-    buf := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire(n + 1)
     end := buf.mangle_write_args(buf.write_str(0, base), args)
     buf.finish_buf(end)
-}
-mangle_str* = (base: str, args: [Ty]) str {
-    a := Malloc(_: 0)
-    a.addr().mangle_str_in(base, args)
 }
 // the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
 // types implementing the same trait method emit DISTINCT C functions. UFCS dispatch routes `x.m()` to
 // the impl for x's type (compiler.check dispatch_name).
-impl_cname_in* = (a: Ptr<Malloc>, trname: str, ty: str, method: str) str {
+impl_cname_in*<A> = (a: MutPtr<A>, trname: str, ty: str, method: str) str {
     n   := 5 + trname.view().len + 1 + ty.view().len + 1 + method.view().len
-    buf := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire(n + 1)
     p1  := buf.write_str(0, "impl_")
     p2  := buf.write_str(p1, trname)
     p3  := buf.write_str(p2, "_")
     p4  := buf.write_str(p3, ty)
     p5  := buf.write_str(p4, "_")
     buf.finish_buf(buf.write_str(p5, method))
-}
-impl_cname* = (trname: str, ty: str, method: str) str {
-    a := Malloc(_: 0)
-    a.addr().impl_cname_in(trname, ty, method)
 }
 tptr* = (t: Ptr<Ty>) Ty { .Ptr(t) }
 tslice* = (e: Ptr<Ty>) Ty { .Slice(e) }
@@ -302,42 +319,50 @@ dforeign* = (f: Func) Decl { .DForeign(f) }
 dimport* = (names: [Param]) Decl { .DImport(ImportData( names: names )) }
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
-dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods )) }
+dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: 0 )) }
+dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: pos )) }
 dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init )) }
 dtraitdef* = (trname: str, fn: Func) Decl { .DTraitDefault(TraitDefData( trname: trname, fn: fn )) }
-mono_tybuf_in = (a: Ptr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
-mono_tynode_in = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
+mono_tybuf_in<A> = (a: MutPtr<A>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
+mono_tynode_in<A> = (a: MutPtr<A>, t: Ty) Ptr<Ty> {
     buf := a.mono_tybuf_in(1)
     buf[0] = t
     buf[0].addr()
 }
 // the FnT SIGNATURE of a function (its param types + ret) — used to give a default-bodied trait method
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
-fnt_param_tys_in = (a: Ptr<Malloc>, ps: [Param]) [Ty] {
+fnt_param_tys_in<A> = (a: MutPtr<A>, ps: [Param]) [Ty] {
     buf := a.mono_tybuf_in(ps.len)
     ps.loop((h, i, p) { buf[i] = p.ty })
     buf
 }
-ty_node_in = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
-fnt_from_func_in* = (a: Ptr<Malloc>, f: Func) Ty { fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret)) }
-fnt_from_func* = (f: Func) Ty {
-    a := Malloc(_: 0)
-    a.addr().fnt_from_func_in(f)
-}
+ty_node_in<A> = (a: MutPtr<A>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
+fnt_from_func_in*<A> = (a: MutPtr<A>, f: Func) Ty { fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret)) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything
 
 
 // append a C type — recurses for pointers (`T*`), so it can't be a plain str-returning fn
-gen_ty* = (s: String, t: Ptr<Ty>) String {
+gen_ty*<A> = (s: String, a: MutPtr<A>, t: Ptr<Ty>) String {
+    out := s
     t.match ({
-        .I32 => s.append("int32_t"), .I64 => s.append("int64_t"), .U8 => s.append("uint8_t"), .F64 => s.append("double"),
-        .Bool => s.append("bool"), .Void => s.append("void"), .Str => s.append("const char*"),
-        .Named(n) => s.append(n), .Ptr(p) => s.gen_ty(p).append("*"),
-        .Slice(e) => s.append("zslice"),                // [T] is the fat-pointer struct (T recovered at use)
-        .FnT(ft)  => s.append("void"),                  // unreachable: a template's FnT param is never emitted
-        .Generic(g) => s.append(g.mangled)              // a generic instance → its monomorphized C name
+        .I32 => { out = out.gstr_append(a, "int32_t") },
+        .I64 => { out = out.gstr_append(a, "int64_t") },
+        .U8 => { out = out.gstr_append(a, "uint8_t") },
+        .F64 => { out = out.gstr_append(a, "double") },
+        .Bool => { out = out.gstr_append(a, "bool") },
+        .Void => { out = out.gstr_append(a, "void") },
+        .Str => { out = out.gstr_append(a, "const char*") },
+        .Named(n) => { out = out.gstr_append(a, n) },
+        .Ptr(p) => {
+            inner := out.gen_ty(a, p)
+            out = inner.gstr_append(a, "*")
+        },
+        .Slice(e) => { out = out.gstr_append(a, "zslice") },                // [T] is the fat-pointer struct (T recovered at use)
+        .FnT(ft)  => { out = out.gstr_append(a, "void") },                  // unreachable: a template's FnT param is never emitted
+        .Generic(g) => { out = out.gstr_append(a, g.mangled) }              // a generic instance → its monomorphized C name
     })
+    out
 }
 // the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
@@ -362,27 +387,15 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
         .FnT(ft)    => dst.write_str(at, "void")
     })
 }
-ty_cname_in* = (a: Ptr<Malloc>, t: Ty) str {
+ty_cname_in*<A> = (a: MutPtr<A>, t: Ty) str {
     n   := t.cname_len()
-    buf := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire(n + 1)
     buf.finish_buf(buf.cname_write(0, t))
 }
-ty_cname* = (t: Ty) str {
-    a := Malloc(_: 0)
-    a.addr().ty_cname_in(t)
-}
 
-// ── type substitution (tparam→arg): shared by compiler.check (subst_ty/find_genenum) and the
+// ── type substitution (tparam→arg): shared by compiler.check (subst_ty_in/find_genenum) and the
 //    monomorphize pass (compiler.mono). A tiny stack of [Ty] buffer helpers + the recursive
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
-mono_tybuf = (n: i64) [Ty] {
-    a := Malloc(_: 0)
-    a.addr().mono_tybuf_in(n)
-}
-mono_tynode = (t: Ty) Ptr<Ty> {
-    a := Malloc(_: 0)
-    a.addr().mono_tynode_in(t)
-}
 // substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
 tparam_arg = (tparams: [Param], args: [Ty], n: str, dflt: Ty) Ty {
     found := dflt
@@ -398,19 +411,11 @@ subst_ty_in* = (a: Ptr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
         _           => t
     })
 }
-subst_ty* = (tparams: [Param], args: [Ty], t: Ty) Ty {
-    a := Malloc(_: 0)
-    a.addr().subst_ty_in(tparams, args, t)
-}
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
 subst_generic_in = (a: Ptr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {
     buf := a.mono_tybuf_in(g.args.len)
     g.args.loop((h, i, gt) { buf[i] = a.subst_ty_in(tparams, args, gt) })
     tgeneric(g.name, buf, a.mangle_str_in(g.name, buf))
-}
-subst_generic = (tparams: [Param], args: [Ty], g: GenericData) Ty {
-    a := Malloc(_: 0)
-    a.addr().subst_generic_in(tparams, args, g)
 }
 find_genenum* = (decls: [Decl], name: str) GenEnumDecl {
     found := GenEnumDecl( name: "", tparams: slice(null_ptr(), 0), variants: slice(null_ptr(), 0) )

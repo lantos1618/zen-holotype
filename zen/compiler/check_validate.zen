@@ -2,8 +2,8 @@
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
 { Env, infer_expr, fits, ty_eq, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
-{ Malloc } = std.mem.alloc
-{ byte_at } = std.text.bytes
+{ Allocator, Malloc } = std.mem.alloc
+{ at, is_alnum } = std.text.bytes
 { eq, is_empty } = std.text.str
 
 // Local fn is known iff the_func finds it by name (sentinel name is "").
@@ -158,6 +158,38 @@ check_args = (env: Env, args: [Expr]) i32 {
 check_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) { acc = acc + env.a.arm_env(env, subjty, ar).check_expr(ar.body) })
+    acc
+}
+match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
+    out := tvoid()
+    arms.loop((h, i, ar) {
+        aenv := env.a.arm_env(env, subjty, ar)
+        got  := aenv.infer_expr(ar.body)
+        out = out.is_void_ty().match ({
+            true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({ true => out, false => got }),
+            false => out
+        })
+    })
+    out
+}
+result_compatible = (want: Ty, got: Ty) bool {
+    ((want.ty_rank() >= 0) && (got.ty_rank() >= 0)).match ({
+        true  => true,
+        false => want.ty_eq(got)
+    })
+}
+arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
+    aenv := env.a.arm_env(env, subjty, ar)
+    got  := aenv.infer_expr(ar.body)
+    (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
+        true  => 0,
+        false => want.result_compatible(got).match ({ true => 0, false => 1 })
+    })
+}
+match_arm_result_errs = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    want := env.match_result_ty(subjty, arms)
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc + env.arm_result_err(subjty, want, ar) })
     acc
 }
 // Early returns inside value-position block arms would be dropped by expression emission.
@@ -323,7 +355,7 @@ match_err = (env: Env, m: MatchData) i32 {
 }
 // Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: str) bool {
-    b := op.byte_at(0)
+    b := op.at(0)
     (b == '+') || (b == '-') || (b == '*') || (b == '/') || (b == '%')
 }
 is_logic_op = (op: str) bool { eq(op, "&&") || eq(op, "||") }
@@ -405,17 +437,17 @@ var_err = (env: Env, name: str) i32 {
     (eq(name, "true") || eq(name, "false")
         || env.is_bound(name) || env.decls.is_known_fn(name) || env.decls.is_imported(name)
         || env.decls.is_trait_method(name) || name.is_intrinsic()
-        || env.decls.is_tag_const(name)).match ({ true => 0, false => 1 })
+        || env.decls.is_tag_const(env.a, name)).match ({ true => 0, false => 1 })
 }
 // Lowered statement-match tag constants count as generated names.
-variant_tags_has = (vs: [VariantDef], ename: str, name: str) bool {
+variant_tags_has<A> = (vs: [VariantDef], a: MutPtr<A>, ename: str, name: str) bool {
     found := false
-    vs.loop((h, i, v) { found = eq(name, tag_const(ename, v.name)).match ({ true => true, false => found }) })
+    vs.loop((h, i, v) { found = eq(name, a.tag_const(ename, v.name)).match ({ true => true, false => found }) })
     found
 }
-is_tag_const = (decls: [Decl], name: str) bool {
+is_tag_const<A> = (decls: [Decl], a: MutPtr<A>, name: str) bool {
     found := false
-    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.variants.variant_tags_has(ed.name, name).match ({ true => true, false => found }), _ => found }) })
+    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.variants.variant_tags_has(a, ed.name, name).match ({ true => true, false => found }), _ => found }) })
     found
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
@@ -426,7 +458,10 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => env.check_expr(m.subj) + env.check_arms(env.infer_expr(m.subj), m.arms) + env.match_err(m) + arm_return_errs(m.arms),
+        .Match(m)       => {
+            subjty := env.infer_expr(m.subj)
+            env.check_expr(m.subj) + env.check_arms(subjty, m.arms) + env.match_err(m) + env.match_arm_result_errs(subjty, m.arms) + arm_return_errs(m.arms)
+        },
         .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
@@ -491,7 +526,7 @@ check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
     e   := env
     body.loop((h, i, st) {
-        acc = acc + a.check_stmt(e, st)
+        acc = (acc + a.check_stmt(e, st))
         e   = a.extend_env(e, st)
     })
     acc
@@ -516,6 +551,150 @@ last_stmt_err = (env: Env, st: Stmt) i32 {
         .Return(r)   => 0,                                       // an explicit return is checked in check_stmt
         _            => 1                                        // let/assign/while/if/index-set produce no value
     })
+}
+
+// Raw ownership validation runs before resolve_module in the CLI, while source-level
+// allocator-explicit `o.release_in(a)` / `r.drop_in(a)` calls still exist. After generic inlining those calls
+// become plain pointer operations, so this rule cannot be recovered reliably later.
+DeadList: DeadNil | DeadCons(DeadCell)
+DeadCell: { name: str, tail: Ptr<DeadList> }
+dead_buf<A> = (a: MutPtr<A>) [DeadList] { slice(a.acquire(sizeof(DeadList)), 1) }
+dead_node<A> = (a: MutPtr<A>, v: DeadList) Ptr<DeadList> {
+    buf := a.dead_buf()
+    buf[0] = v
+    buf[0].addr()
+}
+dead_nil<A> = (a: MutPtr<A>) Ptr<DeadList> { a.dead_node(.DeadNil()) }
+dead_cons<A> = (a: MutPtr<A>, name: str, tail: Ptr<DeadList>) Ptr<DeadList> {
+    a.dead_node(.DeadCons(DeadCell(name: name, tail: tail)))
+}
+dead_has = (seen: Ptr<DeadList>, name: str) bool {
+    seen.match ({
+        .DeadNil => false,
+        .DeadCons(c) => eq(c.name, name).match ({ true => true, false => c.tail.dead_has(name) })
+    })
+}
+owner_base = (t: Ty) str {
+    t.match ({
+        .Generic(g) => g.name,
+        .Named(n)   => n,
+        _           => ""
+    })
+}
+is_consume_method = (env: Env, c: CallData) bool {
+    (c.args.len > 0).match ({
+        false => false,
+        true  => {
+            base := env.infer_expr(c.args[0].addr()).owner_base()
+            eq(c.fn, "release").match ({
+                true  => eq(base, "Own"),
+                false => eq(c.fn, "release_in").match ({
+                    true => eq(base, "Own"),
+                    false => eq(c.fn, "drop").match ({
+                        true  => eq(base, "Rc") || eq(base, "Arc"),
+                        false => eq(c.fn, "drop_in").match ({ true => eq(base, "Rc") || eq(base, "Arc"), false => false })
+                    })
+                })
+            })
+        }
+    })
+}
+is_default_owner_method = (env: Env, c: CallData) bool {
+    (c.args.len > 0).match ({
+        false => false,
+        true  => {
+            base := env.infer_expr(c.args[0].addr()).owner_base()
+            eq(c.fn, "release").match ({
+                true  => eq(base, "Own"),
+                false => eq(c.fn, "drop").match ({ true => eq(base, "Rc") || eq(base, "Arc"), false => false })
+            })
+        }
+    })
+}
+recv_var_name = (c: CallData) str {
+    (c.args.len > 0).match ({
+        false => "",
+        true  => c.args[0].match ({ .Var(v) => v.name, _ => "" })
+    })
+}
+own_args_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc + a.own_expr_err(env, seen, ar.addr()) })
+    acc
+}
+own_inits_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc + a.own_expr_err(env, seen, fi.value) })
+    acc
+}
+own_arms_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc + a.own_expr_err(a.arm_env(env, subjty, ar), seen, ar.body) })
+    acc
+}
+own_expr_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v)        => seen.dead_has(v.name).match ({ true => 1, false => 0 }),
+        .Call(c)       => a.own_args_err(env, seen, c.args) + env.is_default_owner_method(c).match ({ true => 1, false => 0 }),
+        .Index(ix)     => a.own_expr_err(env, seen, ix.seq) + a.own_expr_err(env, seen, ix.idx),
+        .Bin(b)        => a.own_expr_err(env, seen, b.lhs) + a.own_expr_err(env, seen, b.rhs),
+        .Cond(d)       => a.own_expr_err(env, seen, d.c) + a.own_expr_err(env, seen, d.t) + a.own_expr_err(env, seen, d.e),
+        .Member(m)     => a.own_expr_err(env, seen, m.obj),
+        .Arrow(ar)     => a.own_expr_err(env, seen, ar.obj),
+        .Match(m)      => a.own_expr_err(env, seen, m.subj) + a.own_arms_err(env, seen, env.infer_expr(m.subj), m.arms),
+        .MakeEnum(mk)  => a.own_expr_err(env, seen, mk.payload),
+        .MakeStruct(s) => a.own_inits_err(env, seen, s.inits),
+        .SliceLit(sd)  => a.own_args_err(env, seen, sd.items),
+        .Loop(l)       => a.own_expr_err(env, seen, l.seq) + a.own_body_err(env, seen, l.body),
+        .Block(b)      => a.own_body_err(env, seen, b.stmts),
+        _              => 0
+    })
+}
+own_stmt_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.own_expr_err(env, seen, l.value),
+        .Assign(x)   => a.own_expr_err(env, seen, x.target) + a.own_expr_err(env, seen, x.value),
+        .Return(r)   => a.own_expr_err(env, seen, r),
+        .ExprStmt(e) => a.own_expr_err(env, seen, e),
+        .If(f)       => a.own_expr_err(env, seen, f.c) + a.own_body_err(env, seen, f.then) + a.own_body_err(env, seen, f.els),
+        .While(w)    => a.own_expr_err(env, seen, w.c) + a.own_body_err(env, seen, w.body),
+        .IndexSet(x) => a.own_expr_err(env, seen, x.seq) + a.own_expr_err(env, seen, x.idx) + a.own_expr_err(env, seen, x.value)
+    })
+}
+consume_name = (env: Env, st: Stmt) str {
+    st.match ({
+        .ExprStmt(e) => load(e).match ({
+            .Call(c) => env.is_consume_method(c).match ({ true => c.recv_var_name(), false => "" }),
+            _        => ""
+        }),
+        _ => ""
+    })
+}
+own_step<A> = (a: MutPtr<A>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    nm := env.consume_name(st)
+    out := seen
+    nm.is_empty().match ({ true => {}, false => { out = a.dead_cons(nm, seen) } })
+    out
+}
+own_body_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    d   := seen
+    body.loop((h, i, st) {
+        acc = (a.own_stmt_err(e, d, st) + acc)
+        d   = a.own_step(e, d, st)
+        e   = a.extend_env(e, st)
+    })
+    acc
+}
+own_check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+    a.own_body_err(env, a.dead_nil(), f.body)
+}
+check_module_ownership* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.own_check_func(decls, f), _ => 0 }) })
+    acc
 }
 check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
@@ -617,10 +796,10 @@ dup_name_errs = (decls: [Decl]) i32 {
     n := 0
     decls.loop((h, i, d) {
         nm := d.fn_name_of()
-        n = is_empty(nm).match ({
+        n = (is_empty(nm).match ({
             true  => n,
             false => decls.fn_dup_before(nm, i).match ({ true => n + 1, false => n })
-        })
+        }))
     })
     n
 }
@@ -656,23 +835,277 @@ KCONFORMANCE  = () i32 { 11 }   // a Type.impl(Trait) misses a method or its sig
 KDUPFN        = () i32 { 12 }   // two top-level fns share a name (Zen has no overloading)
 KVALPOSRETURN = () i32 { 13 }   // an early (dropped) return in a value-position block arm
 KPARSE        = () i32 { 14 }   // unparseable top-level input (the parser's __syntax_error sentinel)
+KOWNERSHIP    = () i32 { 15 }   // use of a local owner after release/drop
+
+SourceSpan*: { start: i32, width: i32 }
+Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
+CheckDiagnostic*: { code: i32, kind: str, source_offset: i32, span_width: i32, count: i32, message: str, hint: str }
+
+source_span* = (start: i32, width: i32) SourceSpan {
+    SourceSpan(start: start, width: width)
+}
+source_span_none* = () SourceSpan { source_span(0, 0) }
+
+diagnostic_none* = () Diagnostic {
+    Diagnostic(code: 0, kind: "ok", span: source_span_none(), count: 0, message: "", hint: "")
+}
+
+check_diagnostic_none* = () CheckDiagnostic {
+    CheckDiagnostic(code: 0, kind: "ok", source_offset: 0, span_width: 0, count: 0, message: "", hint: "")
+}
+positive_count = (n: i32) i32 {
+    (n < 1).match ({ true => 1, false => n })
+}
+diagnostic_width_from = (src: str, pos: i32, n: i32) i32 {
+    src.at(pos + n).is_alnum().match ({
+        true  => src.diagnostic_width_from(pos, n + 1),
+        false => n
+    })
+}
+diagnostic_span_width = (src: str, pos: i32) i32 {
+    (pos <= 0).match ({
+        true  => 1,
+        false => {
+            n := src.diagnostic_width_from(pos, 0)
+            (n < 1).match ({ true => 1, false => n })
+        }
+    })
+}
+diagnostic_kind_name = (code: i32) str {
+    code.match ({
+        1 => "arity",
+        2 => "arg-type",
+        3 => "undefined-name",
+        4 => "struct-field",
+        5 => "exhaustiveness",
+        6 => "dup-variant",
+        7 => "operand-type",
+        8 => "index",
+        9 => "return-fit",
+        10 => "assign-fit",
+        11 => "conformance",
+        12 => "dup-fn",
+        13 => "value-pos-return",
+        14 => "parse",
+        15 => "ownership",
+        _ => "type"
+    })
+}
+diagnostic_message = (code: i32) str {
+    code.match ({
+        1 => "wrong number of arguments",
+        2 => "argument type does not fit the parameter",
+        3 => "undefined name",
+        4 => "unknown struct field or invalid field access",
+        5 => "match does not cover every variant",
+        6 => "duplicate match arm variant",
+        7 => "operator cannot be applied to these operand types",
+        8 => "invalid index operation",
+        9 => "returned value does not fit the declared return type",
+        10 => "assigned value does not fit the variable's type",
+        11 => "impl does not satisfy the trait",
+        12 => "duplicate top-level definition",
+        13 => "early `return` in a value-position match arm",
+        14 => "syntax error: unparseable top-level input",
+        15 => "use of an owner after release/drop",
+        _ => "type error"
+    })
+}
+diagnostic_hint = (code: i32) str {
+    code.match ({
+        1 => "check the callee signature and pass exactly the declared parameters",
+        2 => "check the argument type or add an explicit conversion at the call site",
+        3 => "declare the name, import it, or qualify the intended module binding",
+        4 => "check the struct literal or field access against the declared fields",
+        5 => "add arms for every variant, or add an explicit `_` arm",
+        6 => "remove the repeated match arm for this variant",
+        7 => "use an operator supported by both operand types",
+        8 => "index only slice-like values with an integer index",
+        9 => "make the returned value fit the function's declared return type",
+        10 => "make the assigned value fit the target's type",
+        11 => "define every required trait method with the exact receiver, parameter, and return types",
+        12 => "rename one definition or move it behind a real module namespace",
+        13 => "return a value from the arm instead of using early `return` in value position",
+        14 => "check the syntax around this top-level declaration",
+        15 => "after release/drop, bind a fresh owner instead of reusing the consumed local",
+        _ => ""
+    })
+}
+check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => {
+            code := packed & 15
+            CheckDiagnostic(
+                code: code,
+                kind: code.diagnostic_kind_name(),
+                source_offset: packed >> 4,
+                span_width: 1,
+                count: count.positive_count(),
+                message: code.diagnostic_message(),
+                hint: code.diagnostic_hint()
+            )
+        }
+    })
+}
+check_diagnostic_from_source* = (src: str, packed: i32, count: i32) CheckDiagnostic {
+    d := check_diagnostic_from_packed(packed, count)
+    (d.code == 0).match ({
+        true  => d,
+        false => CheckDiagnostic(
+            code: d.code,
+            kind: d.kind,
+            source_offset: d.source_offset,
+            span_width: src.diagnostic_span_width(d.source_offset),
+            count: d.count,
+            message: d.message,
+            hint: d.hint
+        )
+    })
+}
+check_to_diagnostic* = (d: CheckDiagnostic) Diagnostic {
+    Diagnostic(
+        code: d.code,
+        kind: d.kind,
+        span: source_span(d.source_offset, d.span_width),
+        count: d.count,
+        message: d.message,
+        hint: d.hint
+    )
+}
+diagnostic_to_check* = (d: Diagnostic) CheckDiagnostic {
+    CheckDiagnostic(
+        code: d.code,
+        kind: d.kind,
+        source_offset: d.span.start,
+        span_width: d.span.width,
+        count: d.count,
+        message: d.message,
+        hint: d.hint
+    )
+}
+diagnostic_from_packed* = (packed: i32, count: i32) Diagnostic {
+    check_diagnostic_from_packed(packed, count).check_to_diagnostic()
+}
+diagnostic_from_source* = (src: str, packed: i32, count: i32) Diagnostic {
+    src.check_diagnostic_from_source(packed, count).check_to_diagnostic()
+}
 
 // first-nonzero combinator: the kind of the FIRST error in traversal order.
 kv_kor = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
 // a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
 kv_one = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
-// pack a SOURCE POSITION into a kind code: kinds are 1..14 (4 bits), so `kind + pos*16` carries the
+// pack a SOURCE POSITION into a kind code: kinds are 1..15 (4 bits), so `kind + pos*16` carries the
 // error's byte offset alongside it (pos 0 = unknown/synthesized — the bare kind, the old encoding).
 // Consumers unpack with `& 15` / `>> 4`. Applied only at leaves that HAVE a pos (Call/Var); an
-// already-packed nested result is never re-packed (kv_at is a no-op on 0 and packs raw kinds only,
-// so it must wrap a LEAF judgment, not a recursion).
-kv_at = (k: i32, p: i32) i32 { (k == 0).match ({ true => 0, false => k + (p * 16) }) }
+// already-packed nested result is never re-packed: values above 15 already carry an offset.
+kv_at = (k: i32, p: i32) i32 {
+    ((k == 0) || (k > 15) || (p <= 0)).match ({ true => k, false => k + (p * 16) })
+}
+
+expr_pos = (e: Expr) i32 {
+    e.match ({
+        .Var(v)       => v.pos,
+        .Call(c)      => c.pos,
+        .Member(m)    => load(m.obj).expr_pos(),
+        .Arrow(ar)    => load(ar.obj).expr_pos(),
+        .Index(ix)    => load(ix.seq).expr_pos(),
+        .Bin(b)       => b.pos.pos_or(load(b.lhs).expr_pos()),
+        .Cond(d)      => load(d.c).expr_pos(),
+        .Match(m)     => load(m.subj).expr_pos(),
+        .MakeEnum(mk) => load(mk.payload).expr_pos(),
+        .MakeStruct(sd) => sd.inits.len.match ({ 0 => 0, _ => load(sd.inits[0].value).expr_pos() }),
+        .SliceLit(sd) => sd.items.len.match ({ 0 => 0, _ => sd.items[0].expr_pos() }),
+        .Block(b)     => b.stmts.len.match ({ 0 => 0, _ => b.stmts[0].stmt_pos() }),
+        .Loop(l)      => load(l.seq).expr_pos(),
+        _             => 0
+    })
+}
+stmt_pos = (st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => load(l.value).expr_pos(),
+        .Assign(x)   => x.pos.pos_or(load(x.target).expr_pos()),
+        .Return(r)   => load(r).expr_pos(),
+        .ExprStmt(e) => load(e).expr_pos(),
+        .If(f)       => load(f.c).expr_pos(),
+        .While(w)    => load(w.c).expr_pos(),
+        .IndexSet(x) => x.pos.pos_or(load(x.seq).expr_pos())
+    })
+}
+
+// Ownership kind pass mirrors the raw ownership count pass above.
+kv_own_args_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, ar.addr())) })
+    acc
+}
+kv_own_inits_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, fi.value)) })
+    acc
+}
+kv_own_arms_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.kv_own_expr_kind(a.arm_env(env, subjty, ar), seen, ar.body)) })
+    acc
+}
+kv_own_expr_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v)        => seen.dead_has(v.name).match ({ true => KOWNERSHIP().kv_at(v.pos), false => 0 }),
+        .Call(c)       => a.kv_own_args_kind(env, seen, c.args).kv_kor(env.is_default_owner_method(c).match ({ true => KOWNERSHIP().kv_at(c.pos), false => 0 })),
+        .Index(ix)     => a.kv_own_expr_kind(env, seen, ix.seq).kv_kor(a.kv_own_expr_kind(env, seen, ix.idx)),
+        .Bin(b)        => a.kv_own_expr_kind(env, seen, b.lhs).kv_kor(a.kv_own_expr_kind(env, seen, b.rhs)),
+        .Cond(d)       => a.kv_own_expr_kind(env, seen, d.c).kv_kor(a.kv_own_expr_kind(env, seen, d.t)).kv_kor(a.kv_own_expr_kind(env, seen, d.e)),
+        .Member(m)     => a.kv_own_expr_kind(env, seen, m.obj),
+        .Arrow(ar)     => a.kv_own_expr_kind(env, seen, ar.obj),
+        .Match(m)      => a.kv_own_expr_kind(env, seen, m.subj).kv_kor(a.kv_own_arms_kind(env, seen, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)  => a.kv_own_expr_kind(env, seen, mk.payload),
+        .MakeStruct(s) => a.kv_own_inits_kind(env, seen, s.inits),
+        .SliceLit(sd)  => a.kv_own_args_kind(env, seen, sd.items),
+        .Loop(l)       => a.kv_own_expr_kind(env, seen, l.seq).kv_kor(a.kv_own_body_kind(env, seen, l.body)),
+        .Block(b)      => a.kv_own_body_kind(env, seen, b.stmts),
+        _              => 0
+    })
+}
+kv_own_stmt_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.kv_own_expr_kind(env, seen, l.value),
+        .Assign(x)   => a.kv_own_expr_kind(env, seen, x.target).kv_kor(a.kv_own_expr_kind(env, seen, x.value)),
+        .Return(r)   => a.kv_own_expr_kind(env, seen, r),
+        .ExprStmt(e) => a.kv_own_expr_kind(env, seen, e),
+        .If(f)       => a.kv_own_expr_kind(env, seen, f.c).kv_kor(a.kv_own_body_kind(env, seen, f.then)).kv_kor(a.kv_own_body_kind(env, seen, f.els)),
+        .While(w)    => a.kv_own_expr_kind(env, seen, w.c).kv_kor(a.kv_own_body_kind(env, seen, w.body)),
+        .IndexSet(x) => a.kv_own_expr_kind(env, seen, x.seq).kv_kor(a.kv_own_expr_kind(env, seen, x.idx)).kv_kor(a.kv_own_expr_kind(env, seen, x.value))
+    })
+}
+kv_own_body_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    d   := seen
+    body.loop((h, i, st) {
+        acc = (acc.kv_kor(a.kv_own_stmt_kind(e, d, st)))
+        d   = a.own_step(e, d, st)
+        e   = a.extend_env(e, st)
+    })
+    acc
+}
+kv_own_check_func_kind = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+    a.kv_own_body_kind(env, a.dead_nil(), f.body)
+}
+check_module_ownership_kind* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_own_check_func_kind(decls, f), _ => 0 })) })
+    acc
+}
 
 // ── a CALL: arity vs arg-type vs undefined ── mirrors check_call/call_errs, but distinguishes WHY.
 // arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
 kv_arg_type_kind = (env: Env, params: [Param], args: [Expr]) i32 {
     acc := 0
-    args.loop((h, i, ar) { acc = acc.kv_kor(env.arg_err_at(params, i, ar).kv_one(KARGTYPE())) })
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(env.arg_err_at(params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
+    })
     acc
 }
 // a known local fn: wrong arity → KARITY; right arity but a mistyped arg → KARGTYPE. An imported
@@ -706,6 +1139,15 @@ kv_check_args_kind = (env: Env, args: [Expr]) i32 {
 kv_check_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) { acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).kv_check_expr_kind(ar.body)) })
+    acc
+}
+kv_arm_result_kind = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
+    env.arm_result_err(subjty, want, ar).kv_one(KRETURNFIT()).kv_at(load(ar.body).expr_pos())
+}
+kv_match_arm_result_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    want := env.match_result_ty(subjty, arms)
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(env.kv_arm_result_kind(subjty, want, ar)) })
     acc
 }
 kv_arm_return_kind = (arms: [ArmData]) i32 {
@@ -746,7 +1188,7 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
 kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     acc := 0
     e   := env
-    stmts.loop((h, i, st) { acc = acc.kv_kor(e.kv_check_block_stmt_kind(st))  e = e.a.extend_env(e, st) })
+    stmts.loop((h, i, st) { acc = (acc.kv_kor(e.kv_check_block_stmt_kind(st)))  e = e.a.extend_env(e, st) })
     acc
 }
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
@@ -758,7 +1200,10 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
         .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
-        .Match(m)       => env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(env.infer_expr(m.subj), m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(kv_arm_return_kind(m.arms)),
+        .Match(m)       => {
+            subjty := env.infer_expr(m.subj)
+            env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
+        },
         .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
@@ -767,13 +1212,21 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         _               => 0
     })
 }
-kv_ret_kind    = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()) }
-kv_assign_kind = (env: Env, x: AssignData) i32 { env.assign_err(x).kv_one(KASSIGNFIT()) }
-kv_idxset_kind = (env: Env, x: IndexSetData) i32 { env.idxset_err(x).kv_one(KASSIGNFIT()) }
+pos_or = (p: i32, fallback: i32) i32 {
+    (p <= 0).match ({ true => fallback, false => p })
+}
+kv_ret_kind    = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos()) }
+kv_let_fit_kind = (env: Env, l: LetData) i32 { env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos()) }
+kv_assign_kind = (env: Env, x: AssignData) i32 {
+    env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos()))
+}
+kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
+    env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos()))
+}
 // mirrors check_stmt: the statement's sub-expressions, then its own fit check.
 kv_check_stmt_kind = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)    => env.kv_check_expr_kind(l.value).kv_kor(env.let_fit_err(l).kv_one(KASSIGNFIT())),
+        .Let(l)    => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)),
         .Assign(x) => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
         .Return(r) => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
@@ -786,7 +1239,7 @@ kv_check_body_kind = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
     e   := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.kv_check_stmt_kind(e, st))
+        acc = (acc.kv_kor(a.kv_check_stmt_kind(e, st)))
         e   = a.extend_env(e, st)
     })
     acc
@@ -823,7 +1276,7 @@ kv_conformance_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, sd: StructDe
 kv_impl_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => a.kv_conformance_kind(decls, im, sd), false => 0 }), _ => 0 })) })
-    acc
+    acc.kv_at(im.pos)
 }
 // the KIND of the FIRST error check_module would have counted, in the same order: dup-fn names
 // first, then each decl's body (DFunc) / impl (DImpl). Returns KNONE (0) for an accepting module.
@@ -833,6 +1286,46 @@ check_module_kind* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs().kv_one(KDUPFN())
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE(), false => 0 }), _ => 0 })) })
     acc
+}
+check_module_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) CheckDiagnostic {
+    packed := a.check_module_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => check_diagnostic_from_packed(packed, a.check_module(decls))
+    })
+}
+check_module_ownership_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) CheckDiagnostic {
+    packed := a.check_module_ownership_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => check_diagnostic_from_packed(packed, a.check_module_ownership(decls))
+    })
+}
+check_module_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := a.check_module_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => src.check_diagnostic_from_source(packed, a.check_module(decls))
+    })
+}
+check_module_ownership_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := a.check_module_ownership_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => src.check_diagnostic_from_source(packed, a.check_module_ownership(decls))
+    })
+}
+module_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) Diagnostic {
+    a.check_module_diagnostic(decls).check_to_diagnostic()
+}
+module_ownership_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) Diagnostic {
+    a.check_module_ownership_diagnostic(decls).check_to_diagnostic()
+}
+module_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) Diagnostic {
+    a.check_module_diagnostic_from_source(decls, src).check_to_diagnostic()
+}
+module_ownership_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) Diagnostic {
+    a.check_module_ownership_diagnostic_from_source(decls, src).check_to_diagnostic()
 }
 // the kind layer over a CROSS-MODULE link (mirrors check_linked): same layered header, then
 // check_module_kind instead of check_module. Lets a cross-module reject also be pinned by KIND.
