@@ -1,6 +1,6 @@
 # Explicit string types — `text` / `view` / `String` / `Cstr`
 
-Status: SPEC (design). Motivation: today `str` (= C `const char*`) is overloaded across three
+Status: Phase 1 DONE (Cstr + text + enforcement + tests). Phase 2 (view + migration) pending. Motivation: today `str` (= C `const char*`) is overloaded across three
 roles with **incompatible lifetimes**, and the type can't tell them apart — so a pointer into a
 heap `String` can escape and dangle with no diagnostic. The fix is to make the bytes' *provenance*
 a type, so a signature documents the lifetime contract (enforceable even without a borrow checker).
