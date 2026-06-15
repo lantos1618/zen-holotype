@@ -1187,8 +1187,8 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: str, p: i32, n: i32) i32 {
     count
 }
 provided_symbol_count* = (a: MutPtr<Malloc>, src: str) i32 { a.provided_symbol_count_from(src, 0, 0) }
-symbol_buf = (a: MutPtr<Malloc>, n: i64) [ProvidedSymbol] { slice(a.acquire(n * sizeof(ProvidedSymbol)), n) }
-try_symbol_buf = (a: MutPtr<Malloc>, n: i64) Result<[ProvidedSymbol], IoError> {
+symbol_buf<A> = (a: MutPtr<A>, n: i64) [ProvidedSymbol] { slice(a.acquire(n * sizeof(ProvidedSymbol)), n) }
+try_symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
     a.try_acquire(n * sizeof(ProvidedSymbol)).match ({
         .Ok(p)  => symbols_ok(slice(p, n)),
         .Err(e) => symbols_err(e)
@@ -1227,17 +1227,17 @@ finish_symbol_name = (buf: RawPtr<u8>, src: str, p: i32, e: i32, escape: bool) s
     buf.offset(cur).store(0)
     cstr(buf)
 }
-symbol_name_alloc = (a: MutPtr<Malloc>, src: str, p: i32, e: i32, escape: bool) str {
+symbol_name_alloc<A> = (a: MutPtr<A>, src: str, p: i32, e: i32, escape: bool) str {
     buf := a.acquire(src.symbol_name_len(p, e, escape) + 1)
     buf.finish_symbol_name(src, p, e, escape)
 }
-try_symbol_name_alloc = (a: MutPtr<Malloc>, src: str, p: i32, e: i32, escape: bool) Result<str, IoError> {
+try_symbol_name_alloc<A> = (a: MutPtr<A>, src: str, p: i32, e: i32, escape: bool) Result<str, IoError> {
     a.try_acquire(src.symbol_name_len(p, e, escape) + 1).match ({
         .Ok(buf) => sym_str_ok(buf.finish_symbol_name(src, p, e, escape)),
         .Err(e)  => sym_str_err(e)
     })
 }
-fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
+fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
     idx := i
     bs: [u8] := src.view()
@@ -1261,7 +1261,7 @@ fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedS
     })
     idx
 }
-try_fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
+try_fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
     pos := p
     idx := i
     failed := false
@@ -1301,7 +1301,7 @@ try_fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [Provi
     })
     failed.match ({ true => i32_err(err), false => i32_ok(idx) })
 }
-fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
+fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
     idx := i
     bs: [u8] := src.view()
@@ -1339,7 +1339,7 @@ fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, 
     })
     idx
 }
-try_fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
+try_fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
     pos := p
     idx := i
     failed := false
@@ -1402,12 +1402,12 @@ try_fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: s
     })
     failed.match ({ true => symbols_err(err), false => symbols_ok(out) })
 }
-provided_symbols_in* = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
+provided_symbols_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str) [ProvidedSymbol] {
     buf := alloc.symbol_buf(a.provided_symbol_count(src))
     a.fill_provided_symbols_in(alloc, src, 0, buf, 0)
     buf
 }
-try_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) Result<[ProvidedSymbol], IoError> {
+try_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str) Result<[ProvidedSymbol], IoError> {
     alloc.try_symbol_buf(a.provided_symbol_count(src)).match ({
         .Ok(buf) => a.try_fill_provided_symbols_in(alloc, src, 0, buf, 0),
         .Err(e)  => symbols_err(e)
@@ -1419,7 +1419,7 @@ provided_symbols* = (a: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
 module_graph* = (a: MutPtr<Malloc>, src: str) ModuleGraph {
     a.module_graph_in(a, src)
 }
-module_graph_in* = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) ModuleGraph {
+module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str) ModuleGraph {
     ModuleGraph(imports: alloc.import_edges(src), symbols: a.provided_symbols_in(alloc, src))
 }
 name_prefix_eq = (raw: str, wanted: str, i: i32, e: i32) bool {
