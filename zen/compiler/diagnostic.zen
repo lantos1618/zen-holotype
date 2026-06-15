@@ -145,3 +145,48 @@ duser_line_alias_at = (user: str, up: i32, flat: str, ls: i32, llen: i32, lead: 
     })
 }
 duser_line_alias = (user: str, flat: str, ls: i32, llen: i32, lead: i32, rn: i32) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }
+
+// ── zen.toml manifest value lookup — moved out of the C driver (driver.c) ──────────────────────
+// Scan a manifest source for a `key = "value"` line and return the value's span (start<0 = absent);
+// the driver dup_range's src[start..start+len] into a NUL-terminated string. Pure char-scan, no alloc.
+MfSpan*: { start: i32, len: i32 }
+mf_none = () MfSpan { MfSpan(start: 0 - 1, len: 0) }
+mf_ws = (b: u8) bool { (b == ' ') || (b == '\t') }
+mf_skip_ws = (s: str, p: i32, e: i32) i32 { ((p < e) && s.at(p).mf_ws()).match ({ true => s.mf_skip_ws(p + 1, e), false => p }) }
+// match `key` literally at p; return pos just past it, or -1
+mf_key_at = (s: str, p: i32, e: i32, key: str, k: i32) i32 {
+    (key.at(k) == 0).match ({
+        true  => p,
+        false => ((p < e) && (s.at(p) == key.at(k))).match ({ true => s.mf_key_at(p + 1, e, key, k + 1), false => 0 - 1 })
+    })
+}
+// the closing-quote position from `i`, or -1
+mf_close = (s: str, i: i32, e: i32) i32 {
+    (i >= e).match ({ true => 0 - 1, false => (s.at(i) == '"').match ({ true => i, false => s.mf_close(i + 1, e) }) })
+}
+// parse one line [p,e) for `key = "value"` -> the value span, or mf_none
+mf_line = (s: str, p: i32, e: i32, key: str) MfSpan {
+    i0 := s.mf_skip_ws(p, e)
+    ((i0 >= e) || (s.at(i0) == '#')).match ({ true => { return mf_none() }, false => {} })
+    ak := s.mf_key_at(i0, e, key, 0)
+    (ak < 0).match ({ true => { return mf_none() }, false => {} })
+    i1 := s.mf_skip_ws(ak, e)
+    ((i1 >= e) || (s.at(i1) != '=')).match ({ true => { return mf_none() }, false => {} })
+    i2 := s.mf_skip_ws(i1 + 1, e)
+    ((i2 >= e) || (s.at(i2) != '"')).match ({ true => { return mf_none() }, false => {} })
+    start := i2 + 1
+    ce := s.mf_close(start, e)
+    (ce < 0).match ({ true => mf_none(), false => MfSpan(start: start, len: ce - start) })
+}
+mf_line_end = (s: str, p: i32, len: i32) i32 {
+    ((p < len) && (s.at(p) != '\n') && (s.at(p) != '\r')).match ({ true => s.mf_line_end(p + 1, len), false => p })
+}
+// scan `src` (length `len`) for `key`'s value, starting at line `p`. The driver calls with p=0.
+manifest_value_span* = (src: str, len: i32, key: str, p: i32) MfSpan {
+    (p >= len).match ({ true => { return mf_none() }, false => {} })
+    e := src.mf_line_end(p, len)
+    r := src.mf_line(p, e, key)
+    (r.start >= 0).match ({ true => { return r }, false => {} })
+    np := ((e < len) && (src.at(e) == '\r') && (e + 1 < len) && (src.at(e + 1) == '\n')).match ({ true => e + 2, false => e + 1 })
+    (e >= len).match ({ true => mf_none(), false => src.manifest_value_span(len, key, np) })
+}

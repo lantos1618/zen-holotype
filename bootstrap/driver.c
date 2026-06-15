@@ -64,6 +64,9 @@ const char* first_user_import(const char* src);
  * inverses). Replaces the hand-rolled C mapping below. line==0 => not located. */
 typedef struct { int32_t line; int32_t col; int32_t end_col; } DiagSpan;
 DiagSpan diag_user_span(const char* flat, const char* user, int32_t offset, int32_t span_width);
+/* compiler.diagnostic: zen.toml manifest value span (start<0 = absent) — parser lives in Zen. */
+typedef struct { int32_t start; int32_t len; } MfSpan;
+MfSpan manifest_value_span(const char* src, int32_t len, const char* key, int32_t p);
 
 static void* driver_alloc(Malloc* a, size_t n){
     return acquire(a, (int64_t)n);
@@ -509,39 +512,10 @@ static int path_is_dir(const char* path){
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-static int manifest_key_line(const char* src, size_t p, size_t e, const char* key, size_t* v0, size_t* v1){
-    size_t i = p;
-    while (i < e && py_isspace((unsigned char)src[i])) i++;
-    if (i >= e || src[i] == '#') return 0;
-    size_t klen = strlen(key);
-    if (i + klen > e || memcmp(src + i, key, klen) != 0) return 0;
-    i += klen;
-    while (i < e && py_isspace((unsigned char)src[i])) i++;
-    if (i >= e || src[i] != '=') return 0;
-    i++;
-    while (i < e && py_isspace((unsigned char)src[i])) i++;
-    if (i >= e || src[i] != '"') return 0;
-    i++;
-    size_t start = i;
-    while (i < e && src[i] != '"') i++;
-    if (i >= e) return 0;
-    *v0 = start;
-    *v1 = i;
-    return 1;
-}
-
 static char* manifest_value(Malloc* a, const char* src, size_t len, const char* key){
-    size_t p = 0;
-    while (p < len){
-        size_t e = p;
-        while (e < len && src[e] != '\n' && src[e] != '\r') e++;
-        size_t v0 = 0, v1 = 0;
-        if (manifest_key_line(src, p, e, key, &v0, &v1)) return dup_range(a, src, v0, v1);
-        if (e >= len) break;
-        if (src[e] == '\r' && e + 1 < len && src[e + 1] == '\n') p = e + 2;
-        else p = e + 1;
-    }
-    return NULL;
+    MfSpan sp = manifest_value_span(src, (int32_t)len, key, 0);
+    if (sp.start < 0) return NULL;
+    return dup_range(a, src, (size_t)sp.start, (size_t)(sp.start + sp.len));
 }
 
 static ProjectSpec project_spec(Malloc* a, const char* project_dir){
