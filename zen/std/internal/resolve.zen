@@ -547,18 +547,6 @@ ParsedProgram*: {
 ModuleCount: { seen: String, count: i32 }
 ModuleFill: { seen: String, next: i32 }
 
-edges_ok = (xs: [ImportEdge]) Result<[ImportEdge], IoError> { .Ok(xs) }
-edges_err = (e: IoError) Result<[ImportEdge], IoError> { .Err(e) }
-edge_ok = (e: ImportEdge) Result<ImportEdge, IoError> { .Ok(e) }
-edge_err = (e: IoError) Result<ImportEdge, IoError> { .Err(e) }
-edge_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-edge_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
-symbols_ok = (xs: [ProvidedSymbol]) Result<[ProvidedSymbol], IoError> { .Ok(xs) }
-symbols_err = (e: IoError) Result<[ProvidedSymbol], IoError> { .Err(e) }
-sym_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-sym_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
-sym_string_ok = (s: String) Result<String, IoError> { .Ok(s) }
-sym_string_err = (e: IoError) Result<String, IoError> { .Err(e) }
 i32_ok = (n: i32) Result<i32, IoError> { .Ok(n) }
 i32_err = (e: IoError) Result<i32, IoError> { .Err(e) }
 
@@ -654,12 +642,6 @@ edge_next = (src: str, p: i32) i32 {
     src.is_import_line(p).match ({ true => src.import_end(p), false => src.next_line(p) })
 }
 edge_buf = (a: MutPtr<Malloc>, n: i64) [ImportEdge] { slice(a.acquire(n * sizeof(ImportEdge)), n) }
-try_edge_buf = (a: MutPtr<Malloc>, n: i64) Result<[ImportEdge], IoError> {
-    a.try_acquire(n * sizeof(ImportEdge)).match ({
-        .Ok(p)  => edges_ok(slice(p, n)),
-        .Err(e) => edges_err(e)
-    })
-}
 EDGE_MODULE_CAP := 128
 EDGE_ALIAS_CAP := 64
 copy_lit_to = (buf: RawPtr<u8>, start: i64, lit: str, cap: i64) i64 {
@@ -741,45 +723,12 @@ import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
     buf.offset(out).store(0)
     cstr(buf)
 }
-try_import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
-    a.try_acquire(EDGE_MODULE_CAP).match ({
-        .Ok(buf) => {
-            pos := p
-            out: i64 := 0
-            bs: [u8] := s.view()
-            bs.loop((h, i, b) {
-                ii := to_i32(i)
-                (ii < pos).match ({
-                    true => {},
-                    false => {
-                        out = buf.write_import_id_at(s, pos, EDGE_MODULE_CAP)
-                        (out > 0).match ({ true => { h.break }, false => { pos = pos + 1 } })
-                    }
-                })
-            })
-            buf.offset(out).store(0)
-            edge_str_ok(cstr(buf))
-        },
-        .Err(e) => edge_str_err(e)
-    })
-}
 ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
     buf := a.acquire(EDGE_ALIAS_CAP)
     ls := s.lstrip(p)
     out := buf.copy_name_to(0, s, ls, EDGE_ALIAS_CAP)
     buf.offset(out).store(0)
     cstr(buf)
-}
-try_ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
-    a.try_acquire(EDGE_ALIAS_CAP).match ({
-        .Ok(buf) => {
-            ls := s.lstrip(p)
-            out := buf.copy_name_to(0, s, ls, EDGE_ALIAS_CAP)
-            buf.offset(out).store(0)
-            edge_str_ok(cstr(buf))
-        },
-        .Err(e) => edge_str_err(e)
-    })
 }
 edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) ImportEdge {
     ns := src.is_ns_line(p)
@@ -790,19 +739,6 @@ edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) ImportEdge {
     start: p,
     next: src.edge_next(p)
     )
-}
-try_edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) Result<ImportEdge, IoError> {
-    ns := src.is_ns_line(p)
-    a.try_import_id_alloc(src, p).match ({
-        .Ok(mod) => ns.match ({
-            true => a.try_ns_qualifier_alloc(src, p).match ({
-                .Ok(alias) => edge_ok(ImportEdge(module: mod, alias: alias, namespace: ns, start: p, next: src.edge_next(p))),
-                .Err(e)    => edge_err(e)
-            }),
-            false => edge_ok(ImportEdge(module: mod, alias: "", namespace: ns, start: p, next: src.edge_next(p)))
-        }),
-        .Err(e) => edge_err(e)
-    })
 }
 fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: i32) [ImportEdge] {
     pos := p
@@ -824,51 +760,9 @@ fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: 
     })
     out
 }
-try_fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
-    pos := p
-    idx := i
-    failed := false
-    err: IoError := .NotFound
-    bs: [u8] := src.view()
-    bs.loop((h, n, b) {
-        failed.match ({
-            true => { h.break },
-            false => {
-                ii := to_i32(n)
-                (ii < pos).match ({
-                    true => {},
-                    false => (src.is_import_line(pos) || src.is_ns_line(pos)).match ({
-                        true => {
-                            a.try_edge_from_line(src, pos).match ({
-                                .Ok(edge) => {
-                                    out[idx] = edge
-                                    idx = idx + 1
-                                    pos = src.edge_next(pos)
-                                },
-                                .Err(e) => {
-                                    failed = true
-                                    err = e
-                                    h.break
-                                }
-                            })
-                        },
-                        false => { pos = src.next_line(pos) }
-                    })
-                })
-            }
-        })
-    })
-    failed.match ({ true => edges_err(err), false => edges_ok(out) })
-}
 import_edges* = (a: MutPtr<Malloc>, src: str) [ImportEdge] {
     buf := a.edge_buf(src.import_edge_count())
     a.fill_import_edges(src, 0, buf, 0)
-}
-try_import_edges* = (a: MutPtr<Malloc>, src: str) Result<[ImportEdge], IoError> {
-    a.try_edge_buf(src.import_edge_count()).match ({
-        .Ok(buf) => a.try_fill_import_edges(src, 0, buf, 0),
-        .Err(e)  => edges_err(e)
-    })
 }
 edge_id_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.mappend(a.mstring(24), e.module) }
 edge_alias_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.mappend(a.mstring(16), e.alias) }
@@ -1202,12 +1096,6 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: str, p: i32, n: i32) i32 {
 }
 provided_symbol_count* = (a: MutPtr<Malloc>, src: str) i32 { a.provided_symbol_count_from(src, 0, 0) }
 symbol_buf = (a: MutPtr<Malloc>, n: i64) [ProvidedSymbol] { slice(a.acquire(n * sizeof(ProvidedSymbol)), n) }
-try_symbol_buf = (a: MutPtr<Malloc>, n: i64) Result<[ProvidedSymbol], IoError> {
-    a.try_acquire(n * sizeof(ProvidedSymbol)).match ({
-        .Ok(p)  => symbols_ok(slice(p, n)),
-        .Err(e) => symbols_err(e)
-    })
-}
 symbol_name_len = (src: str, p: i32, e: i32, escape: bool) i64 {
     base := to_i64(e - p)
     (escape && src.is_c_kw_name_span(p, e)).match ({ true => base + 3, false => base })
@@ -1245,12 +1133,6 @@ symbol_name_alloc = (a: MutPtr<Malloc>, src: str, p: i32, e: i32, escape: bool) 
     buf := a.acquire(src.symbol_name_len(p, e, escape) + 1)
     buf.finish_symbol_name(src, p, e, escape)
 }
-try_symbol_name_alloc = (a: MutPtr<Malloc>, src: str, p: i32, e: i32, escape: bool) Result<str, IoError> {
-    a.try_acquire(src.symbol_name_len(p, e, escape) + 1).match ({
-        .Ok(buf) => sym_str_ok(buf.finish_symbol_name(src, p, e, escape)),
-        .Err(e)  => sym_str_err(e)
-    })
-}
 fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
     idx := i
@@ -1274,46 +1156,6 @@ fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedS
         })
     })
     idx
-}
-try_fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
-    pos := p
-    idx := i
-    failed := false
-    err: IoError := .NotFound
-    bs: [u8] := src.view()
-    bs.loop((h, n, b) {
-        failed.match ({
-            true => { h.break },
-            false => {
-                ii := to_i32(n)
-                (ii < pos).match ({
-                    true => {},
-                    false => ((b == '}') || (b == 0)).match ({
-                        true => { h.break },
-                        false => b.is_alpha().match ({
-                            true => {
-                                ie := src.res_ident_end(pos)
-                                alloc.try_symbol_name_alloc(src, pos, ie, true).match ({
-                                    .Ok(name) => {
-                                        out[idx] = ProvidedSymbol( name: name, start: pos, next: ie, decl_start: pos, decl_next: ie, imported: true, foreign: false )
-                                        idx = idx + 1
-                                        pos = ie
-                                    },
-                                    .Err(e) => {
-                                        failed = true
-                                        err = e
-                                        h.break
-                                    }
-                                })
-                            },
-                            false => { pos = pos + 1 }
-                        })
-                    })
-                })
-            }
-        })
-    })
-    failed.match ({ true => i32_err(err), false => i32_ok(idx) })
 }
 fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
@@ -1353,79 +1195,10 @@ fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, 
     })
     idx
 }
-try_fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
-    pos := p
-    idx := i
-    failed := false
-    err: IoError := .NotFound
-    bs: [u8] := src.view()
-    bs.loop((h, n, b) {
-        failed.match ({
-            true => { h.break },
-            false => {
-                ii := to_i32(n)
-                (ii < pos).match ({
-                    true => {},
-                    false => src.is_import_line(pos).match ({
-                        true => {
-                            alloc.try_fill_head_symbols_in(src, src.lstrip(pos) + 1, out, idx).match ({
-                                .Ok(next) => {
-                                    idx = next
-                                    pos = src.import_end(pos)
-                                },
-                                .Err(e) => {
-                                    failed = true
-                                    err = e
-                                    h.break
-                                }
-                            })
-                        },
-                        false => src.is_ns_line(pos).match ({
-                            true => { pos = src.next_line(pos) },
-                            false => {
-                                sp := a.decl_span(src, pos)
-                                (sp.eof || (sp.next <= pos)).match ({
-                                    true => { h.break },
-                                    false => {
-                                        sp.named.match ({
-                                            true => {
-                                                ie := src.res_ident_end(sp.start)
-                                                alloc.try_symbol_name_alloc(src, sp.start, ie, false).match ({
-                                                    .Ok(name) => {
-                                                        out[idx] = ProvidedSymbol( name: name, start: sp.start, next: ie, decl_start: sp.start, decl_next: sp.next, imported: false, foreign: src.is_foreign_span(sp.start, sp.next) )
-                                                        idx = idx + 1
-                                                    },
-                                                    .Err(e) => {
-                                                        failed = true
-                                                        err = e
-                                                        h.break
-                                                    }
-                                                })
-                                            },
-                                            _
-                                        })
-                                        pos = sp.next
-                                    }
-                                })
-                            }
-                        })
-                    })
-                })
-            }
-        })
-    })
-    failed.match ({ true => symbols_err(err), false => symbols_ok(out) })
-}
 provided_symbols_in* = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
     buf := alloc.symbol_buf(a.provided_symbol_count(src))
     a.fill_provided_symbols_in(alloc, src, 0, buf, 0)
     buf
-}
-try_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) Result<[ProvidedSymbol], IoError> {
-    alloc.try_symbol_buf(a.provided_symbol_count(src)).match ({
-        .Ok(buf) => a.try_fill_provided_symbols_in(alloc, src, 0, buf, 0),
-        .Err(e)  => symbols_err(e)
-    })
 }
 provided_symbols* = (a: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
     a.provided_symbols_in(a, src)
@@ -1457,17 +1230,6 @@ symbol_key_in = (s: ProvidedSymbol, a: MutPtr<Malloc>) String {
     buf := a.acquire(n + 1)
     buf.finish_symbol_name(s.name, 0, e, true)
     String(ptr: buf, len: n, cap: n + 1)
-}
-try_symbol_key_in* = (s: ProvidedSymbol, a: MutPtr<Malloc>) Result<String, IoError> {
-    e := s.name.res_ident_end(0)
-    n := s.name.symbol_name_len(0, e, true)
-    a.try_acquire(n + 1).match ({
-        .Ok(buf) => {
-            buf.finish_symbol_name(s.name, 0, e, true)
-            sym_string_ok(String(ptr: buf, len: n, cap: n + 1))
-        },
-        .Err(err) => sym_string_err(err)
-    })
 }
 has_symbol = (symbols: [ProvidedSymbol], name: str) bool {
     found := false
