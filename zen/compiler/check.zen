@@ -17,8 +17,8 @@ clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 let_exp = (env: Env, t: Ty) Env { t.is_void_ty().match ({ true => env.clr_exp(), false => Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }) }
 
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
-cebuf = (a: MutPtr<Malloc>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
-cenode = (a: MutPtr<Malloc>, v: Expr) Ptr<Expr> {
+cebuf<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
+cenode<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf := a.cebuf(1)
     buf[0] = v
     buf[0].addr()
@@ -830,9 +830,24 @@ hide_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
 local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String {
     (n <= 0).match ({ true => s, false => a.local_marks(s.check_append(a, "_"), n - 1) })
 }
-local_name_at = (a: MutPtr<Malloc>, name: str, depth: i64) str {
+// inline-expansion scope marks: the chain of functions currently being inlined (env's empty-named
+// markers, pushed by inline_template). Distinguishes locals from DIFFERENT inlined functions that
+// share a param-count depth — e.g. cenode and cebuf both at depth 2 would otherwise rename their
+// `buf` to the same C local and alias into a self-referential node. Same-function re-inlines stay
+// distinct via C block scoping. This is what lets the compiler internals be generic (inlined) safely.
+inline_marks = (a: MutPtr<Malloc>, s: String, env: Ptr<VList>) String {
+    env.match ({
+        .VNil     => s,
+        .VCons(c) => c.ty.is_empty_named().match ({
+            true  => a.inline_marks(s.check_append(a, "_").check_append(a, c.name), c.tail),
+            false => a.inline_marks(s, c.tail)
+        })
+    })
+}
+local_name_at = (a: MutPtr<Malloc>, name: str, env: Ptr<VList>, depth: i64) str {
     s := a.check_string(128)
     s = s.check_append(a, "__zen_local")
+    s = a.inline_marks(s, env)
     s = a.local_marks(s, depth)
     s = s.check_append(a, "_")
     s = s.check_append(a, name)
@@ -903,7 +918,7 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, arms: [Arm
         eq(ar.bind, "").match ({
             true  => {},
             false => {
-                bind = a.local_name_at(ar.bind, params.len)
+                bind = a.local_name_at(ar.bind, env, params.len)
                 ps = a.add_subst_param(params, ar.bind)
                 xs = a.add_subst_arg(fargs, bind)
             }
@@ -1212,9 +1227,9 @@ xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param
         .Match(m)     => { out = a.xform_match(decls, m, params, fargs, env, exp) },
         .Index(ix)    => { out = a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs, env), a.xform_expr(decls, ix.idx, params, fargs, env), ix.elem)) },
         .Loop(l)      => {
-            idx  := a.local_name_at(l.idx, params.len)
-            elem := a.local_name_at(l.elem, params.len + 1)
-            hnd  := a.local_name_at(l.h, params.len + 2)
+            idx  := a.local_name_at(l.idx, env, params.len)
+            elem := a.local_name_at(l.elem, env, params.len + 1)
+            hnd  := a.local_name_at(l.h, env, params.len + 2)
             ps1  := a.add_subst_param(a.add_subst_param(a.add_subst_param(params, l.idx), l.elem), l.h)
             xs1  := a.add_subst_arg(a.add_subst_arg(a.add_subst_arg(fargs, idx), elem), hnd)
             out = a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs, env), idx, elem, l.elemTy, a.xform_body(decls, l.body, ps1, xs1, env, tvoid()), hnd))
@@ -1229,7 +1244,7 @@ xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param
 xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
     out := st
     st.match ({
-        .Let(l)      => { out = slett(a.local_name_at(l.name, params.len), l.ty, a.xform_expr_exp(decls, l.value, params, fargs, env, l.ty)) },
+        .Let(l)      => { out = slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, l.value, params, fargs, env, l.ty)) },
         .Assign(x)   => { out = sassign_at(a.xform_expr(decls, x.target, params, fargs, env), a.xform_expr(decls, x.value, params, fargs, env), x.pos) },
         .Return(r)   => { out = sret(a.xform_expr_exp(decls, r, params, fargs, env, exp)) },
         .ExprStmt(e) => { out = sexpr(a.xform_expr_exp(decls, e, params, fargs, env, exp)) },
@@ -1245,7 +1260,7 @@ xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], pa
     st.match ({ .Let(l) => {
         ty := l.ty
         l.ty.is_void_ty().match ({ true => { ty = l.value.light_ty(a, env, decls) }, _ })
-        out = a.vcons(a.local_name_at(l.name, params.len), ty, env)
+        out = a.vcons(a.local_name_at(l.name, env, params.len), ty, env)
     }, _ })
     out
 }
@@ -1254,9 +1269,9 @@ xform_param_shadow = (a: MutPtr<Malloc>, params: [Param], st: Stmt) [Param] {
     st.match ({ .Let(l) => { out = a.add_subst_param(params, l.name) }, _ })
     out
 }
-xform_arg_shadow = (a: MutPtr<Malloc>, args: [Expr], st: Stmt, params: [Param]) [Expr] {
+xform_arg_shadow = (a: MutPtr<Malloc>, args: [Expr], st: Stmt, params: [Param], env: Ptr<VList>) [Expr] {
     out := args
-    st.match ({ .Let(l) => { out = a.add_subst_arg(args, a.local_name_at(l.name, params.len)) }, _ })
+    st.match ({ .Let(l) => { out = a.add_subst_arg(args, a.local_name_at(l.name, env, params.len)) }, _ })
     out
 }
 xform_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
@@ -1269,7 +1284,7 @@ xform_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], f
         (i == body.len - 1).match ({ true => { want = exp }, _ })
         buf[i] = a.xform_stmt(decls, st, ps, xs, e, want)
         e = a.xform_let_ext(e, st, decls, ps)
-        xs = a.xform_arg_shadow(xs, st, ps)
+        xs = a.xform_arg_shadow(xs, st, ps, e)
         ps = a.xform_param_shadow(ps, st)
     })
     buf
