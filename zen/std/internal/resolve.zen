@@ -639,8 +639,8 @@ import_edge_count* = (src: str) i32 { src.import_edge_count_from(0, 0) }
 edge_next = (src: str, p: i32) i32 {
     src.is_import_line(p).match ({ true => src.import_end(p), false => src.next_line(p) })
 }
-edge_buf = (a: MutPtr<Malloc>, n: i64) [ImportEdge] { slice(a.acquire(n * sizeof(ImportEdge)), n) }
-try_edge_buf = (a: MutPtr<Malloc>, n: i64) Result<[ImportEdge], IoError> {
+edge_buf<A> = (a: MutPtr<A>, n: i64) [ImportEdge] { slice(a.acquire(n * sizeof(ImportEdge)), n) }
+try_edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
         .Ok(p)  => edges_ok(slice(p, n)),
         .Err(e) => edges_err(e)
@@ -709,7 +709,7 @@ write_import_id_at = (buf: RawPtr<u8>, s: str, p: i32, cap: i64) i64 {
         })
     })
 }
-import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
+import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) str {
     buf := a.acquire(EDGE_MODULE_CAP)
     pos := p
     out: i64 := 0
@@ -727,7 +727,7 @@ import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
     buf.offset(out).store(0)
     cstr(buf)
 }
-try_import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
+try_import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> {
     a.try_acquire(EDGE_MODULE_CAP).match ({
         .Ok(buf) => {
             pos := p
@@ -749,14 +749,14 @@ try_import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
         .Err(e) => edge_str_err(e)
     })
 }
-ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
+ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) str {
     buf := a.acquire(EDGE_ALIAS_CAP)
     ls := s.lstrip(p)
     out := buf.copy_name_to(0, s, ls, EDGE_ALIAS_CAP)
     buf.offset(out).store(0)
     cstr(buf)
 }
-try_ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
+try_ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> {
     a.try_acquire(EDGE_ALIAS_CAP).match ({
         .Ok(buf) => {
             ls := s.lstrip(p)
@@ -767,7 +767,7 @@ try_ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError
         .Err(e) => edge_str_err(e)
     })
 }
-edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) ImportEdge {
+edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) ImportEdge {
     ns := src.is_ns_line(p)
     ImportEdge(
     module: a.import_id_alloc(src, p),
@@ -777,7 +777,7 @@ edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) ImportEdge {
     next: src.edge_next(p)
     )
 }
-try_edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) Result<ImportEdge, IoError> {
+try_edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) Result<ImportEdge, IoError> {
     ns := src.is_ns_line(p)
     a.try_import_id_alloc(src, p).match ({
         .Ok(mod) => ns.match ({
@@ -790,7 +790,7 @@ try_edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) Result<ImportEdge, Io
         .Err(e) => edge_err(e)
     })
 }
-fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: i32) [ImportEdge] {
+fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i: i32) [ImportEdge] {
     pos := p
     idx := i
     bs: [u8] := src.view()
@@ -810,7 +810,7 @@ fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: 
     })
     out
 }
-try_fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
+try_fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
     pos := p
     idx := i
     failed := false
@@ -846,11 +846,11 @@ try_fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge],
     })
     failed.match ({ true => edges_err(err), false => edges_ok(out) })
 }
-import_edges* = (a: MutPtr<Malloc>, src: str) [ImportEdge] {
+import_edges*<A> = (a: MutPtr<A>, src: str) [ImportEdge] {
     buf := a.edge_buf(src.import_edge_count())
     a.fill_import_edges(src, 0, buf, 0)
 }
-try_import_edges* = (a: MutPtr<Malloc>, src: str) Result<[ImportEdge], IoError> {
+try_import_edges*<A> = (a: MutPtr<A>, src: str) Result<[ImportEdge], IoError> {
     a.try_edge_buf(src.import_edge_count()).match ({
         .Ok(buf) => a.try_fill_import_edges(src, 0, buf, 0),
         .Err(e)  => edges_err(e)
