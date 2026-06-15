@@ -59,6 +59,11 @@ const char* resolve_program(Malloc* a, const char* root, const char* progdir, co
 ResolvedProgram resolve_program_data(Malloc* a, const char* root, const char* progdir, const char* inpath, const char* src);
 /* the first sibling-module name `src` imports ("" if none) — the stdin-mode guard below. */
 const char* first_user_import(const char* src);
+/* compiler.diagnostic (zen/compiler/diagnostic.zen): map a check error's flat-source byte
+ * offset back to the user file's line:col (exact, alias-`__`-removal, and `__`==`.`
+ * inverses). Replaces the hand-rolled C mapping below. line==0 => not located. */
+typedef struct { int32_t line; int32_t col; int32_t end_col; } DiagSpan;
+DiagSpan diag_user_span(const char* flat, const char* user, int32_t offset, int32_t span_width);
 
 static void* driver_alloc(Malloc* a, size_t n){
     return acquire(a, (int64_t)n);
@@ -399,96 +404,6 @@ static int emits_main(String out){
     return 0;
 }
 
-/* U1.4 Phase 2: check_module_kind packs the first error's source BYTE OFFSET alongside its kind
- * (kind + pos*16; pos 0 = unknown/synthesized). The offset is into the import-FLATTENED source, not
- * the user's file — resolve_program strips import lines and can rewrite `ns.name` quals — so map back
- * by the error LINE's text: take the flat line holding pos, find that exact line in the user's buffer,
- * and report its 1-based line + the column within it. A no-import program is a pass-through (exact).
- * Namespace-bound calls rewrite `alias.name` to `alias__name`; if the exact line misses, try that
- * inverse normalization before falling back to the position-less format. */
-static int user_line_of(const char* user, const char* ls, size_t llen){
-    int line = 1;
-    const char* p = user;
-    for (;;){
-        const char* e = strchr(p, '\n');
-        size_t n = e ? (size_t)(e - p) : strlen(p);
-        if (n == llen && memcmp(p, ls, llen) == 0) return line;
-        if (!e) return 0;
-        p = e + 1; line++;
-    }
-}
-
-typedef struct {
-    int line;
-    size_t remove_start;
-    size_t remove_len;
-} LineRewrite;
-
-static int line_matches_removed_span(const char* user, size_t ulen, const char* flat, size_t flen, size_t start, size_t n){
-    if (start + n > flen) return 0;
-    if (ulen != flen - n) return 0;
-    if (memcmp(user, flat, start) != 0) return 0;
-    return memcmp(user + start, flat + start + n, flen - start - n) == 0;
-}
-
-static LineRewrite user_line_of_alias_rewrite(const char* user, const char* ls, size_t llen){
-    LineRewrite miss = { 0, 0, 0 };
-    int line = 1;
-    const char* p = user;
-    for (;;){
-        const char* e = strchr(p, '\n');
-        size_t ulen = e ? (size_t)(e - p) : strlen(p);
-
-        size_t lead = 0;
-        while (lead < llen && (ls[lead] == ' ' || ls[lead] == '\t')) lead++;
-        for (size_t j = lead + 1; j + 1 < llen; j++){
-            if (ls[j] == '_' && ls[j + 1] == '_'){
-                size_t remove_len = j + 2 - lead;
-                if (line_matches_removed_span(p, ulen, ls, llen, lead, remove_len)){
-                    LineRewrite hit = { line, lead, remove_len };
-                    return hit;
-                }
-            }
-        }
-
-        if (!e) return miss;
-        p = e + 1; line++;
-    }
-}
-
-static int flat_offset_to_removed_col(size_t off, size_t start, size_t n){
-    if (off < start) return (int)off + 1;
-    if (off < start + n) return (int)start + 1;
-    return (int)(off - n) + 1;
-}
-
-static size_t normalize_ns_line(char* out, const char* src, size_t len){
-    size_t j = 0;
-    for (size_t i = 0; i < len; ){
-        if (i + 1 < len && src[i] == '_' && src[i + 1] == '_'){
-            out[j++] = '.';
-            i += 2;
-        } else {
-            out[j++] = src[i++];
-        }
-    }
-    return j;
-}
-
-static int flat_offset_to_normalized_col(const char* line, size_t len, size_t off){
-    if (off > len) off = len;
-    int col = 1;
-    for (size_t i = 0; i < off; ){
-        if (i + 1 < len && line[i] == '_' && line[i + 1] == '_'){
-            col++;
-            i += 2;
-        } else {
-            col++;
-            i++;
-        }
-    }
-    return col;
-}
 
 static void print_source_caret(FILE* out, const char* user, int line, int col, int end_col){
     if (!user || line <= 0 || col <= 0) return;
@@ -515,41 +430,15 @@ static void print_source_caret(FILE* out, const char* user, int line, int col, i
 }
 
 static int diagnostic_attach_user_span(Malloc* a, Diagnostic* d, const char* flat, const char* user){
+    (void)a;
     long pos = d->source_offset;
-    if (pos <= 0 || !flat || !user || (size_t)pos >= strlen(flat)) return 0;
-    const char* ls = flat + pos; while (ls > flat && ls[-1] != '\n') ls--;
-    const char* le = flat + pos; while (*le && *le != '\n') le++;
-    size_t llen = (size_t)(le - ls);
-    size_t rel = (size_t)(flat + pos - ls);
-    size_t end_rel = rel + (size_t)d->span_width - 1;
-    if (end_rel >= llen && llen > 0) end_rel = llen - 1;
-
-    int uline = user_line_of(user, ls, llen);
-    int col = (int)rel + 1;
-    int end_col = col + d->span_width - 1;
-    if (uline <= 0){
-        LineRewrite rw = user_line_of_alias_rewrite(user, ls, llen);
-        if (rw.line > 0){
-            uline = rw.line;
-            col = flat_offset_to_removed_col(rel, rw.remove_start, rw.remove_len);
-            end_col = flat_offset_to_removed_col(end_rel, rw.remove_start, rw.remove_len);
-        }
-    }
-    if (uline <= 0){
-        char* normalized = driver_alloc(a, llen + 1);
-        if (!normalized) return 0;
-        size_t nlen = normalize_ns_line(normalized, ls, llen);
-        normalized[nlen] = 0;
-        uline = user_line_of(user, normalized, nlen);
-        driver_release(a, normalized);
-        if (uline <= 0) return 0;
-        col = flat_offset_to_normalized_col(ls, llen, rel);
-        end_col = flat_offset_to_normalized_col(ls, llen, end_rel);
-    }
-    d->line = uline;
-    d->col = col;
-    d->end_line = d->line;
-    d->end_col = end_col;
+    if (pos <= 0 || !flat || !user) return 0;
+    DiagSpan sp = diag_user_span(flat, user, (int32_t)pos, d->span_width);
+    if (sp.line <= 0) return 0;
+    d->line = sp.line;
+    d->col = sp.col;
+    d->end_line = sp.line;
+    d->end_col = sp.end_col;
     return 1;
 }
 

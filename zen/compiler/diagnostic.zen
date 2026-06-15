@@ -1,0 +1,147 @@
+// compiler.diagnostic — map a check error's FLAT-source byte offset back to the user file's
+// line:col. resolve_program strips import lines and rewrites `ns.name` -> `ns__name`, so the
+// flat offset is not the user's; we recover the user line by matching the flat line's TEXT
+// (exact, then an alias-`__`-removal inverse, then an on-the-fly `__`==`.` comparison).
+// Ported out of bootstrap/main.c — the C driver should not carry compiler logic. Allocation-free:
+// returns ints, so main.c keeps only the printf + caret rendering and the per-module search loop.
+
+{ at } = std.text.bytes
+
+// line:col span in the USER source; line == 0 means "could not locate".
+DiagSpan*: { line: i32, col: i32, end_col: i32 }
+dspan_none = () DiagSpan { DiagSpan(line: 0, col: 0, end_col: 0) }
+
+// length of the line of `s` that starts at byte `p` (up to '\n' or NUL)
+dline_len = (s: str, p: i32, n: i32) i32 {
+    b := s.at(p + n)
+    ((b == 0) || (b == '\n')).match ({ true => n, false => s.dline_len(p, n + 1) })
+}
+// start byte of the line containing `off` (scan back past the previous '\n')
+dline_start = (s: str, off: i32) i32 {
+    (off == 0).match ({
+        true  => 0,
+        false => (s.at(off - 1) == '\n').match ({ true => off, false => s.dline_start(off - 1) })
+    })
+}
+
+// user[up..up+ln] == flat[fp..fp+ln] byte-exact
+dseg_eq = (user: str, up: i32, flat: str, fp: i32, ln: i32, i: i32) bool {
+    (i == ln).match ({
+        true  => true,
+        false => (user.at(up + i) == flat.at(fp + i)) && user.dseg_eq(up, flat, fp, ln, i + 1)
+    })
+}
+// the 1-based line in `user` whose text exactly equals flat[fp..fp+ln], else 0.
+duser_line_at = (user: str, up: i32, flat: str, fp: i32, ln: i32, no: i32) i32 {
+    ulen := user.dline_len(up, 0)
+    ((ulen == ln) && user.dseg_eq(up, flat, fp, ln, 0)).match ({
+        true  => no,
+        false => (user.at(up + ulen) == 0).match ({
+            true  => 0,
+            false => user.duser_line_at(up + ulen + 1, flat, fp, ln, no + 1)
+        })
+    })
+}
+duser_line* = (user: str, flat: str, fp: i32, ln: i32) i32 { user.duser_line_at(0, flat, fp, ln, 1) }
+
+// ── alias-rewrite inverse: a flat line `…alias__name…` whose user form removed the inserted span.
+//    find the first `__` after leading whitespace; the removed span is [lead, j+2). ──
+dlead_ws = (s: str, p: i32, ln: i32, i: i32) i32 {
+    (i >= ln).match ({ true => i, false => ((s.at(p + i) == ' ') || (s.at(p + i) == '\t')).match ({ true => s.dlead_ws(p, ln, i + 1), false => i }) })
+}
+// first index >= lead+1 where flat[fp+j]=='_' && flat[fp+j+1]=='_' (j+1 < ln-1), else -1
+dfind_dunder = (flat: str, fp: i32, ln: i32, j: i32) i32 {
+    (j + 1 >= ln - 1).match ({
+        true  => 0 - 1,
+        false => ((flat.at(fp + j) == '_') && (flat.at(fp + j + 1) == '_')).match ({ true => j, false => flat.dfind_dunder(fp, ln, j + 1) })
+    })
+}
+// user[up..up+ulen] == flat[fp..fp+flen] with [start,start+n) removed (lengths must match)
+dmatch_removed = (user: str, up: i32, ulen: i32, flat: str, fp: i32, flen: i32, start: i32, n: i32) bool {
+    ((start + n > flen) || (ulen != flen - n)).match ({
+        true  => false,
+        false => user.dseg_eq(up, flat, fp, start, 0) && user.dseg_eq2(up + start, flat, fp + start + n, flen - start - n, 0)
+    })
+}
+// second-half compare with independent offsets
+dseg_eq2 = (user: str, up: i32, flat: str, fp: i32, ln: i32, i: i32) bool {
+    (i == ln).match ({ true => true, false => (user.at(up + i) == flat.at(fp + i)) && user.dseg_eq2(up, flat, fp, ln, i + 1) })
+}
+// flat byte offset within a line -> user column after removing [start,start+n)
+dremoved_col = (off: i32, start: i32, n: i32) i32 {
+    (off < start).match ({
+        true  => off + 1,
+        false => (off < start + n).match ({ true => start + 1, false => off - n + 1 })
+    })
+}
+
+// ── ns-normalize inverse: compare treating each `__` in the flat line as a single `.`. ──
+// user[up..] equals flat[fp..fp+flen] with every `__` collapsed to one char; returns user line len match.
+dseg_eq_ns = (user: str, up: i32, ui: i32, flat: str, fp: i32, fi: i32, flen: i32) bool {
+    (fi == flen).match ({
+        true  => (user.at(up + ui) == 0) || (user.at(up + ui) == '\n'),
+        false => ((fi + 1 < flen) && (flat.at(fp + fi) == '_') && (flat.at(fp + fi + 1) == '_')).match ({
+            true  => (user.at(up + ui) == '.') && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 2, flen),
+            false => (user.at(up + ui) == flat.at(fp + fi)) && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen)
+        })
+    })
+}
+duser_line_ns_at = (user: str, up: i32, flat: str, fp: i32, flen: i32, no: i32) i32 {
+    ulen := user.dline_len(up, 0)
+    user.dseg_eq_ns(up, 0, flat, fp, 0, flen).match ({
+        true  => no,
+        false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_ns_at(up + ulen + 1, flat, fp, flen, no + 1) })
+    })
+}
+// flat offset -> column counting each `__` as one char
+dnorm_col = (flat: str, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
+    (i >= off).match ({
+        true  => col,
+        false => ((i + 1 < flen) && (flat.at(fp + i) == '_') && (flat.at(fp + i + 1) == '_')).match ({
+            true  => flat.dnorm_col(fp, flen, off, i + 2, col + 1),
+            false => flat.dnorm_col(fp, flen, off, i + 1, col + 1)
+        })
+    })
+}
+
+// the entry point main.c calls per candidate source: flat = import-flattened source the checker saw,
+// user = one real source file, offset = the error's flat byte offset, span_width = its width.
+diag_user_span* = (flat: str, user: str, offset: i32, span_width: i32) DiagSpan {
+    (offset <= 0).match ({ true => { return dspan_none() }, false => {} })
+    ls    := flat.dline_start(offset)
+    llen  := flat.dline_len(ls, 0)
+    rel   := offset - ls
+    erel0 := rel + span_width - 1
+    erel  := ((erel0 >= llen) && (llen > 0)).match ({ true => llen - 1, false => erel0 })
+
+    // 1) exact line-text match
+    exact := user.duser_line(flat, ls, llen)
+    (exact > 0).match ({ true => { return DiagSpan(line: exact, col: rel + 1, end_col: rel + span_width) }, false => {} })
+
+    // 2) alias `__`-removal inverse
+    lead := flat.dlead_ws(ls, llen, 0)
+    j    := flat.dfind_dunder(ls, llen, lead + 1)
+    (j >= 0).match ({
+        true  => {
+            rn   := j + 2 - lead
+            al   := user.duser_line_alias(flat, ls, llen, lead, rn)
+            (al > 0).match ({ true => { return DiagSpan(line: al, col: rel.dremoved_col(lead, rn), end_col: erel.dremoved_col(lead, rn)) }, false => {} })
+        },
+        false => {}
+    })
+
+    // 3) on-the-fly `__`==`.` normalized match
+    nsl := user.duser_line_ns_at(0, flat, ls, llen, 1)
+    (nsl > 0).match ({ true => { return DiagSpan(line: nsl, col: flat.dnorm_col(ls, llen, rel, 0, 1), end_col: flat.dnorm_col(ls, llen, erel, 0, 1)) }, false => {} })
+
+    dspan_none()
+}
+// alias variant of duser_line: match each user line against flat[ls..ls+llen] with [lead,lead+rn) removed
+duser_line_alias_at = (user: str, up: i32, flat: str, ls: i32, llen: i32, lead: i32, rn: i32, no: i32) i32 {
+    ulen := user.dline_len(up, 0)
+    user.dmatch_removed(up, ulen, flat, ls, llen, lead, rn).match ({
+        true  => no,
+        false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_alias_at(up + ulen + 1, flat, ls, llen, lead, rn, no + 1) })
+    })
+}
+duser_line_alias = (user: str, flat: str, ls: i32, llen: i32, lead: i32, rn: i32) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }

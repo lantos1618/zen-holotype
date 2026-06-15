@@ -12,6 +12,10 @@ WHITE := 2
 
 store_ptr = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }
 load_ptr  = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
+ptr_ok = (p: RawPtr<u8>) Result<RawPtr<u8>, IoError> { .Ok(p) }
+ptr_err = (e: IoError) Result<RawPtr<u8>, IoError> { .Err(e) }
+done_ok = () Result<i32, IoError> { .Ok(0) }
+done_err = (e: IoError) Result<i32, IoError> { .Err(e) }
 
 // Rc<T> block layout: [count:i64 | color:i64 | value:T].
 hcount     = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }
@@ -27,6 +31,18 @@ list_new_cap_in<A> = (alloc: MutPtr<A>, cap: i64) RawPtr<u8> {
     l
 }
 list_new_in<A> = (alloc: MutPtr<A>) RawPtr<u8> { alloc.list_new_cap_in(8) }
+try_list_new_cap_in<A> = (alloc: MutPtr<A>, cap: i64) Result<RawPtr<u8>, IoError> {
+    out: Result<RawPtr<u8>, IoError> := alloc.try_acquire(16 + cap * 8).match({
+        .Ok(l) => {
+            store_i64(l.offset(0), 0)
+            store_i64(l.offset(8), cap)
+            ptr_ok(l)
+        },
+        .Err(e) => ptr_err(e)
+    })
+    out
+}
+try_list_new_in<A> = (alloc: MutPtr<A>) Result<RawPtr<u8>, IoError> { alloc.try_list_new_cap_in(8) }
 list_len = (l: RawPtr<u8>) i64 { load_i64(l.offset(0)) }
 list_cap = (l: RawPtr<u8>) i64 { load_i64(l.offset(8)) }
 list_get = (l: RawPtr<u8>, i: i64) RawPtr<u8> { load_ptr(l.offset(16 + i * 8)) }
@@ -36,6 +52,30 @@ list_push_in<A> = (alloc: MutPtr<A>, l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
     store_ptr(r.offset(16 + n * 8), p)
     store_i64(r.offset(0), n + 1)
     r
+}
+try_list_push_in<A> = (alloc: MutPtr<A>, l: RawPtr<u8>, p: RawPtr<u8>) Result<RawPtr<u8>, IoError> {
+    n := list_len(l)
+    out: Result<RawPtr<u8>, IoError> := (n == list_cap(l)).match({
+        true => {
+            nc := list_cap(l) * 2
+            grown: Result<RawPtr<u8>, IoError> := alloc.try_resize(l, 16 + nc * 8).match({
+                .Ok(g) => {
+                    store_i64(g.offset(8), nc)
+                    store_ptr(g.offset(16 + n * 8), p)
+                    store_i64(g.offset(0), n + 1)
+                    ptr_ok(g)
+                },
+                .Err(e) => ptr_err(e)
+            })
+            grown
+        },
+        false => {
+            store_ptr(l.offset(16 + n * 8), p)
+            store_i64(l.offset(0), n + 1)
+            ptr_ok(l)
+        }
+    })
+    out
 }
 list_push_static = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
     n := l.list_len()
@@ -53,6 +93,38 @@ list_push_static = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
 roots := (null_ptr())
 roots_list_in<A> = (alloc: MutPtr<A>) RawPtr<u8> { (roots == null_ptr()).match({ true => { roots = alloc.list_new_in()  roots }, false => roots }) }
 roots_add_in<A> = (alloc: MutPtr<A>, b: RawPtr<u8>) void { roots = alloc.list_push_in(alloc.roots_list_in(), b) }
+try_roots_list_in<A> = (alloc: MutPtr<A>) Result<RawPtr<u8>, IoError> {
+    out: Result<RawPtr<u8>, IoError> := (roots == null_ptr()).match({
+        true => {
+            made: Result<RawPtr<u8>, IoError> := alloc.try_list_new_in().match({
+                .Ok(r) => {
+                    roots = r
+                    ptr_ok(roots)
+                },
+                .Err(e) => ptr_err(e)
+            })
+            made
+        },
+        false => ptr_ok(roots)
+    })
+    out
+}
+try_roots_add_in<A> = (alloc: MutPtr<A>, b: RawPtr<u8>) Result<i32, IoError> {
+    out: Result<i32, IoError> := alloc.try_roots_list_in().match({
+        .Ok(rs) => {
+            pushed: Result<i32, IoError> := alloc.try_list_push_in(rs, b).match({
+                .Ok(next) => {
+                    roots = next
+                    done_ok()
+                },
+                .Err(e) => done_err(e)
+            })
+            pushed
+        },
+        .Err(e) => done_err(e)
+    })
+    out
+}
 roots_clear_raw = () void { (roots == null_ptr()).match({ true => {}, false => { store_i64(roots.offset(0), 0) } }) }
 roots_clear = () void { roots_clear_raw() }
 
@@ -87,9 +159,31 @@ tracked_in*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T> {
     s[0] = x
     r
 }
+try_tracked_in*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError> {
+    tx := x
+    alloc.try_acquire(16 + sizeof(T)).match({
+        .Ok(base) => {
+            tracked_blocks = tracked_blocks + 1
+            store_i64(base.offset(0), 0)
+            store_i64(base.offset(8), 0)
+            r := Rc<T>( base: base )
+            s := r.val()
+            s[0] = tx
+            ok: Result<Rc<T>, IoError> := .Ok(r)
+            ok
+        },
+        .Err(e) => {
+            err: Result<Rc<T>, IoError> := .Err(e)
+            err
+        }
+    })
+}
 tracked*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T> { alloc.tracked_in(x) }
+try_tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError> { alloc.try_tracked_in(x) }
 root_in*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void { alloc.roots_add_in(r.base) }
 root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void { alloc.root_in(r) }
+try_root_in*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError> { alloc.try_roots_add_in(r.base) }
+try_root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError> { alloc.try_root_in(r) }
 
 // Generic shims re-dispatch Trace/Drop after Rc<T> is monomorphized.
 do_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void { s := r.val()  s[0].addr().trace(t) }
@@ -180,3 +274,28 @@ collect_in*<A> = (alloc: MutPtr<A>) void {
     roots_clear_raw()
 }
 collect*<A> = (alloc: MutPtr<A>) void { alloc.collect_in() }
+try_collect_in*<A> = (alloc: MutPtr<A>) Result<i32, IoError> {
+    out: Result<i32, IoError> := (roots == null_ptr()).match({
+        true => done_ok(),
+        false => {
+            rs := roots
+            collected: Result<i32, IoError> := alloc.try_list_new_cap_in(tracked_blocks).match({
+                .Ok(w) => {
+                    white = w
+                    drive_roots(rs, 0, 0)
+                    drive_roots(rs, 1, 0)
+                    drive_roots(rs, 2, 0)
+                    alloc.free_white_in()
+                    alloc.release(white)
+                    white = (null_ptr())
+                    roots_clear_raw()
+                    done_ok()
+                },
+                .Err(e) => done_err(e)
+            })
+            collected
+        }
+    })
+    out
+}
+try_collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError> { alloc.try_collect_in() }
