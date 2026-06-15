@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -92,7 +92,7 @@ is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.g
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
 recv_name* = (t: Ty) str {
     t.match ({
-        .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str",
+        .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str", .Cstr => "str",
         .Named(n)   => n,
         .Generic(g) => g.mangled,
         .Ptr(p)     => load(p).recv_name(),
@@ -336,7 +336,7 @@ infer_call = (env: Env, c: CallData) Ty {
             false => eq(c.fn, "null_ptr").match ({
                 true  => tptr(env.a.tnode(tu8())),
                 false => eq(c.fn, "cstr").match ({
-                    true  => tstr(),
+                    true  => tcstr(),
                     false => eq(c.fn, "addr").match ({
                     true  => tptr(env.a.tnode(env.arg0_ty(c))),
                     false => env.gen_call_ret(c)
@@ -539,7 +539,7 @@ resolve_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) [Expr] {
 }
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
 // String equality lowers to backend-specific content comparison intrinsics.
-is_str_t = (t: Ty) bool { t.match ({ .Str => true, _ => false }) }
+is_str_t = (t: Ty) bool { t.match ({ .Str => true, .Cstr => true, _ => false }) }
 str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf := a.cebuf(2)
     buf[0] = load(lhs)
@@ -942,7 +942,7 @@ light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList
 }
 light_call_ty = (decls: [Decl], a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
     eq(c.fn, "cstr").match ({
-        true  => tstr(),
+        true  => tcstr(),
         false => {
             f := decls.the_func(c.fn)
             (f.tparams.len > 0).match ({
@@ -1360,6 +1360,7 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Bool     => w.match ({ .Bool => true, _ => false }),
         .Void     => w.match ({ .Void => true, _ => false }),
         .Str      => w.match ({ .Str => true, _ => false }),
+        .Cstr     => w.match ({ .Cstr => true, .Str => true, _ => false }),
         .Named(a) => w.match ({ .Named(b) => eq(a, b), .Generic(gb) => eq(a, gb.mangled), _ => false }),
         .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),
         .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }),

@@ -71,7 +71,7 @@ FnTData*: { params: [Ty], ret: Ptr<Ty> }
 // the monomorphized C name ("Box_i32"), precomputed by the parser so gen_ty emits it with no runtime
 // string-building. The monomorphize pass turns each instance into a concrete StructDecl named `mangled`.
 GenericData*: { name: str, args: [Ty], mangled: str }
-Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)   // scalar/f64/struct/void/str, T*, [T], (A)R, or N<T>
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)   // scalar/f64/struct/void/str, T*, [T], (A)R, or N<T>
 Param*: { name: str, ty: Ty }
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: { name: str, params: [Param], ret: Ty, tparams: [Param], body: [Stmt] }   // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic
@@ -166,7 +166,7 @@ gstr_append*<A> = (s: String, a: MutPtr<A>, t: str) String {
     bs.loop((h, i, b) { cur = cur.gstr_push(a, b) })
     cur
 }
-gstr_finish*<A> = (s: String, a: MutPtr<A>) str { cstr(s.gstr_push(a, 0).ptr) }
+gstr_finish*<A> = (s: String, a: MutPtr<A>) Cstr { cstr(s.gstr_push(a, 0).ptr) }
 
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
@@ -224,6 +224,7 @@ ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData
 ematchp* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData( subj: subj, ename: ename, arms: arms, ptr: true )) }
 strlit* = (v: str) Expr { .StrLit(StrData( value: v )) }
 tstr* = () Ty { .Str() }
+tcstr* = () Ty { .Cstr() }
 slet*  = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: tvoid(), value: v )) }
 slett* = (nm: str, t: Ty, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: t, value: v )) }   // a TYPED let
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
@@ -246,7 +247,7 @@ tgeneric* = (nm: str, args: [Ty], mangled: str) Ty { .Generic(GenericData( name:
 mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
         .I32 => s.gstr_append(a, "i32"), .I64 => s.gstr_append(a, "i64"), .U8 => s.gstr_append(a, "u8"), .F64 => s.gstr_append(a, "f64"),
-        .Bool => s.gstr_append(a, "bool"), .Str => s.gstr_append(a, "str"), .Void => s.gstr_append(a, "void"),
+        .Bool => s.gstr_append(a, "bool"), .Str => s.gstr_append(a, "str"), .Cstr => s.gstr_append(a, "cstr"), .Void => s.gstr_append(a, "void"),
         .Named(n)   => s.gstr_append(a, n),
         .Generic(g) => s.gstr_append(a, g.mangled),
         .Ptr(p)     => s.gstr_append(a, "ptr_").mangle_ty(a, load(p)),
@@ -257,7 +258,7 @@ mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
 
 mangle_ty_len = (t: Ty) i64 {
     t.match ({
-        .I32 => 3, .I64 => 3, .U8 => 2, .F64 => 3, .Bool => 4, .Str => 3, .Void => 4,
+        .I32 => 3, .I64 => 3, .U8 => 2, .F64 => 3, .Bool => 4, .Str => 3, .Cstr => 4, .Void => 4,
         .Named(n)   => n.view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(p)     => 4 + load(p).mangle_ty_len(),
@@ -273,7 +274,7 @@ mangle_args_len = (args: [Ty]) i64 {
 mangle_write_ty = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
         .I32 => dst.write_str(at, "i32"), .I64 => dst.write_str(at, "i64"), .U8 => dst.write_str(at, "u8"), .F64 => dst.write_str(at, "f64"),
-        .Bool => dst.write_str(at, "bool"), .Str => dst.write_str(at, "str"), .Void => dst.write_str(at, "void"),
+        .Bool => dst.write_str(at, "bool"), .Str => dst.write_str(at, "str"), .Cstr => dst.write_str(at, "cstr"), .Void => dst.write_str(at, "void"),
         .Named(n)   => dst.write_str(at, n),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(p)     => dst.mangle_write_ty(dst.write_str(at, "ptr_"), load(p)),
@@ -359,6 +360,7 @@ gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
         .Bool => { out = out.gstr_append(a, "bool") },
         .Void => { out = out.gstr_append(a, "void") },
         .Str => { out = out.gstr_append(a, "const char*") },
+        .Cstr => { out = out.gstr_append(a, "const char*") },
         .Named(n) => { out = out.gstr_append(a, n) },
         .Ptr(p) => {
             inner := out.gen_ty(a, p)
@@ -374,7 +376,7 @@ gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 cname_len = (t: Ty) i64 {
     t.match ({
-        .I32 => 7, .I64 => 7, .U8 => 7, .F64 => 6, .Bool => 4, .Void => 4, .Str => 11,
+        .I32 => 7, .I64 => 7, .U8 => 7, .F64 => 6, .Bool => 4, .Void => 4, .Str => 11, .Cstr => 11,
         .Named(n)   => n.view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(p)     => load(p).cname_len() + 1,
@@ -385,7 +387,7 @@ cname_len = (t: Ty) i64 {
 cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
         .I32 => dst.write_str(at, "int32_t"), .I64 => dst.write_str(at, "int64_t"), .U8 => dst.write_str(at, "uint8_t"), .F64 => dst.write_str(at, "double"),
-        .Bool => dst.write_str(at, "bool"), .Void => dst.write_str(at, "void"), .Str => dst.write_str(at, "const char*"),
+        .Bool => dst.write_str(at, "bool"), .Void => dst.write_str(at, "void"), .Str => dst.write_str(at, "const char*"), .Cstr => dst.write_str(at, "const char*"),
         .Named(n)   => dst.write_str(at, n),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(p)     => dst.write_str(dst.cname_write(at, load(p)), "*"),
