@@ -6,6 +6,9 @@
 // returns ints, so main.c keeps only the printf + caret rendering and the per-module search loop.
 
 { at } = std.text.bytes
+{ Malloc } = std.mem.alloc
+{ String } = std.text.string
+{ gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
 
 // line:col span in the USER source; line == 0 means "could not locate".
 DiagSpan*: { line: i32, col: i32, end_col: i32 }
@@ -189,4 +192,54 @@ manifest_value_span* = (src: str, len: i32, key: str, p: i32) MfSpan {
     (r.start >= 0).match ({ true => { return r }, false => {} })
     np := ((e < len) && (src.at(e) == '\r') && (e + 1 < len) && (src.at(e + 1) == '\n')).match ({ true => e + 2, false => e + 1 })
     (e >= len).match ({ true => mf_none(), false => src.manifest_value_span(len, key, np) })
+}
+
+// ── error rendering (message line + source caret) — moved out of the C driver ──────────────────
+// Builds the full "zenc: path:line:col: error[kind]: message" line, the source line + ^~~~ caret,
+// and the hint, into one NUL-terminated string the driver writes to stderr. The driver keeps only
+// file I/O and the per-module span search.
+dsbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+ddigit = (d: i64) u8 { dsbyte("0123456789", d) }
+dnum = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({ true => s.gstr_push(a, ddigit(n)), false => s.dnum(a, n / 10).gstr_push(a, ddigit(n % 10)) })
+}
+// byte offset of the start of the `line`-th (1-based) line in `user`
+dline_off = (user: str, line: i32, p: i32) i32 {
+    (line <= 1).match ({ true => p, false => (user.at(p) == 0).match ({ true => p, false => (user.at(p) == '\n').match ({ true => user.dline_off(line - 1, p + 1), false => user.dline_off(line, p + 1) }) }) })
+}
+// append the source line at byte `p` (until \n/NUL/CR) to s
+dput_line = (s: String, a: MutPtr<Malloc>, user: str, p: i32) String {
+    b := user.at(p)
+    ((b == 0) || (b == '\n') || (b == '\r')).match ({ true => s, false => s.gstr_push(a, b).dput_line(a, user, p + 1) })
+}
+// append `col-1` leading-blanks, preserving tabs from the source line at `ls`
+dput_blanks = (s: String, a: MutPtr<Malloc>, user: str, ls: i32, col: i32, i: i32) String {
+    (i >= col - 1).match ({ true => s, false => {
+        c := user.at(ls + i)
+        s.gstr_push(a, (c == '\t').match ({ true => '\t', false => ' ' })).dput_blanks(a, user, ls, col, i + 1)
+    } })
+}
+// append `^` then `n-1` `~`
+dput_carets = (s: String, a: MutPtr<Malloc>, n: i32, i: i32) String {
+    (i >= n).match ({ true => s, false => s.gstr_push(a, (i == 0).match ({ true => '^', false => '~' })).dput_carets(a, n, i + 1) })
+}
+// render one diagnostic to a NUL-terminated string (line<=0 / col<=0 => no caret)
+render_diagnostic* = (a: MutPtr<Malloc>, in_path: str, user: str, line: i32, col: i32, end_col: i32, kind: str, message: str, hint: str, count: i32) str {
+    s := a.gstr_string(256)
+    s = s.gstr_append(a, "zenc: ").gstr_append(a, in_path)
+    ((line > 0) && (col > 0)).match ({ true => { s = s.gstr_push(a, ':').dnum(a, line).gstr_push(a, ':').dnum(a, col) }, false => {} })
+    s = s.gstr_append(a, ": error[").gstr_append(a, kind).gstr_append(a, "]: ").gstr_append(a, message)
+    (count > 1).match ({ true => {
+        s = s.gstr_append(a, " (+").dnum(a, count - 1).gstr_append(a, " more error")
+        // no method chained after a .match (parser limitation): push the closing chars inside the arms
+        s = (count - 1 == 1).match ({ true => s.gstr_push(a, ')'), false => s.gstr_push(a, 's').gstr_push(a, ')') })
+    }, false => {} })
+    s = s.gstr_push(a, '\n')
+    ((line > 0) && (col > 0)).match ({ true => {
+        ls := user.dline_off(line, 0)
+        width := (end_col >= col).match ({ true => end_col - col + 1, false => 1 })
+        s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
+        s = s.gstr_append(a, "  ").dput_blanks(a, user, ls, col, 0).dput_carets(a, width, 0).gstr_push(a, '\n')
+    }, false => {} })
+    (hint.at(0) == 0).match ({ true => s.gstr_finish(a), false => s.gstr_append(a, "hint: ").gstr_append(a, hint).gstr_push(a, '\n').gstr_finish(a) })
 }

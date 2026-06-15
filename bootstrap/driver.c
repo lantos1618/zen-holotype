@@ -67,6 +67,7 @@ DiagSpan diag_user_span(const char* flat, const char* user, int32_t offset, int3
 /* compiler.diagnostic: zen.toml manifest value span (start<0 = absent) — parser lives in Zen. */
 typedef struct { int32_t start; int32_t len; } MfSpan;
 MfSpan manifest_value_span(const char* src, int32_t len, const char* key, int32_t p);
+const char* render_diagnostic(Malloc* a, const char* in_path, const char* user, int32_t line, int32_t col, int32_t end_col, const char* kind, const char* message, const char* hint, int32_t count);
 
 static void* driver_alloc(Malloc* a, size_t n){
     return acquire(a, (int64_t)n);
@@ -408,30 +409,6 @@ static int emits_main(String out){
 }
 
 
-static void print_source_caret(FILE* out, const char* user, int line, int col, int end_col){
-    if (!user || line <= 0 || col <= 0) return;
-    const char* p = user;
-    for (int cur = 1; cur < line && *p; cur++){
-        const char* e = strchr(p, '\n');
-        if (!e) return;
-        p = e + 1;
-    }
-    const char* e = p;
-    while (*e && *e != '\n' && *e != '\r') e++;
-    fprintf(out, "  ");
-    fwrite(p, 1, (size_t)(e - p), out);
-    fputc('\n', out);
-    fprintf(out, "  ");
-    for (int i = 1; i < col; i++){
-        char c = p[i - 1];
-        fputc(c == '\t' ? '\t' : ' ', out);
-    }
-    int width = end_col >= col ? end_col - col + 1 : 1;
-    fputc('^', out);
-    for (int i = 1; i < width; i++) fputc('~', out);
-    fputc('\n', out);
-}
-
 static int diagnostic_attach_user_span(Malloc* a, Diagnostic* d, const char* flat, const char* user){
     (void)a;
     long pos = d->source_offset;
@@ -473,22 +450,10 @@ static void diagnostic_attach_resolved_span(
     }
 }
 
-static void diagnostic_where(const Diagnostic* d, char* out, size_t n){
-    out[0] = 0;
-    if (d->line > 0 && d->col > 0) snprintf(out, n, ":%d:%d", d->line, d->col);
+static void diagnostic_render(Malloc* a, FILE* out, const char* in_path, const char* user, const Diagnostic* d){
+    /* rendering (message line + source caret + hint) lives in compiler.diagnostic now */
+    fputs(render_diagnostic(a, in_path, user, d->line, d->col, d->end_col, d->kind, d->message, d->hint, d->count), out);
 }
-
-static void diagnostic_render(FILE* out, const char* in_path, const char* user, const Diagnostic* d){
-    char where[64];
-    diagnostic_where(d, where, sizeof where);
-    if (d->count == 1)
-        fprintf(out, "zenc: %s%s: error[%s]: %s\n", in_path, where, d->kind, d->message);
-    else
-        fprintf(out, "zenc: %s%s: error[%s]: %s (+%d more error%s)\n", in_path, where, d->kind, d->message, d->count - 1, d->count - 1 == 1 ? "" : "s");
-    print_source_caret(out, user, d->line, d->col, d->end_col);
-    if (d->hint[0]) fprintf(out, "hint: %s\n", d->hint);
-}
-
 static int type_check(Malloc* m, zslice raw, zslice decls, const char* in_path, const char* flat, const char* user, const ResolvedProgram* resolved){
     CheckDiagnostic cd = check_module_ownership_diagnostic_from_source(m, raw, flat);
     if (cd.code == 0) cd = check_module_diagnostic_from_source(m, decls, flat);
@@ -497,7 +462,7 @@ static int type_check(Malloc* m, zslice raw, zslice decls, const char* in_path, 
     const char* render_path = in_path;
     const char* render_src = user;
     diagnostic_attach_resolved_span(m, &diag, flat, in_path, user, resolved, &render_path, &render_src);
-    diagnostic_render(stderr, render_path, render_src, &diag);
+    diagnostic_render(m, stderr, render_path, render_src, &diag);
     return diag.count;
 }
 
