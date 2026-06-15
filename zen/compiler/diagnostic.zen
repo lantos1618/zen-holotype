@@ -225,7 +225,12 @@ dput_carets = (s: String, a: MutPtr<Malloc>, n: i32, i: i32) String {
 }
 // render one diagnostic to a NUL-terminated string (line<=0 / col<=0 => no caret)
 render_diagnostic* = (a: MutPtr<Malloc>, in_path: str, user: str, line: i32, col: i32, end_col: i32, kind: str, message: str, hint: str, count: i32) str {
-    s := a.gstr_string(256)
+    // Pre-size to bound the whole rendered diagnostic (header + message + source line + carets + hint)
+    // so the buffer NEVER grows: a gstr_grow/resize mid-render reallocs the buffer and the inlined
+    // append chain would then write through the freed pointer (heap-use-after-free). The content is
+    // at most a fixed overhead + the str args + a few times the rendered source line (<= user.len).
+    cap := 1024 + in_path.view().len + kind.view().len + message.view().len + hint.view().len + user.view().len * 4
+    s := a.gstr_string(cap)
     s = s.gstr_append(a, "zenc: ").gstr_append(a, in_path)
     ((line > 0) && (col > 0)).match ({ true => { s = s.gstr_push(a, ':').dnum(a, line).gstr_push(a, ':').dnum(a, col) }, false => {} })
     s = s.gstr_append(a, ": error[").gstr_append(a, kind).gstr_append(a, "]: ").gstr_append(a, message)
