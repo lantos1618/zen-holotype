@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -92,7 +92,7 @@ is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.g
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
 recv_name* = (t: Ty) str {
     t.match ({
-        .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str", .Cstr => "str",
+        .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str", .Cstr => "str", .Text => "str",
         .Named(n)   => n,
         .Generic(g) => g.mangled,
         .Ptr(p)     => load(p).recv_name(),
@@ -235,7 +235,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .MakeEnum(mk)  => env.mkenum_ty(mk),
         .Tag(t)        => env.tag_ty(t),
         .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
-        .StrLit(x)     => tstr(),
+        .StrLit(x)     => ttext(),
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.index_elem(ix),
         .Loop(l)       => tvoid(),
@@ -539,7 +539,7 @@ resolve_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) [Expr] {
 }
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
 // String equality lowers to backend-specific content comparison intrinsics.
-is_str_t = (t: Ty) bool { t.match ({ .Str => true, .Cstr => true, _ => false }) }
+is_str_t = (t: Ty) bool { t.match ({ .Str => true, .Cstr => true, .Text => true, _ => false }) }
 str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf := a.cebuf(2)
     buf[0] = load(lhs)
@@ -983,7 +983,7 @@ light_ty = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl]) Ty 
         .Block(b)      => a.light_block_ty(b, env, decls),
         .Byte(n)       => tu8(),
         .FloatLit(ft)  => tf64(),
-        .StrLit(s)     => tstr(),
+        .StrLit(s)     => ttext(),
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
         .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),
         .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
@@ -1361,6 +1361,7 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Void     => w.match ({ .Void => true, _ => false }),
         .Str      => w.match ({ .Str => true, _ => false }),
         .Cstr     => w.match ({ .Cstr => true, .Str => true, _ => false }),
+        .Text     => w.match ({ .Text => true, .Str => true, .Cstr => true, _ => false }),
         .Named(a) => w.match ({ .Named(b) => eq(a, b), .Generic(gb) => eq(a, gb.mangled), _ => false }),
         .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),
         .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }),
