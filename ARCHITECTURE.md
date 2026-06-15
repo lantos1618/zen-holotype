@@ -73,12 +73,12 @@ See [README → Modules & imports](README.md#modules--imports).
 |---|---|
 | `zenc.gen.c` | the compiler's `.zen` sources, already compiled to C (committed, the bootstrap seed) |
 | `zenrt.c` / `zenrt.h` | a ~30-line runtime: the growable `String`, `eq`/`is_empty`, `heap` |
-| `main.c` | the CLI entry — plain emit, `check`/`build`/`run`, plus `--build-self` regen |
+| `driver.c` | the CLI entry — plain emit, `check`/`build`/`run`, plus `--build-self` regen |
 | `sources.txt` | the graph/SCC-checked manifest of Zen sources used to regenerate `zenc.gen.c` |
 | `Makefile` | `zenc:` builds the binary; `regen:` regenerates `zenc.gen.c` with it |
 
 ```
-make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
+make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c,driver.c} -o zenc
 make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self bootstrap/zenc.gen.c .
 ```
 
@@ -96,7 +96,7 @@ The test suite (`tests/`, run with `pytest`) is the **sole correctness reference
 is Python-*free* in the sense that matters: it imports **no compiler code**. It builds two
 artifacts from the committed bootstrap C with `cc` only —
 
-- an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,main.c}`): Zen source → C on stdout;
+- an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,driver.c}`): Zen source → C on stdout;
 - a **CHECK** binary (the same gen.c plus `check_validate.zen`, linked with a tiny
   `check_main.c`): exit code = the number of type errors —
 

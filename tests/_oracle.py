@@ -170,7 +170,7 @@ def _build_emit():
         d = Path(tempfile.mkdtemp())
         exe = d / "zenc"
         r = subprocess.run(_CC + [str(BOOT / "zenc.gen.c"), str(BOOT / "zenrt.c"),
-                                  str(BOOT / "main.c"), "-o", str(exe)],
+                                  str(BOOT / "driver.c"), "-o", str(exe)],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         _emit_exe = exe

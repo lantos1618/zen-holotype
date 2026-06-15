@@ -1,6 +1,6 @@
 # Python-free build + regen for the self-hosted Zen compiler.
 #
-# The compiler IS the `zenc` binary: cc compiles bootstrap/{zenc.gen.c,zenrt.c,main.c}
+# The compiler IS the `zenc` binary: cc compiles bootstrap/{zenc.gen.c,zenrt.c,driver.c}
 # (zenc.gen.c is the committed C the Zen frontend emits for the bootstrap compiler sources). NO Python is in
 # this loop — this Makefile is the binary-only replacement for the old Python generator.
 #
@@ -20,7 +20,7 @@ CC      ?= cc
 CFLAGS  ?= -std=gnu11 -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
-SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c $(HERE)main.c
+SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c $(HERE)driver.c
 
 .PHONY: zenc regen clean
 

@@ -166,7 +166,7 @@ intentional bootstrap C backend, `compiler.genc`).
 The compiler is the `zenc` binary. `cc` builds it from committed C; nothing else is needed.
 
 ```sh
-make -f bootstrap/Makefile zenc        # cc bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
+make -f bootstrap/Makefile zenc        # cc bootstrap/{zenc.gen.c,zenrt.c,driver.c} -o zenc
 ./zenc path/to/flat.zen > out.c        # plain emit: read flat Zen → emit C on stdout
 echo 'add* = (a: i32, b: i32) i32 { a + b }' | ./zenc > out.c
 ```
@@ -326,7 +326,7 @@ See **[SPEC.md](SPEC.md)** for the current language behavior,
 | `zen/compiler/genjs.zen` | an experimental JavaScript backend over the *same* AST |
 | `zen/std/{mem,str,string,alloc,vec,iter}.zen` | the runtime stdlib (allocator, slices, strings, iterators) |
 | `zen/std/{c,result,cown,drop,io,resolve}.zen` | bindings, errors-as-values, FFI-memory rule, module loader |
-| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked bootstrap manifest) + `zenrt.c`/`main.c`/`Makefile` |
+| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked bootstrap manifest) + `zenrt.c`/`driver.c`/`Makefile` |
 | `tests/` | the binary-only oracle (pytest as runner; imports no compiler code) |
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight
