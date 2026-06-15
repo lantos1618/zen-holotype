@@ -440,12 +440,12 @@ var_err = (env: Env, name: str) i32 {
         || env.decls.is_tag_const(env.a, name)).match ({ true => 0, false => 1 })
 }
 // Lowered statement-match tag constants count as generated names.
-variant_tags_has<A> = (vs: [VariantDef], a: MutPtr<A>, ename: str, name: str) bool {
+variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: str, name: str) bool {
     found := false
     vs.loop((h, i, v) { found = eq(name, a.tag_const(ename, v.name)).match ({ true => true, false => found }) })
     found
 }
-is_tag_const<A> = (decls: [Decl], a: MutPtr<A>, name: str) bool {
+is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: str) bool {
     found := false
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.variants.variant_tags_has(a, ed.name, name).match ({ true => true, false => found }), _ => found }) })
     found
@@ -510,7 +510,7 @@ let_fit_err = (env: Env, l: LetData) i32 {
         }
     })
 }
-check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
+check_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)    => env.check_expr(l.value) + env.let_fit_err(l),
         .Assign(x) => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
@@ -522,7 +522,7 @@ check_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
     })
 }
 // Thread lets into the validating environment.
-check_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
+check_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
     e   := env
     body.loop((h, i, st) {
@@ -558,14 +558,14 @@ last_stmt_err = (env: Env, st: Stmt) i32 {
 // become plain pointer operations, so this rule cannot be recovered reliably later.
 DeadList: DeadNil | DeadCons(DeadCell)
 DeadCell: { name: str, tail: Ptr<DeadList> }
-dead_buf<A> = (a: MutPtr<A>) [DeadList] { slice(a.acquire(sizeof(DeadList)), 1) }
-dead_node<A> = (a: MutPtr<A>, v: DeadList) Ptr<DeadList> {
+dead_buf = (a: MutPtr<Malloc>) [DeadList] { slice(a.acquire(sizeof(DeadList)), 1) }
+dead_node = (a: MutPtr<Malloc>, v: DeadList) Ptr<DeadList> {
     buf := a.dead_buf()
     buf[0] = v
     buf[0].addr()
 }
-dead_nil<A> = (a: MutPtr<A>) Ptr<DeadList> { a.dead_node(.DeadNil()) }
-dead_cons<A> = (a: MutPtr<A>, name: str, tail: Ptr<DeadList>) Ptr<DeadList> {
+dead_nil = (a: MutPtr<Malloc>) Ptr<DeadList> { a.dead_node(.DeadNil()) }
+dead_cons = (a: MutPtr<Malloc>, name: str, tail: Ptr<DeadList>) Ptr<DeadList> {
     a.dead_node(.DeadCons(DeadCell(name: name, tail: tail)))
 }
 dead_has = (seen: Ptr<DeadList>, name: str) bool {
@@ -617,22 +617,22 @@ recv_var_name = (c: CallData) str {
         true  => c.args[0].match ({ .Var(v) => v.name, _ => "" })
     })
 }
-own_args_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
+own_args_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) { acc = acc + a.own_expr_err(env, seen, ar.addr()) })
     acc
 }
-own_inits_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
+own_inits_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) { acc = acc + a.own_expr_err(env, seen, fi.value) })
     acc
 }
-own_arms_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
+own_arms_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) { acc = acc + a.own_expr_err(a.arm_env(env, subjty, ar), seen, ar.body) })
     acc
 }
-own_expr_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+own_expr_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v)        => seen.dead_has(v.name).match ({ true => 1, false => 0 }),
         .Call(c)       => a.own_args_err(env, seen, c.args) + env.is_default_owner_method(c).match ({ true => 1, false => 0 }),
@@ -650,7 +650,7 @@ own_expr_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32
         _              => 0
     })
 }
-own_stmt_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
+own_stmt_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.own_expr_err(env, seen, l.value),
         .Assign(x)   => a.own_expr_err(env, seen, x.target) + a.own_expr_err(env, seen, x.value),
@@ -670,13 +670,13 @@ consume_name = (env: Env, st: Stmt) str {
         _ => ""
     })
 }
-own_step<A> = (a: MutPtr<A>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     nm := env.consume_name(st)
     out := seen
     nm.is_empty().match ({ true => {}, false => { out = a.dead_cons(nm, seen) } })
     out
 }
-own_body_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
+own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
     e   := env
     d   := seen
@@ -687,16 +687,16 @@ own_body_err = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32
     })
     acc
 }
-own_check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+own_check_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
     a.own_body_err(env, a.dead_nil(), f.body)
 }
-check_module_ownership* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.own_check_func(decls, f), _ => 0 }) })
     acc
 }
-check_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+check_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
     a.check_body(env, f.body) + env.trailing_err(f.body)
 }
@@ -720,7 +720,7 @@ impl_ty = (tyname: str) Ty {
     eq(tyname, "bool").match ({ true => tbool(), false =>
     eq(tyname, "str").match ({ true => tstr(), false => tnamed(tyname) }) }) }) }) }) })
 }
-subst_self = (a: Ptr<Malloc>, t: Ty, tyname: str) Ty {
+subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: str) Ty {
     t.match ({
         .Named(n)  => eq(n, "Self").match ({ true => impl_ty(tyname), false => t }),
         .Ptr(p)    => tptr(a.tnode(a.subst_self(load(p), tyname))),
@@ -729,7 +729,7 @@ subst_self = (a: Ptr<Malloc>, t: Ty, tyname: str) Ty {
     })
 }
 // each declared param type (Self→tyname) must equal the impl method's, left to right.
-params_match = (a: Ptr<Malloc>, tps: [Ty], ips: [Param], tyname: str, i: i32) bool {
+params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: str, i: i32) bool {
     (i == tps.len).match ({
         true  => true,
         false => a.subst_self(tps[i], tyname).ty_eq(ips[i].ty).match ({
@@ -739,7 +739,7 @@ params_match = (a: Ptr<Malloc>, tps: [Ty], ips: [Param], tyname: str, i: i32) bo
     })
 }
 // the impl method `f` matches the trait's FnT field `fd` (Self→tyname): same arity, param types, ret.
-sig_matches = (a: Ptr<Malloc>, fd: FnTData, f: Func, tyname: str) bool {
+sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: str) bool {
     (fd.params.len == f.params.len).match ({
         false => false,
         true  => a.params_match(fd.params, f.params, tyname, 0).match ({
@@ -758,7 +758,7 @@ trait_has_default = (decls: [Decl], trname: str, m: str) bool {
 }
 // one declared trait field: 0 if it's not a method, or it's provided with a matching signature, or it
 // is OMITTED but the trait supplies a default body; 1 if the method is missing (no default) or differs.
-method_err = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
+method_err = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
     f.ty.match ({
         .FnT(fd) => im.methods.has_method(f.name).match ({
             false => decls.trait_has_default(im.trname, f.name).match ({ true => 0, false => 1 }),   // omitted: OK iff defaulted
@@ -767,12 +767,12 @@ method_err = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
         _ => 0
     })
 }
-trait_conformance = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
+trait_conformance = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
     acc := 0
     sd.fields.loop((h, i, f) { acc = acc + a.method_err(decls, im, f) })
     acc
 }
-impl_errs = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
+impl_errs = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc + d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => a.trait_conformance(decls, im, sd), false => 0 }), _ => 0 }) })
     acc
@@ -803,7 +803,7 @@ dup_name_errs = (decls: [Decl]) i32 {
     })
     n
 }
-check_module* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs()
     decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => a.impl_errs(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => 1, false => 0 }), _ => 0 }) })
     acc
@@ -1034,22 +1034,22 @@ stmt_pos = (st: Stmt) i32 {
 }
 
 // Ownership kind pass mirrors the raw ownership count pass above.
-kv_own_args_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
+kv_own_args_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) { acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, ar.addr())) })
     acc
 }
-kv_own_inits_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
+kv_own_inits_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) { acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, fi.value)) })
     acc
 }
-kv_own_arms_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
+kv_own_arms_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) { acc = acc.kv_kor(a.kv_own_expr_kind(a.arm_env(env, subjty, ar), seen, ar.body)) })
     acc
 }
-kv_own_expr_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v)        => seen.dead_has(v.name).match ({ true => KOWNERSHIP().kv_at(v.pos), false => 0 }),
         .Call(c)       => a.kv_own_args_kind(env, seen, c.args).kv_kor(env.is_default_owner_method(c).match ({ true => KOWNERSHIP().kv_at(c.pos), false => 0 })),
@@ -1067,7 +1067,7 @@ kv_own_expr_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>)
         _              => 0
     })
 }
-kv_own_stmt_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
+kv_own_stmt_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.kv_own_expr_kind(env, seen, l.value),
         .Assign(x)   => a.kv_own_expr_kind(env, seen, x.target).kv_kor(a.kv_own_expr_kind(env, seen, x.value)),
@@ -1078,7 +1078,7 @@ kv_own_stmt_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32
         .IndexSet(x) => a.kv_own_expr_kind(env, seen, x.seq).kv_kor(a.kv_own_expr_kind(env, seen, x.idx)).kv_kor(a.kv_own_expr_kind(env, seen, x.value))
     })
 }
-kv_own_body_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
+kv_own_body_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
     e   := env
     d   := seen
@@ -1089,11 +1089,11 @@ kv_own_body_kind = (a: Ptr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt])
     })
     acc
 }
-kv_own_check_func_kind = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+kv_own_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
     a.kv_own_body_kind(env, a.dead_nil(), f.body)
 }
-check_module_ownership_kind* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+check_module_ownership_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_own_check_func_kind(decls, f), _ => 0 })) })
     acc
@@ -1224,7 +1224,7 @@ kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
     env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos()))
 }
 // mirrors check_stmt: the statement's sub-expressions, then its own fit check.
-kv_check_stmt_kind = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
+kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)    => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)),
         .Assign(x) => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
@@ -1235,7 +1235,7 @@ kv_check_stmt_kind = (a: Ptr<Malloc>, env: Env, st: Stmt) i32 {
         .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_idxset_kind(x))
     })
 }
-kv_check_body_kind = (a: Ptr<Malloc>, env: Env, body: [Stmt]) i32 {
+kv_check_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
     e   := env
     body.loop((h, i, st) {
@@ -1262,18 +1262,18 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
         })
     })
 }
-kv_check_func_kind = (a: Ptr<Malloc>, decls: [Decl], f: Func) i32 {
+kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
     a.kv_check_body_kind(env, f.body).kv_kor(env.kv_trailing_kind(f.body))
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
-kv_method_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 { a.method_err(decls, im, f).kv_one(KCONFORMANCE()) }
-kv_conformance_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
+kv_method_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 { a.method_err(decls, im, f).kv_one(KCONFORMANCE()) }
+kv_conformance_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
     acc := 0
     sd.fields.loop((h, i, f) { acc = acc.kv_kor(a.kv_method_kind(decls, im, f)) })
     acc
 }
-kv_impl_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
+kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
     acc := 0
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DStruct(sd) => eq(sd.name, im.trname).match ({ true => a.kv_conformance_kind(decls, im, sd), false => 0 }), _ => 0 })) })
     acc.kv_at(im.pos)
@@ -1282,54 +1282,54 @@ kv_impl_kind = (a: Ptr<Malloc>, decls: [Decl], im: ImplData) i32 {
 // first, then each decl's body (DFunc) / impl (DImpl). Returns KNONE (0) for an accepting module.
 // A CHECK-KIND binary reads this; check_module's COUNT is untouched, so the oracle's verdict path
 // (which exits with the count) keeps working unchanged.
-check_module_kind* = (a: Ptr<Malloc>, decls: [Decl]) i32 {
+check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs().kv_one(KDUPFN())
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE(), false => 0 }), _ => 0 })) })
     acc
 }
-check_module_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) CheckDiagnostic {
+check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => check_diagnostic_from_packed(packed, a.check_module(decls))
     })
 }
-check_module_ownership_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) CheckDiagnostic {
+check_module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_ownership_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => check_diagnostic_from_packed(packed, a.check_module_ownership(decls))
     })
 }
-check_module_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+check_module_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => src.check_diagnostic_from_source(packed, a.check_module(decls))
     })
 }
-check_module_ownership_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+check_module_ownership_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_ownership_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => src.check_diagnostic_from_source(packed, a.check_module_ownership(decls))
     })
 }
-module_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) Diagnostic {
+module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic {
     a.check_module_diagnostic(decls).check_to_diagnostic()
 }
-module_ownership_diagnostic* = (a: Ptr<Malloc>, decls: [Decl]) Diagnostic {
+module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic {
     a.check_module_ownership_diagnostic(decls).check_to_diagnostic()
 }
-module_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) Diagnostic {
+module_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) Diagnostic {
     a.check_module_diagnostic_from_source(decls, src).check_to_diagnostic()
 }
-module_ownership_diagnostic_from_source* = (a: Ptr<Malloc>, decls: [Decl], src: str) Diagnostic {
+module_ownership_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) Diagnostic {
     a.check_module_ownership_diagnostic_from_source(decls, src).check_to_diagnostic()
 }
 // the kind layer over a CROSS-MODULE link (mirrors check_linked): same layered header, then
 // check_module_kind instead of check_module. Lets a cross-module reject also be pinned by KIND.
-check_linked_kind* = (a: Ptr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
+check_linked_kind* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     hdr   := a.module_header(lib)
     rfile := a.resolve_module(decls)
     world := a.dbuf(hdr.len + rfile.len)
@@ -1345,17 +1345,17 @@ check_linked_kind* = (a: Ptr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
 // arity/arg-type-checked exactly like a local one — while the header's bodyless sigs are never
 // re-checked (check_module only descends DFunc bodies). A name imported but absent from the header
 // stays known-but-unchecked (the #204 DImport path), so partial headers never false-reject.
-as_sig = (a: Ptr<Malloc>, d: Decl) Decl {
+as_sig = (a: MutPtr<Malloc>, d: Decl) Decl {
     d.match ({ .DFunc(f) => dforeign(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: no_stmts() )), _ => d })
 }
-module_header* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
+module_header* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.as_sig(d) })
     buf
 }
 // check `decls` (one file) against an imported module's `lib` decls: the file is resolved as usual,
 // then checked in a WORLD that prepends lib's header, so its imported calls resolve to real sigs.
-check_linked* = (a: Ptr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
+check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     hdr   := a.module_header(lib)
     rfile := a.resolve_module(decls)
     world := a.dbuf(hdr.len + rfile.len)

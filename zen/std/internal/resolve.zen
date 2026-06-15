@@ -5,7 +5,7 @@
 { Decl } = compiler.genc
 { decl_span, parse_module } = compiler.parse
 { check_linked, check_linked_kind } = compiler.check_validate
-// Parser APIs still take Ptr<Malloc>; scanner-only APIs can use any Allocator.
+// Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
 { Allocator, Malloc, try_acquire } = std.mem.alloc
 { Result, IoError } = std.core.result
 { String } = std.text.string
@@ -112,7 +112,7 @@ line_end = (s: str, p: i32) i32 {
     pos
 }
 
-append_span<A> = (out: String, a: MutPtr<A>, s: str, p: i32, e: i32) String {
+append_span = (out: String, a: MutPtr<Malloc>, s: str, p: i32, e: i32) String {
     cur := out
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
@@ -141,7 +141,7 @@ quoted_at = (s: str, p: i32) bool {
     (s.at(p) == '"') || (s.at(p) == '\'')
 }
 
-copy_line_comment<A> = (out: String, a: MutPtr<A>, s: str, p: i32) RewriteSkip {
+copy_line_comment = (out: String, a: MutPtr<Malloc>, s: str, p: i32) RewriteSkip {
     cur := out
     pos := p
     bs: [u8] := s.view()
@@ -160,7 +160,7 @@ copy_line_comment<A> = (out: String, a: MutPtr<A>, s: str, p: i32) RewriteSkip {
     })
     RewriteSkip(out: cur, next: pos)
 }
-copy_block_comment<A> = (out: String, a: MutPtr<A>, s: str, p: i32) RewriteSkip {
+copy_block_comment = (out: String, a: MutPtr<Malloc>, s: str, p: i32) RewriteSkip {
     cur := out
     pos := p
     bs: [u8] := s.view()
@@ -186,7 +186,7 @@ copy_block_comment<A> = (out: String, a: MutPtr<A>, s: str, p: i32) RewriteSkip 
     })
     RewriteSkip(out: cur, next: pos)
 }
-copy_literal<A> = (out: String, a: MutPtr<A>, s: str, p: i32) RewriteSkip {
+copy_literal = (out: String, a: MutPtr<Malloc>, s: str, p: i32) RewriteSkip {
     q := s.at(p)
     cur := out
     pos := p
@@ -218,7 +218,7 @@ copy_literal<A> = (out: String, a: MutPtr<A>, s: str, p: i32) RewriteSkip {
     RewriteSkip(out: cur, next: pos)
 }
 
-strip_into<A> = (out: String, a: MutPtr<A>, s: str, p: i32, first: bool) String {
+strip_into = (out: String, a: MutPtr<Malloc>, s: str, p: i32, first: bool) String {
     cur := out
     pos := p
     is_first := first
@@ -244,9 +244,9 @@ strip_into<A> = (out: String, a: MutPtr<A>, s: str, p: i32, first: bool) String 
     cur
 }
 
-strip_imports*<A> = (out: String, a: MutPtr<A>, s: str) String { out.strip_into(a, s, 0, true) }
+strip_imports* = (out: String, a: MutPtr<Malloc>, s: str) String { out.strip_into(a, s, 0, true) }
 
-concat_files*<A> = (out: String, a: MutPtr<A>, left: str, right: str) String { out.rappend(a, left).rpush(a, 10).rappend(a, right) }
+concat_files* = (out: String, a: MutPtr<Malloc>, left: str, right: str) String { out.rappend(a, left).rpush(a, 10).rappend(a, right) }
 
 STD_MARKER_LEN := 6
 COMPILER_MARKER_LEN := 11
@@ -264,7 +264,7 @@ module_name_pos = (s: str, p: i32) i32 {
         })
     })
 }
-take_name<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
+take_name = (out: String, a: MutPtr<Malloc>, s: str, p: i32) String {
     cur := out
     pos := p
     bs: [u8] := s.view()
@@ -280,9 +280,9 @@ take_name<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
     })
     cur
 }
-import_module*<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String { out.take_module_path(a, s, s.module_name_pos(p)) }
+import_module* = (out: String, a: MutPtr<Malloc>, s: str, p: i32) String { out.take_module_path(a, s, s.module_name_pos(p)) }
 
-take_module_path<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
+take_module_path = (out: String, a: MutPtr<Malloc>, s: str, p: i32) String {
     cur := out
     pos := p
     bs: [u8] := s.view()
@@ -302,7 +302,7 @@ take_module_path<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
     cur
 }
 
-import_id<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
+import_id = (out: String, a: MutPtr<Malloc>, s: str, p: i32) String {
     cur := out
     s.is_std_marker_at(p).match ({
         true  => {
@@ -362,16 +362,16 @@ snext_line = (set: String, i: i64) i64 {
     })
 }
 
-seen* = (set: String, name: String) bool { set.seen_scan(name, 0) }
+seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
 
-add_name<A> = (set: String, a: MutPtr<A>, name: String) String { set.rappend_string(a, name).rpush(a, 10) }
-append_string<A> = (out: String, a: MutPtr<A>, src: String) String {
+add_name = (set: String, a: MutPtr<Malloc>, name: String) String { set.rappend_string(a, name).rpush(a, 10) }
+append_string = (out: String, a: MutPtr<Malloc>, src: String) String {
     cur := out
     bs: [u8] := src.bytes()
     bs.loop((h, i, b) { cur = cur.rpush(a, b) })
     cur
 }
-copy_from<A> = (out: String, a: MutPtr<A>, src: String, i: i64) String {
+copy_from = (out: String, a: MutPtr<Malloc>, src: String, i: i64) String {
     cur := out
     (i >= src.len).match ({
         true => {},
@@ -382,36 +382,36 @@ copy_from<A> = (out: String, a: MutPtr<A>, src: String, i: i64) String {
     })
     cur
 }
-mstring<A> = (a: MutPtr<A>, cap: i64) String {
+mstring = (a: MutPtr<Malloc>, cap: i64) String {
     String(ptr: a.acquire(cap), len: 0, cap: cap)
 }
-mgrow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
+mgrow = (a: MutPtr<Malloc>, s: String, ncap: i64) String {
     String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
 }
-mreserve<A> = (a: MutPtr<A>, s: String, need: i64) String {
+mreserve = (a: MutPtr<Malloc>, s: String, need: i64) String {
     out := s
     (s.len + need > s.cap).match ({ true => { out = a.mgrow(s, (s.cap + need) * 2) }, _ })
     out
 }
-mpush<A> = (a: MutPtr<A>, s: String, b: u8) String {
+mpush = (a: MutPtr<Malloc>, s: String, b: u8) String {
     r := a.mreserve(s, 1)
     r.ptr.offset(r.len).store(b)
     String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
 }
-mappend<A> = (a: MutPtr<A>, s: String, t: str) String {
+mappend = (a: MutPtr<Malloc>, s: String, t: str) String {
     cur := s
     bs: [u8] := t.view()
     bs.loop((h, i, b) { cur = a.mpush(cur, b) })
     cur
 }
-mfinish<A> = (a: MutPtr<A>, s: String) str { cstr(a.mpush(s, 0).ptr) }
-mappend_string<A> = (a: MutPtr<A>, out: String, src: String) String {
+mfinish = (a: MutPtr<Malloc>, s: String) str { cstr(a.mpush(s, 0).ptr) }
+mappend_string = (a: MutPtr<Malloc>, out: String, src: String) String {
     cur := out
     bs: [u8] := src.bytes()
     bs.loop((h, i, b) { cur = a.mpush(cur, b) })
     cur
 }
-mcopy_from<A> = (a: MutPtr<A>, out: String, src: String, i: i64) String {
+mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
     cur := out
     bs: [u8] := src.bytes()
     bs.loop((h, idx, b) {
@@ -422,7 +422,7 @@ mcopy_from<A> = (a: MutPtr<A>, out: String, src: String, i: i64) String {
     })
     cur
 }
-mappend_span<A> = (a: MutPtr<A>, out: String, s: str, p: i32, e: i32) String {
+mappend_span = (a: MutPtr<Malloc>, out: String, s: str, p: i32, e: i32) String {
     cur := out
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
@@ -437,12 +437,12 @@ mappend_span<A> = (a: MutPtr<A>, out: String, s: str, p: i32, e: i32) String {
     })
     cur
 }
-rpush<A> = (s: String, a: MutPtr<A>, b: u8) String { a.mpush(s, b) }
-rappend<A> = (s: String, a: MutPtr<A>, t: str) String { a.mappend(s, t) }
-rappend_string<A> = (s: String, a: MutPtr<A>, src: String) String { a.mappend_string(s, src) }
-rcopy_from<A> = (s: String, a: MutPtr<A>, src: String, i: i64) String { a.mcopy_from(s, src, i) }
-rappend_span<A> = (s: String, a: MutPtr<A>, src: str, p: i32, e: i32) String { a.mappend_span(s, src, p, e) }
-mcopy_id_dotted<A> = (a: MutPtr<A>, out: String, id: String, i: i64) String {
+rpush = (s: String, a: MutPtr<Malloc>, b: u8) String { a.mpush(s, b) }
+rappend = (s: String, a: MutPtr<Malloc>, t: str) String { a.mappend(s, t) }
+rappend_string = (s: String, a: MutPtr<Malloc>, src: String) String { a.mappend_string(s, src) }
+rcopy_from = (s: String, a: MutPtr<Malloc>, src: String, i: i64) String { a.mcopy_from(s, src, i) }
+rappend_span = (s: String, a: MutPtr<Malloc>, src: str, p: i32, e: i32) String { a.mappend_span(s, src, p, e) }
+mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
     cur := out
     bs: [u8] := id.bytes()
     bs.loop((h, idx, b) {
@@ -456,7 +456,7 @@ mcopy_id_dotted<A> = (a: MutPtr<A>, out: String, id: String, i: i64) String {
     })
     cur
 }
-mappend_id_name<A> = (a: MutPtr<A>, out: String, id: String) String {
+mappend_id_name = (a: MutPtr<Malloc>, out: String, id: String) String {
     cur := out
     id.id_is_user().match ({
         true  => { cur = a.mcopy_from(cur, id, 2) },
@@ -464,11 +464,11 @@ mappend_id_name<A> = (a: MutPtr<A>, out: String, id: String) String {
     })
     cur
 }
-madd_name<A> = (a: MutPtr<A>, set: String, name: String) String { a.mpush(a.mappend_string(set, name), 10) }
-madd_str_name<A> = (a: MutPtr<A>, set: String, name: str) String { a.mpush(a.mappend(set, name), 10) }
+madd_name = (a: MutPtr<Malloc>, set: String, name: String) String { a.mpush(a.mappend_string(set, name), 10) }
+madd_str_name = (a: MutPtr<Malloc>, set: String, name: str) String { a.mpush(a.mappend(set, name), 10) }
 
 Closure*: { seen: String, out: String, useen: String }
-empty_closure<A> = (a: MutPtr<A>) Closure {
+empty_closure = (a: MutPtr<Malloc>) Closure {
     Closure( seen: a.mstring(256), out: a.mstring(4096), useen: a.mstring(64) )
 }
 ImportEdge*: { module: str, alias: str, namespace: bool, start: i32, next: i32 }
@@ -480,13 +480,11 @@ ModuleGraph*: {
     import_count = (g: ModuleGraph) i64 { g.imports.len }
     symbol_count = (g: ModuleGraph) i64 { g.symbols.len }
     has = (g: ModuleGraph, name: str) bool { g.symbols.has_symbol(name) }
-    decl_names<A> = (g: ModuleGraph, a: MutPtr<A>) String { g.decl_names_in(a) }
-    all_decl_names<A> = (g: ModuleGraph, a: MutPtr<A>) String { g.all_decl_names_in(a) }
 }
-decl_names_in*<A> = (g: ModuleGraph, a: MutPtr<A>) String {
+decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
     a.symbol_names_into_in(a.mstring(256), g.symbols, 0, false, false)
 }
-all_decl_names_in*<A> = (g: ModuleGraph, a: MutPtr<A>) String {
+all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
     a.symbol_names_into_in(a.mstring(256), g.symbols, 0, false, true)
 }
 ModuleEntry*: { id: str, path: str, source: str, graph: ModuleGraph }
@@ -573,7 +571,7 @@ file_exists = (path: str) bool {
     (fd >= 0).match ({ true => { close(fd)  true }, false => false })
 }
 
-append_id_name<A> = (out: String, a: MutPtr<A>, id: String) String {
+append_id_name = (out: String, a: MutPtr<Malloc>, id: String) String {
     cur := out
     id.id_is_user().match ({
         true  => { cur = cur.rcopy_from(a, id, 2) },
@@ -581,7 +579,7 @@ append_id_name<A> = (out: String, a: MutPtr<A>, id: String) String {
     })
     cur
 }
-copy_id_dotted<A> = (out: String, a: MutPtr<A>, id: String, i: i64) String {
+copy_id_dotted = (out: String, a: MutPtr<Malloc>, id: String, i: i64) String {
     cur := out
     bs: [u8] := id.bytes()
     bs.loop((h, idx, b) {
@@ -596,7 +594,7 @@ copy_id_dotted<A> = (out: String, a: MutPtr<A>, id: String, i: i64) String {
     cur
 }
 
-fail_unknown_module = (a: Ptr<Malloc>, inpath: str, id: String, path: str) i32 {
+fail_unknown_module = (a: MutPtr<Malloc>, inpath: str, id: String, path: str) i32 {
     msg := a.mappend_id_name(a.mappend(a.mappend(a.mappend(a.mstring(160), "zenc: "), inpath), ": error: unknown module '"), id)
     m2  := msg
     id.id_is_user().match ({
@@ -613,7 +611,7 @@ fail_unknown_module = (a: Ptr<Malloc>, inpath: str, id: String, path: str) i32 {
     exit(1)
     0
 }
-fail_unreadable = (a: Ptr<Malloc>, inpath: str, path: str) str {
+fail_unreadable = (a: MutPtr<Malloc>, inpath: str, path: str) str {
     msg := a.mappend(a.mappend(a.mappend(a.mstring(160), "zenc: "), inpath), ": error: cannot read module file ")
     with_path := a.mappend(msg, path)
     line := a.mpush(with_path, 10)
@@ -621,10 +619,10 @@ fail_unreadable = (a: Ptr<Malloc>, inpath: str, path: str) str {
     exit(1)
     ""
 }
-read_module_file = (a: Ptr<Malloc>, path: str) Result<str, IoError> {
+read_module_file = (a: MutPtr<Malloc>, path: str) Result<str, IoError> {
     a.contents_in(path)
 }
-read_module = (a: Ptr<Malloc>, inpath: str, path: str) str {
+read_module = (a: MutPtr<Malloc>, inpath: str, path: str) str {
     a.read_module_file(path).match ({
         .Ok(s)  => s,
         .Err(e) => a.fail_unreadable(inpath, path),
@@ -655,8 +653,8 @@ import_edge_count* = (src: str) i32 { src.import_edge_count_from(0, 0) }
 edge_next = (src: str, p: i32) i32 {
     src.is_import_line(p).match ({ true => src.import_end(p), false => src.next_line(p) })
 }
-edge_buf<A> = (a: MutPtr<A>, n: i64) [ImportEdge] { slice(a.acquire(n * sizeof(ImportEdge)), n) }
-try_edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
+edge_buf = (a: MutPtr<Malloc>, n: i64) [ImportEdge] { slice(a.acquire(n * sizeof(ImportEdge)), n) }
+try_edge_buf = (a: MutPtr<Malloc>, n: i64) Result<[ImportEdge], IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
         .Ok(p)  => edges_ok(slice(p, n)),
         .Err(e) => edges_err(e)
@@ -725,7 +723,7 @@ write_import_id_at = (buf: RawPtr<u8>, s: str, p: i32, cap: i64) i64 {
         })
     })
 }
-import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) str {
+import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
     buf := a.acquire(EDGE_MODULE_CAP)
     pos := p
     out: i64 := 0
@@ -743,7 +741,7 @@ import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) str {
     buf.offset(out).store(0)
     cstr(buf)
 }
-try_import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> {
+try_import_id_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
     a.try_acquire(EDGE_MODULE_CAP).match ({
         .Ok(buf) => {
             pos := p
@@ -765,14 +763,14 @@ try_import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> {
         .Err(e) => edge_str_err(e)
     })
 }
-ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) str {
+ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) str {
     buf := a.acquire(EDGE_ALIAS_CAP)
     ls := s.lstrip(p)
     out := buf.copy_name_to(0, s, ls, EDGE_ALIAS_CAP)
     buf.offset(out).store(0)
     cstr(buf)
 }
-try_ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> {
+try_ns_qualifier_alloc = (a: MutPtr<Malloc>, s: str, p: i32) Result<str, IoError> {
     a.try_acquire(EDGE_ALIAS_CAP).match ({
         .Ok(buf) => {
             ls := s.lstrip(p)
@@ -783,7 +781,7 @@ try_ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> 
         .Err(e) => edge_str_err(e)
     })
 }
-edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) ImportEdge {
+edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) ImportEdge {
     ns := src.is_ns_line(p)
     ImportEdge(
     module: a.import_id_alloc(src, p),
@@ -793,7 +791,7 @@ edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) ImportEdge {
     next: src.edge_next(p)
     )
 }
-try_edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) Result<ImportEdge, IoError> {
+try_edge_from_line = (a: MutPtr<Malloc>, src: str, p: i32) Result<ImportEdge, IoError> {
     ns := src.is_ns_line(p)
     a.try_import_id_alloc(src, p).match ({
         .Ok(mod) => ns.match ({
@@ -806,7 +804,7 @@ try_edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) Result<ImportEdge, IoEr
         .Err(e) => edge_err(e)
     })
 }
-fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i: i32) [ImportEdge] {
+fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: i32) [ImportEdge] {
     pos := p
     idx := i
     bs: [u8] := src.view()
@@ -826,7 +824,7 @@ fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i: i3
     })
     out
 }
-try_fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
+try_fill_import_edges = (a: MutPtr<Malloc>, src: str, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
     pos := p
     idx := i
     failed := false
@@ -862,22 +860,22 @@ try_fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i
     })
     failed.match ({ true => edges_err(err), false => edges_ok(out) })
 }
-import_edges*<A> = (a: MutPtr<A>, src: str) [ImportEdge] {
+import_edges* = (a: MutPtr<Malloc>, src: str) [ImportEdge] {
     buf := a.edge_buf(src.import_edge_count())
     a.fill_import_edges(src, 0, buf, 0)
 }
-try_import_edges*<A> = (a: MutPtr<A>, src: str) Result<[ImportEdge], IoError> {
+try_import_edges* = (a: MutPtr<Malloc>, src: str) Result<[ImportEdge], IoError> {
     a.try_edge_buf(src.import_edge_count()).match ({
         .Ok(buf) => a.try_fill_import_edges(src, 0, buf, 0),
         .Err(e)  => edges_err(e)
     })
 }
-edge_id_in<A> = (e: ImportEdge, a: MutPtr<A>) String { a.mappend(a.mstring(24), e.module) }
-edge_alias_in<A> = (e: ImportEdge, a: MutPtr<A>) String { a.mappend(a.mstring(16), e.alias) }
-edge_id<A> = (e: ImportEdge, a: MutPtr<A>) String { e.edge_id_in(a) }
-edge_alias<A> = (e: ImportEdge, a: MutPtr<A>) String { e.edge_alias_in(a) }
+edge_id_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.mappend(a.mstring(24), e.module) }
+edge_alias_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.mappend(a.mstring(16), e.alias) }
+edge_id = (e: ImportEdge, a: MutPtr<Malloc>) String { e.edge_id_in(a) }
+edge_alias = (e: ImportEdge, a: MutPtr<Malloc>) String { e.edge_alias_in(a) }
 
-fail_unknown_name = (a: Ptr<Malloc>, inpath: str, nm: String, id: String) i32 {
+fail_unknown_name = (a: MutPtr<Malloc>, inpath: str, nm: String, id: String) i32 {
     msg0 := a.mappend(a.mappend(a.mappend(a.mstring(160), "zenc: "), inpath), ": error: unknown name '")
     msg1 := a.mappend_string(msg0, nm)
     in_mod := a.mappend(msg1, "' in module '")
@@ -888,7 +886,7 @@ fail_unknown_name = (a: Ptr<Malloc>, inpath: str, nm: String, id: String) i32 {
     exit(1)
     0
 }
-fail_dup_user = (a: Ptr<Malloc>, inpath: str, id: String, nm: String) i32 {
+fail_dup_user = (a: MutPtr<Malloc>, inpath: str, id: String, nm: String) i32 {
     msg0 := a.mappend(a.mappend(a.mappend(a.mstring(160), "zenc: "), inpath), ": error: duplicate top-level definition '")
     msg1 := a.mappend_string(msg0, nm)
     in_mod := a.mappend(msg1, "' (module '")
@@ -899,7 +897,7 @@ fail_dup_user = (a: Ptr<Malloc>, inpath: str, id: String, nm: String) i32 {
     exit(1)
     0
 }
-fail_no_progdir = (a: Ptr<Malloc>, inpath: str, id: String) i32 {
+fail_no_progdir = (a: MutPtr<Malloc>, inpath: str, id: String) i32 {
     msg0 := a.mappend(a.mappend(a.mappend(a.mstring(160), "zenc: "), inpath), ": error: sibling import '")
     msg1 := a.mappend_id_name(msg0, id)
     tail := a.mappend(msg1, "' needs a source file on disk (stdin has no directory to load it from)")
@@ -909,7 +907,7 @@ fail_no_progdir = (a: Ptr<Malloc>, inpath: str, id: String) i32 {
     0
 }
 
-module_path = (a: Ptr<Malloc>, root: str, progdir: str, id: String) str {
+module_path = (a: MutPtr<Malloc>, root: str, progdir: str, id: String) str {
     out := a.mstring(64)
     id.id_is_user().match ({
         true  => {
@@ -928,7 +926,7 @@ module_path = (a: Ptr<Malloc>, root: str, progdir: str, id: String) str {
     a.mfinish(out)
 }
 
-guard_module = (a: Ptr<Malloc>, progdir: str, inpath: str, id: String, path: str) i32 {
+guard_module = (a: MutPtr<Malloc>, progdir: str, inpath: str, id: String, path: str) i32 {
     (id.id_is_user() && (progdir.at(0) == 0)).match ({
         true  => a.fail_no_progdir(inpath, id),
         false => 0
@@ -936,8 +934,8 @@ guard_module = (a: Ptr<Malloc>, progdir: str, inpath: str, id: String, path: str
     file_exists(path).match ({ true => 0, false => a.fail_unknown_module(inpath, id, path) })
 }
 
-module_count_one = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, st: ModuleCount) ModuleCount {
-    st.seen.seen(id).match ({
+module_count_one = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, id: String, st: ModuleCount) ModuleCount {
+    st.seen.seen_name(id).match ({
         true  => st,
         false => {
             path := a.module_path(root, progdir, id)
@@ -949,17 +947,17 @@ module_count_one = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: St
         }
     })
 }
-module_count_edges = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, edges: [ImportEdge], st: ModuleCount) ModuleCount {
+module_count_edges = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, edges: [ImportEdge], st: ModuleCount) ModuleCount {
     cur := st
     edges.loop((h, i, edge) { cur = a.module_count_one(root, progdir, inpath, edge.edge_id_in(a), cur) })
     cur
 }
-module_table_count_graph = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, graph: ModuleGraph) i32 {
+module_table_count_graph = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, graph: ModuleGraph) i32 {
     a.module_count_edges(root, progdir, inpath, graph.imports, ModuleCount( seen: a.mstring(256), count: 1 )).count
 }
-module_entry_buf<A> = (a: MutPtr<A>, n: i64) [ModuleEntry] { slice(a.acquire(n * sizeof(ModuleEntry)), n) }
-fill_module_one = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, out: [ModuleEntry], st: ModuleFill) ModuleFill {
-    st.seen.seen(id).match ({
+module_entry_buf = (a: MutPtr<Malloc>, n: i64) [ModuleEntry] { slice(a.acquire(n * sizeof(ModuleEntry)), n) }
+fill_module_one = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, id: String, out: [ModuleEntry], st: ModuleFill) ModuleFill {
+    st.seen.seen_name(id).match ({
         true  => st,
         false => {
             path := a.module_path(root, progdir, id)
@@ -973,25 +971,25 @@ fill_module_one = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: Str
         }
     })
 }
-fill_module_edges = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, edges: [ImportEdge], out: [ModuleEntry], st: ModuleFill) ModuleFill {
+fill_module_edges = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, edges: [ImportEdge], out: [ModuleEntry], st: ModuleFill) ModuleFill {
     cur := st
     edges.loop((h, i, edge) { cur = a.fill_module_one(root, progdir, inpath, edge.edge_id_in(a), out, cur) })
     cur
 }
-module_table_graph* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str, graph: ModuleGraph) ModuleTable {
+module_table_graph* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str, graph: ModuleGraph) ModuleTable {
     entries := a.module_entry_buf(a.module_table_count_graph(root, progdir, inpath, graph))
     entries[0] = ModuleEntry( id: "", path: inpath, source: mainsrc, graph: graph )
     a.fill_module_edges(root, progdir, inpath, graph.imports, entries, ModuleFill( seen: a.mstring(256), next: 1 ))
     ModuleTable( modules: entries )
 }
-module_table* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ModuleTable {
+module_table* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ModuleTable {
     graph := a.module_graph(mainsrc)
     a.module_table_graph(root, progdir, inpath, mainsrc, graph)
 }
 
 // Legacy transitive loader; table-based resolve_program below is the checked path.
-load_closure* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, c: Closure) Closure {
-    c.seen.seen(id).match ({
+load_closure* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, id: String, c: Closure) Closure {
+    c.seen.seen_name(id).match ({
         true  => c,
         false => {
             path := a.module_path(root, progdir, id)
@@ -1011,7 +1009,7 @@ load_closure* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: Strin
     })
 }
 
-load_import_edges = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, edges: [ImportEdge], i: i64, validate: bool, c: Closure) Closure {
+load_import_edges = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, edges: [ImportEdge], i: i64, validate: bool, c: Closure) Closure {
     cur := c
     edges.loop((h, idx, edge) {
         (idx < i).match ({
@@ -1032,16 +1030,16 @@ load_import_edges = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: 
     cur
 }
 
-load_import_graph = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, graph: ModuleGraph, validate: bool, c: Closure) Closure {
+load_import_graph = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, graph: ModuleGraph, validate: bool, c: Closure) Closure {
     a.load_import_edges(root, progdir, inpath, src, graph.imports, 0, validate, c)
 }
 
-load_imports = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, validate: bool, c: Closure) Closure {
+load_imports = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, validate: bool, c: Closure) Closure {
     graph := a.module_graph(src)
     a.load_import_graph(root, progdir, inpath, src, graph, validate, c)
 }
 
-load_ns_edge = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, edge: ImportEdge, st: NsScan) NsScan {
+load_ns_edge = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, edge: ImportEdge, st: NsScan) NsScan {
     modid   := edge.edge_id_in(a)
     alias   := edge.edge_alias_in(a)
     path    := a.module_path(root, progdir, modid)
@@ -1058,11 +1056,11 @@ load_ns_edge = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, 
     NsScan( quals: q2, qnames: qn2, strip_qnames: sqn2, strip_all_quals: saq2, c: c2 )
 }
 
-collect_ns_graph = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, graph: ModuleGraph, st: NsScan) NsScan {
+collect_ns_graph = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, graph: ModuleGraph, st: NsScan) NsScan {
     a.collect_ns_edges(root, progdir, inpath, src, graph.imports, 0, st)
 }
 
-collect_ns_edges = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, edges: [ImportEdge], i: i64, st: NsScan) NsScan {
+collect_ns_edges = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, edges: [ImportEdge], i: i64, st: NsScan) NsScan {
     cur := st
     edges.loop((h, idx, edge) {
         (idx < i).match ({
@@ -1076,8 +1074,8 @@ collect_ns_edges = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: s
     cur
 }
 
-load_closure_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, id: String, c: Closure) Closure {
-    c.seen.seen(id).match ({
+load_closure_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, id: String, c: Closure) Closure {
+    c.seen.seen_name(id).match ({
         true  => c,
         false => {
             entry := table.module_id(id)
@@ -1094,7 +1092,7 @@ load_closure_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, id: Strin
         }
     })
 }
-load_import_edges_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: str, edges: [ImportEdge], i: i64, validate: bool, c: Closure) Closure {
+load_import_edges_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, src: str, edges: [ImportEdge], i: i64, validate: bool, c: Closure) Closure {
     cur := c
     edges.loop((h, idx, edge) {
         (idx < i).match ({
@@ -1114,10 +1112,10 @@ load_import_edges_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src:
     })
     cur
 }
-load_import_graph_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: str, graph: ModuleGraph, validate: bool, c: Closure) Closure {
+load_import_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, src: str, graph: ModuleGraph, validate: bool, c: Closure) Closure {
     a.load_import_edges_table(table, inpath, src, graph.imports, 0, validate, c)
 }
-load_ns_edge_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: str, edge: ImportEdge, st: NsScan) NsScan {
+load_ns_edge_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, src: str, edge: ImportEdge, st: NsScan) NsScan {
     modid   := edge.edge_id_in(a)
     alias   := edge.edge_alias_in(a)
     entry   := table.module_id(modid)
@@ -1131,7 +1129,7 @@ load_ns_edge_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: str,
     saq2    := modid.id_is_std_io_c().match ({ true => a.madd_name(st.strip_all_quals, alias), false => st.strip_all_quals })
     NsScan( quals: q2, qnames: qn2, strip_qnames: sqn2, strip_all_quals: saq2, c: c2 )
 }
-collect_ns_edges_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: str, edges: [ImportEdge], i: i64, st: NsScan) NsScan {
+collect_ns_edges_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, src: str, edges: [ImportEdge], i: i64, st: NsScan) NsScan {
     cur := st
     edges.loop((h, idx, edge) {
         (idx < i).match ({
@@ -1144,7 +1142,7 @@ collect_ns_edges_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: 
     })
     cur
 }
-collect_ns_graph_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, src: str, graph: ModuleGraph, st: NsScan) NsScan {
+collect_ns_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, src: str, graph: ModuleGraph, st: NsScan) NsScan {
     a.collect_ns_edges_table(table, inpath, src, graph.imports, 0, st)
 }
 
@@ -1171,7 +1169,7 @@ provided_head_count = (src: str, p: i32, n: i32) i32 {
     })
     count
 }
-provided_symbol_count_from = (a: Ptr<Malloc>, src: str, p: i32, n: i32) i32 {
+provided_symbol_count_from = (a: MutPtr<Malloc>, src: str, p: i32, n: i32) i32 {
     pos := p
     count := n
     bs: [u8] := src.view()
@@ -1202,9 +1200,9 @@ provided_symbol_count_from = (a: Ptr<Malloc>, src: str, p: i32, n: i32) i32 {
     })
     count
 }
-provided_symbol_count* = (a: Ptr<Malloc>, src: str) i32 { a.provided_symbol_count_from(src, 0, 0) }
-symbol_buf<A> = (a: MutPtr<A>, n: i64) [ProvidedSymbol] { slice(a.acquire(n * sizeof(ProvidedSymbol)), n) }
-try_symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
+provided_symbol_count* = (a: MutPtr<Malloc>, src: str) i32 { a.provided_symbol_count_from(src, 0, 0) }
+symbol_buf = (a: MutPtr<Malloc>, n: i64) [ProvidedSymbol] { slice(a.acquire(n * sizeof(ProvidedSymbol)), n) }
+try_symbol_buf = (a: MutPtr<Malloc>, n: i64) Result<[ProvidedSymbol], IoError> {
     a.try_acquire(n * sizeof(ProvidedSymbol)).match ({
         .Ok(p)  => symbols_ok(slice(p, n)),
         .Err(e) => symbols_err(e)
@@ -1243,17 +1241,17 @@ finish_symbol_name = (buf: RawPtr<u8>, src: str, p: i32, e: i32, escape: bool) s
     buf.offset(cur).store(0)
     cstr(buf)
 }
-symbol_name_alloc<A> = (a: MutPtr<A>, src: str, p: i32, e: i32, escape: bool) str {
+symbol_name_alloc = (a: MutPtr<Malloc>, src: str, p: i32, e: i32, escape: bool) str {
     buf := a.acquire(src.symbol_name_len(p, e, escape) + 1)
     buf.finish_symbol_name(src, p, e, escape)
 }
-try_symbol_name_alloc<A> = (a: MutPtr<A>, src: str, p: i32, e: i32, escape: bool) Result<str, IoError> {
+try_symbol_name_alloc = (a: MutPtr<Malloc>, src: str, p: i32, e: i32, escape: bool) Result<str, IoError> {
     a.try_acquire(src.symbol_name_len(p, e, escape) + 1).match ({
         .Ok(buf) => sym_str_ok(buf.finish_symbol_name(src, p, e, escape)),
         .Err(e)  => sym_str_err(e)
     })
 }
-fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
+fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
     idx := i
     bs: [u8] := src.view()
@@ -1277,7 +1275,7 @@ fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSym
     })
     idx
 }
-try_fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
+try_fill_head_symbols_in = (alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
     pos := p
     idx := i
     failed := false
@@ -1317,7 +1315,7 @@ try_fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [Provide
     })
     failed.match ({ true => i32_err(err), false => i32_ok(idx) })
 }
-fill_provided_symbols_in<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
+fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
     idx := i
     bs: [u8] := src.view()
@@ -1355,7 +1353,7 @@ fill_provided_symbols_in<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str, p: i3
     })
     idx
 }
-try_fill_provided_symbols_in<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
+try_fill_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
     pos := p
     idx := i
     failed := false
@@ -1418,24 +1416,24 @@ try_fill_provided_symbols_in<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str, p
     })
     failed.match ({ true => symbols_err(err), false => symbols_ok(out) })
 }
-provided_symbols_in*<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str) [ProvidedSymbol] {
+provided_symbols_in* = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
     buf := alloc.symbol_buf(a.provided_symbol_count(src))
     a.fill_provided_symbols_in(alloc, src, 0, buf, 0)
     buf
 }
-try_provided_symbols_in<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str) Result<[ProvidedSymbol], IoError> {
+try_provided_symbols_in = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) Result<[ProvidedSymbol], IoError> {
     alloc.try_symbol_buf(a.provided_symbol_count(src)).match ({
         .Ok(buf) => a.try_fill_provided_symbols_in(alloc, src, 0, buf, 0),
         .Err(e)  => symbols_err(e)
     })
 }
-provided_symbols* = (a: Ptr<Malloc>, src: str) [ProvidedSymbol] {
+provided_symbols* = (a: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
     a.provided_symbols_in(a, src)
 }
-module_graph* = (a: Ptr<Malloc>, src: str) ModuleGraph {
+module_graph* = (a: MutPtr<Malloc>, src: str) ModuleGraph {
     a.module_graph_in(a, src)
 }
-module_graph_in*<A> = (a: Ptr<Malloc>, alloc: MutPtr<A>, src: str) ModuleGraph {
+module_graph_in* = (a: MutPtr<Malloc>, alloc: MutPtr<Malloc>, src: str) ModuleGraph {
     ModuleGraph(imports: alloc.import_edges(src), symbols: a.provided_symbols_in(alloc, src))
 }
 name_prefix_eq = (raw: str, wanted: str, i: i32, e: i32) bool {
@@ -1453,14 +1451,14 @@ escaped_name_eq = (raw: str, wanted: str) bool {
 symbol_matches = (s: ProvidedSymbol, name: str) bool {
     eq(s.name, name) || s.name.escaped_name_eq(name)
 }
-symbol_key_in<A> = (s: ProvidedSymbol, a: MutPtr<A>) String {
+symbol_key_in = (s: ProvidedSymbol, a: MutPtr<Malloc>) String {
     e := s.name.res_ident_end(0)
     n := s.name.symbol_name_len(0, e, true)
     buf := a.acquire(n + 1)
     buf.finish_symbol_name(s.name, 0, e, true)
     String(ptr: buf, len: n, cap: n + 1)
 }
-try_symbol_key_in*<A> = (s: ProvidedSymbol, a: MutPtr<A>) Result<String, IoError> {
+try_symbol_key_in* = (s: ProvidedSymbol, a: MutPtr<Malloc>) Result<String, IoError> {
     e := s.name.res_ident_end(0)
     n := s.name.symbol_name_len(0, e, true)
     a.try_acquire(n + 1).match ({
@@ -1486,13 +1484,13 @@ span_has_byte = (s: str, p: i32, e: i32, b: u8) bool {
 is_foreign_span = (s: str, p: i32, e: i32) bool {
     s.span_has_byte(p, e, '=') && !s.span_has_byte(p, e, '{')
 }
-symbol_name_in<A> = (s: ProvidedSymbol, a: MutPtr<A>) String {
+symbol_name_in = (s: ProvidedSymbol, a: MutPtr<Malloc>) String {
     a.mappend(a.mstring(s.name.view().len + 1), s.name)
 }
 symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool {
     (include_imported || !s.imported) && (include_foreign || !s.foreign)
 }
-symbol_names_into<A> = (set: String, a: MutPtr<A>, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
+symbol_names_into = (set: String, a: MutPtr<Malloc>, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i).match ({
@@ -1505,7 +1503,7 @@ symbol_names_into<A> = (set: String, a: MutPtr<A>, symbols: [ProvidedSymbol], i:
     })
     cur
 }
-symbol_names_into_in<A> = (a: MutPtr<A>, set: String, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
+symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i).match ({
@@ -1518,10 +1516,10 @@ symbol_names_into_in<A> = (a: MutPtr<A>, set: String, symbols: [ProvidedSymbol],
     })
     cur
 }
-alias_decl_names = (a: Ptr<Malloc>, src: str) String {
+alias_decl_names = (a: MutPtr<Malloc>, src: str) String {
     a.module_graph(src).decl_names_in(a)
 }
-alias_all_decl_names = (a: Ptr<Malloc>, src: str) String {
+alias_all_decl_names = (a: MutPtr<Malloc>, src: str) String {
     a.module_graph(src).all_decl_names_in(a)
 }
 span_eq_lit = (s: str, p: i32, e: i32, lit: str, i: i32) bool {
@@ -1540,16 +1538,16 @@ is_c_kw_name_span = (s: str, p: i32, e: i32) bool {
     || s.span_eq_name(p, e, "register") || s.span_eq_name(p, e, "auto") || s.span_eq_name(p, e, "inline") || s.span_eq_name(p, e, "restrict") || s.span_eq_name(p, e, "if") || s.span_eq_name(p, e, "else") || s.span_eq_name(p, e, "for") || s.span_eq_name(p, e, "while")
     || s.span_eq_name(p, e, "do") || s.span_eq_name(p, e, "switch") || s.span_eq_name(p, e, "case") || s.span_eq_name(p, e, "default") || s.span_eq_name(p, e, "goto") || s.span_eq_name(p, e, "void") || s.span_eq_name(p, e, "continue") || s.span_eq_name(p, e, "break")
 }
-import_head_name<A> = (out: String, a: MutPtr<A>, src: str, p: i32, e: i32) String {
+import_head_name = (out: String, a: MutPtr<Malloc>, src: str, p: i32, e: i32) String {
     src.is_c_kw_name_span(p, e).match ({
         true  => out.import_name_span(a, src, p, e).rappend(a, "_zk"),
         false => out.import_name_span(a, src, p, e)
     })
 }
-mimport_name_span<A> = (a: MutPtr<A>, flat: str, p: i32, e: i32) String {
+mimport_name_span = (a: MutPtr<Malloc>, flat: str, p: i32, e: i32) String {
     a.mappend_span(a.mstring(16), flat, p, e)
 }
-mimport_head_name<A> = (a: MutPtr<A>, src: str, p: i32, e: i32) String {
+mimport_head_name = (a: MutPtr<Malloc>, src: str, p: i32, e: i32) String {
     raw := a.mimport_name_span(src, p, e)
     out := raw
     src.is_c_kw_name_span(p, e).match ({
@@ -1558,15 +1556,15 @@ mimport_head_name<A> = (a: MutPtr<A>, src: str, p: i32, e: i32) String {
     })
     out
 }
-check_import_names = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, id: String) i32 {
+check_import_names = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, id: String) i32 {
     graph := a.module_graph(a.read_module(inpath, a.module_path(root, progdir, id)))
     src.check_head(a, src.lstrip(p) + 1, graph.symbols, id, inpath)
 }
-check_import_names_table = (table: ModuleTable, a: Ptr<Malloc>, src: str, p: i32, id: String, inpath: str) i32 {
+check_import_names_table = (table: ModuleTable, a: MutPtr<Malloc>, src: str, p: i32, id: String, inpath: str) i32 {
     entry := table.module_id(id)
     src.check_head(a, src.lstrip(p) + 1, entry.graph.symbols, id, inpath)
 }
-check_head = (src: str, a: Ptr<Malloc>, p: i32, provided: [ProvidedSymbol], id: String, inpath: str) i32 {
+check_head = (src: str, a: MutPtr<Malloc>, p: i32, provided: [ProvidedSymbol], id: String, inpath: str) i32 {
     pos := p
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
@@ -1591,12 +1589,12 @@ check_head = (src: str, a: Ptr<Malloc>, p: i32, provided: [ProvidedSymbol], id: 
     0
 }
 
-user_symbol_seen = (a: Ptr<Malloc>, useen: String, s: ProvidedSymbol, id: String, inpath: str) String {
+user_symbol_seen = (a: MutPtr<Malloc>, useen: String, s: ProvidedSymbol, id: String, inpath: str) String {
     key := s.symbol_key_in(a)
-    useen.seen(key).match ({ true => a.fail_dup_user(inpath, id, s.symbol_name_in(a)), false => 0 })
+    useen.seen_name(key).match ({ true => a.fail_dup_user(inpath, id, s.symbol_name_in(a)), false => 0 })
     a.madd_name(useen, key)
 }
-user_decls_from_symbols = (a: Ptr<Malloc>, useen: String, symbols: [ProvidedSymbol], i: i64, id: String, inpath: str) String {
+user_decls_from_symbols = (a: MutPtr<Malloc>, useen: String, symbols: [ProvidedSymbol], i: i64, id: String, inpath: str) String {
     cur := useen
     symbols.loop((h, idx, sym) {
         (idx < i).match ({
@@ -1609,11 +1607,11 @@ user_decls_from_symbols = (a: Ptr<Malloc>, useen: String, symbols: [ProvidedSymb
     })
     cur
 }
-user_decls_into = (a: Ptr<Malloc>, useen: String, src: str, p: i32, id: String, inpath: str) String {
+user_decls_into = (a: MutPtr<Malloc>, useen: String, src: str, p: i32, id: String, inpath: str) String {
     a.user_decls_from_symbols(useen, a.module_graph(src).symbols, 0, id, inpath)
 }
 
-first_user_import_in*<A> = (a: MutPtr<A>, src: str) str {
+first_user_import_in* = (a: MutPtr<Malloc>, src: str) str {
     a.mfinish(fui_scan(a.mstring(16), a, src, 0))
 }
 
@@ -1622,7 +1620,7 @@ first_user_import* = (src: str) str {
     a := Malloc(_: 0)
     first_user_import_in(a.addr(), src)
 }
-fui_scan<A> = (out: String, a: MutPtr<A>, src: str, p: i32) String {
+fui_scan = (out: String, a: MutPtr<Malloc>, src: str, p: i32) String {
     cur := out
     pos := p
     done := false
@@ -1655,10 +1653,10 @@ fui_scan<A> = (out: String, a: MutPtr<A>, src: str, p: i32) String {
 res_ident_end = (flat: str, p: i32) i32 {
     flat.at(p).is_alnum().match ({ true => flat.res_ident_end(p + 1), false => p })
 }
-import_name_span<A> = (out: String, a: MutPtr<A>, flat: str, p: i32, e: i32) String {
+import_name_span = (out: String, a: MutPtr<Malloc>, flat: str, p: i32, e: i32) String {
     (p == e).match ({ true => out, false => out.rpush(a, flat.at(p)).import_name_span(a, flat, p + 1, e) })
 }
-append_to_nul<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
+append_to_nul = (out: String, a: MutPtr<Malloc>, s: str, p: i32) String {
     cur := out
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
@@ -1691,7 +1689,7 @@ internal_source_path = (path: str) bool {
     || path.path_contains("/zen/compiler/") || path.path_contains("zen/compiler/")
 }
 
-main_symbol_names = (a: Ptr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, bodystart: i64, bodyend: i64) String {
+main_symbol_names = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, bodystart: i64, bodyend: i64) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i).match ({
@@ -1701,7 +1699,7 @@ main_symbol_names = (a: Ptr<Malloc>, set: String, symbols: [ProvidedSymbol], i: 
                 false => {
                     key := sym.symbol_key_in(a)
                     inmain := (sym.start >= bodystart) && (sym.start < bodyend)
-                    cur = (inmain && !cur.seen(key)).match ({ true => a.madd_name(cur, key), false => cur })
+                    cur = (inmain && !cur.seen_name(key)).match ({ true => a.madd_name(cur, key), false => cur })
                 }
             })
         })
@@ -1709,17 +1707,17 @@ main_symbol_names = (a: Ptr<Malloc>, set: String, symbols: [ProvidedSymbol], i: 
     cur
 }
 
-dedup_decls* = (a: Ptr<Malloc>, flat: str, bodystart: i64, bodyend: i64) str {
+dedup_decls* = (a: MutPtr<Malloc>, flat: str, bodystart: i64, bodyend: i64) str {
     a.dedup_decls_mode(flat, bodystart, bodyend, false)
 }
 
-dedup_decls_mode = (a: Ptr<Malloc>, flat: str, bodystart: i64, bodyend: i64, allow_main_shadow: bool) str {
+dedup_decls_mode = (a: MutPtr<Malloc>, flat: str, bodystart: i64, bodyend: i64, allow_main_shadow: bool) str {
     symbols := a.module_graph(flat).symbols
     main_names := allow_main_shadow.match ({ true => a.main_symbol_names(a.mstring(256), symbols, 0, bodystart, bodyend), false => a.mstring(64) })
     a.mfinish(a.dedup_symbols(a.mstring(4096), flat, symbols, 0, 0, a.mstring(256), a.mstring(64), main_names, bodystart, bodyend, allow_main_shadow))
 }
 
-dedup_symbols = (a: Ptr<Malloc>, out: String, flat: str, symbols: [ProvidedSymbol], i: i64, p: i32, set: String, mainset: String, main_names: String, bodystart: i64, bodyend: i64, allow_main_shadow: bool) String {
+dedup_symbols = (a: MutPtr<Malloc>, out: String, flat: str, symbols: [ProvidedSymbol], i: i64, p: i32, set: String, mainset: String, main_names: String, bodystart: i64, bodyend: i64, allow_main_shadow: bool) String {
     cur := out
     pos := p
     seen := set
@@ -1732,14 +1730,14 @@ dedup_symbols = (a: Ptr<Malloc>, out: String, flat: str, symbols: [ProvidedSymbo
                 false => {
                     nm     := sym.symbol_key_in(a)
                     inmain := (sym.start >= bodystart) && (sym.start < bodyend)
-                    shadow := allow_main_shadow && !inmain && main_names.seen(nm)
-                    keep   := shadow.match ({ true => false, false => inmain.match ({ true => true, false => seen.seen(nm).match ({ true => main_seen.seen(nm), false => true }) }) })
+                    shadow := allow_main_shadow && !inmain && main_names.seen_name(nm)
+                    keep   := shadow.match ({ true => false, false => inmain.match ({ true => true, false => seen.seen_name(nm).match ({ true => main_seen.seen_name(nm), false => true }) }) })
                     cur = cur.rappend_span(a, flat, pos, sym.decl_start)
                     keep.match ({
                         true  => { cur = cur.rappend_span(a, flat, sym.decl_start, sym.decl_next) },
                         false => {}
                     })
-                    seen = shadow.match ({ true => seen, false => seen.seen(nm).match ({ true => seen, false => a.madd_name(seen, nm) }) })
+                    seen = shadow.match ({ true => seen, false => seen.seen_name(nm).match ({ true => seen, false => a.madd_name(seen, nm) }) })
                     main_seen = inmain.match ({ true => a.madd_name(main_seen, nm), false => main_seen })
                     pos = sym.decl_next
                 }
@@ -1763,17 +1761,17 @@ is_ns_line* = (s: str, p: i32) bool {
     })
 }
 
-ns_qualifier*<A> = (out: String, a: MutPtr<A>, s: str, p: i32) String {
+ns_qualifier* = (out: String, a: MutPtr<Malloc>, s: str, p: i32) String {
     ls := s.lstrip(p)
     out.import_name_span(a, s, ls, s.res_ident_end(ls))
 }
 
 NsScan*: { quals: String, qnames: String, strip_qnames: String, strip_all_quals: String, c: Closure }
-ns_scan<A> = (a: MutPtr<A>, c: Closure) NsScan {
+ns_scan = (a: MutPtr<Malloc>, c: Closure) NsScan {
     NsScan( quals: a.mstring(64), qnames: a.mstring(128), strip_qnames: a.mstring(128), strip_all_quals: a.mstring(64), c: c )
 }
 
-alias_name<A> = (out: String, a: MutPtr<A>, alias: String, name: String) String {
+alias_name = (out: String, a: MutPtr<Malloc>, alias: String, name: String) String {
     out.rappend_string(a, alias).rappend(a, "__").rappend_string(a, name)
 }
 
@@ -1783,10 +1781,10 @@ alias_hit = (s: str, p: i32, ie: i32, names: String, nm: String) bool {
         true  => s.at(s.lstrip(ie)) == '(',
         false => true
     })
-    names.seen(nm) && rewrite_member
+    names.seen_name(nm) && rewrite_member
 }
 
-rewrite_alias_copy = (out: String, a: Ptr<Malloc>, s: str, p: i32, names: String, alias: String) String {
+rewrite_alias_copy = (out: String, a: MutPtr<Malloc>, s: str, p: i32, names: String, alias: String) String {
     s.line_comment_at(p).match ({
         true  => {
             sk := out.copy_line_comment(a, s, p)
@@ -1808,7 +1806,7 @@ rewrite_alias_copy = (out: String, a: Ptr<Malloc>, s: str, p: i32, names: String
     })
 }
 
-rewrite_alias_names = (out: String, a: Ptr<Malloc>, s: str, p: i32, names: String, alias: String) String {
+rewrite_alias_names = (out: String, a: MutPtr<Malloc>, s: str, p: i32, names: String, alias: String) String {
     cur := out
     pos := p
     bs: [u8] := s.str_bytes()
@@ -1860,22 +1858,22 @@ rewrite_alias_names = (out: String, a: Ptr<Malloc>, s: str, p: i32, names: Strin
     cur
 }
 
-alias_module_body = (a: Ptr<Malloc>, src: str, graph: ModuleGraph, alias: String, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
+alias_module_body = (a: MutPtr<Malloc>, src: str, graph: ModuleGraph, alias: String, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
     names := graph.decl_names_in(a)
     body  := a.mfinish(a.mstring(4096).strip_ns_into(a, src, 0, quals, qnames, strip_qnames, strip_all_quals, true))
     a.mstring(4096).rewrite_alias_names(a, body, 0, names, alias)
 }
 
-line_name = (out: String, a: Ptr<Malloc>, names: String, i: i64) String {
+line_name = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String {
     ((i >= names.len) || (names.res_sbyte(i) == 10)).match ({
         true  => out,
         false => out.rpush(a, names.res_sbyte(i)).line_name(a, names, i + 1)
     })
 }
-add_qual_name<A> = (set: String, a: MutPtr<A>, alias: String, name: String) String {
+add_qual_name = (set: String, a: MutPtr<Malloc>, alias: String, name: String) String {
     set.rappend_string(a, alias).rpush(a, '.').rappend_string(a, name).rpush(a, 10)
 }
-add_qual_names = (set: String, a: Ptr<Malloc>, alias: String, names: String, i: i64) String {
+add_qual_names = (set: String, a: MutPtr<Malloc>, alias: String, names: String, i: i64) String {
     (i >= names.len).match ({
         true  => set,
         false => {
@@ -1885,40 +1883,40 @@ add_qual_names = (set: String, a: Ptr<Malloc>, alias: String, names: String, i: 
     })
 }
 
-load_ns_closure_graph = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, alias: String, src: str, graph: ModuleGraph, c: Closure) Closure {
+load_ns_closure_graph = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, id: String, alias: String, src: str, graph: ModuleGraph, c: Closure) Closure {
     c2   := a.load_import_graph(root, progdir, inpath, src, graph, id.id_is_user(), c)
     ns   := a.collect_ns_graph(root, progdir, inpath, src, graph, a.ns_scan(c2))
     body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     Closure( seen: ns.c.seen, out: ns.c.out.rpush(a, 10).rappend_string(a, body), useen: ns.c.useen )
 }
-load_ns_closure_graph_table = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, id: String, alias: String, src: str, graph: ModuleGraph, c: Closure) Closure {
+load_ns_closure_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, id: String, alias: String, src: str, graph: ModuleGraph, c: Closure) Closure {
     c2   := a.load_import_graph_table(table, inpath, src, graph, id.id_is_user(), c)
     ns   := a.collect_ns_graph_table(table, inpath, src, graph, a.ns_scan(c2))
     body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     Closure( seen: ns.c.seen, out: ns.c.out.rpush(a, 10).rappend_string(a, body), useen: ns.c.useen )
 }
 
-load_ns_closure = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, id: String, alias: String, src: str, c: Closure) Closure {
+load_ns_closure = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, id: String, alias: String, src: str, c: Closure) Closure {
     graph := a.module_graph(src)
     a.load_ns_closure_graph(root, progdir, inpath, id, alias, src, graph, c)
 }
 
-collect_ns* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, st: NsScan) NsScan {
+collect_ns* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: str, p: i32, st: NsScan) NsScan {
     graph := a.module_graph(src)
     a.collect_ns_graph(root, progdir, inpath, src, graph, st)
 }
 
-is_qual_access<A> = (s: str, a: MutPtr<A>, p: i32, ie: i32, quals: String) bool {
+is_qual_access = (s: str, a: MutPtr<Malloc>, p: i32, ie: i32, quals: String) bool {
     ((s.at(ie) == '.') && s.at(ie + 1).is_alpha()).match ({
-        true  => quals.seen(a.mimport_name_span(s, p, ie)),
+        true  => quals.seen_name(a.mimport_name_span(s, p, ie)),
         false => false
     })
 }
 
-qualified_name<A> = (out: String, a: MutPtr<A>, s: str, p: i32, ie: i32) String {
+qualified_name = (out: String, a: MutPtr<Malloc>, s: str, p: i32, ie: i32) String {
     out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, ie + 1, s.res_ident_end(ie + 1))
 }
-rewrite_quals = (out: String, a: Ptr<Malloc>, s: str, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
+rewrite_quals = (out: String, a: MutPtr<Malloc>, s: str, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
     cur := out
     pos := p
     bs: [u8] := s.str_bytes()
@@ -1954,12 +1952,12 @@ rewrite_quals = (out: String, a: Ptr<Malloc>, s: str, p: i32, quals: String, qna
                                             alias := a.mimport_name_span(s, pos, ie)
                                             qn := qualified_name(a.mstring(32), a, s, pos, ie)
                                             me := s.res_ident_end(ie + 1)
-                                            qnames.seen(qn).match ({
+                                            qnames.seen_name(qn).match ({
                                                 true => {
                                                     cur = cur.rappend_span(a, s, pos, ie).rappend(a, "__")
                                                     pos = ie + 1
                                                 },
-                                                false => (strip_qnames.seen(qn) || strip_all_quals.seen(alias)).match ({
+                                                false => (strip_qnames.seen_name(qn) || strip_all_quals.seen_name(alias)).match ({
                                                     true => {
                                                         pos = ie + 1
                                                     },
@@ -1990,7 +1988,7 @@ rewrite_quals = (out: String, a: Ptr<Malloc>, s: str, p: i32, quals: String, qna
     cur
 }
 
-strip_ns_lines_into = (out: String, a: Ptr<Malloc>, s: str, p: i32, first: bool) String {
+strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: str, p: i32, first: bool) String {
     cur := out
     pos := p
     is_first := first
@@ -2019,7 +2017,7 @@ strip_ns_lines_into = (out: String, a: Ptr<Malloc>, s: str, p: i32, first: bool)
     cur
 }
 
-strip_ns_into = (out: String, a: Ptr<Malloc>, s: str, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String, first: bool) String {
+strip_ns_into = (out: String, a: MutPtr<Malloc>, s: str, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String, first: bool) String {
     raw := a.mfinish(a.mstring(4096).strip_ns_lines_into(a, s, p, true))
     (raw.at(0) == 0).match ({
         true => out,
@@ -2033,24 +2031,24 @@ strip_ns_into = (out: String, a: Ptr<Malloc>, s: str, p: i32, quals: String, qna
     })
 }
 
-module_body = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, entry: ModuleEntry) str {
+module_body = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, entry: ModuleEntry) str {
     ns := a.collect_ns_graph_table(table, inpath, entry.source, entry.graph, a.ns_scan(a.empty_closure()))
     a.mfinish(a.mstring(4096).strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, true))
 }
-parsed_module_buf<A> = (a: MutPtr<A>, n: i64) [ParsedModule] { slice(a.acquire(n * sizeof(ParsedModule)), n) }
-parse_module_entry = (a: Ptr<Malloc>, table: ModuleTable, inpath: str, entry: ModuleEntry) ParsedModule {
+parsed_module_buf = (a: MutPtr<Malloc>, n: i64) [ParsedModule] { slice(a.acquire(n * sizeof(ParsedModule)), n) }
+parse_module_entry = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, entry: ModuleEntry) ParsedModule {
     body := a.module_body(table, inpath, entry)
     ParsedModule( id: entry.id, path: entry.path, source: entry.source, body: body, graph: entry.graph, decls: a.parse_module(body) )
 }
-parse_resolved_program* = (a: Ptr<Malloc>, resolved: ResolvedProgram, inpath: str) ParsedProgram {
+parse_resolved_program* = (a: MutPtr<Malloc>, resolved: ResolvedProgram, inpath: str) ParsedProgram {
     mods := a.parsed_module_buf(resolved.table.count())
     resolved.table.modules.loop((h, i, entry) { mods[i] = a.parse_module_entry(resolved.table, inpath, entry) })
     ParsedProgram( resolved: resolved, modules: mods, flat_decls: a.parse_module(resolved.flat) )
 }
-resolve_parsed_program* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ParsedProgram {
+resolve_parsed_program* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ParsedProgram {
     a.parse_resolved_program(a.resolve_program_data(root, progdir, inpath, mainsrc), inpath)
 }
-parsed_decl_buf<A> = (a: MutPtr<A>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
+parsed_decl_buf = (a: MutPtr<Malloc>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
 append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     j := at
     src.loop((h, i, d) {
@@ -2059,43 +2057,43 @@ append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     })
     j
 }
-alias_edge_decls = (a: Ptr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
+alias_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
     entry := p.resolved.table.module(edge.module)
     ns := a.collect_ns_graph_table(p.resolved.table, p.module("").path, entry.source, entry.graph, a.ns_scan(a.empty_closure()))
     body := a.mfinish(a.alias_module_body(entry.source, entry.graph, edge.edge_alias_in(a), ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals))
     a.parse_module(body)
 }
-root_link_edge_decls = (a: Ptr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
+root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
     edge.namespace.match ({
         true  => a.alias_edge_decls(p, edge),
         false => p.module(edge.module).decls
     })
 }
-root_link_count* = (a: Ptr<Malloc>, p: ParsedProgram) i64 {
+root_link_count* = (a: MutPtr<Malloc>, p: ParsedProgram) i64 {
     n := 0
     root := p.module("")
     root.graph.imports.loop((h, i, edge) { n = n + a.root_link_edge_decls(p, edge).len })
     n
 }
-root_link_decls* = (a: Ptr<Malloc>, p: ParsedProgram) [Decl] {
+root_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram) [Decl] {
     root := p.module("")
     buf := a.parsed_decl_buf(a.root_link_count(p))
     j := 0
     root.graph.imports.loop((h, i, edge) { j = buf.append_decls_to(j, a.root_link_edge_decls(p, edge)) })
     slice(buf.ptr, j)
 }
-check_parsed_program* = (a: Ptr<Malloc>, p: ParsedProgram) i32 {
+check_parsed_program* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     root := p.module("")
     a.check_linked(root.decls, a.root_link_decls(p))
 }
-check_parsed_program_kind* = (a: Ptr<Malloc>, p: ParsedProgram) i32 {
+check_parsed_program_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     root := p.module("")
     a.check_linked_kind(root.decls, a.root_link_decls(p))
 }
 
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
-resolve_program_data* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
+resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     ns   := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
@@ -2105,6 +2103,6 @@ resolve_program_data* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, m
     flat := a.dedup_decls_mode(a.mfinish(cN.out), nsl, body.len, inpath.internal_source_path())
     ResolvedProgram( table: table, flat: flat, body_start: nsl, body_end: body.len )
 }
-resolve_program* = (a: Ptr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) str {
+resolve_program* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) str {
     a.resolve_program_data(root, progdir, inpath, mainsrc).flat
 }

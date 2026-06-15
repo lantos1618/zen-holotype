@@ -11,69 +11,69 @@
 VList*: VNil | VCons(VCell)
 VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 // exp is the current expected type; tvoid() means no expectation.
-Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: Ptr<Malloc> }   // a = allocator (heap-alloc in infer)
+Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: MutPtr<Malloc> }   // a = allocator (heap-alloc in infer)
 with_exp = (env: Env, t: Ty) Env { Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 let_exp = (env: Env, t: Ty) Env { t.is_void_ty().match ({ true => env.clr_exp(), false => Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }) }
 
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
-cebuf<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
-cenode<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
+cebuf = (a: MutPtr<Malloc>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
+cenode = (a: MutPtr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.cebuf(1)
     buf[0] = v
     buf[0].addr()
 }
 // Pos-preserving rebuilds. Bare call()/vref() are only for synthesized nodes.
-recall<A>   = (a: MutPtr<A>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(c.raw.match ({ true => raw_call_at(fn, args, c.pos), false => call_at(fn, args, c.pos) })) }
-revar<A>    = (a: MutPtr<A>, v: VarData, name: str) Ptr<Expr> { a.cenode(vref_at(name, v.pos)) }
-var_call<A> = (a: MutPtr<A>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }
-abuf<A> = (a: MutPtr<A>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(ArmData)), n) }
-sbuf<A> = (a: MutPtr<A>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
-dbuf*<A> = (a: MutPtr<A>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
-tbuf<A> = (a: MutPtr<A>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
+recall = (a: MutPtr<Malloc>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(c.raw.match ({ true => raw_call_at(fn, args, c.pos), false => call_at(fn, args, c.pos) })) }
+revar = (a: MutPtr<Malloc>, v: VarData, name: str) Ptr<Expr> { a.cenode(vref_at(name, v.pos)) }
+var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }
+abuf = (a: MutPtr<Malloc>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(ArmData)), n) }
+sbuf = (a: MutPtr<Malloc>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
+dbuf* = (a: MutPtr<Malloc>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
+tbuf = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 // Heap-own a Ty so Ptr<Ty> fields do not dangle.
-tnode*<A> = (a: MutPtr<A>, t: Ty) Ptr<Ty> {
+tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tbuf(1)
     buf[0] = t
     buf[0].addr()
 }
-check_string<A> = (a: MutPtr<A>, cap: i64) String {
+check_string = (a: MutPtr<Malloc>, cap: i64) String {
     String(ptr: a.acquire(cap), len: 0, cap: cap)
 }
-check_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
+check_grow = (a: MutPtr<Malloc>, s: String, ncap: i64) String {
     String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
 }
-check_reserve<A> = (a: MutPtr<A>, s: String, need: i64) String {
+check_reserve = (a: MutPtr<Malloc>, s: String, need: i64) String {
     out := s
     (s.len + need > s.cap).match ({ true => { out = a.check_grow(s, (s.cap + need) * 2) }, _ })
     out
 }
-check_push<A> = (s: String, a: MutPtr<A>, b: u8) String {
+check_push = (s: String, a: MutPtr<Malloc>, b: u8) String {
     r := a.check_reserve(s, 1)
     r.ptr.offset(r.len).store(b)
     String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
 }
-check_append<A> = (s: String, a: MutPtr<A>, t: str) String {
+check_append = (s: String, a: MutPtr<Malloc>, t: str) String {
     cur := s
     bs: [u8] := t.view()
     bs.loop((h, i, b) { cur = cur.check_push(a, b) })
     cur
 }
-check_finish<A> = (s: String, a: MutPtr<A>) str {
+check_finish = (s: String, a: MutPtr<Malloc>) str {
     cstr(s.check_push(a, 0).ptr)
 }
 
-vlbuf<A> = (a: MutPtr<A>) [VList] { slice(a.acquire(sizeof(VList)), 1) }
-vlnode<A> = (a: MutPtr<A>, v: VList) Ptr<VList> {
+vlbuf = (a: MutPtr<Malloc>) [VList] { slice(a.acquire(sizeof(VList)), 1) }
+vlnode = (a: MutPtr<Malloc>, v: VList) Ptr<VList> {
     buf := a.vlbuf()
     buf[0] = v
     buf[0].addr()
 }
 vnil_val  = () VList { .VNil() }
 vcons_val = (nm: str, t: Ty, tail: Ptr<VList>) VList { .VCons(VCell( name: nm, ty: t, tail: tail )) }
-vnil<A> = (a: MutPtr<A>) Ptr<VList> { a.vlnode(vnil_val()) }
-vcons<A> = (a: MutPtr<A>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
-params_env*<A> = (a: MutPtr<A>, ps: [Param]) Ptr<VList> {
+vnil = (a: MutPtr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
+vcons = (a: MutPtr<Malloc>, nm: str, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
+params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
     e := a.vnil()
     ps.loop((h, i, p) { e = a.vcons(p.name, p.ty, e) })
     e
@@ -302,7 +302,7 @@ trait_default_exists = (decls: [Decl], trname: str, m: str) bool {
         _ => found }) })
     found
 }
-dispatch_recv = (a: Ptr<Malloc>, decls: [Decl], fn: str, tyname: str) str {
+dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], fn: str, tyname: str) str {
     found := ""
     decls.loop((h, i, d) {
         found = d.match ({
@@ -392,7 +392,7 @@ gen_field_at = (fields: [Field], fname: str) Ty {
     fields.loop((h, i, f) { found = eq(f.name, fname).match ({ true => f.ty, false => found }) })
     found
 }
-gen_struct_field = (a: Ptr<Malloc>, decls: [Decl], gname: str, fname: str, targs: [Ty]) Ty {
+gen_struct_field = (a: MutPtr<Malloc>, decls: [Decl], gname: str, fname: str, targs: [Ty]) Ty {
     found := tvoid()
     decls.loop((h, i, d) { found = d.match ({
         .DGenStruct(gsd) => eq(gsd.name, gname).match ({ true => a.subst_ty_in(gsd.tparams, targs, gsd.fields.gen_field_at(fname)), false => found }),
@@ -400,7 +400,7 @@ gen_struct_field = (a: Ptr<Malloc>, decls: [Decl], gname: str, fname: str, targs
     found
 }
 ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => t }) }
-slice_member = (a: Ptr<Malloc>, field: str) Ty {
+slice_member = (a: MutPtr<Malloc>, field: str) Ty {
     eq(field, "len").match ({
         true  => ti64(),
         false => eq(field, "ptr").match ({ true => tptr(a.tnode(tu8())), false => tvoid() })
@@ -444,7 +444,7 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
 }
 
 // Stamp enum constructors with their concrete generic instance when needed.
-resolve_mkenum = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str, payload: Ptr<Expr>) Ptr<Expr> {
+resolve_mkenum = (a: MutPtr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str, payload: Ptr<Expr>) Ptr<Expr> {
     p := a.resolve_expr(env.clr_exp(), payload)
     (etargs.len > 0).match ({
         true  => a.cenode(mkenumg(ety, emty, etargs, variant, p)),
@@ -454,11 +454,11 @@ resolve_mkenum = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], v
         })
     })
 }
-resolve_mkenum_fresh = (a: Ptr<Malloc>, env: Env, variant: str, p: Ptr<Expr>) Ptr<Expr> {
+resolve_mkenum_fresh = (a: MutPtr<Malloc>, env: Env, variant: str, p: Ptr<Expr>) Ptr<Expr> {
     inst := env.enum_inst_mk(variant, p)
     a.cenode(mkenumg(inst.base, inst.mty, inst.targs, variant, p))
 }
-resolve_mktag = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str) Ptr<Expr> {
+resolve_mktag = (a: MutPtr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str) Ptr<Expr> {
     (etargs.len > 0).match ({
         true  => a.cenode(mktagg(ety, emty, etargs, variant)),
         false => eq(ety, "").match ({
@@ -467,7 +467,7 @@ resolve_mktag = (a: Ptr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], va
         })
     })
 }
-resolve_mktag_fresh = (a: Ptr<Malloc>, env: Env, variant: str) Ptr<Expr> {
+resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: str) Ptr<Expr> {
     inst := env.enum_inst_tag(variant)
     a.cenode(mktagg(inst.base, inst.mty, inst.targs, variant))
 }
@@ -481,7 +481,7 @@ set_elem = (env: Env, existing: Ty, seq: Ptr<Expr>, value: Ptr<Expr>) Ty {
     e.is_void_ty().match ({ true => env.infer_expr(value), false => e })
 }
 // Rebuild expressions with resolved enum, constructor, member, and loop metadata.
-resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
+resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)     => a.resolve_match(env, m),
         .MakeEnum(mk) => a.resolve_mkenum(env, mk.ty, mk.mty, mk.targs, mk.variant, mk.payload),
@@ -502,11 +502,11 @@ resolve_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
 sl_elem = (env: Env, items: [Expr]) Ty {
     (items.len == 0).match ({ true => tvoid(), false => env.infer_expr(items[0].addr()) })
 }
-resolve_slicelit = (a: Ptr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
+resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
     a.cenode(slit(env.sl_elem(sd.items), a.resolve_args(env.clr_exp(), sd.items)))
 }
 // Field access auto-derefs pointer receivers.
-resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
+resolve_member = (a: MutPtr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
     obj := a.resolve_expr(env.clr_exp(), mm.obj)
     env.infer_expr(mm.obj).ty_is_ptr().match ({
         true  => a.cenode(arrow(obj, mm.field)),
@@ -514,13 +514,13 @@ resolve_member = (a: Ptr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
     })
 }
 // Resolve foreach body with index and element bindings.
-resolve_loop = (a: Ptr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
+resolve_loop = (a: MutPtr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.keep_elem(l.elemTy, l.seq)
     env2 := Env( vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a )
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
 }
-fbuf<A> = (a: MutPtr<A>, n: i64) [FieldInit] { slice(a.acquire(n * sizeof(FieldInit)), n) }
-resolve_inits = (a: Ptr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
+fbuf = (a: MutPtr<Malloc>, n: i64) [FieldInit] { slice(a.acquire(n * sizeof(FieldInit)), n) }
+resolve_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.resolve_expr(env, fi.value)) })
     buf
@@ -547,7 +547,7 @@ subj_variant_payload* = (env: Env, t: Ty, variant: str) Ty {
 }
 gsubst = (pty: Ty, env: Env, g: GenericData) Ty { env.a.subst_ty_in(env.decls.find_genenum(g.name).tparams, g.args, pty) }
 // Fill match enum name and choose pointer/value tag access.
-resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
+resolve_match = (a: MutPtr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
     subj2 := a.resolve_expr(env.clr_exp(), m.subj)
     t     := env.infer_expr(subj2)
     en    := t.enum_name()
@@ -557,7 +557,7 @@ resolve_match = (a: Ptr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
         false => a.cenode(ematch(subj2, en, arms))
     })
 }
-resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
+resolve_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) [Expr] {
     buf := a.cebuf(args.len)
     args.loop((h, i, ar) { buf[i] = load(a.resolve_expr(env, ar.addr())) })
     buf
@@ -565,13 +565,13 @@ resolve_args = (a: Ptr<Malloc>, env: Env, args: [Expr]) [Expr] {
 arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
 // String equality lowers to backend-specific content comparison intrinsics.
 is_str_t = (t: Ty) bool { t.match ({ .Str => true, _ => false }) }
-str_eq_args<A> = (a: MutPtr<A>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
+str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf := a.cebuf(2)
     buf[0] = load(lhs)
     buf[1] = load(rhs)
     buf
 }
-resolve_bin = (a: Ptr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
+resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     lhs := a.resolve_expr(env.clr_exp(), b.lhs)
     rhs := a.resolve_expr(env.clr_exp(), b.rhs)
     cmp := eq(b.op, "==") || eq(b.op, "!=")
@@ -582,13 +582,13 @@ resolve_bin = (a: Ptr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
 }
 // Prefix `-f64` parses as `0 - x`; rewrite that zero to `0.0`.
 is_int_zero = (e: Ptr<Expr>) bool { load(e).match ({ .Int(n) => n == 0, _ => false }) }
-resolve_f64_neg = (a: Ptr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>, p: i32) Ptr<Expr> {
+resolve_f64_neg = (a: MutPtr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>, p: i32) Ptr<Expr> {
     (eq(op, "-") && lhs.is_int_zero() && env.infer_expr(rhs).is_f64_ty()).match ({
         true  => a.cenode(bin_at(op, a.cenode(flit("0.0")), rhs, p)),
         false => a.cenode(bin_at(op, lhs, rhs, p))
     })
 }
-resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
+resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     dn   := env.dispatch_name(c)
     ps   := env.decls.fn_params(dn)
     tmpl := env.decls.is_template_call(dn)
@@ -600,13 +600,13 @@ resolve_call = (a: Ptr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     a.recall(c, dn, buf)
 }
 // Arm payload binds get their concrete payload type.
-arm_env* = (a: Ptr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
+arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
     eq(ar.bind, "").match ({
         true  => env,
         false => Env( vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars), decls: env.decls, exp: env.exp, a: env.a )
     })
 }
-resolve_arms = (a: Ptr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
+resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(a.arm_env(env, t, ar), ar.body)) })
     buf
@@ -638,12 +638,12 @@ match_lowerable = (decls: [Decl], m: MatchData) bool {
     match_has_wild(m).match ({ true => true, false => decls.enum_exhaustive(m) })
 }
 
-one_stmt = (a: Ptr<Malloc>, st: Stmt) [Stmt] {
+one_stmt = (a: MutPtr<Malloc>, st: Stmt) [Stmt] {
     buf := a.sbuf(1)
     buf[0] = st
     buf
 }
-branch_stmts = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
+branch_stmts = (a: MutPtr<Malloc>, e: Ptr<Expr>) [Stmt] {
     out := a.one_stmt(sexpr(e))
     load(e).match ({
         .Block(b) => { out = b.stmts },
@@ -651,24 +651,24 @@ branch_stmts = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
     })
     out
 }
-tag_const*<A> = (a: MutPtr<A>, ename: str, variant: str) str {
+tag_const* = (a: MutPtr<Malloc>, ename: str, variant: str) str {
     s := a.check_string(64)
     s = s.check_append(a, ename)
     s = s.check_append(a, "_")
     s = s.check_append(a, variant)
     s.check_finish(a)
 }
-subj_tag<A> = (a: MutPtr<A>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
+subj_tag = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     out := a.cenode(member(subj, "tag"))
     ptr.match ({ true => { out = a.cenode(arrow(subj, "tag")) }, _ })
     out
 }
-subj_payload<A> = (a: MutPtr<A>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr<Expr> {
+subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr<Expr> {
     u := a.cenode(member(subj, "u"))
     ptr.match ({ true => { u = a.cenode(arrow(subj, "u")) }, _ })
     a.cenode(member(u, variant))
 }
-arm_then = (a: Ptr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
+arm_then = (a: MutPtr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
     body := a.branch_stmts(ar.body)
     out := body
     eq(ar.bind, "").match ({
@@ -677,14 +677,14 @@ arm_then = (a: Ptr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
     })
     out
 }
-cons_stmt = (a: Ptr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
+cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
     buf := a.sbuf(rest.len + 1)
     buf[0] = head
     rest.loop((h, i, st) { buf[i + 1] = st })
     buf
 }
 // Build if/else chain over enum arms.
-lower_match_arms = (a: Ptr<Malloc>, m: MatchData, i: i32) [Stmt] {
+lower_match_arms = (a: MutPtr<Malloc>, m: MatchData, i: i32) [Stmt] {
     out := no_stmts()
     (i >= m.arms.len).match ({
         true  => {},
@@ -701,17 +701,17 @@ lower_match_arms = (a: Ptr<Malloc>, m: MatchData, i: i32) [Stmt] {
     })
     out
 }
-lower_match_stmt = (a: Ptr<Malloc>, m: MatchData) Stmt {
+lower_match_stmt = (a: MutPtr<Malloc>, m: MatchData) Stmt {
     stmts := a.lower_match_arms(m, 0)
     out := sexpr(a.cenode(block(stmts)))
     (stmts.len == 1).match ({ true => { out = stmts[0] }, _ })
     out
 }
 // Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
-lower_cond_stmt = (a: Ptr<Malloc>, d: CondData) Stmt {
+lower_cond_stmt = (a: MutPtr<Malloc>, d: CondData) Stmt {
     sif(d.c, a.branch_stmts(d.t), a.cond_else(d.e))
 }
-cond_else = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
+cond_else = (a: MutPtr<Malloc>, e: Ptr<Expr>) [Stmt] {
     out := a.branch_stmts(e)
     load(e).match ({
         .Cond(d) => { out = a.one_stmt(a.lower_cond_stmt(d)) },
@@ -720,7 +720,7 @@ cond_else = (a: Ptr<Malloc>, e: Ptr<Expr>) [Stmt] {
     out
 }
 // Lower resolved statement-position expressions whose values are discarded.
-lower_stmt_expr = (a: Ptr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
+lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
     out := sexpr(e)
     load(e).match ({
         .Match(m) => env.decls.match_lowerable(m).match ({
@@ -741,7 +741,7 @@ store_local_ty = (t: Ty) Ty {
         _ => t
     })
 }
-resolve_let = (a: Ptr<Malloc>, env: Env, l: LetData) Stmt {
+resolve_let = (a: MutPtr<Malloc>, env: Env, l: LetData) Stmt {
     v := a.resolve_expr(env.let_exp(l.ty), l.value)
     ty := l.ty.is_void_ty().match ({
         true  => env.infer_expr(v).store_local_ty(),
@@ -749,7 +749,7 @@ resolve_let = (a: Ptr<Malloc>, env: Env, l: LetData) Stmt {
     })
     slett(l.name, ty, v)
 }
-resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
+resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     out := st
     st.match ({
         .Let(l)    => { out = a.resolve_let(env, l) },
@@ -772,21 +772,21 @@ resolve_stmt = (a: Ptr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
 }
 // Resolve a statement sequence while threading let bindings.
 noop2 = () void { }
-resolve_body = (a: Ptr<Malloc>, env: Env, body: [Stmt]) [Stmt] {
+resolve_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
     a.fill_stmts(env, body, buf, 0)
     buf
 }
-fill_stmts = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
+fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i), false => noop2() })
 }
-fill_stmt = (a: Ptr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
+fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
     st       := body[i]
     resolved := a.resolve_stmt(env, st, i == body.len - 1)
     buf[i]   = resolved
     a.fill_stmts(a.extend_env(env, resolved), body, buf, i + 1)
 }
-extend_env* = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
+extend_env* = (a: MutPtr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
         .Let(l) => Env( vars: a.vcons(l.name, l.ty.is_void_ty().match ({ true => env.infer_expr(l.value), false => l.ty }), env.vars), decls: env.decls, exp: env.exp, a: env.a ),
         _       => env
@@ -794,15 +794,15 @@ extend_env* = (a: Ptr<Malloc>, env: Env, st: Stmt) Env {
 }
 
 // Rebuild decls with resolved bodies/inits.
-resolve_func = (a: Ptr<Malloc>, decls: [Decl], f: Func) Func {
+resolve_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) Func {
     env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
     Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) )
 }
-resolve_global = (a: Ptr<Malloc>, decls: [Decl], g: GlobalData) Decl {
+resolve_global = (a: MutPtr<Malloc>, decls: [Decl], g: GlobalData) Decl {
     env := Env( vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a )
     dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init))
 }
-resolve_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
+resolve_decl = (a: MutPtr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), .DGlobal(g) => a.resolve_global(decls, g), _ => d })
 }
 
@@ -816,7 +816,7 @@ pidx = (params: [Param], name: str, found: i32, i: i32) i32 {
     })
 }
 param_index = (params: [Param], name: str) i32 { params.pidx(name, 0 - 1, 0) }
-hide_param<A> = (a: MutPtr<A>, params: [Param], name: str) [Param] {
+hide_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
     idx := params.param_index(name)
     (idx < 0).match ({
         true  => params,
@@ -827,10 +827,10 @@ hide_param<A> = (a: MutPtr<A>, params: [Param], name: str) [Param] {
         }
     })
 }
-local_marks = (a: Ptr<Malloc>, s: String, n: i64) String {
+local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String {
     (n <= 0).match ({ true => s, false => a.local_marks(s.check_append(a, "_"), n - 1) })
 }
-local_name_at = (a: Ptr<Malloc>, name: str, depth: i64) str {
+local_name_at = (a: MutPtr<Malloc>, name: str, depth: i64) str {
     s := a.check_string(128)
     s = s.check_append(a, "__zen_local")
     s = a.local_marks(s, depth)
@@ -838,14 +838,14 @@ local_name_at = (a: Ptr<Malloc>, name: str, depth: i64) str {
     s = s.check_append(a, name)
     s.check_finish(a)
 }
-add_subst_param<A> = (a: MutPtr<A>, params: [Param], name: str) [Param] {
+add_subst_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
     base := a.hide_param(params, name)
     buf := a.pbuf(base.len + 1)
     base.loop((h, i, p) { buf[i] = p })
     buf[base.len] = Param( name: name, ty: tvoid() )
     buf
 }
-add_subst_arg<A> = (a: MutPtr<A>, args: [Expr], name: str) [Expr] {
+add_subst_arg = (a: MutPtr<Malloc>, args: [Expr], name: str) [Expr] {
     buf := a.cebuf(args.len + 1)
     args.loop((h, i, e) { buf[i] = e })
     buf[args.len] = vref(name)
@@ -857,36 +857,36 @@ the_func* = (decls: [Decl], name: str) Func {
     found
 }
 is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).is_generic_fn() }
-subst_var = (a: Ptr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
+subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
     (idx < 0).match ({ true => e, false => args[idx].addr() })
 }
 // Inline body as block expression: trailing return becomes the result expression.
 ret_to_expr = (st: Stmt) Stmt { st.match ({ .Return(e) => sexpr(e), _ => st }) }
-block_of = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+block_of = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     buf: [Stmt] := a.sbuf(stmts.len)
     stmts.loop((h, i, st) { buf[i] = (i == stmts.len - 1).match ({ true => ret_to_expr(st), false => st }) })
     a.cenode(block(buf))
 }
 // One value statement inlines directly; larger bodies become block expressions.
-blockify = (a: Ptr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+blockify = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     (stmts.len == 1).match ({
         true  => stmts[0].match ({ .Return(e) => e, .ExprStmt(e) => e, _ => a.block_of(stmts) }),
         false => a.block_of(stmts)
     })
 }
-xform_args = (a: Ptr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr], env: Ptr<VList>) [Expr] {
+xform_args = (a: MutPtr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr], env: Ptr<VList>) [Expr] {
     buf := a.cebuf(args.len)
     args.loop((h, i, ar) { buf[i] = load(a.xform_expr(decls, ar.addr(), params, fargs, env)) })
     buf
 }
-xform_arm_payload = (a: Ptr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmData) Ty {
+xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmData) Ty {
     subj.match ({
         .Generic(g) => a.subst_ty_in(decls.find_genenum(g.name).tparams, g.args, decls.find_genenum(g.name).gen_variant_payload(ar.variant)),
         _           => decls.concrete_variant_payload(ename, ar.variant)
     })
 }
-xform_arm_env = (a: Ptr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
+xform_arm_env = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
     out := env
     eq(ar.bind, "").match ({
         true  => {},
@@ -894,7 +894,7 @@ xform_arm_env = (a: Ptr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmDat
     })
     out
 }
-xform_arms = (a: Ptr<Malloc>, decls: [Decl], subj: Ty, ename: str, arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [ArmData] {
+xform_arms = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
         bind := ""
@@ -913,7 +913,7 @@ xform_arms = (a: Ptr<Malloc>, decls: [Decl], subj: Ty, ename: str, arms: [ArmDat
     })
     buf
 }
-inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
         .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs, env, tvoid())),
         .Var(v)     => a.var_call(v, cargs),
@@ -922,18 +922,18 @@ inline_lambda = (a: Ptr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: 
 }
 // Generic template calls infer type args at the call site before splicing.
 // Light types are enough to unify tparams, including local Var args.
-lty_node<A> = (a: MutPtr<A>, t: Ty) Ptr<Ty> { a.tnode(t) }
-light_sl_elem = (a: Ptr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl]) Ty {
+lty_node = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.tnode(t) }
+light_sl_elem = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl]) Ty {
     (items.len == 0).match ({ true => tvoid(), false => items[0].addr().light_ty(a, env, decls) })
 }
-light_slice = (a: Ptr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl]) Ty {
+light_slice = (a: MutPtr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl]) Ty {
     sd.elem.is_void_ty().match ({
         true  => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls))),
         false => tslice(a.lty_node(sd.elem))
     })
 }
 // Light call type mirrors infer_call for template-splice inference.
-light_one = (params: [Param], a: Ptr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+light_one = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     found := tvoid()
     params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls), tp), false => found }), false => found }) })
     found
@@ -941,16 +941,16 @@ light_one = (params: [Param], a: Ptr<Malloc>, args: [Expr], tp: str, env: Ptr<VL
 light_ret_one = (ret: Ty, exp: Ty, tp: str) Ty {
     exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(exp, tp) })
 }
-light_targ = (f: Func, a: Ptr<Malloc>, args: [Expr], exp: Ty, tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+light_targ = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     arg := f.params.light_one(a, args, tp, env, decls)
     arg.is_void_ty().match ({ true => f.ret.light_ret_one(exp, tp), false => arg })
 }
-light_targs = (f: Func, a: Ptr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList>, decls: [Decl]) [Ty] {
+light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList>, decls: [Decl]) [Ty] {
     buf := a.tbuf(f.tparams.len)
     f.tparams.loop((h, i, tp) { buf[i] = f.light_targ(a, args, exp, tp.name, env, decls) })
     buf
 }
-light_call_ty = (decls: [Decl], a: Ptr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
+light_call_ty = (decls: [Decl], a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
     eq(c.fn, "cstr").match ({
         true  => tstr(),
         false => {
@@ -962,13 +962,13 @@ light_call_ty = (decls: [Decl], a: Ptr<Malloc>, c: CallData, env: Ptr<VList>) Ty
         }
     })
 }
-light_last_stmt_ty = (a: Ptr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl]) Ty {
+light_last_stmt_ty = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl]) Ty {
     stmts[stmts.len - 1].match ({ .ExprStmt(e) => e.light_ty(a, env, decls), .Return(r) => r.light_ty(a, env, decls), _ => tvoid() })
 }
-light_extend = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
+light_extend = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
     st.match ({ .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({ true => l.value.light_ty(a, env, decls), false => l.ty }), env), _ => env })
 }
-light_block_ty_from = (a: Ptr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], i: i32) Ty {
+light_block_ty_from = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], i: i32) Ty {
     (i >= stmts.len).match ({
         true  => tvoid(),
         false => (i == stmts.len - 1).match ({
@@ -977,17 +977,17 @@ light_block_ty_from = (a: Ptr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [D
         })
     })
 }
-light_block_ty = (a: Ptr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl]) Ty {
+light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl]) Ty {
     a.light_block_ty_from(b.stmts, env, decls, 0)
 }
-light_member_ty = (a: Ptr<Malloc>, decls: [Decl], obj: Ty, field: str) Ty {
+light_member_ty = (a: MutPtr<Malloc>, decls: [Decl], obj: Ty, field: str) Ty {
     obj.ty_under_ptr().match ({
         .Generic(g) => a.gen_struct_field(decls, g.name, field, g.args),
         .Slice(e)   => a.slice_member(field),
         _           => decls.struct_field(obj.enum_name(), field)
     })
 }
-light_ty = (e: Ptr<Expr>, a: Ptr<Malloc>, env: Ptr<VList>, decls: [Decl]) Ty {
+light_ty = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl]) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Block(b)      => a.light_block_ty(b, env, decls),
@@ -1021,83 +1021,83 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: str) Ty {
     pargs.loop((h, i, pa) { found = found.is_void_ty().match ({ true => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }), false => found }) })
     found
 }
-infer_one = (params: [Param], a: Ptr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     found := tvoid()
     params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(a, env, decls), tp), false => found }), false => found }) })
     found
 }
-infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: Ptr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
     arg := params.infer_one(a, cargs, tp, env, decls)
     arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
 }
-infer_targs = (a: Ptr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl]) [Ty] {
+infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl]) [Ty] {
     buf := a.tbuf(tparams.len)
     tparams.loop((h, i, tp) { buf[i] = params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls) })
     buf
 }
 // Substitute tparams in type-bearing expression/statement nodes.
-subst_targs = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
+subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
     buf := a.tbuf(xs.len)
     xs.loop((h, i, t) { buf[i] = a.subst_ty_in(tparams, targs, t) })
     buf
 }
-subst_genlit_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+subst_genlit_g = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
     nt := a.subst_targs(tparams, targs, m.targs)
     mkstructg(m.ty, a.mangle_str_in(m.ty, nt), nt, a.subst_inits(tparams, targs, m.inits))
 }
-subst_genlit = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+subst_genlit = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
     (m.targs.len > 0).match ({
         true  => a.subst_genlit_g(tparams, targs, m),
         false => mkstruct(m.ty, a.subst_inits(tparams, targs, m.inits))
     })
 }
-subst_inits = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] {
+subst_inits = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.subst_expr(tparams, targs, fi.value)) })
     buf
 }
-subst_exprs = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
+subst_exprs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
     buf := a.cebuf(xs.len)
     xs.loop((h, i, x) { buf[i] = load(a.subst_expr(tparams, targs, x.addr())) })
     buf
 }
-subst_arms = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
+subst_arms = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.subst_expr(tparams, targs, ar.body)) })
     buf
 }
-subst_match = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
+subst_match = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
     subj := a.subst_expr(tparams, targs, m.subj)
     arms := a.subst_arms(tparams, targs, m.arms)
     m.ptr.match ({ true => a.cenode(ematchp(subj, m.ename, arms)), false => a.cenode(ematch(subj, m.ename, arms)) })
 }
 // Substitute and remangle generic-enum ctors/tags inside template bodies.
-subst_mkenum = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Ptr<Expr> {
+subst_mkenum = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Ptr<Expr> {
     (etargs.len > 0).match ({
         true  => a.cenode(a.subst_mkenum_g(tparams, targs, ety, etargs, variant, p)),
         false => a.cenode(mkenum(ety, variant, p))
     })
 }
-subst_mkenum_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Expr {
+subst_mkenum_g = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Expr {
     nt := a.subst_targs(tparams, targs, etargs)
     mkenumg(ety, a.mangle_str_in(ety, nt), nt, variant, p)
 }
-subst_tag = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str) Ptr<Expr> {
+subst_tag = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str) Ptr<Expr> {
     (etargs.len > 0).match ({
         true  => a.cenode(a.subst_tag_g(tparams, targs, ety, etargs, variant)),
         false => a.cenode(mktag(ety, variant))
     })
 }
-subst_tag_g = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str) Expr {
+subst_tag_g = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ety: str, etargs: [Ty], variant: str) Expr {
     nt := a.subst_targs(tparams, targs, etargs)
     mktagg(ety, a.mangle_str_in(ety, nt), nt, variant)
 }
 // `sizeof(T)` uses the tparam name as a value; rewrite it to the concrete C type name.
-subst_tparam_var = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], v: VarData, e: Ptr<Expr>) Ptr<Expr> {
+subst_tparam_var = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], v: VarData, e: Ptr<Expr>) Ptr<Expr> {
     i := tparams.param_index(v.name)
     (i < 0).match ({ true => e, false => a.revar(v, a.ty_cname_in(targs[i])) })
 }
-subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
+subst_expr = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)       => a.subst_tparam_var(tparams, targs, v, e),
         .Bin(b)       => a.cenode(bin_at(b.op, a.subst_expr(tparams, targs, b.lhs), a.subst_expr(tparams, targs, b.rhs), b.pos)),
@@ -1116,7 +1116,7 @@ subst_expr = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<E
         _             => e
     })
 }
-subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
+subst_stmt = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slett(l.name, a.subst_ty_in(tparams, targs, l.ty), a.subst_expr(tparams, targs, l.value)),
         .Assign(x)   => sassign_at(a.subst_expr(tparams, targs, x.target), a.subst_expr(tparams, targs, x.value), x.pos),
@@ -1127,7 +1127,7 @@ subst_stmt = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
         .IndexSet(x) => sidxset_at(a.subst_expr(tparams, targs, x.seq), a.subst_expr(tparams, targs, x.idx), a.subst_ty_in(tparams, targs, x.elem), a.subst_expr(tparams, targs, x.value), x.pos)
     })
 }
-subst_body = (a: Ptr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
+subst_body = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
     body.loop((h, i, st) { buf[i] = a.subst_stmt(tparams, targs, st) })
     buf
@@ -1141,7 +1141,7 @@ is_inlining = (v: Ptr<VList>, name: str) bool {
         .VCons(c) => (eq(c.name, name) && c.ty.is_empty_named()).match ({ true => true, false => c.tail.is_inlining(name) })
     })
 }
-inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+inline_template = (a: MutPtr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     tf   := decls.the_func(name)
     ienv := a.vcons(name, tnamed(""), env)
     body := (tf.tparams.len > 0).match ({
@@ -1150,7 +1150,7 @@ inline_template = (a: Ptr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env:
     })
     a.blockify(a.xform_body(decls, body, tf.params, cargs, ienv, exp))
 }
-maybe_template = (a: Ptr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+maybe_template = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     decls.is_template_call(c.fn).match ({
         true  => env.is_inlining(c.fn).match ({
             true  => a.recall(c, c.fn, cargs),
@@ -1162,7 +1162,7 @@ maybe_template = (a: Ptr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env
         false => a.recall(c, c.fn, cargs)
     })
 }
-xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+xform_call = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     cargs := a.xform_args(decls, c.args, params, fargs, env)
     fi    := params.param_index(c.fn)
     (fi < 0).match ({
@@ -1173,7 +1173,7 @@ xform_call = (a: Ptr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs
         })
     })
 }
-xform_match = (a: Ptr<Malloc>, decls: [Decl], m: MatchData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+xform_match = (a: MutPtr<Malloc>, decls: [Decl], m: MatchData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     subj := a.xform_expr(decls, m.subj, params, fargs, env)
     st   := subj.light_ty(a, env, decls)
     arms := a.xform_arms(decls, st, m.ename, m.arms, params, fargs, env, exp)
@@ -1181,12 +1181,12 @@ xform_match = (a: Ptr<Malloc>, decls: [Decl], m: MatchData, params: [Param], far
     m.ptr.match ({ true => { out = a.cenode(ematchp(subj, m.ename, arms)) }, _ })
     out
 }
-xform_inits = (a: Ptr<Malloc>, decls: [Decl], inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
+xform_inits = (a: MutPtr<Malloc>, decls: [Decl], inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.xform_expr(decls, fi.value, params, fargs, env)) })
     buf
 }
-xform_lambda = (a: Ptr<Malloc>, decls: [Decl], lm: LambdaData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+xform_lambda = (a: MutPtr<Malloc>, decls: [Decl], lm: LambdaData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     ps := params
     xs := fargs
     lm.params.loop((h, i, p) {
@@ -1195,10 +1195,10 @@ xform_lambda = (a: Ptr<Malloc>, decls: [Decl], lm: LambdaData, params: [Param], 
     })
     a.cenode(lam(lm.params, a.xform_body(decls, lm.body, ps, xs, env, tvoid())))
 }
-xform_expr = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+xform_expr = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     a.xform_expr_exp(decls, e, params, fargs, env, tvoid())
 }
-xform_expr_exp = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     out := e
     load(e).match ({
         .Var(v)       => { out = a.subst_var(params, fargs, v.name, e) },
@@ -1226,7 +1226,7 @@ xform_expr_exp = (a: Ptr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], 
     })
     out
 }
-xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
+xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
     out := st
     st.match ({
         .Let(l)      => { out = slett(a.local_name_at(l.name, params.len), l.ty, a.xform_expr_exp(decls, l.value, params, fargs, env, l.ty)) },
@@ -1240,7 +1240,7 @@ xform_stmt = (a: Ptr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [
     out
 }
 // Thread local light types so generic call args can infer from Vars.
-xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], params: [Param]) Ptr<VList> {
+xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], params: [Param]) Ptr<VList> {
     out := env
     st.match ({ .Let(l) => {
         ty := l.ty
@@ -1249,17 +1249,17 @@ xform_let_ext = (a: Ptr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], param
     }, _ })
     out
 }
-xform_param_shadow = (a: Ptr<Malloc>, params: [Param], st: Stmt) [Param] {
+xform_param_shadow = (a: MutPtr<Malloc>, params: [Param], st: Stmt) [Param] {
     out := params
     st.match ({ .Let(l) => { out = a.add_subst_param(params, l.name) }, _ })
     out
 }
-xform_arg_shadow = (a: Ptr<Malloc>, args: [Expr], st: Stmt, params: [Param]) [Expr] {
+xform_arg_shadow = (a: MutPtr<Malloc>, args: [Expr], st: Stmt, params: [Param]) [Expr] {
     out := args
     st.match ({ .Let(l) => { out = a.add_subst_arg(args, a.local_name_at(l.name, params.len)) }, _ })
     out
 }
-xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
+xform_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
     buf := a.sbuf(body.len)
     e   := env
     ps  := params
@@ -1274,7 +1274,7 @@ xform_body = (a: Ptr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], farg
     })
     buf
 }
-inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
+inline_decl = (a: MutPtr<Malloc>, decls: [Decl], d: Decl) Decl {
     d.match ({
         .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args(), a.params_env(f.params), f.ret) )),
         _         => d
@@ -1282,12 +1282,12 @@ inline_decl = (a: Ptr<Malloc>, decls: [Decl], d: Decl) Decl {
 }
 
 // Trait default methods are materialized for impls that omit them.
-pbuf<A> = (a: MutPtr<A>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param) + sizeof(Param)), n) }
-tybuf1<A> = (a: MutPtr<A>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
-self_param<A> = (a: MutPtr<A>) [Param] { buf := a.pbuf(1)  buf[0] = param("Self", tvoid())  buf }
-self_arg<A> = (a: MutPtr<A>, tyname: str) [Ty] { buf := a.tybuf1()  buf[0] = tnamed(tyname)  buf }
+pbuf = (a: MutPtr<Malloc>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param) + sizeof(Param)), n) }
+tybuf1 = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
+self_param = (a: MutPtr<Malloc>) [Param] { buf := a.pbuf(1)  buf[0] = param("Self", tvoid())  buf }
+self_arg = (a: MutPtr<Malloc>, tyname: str) [Ty] { buf := a.tybuf1()  buf[0] = tnamed(tyname)  buf }
 // Specialize default Func to a concrete impl type.
-default_for_type = (a: Ptr<Malloc>, td: TraitDefData, tyname: str) Func {
+default_for_type = (a: MutPtr<Malloc>, td: TraitDefData, tyname: str) Func {
     sp := a.self_param()
     ag := a.self_arg(tyname)
     ps := a.pbuf(td.fn.params.len)
@@ -1317,7 +1317,7 @@ default_expansion_count = (decls: [Decl]) i64 {
         _ => {} }) }), _ => {} }) })
     n
 }
-emit_defaults_for = (a: Ptr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
+emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
     k := j
     decls.loop((h, i, d) { d.match ({
         .DImpl(im) => (eq(im.trname, td.trname) && (decls.def_provided(im.ty, td.trname, td.fn.name) == false)).match ({
@@ -1326,7 +1326,7 @@ emit_defaults_for = (a: Ptr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl
         _ => {} }) })
     k
 }
-expand_defaults = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
+expand_defaults = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     extra := decls.default_expansion_count()
     (extra == 0).match ({
         true  => decls,
@@ -1342,7 +1342,7 @@ expand_defaults = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
 // Resolve module: defaults, resolve, inline templates, then re-resolve concrete inline residue.
 // Lambdas splice bodies back into their caller, so that re-resolve can expose more template calls
 // such as captured generic receiver methods; run one more inline/resolve pass for that residue.
-resolve_module* = (a: Ptr<Malloc>, raw: [Decl]) [Decl] {
+resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     decls := a.expand_defaults(raw)
     buf := a.dbuf(decls.len)
     decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
