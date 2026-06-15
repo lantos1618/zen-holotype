@@ -142,25 +142,31 @@ finish_buf = (dst: RawPtr<u8>, n: i64) str {
     cstr(dst)
 }
 
-gstr_grow = (a: MutPtr<Malloc>, s: String, ncap: i64) String {
+// ── THE canonical String builder: allocator-explicit + generic over the allocator type, so a caller
+// passes whatever allocator it has (heap/arena/test). One implementation for the whole compiler — the
+// per-module emit_*/check_*/m* builders are thin aliases onto these. Safe to inline now that the
+// inliner namespaces inlined locals by their inline-marker chain (see check.inline_marks).
+gstr_string*<A> = (a: MutPtr<A>, cap: i64) String { String(ptr: a.acquire(cap), len: 0, cap: cap) }
+gstr_grow*<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
     String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
 }
-gstr_reserve = (a: MutPtr<Malloc>, s: String, need: i64) String {
+gstr_reserve*<A> = (a: MutPtr<A>, s: String, need: i64) String {
     out := s
     (s.len + need > s.cap).match ({ true => { out = a.gstr_grow(s, (s.cap + need) * 2) }, _ })
     out
 }
-gstr_push = (s: String, a: MutPtr<Malloc>, b: u8) String {
+gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
     r := a.gstr_reserve(s, 1)
     r.ptr.offset(r.len).store(b)
     String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
 }
-gstr_append = (s: String, a: MutPtr<Malloc>, t: str) String {
+gstr_append*<A> = (s: String, a: MutPtr<A>, t: str) String {
     cur := s
     bs: [u8] := t.view()
     bs.loop((h, i, b) { cur = cur.gstr_push(a, b) })
     cur
 }
+gstr_finish*<A> = (s: String, a: MutPtr<A>) str { cstr(s.gstr_push(a, 0).ptr) }
 
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`

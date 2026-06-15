@@ -2,7 +2,7 @@
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 
 { at, is_alpha, is_alnum } = std.text.bytes
-{ Decl } = compiler.genc
+{ Decl, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { decl_span, parse_module } = compiler.parse
 { check_linked, check_linked_kind } = compiler.check_validate
 // Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
@@ -382,29 +382,15 @@ copy_from = (out: String, a: MutPtr<Malloc>, src: String, i: i64) String {
     })
     cur
 }
-mstring = (a: MutPtr<Malloc>, cap: i64) String {
-    String(ptr: a.acquire(cap), len: 0, cap: cap)
-}
-mgrow = (a: MutPtr<Malloc>, s: String, ncap: i64) String {
-    String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
-}
-mreserve = (a: MutPtr<Malloc>, s: String, need: i64) String {
-    out := s
-    (s.len + need > s.cap).match ({ true => { out = a.mgrow(s, (s.cap + need) * 2) }, _ })
-    out
-}
-mpush = (a: MutPtr<Malloc>, s: String, b: u8) String {
-    r := a.mreserve(s, 1)
-    r.ptr.offset(r.len).store(b)
-    String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
-}
-mappend = (a: MutPtr<Malloc>, s: String, t: str) String {
-    cur := s
-    bs: [u8] := t.view()
-    bs.loop((h, i, b) { cur = a.mpush(cur, b) })
-    cur
-}
-mfinish = (a: MutPtr<Malloc>, s: String) str { cstr(a.mpush(s, 0).ptr) }
+// resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
+// gstr_* builder (one implementation for the whole compiler). The only difference is the arg
+// convention: m* take the allocator first (a.mpush(s, b)); gstr_* take the String first.
+mstring = (a: MutPtr<Malloc>, cap: i64) String { a.gstr_string(cap) }
+mgrow = (a: MutPtr<Malloc>, s: String, ncap: i64) String { a.gstr_grow(s, ncap) }
+mreserve = (a: MutPtr<Malloc>, s: String, need: i64) String { a.gstr_reserve(s, need) }
+mpush = (a: MutPtr<Malloc>, s: String, b: u8) String { s.gstr_push(a, b) }
+mappend = (a: MutPtr<Malloc>, s: String, t: str) String { s.gstr_append(a, t) }
+mfinish = (a: MutPtr<Malloc>, s: String) str { s.gstr_finish(a) }
 mappend_string = (a: MutPtr<Malloc>, out: String, src: String) String {
     cur := out
     bs: [u8] := src.bytes()

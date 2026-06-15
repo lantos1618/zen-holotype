@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -36,31 +36,6 @@ tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tbuf(1)
     buf[0] = t
     buf[0].addr()
-}
-check_string = (a: MutPtr<Malloc>, cap: i64) String {
-    String(ptr: a.acquire(cap), len: 0, cap: cap)
-}
-check_grow = (a: MutPtr<Malloc>, s: String, ncap: i64) String {
-    String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
-}
-check_reserve = (a: MutPtr<Malloc>, s: String, need: i64) String {
-    out := s
-    (s.len + need > s.cap).match ({ true => { out = a.check_grow(s, (s.cap + need) * 2) }, _ })
-    out
-}
-check_push = (s: String, a: MutPtr<Malloc>, b: u8) String {
-    r := a.check_reserve(s, 1)
-    r.ptr.offset(r.len).store(b)
-    String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
-}
-check_append = (s: String, a: MutPtr<Malloc>, t: str) String {
-    cur := s
-    bs: [u8] := t.view()
-    bs.loop((h, i, b) { cur = cur.check_push(a, b) })
-    cur
-}
-check_finish = (s: String, a: MutPtr<Malloc>) str {
-    cstr(s.check_push(a, 0).ptr)
 }
 
 vlbuf = (a: MutPtr<Malloc>) [VList] { slice(a.acquire(sizeof(VList)), 1) }
@@ -652,11 +627,11 @@ branch_stmts = (a: MutPtr<Malloc>, e: Ptr<Expr>) [Stmt] {
     out
 }
 tag_const* = (a: MutPtr<Malloc>, ename: str, variant: str) str {
-    s := a.check_string(64)
-    s = s.check_append(a, ename)
-    s = s.check_append(a, "_")
-    s = s.check_append(a, variant)
-    s.check_finish(a)
+    s := a.gstr_string(64)
+    s = s.gstr_append(a, ename)
+    s = s.gstr_append(a, "_")
+    s = s.gstr_append(a, variant)
+    s.gstr_finish(a)
 }
 subj_tag = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     out := a.cenode(member(subj, "tag"))
@@ -828,7 +803,7 @@ hide_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
     })
 }
 local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String {
-    (n <= 0).match ({ true => s, false => a.local_marks(s.check_append(a, "_"), n - 1) })
+    (n <= 0).match ({ true => s, false => a.local_marks(s.gstr_append(a, "_"), n - 1) })
 }
 // inline-expansion scope marks: the chain of functions currently being inlined (env's empty-named
 // markers, pushed by inline_template). Distinguishes locals from DIFFERENT inlined functions that
@@ -839,19 +814,19 @@ inline_marks = (a: MutPtr<Malloc>, s: String, env: Ptr<VList>) String {
     env.match ({
         .VNil     => s,
         .VCons(c) => c.ty.is_empty_named().match ({
-            true  => a.inline_marks(s.check_append(a, "_").check_append(a, c.name), c.tail),
+            true  => a.inline_marks(s.gstr_append(a, "_").gstr_append(a, c.name), c.tail),
             false => a.inline_marks(s, c.tail)
         })
     })
 }
 local_name_at = (a: MutPtr<Malloc>, name: str, env: Ptr<VList>, depth: i64) str {
-    s := a.check_string(128)
-    s = s.check_append(a, "__zen_local")
+    s := a.gstr_string(128)
+    s = s.gstr_append(a, "__zen_local")
     s = a.inline_marks(s, env)
     s = a.local_marks(s, depth)
-    s = s.check_append(a, "_")
-    s = s.check_append(a, name)
-    s.check_finish(a)
+    s = s.gstr_append(a, "_")
+    s = s.gstr_append(a, name)
+    s.gstr_finish(a)
 }
 add_subst_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
     base := a.hide_param(params, name)
