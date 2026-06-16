@@ -377,6 +377,15 @@ def test_zenc_check_resolves_std_import():
     assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
 
 
+def test_scope_colorless_sync_async():
+    """M3 capstone: ONE colorless body (`run`) runs under both a sync scope (with_sync) and an
+    async scope (spawned coroutine), producing the same 105 either way — checkpoint is a no-op
+    under SyncArena and a coroutine yield under AsyncArena. Exit 3 = sync(1) + async(2)."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "scope_colorless_sync_async.zen")
+    assert r.returncode == 3, r.stderr
+
+
 def test_zenc_project_manifest_build_run_check():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())

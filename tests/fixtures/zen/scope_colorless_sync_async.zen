@@ -1,0 +1,37 @@
+// M3 capstone: ONE colorless body `run` produces the same result under a sync scope and an
+// async scope. The only difference is which combinator opens the scope — checkpoint is a no-op
+// under SyncArena and a coroutine yield under AsyncArena. Exit 3 = sync(1) + async(2), both = 105.
+{ with_sync } = std.scope
+{ async_in } = std.concurrent.runtime
+{ spawn_in, Coro } = std.concurrent.coroutine
+{ default } = std.mem.alloc
+
+g_result := 0
+
+// THE colorless body — identical for sync and async. `s` is the scope (direct receiver).
+run = (s: MutPtr<S>) i32 {
+    p := s.acquire(8)
+    store_i64(p, 5)
+    s.checkpoint()                       // sync: no-op ; async: yields the coroutine
+    store_i64(p, load_i64(p) + 100)
+    to_i32(load_i64(p))
+}
+
+// async driver: run the SAME body under an AsyncArena, inside a coroutine, to completion.
+awork = () void {
+    h := default()
+    a := h.addr().async_in(4096)
+    g_result = run(a.addr())
+    a.addr().free(h.addr())
+}
+drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => {} }) }
+
+main = () i32 {
+    h := default()
+    sync_r := h.addr().with_sync(4096, run)   // sync path: same run, checkpoint no-ops
+    c := h.addr().spawn_in(awork)             // async path: same run, checkpoint yields
+    drive(c)
+    sb := (sync_r == 105).match ({ true => 1, false => 0 })
+    ab := (g_result == 105).match ({ true => 2, false => 0 })
+    sb + ab
+}

@@ -1,0 +1,28 @@
+// std.scope — region-scoped, colorless capability combinators.
+//
+// A "scope" is an arena carved from a backing allocator that is ALSO the execution mode
+// (SyncArena: checkpoint is a no-op; AsyncArena: checkpoint yields a coroutine). A colorless
+// body takes the scope as a direct receiver `MutPtr<S>` and calls s.acquire / s.checkpoint —
+// the SAME body runs under either, decided by which combinator opens it.
+//
+// Cleanup is the REGION: `with_sync`/`with_async` free the whole arena on exit, on every path,
+// so memory acquired in the body is released when the scope closes. (Per-resource onExit thunks
+// await first-class indirect calls; the arena-region drain needs none.)
+
+{ SyncArena, AsyncArena, sync_in, async_in, free_sync, free_async } = std.concurrent.runtime
+
+// open a SYNC scope over `backing`, run `body`, free the arena on exit.
+with_sync* = (backing: MutPtr<A>, cap: i64, body: (MutPtr<SyncArena>) R) R {
+    s := backing.sync_in(cap)
+    out := body(s.addr())
+    s.addr().free_sync(backing)
+    out
+}
+
+// open an ASYNC scope (checkpoint yields); same body shape, freed on exit.
+with_async* = (backing: MutPtr<A>, cap: i64, body: (MutPtr<AsyncArena>) R) R {
+    s := backing.async_in(cap)
+    out := body(s.addr())
+    s.addr().free_async(backing)
+    out
+}
