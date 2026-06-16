@@ -377,6 +377,14 @@ def test_zenc_check_resolves_std_import():
     assert subprocess.run([zenc, "check", str(d / "p.zen")]).returncode == 0
 
 
+def test_or_return_propagates_err():
+    """.or_return() (M4): keyword-free error propagation. `x := g().or_return()` yields the Ok payload
+    or early-returns the Err from the enclosing fn. Exit 61 = f(1)->Ok(6), f(0)->Err propagated."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "or_return.zen")
+    assert r.returncode == 61, r.stderr
+
+
 def test_scope_cancellation_signal_consumed():
     """Cancellation is a behavior, not just a type: a Scope's checkpoint budget runs out, checkpoint
     CONSTRUCTS .Stop(.Deadline), and the body MATCHES it and bails — exit 3 = ran 3 Go's then Stop."""

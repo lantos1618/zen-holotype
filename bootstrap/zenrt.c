@@ -8,6 +8,9 @@
 #define ZWEAK __attribute__((weak))
 ZWEAK bool eq(const char* a, const char* b){ return strcmp(a, b) == 0; }
 ZWEAK bool is_empty(const char* s){ return s[0] == 0; }
+/* mirror std.text.str.starts_with / ends_with (prefix/suffix byte tests over a str). */
+ZWEAK bool starts_with(const char* s, const char* prefix){ size_t pl = strlen(prefix); return strlen(s) >= pl && memcmp(s, prefix, pl) == 0; }
+ZWEAK bool ends_with(const char* s, const char* suffix){ size_t sl = strlen(s), fl = strlen(suffix); return sl >= fl && memcmp(s + (sl - fl), suffix, fl) == 0; }
 ZWEAK zslice bytes(String s){ zslice z; z.ptr = s.ptr; z.len = s.len; return z; }
 ZWEAK void* heap(int64_t n){ return malloc(n); }
 /* mirror the Zen bodies exactly:

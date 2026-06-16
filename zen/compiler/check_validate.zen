@@ -1,10 +1,10 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Env, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { at, is_alnum } = std.text.bytes
-{ eq, is_empty } = std.text.str
+{ eq, is_empty, starts_with, ends_with } = std.text.str
 
 // Local fn is known iff the_func finds it by name (sentinel name is "").
 is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
@@ -448,9 +448,28 @@ variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: str, name: str) 
     vs.loop((h, i, v) { found = eq(name, a.tag_const(ename, v.name)).match ({ true => true, false => found }) })
     found
 }
+// A lowered match over a GENERIC enum instance compares against `<mangled>_<variant>` — e.g.
+// `Result_i32_IoError_Err`. The concrete EnumDecl is created only at backend monomorphization, so the
+// validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
+// of its variant names (`Result_…` + `…_Err`). Keeps lowered generic-enum guards from false-rejecting.
+variant_affix = (a: MutPtr<Malloc>, lead: str, vn: str) str {
+    s := a.gstr_string(64)
+    s = s.gstr_append(a, lead)
+    s = s.gstr_append(a, vn)
+    s.gstr_finish(a)
+}
+gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: str, name: str) bool {
+    found := false
+    pre   := a.variant_affix(base, "_")
+    vs.loop((h, i, v) { found = (name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name))).match ({ true => true, false => found }) })
+    found
+}
 is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: str) bool {
     found := false
-    decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => ed.variants.variant_tags_has(a, ed.name, name).match ({ true => true, false => found }), _ => found }) })
+    decls.loop((h, i, d) { found = d.match ({
+        .DEnum(ed)    => ed.variants.variant_tags_has(a, ed.name, name).match ({ true => true, false => found }),
+        .DGenEnum(g)  => a.gen_tag_match(g.variants, g.name, name).match ({ true => true, false => found }),
+        _ => found }) })
     found
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {

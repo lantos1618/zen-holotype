@@ -800,21 +800,78 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     })
     out
 }
+// `x := recv.or_return()` is keyword-free error propagation: the Ok payload becomes x, while an Err
+// early-returns the receiver from the enclosing function. It lowers to a temp-bind + Err-guard +
+// Ok-payload bind (three statements), so one source statement expands into three resolved ones.
+is_or_return_call = (e: Ptr<Expr>) bool {
+    load(e).match ({ .Call(c) => eq(c.fn, "or_return") && (c.args.len == 1), _ => false })
+}
+let_is_or_return = (st: Stmt) bool {
+    st.match ({ .Let(l) => l.value.is_or_return_call(), _ => false })
+}
+stmt_out_span = (st: Stmt) i32 { st.let_is_or_return().match ({ true => 3, false => 1 }) }
+body_out_len = (body: [Stmt]) i32 {
+    n := 0
+    body.loop((h, i, st) { n = n + st.stmt_out_span() })
+    n
+}
+or_return_recv = (a: MutPtr<Malloc>, e: Ptr<Expr>) Ptr<Expr> {
+    out := e
+    load(e).match ({ .Call(c) => { out = c.args[0].addr() }, _ => {} })
+    out
+}
+or_temp_name = (a: MutPtr<Malloc>, name: str) str {
+    s := a.gstr_string(64)
+    s = s.gstr_append(a, "_orret_")
+    s = s.gstr_append(a, name)
+    s.gstr_finish(a)
+}
+lower_or_return_let = (a: MutPtr<Malloc>, env: Env, l: LetData) [Stmt] {
+    recv2 := a.resolve_expr(env.clr_exp(), a.or_return_recv(l.value))
+    t     := env.infer_expr(recv2)
+    en    := t.enum_name()
+    ptr   := t.ty_is_ptr()
+    tmp   := a.or_temp_name(l.name)
+    cnd   := a.cenode(bin("==", a.subj_tag(a.cenode(vref(tmp)), ptr), a.cenode(vref(a.tag_const(en, "Err")))))
+    buf   := a.sbuf(3)
+    buf[0] = slett(tmp, t, recv2)
+    buf[1] = sif(cnd, a.one_stmt(sret(a.cenode(vref(tmp)))), no_stmts())
+    buf[2] = slett(l.name, env.subj_variant_payload(t, "Ok"), a.subj_payload(a.cenode(vref(tmp)), "Ok", ptr))
+    buf
+}
+lower_or_return = (a: MutPtr<Malloc>, env: Env, st: Stmt) [Stmt] {
+    out := no_stmts()
+    st.match ({ .Let(l) => { out = a.lower_or_return_let(env, l) }, _ => {} })
+    out
+}
 // Resolve a statement sequence while threading let bindings.
 noop2 = () void { }
 resolve_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) [Stmt] {
-    buf := a.sbuf(body.len)
-    a.fill_stmts(env, body, buf, 0)
+    buf := a.sbuf(body.body_out_len())
+    a.fill_stmts(env, body, buf, 0, 0)
     buf
 }
-fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
-    (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i), false => noop2() })
+fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32) void {
+    (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i, o), false => noop2() })
 }
-fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32) void {
-    st       := body[i]
-    resolved := a.resolve_stmt(env, st, i == body.len - 1)
-    buf[i]   = resolved
-    a.fill_stmts(a.extend_env(env, resolved), body, buf, i + 1)
+fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32) void {
+    st := body[i]
+    st.let_is_or_return().match ({
+        true  => a.fill_or_return(env, body, buf, i, o),
+        false => {
+            resolved := a.resolve_stmt(env, st, i == body.len - 1)
+            buf[o]   = resolved
+            a.fill_stmts(a.extend_env(env, resolved), body, buf, i + 1, o + 1)
+        }
+    })
+}
+fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32) void {
+    stmts      := a.lower_or_return(env, body[i])
+    buf[o]     = stmts[0]
+    buf[o + 1] = stmts[1]
+    buf[o + 2] = stmts[2]
+    env2       := a.extend_env(a.extend_env(a.extend_env(env, stmts[0]), stmts[1]), stmts[2])
+    a.fill_stmts(env2, body, buf, i + 1, o + 3)
 }
 extend_env* = (a: MutPtr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
