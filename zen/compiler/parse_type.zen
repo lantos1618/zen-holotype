@@ -130,7 +130,7 @@ fill_tyargs = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd { 
     after := src.scan(te.next)                           // ',' or '>'
     src.is_comma(after.tok).match ({
         true  => a.fill_tyargs(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )  // '>'
+        false => PEnd( count: i + 1, next: src.gt_resume(after) )  // '>' (splits a nested '>>')
     })
 }
 parse_generic_ty = (a: MutPtr<Malloc>, src: str, nameTok: Scan, pos: i32) TyEnd {   // pos just past '<'
@@ -174,8 +174,8 @@ parse_slice_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just p
 parse_ptr_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
     lt    := src.scan(pos)                               // '<'
     inner := a.parse_ty(src, lt.next)                    // the pointee (recursive)
-    gt    := src.scan(inner.next)                        // '>'
-    TyEnd( ty: tptr(a.tynode(inner.ty)), next: gt.next )
+    gt    := src.scan(inner.next)                        // '>' (or a nested '>>')
+    TyEnd( ty: tptr(a.tynode(inner.ty)), next: src.gt_resume(gt) )
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
@@ -234,3 +234,9 @@ skip_block_d = (src: str, pos: i32, depth: i32) i32 {
 
 is_langle* = (src: str, t: Token) bool { src.is_op(t, '<') }
 is_rangle* = (src: str, t: Token) bool { src.is_op(t, '>') }
+// nested-generic close: a `>>` token (two '>' chars, lexed as one shift op) must close only ONE
+// generic level and leave the rest for the enclosing one. gt_resume consumes exactly one '>':
+// for a '>>' it resumes at the second '>' (tok.start+1, which re-lexes as '>' or another '>>');
+// for a lone '>' it resumes past it. Fixes `MutPtr<Scope<A>>`, `Vec<Vec<T>>`, etc.
+is_shr_close* = (src: str, t: Token) bool { (src.at(t.start) == '>') && (src.at(t.start + 1) == '>') }
+gt_resume* = (src: str, sc: Scan) i32 { src.is_shr_close(sc.tok).match ({ true => sc.tok.start + 1, false => sc.next }) }
