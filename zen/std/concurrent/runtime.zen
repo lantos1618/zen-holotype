@@ -4,8 +4,14 @@
 { Arena, new_in } = std.mem.arena
 { checkpoint_current } = std.concurrent.coroutine
 
+CancelReason*: Deadline | Parent | User
+Signal*: Go | Stop(CancelReason)
+
+// helper to yield a Go signal inside multi-statement bodies (dodges leading-dot statement glue)
+sig_go* = () Signal { .Go }
+
 Runtime*: {
-    checkpoint: (MutPtr<Self>) void
+    checkpoint: (MutPtr<Self>) Signal
 }
 
 SyncArena*: {
@@ -28,15 +34,15 @@ AsyncArena*: {
 }
 
 SyncArena.impl(Runtime, {
-    checkpoint = (s: MutPtr<SyncArena>) void {}
+    checkpoint = (s: MutPtr<SyncArena>) Signal { .Go }
 })
 
 Heap.impl(Runtime, {
-    checkpoint = (s: MutPtr<Heap>) void {}
+    checkpoint = (s: MutPtr<Heap>) Signal { .Go }
 })
 
 AsyncArena.impl(Runtime, {
-    checkpoint = (s: MutPtr<AsyncArena>) void { checkpoint_current() }
+    checkpoint = (s: MutPtr<AsyncArena>) Signal { checkpoint_current()  sig_go() }
 })
 
 runtime_checkpoint = () void { checkpoint_current() }
