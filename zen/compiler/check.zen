@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -232,6 +232,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),
+        .Arrow(ar)     => env.infer_arrow(ar),
         .MakeEnum(mk)  => env.mkenum_ty(mk),
         .Tag(t)        => env.tag_ty(t),
         .MakeStruct(s) => (s.targs.len > 0).match ({ true => tgeneric(s.ty, s.targs, s.mty), false => tnamed(s.ty) }),
@@ -381,14 +382,18 @@ slice_member = (a: MutPtr<Malloc>, field: str) Ty {
         false => eq(field, "ptr").match ({ true => tptr(a.tnode(tu8())), false => tvoid() })
     })
 }
-infer_member = (env: Env, m: MemberData) Ty {
-    oty := env.infer_expr(m.obj)
+// Field-type inference, auto-deref'd. Shared by `obj.field` (Member) and `obj->field` (Arrow); the
+// latter exists because resolve_member rewrites a pointer receiver to Arrow, and a later re-resolve
+// (e.g. dispatch on a generic-struct field receiver in an inlined template body) must re-infer it.
+infer_field = (env: Env, oty: Ty, field: str) Ty {
     oty.ty_under_ptr().match ({
-        .Generic(g) => env.a.gen_struct_field(env.decls, g.name, m.field, g.args),
-        .Slice(e)   => env.a.slice_member(m.field),
-        _           => env.decls.struct_field(oty.enum_name(), m.field)
+        .Generic(g) => env.a.gen_struct_field(env.decls, g.name, field, g.args),
+        .Slice(e)   => env.a.slice_member(field),
+        _           => env.decls.struct_field(oty.enum_name(), field)
     })
 }
+infer_member = (env: Env, m: MemberData) Ty { env.infer_field(env.infer_expr(m.obj), m.field) }
+infer_arrow = (env: Env, ar: ArrowData) Ty { env.infer_field(env.infer_expr(ar.obj), ar.field) }
 infer_arm_ty = (env: Env, subjty: Ty, ar: ArmData) Ty {
     env.a.arm_env(env, subjty, ar).infer_expr(ar.body)
 }
@@ -455,6 +460,56 @@ set_elem = (env: Env, existing: Ty, seq: Ptr<Expr>, value: Ptr<Expr>) Ty {
     e := env.keep_elem(existing, seq)
     e.is_void_ty().match ({ true => env.infer_expr(value), false => e })
 }
+// Generic struct constructor monomorphization. A literal `Scope<A>(alloc: x)` carries the type-param
+// `A` verbatim as its targ; infer the concrete arg from the field-init types so the instance mangles
+// to `Scope_SyncArena` and field reads/dispatch (`s.alloc.acquire`) resolve to the concrete impl.
+gstruct_of = (decls: [Decl], name: str) GenStructDecl {
+    found := GenStructDecl( name: "", tparams: slice(null_ptr(), 0), fields: slice(null_ptr(), 0) )
+    decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
+    found
+}
+has_tparam = (tparams: [Param], n: str) bool {
+    f := false
+    tparams.loop((h, i, tp) { f = eq(tp.name, n).match ({ true => true, false => f }) })
+    f
+}
+// A written targ that is just the struct's own type-param name (e.g. literal `A`) needs inference.
+is_placeholder_targ = (tparams: [Param], t: Ty) bool {
+    t.match ({ .Named(n) => tparams.has_tparam(n), _ => false })
+}
+init_field_ty = (env: Env, inits: [FieldInit], fname: str) Ty {
+    found := tvoid()
+    inits.loop((h, i, fi) { found = eq(fi.name, fname).match ({ true => env.infer_expr(fi.value), false => found }) })
+    found
+}
+// Unify each declared field type against its init's inferred type to recover one tparam's concrete arg.
+struct_targ_one = (env: Env, fields: [Field], inits: [FieldInit], tp: str) Ty {
+    found := tvoid()
+    fields.loop((h, i, f) { found = found.is_void_ty().match ({ true => f.ty.unify_ty(env.init_field_ty(inits, f.name), tp), false => found }) })
+    found
+}
+pick_targ = (inf: Ty, fallback: Ty) Ty { inf.is_void_ty().match ({ true => fallback, false => inf }) }
+infer_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, written: [Ty], inits: [FieldInit]) [Ty] {
+    buf := a.tbuf(written.len)
+    written.loop((h, i, t) {
+        buf[i] = ((i < gsd.tparams.len) && gsd.tparams.is_placeholder_targ(t)).match ({
+            true  => env.struct_targ_one(gsd.fields, inits, gsd.tparams[i].name).pick_targ(t),
+            false => t
+        })
+    })
+    buf
+}
+genlit_g = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
+    nt := a.infer_struct_targs(env, env.decls.gstruct_of(sd.ty), sd.targs, inits)
+    a.cenode(mkstructg(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits))
+}
+resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
+    inits := a.resolve_inits(env.clr_exp(), sd.inits)
+    (sd.targs.len > 0).match ({
+        true  => a.genlit_g(env, sd, inits),
+        false => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, inits))
+    })
+}
 // Rebuild expressions with resolved enum, constructor, member, and loop metadata.
 resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
@@ -465,7 +520,7 @@ resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Cond(c)      => a.cenode(cond(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e))),
         .Call(c)      => a.resolve_call(env, c),
         .Member(mm)   => a.resolve_member(env, mm),
-        .MakeStruct(sd) => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.resolve_inits(env.clr_exp(), sd.inits))),
+        .MakeStruct(sd) => a.resolve_genlit(env, sd),
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.keep_elem(ix.elem, ix.seq))),
         .Loop(l)      => a.resolve_loop(env, l),
         .SliceLit(sd) => a.resolve_slicelit(env, sd),

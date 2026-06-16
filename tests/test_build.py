@@ -386,6 +386,16 @@ def test_scope_colorless_sync_async():
     assert r.returncode == 3, r.stderr
 
 
+def test_scope_generic_field_dispatch():
+    """A1: trait dispatch through a nested-generic struct FIELD receiver across an inlined generic fn.
+    `Scope<A>(alloc: a.addr())` monomorphizes to Scope<SyncArena>, and the field receiver `s.alloc`
+    (an Arrow after pointer-receiver resolution) is re-inferred so `acquire`/`checkpoint` route to the
+    SyncArena impls rather than emitting bare unlinkable names. Exit 105."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "scope_generic_field_dispatch.zen")
+    assert r.returncode == 105, r.stderr
+
+
 def test_zenc_project_manifest_build_run_check():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())

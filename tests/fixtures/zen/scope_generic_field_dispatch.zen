@@ -1,0 +1,10 @@
+// A1: trait-method dispatch through a nested-generic struct field receiver, across an inlined
+// generic function. `run` is generic over `A`; its body dispatches `s.alloc.acquire`/`.checkpoint`
+// where `s.alloc` is a field of `Scope<A>`. Monomorphizing the `Scope<A>(alloc: a.addr())` literal
+// to `Scope<SyncArena>` and re-inferring the (Arrow) field receiver after inlining must route the
+// calls to impl_Allocator_SyncArena_acquire / impl_Runtime_SyncArena_checkpoint. Exit 105.
+{ sync } = std.concurrent.runtime
+{ default } = std.mem.alloc
+Scope<A>: { alloc: MutPtr<A> }
+run = (s: MutPtr<Scope<A>>) i64 { p := s.alloc.acquire(8)  store_i64(p, 5)  s.alloc.checkpoint()  store_i64(p, load_i64(p) + 100)  load_i64(p) }
+main = () i32 { h := default()  a := h.addr().sync(4096)  s := Scope<A>( alloc: a.addr() )  to_i32(run(s.addr())) }
