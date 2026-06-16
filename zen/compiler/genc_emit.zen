@@ -446,10 +446,14 @@ gen_func* = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     out
 }
 gen_func_body = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
-    out := s.gen_block(alloc, f.body)
+    // Use `s` EXACTLY ONCE: gen_block reallocs s's buffer (freeing the old pointer), so the previous
+    // form (out := s.gen_block(...); then for Void out = s.gen_block_void(...)) reused a freed `s`
+    // (heap-use-after-free) for every void function whose body grows the output buffer.
     rt: Ty := f.ret
-    rt.match ({ .Void => { out = s.gen_block_void(alloc, f.body) }, _ })
-    out
+    rt.match ({
+        .Void => s.gen_block_void(alloc, f.body),
+        _     => s.gen_block(alloc, f.body)
+    })
 }
 // a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
 gen_proto = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
