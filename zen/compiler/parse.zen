@@ -1,8 +1,8 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, lit, ti32, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, lit, ti32, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
-{ at } = std.text.bytes
+{ at, is_digit } = std.text.bytes
 { eq } = std.text.str
 { Malloc } = std.mem.alloc
 { parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
@@ -423,15 +423,165 @@ fill_import = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     eq   := src.scan(ie.next)
     a.fill_decls(src, src.skip_path(eq.next), buf, i + 1)
 }
+// ── implicit type parameters (M2): a free, short ALL-CAPS name (A, T, E, R, K, V, T1, …) used in a
+//    param / field / payload TYPE position introduces the type parameter, so the `<A>` declaration list
+//    becomes OPTIONAL (the existing explicit lists keep working untouched). Two gates make this safe:
+//    (1) the name matches the type-variable CONVENTION — a single upper letter, optionally one digit —
+//    so a real multi-letter type (Vec, Malloc, Strng, Scope) is never collected and a multi-letter typo
+//    still errors; (2) the name is NOT a type DECLARED or IMPORTED in this module — so a single-letter
+//    struct/enum name (`P*: {…}`, `R*: Ok|Err`) used as a param type is a real reference, not a tyvar.
+//    Both gates require the whole module, so this runs as a post-parse pass over the [Decl] list (not in
+//    the streaming parser). A collected param lands in the SAME tparams set an explicit `<A>` feeds, so
+//    is_generic_fn / mono / check treat implicit and explicit params identically. Collection is purely
+//    additive for explicit sites (their vars are already declared → found present → nothing added).
+is_upper_b = (b: u8) bool { (b >= 'A') && (b <= 'Z') }
+// A `str` is NUL-terminated, so we read bytes directly: a tyvar name is a single upper letter (`A`) or
+// an upper letter followed by exactly one digit (`T1`), and nothing more.
+is_tyvar_name = (s: str) bool {
+    s.at(0).is_upper_b().match ({
+        false => false,
+        true  => (s.at(1) == 0).match ({
+            true  => true,
+            false => s.at(1).is_digit() && (s.at(2) == 0)
+        })
+    })
+}
+tv_seen = (buf: [Param], cnt: i32, name: str) bool {
+    found := false
+    buf.loop((h, i, p) { found = (i < cnt).match ({ true => (found || eq(p.name, name)), false => found }) })
+    found
+}
+// types = the module's declared/imported type names (the exclusion set). A name is collected only when
+// it looks like a tyvar AND names no declared/imported type AND is not already in the tparam buffer.
+add_tv = (buf: [Param], types: [Param], cnt: i32, name: str) i32 {
+    (name.is_tyvar_name() && (types.param_names_has(name).match ({ true => false, false => true })) && (buf.tv_seen(cnt, name).match ({ true => false, false => true })) && (cnt < buf.len)).match ({
+        true  => { buf[cnt] = param(name, tvoid())  cnt + 1 },
+        false => cnt
+    })
+}
+collect_tv_ty = (buf: [Param], types: [Param], cnt: i32, t: Ty) i32 {
+    t.match ({
+        .Named(n)   => buf.add_tv(types, cnt, n),
+        .Ptr(p)     => buf.collect_tv_ty(types, cnt, load(p)),
+        .Slice(e)   => buf.collect_tv_ty(types, cnt, load(e)),
+        .Generic(g) => buf.collect_tv_tys(types, cnt, g.args),
+        .FnT(fd)    => buf.collect_tv_ty(types, buf.collect_tv_tys(types, cnt, fd.params), load(fd.ret)),
+        _           => cnt
+    })
+}
+collect_tv_tys = (buf: [Param], types: [Param], cnt: i32, ts: [Ty]) i32 {
+    c := cnt
+    ts.loop((h, i, t) { c = buf.collect_tv_ty(types, c, t) })
+    c
+}
+collect_tv_params = (buf: [Param], types: [Param], cnt: i32, ps: [Param]) i32 {
+    c := cnt
+    ps.loop((h, i, p) { c = buf.collect_tv_ty(types, c, p.ty) })
+    c
+}
+collect_tv_fields = (buf: [Param], types: [Param], cnt: i32, fields: [Field]) i32 {
+    c := cnt
+    fields.loop((h, i, f) { c = f.field_is_method().match ({ true => c, false => buf.collect_tv_ty(types, c, f.ty) }) })
+    c
+}
+collect_tv_variants = (buf: [Param], types: [Param], cnt: i32, vs: [VariantDef]) i32 {
+    c := cnt
+    vs.loop((h, i, v) { c = buf.collect_tv_ty(types, c, v.payload) })
+    c
+}
+copy_tparams = (buf: [Param], tparams: [Param]) i32 {
+    n := 0
+    tparams.loop((h, i, p) { buf[n] = p  n = n + 1 })
+    n
+}
+// the exclusion set: every type a module declares or imports, by name.
+tv_add_name = (buf: [Param], cnt: i32, name: str) i32 {
+    (cnt < buf.len).match ({ true => { buf[cnt] = param(name, tvoid())  cnt + 1 }, false => cnt })
+}
+tv_add_names = (buf: [Param], cnt: i32, names: [Param]) i32 {
+    c := cnt
+    names.loop((h, i, p) { c = buf.tv_add_name(c, p.name) })
+    c
+}
+collect_decltype = (buf: [Param], cnt: i32, d: Decl) i32 {
+    d.match ({
+        .DStruct(sd)   => buf.tv_add_name(cnt, sd.name),
+        .DEnum(ed)     => buf.tv_add_name(cnt, ed.name),
+        .DGenStruct(g) => buf.tv_add_name(cnt, g.name),
+        .DGenEnum(g)   => buf.tv_add_name(cnt, g.name),
+        .DImport(im)   => buf.tv_add_names(cnt, im.names),
+        _              => cnt
+    })
+}
+decltype_buf = (a: MutPtr<Malloc>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param)), n) }
+collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
+    buf := a.decltype_buf(decls.len + 8)
+    n := 0
+    decls.loop((h, i, d) { n = buf.collect_decltype(n, d) })
+    buf.take_params(n)
+}
+augment_func = (a: MutPtr<Malloc>, types: [Param], f: Func) Func {
+    buf := a.param_buf()
+    n0  := buf.copy_tparams(f.tparams)
+    n1  := buf.collect_tv_params(types, n0, f.params)
+    n2  := buf.collect_tv_ty(types, n1, f.ret)
+    Func( name: f.name, params: f.params, ret: f.ret, tparams: buf.take_params(n2), body: f.body )
+}
+augment_dstruct = (a: MutPtr<Malloc>, types: [Param], sd: StructDecl) Decl {
+    buf := a.param_buf()
+    n   := buf.collect_tv_fields(types, 0, sd.fields)
+    (n > 0).match ({
+        true  => dgenstruct(gsdef(sd.name, buf.take_params(n), sd.fields)),
+        false => dstruct(sd)
+    })
+}
+augment_dgenstruct = (a: MutPtr<Malloc>, types: [Param], g: GenStructDecl) Decl {
+    buf := a.param_buf()
+    n0  := buf.copy_tparams(g.tparams)
+    n1  := buf.collect_tv_fields(types, n0, g.fields)
+    dgenstruct(gsdef(g.name, buf.take_params(n1), g.fields))
+}
+augment_denum = (a: MutPtr<Malloc>, types: [Param], ed: EnumDecl) Decl {
+    buf := a.param_buf()
+    n   := buf.collect_tv_variants(types, 0, ed.variants)
+    (n > 0).match ({
+        true  => dgenenum(genumdef(ed.name, buf.take_params(n), ed.variants)),
+        false => denum(ed)
+    })
+}
+augment_dgenenum = (a: MutPtr<Malloc>, types: [Param], g: GenEnumDecl) Decl {
+    buf := a.param_buf()
+    n0  := buf.copy_tparams(g.tparams)
+    n1  := buf.collect_tv_variants(types, n0, g.variants)
+    dgenenum(genumdef(g.name, buf.take_params(n1), g.variants))
+}
+rewrite_decl = (a: MutPtr<Malloc>, types: [Param], d: Decl) Decl {
+    d.match ({
+        .DFunc(f)      => dfunc(a.augment_func(types, f)),
+        .DForeign(f)   => dforeign(a.augment_func(types, f)),
+        .DStruct(sd)   => a.augment_dstruct(types, sd),
+        .DGenStruct(g) => a.augment_dgenstruct(types, g),
+        .DEnum(ed)     => a.augment_denum(types, ed),
+        .DGenEnum(g)   => a.augment_dgenenum(types, g),
+        _              => d
+    })
+}
+implicit_tparams = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
+    types := a.collect_decltypes(decls)
+    decls.loop((h, i, d) { decls[i] = a.rewrite_decl(types, d) })
+    decls
+}
+
 parse_module* = (a: MutPtr<Malloc>, src: str) [Decl] {
     perr_reset()
     lerr_reset()
     buf := a.decl_buf()
     n   := a.fill_decls(src, 0, buf, 0)
-    (perr_get() || lerr_get()).match ({
+    decls := (perr_get() || lerr_get()).match ({
         true  => a.prepend_syntax_error(buf, n),
         false => buf.take_decls(n)
     })
+    a.implicit_tparams(decls)
 }
 // Parser totality: any parse/lex failure plants a leading syntax sentinel.
 prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
