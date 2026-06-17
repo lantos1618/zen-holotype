@@ -225,12 +225,24 @@ is_loop_at = (src: str, pos: i32) bool {
     dot := src.scan(pos)
     src.is_dot(dot.tok).match ({ true => src.is_loop_kw(src.scan(dot.next).tok), false => false })
 }
+// A statement-leading enum constructor `.Ok(x)` after a COMPLETED expression is a NEW statement,
+// not a `.field` chain continuation: Zen has no semicolons, so `g + 1  .Ok(g)` is two statements.
+// Methods/fields are lowercase, so a `.` followed by an UPPERCASE name is never a real field access
+// — it is either a qualified ctor `Type.Variant` (base is an Uppercase type-name Var, handled by
+// parse_field/is_qual_ctor) or a leading-dot ctor. Only the latter BREAKS the chain: an Uppercase
+// `.Name` whose base is NOT an Uppercase type-name Var ends the previous expression. (Mirrors the
+// same-line guard is_index_at uses to stop `[…]` slice-literal statements gluing onto a statement.)
+is_variant_break = (src: str, base: PExpr, pos: i32) bool {
+    dot := src.scan(pos)
+    fld := src.scan(dot.next)
+    is_upper_byte(src.at(fld.tok.start)) && !is_upper_byte(subj_name(base.expr).at(0))
+}
 parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
     src.is_match_at(base.next).match ({
         true  => a.parse_match(src, base),
         false => src.is_loop_at(base.next).match ({
             true  => a.parse_loop(src, base),
-            false => src.is_field_at(base.next).match ({
+            false => (src.is_field_at(base.next) && !src.is_variant_break(base, base.next)).match ({
                 true  => a.parse_field(src, base),
                 false => src.is_index_at(base.next).match ({
                     true  => a.parse_index(src, base),
