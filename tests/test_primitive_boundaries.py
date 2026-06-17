@@ -21,6 +21,9 @@ RAW_ALLOC_ALLOWED = {
     Path("zen/std/mem/alloc.zen"),
     Path("zen/std/mem/raw.zen"),
     Path("zen/compiler/genc.zen"),
+    # genc_emit emits malloc/memcpy as the LOWERING of a heap-promoted slice literal (codegen text,
+    # not a call) — same codegen category as genc.zen, which is already allow-listed.
+    Path("zen/compiler/genc_emit.zen"),
 }
 
 EXAMPLE_PRIMITIVES = {

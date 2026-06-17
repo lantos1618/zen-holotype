@@ -38,7 +38,12 @@ try_malloc* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(malloc(n)) }
 try_realloc* = (p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(realloc(p, n)) }
 
 try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
-    ok_ptr(a.acquire(n))
+    // A 0-byte request is an empty success, not OOM: acquire(0) returns null by design, and
+    // ok_ptr would mis-map that null to .Err. Short-circuit before reaching ok_ptr.
+    (n <= 0).match ({
+        true  => .Ok(null_ptr()),
+        false => ok_ptr(a.acquire(n))
+    })
 }
 
 try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
