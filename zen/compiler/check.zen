@@ -774,7 +774,11 @@ store_local_ty = (t: Ty) Ty {
 resolve_let = (a: MutPtr<Malloc>, env: Env, l: LetData) Stmt {
     v := a.resolve_expr(env.let_exp(l.ty), l.value)
     ty := l.ty.is_void_ty().match ({
-        true  => env.infer_expr(v).store_local_ty(),
+        // Infer the stored type under the SAME cleared expected-type the value was resolved with: an
+        // unannotated let has no target type, so the enclosing function's `exp` must not leak in. Else a
+        // generic call whose return is a bare tparam (`with_sync … R`) unifies R against that stray exp
+        // (e.g. main's i32) and the let is mistyped — value Result, type i32.
+        true  => env.clr_exp().infer_expr(v).store_local_ty(),
         false => l.ty
     })
     slett(l.name, ty, v)
