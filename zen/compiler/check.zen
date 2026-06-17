@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -69,9 +69,20 @@ global_ty = (env: Env, name: str) Ty {
     env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_global_init(g.name, g.init), false => found }), _ => found }) })
     found
 }
+// a bare reference to a top-level function NAME is a first-class function value: its type is the
+// function's FnT signature (its params + ret). This lets `f := some_fn` bind `f` to a fn value and
+// `f()` call through it (an indirect call). Falls back after locals + globals so a same-named local wins.
+fn_value_ty = (env: Env, name: str) Ty {
+    f := env.decls.the_func(name)
+    eq(f.name, name).match ({ true => env.a.fnt_from_func_in(f), false => tvoid() })
+}
+global_or_fn = (env: Env, name: str) Ty {
+    g := env.global_ty(name)
+    g.is_void_ty().match ({ true => env.fn_value_ty(name), false => g })
+}
 var_or_global* = (env: Env, name: str) Ty {
     lv := env.vars.lookup_var(name)
-    lv.is_void_ty().match ({ true => env.global_ty(name), false => lv })
+    lv.is_void_ty().match ({ true => env.global_or_fn(name), false => lv })
 }
 var_ty = (env: Env, name: str) Ty {
     (eq(name, "true") || eq(name, "false")).match ({
@@ -967,6 +978,10 @@ subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr
     idx := params.param_index(name)
     (idx < 0).match ({ true => e, false => args[idx].addr() })
 }
+// the C name a substituted arg carries: a Var holds the (renamed) local it stands for, so an
+// indirect call `f()` through a renamed local let recovers `f`'s renamed C name. Falls back to the
+// original callee name when the substituted arg isn't a plain Var.
+callee_subst_name = (e: Expr, fallback: str) str { e.match ({ .Var(v) => v.name, _ => fallback }) }
 // Inline body as block expression: trailing return becomes the result expression.
 ret_to_expr = (st: Stmt) Stmt { st.match ({ .Return(e) => sexpr(e), _ => st }) }
 block_of = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
@@ -1275,7 +1290,9 @@ xform_call = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, params: [Param], fa
         true  => a.maybe_template(decls, c, cargs, env, exp),
         false => params[fi].ty.is_fnt().match ({
             true  => a.inline_lambda(decls, fargs[fi], cargs, env),
-            false => a.maybe_template(decls, c, cargs, env, exp)
+            // an indirect call through a renamed local (a fn-value let): the substituted arg is the
+            // renamed local's Var, so recall through its renamed C name (not the stale original).
+            false => a.recall(c, fargs[fi].callee_subst_name(c.fn), cargs)
         })
     })
 }
