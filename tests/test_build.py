@@ -473,6 +473,60 @@ def test_zenc_project_manifest_fixture_build_run_check():
     assert exe.stdout == "fixture project\n"
 
 
+def test_zenc_project_manifest_link_directive_links_c_library():
+    """M6 (build graph): a `link = "m"` manifest directive adds `-l<lib>` to the cc link line, so a
+    program that calls a libm symbol links + runs. We use Bessel `j0` (gcc has no const-folding path
+    once its argument is an opaque cross-TU value), fed by a native `zen_seed()` returning 1.5;
+    j0(1.5)*100 truncates to 51. Without the directive the libm symbol is unresolved and the build
+    fails with no binary — proving the `link` field is load-bearing, not cosmetic."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "src"
+    src.mkdir()
+    native = d / "native.c"
+    native.write_text('#include <stdint.h>\ndouble zen_seed(void){ return 1.5; }\n')
+    (src / "main.zen").write_text(
+        "{ println } = std.text.fmt\n"
+        "j0 = (x: f64) f64\n"
+        "zen_seed = () f64\n"
+        "main = () i32 {\n"
+        '    println("link libm")\n'
+        "    to_i32(j0(zen_seed()) * 100.0)\n"
+        "}\n"
+    )
+
+    def write_manifest(out_name, with_link):
+        link_line = 'link = "m"\n' if with_link else ""
+        (d / "zen.toml").write_text(
+            'package = "linklib-demo"\n'
+            'root = "src"\n'
+            'main = "main.zen"\n'
+            f'out = "{out_name}"\n'
+            + link_line
+            + f'ccflags = "{native}"\n'
+        )
+
+    # with `link = "m"`: the libm symbol resolves -> builds, runs, exits 51.
+    write_manifest("linklib-bin", with_link=True)
+    built = subprocess.run([zenc, "build", str(d)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    out = d / "linklib-bin"
+    assert out.exists()
+    exe = subprocess.run([str(out)], capture_output=True, text=True)
+    assert exe.returncode == 51, exe.stderr
+    assert exe.stdout == "link libm\n"
+
+    run = subprocess.run([zenc, "run", str(d)], capture_output=True, text=True)
+    assert run.returncode == 51, run.stderr
+    assert run.stdout == "link libm\n"
+
+    # drop the directive: j0 is now unresolved at link time -> clean build failure, no binary.
+    write_manifest("linklib-bin-nolink", with_link=False)
+    nolink = subprocess.run([zenc, "build", str(d)], capture_output=True, text=True)
+    assert nolink.returncode != 0, "the `link` directive should be load-bearing"
+    assert not (d / "linklib-bin-nolink").exists()
+
+
 def test_type_import_keeps_actor_methods_available():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())

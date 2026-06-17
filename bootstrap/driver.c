@@ -472,6 +472,7 @@ typedef struct {
     char* source;
     char* out;
     char* ccflags;
+    char* links;   /* M6: `-l<lib>` flags built from the manifest's `link = "lib1 lib2"` directive */
 } ProjectSpec;
 
 static int path_is_dir(const char* path){
@@ -483,6 +484,25 @@ static char* manifest_value(Malloc* a, const char* src, size_t len, const char* 
     MfSpan sp = manifest_value_span(src, (int32_t)len, key, 0);
     if (sp.start < 0) return NULL;
     return dup_range(a, src, (size_t)sp.start, (size_t)(sp.start + sp.len));
+}
+
+/* M6: turn a whitespace-separated library list ("m" or "m pthread") into cc `-l` flags
+ * ("-lm " / "-lm -lpthread "). Returns NULL when there is nothing to link. */
+static char* link_flags(Malloc* a, const char* libs){
+    if (!libs) return NULL;
+    size_t n = strlen(libs);
+    char* out = driver_alloc(a, n * 4 + 1);  /* each char -> at most "-l", char, " " */
+    size_t o = 0, i = 0;
+    while (libs[i]){
+        while (libs[i] == ' ' || libs[i] == '\t') i++;
+        if (!libs[i]) break;
+        out[o++] = '-'; out[o++] = 'l';
+        while (libs[i] && libs[i] != ' ' && libs[i] != '\t') out[o++] = libs[i++];
+        out[o++] = ' ';
+    }
+    out[o] = 0;
+    if (o == 0){ driver_release(a, out); return NULL; }
+    return out;
 }
 
 static ProjectSpec project_spec(Malloc* a, const char* project_dir){
@@ -497,6 +517,7 @@ static ProjectSpec project_spec(Malloc* a, const char* project_dir){
     char* main = manifest_value(a, src, len, "main");
     char* out = manifest_value(a, src, len, "out");
     char* ccflags = manifest_value(a, src, len, "ccflags");
+    char* link = manifest_value(a, src, len, "link");
     if (!package || !root || !main){
         fprintf(stderr, "zenc: %s: missing required package/root/main entries\n", manifest_path);
     } else {
@@ -504,6 +525,7 @@ static ProjectSpec project_spec(Malloc* a, const char* project_dir){
         spec.source = join_root_path(a, root_path, main);
         spec.out = out ? join_root_path(a, project_dir, out) : NULL;
         spec.ccflags = ccflags ? dup_cstr(a, ccflags) : NULL;
+        spec.links = link_flags(a, link);
         driver_release(a, root_path);
     }
 
@@ -512,6 +534,7 @@ static ProjectSpec project_spec(Malloc* a, const char* project_dir){
     driver_release(a, main);
     driver_release(a, out);
     driver_release(a, ccflags);
+    driver_release(a, link);
     driver_release(a, src);
     driver_release(a, manifest_path);
     return spec;
@@ -524,7 +547,7 @@ static ProjectSpec input_spec(Malloc* a, const char* in_path){
     return spec;
 }
 
-static int build_program(const char* argv0, const char* in_path, const char* out_path, const char* ccflags, int run){
+static int build_program(const char* argv0, const char* in_path, const char* out_path, const char* ccflags, const char* links, int run){
     Malloc m = { 0 };
     size_t len = 0;
     char* buf = slurp(&m, in_path, &len);
@@ -564,8 +587,8 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     if (run){ snprintf(binpath, sizeof binpath, "/tmp/zenc_run_%d", (int)getpid()); out_path = binpath; }
 
     char cmd[8192];
-    snprintf(cmd, sizeof cmd, "cc -std=gnu11 -w -I%s/bootstrap %s %s %s/bootstrap/zenrt.c -o %s",
-             dir, ccflags ? ccflags : "", cpath, dir, out_path);
+    snprintf(cmd, sizeof cmd, "cc -std=gnu11 -w -I%s/bootstrap %s %s %s/bootstrap/zenrt.c -o %s %s",
+             dir, ccflags ? ccflags : "", cpath, dir, out_path, links ? links : "");
     int rc = system(cmd);
     unlink(cpath);
     if (rc != 0){ fprintf(stderr, "zenc: cc failed to link %s\n", in_path); return 1; }
@@ -583,10 +606,11 @@ static int build_input(const char* argv0, const char* in_path, const char* out_p
     if (!spec.source) return 1;
     const char* final_out = out_path;
     if (!run && !final_out) final_out = spec.out ? spec.out : "a.out";
-    int rc = build_program(argv0, spec.source, final_out, spec.ccflags, run);
+    int rc = build_program(argv0, spec.source, final_out, spec.ccflags, spec.links, run);
     driver_release(&m, spec.source);
     driver_release(&m, spec.out);
     driver_release(&m, spec.ccflags);
+    driver_release(&m, spec.links);
     return rc;
 }
 
@@ -618,6 +642,7 @@ static int check_input(const char* argv0, const char* in_path){
     driver_release(&m, spec.source);
     driver_release(&m, spec.out);
     driver_release(&m, spec.ccflags);
+    driver_release(&m, spec.links);
     return rc;
 }
 
