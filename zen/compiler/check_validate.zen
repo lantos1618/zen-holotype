@@ -1385,3 +1385,161 @@ check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     rfile.loop((h, i, d) { world[hdr.len + i] = d })
     a.check_module(world)
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// ── M5: LEXICAL SCOPE-ESCAPE CHECK ──────────────────────────────────────────────────────
+// A parameter `s: MutPtr<Scope<…>>` is a SCOPE RECEIVER. Memory it hands out via `s.acquire(…)`
+// lives in the scope's arena, which `with_sync`/`with_async` FREE on exit — so RETURNING such a
+// pointer (or a local bound to it) past the scope compiles a use-after-free. Scopes are lexical, so a
+// lexical rule suffices: collect the scope-receiver params, track locals bound to a scope-derived
+// pointer (`p := s.acquire(…)` / `p := s.alloc.acquire(…)` / `p := s.alloc`), and REJECT a
+// `return <that>` / a trailing `<that>` where `<that>` is such a local OR a direct `s.acquire(…)`.
+// The direct form deliberately excludes Scope's own `s.alloc.acquire(n)` accessor (its receiver is the
+// `.alloc` field, not the scope var), so std.scope's primitives are never false-rejected.
+KESCAPE = () i32 { 16 }   // (own field code, NOT 4-bit packed: reported via its own diagnostic, never kv_at)
+
+is_scope_param_ty = (t: Ty) bool {
+    t.match ({ .Ptr(p) => load(p).match ({ .Generic(g) => eq(g.name, "Scope"), _ => false }), _ => false })
+}
+scope_params = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
+    out := a.dead_nil()
+    params.loop((h, i, p) { p.ty.is_scope_param_ty().match ({ true => { out = a.dead_cons(p.name, out) }, false => {} }) })
+    out
+}
+// the root Var name of a member/arrow chain (`s.alloc` -> "s"); "" if not rooted at a plain Var.
+expr_root_var = (e: Ptr<Expr>) str {
+    load(e).match ({
+        .Var(v)    => v.name,
+        .Member(m) => m.obj.expr_root_var(),
+        .Arrow(ar) => ar.obj.expr_root_var(),
+        _          => ""
+    })
+}
+// a call `acquire(recv, …)` whose receiver chain is rooted at a scope var (covers `s.acquire` and
+// `s.alloc.acquire`). Used only to MARK a local binding as scope-derived (returning the local is the
+// hazard; Scope.acquire itself never binds a local).
+is_scope_acquire = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c) => (eq(c.fn, "acquire") && (c.args.len > 0)).match ({
+            true  => svars.dead_has(c.args[0].addr().expr_root_var()),
+            false => false
+        }),
+        _ => false
+    })
+}
+// the DIRECT hazard `s.acquire(…)`: a UFCS acquire whose FIRST ARG IS the scope var itself (a bare
+// Var), NOT `s.alloc.acquire(…)` (whose first arg is the `.alloc` member — Scope's legit accessor).
+is_direct_scope_acquire = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c) => (eq(c.fn, "acquire") && (c.args.len > 0)).match ({
+            true  => c.args[0].match ({ .Var(v) => svars.dead_has(v.name), _ => false }),
+            false => false
+        }),
+        _ => false
+    })
+}
+// `s.alloc` — the raw allocator field of a scope var (also escapes the scope if returned).
+is_scope_alloc_member = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Member(m) => eq(m.field, "alloc") && svars.dead_has(m.obj.expr_root_var()),
+        _ => false
+    })
+}
+let_is_scope_derived = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    svars.is_scope_acquire(e) || svars.is_scope_alloc_member(e)
+}
+// does returning `e` let a scope value escape? a direct `s.acquire(…)`, or a bare local we marked.
+expr_escapes = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    svars.is_direct_scope_acquire(e).match ({
+        true  => true,
+        false => load(e).match ({ .Var(v) => derived.dead_has(v.name), _ => false })
+    })
+}
+// thread the derived-local set across a `let`.
+escape_step = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    out := derived
+    st.match ({
+        .Let(l) => svars.let_is_scope_derived(l.value).match ({ true => { out = a.dead_cons(l.name, derived) }, false => {} }),
+        _       => {}
+    })
+    out
+}
+escape_stmt_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Return(r) => svars.expr_escapes(derived, r).match ({ true => 1, false => 0 }),
+        .If(f)     => a.escape_body_err(svars, derived, f.then) + a.escape_body_err(svars, derived, f.els),
+        .While(w)  => a.escape_body_err(svars, derived, w.body),
+        _          => 0
+    })
+}
+// a trailing value-expression that escapes counts once (returns are handled in escape_stmt_err).
+escape_trailing_err = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({ .ExprStmt(e) => svars.expr_escapes(derived, e).match ({ true => 1, false => 0 }), _ => 0 })
+}
+escape_body_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    d   := derived
+    body.loop((h, i, st) {
+        acc = acc + a.escape_stmt_err(svars, d, st)
+        d   = a.escape_step(svars, d, st)
+    })
+    acc + (body.len == 0).match ({ true => 0, false => escape_trailing_err(svars, d, body[body.len - 1]) })
+}
+escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
+    svars := a.scope_params(f.params)
+    svars.match ({ .DeadNil => 0, .DeadCons(c) => a.escape_body_err(svars, a.dead_nil(), f.body) })
+}
+check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.escape_check_func(f), _ => 0 }) })
+    acc
+}
+
+// kind/position pass: the source offset of the FIRST escaping return/trailing (0 = none).
+kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Return(r) => svars.expr_escapes(derived, r).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
+        .If(f)     => a.kv_escape_body(svars, derived, f.then).kv_kor(a.kv_escape_body(svars, derived, f.els)),
+        .While(w)  => a.kv_escape_body(svars, derived, w.body),
+        _          => 0
+    })
+}
+kv_escape_trailing = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({ .ExprStmt(e) => svars.expr_escapes(derived, e).match ({ true => load(e).expr_pos().pos_or(1), false => 0 }), _ => 0 })
+}
+kv_escape_body = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    d   := derived
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.kv_escape_stmt(svars, d, st))
+        d   = a.escape_step(svars, d, st)
+    })
+    acc.kv_kor((body.len == 0).match ({ true => 0, false => kv_escape_trailing(svars, d, body[body.len - 1]) }))
+}
+kv_escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
+    svars := a.scope_params(f.params)
+    svars.match ({ .DeadNil => 0, .DeadCons(c) => a.kv_escape_body(svars, a.dead_nil(), f.body) })
+}
+check_module_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_escape_check_func(f), _ => 0 })) })
+    acc
+}
+check_module_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    n := a.check_module_escape(decls)
+    (n == 0).match ({
+        true  => check_diagnostic_none(),
+        false => {
+            pos := a.check_module_escape_kind(decls)
+            CheckDiagnostic(
+                code: KESCAPE(),
+                kind: "scope-escape",
+                source_offset: pos,
+                span_width: src.diagnostic_span_width(pos),
+                count: n.positive_count(),
+                message: "value from scope `s` escapes its scope (its arena is freed on scope exit)",
+                hint: "do not return a pointer from `s.acquire(...)`; copy the value out, or allocate in an outer scope"
+            )
+        }
+    })
+}

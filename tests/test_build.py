@@ -2365,6 +2365,51 @@ def test_zenc_check_rejects_owner_use_after_release_or_drop():
     assert _caret(5) in r.stderr
 
 
+def test_zenc_check_rejects_scope_pointer_escape():
+    """M5 lexical escape check: memory from `s.acquire(...)` lives in the scope's arena, which is freed
+    on scope exit, so RETURNING it (directly, or via a local bound to it) compiles a use-after-free.
+    The checker rejects it before generic inlining lowers the call to raw pointer ops. Scope's own
+    `s.alloc.acquire(n)` accessor is NOT flagged (its receiver is the `.alloc` field, not the scope var),
+    so std.scope itself and the colorless capstone body (which only loads a value out) still pass."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+
+    # a local bound to s.acquire(...) is then returned -> escapes.
+    via_let = d / "scope_escape_let.zen"
+    via_let.write_text(
+        "{ Scope, with_sync } = std.scope\n"
+        "{ default } = std.mem.alloc\n"
+        "leak = (s: MutPtr<Scope<A>>) RawPtr<u8> {\n"
+        "    p := s.acquire(8)\n"
+        "    p\n"
+        "}\n"
+        "main = () i32 { h := default()  h.addr().with_sync(4096, leak)  0 }\n"
+    )
+    r = subprocess.run([zenc, "check", str(via_let)], capture_output=True, text=True)
+    assert r.returncode == 1, r.stderr
+    assert f"zenc: {via_let}:5:5: error[scope-escape]: value from scope `s` escapes its scope" in r.stderr, r.stderr
+    assert "      p\n" in r.stderr, r.stderr
+    assert _caret(5) in r.stderr, r.stderr
+    assert "hint: do not return a pointer from `s.acquire(...)`" in r.stderr, r.stderr
+
+    # a direct trailing `s.acquire(...)` (the UFCS receiver IS the scope var) also escapes.
+    direct = d / "scope_escape_direct.zen"
+    direct.write_text(
+        "{ Scope, with_sync } = std.scope\n"
+        "{ default } = std.mem.alloc\n"
+        "leak = (s: MutPtr<Scope<A>>) RawPtr<u8> { s.acquire(8) }\n"
+        "main = () i32 { h := default()  h.addr().with_sync(4096, leak)  0 }\n"
+    )
+    r = subprocess.run([zenc, "check", str(direct)], capture_output=True, text=True)
+    assert r.returncode == 1, r.stderr
+    assert "error[scope-escape]: value from scope `s` escapes its scope" in r.stderr, r.stderr
+
+    # GOOD: the colorless capstone binds `p := s.acquire(...)` but returns a loaded VALUE, not p — must pass.
+    good = subprocess.run([zenc, "run", str(ZEN_FIXTURES / "scope_colorless_sync_async.zen")],
+                          capture_output=True, text=True)
+    assert good.returncode == 3, (good.returncode, good.stderr)
+
+
 # ── std.text.str search/slice/parse: find/contains/substr/parse_int/starts_with/at ────────────────────────
 def test_zenc_run_str_ops_edges():
     """The new std.text.str ops, hammered on edges: find at head/end/absent/empty-needle, substr CLAMPS

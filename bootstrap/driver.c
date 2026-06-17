@@ -28,6 +28,7 @@ CheckDiagnostic check_module_diagnostic(Malloc* a, zslice decls);
 CheckDiagnostic check_module_ownership_diagnostic(Malloc* a, zslice decls);
 CheckDiagnostic check_module_diagnostic_from_source(Malloc* a, zslice decls, const char* src);
 CheckDiagnostic check_module_ownership_diagnostic_from_source(Malloc* a, zslice decls, const char* src);
+CheckDiagnostic check_module_escape_diagnostic_from_source(Malloc* a, zslice decls, const char* src);  /* M5: a scope ptr that outlives its scope */
 typedef struct ModuleGraph {
     zslice imports;
     zslice symbols;
@@ -456,6 +457,7 @@ static void diagnostic_render(Malloc* a, FILE* out, const char* in_path, const c
 }
 static int type_check(Malloc* m, zslice raw, zslice decls, const char* in_path, const char* flat, const char* user, const ResolvedProgram* resolved){
     CheckDiagnostic cd = check_module_ownership_diagnostic_from_source(m, raw, flat);
+    if (cd.code == 0) cd = check_module_escape_diagnostic_from_source(m, raw, flat);  /* M5: lexical scope-escape, on raw (pre-inline) decls */
     if (cd.code == 0) cd = check_module_diagnostic_from_source(m, decls, flat);
     if (cd.code == 0) return 0;
     Diagnostic diag = diagnostic_from_check(cd);
