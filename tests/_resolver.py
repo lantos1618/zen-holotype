@@ -375,7 +375,7 @@ def resolve(target, modules=None):
 # source SET from bootstrap roots + runtime-provided std exclusions, then derive the expected ORDER by
 # SCC-condensing the import graph and sorting deterministically inside each SCC.
 
-_BOOTSTRAP_ROOTS = ["compiler/genc_emit", "compiler/parse", "compiler/check_validate", "std/internal/resolve", "compiler/diagnostic"]
+_BOOTSTRAP_ROOTS = ["compiler/genc_emit", "compiler/parse", "compiler/check_validate", "std/internal/resolve", "compiler/diagnostic", "std/os"]
 _BOOTSTRAP_RUNTIME_MODULES = {"std/mem/raw", "std/text/str", "std/text/string"}
 
 

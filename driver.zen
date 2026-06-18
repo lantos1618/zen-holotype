@@ -2,20 +2,47 @@
 // (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
 // once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
 
-{ arg } = std.os
+{ arg, getEnv } = std.os
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc   // the seed's String API (string.zen isn't in the manifest)
 
 { contents_in, out, out_bytes, O_WRTRUNC, MODE_644 } = std.io.file
-{ open, write, close, system } = std.c.libc
+{ open, read, write, close, system } = std.c.libc
 { parse_module } = compiler.parse
 { resolve_module } = compiler.check
-{ check_module } = compiler.check_validate
+{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
-{ resolve_program_data } = std.internal.resolve
+{ diag_user_span, render_diagnostic } = compiler.diagnostic
+{ resolve_program_data, first_user_import_in } = std.internal.resolve
 
 say = (s: str) i64 { out(s)  out("\n") }
+derr = (s: str) i64 { v := s.view()  write(2, v.ptr, v.len) }   // diagnostics go to stderr
+
+// the full type-check pipeline (ownership -> escape -> validate), short-circuiting on the first error
+// (mirrors the old C driver's type_check). raw = pre-resolve decls, decls = resolved.
+check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDiagnostic {
+    cd1 := mp.check_module_ownership_diagnostic_from_source(raw, flat)
+    (cd1.code == 0).match ({
+        true  => {
+            cd2 := mp.check_module_escape_diagnostic_from_source(raw, flat)
+            (cd2.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd2 })
+        },
+        false => cd1
+    })
+}
+// 0 if clean; else render the diagnostic (file:line:col + caret) to stderr and return the error count.
+report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str, path: str, user: str) i32 {
+    cd := mp.check_diag(raw, decls, flat)
+    (cd.code == 0).match ({
+        true  => 0,
+        false => {
+            sp := diag_user_span(flat, user, cd.source_offset, cd.span_width)
+            derr(mp.render_diagnostic(path, user, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            cd.count
+        }
+    })
+}
 
 // run/build temp.c swaps the emitted HEAD typedef for the zenrt.h include; the PROG variant also
 // suppresses zenrt's String (the program emits its own). --build-self uses the plain seed variant.
@@ -70,9 +97,18 @@ cc_command = (mp: MutPtr<Malloc>, root: str, out: str) str {
         .gstr_append(mp, TMPC()).gstr_append(mp, " ")
         .gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c -o ").gstr_append(mp, out).gstr_finish(mp)
 }
-compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str) bool {
-    gen := mp.genModuleIn(mp.decls_of(root, path, src))
-    write_runnable_c(gen).match ({ true => (mp.cc_command(root, out).system() == 0), false => false })
+// type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc failure.
+compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str) i32 {
+    flat  := mp.flatten(root, path, src)
+    raw   := mp.parse_module(flat)
+    decls := mp.resolve_module(raw)
+    (mp.report_check(raw, decls, flat, path, src) == 0).match ({
+        false => 1,
+        true  => {
+            gen := mp.genModuleIn(decls)
+            write_runnable_c(gen).match ({ true => (mp.cc_command(root, out).system() == 0).match ({ true => 0, false => 1 }), false => 1 })
+        }
+    })
 }
 
 // ── subcommands ───────────────────────────────────────────────────────────────────────────────────
@@ -85,34 +121,49 @@ emit_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
 check_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            n := mp.check_module(mp.decls_of(root, path, src))
-            (n == 0).match ({ true => { say("ok")  0 }, false => { say("zenc: check failed")  1 } })
+            flat  := mp.flatten(root, path, src)
+            raw   := mp.parse_module(flat)
+            decls := mp.resolve_module(raw)
+            (mp.report_check(raw, decls, flat, path, src) == 0).match ({ true => { say("ok")  0 }, false => 1 })
         },
-        .Err(e) => { say("zenc: cannot read input")  1 }
+        .Err(e) => { say("zenc: cannot open input")  1 }
     })
 }
 build_file = (mp: MutPtr<Malloc>, root: str, path: str, out: str) i32 {
     contents_in(mp, path).match ({
-        .Ok(src) => mp.compile_to(root, path, src, out).match ({ true => 0, false => 1 }),
-        .Err(e)  => { say("zenc: cannot read input")  1 }
+        .Ok(src) => mp.compile_to(root, path, src, out),
+        .Err(e)  => { say("zenc: cannot open input")  1 }
     })
 }
 run_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
     contents_in(mp, path).match ({
-        .Ok(src) => mp.compile_to(root, path, src, TMPBIN()).match ({ true => TMPBIN().system() / 256, false => 1 }),
-        .Err(e)  => { say("zenc: cannot read input")  1 }
+        .Ok(src) => (mp.compile_to(root, path, src, TMPBIN()) == 0).match ({ true => TMPBIN().system() / 256, false => 1 }),
+        .Err(e)  => { say("zenc: cannot open input")  1 }
     })
 }
+
+// the project ROOT (holds zen/std + zen/compiler + bootstrap): $ZEN_ROOT if set (a relocated binary
+// points it at a checkout), else the directory of the binary (argv[0]).
+root_of = (mp: MutPtr<Malloc>) str {
+    e := getEnv("ZEN_ROOT")
+    eq(e, "").match ({ true => mp.dirname(arg(0)), false => e })
+}
+HELP = () str { "usage: zenc <run|build|check|emit|doc|fmt|--build-self|--version|--help> <file>\n  zenc doc <std.mod|file.zen>\n  cat file.zen | zenc   (source -> C filter)\n" }
 
 main = () i32 {
     m    := Malloc(_: 0)
     mp   := m.addr()
-    root := mp.dirname(arg(0))
+    root := mp.root_of()
     cmd  := arg(1)
-    eq(cmd, "--version").match ({
+    eq(cmd, "--help").match ({
+        true  => { say(HELP())  0 },
+        false => eq(cmd, "--version").match ({
         true  => { say("zenc 0.2.0-dev (self-hosted; zen driver)")  0 },
         false => eq(cmd, "--build-self").match ({
-            true  => mp.build_self(arg(3), arg(2)),       // --build-self <out.c> <srcroot>
+            true  => eq(arg(2), "").match ({                       // --build-self <out.c> <srcroot>
+                true  => { derr("usage: zenc --build-self <out.c> <srcroot>\n")  2 },
+                false => mp.build_self(arg(3), arg(2))
+            }),
             false => eq(cmd, "emit").match ({
                 true  => mp.emit_file(root, arg(2)),
                 false => eq(cmd, "check").match ({
@@ -121,16 +172,59 @@ main = () i32 {
                         true  => mp.run_file(root, arg(2)),
                         false => eq(cmd, "build").match ({
                             true  => mp.build_file(root, arg(2), build_out(arg(3), arg(4))),
-                            false => { say("usage: zenc <run|build|check|emit|--build-self|--version> <file>")  1 }
+                            false => mp.default_emit(cmd)   // `zenc <file>` (or stdin) -> raw C on stdout, the oracle filter
                         })
                     })
                 })
             })
         })
     })
+    })
 }
 // build output path: `build <file> -o <out>` -> <out>, else "a.out".
 build_out = (flag: str, out: str) str { eq(flag, "-o").match ({ true => out, false => "a.out" }) }
+
+// the DEFAULT mode (no subcommand): `zenc <file>` or `cat … | zenc` -> emit C to stdout, RAW
+// (resolve_module only, NO import flatten — std imports stay as-is; the oracle depends on this).
+default_emit = (mp: MutPtr<Malloc>, path: str) i32 {
+    eq(path, "").match ({ true => mp.stdin_emit(mp.read_stdin()), false => mp.raw_emit_file(path) })
+}
+// piped stdin has no directory, so a sibling import `{ f } = b` can't resolve — error cleanly instead
+// of emitting C that references undefined names (std imports stay raw, which the oracle relies on).
+stdin_emit = (mp: MutPtr<Malloc>, src: str) i32 {
+    sib := mp.first_user_import_in(src)
+    eq(sib, "").match ({
+        true  => mp.raw_emit_src(src),
+        false => {
+            derr(mp.gstr_string(256).gstr_append(mp, "zenc: <stdin>: error: sibling import '").gstr_append(mp, sib).gstr_append(mp, "' needs a source file on disk (stdin has no directory); use `zenc build <file.zen>`\n").gstr_finish(mp))
+            1
+        }
+    })
+}
+raw_emit_file = (mp: MutPtr<Malloc>, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => mp.raw_emit_src(src),
+        .Err(e)  => { say("zenc: cannot open input")  1 }
+    })
+}
+raw_emit_src = (mp: MutPtr<Malloc>, src: str) i32 {
+    out_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(src))).bytes())  0
+}
+// read all of fd 0 (stdin/pipe — no seekable size) into one buffer.
+STDIN_CAP := 8388608
+read_stdin = (mp: MutPtr<Malloc>) str {
+    buf := mp.acquire(STDIN_CAP)
+    n   := read_fd_all(0, buf, 0, STDIN_CAP)
+    buf.offset(n).store(0)
+    cstr(buf)
+}
+read_fd_all = (fd: i32, buf: RawPtr<u8>, off: i64, cap: i64) i64 {
+    r := fd.read(buf.offset(off), cap - off)
+    (r <= 0).match ({
+        true  => off,
+        false => ((off + r) >= cap).match ({ true => cap, false => read_fd_all(fd, buf, off + r, cap) })
+    })
+}
 
 // ── --build-self: regenerate the seed (ported from bootstrap/driver.c build_self) ─────────────────
 BS_HEAD      = () str { "typedef struct { void* ptr; int64_t len; } zslice; " }
@@ -183,7 +277,7 @@ bs_add_source = (mp: MutPtr<Malloc>, out: String, root: str, rel: str) String {
     path := mp.bs_join(root, rel)
     contents_in(mp, path).match ({
         .Ok(src) => { sv := src.view()  mp.bs_strip_file(out, sv, 0, sv.len, true) },
-        .Err(e)  => { say("zenc: --build-self: cannot read a source file")  out }
+        .Err(e)  => { derr("zenc: --build-self: cannot open a source file\n")  out }
     })
 }
 bs_walk_manifest = (mp: MutPtr<Malloc>, out: String, root: str, mv: [u8], p: i64, n: i64, count: i64) String {
@@ -221,9 +315,10 @@ build_self = (mp: MutPtr<Malloc>, root: str, out_path: str) i32 {
             gen  := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))
             gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
                 true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
-                false => { say("zenc: --build-self: emitted C did not start with the expected head")  1 }
+                false => { derr("zenc: --build-self: emitted C did not start with the expected head\n")  1 }
             })
         },
-        .Err(e) => { say("zenc: --build-self: cannot read bootstrap/sources.txt")  1 }
+        .Err(e) => { derr("zenc: --build-self: cannot open bootstrap/sources.txt\n")  1 }
     })
 }
+
