@@ -1,79 +1,206 @@
-// Numeric text formatting helpers.
-// These build decimal strings; math predicates and arithmetic belong elsewhere.
+// Numeric text formatting helpers. All builders take the caller's allocator.
 
-{ String, new, push, append, finish } = std.text.string
+{ Result, IoError } = std.core.result
+{ Allocator, try_acquire } = std.mem.alloc
+{ String } = std.text.string
 
-udigits = (out: String, n: i64) String {
+num_ok = (s: String) Result<String, IoError> { .Ok(s) }
+num_err = (e: IoError) Result<String, IoError> { .Err(e) }
+
+num_udigit_count = (n: i64) i64 {
     (n < 10).match ({
-        true  => out.push('0' + n),
-        false => out.udigits(n / 10).push('0' + (n % 10))
+        true  => 1,
+        false => 1 + num_udigit_count(n / 10)
     })
 }
 
-// Append digits for a negative i64 without negating INT64_MIN.
-ndigits = (out: String, n: i64) String {
+num_ndigit_count = (n: i64) i64 {
     (n > 0 - 10).match ({
-        true  => out.push('0' + (0 - n)),
-        false => out.ndigits(n / 10).push('0' + (0 - (n % 10)))
+        true  => 1,
+        false => 1 + num_ndigit_count(n / 10)
     })
 }
 
-int_string* = (n: i64) String {
+num_integer_len = (n: i64) i64 {
     (n < 0).match ({
-        true  => new().push('-').ndigits(n),
-        false => new().udigits(n)
+        true  => 1 + num_ndigit_count(n),
+        false => num_udigit_count(n)
     })
 }
 
-int_to_str* = (n: i64) str { n.int_string().finish() }
+num_write_udigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
+    (n < 10).match ({
+        true => {
+            p.offset(at).store('0' + n)
+            at + 1
+        },
+        false => {
+            next := num_write_udigits(p, at, n / 10)
+            p.offset(next).store('0' + (n % 10))
+            next + 1
+        }
+    })
+}
 
-// Small %g-like f64 formatter: six fractional digits, rounded, trailing zeroes trimmed.
-// It avoids snprintf so generated C does not collide with host stdio prototypes.
-fpad = (out: String, n: i64, w: i64) String {
+num_write_ndigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
+    (n > 0 - 10).match ({
+        true => {
+            p.offset(at).store('0' + (0 - n))
+            at + 1
+        },
+        false => {
+            next := num_write_ndigits(p, at, n / 10)
+            p.offset(next).store('0' + (0 - (n % 10)))
+            next + 1
+        }
+    })
+}
+
+num_write_integer = (p: RawPtr<u8>, n: i64) i64 {
+    (n < 0).match ({
+        true => {
+            p.store('-')
+            num_write_ndigits(p, 1, n)
+        },
+        false => num_write_udigits(p, 0, n)
+    })
+}
+
+num_integer_from_ptr = (p: RawPtr<u8>, n: i64, cap: i64) String {
+    String( ptr: p, len: num_write_integer(p, n), cap: cap )
+}
+
+integer_in*<A> = (a: MutPtr<A>, n: i64) String {
+    cap := num_integer_len(n) + 1
+    num_integer_from_ptr(a.acquire(cap), n, cap)
+}
+
+integer*<A> = (a: MutPtr<A>, n: i64) String { a.integer_in(n) }
+
+try_integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> {
+    cap := num_integer_len(n) + 1
+    a.try_acquire(cap).match ({
+        .Ok(p)  => num_ok(num_integer_from_ptr(p, n, cap)),
+        .Err(e) => num_err(e)
+    })
+}
+
+try_integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> { a.try_integer_in(n) }
+
+num_copy_text = (p: RawPtr<u8>, at: i64, s: str, i: i64) i64 {
+    b := s.offset(i).load()
+    (b == '\0').match ({
+        true => at,
+        false => {
+            p.offset(at).store(b)
+            num_copy_text(p, at + 1, s, i + 1)
+        }
+    })
+}
+
+num_text_len_at = (s: str, i: i64) i64 {
+    (s.offset(i).load() == '\0').match ({
+        true  => i,
+        false => num_text_len_at(s, i + 1)
+    })
+}
+num_text_len = (s: str) i64 { num_text_len_at(s, 0) }
+
+num_write_fpad = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
     (w == 1).match ({
-        true  => out.push('0' + (n % 10)),
-        false => out.fpad(n / 10, w - 1).push('0' + (n % 10))
+        true => {
+            p.offset(at).store('0' + (n % 10))
+            at + 1
+        },
+        false => {
+            next := num_write_fpad(p, at, n / 10, w - 1)
+            p.offset(next).store('0' + (n % 10))
+            next + 1
+        }
     })
 }
-frac_digits = (out: String, n: i64, w: i64) String {
+
+num_write_frac_digits = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
     ((n % 10 == 0) && (w > 1)).match ({
-        true  => out.frac_digits(n / 10, w - 1),
-        false => out.fpad(n, w)
+        true  => num_write_frac_digits(p, at, n / 10, w - 1),
+        false => num_write_fpad(p, at, n, w)
     })
 }
-fparts = (out: String, ip: i64, scaled: i64) String {
+
+num_write_fparts = (p: RawPtr<u8>, at: i64, ip: i64, scaled: i64) i64 {
+    whole := num_write_udigits(p, at, ip)
     (scaled == 0).match ({
-        true  => out.udigits(ip),
-        false => out.udigits(ip).push('.').frac_digits(scaled, 6)
+        true => whole,
+        false => {
+            p.offset(whole).store('.')
+            num_write_frac_digits(p, whole + 1, scaled, 6)
+        }
     })
 }
-fabs_digits = (out: String, x: f64) String {
+
+num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
     ip     := to_i64(x)
     scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
     (scaled >= 1000000).match ({
-        true  => out.fparts(ip + 1, 0),
-        false => out.fparts(ip, scaled)
+        true  => num_write_fparts(p, at, ip + 1, 0),
+        false => num_write_fparts(p, at, ip, scaled)
     })
 }
 
-F64_DIGIT_MAX := 9000000000000000000.0    // just inside i64; beyond it to_i64 is UB
+F64_DIGIT_MAX := 9000000000000000000.0
 f64_special* = (x: f64) str {
-    (x != x).match ({ true => { return "nan" }, false => {} })
-    (x > F64_DIGIT_MAX).match ({ true => { return "inf" }, false => {} })
-    (x < 0.0 - F64_DIGIT_MAX).match ({ true => { return "-inf" }, false => {} })
-    ""
-}
-is_special_text = (s: str) bool { s.offset(0).load() != '\0' }
-
-float_string* = (x: f64) String {
-    sp := x.f64_special()
-    sp.is_special_text().match ({
-        true  => new().append(sp),
-        false => (x < 0.0).match ({
-            true  => new().push('-').fabs_digits(0.0 - x),
-            false => new().fabs_digits(x)
+    (x != x).match ({
+        true => "nan",
+        false => (x > F64_DIGIT_MAX).match ({
+            true => "inf",
+            false => (x < 0.0 - F64_DIGIT_MAX).match ({
+                true  => "-inf",
+                false => ""
+            })
         })
     })
 }
 
-float_to_str* = (x: f64) str { x.float_string().finish() }
+num_is_special_text = (s: str) bool { s.offset(0).load() != '\0' }
+num_float_cap = (x: f64) i64 {
+    sp := x.f64_special()
+    sp.num_is_special_text().match ({
+        true  => num_text_len(sp) + 1,
+        false => 80
+    })
+}
+
+num_write_float = (p: RawPtr<u8>, x: f64) i64 {
+    sp := x.f64_special()
+    sp.num_is_special_text().match ({
+        true => num_copy_text(p, 0, sp, 0),
+        false => (x < 0.0).match ({
+            true => {
+                p.store('-')
+                num_write_fabs_digits(p, 1, 0.0 - x)
+            },
+            false => num_write_fabs_digits(p, 0, x)
+        })
+    })
+}
+
+num_float_from_ptr = (p: RawPtr<u8>, x: f64, cap: i64) String {
+    String( ptr: p, len: num_write_float(p, x), cap: cap )
+}
+
+float_in*<A> = (a: MutPtr<A>, x: f64) String {
+    cap := num_float_cap(x)
+    num_float_from_ptr(a.acquire(cap), x, cap)
+}
+
+float*<A> = (a: MutPtr<A>, x: f64) String { a.float_in(x) }
+
+try_float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> {
+    cap := num_float_cap(x)
+    a.try_acquire(cap).match ({
+        .Ok(p)  => num_ok(num_float_from_ptr(p, x, cap)),
+        .Err(e) => num_err(e)
+    })
+}
+
+try_float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> { a.try_float_in(x) }

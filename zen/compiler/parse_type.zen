@@ -4,9 +4,9 @@
 // (is_lbrace/is_comma/is_rparen/…/tok_eq) and the param buffer used by both expr and decl parsers.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Param, Ty, param, fntype, mangle_str_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tnamed, tptr, tslice } = compiler.genc
+{ Param, Ty, param, fntype, mangle_str_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
 { Token, Scan, scan } = compiler.lex
-{ byte_at } = std.text.bytes
+{ at } = std.text.bytes
 { Malloc } = std.mem.alloc
 { is_op, is_lparen, lexeme } = compiler.parse_expr
 
@@ -36,16 +36,16 @@ skip_to_brace* = (src: str, pos: i32) i32 {
 // (`Ptr<T>`, `[T]`, `(A) R`) are parsed by parse_ty below.
 span_eq = (src: str, start: i32, len: i32, kw: str, i: i32) bool {
     (i == len).match ({
-        true  => kw.byte_at(i) == 0,                     // kw is exactly `len` bytes
-        false => (src.byte_at(start + i) == kw.byte_at(i)) && src.span_eq(start, len, kw, i + 1)
+        true  => kw.at(i) == 0,                     // kw is exactly `len` bytes
+        false => (src.at(start + i) == kw.at(i)) && src.span_eq(start, len, kw, i + 1)
     })
 }
 tok_eq* = (src: str, t: Token, kw: str) bool { src.span_eq(t.start, t.len, kw, 0) }
-tok_word_end = (words: str, p: i32) bool { (words.byte_at(p) == 0) || (words.byte_at(p) == '|') }
+tok_word_end = (words: str, p: i32) bool { (words.at(p) == 0) || (words.at(p) == '|') }
 tok_word_next = (words: str, p: i32) i32 {
-    (words.byte_at(p) == 0).match ({
+    (words.at(p) == 0).match ({
         true  => p,
-        false => (words.byte_at(p) == '|').match ({
+        false => (words.at(p) == '|').match ({
             true  => p + 1,
             false => words.tok_word_next(p + 1)
         })
@@ -56,12 +56,12 @@ tok_word_eq = (src: str, t: Token, words: str, p: i32, i: i32) bool {
         true  => words.tok_word_end(p + i),
         false => words.tok_word_end(p + i).match ({
             true  => false,
-            false => (src.byte_at(t.start + i) == words.byte_at(p + i)) && src.tok_word_eq(t, words, p, i + 1)
+            false => (src.at(t.start + i) == words.at(p + i)) && src.tok_word_eq(t, words, p, i + 1)
         })
     })
 }
 tok_in_from = (src: str, t: Token, words: str, p: i32) bool {
-    (words.byte_at(p) == 0).match ({
+    (words.at(p) == 0).match ({
         true  => false,
         false => src.tok_word_eq(t, words, p, 0).match ({
             true  => true,
@@ -71,29 +71,31 @@ tok_in_from = (src: str, t: Token, words: str, p: i32) bool {
 }
 tok_in* = (src: str, t: Token, words: str) bool { src.tok_in_from(t, words, 0) }
 // a single type token -> genc's Ty: a primitive keyword, else a Named type (the lexeme).
-ty_of = (a: Ptr<Malloc>, src: str, t: Token) Ty {
+ty_of = (a: MutPtr<Malloc>, src: str, t: Token) Ty {
     src.tok_eq(t, "i32").match ({ true => ti32(), false =>
     src.tok_eq(t, "i64").match ({ true => ti64(), false =>
     src.tok_eq(t, "u8").match ({ true => tu8(), false =>
     src.tok_eq(t, "f64").match ({ true => tf64(), false =>
     src.tok_eq(t, "bool").match ({ true => tbool(), false =>
     src.tok_eq(t, "str").match ({ true => tstr(), false =>
-    src.tok_eq(t, "void").match ({ true => tvoid(), false => tnamed(a.lexeme(src, t)) }) }) }) }) }) }) })
+    src.tok_eq(t, "void").match ({ true => tvoid(), false =>
+    src.tok_eq(t, "Cstr").match ({ true => tcstr(), false =>
+    src.tok_eq(t, "text").match ({ true => ttext(), false => tnamed(a.lexeme(src, t)) }) }) }) }) }) }) }) }) })
 }
 
 // ── a whole type, which may span several tokens (`Ptr<T>`) — returns the Ty + pos past it ──
 // `Ptr<Inner>` -> genc's Ptr(Inner) (heap Ptr<Ty>, recursive so `Ptr<Ptr<T>>` works); any
 // other token is a leaf type via ty_of. This is what lets params/fields/returns be pointers.
 TyEnd*: { ty: Ty, next: i32 }
-tybuf = (a: Ptr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
-tynode = (a: Ptr<Malloc>, t: Ty) Ptr<Ty> {
+tybuf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
+tynode = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tybuf()
     buf[0] = t
     buf[0].addr()
 }
 is_lbracket* = (src: str, t: Token) bool { src.is_op(t, '[') }
 is_rbracket* = (src: str, t: Token) bool { src.is_op(t, ']') }
-parse_ty* = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {
+parse_ty* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
     src.is_lbracket(tt.tok).match ({
         true  => a.parse_slice_ty(src, tt.next),         // [ T ]
@@ -107,7 +109,7 @@ parse_ty* = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {
     })
 }
 // a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name.
-parse_leaf_ty = (a: Ptr<Malloc>, src: str, tt: Scan) TyEnd {
+parse_leaf_ty = (a: MutPtr<Malloc>, src: str, tt: Scan) TyEnd {
     nx := src.scan(tt.next)
     src.is_langle(nx.tok).match ({
         true  => a.parse_generic_ty(src, tt, nx.next),
@@ -115,12 +117,12 @@ parse_leaf_ty = (a: Ptr<Malloc>, src: str, tt: Scan) TyEnd {
     })
 }
 TyArgs*: { args: [Ty], next: i32 }
-parse_tyargs* = (a: Ptr<Malloc>, src: str, pos: i32) TyArgs {   // pos just past '<'
+parse_tyargs* = (a: MutPtr<Malloc>, src: str, pos: i32) TyArgs {   // pos just past '<'
     buf := a.ty_buf()
     ae  := a.fill_tyargs(src, pos, buf, 0)
     TyArgs( args: buf.take_tys(ae.count), next: ae.next )
 }
-fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   // `>`-terminated type list
+fill_tyargs = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   // `>`-terminated type list
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     te    := a.parse_ty(src, pos)
@@ -128,23 +130,23 @@ fill_tyargs = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {   /
     after := src.scan(te.next)                           // ',' or '>'
     src.is_comma(after.tok).match ({
         true  => a.fill_tyargs(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )  // '>'
+        false => PEnd( count: i + 1, next: src.gt_resume(after) )  // '>' (splits a nested '>>')
     })
 }
-parse_generic_ty = (a: Ptr<Malloc>, src: str, nameTok: Scan, pos: i32) TyEnd {   // pos just past '<'
+parse_generic_ty = (a: MutPtr<Malloc>, src: str, nameTok: Scan, pos: i32) TyEnd {   // pos just past '<'
     name := a.lexeme(src, nameTok.tok)
     ta   := a.parse_tyargs(src, pos)
     TyEnd( ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)), next: ta.next )
 }
 // a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
-ty_buf = (a: Ptr<Malloc>) [Ty] { slice(a.acquire(256 * sizeof(Ty)), 256) }   // cap 256
+ty_buf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(256 * sizeof(Ty)), 256) }   // cap 256
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
-fill_tys = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
+fill_tys = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_ty(src, pos, buf, i) })
 }
-fill_ty = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
+fill_ty = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     te    := a.parse_ty(src, pos)                        // one parameter type
@@ -155,7 +157,7 @@ fill_ty = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
         false => PEnd( count: i + 1, next: after.next )  // ')'
     })
 }
-parse_fn_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '('
+parse_fn_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '('
     buf := a.ty_buf()
     pe  := a.fill_tys(src, pos, buf, 0)                  // param types, pos just past ')'
     rt  := a.parse_ty(src, pe.next)                      // the return type
@@ -164,16 +166,16 @@ parse_fn_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '(
 // `Ptr`, `MutPtr`, and `RawPtr` all lower to `T*` today, so all three parse through the same pointer
 // type node. Mutability/aliasing remains a checker-level policy, not a C type distinction.
 is_ptr_kw = (src: str, t: Token) bool { src.tok_in(t, "Ptr|MutPtr|RawPtr") }
-parse_slice_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
+parse_slice_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
     inner := a.parse_ty(src, pos)                        // the element type
     rb    := src.scan(inner.next)                        // ']'
     TyEnd( ty: tslice(a.tynode(inner.ty)), next: rb.next )
 }
-parse_ptr_ty = (a: Ptr<Malloc>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
+parse_ptr_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
     lt    := src.scan(pos)                               // '<'
     inner := a.parse_ty(src, lt.next)                    // the pointee (recursive)
-    gt    := src.scan(inner.next)                        // '>'
-    TyEnd( ty: tptr(a.tynode(inner.ty)), next: gt.next )
+    gt    := src.scan(inner.next)                        // '>' (or a nested '>>')
+    TyEnd( ty: tptr(a.tynode(inner.ty)), next: src.gt_resume(gt) )
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────
@@ -187,16 +189,16 @@ skip_to_lparen* = (src: str, pos: i32) i32 {
         _    => src.is_lparen(sc.tok).match ({ true => sc.next, false => src.skip_to_lparen(sc.next) })
     })
 }
-param_buf* = (a: Ptr<Malloc>) [Param] { slice(a.acquire(1024 * sizeof(Param)), 1024) }   // cap 1024
+param_buf* = (a: MutPtr<Malloc>) [Param] { slice(a.acquire(1024 * sizeof(Param)), 1024) }   // cap 1024
 take_params* = (buf: [Param], n: i64) [Param] { slice(buf.ptr, n) }                            // exact length
-fill_params* = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+fill_params* = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },   // unterminated `(…`: a truncated param list
         _    => src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_one(src, pos, buf, i) })
     })
 }
-fill_one = (a: Ptr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
+fill_one = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     nt    := src.scan(pos)                               // param name
@@ -232,3 +234,9 @@ skip_block_d = (src: str, pos: i32, depth: i32) i32 {
 
 is_langle* = (src: str, t: Token) bool { src.is_op(t, '<') }
 is_rangle* = (src: str, t: Token) bool { src.is_op(t, '>') }
+// nested-generic close: a `>>` token (two '>' chars, lexed as one shift op) must close only ONE
+// generic level and leave the rest for the enclosing one. gt_resume consumes exactly one '>':
+// for a '>>' it resumes at the second '>' (tok.start+1, which re-lexes as '>' or another '>>');
+// for a lone '>' it resumes past it. Fixes `MutPtr<Scope<A>>`, `Vec<Vec<T>>`, etc.
+is_shr_close* = (src: str, t: Token) bool { (src.at(t.start) == '>') && (src.at(t.start + 1) == '>') }
+gt_resume* = (src: str, sc: Scan) i32 { src.is_shr_close(sc.tok).match ({ true => sc.tok.start + 1, false => sc.next }) }

@@ -15,9 +15,15 @@ ATWHILE_ALLOWED = {
     Path("zen/compiler/parse.zen"),
     Path("zen/compiler/parse_expr.zen"),
     Path("zen/compiler/parse_stmt.zen"),
-    # Temporary low-level string scanner. Once std gets a loop primitive that can
-    # express condition-driven scans, this should move off @while too.
-    Path("zen/std/text/str.zen"),
+}
+
+RAW_ALLOC_ALLOWED = {
+    Path("zen/std/mem/alloc.zen"),
+    Path("zen/std/mem/raw.zen"),
+    Path("zen/compiler/genc.zen"),
+    # genc_emit emits malloc/memcpy as the LOWERING of a heap-promoted slice literal (codegen text,
+    # not a call) — same codegen category as genc.zen, which is already allow-listed.
+    Path("zen/compiler/genc_emit.zen"),
 }
 
 EXAMPLE_PRIMITIVES = {
@@ -89,3 +95,61 @@ def test_atwhile_stays_in_compiler_or_named_low_level_substrate():
             hits.append(str(rel))
 
     assert not hits, "@while is a substrate primitive; public code should use loop handles:\n" + "\n".join(hits)
+
+
+def test_raw_allocation_calls_stay_behind_allocator_boundaries():
+    raw_alloc = re.compile(r"(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(")
+    hits = []
+
+    for path in _zen_files_under("examples", "tools", "zen/std", "zen/compiler"):
+        rel = _rel(path)
+        if rel not in RAW_ALLOC_ALLOWED and raw_alloc.search(_code(path)):
+            hits.append(str(rel))
+
+    assert not hits, (
+        "raw malloc/calloc/realloc/free must stay behind std.mem alloc/raw or the compiler bootstrap shim; "
+        "thread an allocator and use acquire/resize/release instead:\n" + "\n".join(hits)
+    )
+
+
+def test_trace_gather_does_not_fall_back_to_default_list_growth():
+    src = _code(ROOT / "zen" / "std" / "mem" / "trace.zen")
+    gather = src.split("cc_gather = ", 1)[1].split("Node*: ", 1)[0]
+    assert ".list_push(" not in gather, "trace gather must use collection-owned scratch capacity, not default list growth"
+    assert ".list_push_static(" in gather
+
+
+def test_io_contents_allocator_path_uses_try_acquire():
+    src = _code(ROOT / "zen" / "std" / "io" / "file.zen")
+    body = src.split("read_file_alloc", 1)[1].split("read_file_open", 1)[0]
+    assert ".try_acquire(" in body, "std.io.file contents_in should keep allocation failure in Result flow"
+    assert ".acquire(" not in body, "std.io.file contents_in should not hand-roll null checks around acquire"
+    assert "default()" not in src, "std.io.file should not allocate through a hidden default heap"
+
+
+def test_map_try_paths_use_result_allocator_helpers():
+    src = _code(ROOT / "zen" / "std" / "collections" / "map.zen")
+    grow = src.split("try_grow", 1)[1].split("append<A>", 1)[0]
+    append = src.split("try_append", 1)[1].split("put<A>", 1)[0]
+    of = src.split("try_of*", 1)[1]
+    assert ".try_acquire(" in grow
+    assert ".acquire(" not in grow
+    assert ".try_grow(" in append
+    assert ".acquire(" not in append
+    assert ".try_acquire(" in of
+    assert ".acquire(" not in of
+
+
+def test_fmt_try_numeric_writes_use_fallible_num_helpers():
+    src = _code(ROOT / "zen" / "std" / "text" / "fmt.zen")
+    ti = src.split("try_write_int_in", 1)[1].split("try_write_float_in", 1)[0]
+    tf = src.split("try_write_float_in", 1)[1].split("write_int = ", 1)[0]
+    assert ".try_integer_in(" in ti
+    assert ".integer_in(" not in ti
+    assert ".try_float_in(" in tf
+    assert ".float_in(" not in tf
+    wi = src.split("write_int = ", 1)[1].split("write_fpad", 1)[0]
+    wf = src.split("write_float = ", 1)[1].split("// Display", 1)[0]
+    assert "default()" not in src, "std.text.fmt default printing must not hide heap allocation"
+    assert ".integer_in(" not in wi and ".write_int_in(" not in wi
+    assert ".float_in(" not in wf and ".write_float_in(" not in wf

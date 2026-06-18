@@ -1,12 +1,10 @@
-// std.text.str — borrowed `str` helpers plus owned byte copies.
-// `dup`/`substr` use the default allocator; `*_in` takes an allocator explicitly; `try_*_in`
-// returns Result so allocation failure stays in the value flow.
+// std.text.str — borrowed `str` helpers plus allocator-owned byte copies.
+// Allocating helpers take the caller allocator explicitly; `try_*` returns Result so allocation
+// failure stays in the value flow.
 
-{ default_allocator, Allocator, try_acquire } = std.mem.alloc
+{ Allocator, try_acquire } = std.mem.alloc
 { Result, Opt, IoError } = std.core.result
-
-strlen = (s: str) i64
-strcmp = (a: str, b: str) i32
+{ strlen, strcmp } = std.c.libc
 
 len* = (s: str) i64 { s.strlen() }
 is_empty* = (s: str) bool { s.strlen().match ({ 0 => true, _ => false }) }
@@ -34,10 +32,7 @@ dup_in*<A> = (a: MutPtr<A>, s: str) [u8] {
     src.copy_bytes(out)
     out
 }
-dup* = (s: str) [u8] {
-    a := default_allocator()
-    a.addr().dup_in(s)
-}
+dup*<A> = (a: MutPtr<A>, s: str) [u8] { a.dup_in(s) }
 try_dup_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
     src := s.view()
     a.try_acquire(src.len.alloc_size()).match ({
@@ -49,6 +44,7 @@ try_dup_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
         .Err(e) => bytes_err(e)
     })
 }
+try_dup*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.try_dup_in(s) }
 
 // ── search ──────────────────────────────────────────────────────────────────
 
@@ -106,6 +102,13 @@ starts_with* = (s: str, prefix: str) bool {
     pv.len <= sv.len && sv.has_at(pv, 0)
 }
 
+// does `s` end with `suffix`? (every str ends with the empty suffix)
+ends_with* = (s: str, suffix: str) bool {
+    sv := s.view()
+    fv := suffix.view()
+    fv.len <= sv.len && sv.has_at(fv, sv.len - fv.len)
+}
+
 // ── slicing & indexing ──────────────────────────────────────────────────────
 
 // pin `x` into [lo, hi] — the substr clamp
@@ -126,7 +129,7 @@ copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out[m] = 0
 }
 
-// Out-of-range is clamped: substr("hi", 1, 99) == "i"; substr("hi", 5, 2) == "".
+// Out-of-range is clamped: a.substr("hi", 1, 99) == "i"; a.substr("hi", 5, 2) == "".
 substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str {
     sv := s.view()
     lo := start.pin(0, sv.len)
@@ -135,10 +138,7 @@ substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str {
     sv.copy_substr(out, lo, m)
     cstr(out.ptr)
 }
-substr* = (s: str, start: i64, n: i64) str {
-    a := default_allocator()
-    a.addr().substr_in(s, start, n)
-}
+substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str { a.substr_in(s, start, n) }
 try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> {
     sv := s.view()
     lo := start.pin(0, sv.len)
@@ -152,9 +152,10 @@ try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoErr
         .Err(e) => str_err(e)
     })
 }
+try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> { a.try_substr_in(s, start, n) }
 
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
-char_at* = (s: str, i: i64) u8 {
+at* = (s: str, i: i64) u8 {
     sv := s.view()
     (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
 }
@@ -185,7 +186,7 @@ parse_int* = (s: str) i64 {
 // ── the VALUE-shaped variants: a miss/garbage must be `.match`ed, not guessed at ─────────────
 
 // find, as a value: `.Some(index)` or `.None`. find's raw -1 sentinel compounds badly when
-// unchecked — substr(s, find(s, n), k) silently clamps the -1 to index 0 via pin.
+// unchecked — a.substr(s, find(s, n), k) silently clamps the -1 to index 0 via pin.
 some_at = (i: i64) Opt<i64> { .Some(i) }
 no_hit  = () Opt<i64> { .None }
 find_opt* = (s: str, needle: str) Opt<i64> {
@@ -230,8 +231,15 @@ try_parse_int* = (s: str) Result<i64, ParseError> {
             })
         })
     })
-    over.match ({ true => { return parse_err(e_overflow()) }, false => {} })
-    (nd == 0).match ({ true => { return parse_err(e_nodigits()) }, false => {} })
-    (bad != 0).match ({ true => { return parse_err(e_trailing(bad)) }, false => {} })
-    parse_ok(neg.match ({ true => 0 - acc, false => acc }))
+    out: Result<i64, ParseError> := over.match ({
+        true => parse_err(e_overflow()),
+        false => (nd == 0).match ({
+            true => parse_err(e_nodigits()),
+            false => (bad != 0).match ({
+                true  => parse_err(e_trailing(bad)),
+                false => parse_ok(neg.match ({ true => 0 - acc, false => acc }))
+            })
+        })
+    })
+    out
 }

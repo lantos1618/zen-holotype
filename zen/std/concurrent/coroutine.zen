@@ -1,6 +1,7 @@
 // @self-hosted-only: stackful coroutines over glibc x86-64 ucontext.
 // Public code should checkpoint through Runtime.checkpoint; this module is substrate.
-{ Allocator } = std.mem.alloc
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
 { is_null } = std.core.ptr
 
 getcontext  = (ctx: RawPtr<u8>) i32
@@ -19,9 +20,20 @@ back := null_ptr()
 flag := 0
 
 CoroState: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
-Coro*: { state: RawPtr<u8> }
+Coro*: {
+    state: RawPtr<u8>
 
-coro_state = (c: Coro) [CoroState] { c.state.slice(1) }
+    coro_state = (c: Coro) [CoroState] { c.state.slice(1) }
+    resume = (c: Coro) i32 {
+        cur_state := c.coro_state()[0]
+        cur = cur_state.ctx
+        back = cur_state.link
+        flag = 0
+        swapcontext(cur_state.link, cur_state.ctx)
+        cur = null_ptr()
+        flag
+    }
+}
 init_context = (ctx: RawPtr<u8>, stack: RawPtr<u8>, link: RawPtr<u8>) void {
     ctx.offset(UC_SS_SP_OFF).store_i64(stack)
     ctx.offset(UC_SS_SIZE_OFF).store_i64(CORO_STACK)
@@ -43,6 +55,49 @@ spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
 spawn*<A> = (alloc: MutPtr<A>, work: () void) Coro {
     alloc.spawn_in(work)
 }
+coro_ok = (c: Coro) Result<Coro, IoError> { .Ok(c) }
+coro_err = (e: IoError) Result<Coro, IoError> { .Err(e) }
+spawn_cleanup<A> = (alloc: MutPtr<A>, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>, e: IoError) Result<Coro, IoError> {
+    stack.is_null().match ({ false => alloc.release(stack), _ })
+    ctx.is_null().match ({ false => alloc.release(ctx), _ })
+    lnk.is_null().match ({ false => alloc.release(lnk), _ })
+    coro_err(e)
+}
+finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawPtr<u8>, work: () void) Result<Coro, IoError> {
+    getcontext(ctx)
+    ctx.init_context(stack, lnk)
+    makecontext(ctx, work, 0)
+    slot: [CoroState] := state.slice(1)
+    slot[0] = CoroState(ctx: ctx, link: lnk, stack: stack)
+    coro_ok(Coro(state: state))
+}
+try_spawn_with_link<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>) Result<Coro, IoError> {
+    alloc.try_acquire(sizeof(CoroState)).match ({
+        .Ok(state) => finish_spawn(ctx, stack, lnk, state, work),
+        .Err(e) => alloc.spawn_cleanup(stack, ctx, lnk, e)
+    })
+}
+try_spawn_with_ctx<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>) Result<Coro, IoError> {
+    alloc.try_acquire(UC_CTX_SIZE).match ({
+        .Ok(lnk) => alloc.try_spawn_with_link(work, stack, ctx, lnk),
+        .Err(e) => alloc.spawn_cleanup(stack, ctx, null_ptr(), e)
+    })
+}
+try_spawn_with_stack<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>) Result<Coro, IoError> {
+    alloc.try_acquire(UC_CTX_SIZE).match ({
+        .Ok(ctx) => alloc.try_spawn_with_ctx(work, stack, ctx),
+        .Err(e) => alloc.spawn_cleanup(stack, null_ptr(), null_ptr(), e)
+    })
+}
+try_spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> {
+    alloc.try_acquire(CORO_STACK).match ({
+        .Ok(stack) => alloc.try_spawn_with_stack(work, stack),
+        .Err(e) => coro_err(e)
+    })
+}
+try_spawn*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> {
+    alloc.try_spawn_in(work)
+}
 destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
     state := c.coro_state()
     cur_state := state[0]
@@ -53,15 +108,6 @@ destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
 }
 destroy*<A> = (alloc: MutPtr<A>, c: Coro) void {
     alloc.destroy_in(c)
-}
-resume* = (c: Coro) i32 {
-    cur_state := c.coro_state()[0]
-    cur = cur_state.ctx
-    back = cur_state.link
-    flag = 0
-    swapcontext(cur_state.link, cur_state.ctx)
-    cur = null_ptr()
-    flag
 }
 checkpoint_current* = () void {
     is_null(cur).match ({

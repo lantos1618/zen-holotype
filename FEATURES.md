@@ -81,12 +81,19 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   `IoError`. `.match` *is* the catch; `return .Err(e)` propagates by value; the boundary
   checkers `ok_if` / `ok_ptr` lift a raw C sentinel (a negative rc, a null pointer) into a
   `Result`; `panic` is the explicit, greppable abort for invariant breaks (not the default
-  path).
+  path). The stdlib fast/fallible contract is documented in [ERROR_POLICY.md](ERROR_POLICY.md).
 - **Allocator and FFI ownership rule** (`zen/std/concurrent/cown.zen`) — Zen-owned memory takes
-  an explicit allocator from program setup (`Buf` uses `alloc.acquire` / `alloc.release`).
+  an explicit allocator from program setup (`cown.buf(alloc, n)` / `cown.try_buf(alloc, n)` /
+  `Buf.free(alloc)`).
   FFI handles remain the raw floor below that discipline: a C descriptor or pointer crosses
   back as a raw handle, then gets wrapped in a small type with the matching release operation
-  (`File` over `open`/`close`).
+  (`cown.file(path)` / `cown.file_in(alloc, path)` over `open`/`close`, closing the descriptor
+  again if wrapping it in `Own<File>` cannot allocate).
+- **Coroutine allocation follows the same split** (`zen/std/concurrent/coroutine.zen`) —
+  `spawn` / `spawn_in` are the fast path, while `try_spawn` / `try_spawn_in` return
+  `Result<Coro, IoError>` and clean up partial stack/context allocations on failure.
+  The scheduler mirrors that shape with `run` / `run_in` plus `try_run` / `try_run_in`,
+  so the caller can keep flag-buffer allocation failure in the value flow.
 - **Metaprogramming is values, not pragmas** — there is no `@emit` and no comptime
   evaluator. A generator is an ordinary function returning `[Decl]`, emitted by
   `compiler.genc.genModule`; `std.internal.ast` gives fluent heap-allocating builders
@@ -109,28 +116,44 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - **`std.collections.iter`** — `fold` / `each` over slices + closures, plus two flavours of map/filter:
   `map_into`/`filter_into` are **generic** and write into a caller-owned buffer (no allocation),
   while **`map`/`filter`** return a **fresh heap slice** the caller owns (`map([1,2,3], (x){x*2})`
-  → a new `[i32]`). The allocating forms are `[i32]` today; a generic version needs
+  → a new `[i32]`). `try_map_in` / `try_filter_in` return `Result<[i32], IoError>` for
+  allocator failure. The allocating forms are `[i32]` today; a generic version needs
   type-parameter `sizeof`.
-- **`std.mem.raw`** — the library's allocator over libc: `alloc` / `zeroed` / `copy` / `release`,
-  and `new_i32` (a fresh typed slice). No GC or destructors — ownership is explicit.
+- **`std.mem.raw`** — the library's raw libc heap floor: `alloc` / `zeroed` / `copy` / `release`,
+  plus namespace-bound `raw.of(seed, n)` for a typed heap slice seeded at index 0. `try_alloc`,
+  `try_zeroed`, and `try_of` lift nullable allocation into `Result`. No GC or destructors —
+  ownership is explicit.
 - **`slice(ptr, len)`** intrinsic — build a `[T]` view from a raw pointer + length (Rust's
   `from_raw_parts`); the element type comes from the wanted slice type (a return/param slot).
 - **`std.text.str`** — `len` / `eq` / `ne` / `is_empty` on a `str` (C string), plus `view` (a
-  read-only `[u8]` byte view that borrows a str's memory) and `dup` (an **owned** heap `[u8]`
-  copy the caller frees). An owned string is a length-tracked byte slice — `dup("hi").len`,
-  index its bytes, `release(it.ptr)`. String literals are first-class values.
-- **`std.text.string`** — a growable, owned heap **`String`** assembled at **runtime** (vs a
-  comptime `str` literal): `new` / `with_cap`, `push` (a byte), `append` (a `str`), `bytes` (a
-  `[u8]` view), `free`. Functional — each op returns the updated `(ptr,len,cap)` header while the
-  buffer is `realloc`'d underneath, so `s := s.append("…")` threads it. This is the keystone for
+  read-only `[u8]` byte view that borrows a str's memory), `at` (safe byte indexing with 0
+  out of range), and allocator-first `dup` / `substr` helpers for owned copies. An owned string
+  is a length-tracked byte slice — `text.dup(a, "hi").len`, index its bytes, release through
+  the same allocator, or allocate scoped copies through an arena. String literals are first-class values.
+- **`std.text.string`** — a growable, allocator-backed **`String`** assembled at **runtime** (vs a
+  comptime `str` literal): `new_in` / `init`, `push_in` (a byte), `append_in` (a `str`),
+  `bytes` (a `[u8]` view), `free_in`. Construction takes an allocator, and each op returns the
+  updated `(ptr,len,cap)` header while the buffer is resized underneath, so
+  `s := s.append_in(a, "…")` threads it. This is the keystone for
   **runtime code generation** — a backend can emit source as a value the running program builds.
 - **`std.mem.alloc` — an explicit, Zig-style allocator.** An `Allocator` trait
   (`acquire`/`resize`/`release`) + a stateless libc-backed `Heap`. A function that allocates
   takes the allocator as a parameter, so allocation is visible in the signature; a `<A: Allocator>`
   bound monomorphizes, so dispatch is zero-cost (`a.acquire(n)` compiles straight to the chosen
-  allocator). `Arena` also implements the trait; nothing hides a `malloc`.
-- **`std.collections.vec`** — a growable array that threads the allocator explicitly: `a.vec(cap)` /
-  `v.push(a, x)` (grows via `a.resize`) / `v.items()` / `v.vfree(a)`.
+  allocator). Namespace-bound `alloc.default()` constructs the standard heap allocator.
+  `Arena` also implements the trait; namespace-bound `arena.new_in` lets callers
+  choose the backing allocator.
+- **`std.mem.own` / `std.mem.rc` / `std.mem.arc`** — library ownership types with allocator-first
+  constructors (`new_in`) plus `try_new_in` for value-shaped allocation failure. These modules can
+  all export the same natural names when imported through namespace binds such as `rc = std.mem.rc`
+  and `arc = std.mem.arc`.
+- **`std.collections.vec`** — a growable array that threads the allocator explicitly:
+  namespace-bound `vec.of(a, [1, 2])`, then `v.push(a, x)` (grows via `a.resize`) /
+  `v.get(i)` / `v.len()` / `v.free(a)`, plus `vec.try_of(a, xs)` and `v.try_push(a, x)` for
+  `Result`-shaped allocation failure.
+- **`std.collections.map`** — a str-keyed `Map<T>` with the same allocator-visible
+  shape: namespace-bound `maps.of(a, "k", 1)` / `maps.try_of(...)`, with receiver
+  methods `m.put`, `m.try_put`, `m.get`, `m.has`, `m.len`, and `m.free`.
 - **`compiler.genc` (+ `mono` / `genc_emit`) — shared AST + monomorphization, then the C backend, in Zen, AND the compiler's own
   codegen.** It defines the **one AST** the whole pipeline shares — expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond`/`Member`/`Arrow`/`MakeEnum`/`Tag`/`Match`/`StrLit`, statements
@@ -141,8 +164,9 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
   not a demo.
 - **`compiler.genjs` — a second backend over that same AST**, emitting JavaScript for the
-  computational subset. It demonstrates reuse of the shared AST without claiming the whole
-  compiler IR is backend-neutral yet.
+  computational subset. It is documented as experimental in [JS_BACKEND.md](JS_BACKEND.md):
+  value programs run under Node in tests, while raw pointer/memory constructs emit explicit
+  `unsupported-in-js` markers instead of being faked.
 - **`compiler.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
   kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (a `str` is a `const char*`),
   tokens are spans (allocation-free), and it handles idents, ints, strings (with escapes), multi-char
@@ -156,7 +180,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   **statements** — `name := v` (let), `name = v` (assign), a final-expression return, N of them;
   and whole **function declarations** `name* = (typed params) RetType { body }`, **several per
   module** (`parse_module → genModule` = a translation unit). Written UFCS throughout
-  (`src.scan(pos)`, `src.byte_at(i).op_str()`).
+  (`src.scan(pos)`, `src.at(i).op_str()`).
 - **`compiler.check` + `compiler.check_validate`** — the resolver and the `fits()` validator, in Zen.
   `check` fills the type information the parser can't (each `match`'s enum name, each
   constructor's enum type) by looking names up among a module's decls; `check_validate` adds
@@ -178,11 +202,13 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   fluent UFCS style, so the builder reads like the Zen it generates:
 
   ```zen
-  var("x").dot("a").eq(var("y").dot("a"))   // builds the AST for `x.a == y.a`
+  var("x").dot("a").eqx(var("y").dot("a"))  // builds the AST for `x.a == y.a`
   ```
 
   The builders heap-allocate every node and copy every slice, so generated AST safely
   outlives the function that built it (no dangling `.addr()` of a stack literal).
+  Declaration-buffer helpers also have allocator-threaded forms such as `dbuf_in`
+  and `derive_accessors_in`.
 - **The header is a function** — `zen/std/io/c.zen`'s `libc() [Decl]` is exactly this shape: a
   function that returns the libc foreign bindings as AST, emitted by `genModule(libc())`.
   Bindings live in Zen, as data, never as compiler-special-cased C logic.
@@ -197,16 +223,23 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   exactly once (per-module dedup breaks cycles; a per-name pass keeps the first definition
   of each top-level name, so a cross-module clash like `string.free` vs `mem.free` resolves
   deterministically).
+- Namespace binds (`c = std.io.c`, `left = sibling`) are also resolved by the checked loader.
+  Direct exports from a bound module are prefixed in the flattened source, so two modules can
+  both export `thing` or `Box` and be used as `left.thing()` / `right.thing()` without a
+  short-name collision.
 - The same resolver understands `compiler.X` for internal compiler/std dependencies, but
   normal user-facing library imports live under `std.X`.
 - Plain emit mode (`zenc file.zen` or stdin) remains flat and unvalidated: it expects an
   already-flattened module and writes C to stdout.
 
 ## Diagnostics
-- Checked CLI modes reject on any type error and report the source path, total error count,
-  and first validator kind, e.g. `zenc: app.zen: 1 error (first: undefined-name)`.
-  Structured source spans and caret rendering are still future work; lower-level codegen can
-  still operate on the accepted declarations.
+- Checked CLI modes reject on any type error and report the source path, stable error kind,
+  message, mapped line/column where available, a source-line caret when the source maps
+  cleanly, and a hint. The checker exposes
+  `CheckDiagnostic { code, kind, source_offset, span_width, count, message, hint }` for
+  the checked CLI path and `Diagnostic { code, kind, span: SourceSpan, count, message, hint }`
+  as a first-class Zen value. `diagnostic_from_source` and the module diagnostic helpers
+  provide structured spans; lower-level codegen can still operate on accepted declarations.
 
 ## Pipeline
 Checked commands run `resolve imports (std.internal.resolve) → scan (compiler.lex) → parse
@@ -223,6 +256,6 @@ Plain emit mode skips the std-import loader and validator and writes C for one f
   full parity with what `zenlang` describes is the active arc.
 - The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
   (the `map_into`/`filter_into` forms are already generic).
-- Two backends (`compiler.genc` for C, `compiler.genjs` for JS — the latter the computational subset).
+- Two backends (`compiler.genc` for C, `compiler.genjs` for experimental JS — the latter the computational subset).
   An LLVM backend and the one-structure surface syntax from [VISION](VISION.md) are the
   *direction*, not the current state.

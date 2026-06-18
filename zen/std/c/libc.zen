@@ -1,0 +1,37 @@
+// std.c.libc — the single home for the raw libc / POSIX foreign declarations.
+//
+// A bodyless `name = (params) Ret` decl IS the foreign-binding mechanism: the parser
+// tags it (resolve.is_foreign_span), genc lowers it to a bare C prototype, and libc's
+// own headers define the symbol — nothing is re-prototyped. Declaring each symbol HERE
+// exactly once keeps every libc name in one file; other std modules import what they
+// need (`{ malloc, free } = std.c.libc`) instead of re-declaring it.
+//
+// This module imports NOTHING (RawPtr, str, i32, i64, void are builtins), so it sits at
+// the very bottom of the std import graph and can be pulled in by even the lowest-level
+// modules (core.result, mem.raw, text.str, io.file) without forming a cycle.
+//
+// NOTE: malloc / realloc / free are deliberately NOT here. They are the std.mem.alloc
+// public API (`{ malloc, free } = std.mem.alloc`, asserted by the build/resolver tests and
+// used by the allocator impls), and the resolver does NOT re-export imported names — a
+// module only exports what it itself declares. So those three stay declared in
+// std.mem.alloc; every OTHER libc symbol funnels here. (Each symbol still lives in exactly
+// one file — no duplicates.)
+
+// ── memory ───────────────────────────────────────────────────────────────────
+calloc* = (n: i64, size: i64) RawPtr<u8>
+memcpy* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) RawPtr<u8>
+
+// ── strings ──────────────────────────────────────────────────────────────────
+strlen* = (s: str) i64
+strcmp* = (a: str, b: str) i32
+
+// ── POSIX file descriptors ───────────────────────────────────────────────────
+open*  = (path: str, flags: i32, mode: i32) i32
+read*  = (fd: i32, buf: RawPtr<u8>, n: i64) i64
+write* = (fd: i32, buf: RawPtr<u8>, n: i64) i64
+close* = (fd: i32) i32
+lseek* = (fd: i32, off: i64, whence: i32) i64
+
+// ── process ──────────────────────────────────────────────────────────────────
+system* = (cmd: str) i32
+abort*  = () void

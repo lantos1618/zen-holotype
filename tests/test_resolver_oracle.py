@@ -83,7 +83,7 @@ def test_module_typechecks_through_namespaced_resolver(module):
     # The full S1 result: every std module composes with its REAL TRANSITIVE imports, resolved with
     # per-module namespacing (no clash), to 0 cross-module type errors. Covers the parse_* cycle that
     # the direct-import driver only passed by accident of its import sets, AND a module that CALLS a
-    # cross-module generic (std.concurrent.cown -> std.mem.own's Own<T>/new<T>/own_get<T>): check_validate.call_errs
+    # cross-module generic (std.concurrent.cown -> std.mem.own's Own<T>/own<T>/receiver methods): check_validate.call_errs
     # now skips the strict arg-TYPE check for an imported generic (its param types still carry the
     # unbound tparam `T`, which is uninferable here), exactly as a LOCAL generic call is monomorphized
     # away before this pass. Arity is still enforced, so a wrong-arity imported generic call is rejected.

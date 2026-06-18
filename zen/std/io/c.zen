@@ -1,6 +1,6 @@
 // std.io.c — libc bindings as AST data.
 //
-// `libc()` returns bodyless foreign declarations for the libc surface the stdlib
+// `libc(alloc)` returns bodyless foreign declarations for the libc surface the stdlib
 // needs. The resolver can also namespace-bind this module (`c = std.io.c`) so
 // user code may call `c.malloc` while the backend still emits normal C prototypes.
 
@@ -12,60 +12,60 @@ c_empty_params = () [Param] { slice(null_ptr(), 0) }
 c_empty_body   = () [Stmt]  { slice(null_ptr(), 0) }
 
 // Box Ty values before storing them behind Ptr<Ty> fields in the returned AST.
-c_tynode = (t: Ty) Ptr<Ty> { t.node() }
-ptr_u8_ty = () Ty { tptr(c_tynode(tu8())) }
+c_tynode<A> = (alloc: MutPtr<A>, t: Ty) Ptr<Ty> { alloc.node(t) }
+ptr_u8_ty<A> = (alloc: MutPtr<A>) Ty { tptr(alloc.c_tynode(tu8())) }
 
-foreign_decl = (name: str, ps: [Param], ret: Ty) Decl {
+foreign_decl<A> = (alloc: MutPtr<A>, name: str, ps: [Param], ret: Ty) Decl {
     dforeign(Func(
         name: name,
-        params: ps.dupx(),
+        params: alloc.dupx(ps),
         ret: ret,
         tparams: c_empty_params(),
         body: c_empty_body()
     ))
 }
 
-binding0 = (name: str, ret: Ty) Decl {
-    foreign_decl(name, c_empty_params(), ret)
+binding0<A> = (alloc: MutPtr<A>, name: str, ret: Ty) Decl {
+    alloc.foreign_decl(name, c_empty_params(), ret)
 }
 
-binding1 = (name: str, p0: Param, ret: Ty) Decl {
-    foreign_decl(name, [p0], ret)
+binding1<A> = (alloc: MutPtr<A>, name: str, p0: Param, ret: Ty) Decl {
+    alloc.foreign_decl(name, [p0], ret)
 }
 
-binding2 = (name: str, p0: Param, p1: Param, ret: Ty) Decl {
-    foreign_decl(name, [p0, p1], ret)
+binding2<A> = (alloc: MutPtr<A>, name: str, p0: Param, p1: Param, ret: Ty) Decl {
+    alloc.foreign_decl(name, [p0, p1], ret)
 }
 
-binding3 = (name: str, p0: Param, p1: Param, p2: Param, ret: Ty) Decl {
-    foreign_decl(name, [p0, p1, p2], ret)
+binding3<A> = (alloc: MutPtr<A>, name: str, p0: Param, p1: Param, p2: Param, ret: Ty) Decl {
+    alloc.foreign_decl(name, [p0, p1, p2], ret)
 }
 
 p_i32 = (name: str) Param { param(name, ti32()) }
 p_i64 = (name: str) Param { param(name, ti64()) }
 p_str = (name: str) Param { param(name, tstr()) }
-p_ptr = (name: str) Param { param(name, ptr_u8_ty()) }
+p_ptr<A> = (alloc: MutPtr<A>, name: str) Param { param(name, alloc.ptr_u8_ty()) }
 
 // Canonical libc surface used by std memory, strings, I/O, and process code.
-libc* = () [Decl] {
-    [
-        binding1("malloc", p_i64("n"), ptr_u8_ty()),
-        binding2("calloc", p_i64("n"), p_i64("size"), ptr_u8_ty()),
-        binding2("realloc", p_ptr("p"), p_i64("n"), ptr_u8_ty()),
-        binding1("free", p_ptr("p"), tvoid()),
+libc*<A> = (alloc: MutPtr<A>) [Decl] {
+    alloc.dupx([
+        alloc.binding1("malloc", p_i64("n"), alloc.ptr_u8_ty()),
+        alloc.binding2("calloc", p_i64("n"), p_i64("size"), alloc.ptr_u8_ty()),
+        alloc.binding2("realloc", alloc.p_ptr("p"), p_i64("n"), alloc.ptr_u8_ty()),
+        alloc.binding1("free", alloc.p_ptr("p"), tvoid()),
 
-        binding3("memcpy", p_ptr("dst"), p_ptr("src"), p_i64("n"), ptr_u8_ty()),
-        binding3("memmove", p_ptr("dst"), p_ptr("src"), p_i64("n"), ptr_u8_ty()),
-        binding3("memset", p_ptr("p"), p_i32("v"), p_i64("n"), ptr_u8_ty()),
+        alloc.binding3("memcpy", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()),
+        alloc.binding3("memmove", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()),
+        alloc.binding3("memset", alloc.p_ptr("p"), p_i32("v"), p_i64("n"), alloc.ptr_u8_ty()),
 
-        binding1("strlen", p_str("s"), ti64()),
-        binding2("strcmp", p_str("a"), p_str("b"), ti32()),
+        alloc.binding1("strlen", p_str("s"), ti64()),
+        alloc.binding2("strcmp", p_str("a"), p_str("b"), ti32()),
 
-        binding1("putchar", p_i32("c"), ti32()),
-        binding0("getchar", ti32()),
-        binding1("puts", p_str("s"), ti32()),
+        alloc.binding1("putchar", p_i32("c"), ti32()),
+        alloc.binding0("getchar", ti32()),
+        alloc.binding1("puts", p_str("s"), ti32()),
 
-        binding0("abort", tvoid()),
-        binding1("exit", p_i32("code"), tvoid())
-    ].dupx()
+        alloc.binding0("abort", tvoid()),
+        alloc.binding1("exit", p_i32("code"), tvoid())
+    ])
 }

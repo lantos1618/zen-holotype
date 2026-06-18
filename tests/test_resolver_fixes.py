@@ -42,10 +42,10 @@ def _check(src):
 
 # ── bug 1: co-imports whose closures share generic decls (`new<T>`, `release<T>*`, `dup<T>`) ─────────
 @pytest.mark.parametrize("imports", [
-    pytest.param("{ println } = std.text.fmt\n{ rc_val } = std.mem.rc\n", id="fmt+rc"),
-    pytest.param("{ vec_of } = std.collections.vec\n{ rc_val } = std.mem.rc\n", id="vec+rc"),
-    pytest.param("{ println } = std.text.fmt\n{ arc_val } = std.mem.arc\n", id="fmt+arc"),
-    pytest.param("{ println } = std.text.fmt\n{ own_get } = std.mem.own\n", id="fmt+drop"),
+    pytest.param("{ println } = std.text.fmt\n{ Rc } = std.mem.rc\n", id="fmt+rc"),
+    pytest.param("vec = std.collections.vec\n{ Rc } = std.mem.rc\n", id="vec+rc"),
+    pytest.param("{ println } = std.text.fmt\n{ Arc } = std.mem.arc\n", id="fmt+arc"),
+    pytest.param("{ println } = std.text.fmt\n{ Own } = std.mem.own\n", id="fmt+drop"),
 ])
 def test_generic_decl_co_imports_check_ok(imports):
     r = _check(imports + "main = () i32 { 0 }\n")
@@ -54,7 +54,7 @@ def test_generic_decl_co_imports_check_ok(imports):
 
 @pytest.mark.parametrize("imports", [
     pytest.param("{ libc } = std.io.c\n", id="std.io.c"),
-    pytest.param("{ buf_alloc } = std.concurrent.cown\n", id="std.concurrent.cown"),
+    pytest.param("cown = std.concurrent.cown\n", id="std.concurrent.cown"),
 ])
 def test_generic_heavy_module_alone_checks_ok(imports):
     r = _check(imports + "main = () i32 { 0 }\n")
@@ -80,7 +80,7 @@ def test_std_runtime_imports_clean():
     """The two Runtime impls both hold a column-0 `checkpoint = …` METHOD line; the line-based dedup
         used to treat the second as a duplicate top-level decl and silently drop it — the flattened
         AsyncArena impl then lacked `checkpoint` ("impl does not satisfy the trait")."""
-    r = _check("{ sync_arena } = std.concurrent.runtime\nmain = () i32 { 0 }\n")
+    r = _check("rt = std.concurrent.runtime\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 
 
@@ -89,6 +89,25 @@ def test_std_ast_imports_clean():
     the continuation lines into the flat source, and lost the imported types (unknown type 'Expr')."""
     r = _check("{ var } = std.internal.ast\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
+
+
+def test_std_actor_standalone_check_does_not_treat_assignments_as_imports():
+    """Indented body assignments like `sent = true` are code, not namespace imports of sibling module `true`."""
+    r = subprocess.run([_zenc(), "check", str(ROOT / "zen/std/concurrent/actor.zen")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_std_actor_can_export_spawn_despite_coroutine_spawn_dependency():
+    """std.concurrent.actor owns actor.spawn/try_spawn even though the coroutine substrate owns the same names."""
+    zenc = _zenc()
+    r = subprocess.run([zenc, "check", str(ROOT / "zen/std/concurrent/actor.zen")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    doc = subprocess.run([zenc, "doc", "std.concurrent.actor"], capture_output=True, text=True)
+    assert doc.returncode == 0, doc.stderr
+    assert "spawn*<A, M, ActorT>" in doc.stdout
+    assert "try_spawn*<A, M, ActorT>" in doc.stdout
 
 
 def test_user_shadow_of_imported_std_name_is_an_error():
@@ -105,7 +124,7 @@ def test_user_shadow_of_imported_std_name_is_an_error():
 def test_import_vs_import_collision_still_first_wins():
     """Two IMPORTED modules sharing a name (std.text.string `free(String)` vs std.mem.raw `free(RawPtr)`)
     still dedup silently — dependency-first, the defining module wins; no false dup error."""
-    r = _check("{ String, with_cap, finish } = std.text.string\nmain = () i32 { 0 }\n")
+    r = _check("{ String, new_in } = std.text.string\nmain = () i32 { 0 }\n")
     assert r.returncode == 0, r.stderr
 
 
@@ -113,10 +132,46 @@ def test_std_ast_builders_usable():
     """Beyond importing: the renamed builders (dupx/eqx — the std.text.str collision dodge) actually run."""
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
+        "{ default } = std.mem.alloc\n"
         "{ var, dot, eqx } = std.internal.ast\n"
         "main = () i32 {\n"
-        '    e := var("x").dot("a").eqx(var("y").dot("a"))\n'
+        "    heap := default()\n"
+        "    a := heap.addr()\n"
+        '    e := eqx(a, dot(a, var(a, "x"), "a"), dot(a, var(a, "y"), "a"))\n'
         "    0\n"
+        "}\n")
+    r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_std_ast_decl_buffer_uses_explicit_allocator():
+    """std.internal.ast should not own declaration buffers through raw malloc."""
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ Allocator, malloc, free } = std.mem.alloc\n"
+        "{ to_exit } = std.core.bool\n"
+        "{ derive_accessors_in } = std.internal.ast\n"
+        "{ Decl, sdef, field, ti32 } = compiler.genc\n"
+        "Counting: { acquired: i32, released: i32 }\n"
+        "Counting.impl(Allocator, {\n"
+        "    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {\n"
+        "        a.acquired = a.acquired + 1\n"
+        "        malloc(n)\n"
+        "    }\n"
+        "    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n"
+        "    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {\n"
+        "        a.released = a.released + 1\n"
+        "        free(p)\n"
+        "    }\n"
+        "})\n"
+        "main = () i32 {\n"
+        "    backing := Counting(acquired: 0, released: 0)\n"
+        "    a := backing.addr()\n"
+        "    sd := sdef(\"Point\", [field(\"x\", ti32()), field(\"y\", ti32())])\n"
+        "    ds: [Decl] := a.derive_accessors_in(sd)\n"
+        "    ok := (backing.acquired > 1) && (ds.len == 2)\n"
+        "    a.release(ds.ptr)\n"
+        "    (ok && (backing.released == 1)).to_exit()\n"
         "}\n")
     r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

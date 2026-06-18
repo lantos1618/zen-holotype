@@ -37,7 +37,7 @@ multiple modules, all in Zen:
   name) into one flat module for `zenc`.
 
 **Self-hosted — Python and tree-sitter removed.** The compiler is now the `zenc` binary alone:
-`cc` builds it from `bootstrap/{zenc.gen.c,zenrt.c,main.c}`, and `zenc --build-self` regenerates
+`cc` builds it from `bootstrap/{zenc.gen.c,zenrt.c,driver.c}`, and `zenc --build-self` regenerates
 `zenc.gen.c` byte-for-byte (the fixpoint). The former Python reference frontend, `tree-sitter-zen`,
 `generate.py`, and `mypy` are gone; only the binary-only test oracle (pytest as a runner that
 imports no compiler code) remains, and it is being ported to a Zen-native oracle.

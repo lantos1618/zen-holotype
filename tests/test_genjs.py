@@ -75,7 +75,7 @@ def _build_emit():
         d = Path(tempfile.mkdtemp())
         exe = d / "zenc"
         r = subprocess.run(_CC + [str(BOOT / "zenc.gen.c"), str(BOOT / "zenrt.c"),
-                                  str(BOOT / "main.c"), "-o", str(exe)],
+                                  str(BOOT / "driver.c"), "-o", str(exe)],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         _emit_exe = exe
@@ -211,13 +211,31 @@ def test_genjs_emits_slice_and_loop_as_js_values():
     js = emit_js(SLICE + LOOP.replace("test*", "loop_test*"))
     assert "ptr: [10, 20, 12]" in js
     assert ".ptr[1]" in js
-    assert "for (let i = 0; i < _seq.len;" in js
+    assert "for (let __zen_local" in js and " < _seq.len;" in js
 
 
 def test_genjs_marks_raw_primitive_calls():
     js = emit_js("test* = () i32 { x := 1\n  @addr(x)\n  0 }\n")
     assert "unsupported-in-js: raw @addr" in js
     assert "unsupported-in-js: intrinsic addr" not in js
+
+
+def test_genjs_marks_pointer_memory_intrinsics():
+    js = emit_js(
+        "test* = () i32 {\n"
+        "  p := null_ptr()\n"
+        "  load(p)\n"
+        "  store(p, 1)\n"
+        "  offset(p, 1)\n"
+        "  cstr(p)\n"
+        "  load_i64(p)\n"
+        "  store_i64(p, 1)\n"
+        "  atomic_add_i64(p, 1)\n"
+        "  0\n"
+        "}\n"
+    )
+    for name in ["null_ptr", "load", "store", "offset", "cstr", "load_i64", "store_i64", "atomic_add_i64"]:
+        assert f"unsupported-in-js: intrinsic {name}" in js
 
 
 def test_genjs_plain_malloc_is_not_magic():

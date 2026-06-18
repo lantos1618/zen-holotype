@@ -108,9 +108,11 @@ sum = (xs: [i32]) i32 {
 }
 
 // collections take an EXPLICIT allocator — nothing hides a malloc.
-// m := default_allocator()
-// v := m.addr().vec_of([1, 2, 3])      // Vec<i32> backed by m
-// v2 := m.addr().vpush(v, 4)
+// alloc = std.mem.alloc
+// vec = std.collections.vec
+// heap := alloc.default()
+// v := vec.of(heap.addr(), [1, 2, 3])      // Vec<i32> backed by heap
+// v = v.push(heap.addr(), 4)
 ```
 
 ## A real program

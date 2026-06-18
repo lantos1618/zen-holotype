@@ -1,60 +1,80 @@
 // Heap-stable builders over compiler.genc's AST values.
 // Pointer and slice children are copied so returned ASTs do not dangle.
 
-{ malloc } = std.mem.alloc
-{ node, dupx } = std.core.slice
+{ node_in, dupx_in, buf_in } = std.core.slice
 { Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl,
-  vref, lit, bin, call, member, mkstruct, finit, FieldInit,
-  slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
-  tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = compiler.genc
+    vref, lit, bin, call, member, mkstruct, finit, FieldInit,
+    slet, sassign, sret, sexpr, param, field, dfunc, dstruct,
+    tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = compiler.genc
 
 // Expressions
-var*    = (name: str) Ptr<Expr> { vref(name).node() }
-int*    = (n: i32) Ptr<Expr> { lit(n).node() }
-dot*    = (o: Ptr<Expr>, f: str) Ptr<Expr> { member(o, f).node() }
-binop*  = (l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { bin(op, l, r).node() }
-add*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("+", r) }
-eqx*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("==", r) }
-and*    = (l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { l.binop("&&", r) }
-callx*  = (fn: str, args: [Expr]) Ptr<Expr> { call(fn, args.dupx()).node() }
-estruct* = (ty: str, fi: [FieldInit]) Ptr<Expr> { mkstruct(ty, fi.dupx()).node() }
+var_in*<A> = (a: MutPtr<A>, name: str) Ptr<Expr> { a.node_in(vref(name)) }
+int_in*<A> = (a: MutPtr<A>, n: i32) Ptr<Expr> { a.node_in(lit(n)) }
+dot_in*<A> = (a: MutPtr<A>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.node_in(member(o, f)) }
+binop_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { a.node_in(bin(op, l, r)) }
+add_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "+", r) }
+eqx_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "==", r) }
+and_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "&&", r) }
+callx_in*<A> = (a: MutPtr<A>, fn: str, args: [Expr]) Ptr<Expr> { a.node_in(call(fn, a.dupx_in(args))) }
+estruct_in*<A> = (a: MutPtr<A>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.node_in(mkstruct(ty, a.dupx_in(fi))) }
+
+var*<A> = (a: MutPtr<A>, name: str) Ptr<Expr> { a.var_in(name) }
+int*<A> = (a: MutPtr<A>, n: i32) Ptr<Expr> { a.int_in(n) }
+dot*<A> = (a: MutPtr<A>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.dot_in(o, f) }
+binop*<A> = (a: MutPtr<A>, l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, op, r) }
+add*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.add_in(l, r) }
+eqx*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.eqx_in(l, r) }
+and*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.and_in(l, r) }
+callx*<A> = (a: MutPtr<A>, fn: str, args: [Expr]) Ptr<Expr> { a.callx_in(fn, args) }
+estruct*<A> = (a: MutPtr<A>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.estruct_in(ty, fi) }
 
 // Types
 named*  = (name: str) Ty { tnamed(name) }
-ptrto*  = (inner: Ty) Ty { tptr(inner.node()) }
+ptrto_in*<A> = (a: MutPtr<A>, inner: Ty) Ty { tptr(a.node_in(inner)) }
+ptrto*<A> = (a: MutPtr<A>, inner: Ty) Ty { a.ptrto_in(inner) }
 i32t*   = () Ty { ti32() }
 
 // Statements
 ret*    = (e: Ptr<Expr>) Stmt { sret(e) }
 asstmt* = (e: Ptr<Expr>) Stmt { sexpr(e) }
 letb*   = (name: str, v: Ptr<Expr>) Stmt { slet(name, v) }
-set*    = (name: str, v: Ptr<Expr>) Stmt { sassign(var(name), v) }
+set_in*<A> = (a: MutPtr<A>, name: str, v: Ptr<Expr>) Stmt { sassign(a.var_in(name), v) }
+set*<A> = (a: MutPtr<A>, name: str, v: Ptr<Expr>) Stmt { a.set_in(name, v) }
 
 // Declarations
-func*   = (name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
-    dfunc(Func( name: name, params: ps.dupx(), ret: ret, body: body.dupx() ))
+func_in*<A> = (a: MutPtr<A>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
+    dfunc(Func( name: name, params: a.dupx_in(ps), ret: ret, body: a.dupx_in(body) ))
 }
-struct* = (name: str, fs: [Field]) Decl { dstruct(StructDecl( name: name, fields: fs.dupx() )) }
+func*<A> = (a: MutPtr<A>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl { a.func_in(name, ps, ret, body) }
+struct_in*<A> = (a: MutPtr<A>, name: str, fs: [Field]) Decl {
+    dstruct(StructDecl( name: name, fields: a.dupx_in(fs) ))
+}
+struct*<A> = (a: MutPtr<A>, name: str, fs: [Field]) Decl { a.struct_in(name, fs) }
 
-accessor = (sname: str, f: Field) Decl {
-    func(f.name, [param("s", named(sname).ptrto())], f.ty, [var("s").dot(f.name).ret()])
+accessor_in<A> = (a: MutPtr<A>, sname: str, f: Field) Decl {
+    recv := a.ptrto_in(named(sname))
+    body := a.dot_in(a.var_in("s"), f.name)
+    a.func_in(f.name, [param("s", recv)], f.ty, [body.ret()])
 }
-dbuf = (n: i64) [Decl] { slice(malloc(n * sizeof(Decl)), n) }
-derive_accessors* = (sd: StructDecl) [Decl] {
-    buf := dbuf(sd.fields.len)
-    sd.fields.loop((h, i, f) { buf[i] = accessor(sd.name, f) })
+empty_fields = () [Field] { slice(null_ptr(), 0) }
+decl_seed = () [Decl] { [dstruct(StructDecl( name: "", fields: empty_fields() ))] }
+dbuf_in*<A> = (a: MutPtr<A>, n: i64) [Decl] { a.buf_in(n, decl_seed()) }
+fill_accessors_in<A> = (a: MutPtr<A>, buf: [Decl], sd: StructDecl) [Decl] {
+    sd.fields.loop((h, i, f) { buf[i] = a.accessor_in(sd.name, f) })
     buf
 }
+derive_accessors_in*<A> = (a: MutPtr<A>, sd: StructDecl) [Decl] {
+    a.fill_accessors_in(a.dbuf_in(sd.fields.len), sd)
+}
+derive_accessors*<A> = (a: MutPtr<A>, sd: StructDecl) [Decl] { a.derive_accessors_in(sd) }
 
-field_eq = (fname: str) Ptr<Expr> { var("x").dot(fname).eqx(var("y").dot(fname)) }
-and_fields = (fields: [Field], i: i32, acc: Ptr<Expr>) Ptr<Expr> {
-    (i == fields.len).match ({
-        true  => acc,
-        false => and_fields(fields, i + 1, acc.and(field_eq(fields[i].name)))
-    })
+field_eq_in<A> = (a: MutPtr<A>, fname: str) Ptr<Expr> {
+    a.eqx_in(a.dot_in(a.var_in("x"), fname), a.dot_in(a.var_in("y"), fname))
 }
-derive_eq* = (name: str, sd: StructDecl) Decl {
-    pty  := named(sd.name).ptrto()
-    body := and_fields(sd.fields, 0, var("true"))
-    func(name, [param("x", pty), param("y", pty)], tbool(), [body.ret()])
+derive_eq_in*<A> = (a: MutPtr<A>, name: str, sd: StructDecl) Decl {
+    pty  := a.ptrto_in(named(sd.name))
+    body := a.var_in("true")
+    sd.fields.loop((h, i, f) { body = a.and_in(body, a.field_eq_in(f.name)) })
+    a.func_in(name, [param("x", pty), param("y", pty)], tbool(), [body.ret()])
 }
+derive_eq*<A> = (a: MutPtr<A>, name: str, sd: StructDecl) Decl { a.derive_eq_in(name, sd) }

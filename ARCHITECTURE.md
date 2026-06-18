@@ -1,8 +1,8 @@
 # Architecture
 
-How the **self-hosted** compiler is shaped. For *what* the language does see
-[FEATURES](FEATURES.md); for the *why* see [README](README.md); for the long-term language
-see [VISION](VISION.md).
+How the **self-hosted** compiler is shaped. For the current language behavior see
+[SPEC](SPEC.md); for the feature inventory see [FEATURES](FEATURES.md); for the *why* see
+[README](README.md); for the long-term language see [VISION](VISION.md).
 
 The compiler is written entirely in Zen (`zen/compiler/`) and compiles itself, with runtime
 and user-facing library modules in `zen/std/`. There is no Python frontend and no tree-sitter —
@@ -29,9 +29,10 @@ emitted C to `cc`.
 ```
 
 `compiler.genc`'s `Expr`/`Stmt`/`Decl` are the **one AST** the parser builds, the checker
-annotates, and a backend walks. `compiler.genjs` is a second, partial backend over that
-same AST for the computational subset; it demonstrates AST reuse without making the whole
-IR backend-neutral yet.
+annotates, and a backend walks. `compiler.genjs` is a second, experimental backend over
+that same AST; [JS_BACKEND.md](JS_BACKEND.md) documents the supported computational subset
+and unsupported memory markers. It demonstrates AST reuse without making the whole IR
+backend-neutral yet.
 
 Checked CLI modes reject on any type error before linking.
 The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one
@@ -45,6 +46,19 @@ self-hosted loader. It reads a program's import edges, gathers the transitive cl
 dependencies. It strips import lines and concatenates each module body exactly once into one
 flat module (per-module dedup breaks cycles; a final per-**name** pass keeps the first definition
 of each top-level name, so a cross-module clash resolves deterministically).
+Namespace binds (`alias = std.X` or `alias = sibling`) are also source-text based, but they
+prefix direct exports before flattening; that lets two bound modules export the same short
+function or type name and be used through `left.name` / `right.name` in one program.
+The resolver also has a structured `ImportEdge { module, alias, namespace, start, next }`
+scanner (`import_edges`) that records destructuring and namespace-bind imports in source
+order with byte spans. The checked loader consumes that edge list when loading
+destructuring dependencies and namespace-bound modules. Declaration resolution still uses
+the flattened source path below, but import-head validation and namespace alias rewrite
+sets now use structured
+`ProvidedSymbol { name, start, next, decl_start, decl_next, imported, foreign }`
+values instead of separate newline-delimited declaration scans. User-module duplicate
+tracking and the final per-name dedup pass also consume the same symbol data, using
+normalized keys for lowered-name collisions while preserving source spelling in diagnostics.
 
 That loader is folded into the shipping CLI for `zenc check`, `zenc build`, and `zenc run`,
 so std-importing programs resolve from disk in those modes. Plain emit mode remains flat and
@@ -59,12 +73,12 @@ See [README → Modules & imports](README.md#modules--imports).
 |---|---|
 | `zenc.gen.c` | the compiler's `.zen` sources, already compiled to C (committed, the bootstrap seed) |
 | `zenrt.c` / `zenrt.h` | a ~30-line runtime: the growable `String`, `eq`/`is_empty`, `heap` |
-| `main.c` | the CLI entry — plain emit, `check`/`build`/`run`, plus `--build-self` regen |
+| `driver.c` | the CLI entry — plain emit, `check`/`build`/`run`, plus `--build-self` regen |
 | `sources.txt` | the graph/SCC-checked manifest of Zen sources used to regenerate `zenc.gen.c` |
 | `Makefile` | `zenc:` builds the binary; `regen:` regenerates `zenc.gen.c` with it |
 
 ```
-make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c,main.c} -o zenc
+make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c,driver.c} -o zenc
 make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self bootstrap/zenc.gen.c .
 ```
 
@@ -82,7 +96,7 @@ The test suite (`tests/`, run with `pytest`) is the **sole correctness reference
 is Python-*free* in the sense that matters: it imports **no compiler code**. It builds two
 artifacts from the committed bootstrap C with `cc` only —
 
-- an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,main.c}`): Zen source → C on stdout;
+- an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,driver.c}`): Zen source → C on stdout;
 - a **CHECK** binary (the same gen.c plus `check_validate.zen`, linked with a tiny
   `check_main.c`): exit code = the number of type errors —
 
@@ -105,7 +119,7 @@ a walk over it:
 | backend | module | target |
 |---|---|---|
 | `genc` | `zen/compiler/genc_emit.zen` | C, the bootstrap/intermediate target |
-| `genjs` | `zen/compiler/genjs.zen` | JavaScript (the computational subset) |
+| `genjs` | `zen/compiler/genjs.zen` | JavaScript (experimental computational subset) |
 
 A new backend is a new walk; it never re-checks, because the checker already proved the
 structure fits. Source branching is `.match` only, but a backend can choose target-native

@@ -4,9 +4,8 @@
 // every distinct concrete instance the module uses, this pass creates one concrete StructDecl/
 // EnumDecl with tparam→arg substituted. Instances are DISCOVERED from typed positions AND from
 // struct/enum LITERALS in expression bodies, then transitively closed. The AST types + the
-// type-substitution helpers (subst_ty, find_genenum, the constructors) live in the base, compiler.genc.
+// type-substitution helpers (subst_ty_in, find_genenum, the constructors) live in the base, compiler.genc.
 
-{ String, new, append, push, finish } = std.text.string
 { view, is_empty, eq } = std.text.str
 { Malloc } = std.mem.alloc
 { panic } = std.core.result
@@ -19,11 +18,11 @@
 // substituted in the field types. Instances are DISCOVERED from typed positions — function params,
 // returns, and struct fields (so a generic used through a typed API is found); a generic struct
 // LITERAL already carries its monomorphized name (MakeStruct.mty), so it just references the result.
-mono_gbuf = (a: Ptr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
-mono_fbuf = (a: Ptr<Malloc>, n: i64) [Field] { slice(a.acquire(n * sizeof(Field)), n) }
-mono_dbuf = (a: Ptr<Malloc>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
+mono_gbuf = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
+mono_fbuf = (a: MutPtr<Malloc>, n: i64) [Field] { slice(a.acquire(n * sizeof(Field)), n) }
+mono_dbuf = (a: MutPtr<Malloc>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
 // the concrete StructDecl for one instance: the matching DGenStruct's fields, tparam→arg substituted.
-mono_struct = (a: Ptr<Malloc>, decls: [Decl], g: GenericData) Decl {
+mono_struct = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     gsd := decls.find_genstruct(g.name)
     buf := a.mono_fbuf(gsd.fields.len)
     gsd.fields.loop((h, i, f) { buf[i] = field(f.name, a.subst_ty_in(gsd.tparams, g.args, f.ty)) })
@@ -35,8 +34,8 @@ find_genstruct = (decls: [Decl], name: str) GenStructDecl {
     found
 }
 // the concrete EnumDecl for one instance: the matching DGenEnum's variants, tparam→arg substituted.
-mono_vbuf = (a: Ptr<Malloc>, n: i64) [VariantDef] { slice(a.acquire(n * sizeof(VariantDef)), n) }
-mono_enum = (a: Ptr<Malloc>, decls: [Decl], g: GenericData) Decl {
+mono_vbuf = (a: MutPtr<Malloc>, n: i64) [VariantDef] { slice(a.acquire(n * sizeof(VariantDef)), n) }
+mono_enum = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     ged := decls.find_genenum(g.name)
     buf := a.mono_vbuf(ged.variants.len)
     ged.variants.loop((h, i, v) { buf[i] = VariantDef( name: v.name, payload: a.subst_ty_in(ged.tparams, g.args, v.payload) ) })
@@ -52,7 +51,7 @@ is_genstruct_name = (decls: [Decl], name: str) bool {
 // HOLLOW decl. That is deliberate for the emit-only pipeline (the acid gate feeds real stdlib files
 // whose imported generics aren't loaded); the CHECKED pipeline rejects an undefined generic ctor
 // up front (check_validate's mkenum_err/KUNDEFINED), so a hollow decl never reaches a user build.
-mono_inst = (a: Ptr<Malloc>, decls: [Decl], g: GenericData) Decl {
+mono_inst = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     decls.is_genstruct_name(g.name).match ({ true => a.mono_struct(decls, g), false => a.mono_enum(decls, g) })
 }
 // discovery: scan all typed positions for generic instances, deduped by mangled name.
@@ -196,7 +195,7 @@ collect_body = (buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
     c
 }
 GBufEnd*: { buf: [GenericData], count: i32 }
-collect_insts = (a: Ptr<Malloc>, decls: [Decl]) GBufEnd {
+collect_insts = (a: MutPtr<Malloc>, decls: [Decl]) GBufEnd {
     buf := a.mono_gbuf(2048)
     cnt := 0
     decls.loop((h, i, d) { cnt = buf.collect_decl(cnt, d) })
@@ -208,15 +207,15 @@ is_gen_template = (d: Decl) bool { d.is_gen_struct() || d.is_gen_enum() }
 // transitive discovery: an instance's CONCRETE form (substituted fields/payloads) may name FURTHER
 // instances (`Outer<i32>` has field `Inner<i32>`). Walk the growing list — for each, collect the
 // generics inside its monomorphized decl — until no new ones appear (collect_ty dedups by mangled).
-expand_one = (a: Ptr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
+expand_one = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
     nc := buf.collect_decl(count, a.mono_inst(decls, buf[i]))
     a.expand_insts(decls, buf, nc, i + 1)
 }
-expand_insts = (a: Ptr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
+expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
     (i >= count).match ({ true => count, false => a.expand_one(decls, buf, count, i) })
 }
 // monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
-monomorphize* = (a: Ptr<Malloc>, decls: [Decl]) [Decl] {
+monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     ce  := a.collect_insts(decls)
     cnt := a.expand_insts(decls, ce.buf, ce.count, 0)   // transitively close over nested generic instances
     out := a.mono_dbuf(decls.len + cnt)

@@ -1,11 +1,16 @@
 // std.collections.iter - slice iteration helpers.
 //
 // `fold`, `each`, `map_into`, and `filter_into` allocate nothing. Allocating
-// `[i32]` helpers come in explicit-allocator form (`map_in`,
-// `filter_in`) plus default wrappers (`map`, `filter`) for simple programs.
+// `[i32]` helpers require the caller allocator (`map_in`, `filter_in`, and
+// the receiver-style `map`, `filter` aliases).
+// `try_*` variants keep allocator failure in the value flow.
 // For other element types, use the generic `_into` forms with your own buffer.
 
-{ Allocator, default_allocator } = std.mem.alloc
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
+
+i32s_ok = (xs: [i32]) Result<[i32], IoError> { .Ok(xs) }
+i32s_err = (e: IoError) Result<[i32], IoError> { .Err(e) }
 
 fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
     acc := init
@@ -41,6 +46,20 @@ map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] {
     out
 }
 
+try_map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> {
+    (xs.len <= 0).match ({
+        true => i32s_ok(slice(null_ptr(), 0)),
+        false => a.try_acquire(xs.len * 4).match ({
+            .Ok(p) => {
+                out := p.slice(xs.len)
+                xs.loop((h, i, x) { out[i] = f(x) })
+                i32s_ok(out)
+            },
+            .Err(e) => i32s_err(e)
+        })
+    })
+}
+
 filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
     buf := slice(a.acquire(xs.len * 4), xs.len)
     n := 0
@@ -51,12 +70,28 @@ filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
     slice(buf[0].addr(), n)
 }
 
-map* = (xs: [i32], f: (i32) i32) [i32] {
-    a := default_allocator()
-    a.addr().map_in(xs, f)
+try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> {
+    (xs.len <= 0).match ({
+        true => i32s_ok(slice(null_ptr(), 0)),
+        false => a.try_acquire(xs.len * 4).match ({
+            .Ok(p) => {
+                buf := p.slice(xs.len)
+                n := 0
+                xs.loop((h, i, x) {
+                    buf[n] = x
+                    n = n + (keep(x)).match ({ true => 1, false => 0 })
+                })
+                i32s_ok(slice(buf[0].addr(), n))
+            },
+            .Err(e) => i32s_err(e)
+        })
+    })
 }
 
-filter* = (xs: [i32], keep: (i32) bool) [i32] {
-    a := default_allocator()
-    a.addr().filter_in(xs, keep)
-}
+map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] { a.map_in(xs, f) }
+
+try_map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> { a.try_map_in(xs, f) }
+
+filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] { a.filter_in(xs, keep) }
+
+try_filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> { a.try_filter_in(xs, keep) }

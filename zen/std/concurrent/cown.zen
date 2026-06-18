@@ -1,36 +1,59 @@
 // @self-hosted-only: allocator-owned buffers and Drop-owned C handles.
 
-{ Own, Drop, own_new, own_clone, own_release, own_get, own_ptr, own_count } = std.mem.own
-{ Allocator } = std.mem.alloc
-{ open, close, O_RDONLY } = std.io.file
+{ Own, Drop, try_new_in } = std.mem.own
+{ Allocator, try_acquire } = std.mem.alloc
+{ O_RDONLY } = std.io.file
+{ open, close } = std.c.libc
 { Result, IoError, ok_if } = std.core.result
 
-Buf*: { p: RawPtr<u8>, len: i64 }
+Buf*: {
+    p: RawPtr<u8>,
+    len: i64
 
-buf_alloc*<A> = (alloc: MutPtr<A>, n: i64) Buf {
+    get = (b: Ptr<Buf>, i: i64) u8 { b.p.offset(i).load() }
+    set = (b: MutPtr<Buf>, i: i64, v: u8) void { b.p.offset(i).store(v) }
+    free<A> = (b: MutPtr<Buf>, alloc: MutPtr<A>) void {
+        alloc.release(b.p)
+        b.p = null_ptr()
+        b.len = 0
+    }
+}
+
+buf*<A> = (alloc: MutPtr<A>, n: i64) Buf {
     Buf(p: alloc.acquire(n), len: n)
 }
-buf_free*<A> = (alloc: MutPtr<A>, b: MutPtr<Buf>) void {
-    alloc.release(b.p)
-    b.p = null_ptr()
-    b.len = 0
-}
 
-buf_get* = (b: Ptr<Buf>, i: i64) u8 { b.p.offset(i).load() }
-buf_set* = (b: MutPtr<Buf>, i: i64, v: u8) void { b.p.offset(i).store(v) }
+buf_ok = (b: Buf) Result<Buf, IoError> { .Ok(b) }
+buf_err = (e: IoError) Result<Buf, IoError> { .Err(e) }
+try_buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError> {
+    (n <= 0).match ({
+        true => buf_ok(Buf(p: null_ptr(), len: 0)),
+        false => alloc.try_acquire(n).match ({
+            .Ok(p)  => buf_ok(Buf(p: p, len: n)),
+            .Err(e) => buf_err(e)
+        })
+    })
+}
 
 // POSIX open returns a raw descriptor; File closes it through Drop.
 File*: { fd: i32 }
 
 file_ok = (o: Own<File>) Result<Own<File>, IoError> { .Ok(o) }
 file_err = (e: IoError) Result<Own<File>, IoError> { .Err(e) }
-file_open* = (path: str) Result<Own<File>, IoError> {
+file_in*<A> = (alloc: MutPtr<A>, path: str) Result<Own<File>, IoError> {
     path.open(O_RDONLY, 0).ok_if().match ({
-        .Ok(fd)  => file_ok(own_new(File( fd: fd ))),
+        .Ok(fd)  => {
+            alloc.try_new_in(File( fd: fd )).match ({
+                .Ok(o) => file_ok(o),
+                .Err(e) => {
+                    fd.close()
+                    file_err(e)
+                }
+            })
+        },
         .Err(e)  => file_err(e),
     })
 }
-
-file_fd* = (o: Own<File>) i32 { o.own_get().fd }
+file*<A> = (alloc: MutPtr<A>, path: str) Result<Own<File>, IoError> { alloc.file_in(path) }
 
 File.impl(Drop, { drop = (f: MutPtr<File>) void { f.fd.close() } })

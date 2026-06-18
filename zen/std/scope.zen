@@ -1,0 +1,53 @@
+// std.scope — the generic capability value + region-scoped, colorless combinators.
+//
+// `Scope<A>` wraps a backing `A` that is BOTH the allocator and the execution mode (SyncArena:
+// checkpoint is a no-op; AsyncArena: checkpoint yields a coroutine). A colorless body takes
+// `MutPtr<Scope<A>>` and calls `s.acquire` / `s.checkpoint` — the SAME generic body runs under
+// any backing, decided by which combinator opened the scope. (s.acquire forwards to s.alloc.acquire,
+// a dispatch through a generic-struct field — see compiler A1.)
+//
+// Cancellation rides the checkpoint: a scope carries a `budget` (a checkpoint countdown; < 0 =
+// unlimited). When the budget is exhausted, `checkpoint` returns `.Stop(.Deadline)` — a real value
+// a body matches and bails on — instead of yielding. Cleanup is the REGION: `with_sync`/`with_async`
+// free the whole arena on exit, on every path.
+
+{ Signal, CancelReason, SyncArena, AsyncArena, sync_in, async_in, free_sync, free_async } = std.concurrent.runtime
+
+UNLIMITED := 0 - 1
+
+// The one capability value: a backing allocator/runtime + a cancellation budget, threaded explicitly.
+Scope<A>: {
+    alloc:  MutPtr<A>
+    budget: i64
+
+    acquire = (s: MutPtr<Scope<A>>, n: i64) RawPtr<u8> { s.alloc.acquire(n) }
+
+    // count down one checkpoint of budget (unlimited = stays negative, never reaches 0).
+    tick = (s: MutPtr<Scope<A>>) void { (s.budget > 0).match ({ true => { s.budget = s.budget - 1 }, false => {} }) }
+
+    // the suspension point, now cancellation-aware: budget exhausted => Stop, else tick + yield/no-op.
+    checkpoint = (s: MutPtr<Scope<A>>) Signal {
+        (s.budget == 0).match ({
+            true  => .Stop(.Deadline),
+            false => { s.tick()  s.alloc.checkpoint() }
+        })
+    }
+}
+
+// open a SYNC scope over `backing`, run `body` with a Scope<SyncArena>, free the arena on exit.
+with_sync* = (backing: MutPtr<A>, cap: i64, body: (MutPtr<Scope<SyncArena>>) R) R {
+    arena := backing.sync_in(cap)
+    s := Scope<SyncArena>( alloc: arena.addr(), budget: UNLIMITED )
+    out := body(s.addr())
+    arena.addr().free_sync(backing)
+    out
+}
+
+// open an ASYNC scope (checkpoint yields); same generic body shape, freed on exit.
+with_async* = (backing: MutPtr<A>, cap: i64, body: (MutPtr<Scope<AsyncArena>>) R) R {
+    arena := backing.async_in(cap)
+    s := Scope<AsyncArena>( alloc: arena.addr(), budget: UNLIMITED )
+    out := body(s.addr())
+    arena.addr().free_async(backing)
+    out
+}

@@ -1,7 +1,7 @@
 // std.collections.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the std.collections.vec mold.
 // Every op that allocates takes the allocator as `a: MutPtr<A>` and goes through std.mem.alloc's `Allocator`
-// trait — nothing here hides a malloc. The plain `map_new`/`mput` path is fail-fast like Vec; the
-// `try_*` variants return Result<Map<T>, IoError> so callers can handle allocation failure as a value.
+// trait — nothing here hides a malloc. `of` plus `Map.put` is fail-fast like Vec; `try_*`
+// variants return Result<Map<T>, IoError> so callers can handle allocation failure as a value.
 // Lookup is a LINEAR SCAN (v1: fine for the small maps the compiler and examples need; hashing can land
 // behind the same API later).
 //
@@ -10,29 +10,19 @@
 // so a key must outlive the map (string literals always do; `dup` one from std.text.str otherwise). Key
 // comparison is byte-wise `eq` from std.text.str, never pointer `==`.
 //
-//   alloc := system_allocator()
+//   alloc := default()
 //   a := alloc.addr()
-//   w := a.map_new("the", 1)               // fail-fast Map<i32>; T inferred from the seed
-//   w  = a.mput(w, "cat", 2)               // insert — grows through alloc when full
-//   r := a.try_map_new("the", 1)           // Result<Map<i32>, IoError>
-//   w  = a.mput(w, "the", 9)               // upsert — same key overwrites in place
-//   n := w.mget("the", 0)                 // 9; absent keys produce the default
-//   a.free_map(w)                          // hand both buffers back to alloc
+//   w := maps.of(a, "the", 1)              // fail-fast Map<i32>; T inferred from the seed
+//   w  = w.put(a, "cat", 2)                // insert — grows through alloc when full
+//   r := maps.try_of(a, "the", 1)          // Result<Map<i32>, IoError>
+//   w  = w.put(a, "the", 9)                // upsert — same key overwrites in place
+//   n := w.get("the", 0)                   // 9; absent keys produce the default
+//   w.free(a)                              // hand both buffers back to alloc
 //
-// Names are m-prefixed (map_new/mput/mget/mhas/mlen/mgrow) because Zen's namespace is FLAT with no
-// overloading — a bare `put`/`get`/`len`/`new` would clash with std.text.string/std.collections.vec/std.text.str when
-// imported together (`get` is std.collections.vec's, `len` is std.text.str's, `new` is std.text.string's).
+// Allocator-threaded constructors remain free functions; Map-owned operations live on Map<T>, so
+// callers use w.put(...), w.try_put(...), w.free(...), w.get(...), w.has(...), and w.len().
 //
-// LOCALS in the generic bodies are mk-prefixed (mkm/mkr/mkks/mkvs/mkcap) on purpose: generic mono
-// INLINES these bodies into the caller and substitutes argument EXPRESSIONS textually, without
-// alpha-renaming — a body local named `m` would capture the `m` in a caller's `m.addr().mput(…)`
-// (silent mis-dispatch; see the capture repro in this module's PR). Distinctive names dodge it.
-// For the same reason no generic body here uses `return` (the inliner hoists it into the CALLER's
-// frame) and every value-returning branch is a whole-body match — the two body shapes the inliner
-// lowers soundly in any context (proven by std.collections.vec): a single match/call EXPRESSION, or statements
-// followed by a trailing variable/constructor.
-
-{ Allocator } = std.mem.alloc        // explicit allocator trait
+{ Allocator, try_acquire } = std.mem.alloc        // explicit allocator trait
 { Result, IoError } = std.core.result
 { eq } = std.text.str                 // byte-wise str equality (`==` on str compares POINTERS)
 
@@ -40,13 +30,130 @@
 // C type name), `sizeof(MKey)` does, and a one-pointer struct is exactly one key slot.
 MKey: { k: str }
 
-Map*<T>: { keys: RawPtr<u8>, vals: RawPtr<u8>, len: i64, cap: i64 }    // parallel buffers of cap slots
+Map*<T>: {
+    keys: RawPtr<u8>,
+    vals: RawPtr<u8>,
+    len: i64,
+    cap: i64
 
-// the backing buffers as typed slices (cap slots) — for indexed reads/writes
-mkeys*<T> = (m: Map<T>) [str] { slice(m.keys, m.cap) }
-mvals*<T> = (m: Map<T>) [T] { slice(m.vals, m.cap) }
-// the live entry count
-mlen*<T> = (m: Map<T>) i64 { m.len }
+    keys = (m: Map<T>) [str] { slice(m.keys, m.cap) }
+    vals = (m: Map<T>) [T] { slice(m.vals, m.cap) }
+    len = (m: Map<T>) i64 { m.len }
+    find = (m: Map<T>, k: str) i64 { mscan(m.keys(), m.len, k, 0) }
+    set = (m: Map<T>, i: i64, v: T) Map<T> {
+        vals := m.vals()
+        vals[i] = v
+        m
+    }
+    get_at = (m: Map<T>, i: i64, dflt: T) T {
+        (i < 0).match ({ true => dflt, false => m.vals()[i] })
+    }
+    get = (m: Map<T>, k: str, dflt: T) T { m.get_at(m.find(k), dflt) }
+    has = (m: Map<T>, k: str) bool { m.find(k) >= 0 }
+    grow<A> = (m: Map<T>, a: MutPtr<A>) Map<T> {
+        cap := (m.cap * 2) + 1
+        Map<T>( keys: a.resize(m.keys, cap * sizeof(MKey)),
+                vals: a.resize(m.vals, cap * sizeof(T)),
+                len: m.len, cap: cap )
+    }
+    try_grow<A> = (m: Map<T>, a: MutPtr<A>) Result<Map<T>, IoError> {
+        cap := (m.cap * 2) + 1
+        a.try_acquire(cap * sizeof(MKey)).match ({
+            .Ok(kp) => {
+                a.try_acquire(cap * sizeof(T)).match ({
+                    .Ok(vp) => {
+                        oldks := m.keys()
+                        oldvs := m.vals()
+                        next := Map<T>( keys: kp, vals: vp, len: m.len, cap: cap )
+                        keys := next.keys()
+                        vals := next.vals()
+                        oldks.loop((h, i, k) {
+                            (i < m.len).match ({
+                                true => {
+                                    keys[i] = k
+                                    vals[i] = oldvs[i]
+                                },
+                                false => { h.break }
+                            })
+                        })
+                        a.release(m.keys)
+                        a.release(m.vals)
+                        ok: Result<Map<T>, IoError> := .Ok(next)
+                        ok
+                    },
+                    .Err(e) => {
+                        a.release(kp)
+                        err: Result<Map<T>, IoError> := .Err(e)
+                        err
+                    }
+                })
+            },
+            .Err(e) => {
+                err: Result<Map<T>, IoError> := .Err(e)
+                err
+            }
+        })
+    }
+    append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Map<T> {
+        k := k
+        v := v
+        next := (m.len < m.cap).match ({ true => m, false => m.grow(a) })
+        keys := next.keys()
+        vals := next.vals()
+        keys[next.len] = k
+        vals[next.len] = v
+        Map<T>( keys: next.keys, vals: next.vals, len: next.len + 1, cap: next.cap )
+    }
+    try_append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
+        k := k
+        v := v
+        out: Result<Map<T>, IoError> := (m.len < m.cap).match ({
+            true => {
+                keys := m.keys()
+                vals := m.vals()
+                keys[m.len] = k
+                vals[m.len] = v
+                ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: m.keys, vals: m.vals, len: m.len + 1, cap: m.cap ))
+                ok
+            },
+            false => {
+                m.try_grow(a).match ({
+                    .Ok(next) => {
+                        keys := next.keys()
+                        vals := next.vals()
+                        keys[next.len] = k
+                        vals[next.len] = v
+                        ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: next.keys, vals: next.vals, len: next.len + 1, cap: next.cap ))
+                        ok
+                    },
+                    .Err(e) => {
+                        err: Result<Map<T>, IoError> := .Err(e)
+                        err
+                    }
+                })
+            }
+        })
+        out
+    }
+    put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Map<T> {
+        (m.find(k) < 0).match ({
+            true  => m.append(a, k, v),
+            false => m.set(m.find(k), v),
+        })
+    }
+    try_put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
+        out: Result<Map<T>, IoError> := (m.find(k) < 0).match ({
+            true  => m.try_append(a, k, v),
+            false => {
+                next := m.set(m.find(k), v)
+                ok: Result<Map<T>, IoError> := .Ok(next)
+                ok
+            },
+        })
+        out
+    }
+    free<A> = (m: Map<T>, a: MutPtr<A>) void { a.release(m.keys)  a.release(m.vals) }
+}
 
 // index of k in the first n slots of ks (linear scan from i), or -1 if absent. CONCRETE on purpose:
 // the key columns of every Map<T> are the same [str], and a concrete fn may recurse (a recursive
@@ -59,212 +166,40 @@ mscan = (ks: [str], n: i64, k: str, i: i64) i64 {
     })
 }
 
-// index of k among m's live keys, or -1 if absent
-mfind<T> = (m: Map<T>, k: str) i64 { mscan(m.mkeys(), m.len, k, 0) }
-
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
-// (Zen has no call-site type args — the vec_of/buf_of pattern). Starts at cap 1, like vec_of full.
-map_new*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Map<T> {
-    mkm := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)), len: 1, cap: 1 )
-    mkks := mkm.mkeys()
-    mkvs := mkm.mvals()
-    mkks[0] = seed_key
-    mkvs[0] = seed_val
-    mkm
-}
-
-try_map_new*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError> {
-    kp := a.acquire(sizeof(MKey))
-    (kp == null_ptr()).match ({
-        true => {
-            mkerr: Result<Map<T>, IoError> := .Err(.NotFound)
-            mkerr
-        },
-        false => {
-            vp := a.acquire(sizeof(T))
-            (vp == null_ptr()).match ({
-                true => {
-                    a.release(kp)
-                    mkerr: Result<Map<T>, IoError> := .Err(.NotFound)
-                    mkerr
-                },
-                false => {
-                    mkm := Map<T>( keys: kp, vals: vp, len: 1, cap: 1 )
-                    mkks := mkm.mkeys()
-                    mkvs := mkm.mvals()
-                    mkks[0] = seed_key
-                    mkvs[0] = seed_val
-                    mkok: Result<Map<T>, IoError> := .Ok(mkm)
-                    mkok
-                }
-            })
-        }
-    })
-}
-
-// grow (double + 1) by RESIZING both buffers through `a` — keeps the live entries, leaks nothing
-mgrow*<T, A> = (a: MutPtr<A>, m: Map<T>) Map<T> {
-    mkcap := (m.cap * 2) + 1
-    Map<T>( keys: a.resize(m.keys, mkcap * sizeof(MKey)),
-            vals: a.resize(m.vals, mkcap * sizeof(T)),
-            len: m.len, cap: mkcap )
-}
-
-// fallible grow: allocate fresh parallel buffers, copy live entries, then release the old buffers.
-// That keeps the original Map valid if either allocation fails; a pair of reallocs cannot do that.
-try_mgrow*<T, A> = (a: MutPtr<A>, m: Map<T>) Result<Map<T>, IoError> {
-    mkcap := (m.cap * 2) + 1
-    kp := a.acquire(mkcap * sizeof(MKey))
-    (kp == null_ptr()).match ({
-        true => {
-            mkerr: Result<Map<T>, IoError> := .Err(.NotFound)
-            mkerr
-        },
-        false => {
-            vp := a.acquire(mkcap * sizeof(T))
-            (vp == null_ptr()).match ({
-                true => {
-                    a.release(kp)
-                    mkerr: Result<Map<T>, IoError> := .Err(.NotFound)
-                    mkerr
-                },
-                false => {
-                    oldks := m.mkeys()
-                    oldvs := m.mvals()
-                    mkr := Map<T>( keys: kp, vals: vp, len: m.len, cap: mkcap )
-                    mkks := mkr.mkeys()
-                    mkvs := mkr.mvals()
-                    oldks.loop((h, i, k) {
-                        (i < m.len).match ({
-                            true => {
-                                mkks[i] = k
-                                mkvs[i] = oldvs[i]
-                            },
-                            false => { h.break }
-                        })
-                    })
-                    a.release(m.keys)
-                    a.release(m.vals)
-                    mkok: Result<Map<T>, IoError> := .Ok(mkr)
-                    mkok
-                }
-            })
-        }
-    })
-}
-
-// overwrite slot i with v, in place (i must be a live index)
-mset<T> = (m: Map<T>, i: i64, v: T) Map<T> {
-    mkvs := m.mvals()
-    mkvs[i] = v
+// (Zen has no call-site type args). Starts at cap 1.
+of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Map<T> {
+    m := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)), len: 1, cap: 1 )
+    keys := m.keys()
+    vals := m.vals()
+    keys[0] = seed_key
+    vals[0] = seed_val
     m
 }
 
-// append a NEW entry (k known absent), growing through `a` if full
-mappend<T, A> = (a: MutPtr<A>, m: Map<T>, k: str, v: T) Map<T> {
-    // force k and v FIRST: the inliner substitutes argument expressions by NAME (re-evaluated at
-    // each use), so a caller's `m.mget(k, 0) + 1` value arg would otherwise be evaluated after the
-    // grow below — reading m's buffers AFTER resize freed them (a use-after-free; see PR)
-    mkk := k
-    mkv := v
-    mkr := (m.len < m.cap).match ({ true => m, false => a.mgrow(m) })
-    mkks := mkr.mkeys()
-    mkvs := mkr.mvals()
-    mkks[mkr.len] = mkk
-    mkvs[mkr.len] = mkv
-    Map<T>( keys: mkr.keys, vals: mkr.vals, len: mkr.len + 1, cap: mkr.cap )
-}
-
-try_mappend<T, A> = (a: MutPtr<A>, m: Map<T>, k: str, v: T) Result<Map<T>, IoError> {
-    mkk := k
-    mkv := v
-    out: Result<Map<T>, IoError> := (m.len < m.cap).match ({
-        true => {
-            mkks0 := m.mkeys()
-            mkvs0 := m.mvals()
-            mkks0[m.len] = mkk
-            mkvs0[m.len] = mkv
-            mkok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: m.keys, vals: m.vals, len: m.len + 1, cap: m.cap ))
-            mkok
-        },
-        false => {
-            mkcap := (m.cap * 2) + 1
-            kp := a.acquire(mkcap * sizeof(MKey))
-            (kp == null_ptr()).match ({
-                true => {
-                    mkerr: Result<Map<T>, IoError> := .Err(.NotFound)
-                    mkerr
+try_of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError> {
+    a.try_acquire(sizeof(MKey)).match ({
+        .Ok(kp) => {
+            a.try_acquire(sizeof(T)).match ({
+                .Ok(vp) => {
+                    m := Map<T>( keys: kp, vals: vp, len: 1, cap: 1 )
+                    keys := m.keys()
+                    vals := m.vals()
+                    keys[0] = seed_key
+                    vals[0] = seed_val
+                    ok: Result<Map<T>, IoError> := .Ok(m)
+                    ok
                 },
-                false => {
-                    vp := a.acquire(mkcap * sizeof(T))
-                    (vp == null_ptr()).match ({
-                        true => {
-                            a.release(kp)
-                            mkerr: Result<Map<T>, IoError> := .Err(.NotFound)
-                            mkerr
-                        },
-                        false => {
-                            oldks := m.mkeys()
-                            oldvs := m.mvals()
-                            mkr := Map<T>( keys: kp, vals: vp, len: m.len, cap: mkcap )
-                            mkks := mkr.mkeys()
-                            mkvs := mkr.mvals()
-                            oldks.loop((h, i, oldk) {
-                                (i < m.len).match ({
-                                    true => {
-                                        mkks[i] = oldk
-                                        mkvs[i] = oldvs[i]
-                                    },
-                                    false => { h.break }
-                                })
-                            })
-                            mkks[m.len] = mkk
-                            mkvs[m.len] = mkv
-                            a.release(m.keys)
-                            a.release(m.vals)
-                            mkok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: mkr.keys, vals: mkr.vals, len: m.len + 1, cap: mkr.cap ))
-                            mkok
-                        }
-                    })
+                .Err(e) => {
+                    a.release(kp)
+                    err: Result<Map<T>, IoError> := .Err(e)
+                    err
                 }
             })
+        },
+        .Err(e) => {
+            err: Result<Map<T>, IoError> := .Err(e)
+            err
         }
     })
-    out
 }
-
-// upsert: overwrite in place if k is present, else append (growing through `a` if full); returns the
-// updated Map. The hit arm rescans for the index — a second linear pass, the price of keeping this
-// body a single inliner-safe expression (v1: scans are the cost model anyway).
-mput*<T, A> = (a: MutPtr<A>, m: Map<T>, k: str, v: T) Map<T> {
-    (m.mfind(k) < 0).match ({
-        true  => a.mappend(m, k, v),
-        false => m.mset(m.mfind(k), v),
-    })
-}
-
-try_mput*<T, A> = (a: MutPtr<A>, m: Map<T>, k: str, v: T) Result<Map<T>, IoError> {
-    out: Result<Map<T>, IoError> := (m.mfind(k) < 0).match ({
-        true  => a.try_mappend(m, k, v),
-        false => {
-            mkr := m.mset(m.mfind(k), v)
-            mkok: Result<Map<T>, IoError> := .Ok(mkr)
-            mkok
-        },
-    })
-    out
-}
-
-// the value at live index i, dflt when i is the miss sentinel -1
-mget_at<T> = (m: Map<T>, i: i64, dflt: T) T {
-    (i < 0).match ({ true => dflt, false => m.mvals()[i] })
-}
-
-// the value under k, or dflt if absent
-mget*<T> = (m: Map<T>, k: str, dflt: T) T { m.mget_at(m.mfind(k), dflt) }
-
-// is k present?
-mhas*<T> = (m: Map<T>, k: str) bool { m.mfind(k) >= 0 }
-
-// hand both buffers back to `a` (free_map, not free — std.mem.alloc/std.mem.raw own that name)
-free_map*<T, A> = (a: MutPtr<A>, m: Map<T>) void { a.release(m.keys)  a.release(m.vals) }

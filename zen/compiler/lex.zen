@@ -12,7 +12,7 @@
 //   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
 //   sc.next                   // feed back into scan for the next token
 
-{ byte_at, is_digit, is_hex, is_alpha, is_alnum, is_space } = std.text.bytes
+{ at, is_digit, is_hex, is_alpha, is_alnum, is_space } = std.text.bytes
 
 // ── tokens ───────────────────────────────────────────────────────────────────
 TokKind*: Ident | Int | Float | Str | Char | Sym | Eof
@@ -31,21 +31,21 @@ lerr_reset* = () void { lex_failed = 0 }
 lerr_get*   = () bool { lex_failed == 1 }
 
 // ── skip whitespace, `//` line comments, and `/* */` block comments → next significant pos ──
-is_comment = (src: str, pos: i32) bool { (byte_at(src, pos) == '/') && (byte_at(src, pos + 1) == '/') }
-is_block_open = (src: str, pos: i32) bool { (byte_at(src, pos) == '/') && (byte_at(src, pos + 1) == '*') }
+is_comment = (src: str, pos: i32) bool { (at(src, pos) == '/') && (at(src, pos + 1) == '/') }
+is_block_open = (src: str, pos: i32) bool { (at(src, pos) == '/') && (at(src, pos + 1) == '*') }
 skip_line = (src: str, pos: i32) i32 {
-    b := byte_at(src, pos)
+    b := at(src, pos)
     ((b == '\0') || (b == '\n')).match ({ true => pos, false => src.skip_line(pos + 1) })   // stop at NUL / newline
 }
 skip_block_comment = (src: str, pos: i32) i32 { src.skip_bc_d(pos, 1) }   // pos just past `/*`
 // NESTED block comments: track depth so `/* /* */ */` closes at the OUTER `*/`, not the first one.
 skip_bc_d = (src: str, pos: i32, depth: i32) i32 {
-    b := byte_at(src, pos)
+    b := at(src, pos)
     (b == '\0').match ({
         true  => { lerr_set()  pos },                  // unterminated — stop at NUL and FLAG it
-        false => ((b == '/') && (byte_at(src, pos + 1) == '*')).match ({
+        false => ((b == '/') && (at(src, pos + 1) == '*')).match ({
             true  => src.skip_bc_d(pos + 2, depth + 1),   // a nested `/*`
-            false => ((b == '*') && (byte_at(src, pos + 1) == '/')).match ({
+            false => ((b == '*') && (at(src, pos + 1) == '/')).match ({
                 true  => (depth == 1).match ({ true => pos + 2, false => src.skip_bc_d(pos + 2, depth - 1) }),
                 false => src.skip_bc_d(pos + 1, depth)
             })
@@ -53,7 +53,7 @@ skip_bc_d = (src: str, pos: i32, depth: i32) i32 {
     })
 }
 skip = (src: str, pos: i32) i32 {
-    is_space(byte_at(src, pos)).match ({
+    is_space(at(src, pos)).match ({
         true  => src.skip(pos + 1),
         false => src.is_comment(pos).match ({
             true  => src.skip(src.skip_line(pos + 2)),
@@ -66,14 +66,14 @@ skip = (src: str, pos: i32) i32 {
 }
 
 // ── span ends: advance while the class holds ───────────────────────────────────
-ident_end = (src: str, pos: i32) i32 { is_alnum(byte_at(src, pos)).match ({ true => src.ident_end(pos + 1), false => pos }) }
-int_end   = (src: str, pos: i32) i32 { is_digit(byte_at(src, pos)).match ({ true => src.int_end(pos + 1), false => pos }) }
-hex_end   = (src: str, pos: i32) i32 { is_hex(byte_at(src, pos)).match ({ true => src.hex_end(pos + 1), false => pos }) }
+ident_end = (src: str, pos: i32) i32 { is_alnum(at(src, pos)).match ({ true => src.ident_end(pos + 1), false => pos }) }
+int_end   = (src: str, pos: i32) i32 { is_digit(at(src, pos)).match ({ true => src.int_end(pos + 1), false => pos }) }
+hex_end   = (src: str, pos: i32) i32 { is_hex(at(src, pos)).match ({ true => src.hex_end(pos + 1), false => pos }) }
 // a number span from its first digit: `0x…` runs over hex digits, otherwise decimal digits.
-is_hex_prefix* = (src: str, pos: i32) bool { (byte_at(src, pos) == '0') && ((byte_at(src, pos + 1) == 'x') || (byte_at(src, pos + 1) == 'X')) }
+is_hex_prefix* = (src: str, pos: i32) bool { (at(src, pos) == '0') && ((at(src, pos + 1) == 'x') || (at(src, pos + 1) == 'X')) }
 num_end   = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.hex_end(pos + 2), false => src.int_end(pos + 1) }) }
 str_end   = (src: str, pos: i32) i32 {                 // pos just past the opening quote
-    b := byte_at(src, pos)
+    b := at(src, pos)
     (b == '\0').match ({
         true  => pos,                                  // unterminated — stop at NUL
         false => (b == '"').match ({                    // closing quote
@@ -89,7 +89,7 @@ str_end   = (src: str, pos: i32) i32 {                 // pos just past the open
 // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
 // position just past the closing quote. One char, or a `\.` escape.
 char_end = (src: str, pos: i32) i32 {                                          // pos = first byte inside the quotes
-    b := byte_at(src, pos)
+    b := at(src, pos)
     (b == '\'').match ({                                                        // empty ''  → consume just the two quotes
         true  => pos + 1,
         false => (b == '\\').match ({ true  => src.scan_quote_end(pos + 2),     // '\x'  — skip the escaped byte
@@ -99,7 +99,7 @@ char_end = (src: str, pos: i32) i32 {                                          /
 // Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
 // DESYNCING the token stream — it consumes the whole literal instead of leaving a stray quote.
 scan_quote_end = (src: str, pos: i32) i32 {
-    b := byte_at(src, pos)
+    b := at(src, pos)
     ((b == '\'') || (b == '\0')).match ({ true => pos + 1, false => src.scan_quote_end(pos + 1) })
 }
 
@@ -119,7 +119,7 @@ two_op = (b0: u8, b1: u8) bool {
     ((b0 == '>') && (b1 == '>'))         // >> (shift)
 }
 sym_end = (src: str, pos: i32) i32 {
-    two_op(byte_at(src, pos), byte_at(src, pos + 1)).match ({ true => pos + 2, false => pos + 1 })
+    two_op(at(src, pos), at(src, pos + 1)).match ({ true => pos + 2, false => pos + 1 })
 }
 
 // ── one token ──────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ tok_eof = () TokKind { .Eof() }
 // an Int and a `.` postfix — only `1.5` fuses into one Float token.
 num_tok = (src: str, pos: i32) Scan {
     e := src.num_end(pos)
-    (!src.is_hex_prefix(pos) && (byte_at(src, e) == '.') && is_digit(byte_at(src, e + 1))).match ({
+    (!src.is_hex_prefix(pos) && (at(src, e) == '.') && is_digit(at(src, e + 1))).match ({
         true  => mk(.Float(), pos, src.int_end(e + 1)),
         false => mk(.Int(), pos, e)
     })
@@ -153,7 +153,7 @@ scan_one = (src: str, pos: i32, b: u8) Scan {
 }
 scan* = (src: str, pos0: i32) Scan {
     pos := src.skip(pos0)
-    b := byte_at(src, pos)
+    b := at(src, pos)
     (b == '\0').match ({
         true  => Scan( tok: Token( kind: tok_eof(), start: pos, len: 0 ), next: pos ),
         false => src.scan_one(pos, b)
@@ -185,8 +185,8 @@ TokList*: Nil | Cons(TokCell)
 TokCell*: { head: Token, tail: Ptr<TokList> }
 
 // heap-allocate one node holding `v`, returning a pointer to it
-nodebuf = (a: Ptr<Malloc>) [TokList] { slice(a.acquire(sizeof(TokList)), 1) }
-node = (a: Ptr<Malloc>, v: TokList) Ptr<TokList> {
+nodebuf = (a: MutPtr<Malloc>) [TokList] { slice(a.acquire(sizeof(TokList)), 1) }
+node = (a: MutPtr<Malloc>, v: TokList) Ptr<TokList> {
     buf := a.nodebuf()
     buf[0] = v
     buf[0].addr()
@@ -198,14 +198,14 @@ nil_node  = () TokList { .Nil() }
 cons_node = (h: Token, t: Ptr<TokList>) TokList { .Cons(TokCell( head: h, tail: t )) }
 
 // build the token list [pos .. Eof] in order; recursion builds the tail first
-build = (a: Ptr<Malloc>, src: str, pos: i32) Ptr<TokList> {
+build = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<TokList> {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => a.node(nil_node()),
         _    => a.node(cons_node(sc.tok, a.build(src, sc.next)))
     })
 }
-tokenize* = (a: Ptr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }
+tokenize* = (a: MutPtr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }
 
 // walk the list: number of Cons nodes (the terminal Nil ends it)
 list_len* = (l: Ptr<TokList>) i32 { l.match ({ .Nil => 0, .Cons(c) => 1 + c.tail.list_len() }) }
