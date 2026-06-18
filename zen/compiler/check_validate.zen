@@ -24,10 +24,20 @@ named_declared = (decls: [Decl], n: str) bool {
     }) })
     found
 }
+// A type the validator can't pin down concretely, so fit-checks against it stay lenient: an
+// uninferable residue, an UNDECLARED Named (a generic type param like `T`), a Ptr/Slice WHOSE element
+// is itself unknown (`Ptr<T>`, `[T]`), or a generic INSTANCE (`Result<Mailbox, IoError>`) whose
+// concrete decl only exists after monomorphization.
 unknown_ty = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
-        false => t.match ({ .Named(n) => env.decls.named_declared(n).match ({ true => false, false => true }), _ => false })
+        false => t.match ({
+            .Named(n)   => env.decls.named_declared(n).match ({ true => false, false => true }),
+            .Ptr(p)     => env.unknown_ty(load(p)),
+            .Slice(e)   => env.unknown_ty(load(e)),
+            .Generic(g) => true,
+            _           => false
+        })
     })
 }
 fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
@@ -45,18 +55,40 @@ lit_fits = (e: Ptr<Expr>, t: Ty) bool {
         _ => true
     })
 }
-arg_err_at = (env: Env, params: [Param], i: i32, ar: Expr) i32 {
+// does a type MENTION an (unbound) generic type param? recurses Ptr/Slice/Generic-args. Concrete
+// params (bool/Box/i32/…) do NOT mention a tparam → they are still arg/field-checked; only slots
+// typed by the callee's own tparam are skipped (their concrete type is known only after mono).
+tys_mention_tparam = (tps: [Param], ts: [Ty]) bool {
+    f := false
+    ts.loop((h, i, t) { f = tps.ty_mentions_tparam(t).match ({ true => true, false => f }) })
+    f
+}
+ty_mentions_tparam = (tps: [Param], t: Ty) bool {
+    t.match ({
+        .Named(n)   => tps.names_has(n),
+        .Ptr(p)     => tps.ty_mentions_tparam(load(p)),
+        .Slice(e)   => tps.ty_mentions_tparam(load(e)),
+        .Generic(g) => tps.tys_mention_tparam(g.args),
+        _           => false
+    })
+}
+// an argument check, given the callee's tparams: a slot typed by a tparam is skipped; a CONCRETE slot
+// of a generic fn is still checked (so `gen2(x: T, b: Box)` rejects a non-Box second arg).
+arg_err_at = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
     (i < params.len).match ({
-        true  => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0 && ar.addr().lit_fits(params[i].ty)).match ({
+        true  => tps.ty_mentions_tparam(params[i].ty).match ({
             true  => 0,
-            false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
+            false => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0 && ar.addr().lit_fits(params[i].ty)).match ({
+                true  => 0,
+                false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
+            })
         }),
         false => 0
     })
 }
-arg_type_errs = (env: Env, params: [Param], args: [Expr]) i32 {
+arg_type_errs = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
     acc := 0
-    args.loop((h, i, ar) { acc = acc + env.arg_err_at(params, i, ar) })
+    args.loop((h, i, ar) { acc = acc + env.arg_err_at(tps, params, i, ar) })
     acc
 }
 names_has = (names: [Param], fn: str) bool {
@@ -141,13 +173,17 @@ check_call = (env: Env, c: CallData) i32 {
         })
     }) })
 }
-// Imported generic calls check arity but skip arg-fit against unbound tparams.
-is_generic_call = (decls: [Decl], fn: str) bool { decls.the_func(fn).tparams.len > 0 }
+// A call checks arity, then arg types. For a LOCAL generic only tparam-typed slots defer to mono;
+// CONCRETE slots are still checked. An IMPORTED generic (a bodyless header) is skipped entirely — its
+// param types still carry unbound tparams that cross-module inference can't resolve at the call site,
+// so a strict check there false-rejects real code (text/fmt, concurrent/actor, core/slice).
+is_imported_generic = (f: Func) bool { (f.tparams.len > 0) && (f.body.len == 0) }
 call_errs = (env: Env, c: CallData) i32 {
+    f  := env.decls.the_func(c.fn)
     ps := env.decls.fn_params(c.fn)
     (ps.len == c.args.len).match ({
         false => 1,
-        true  => env.decls.is_generic_call(c.fn).match ({ true => 0, false => env.arg_type_errs(ps, c.args) })
+        true  => f.is_imported_generic().match ({ true => 0, false => env.arg_type_errs(f.tparams, ps, c.args) })
     })
 }
 check_args = (env: Env, args: [Expr]) i32 {
@@ -257,9 +293,41 @@ struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
     inits.loop((h, i, fi) { acc = acc + env.init_err(fields, fi) })
     acc
 }
+// generic-struct-literal support: look up the GenStructDecl by base name; a field typed by a struct
+// tparam stays lenient, a CONCRETE field (bool/i32/Box/…) is still fit-checked.
+cv_no_params = () [Param] { slice(null_ptr(), 0) }
+cv_is_gen_struct = (decls: [Decl], name: str) bool {
+    f := false
+    decls.loop((h, i, d) { f = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => true, false => f }), _ => f }) })
+    f
+}
+gen_struct_fields = (decls: [Decl], name: str) [Field] {
+    found := no_fields()
+    decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g.fields, false => found }), _ => found }) })
+    found
+}
+gen_struct_tparams = (decls: [Decl], name: str) [Param] {
+    found := cv_no_params()
+    decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g.tparams, false => found }), _ => found }) })
+    found
+}
+gen_field_fit_err = (env: Env, tps: [Param], fields: [Field], fi: FieldInit) i32 {
+    tps.ty_mentions_tparam(fields.field_in(fi.name)).match ({
+        true  => 0,                                                  // a tparam-typed field -> lenient
+        false => env.field_fit_err(fields, fi)                       // a concrete field -> check the fit
+    })
+}
+gen_struct_init_errs = (env: Env, tps: [Param], fields: [Field], inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc + fields.has_field(fi.name).match ({ true => env.gen_field_fit_err(tps, fields, fi), false => 1 }) })
+    acc
+}
 makestruct_err = (env: Env, m: MakeStructData) i32 {
     (m.targs.len > 0).match ({
-        true  => 0,                                                  // a generic literal -> skip (lenient)
+        true  => env.decls.cv_is_gen_struct(m.ty).match ({                // a generic literal: check concrete fields
+            true  => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), env.decls.gen_struct_fields(m.ty), m.inits),
+            false => 0                                                 // unknown gen-struct (template residue) -> lenient
+        }),
         false => env.decls.is_struct(m.ty).match ({ true => env.struct_init_errs(env.decls.struct_fields(m.ty), m.inits), false => 0 })
     })
 }
@@ -390,13 +458,26 @@ num_operand_err = (env: Env, b: BinData) i32 {
         false => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({ true => 1, false => 0 })
     })
 }
-// Equality allows any pair except known f64/non-f64 mixes.
+// the two sides of an ==/!= must share a comparable category: both numeric, both bool, both str-family,
+// both pointer, or the same nominal type. (unknown sides pass — no false-reject on template residue.)
+is_ptr_ty = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+same_eq_category = (a: Ty, b: Ty) bool {
+    ((a.ty_rank() >= 0) && (b.ty_rank() >= 0))
+        || (a.is_bool_ty() && b.is_bool_ty())
+        || (a.is_str_t() && b.is_str_t())
+        || (a.is_ptr_ty() && b.is_ptr_ty())
+        || a.ty_eq(b)
+}
+// Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).
 eq_mix_err = (env: Env, b: BinData) i32 {
     lt := env.infer_expr(b.lhs)
     rt := env.infer_expr(b.rhs)
     (lt.is_f64_ty() || rt.is_f64_ty()).match ({
         true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).match ({ true => 0, false => 1 }),
-        false => 0
+        false => (env.unknown_ty(lt) || env.unknown_ty(rt)).match ({
+            true  => 0,
+            false => lt.same_eq_category(rt).match ({ true => 0, false => 1 })
+        })
     })
 }
 operand_err = (env: Env, b: BinData) i32 {
@@ -420,13 +501,13 @@ index_err = (env: Env, ix: IndexData) i32 {
 // Value-position blocks recurse into statement expressions; full env-threading stays in check_body.
 check_block_stmt = (env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => env.check_expr(l.value),
-        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value),
-        .Return(r)   => env.check_expr(r),
+        .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l),
+        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
+        .Return(r)   => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
         .If(f)       => env.check_expr(f.c),
         .While(w)    => env.check_expr(w.c),
-        .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value)
+        .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value) + env.idxset_err(x)
     })
 }
 check_block = (env: Env, stmts: [Stmt]) i32 {
@@ -1123,20 +1204,21 @@ check_module_ownership_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 
 // ── a CALL: arity vs arg-type vs undefined ── mirrors check_call/call_errs, but distinguishes WHY.
 // arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
-kv_arg_type_kind = (env: Env, params: [Param], args: [Expr]) i32 {
+kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(env.arg_err_at(params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
+        acc = acc.kv_kor(env.arg_err_at(tps, params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
     })
     acc
 }
-// a known local fn: wrong arity → KARITY; right arity but a mistyped arg → KARGTYPE. An imported
-// generic call skips the arg-type kind too, mirroring call_errs (so count and kind stay in agreement).
+// a known local fn: wrong arity → KARITY; right arity but a mistyped CONCRETE arg → KARGTYPE. Slots
+// typed by the callee's own tparams are skipped, mirroring call_errs (so count and kind stay in agreement).
 kv_call_errs_kind = (env: Env, c: CallData) i32 {
+    f  := env.decls.the_func(c.fn)
     ps := env.decls.fn_params(c.fn)
     (ps.len == c.args.len).match ({
         false => KARITY(),
-        true  => env.decls.is_generic_call(c.fn).match ({ true => 0, false => env.kv_arg_type_kind(ps, c.args) })
+        true  => f.is_imported_generic().match ({ true => 0, false => env.kv_arg_type_kind(f.tparams, ps, c.args) })
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
@@ -1198,13 +1280,13 @@ kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAN
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => env.kv_check_expr_kind(l.value),
-        .Assign(x)   => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)),
-        .Return(r)   => env.kv_check_expr_kind(r),
+        .Let(l)      => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)),
+        .Assign(x)   => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
+        .Return(r)   => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
         .If(f)       => env.kv_check_expr_kind(f.c),
         .While(w)    => env.kv_check_expr_kind(w.c),
-        .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value))
+        .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_idxset_kind(x))
     })
 }
 kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
@@ -1448,33 +1530,111 @@ is_scope_alloc_member = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
 let_is_scope_derived = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
     svars.is_scope_acquire(e) || svars.is_scope_alloc_member(e)
 }
-// does returning `e` let a scope value escape? a direct `s.acquire(…)`, or a bare local we marked.
-expr_escapes = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    svars.is_direct_scope_acquire(e).match ({
-        true  => true,
-        false => load(e).match ({ .Var(v) => derived.dead_has(v.name), _ => false })
+// aliasing laundering: a value that IS an already-derived local — a bare Var, or a member/arrow chain
+// rooted at one — so `q := p` / `q := p.f` taints `q` once `p` is derived.
+expr_is_derived = (derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)    => derived.dead_has(v.name),
+        .Member(m) => derived.dead_has(m.obj.expr_root_var()),
+        .Arrow(ar) => derived.dead_has(ar.obj.expr_root_var()),
+        _          => false
     })
 }
-// thread the derived-local set across a `let`.
+// a `let` value that becomes a derived local: a scope acquire / `s.alloc` field, OR an alias of one.
+let_taints = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    svars.let_is_scope_derived(e) || derived.expr_is_derived(e)
+}
+// VALUE-position escape: a returned/trailing expr lets a scope value out when it IS a direct
+// `s.acquire(…)`, the raw `s.alloc` field, a derived local, OR forwards one through a struct literal,
+// a match arm value, a cond branch, or a block's value. Call ARGS are deliberately NOT walked — passing
+// a scope pointer into a callee that returns a COPY (`to_i32(load_i64(p))`) does not escape.
+expr_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    (svars.is_direct_scope_acquire(e) || svars.is_scope_alloc_member(e)).match ({
+        true  => true,
+        false => load(e).match ({
+            .Var(v)        => derived.dead_has(v.name),
+            .MakeStruct(s) => a.inits_escape(svars, derived, s.inits),
+            .Match(m)      => a.arms_escape(svars, derived, m.arms),
+            .Cond(d)       => a.expr_escapes(svars, derived, d.t) || a.expr_escapes(svars, derived, d.e),
+            .Block(b)      => a.block_val_escapes(svars, derived, b.stmts),
+            _              => false
+        })
+    })
+}
+inits_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) { f = a.expr_escapes(svars, derived, fi.value).match ({ true => true, false => f }) })
+    f
+}
+arms_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) { f = a.expr_escapes(svars, derived, ar.body).match ({ true => true, false => f }) })
+    f
+}
+// a block in VALUE position: its trailing value, or any `return` inside it, may escape (lets thread).
+block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, stmts: [Stmt]) bool {
+    f := false
+    d := derived
+    stmts.loop((h, i, st) {
+        st.match ({
+            .Return(r)   => { f = a.expr_escapes(svars, d, r).match ({ true => true, false => f }) },
+            .ExprStmt(e) => (i == stmts.len - 1).match ({ true => { f = a.expr_escapes(svars, d, e).match ({ true => true, false => f }) }, false => {} }),
+            _            => {}
+        })
+        d = a.escape_step(svars, d, st)
+    })
+    f
+}
+// thread the derived-local set across a `let` (now including aliases of derived locals).
 escape_step = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     out := derived
     st.match ({
-        .Let(l) => svars.let_is_scope_derived(l.value).match ({ true => { out = a.dead_cons(l.name, derived) }, false => {} }),
+        .Let(l) => svars.let_taints(derived, l.value).match ({ true => { out = a.dead_cons(l.name, derived) }, false => {} }),
         _       => {}
     })
     out
 }
+// returns-only statement walker: a `return <escaping>` ANYWHERE (incl. inside statement-position
+// match/cond/loop/block arms) is a hazard; trailing arm values in statement position are DISCARDED.
+escape_stmts_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    d   := derived
+    body.loop((h, i, st) {
+        acc = acc + a.escape_stmt_err(svars, d, st)
+        d   = a.escape_step(svars, d, st)
+    })
+    acc
+}
 escape_stmt_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
-        .Return(r) => svars.expr_escapes(derived, r).match ({ true => 1, false => 0 }),
-        .If(f)     => a.escape_body_err(svars, derived, f.then) + a.escape_body_err(svars, derived, f.els),
-        .While(w)  => a.escape_body_err(svars, derived, w.body),
-        _          => 0
+        .Return(r)   => a.expr_escapes(svars, derived, r).match ({ true => 1, false => 0 }),
+        .If(f)       => a.escape_stmts_err(svars, derived, f.then) + a.escape_stmts_err(svars, derived, f.els),
+        .While(w)    => a.escape_stmts_err(svars, derived, w.body),
+        .ExprStmt(e) => a.escape_expr_stmt_err(svars, derived, e),
+        _            => 0
     })
 }
+// descend into a statement-position match/cond/loop/block to find escaping `return`s in its arms.
+escape_expr_stmt_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Match(m) => a.escape_match_arms_err(svars, derived, m.arms),
+        .Cond(d)  => a.escape_expr_stmt_err(svars, derived, d.t) + a.escape_expr_stmt_err(svars, derived, d.e),
+        .Block(b) => a.escape_stmts_err(svars, derived, b.stmts),
+        .Loop(l)  => a.escape_stmts_err(svars, derived, l.body),
+        _         => 0
+    })
+}
+escape_match_arms_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc + a.escape_arm_stmts_err(svars, derived, ar.body) })
+    acc
+}
+escape_arm_stmts_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: Ptr<Expr>) i32 {
+    load(body).match ({ .Block(b) => a.escape_stmts_err(svars, derived, b.stmts), _ => 0 })
+}
 // a trailing value-expression that escapes counts once (returns are handled in escape_stmt_err).
-escape_trailing_err = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
-    st.match ({ .ExprStmt(e) => svars.expr_escapes(derived, e).match ({ true => 1, false => 0 }), _ => 0 })
+escape_trailing_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({ .ExprStmt(e) => a.expr_escapes(svars, derived, e).match ({ true => 1, false => 0 }), _ => 0 })
 }
 escape_body_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
@@ -1483,7 +1643,7 @@ escape_body_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadLis
         acc = acc + a.escape_stmt_err(svars, d, st)
         d   = a.escape_step(svars, d, st)
     })
-    acc + (body.len == 0).match ({ true => 0, false => escape_trailing_err(svars, d, body[body.len - 1]) })
+    acc + (body.len == 0).match ({ true => 0, false => a.escape_trailing_err(svars, d, body[body.len - 1]) })
 }
 escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
     svars := a.scope_params(f.params)
@@ -1496,16 +1656,44 @@ check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 }
 
 // kind/position pass: the source offset of the FIRST escaping return/trailing (0 = none).
+// returns-only kind walker (mirrors escape_stmts_err): no trailing-value check.
+kv_escape_stmts = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    d   := derived
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.kv_escape_stmt(svars, d, st))
+        d   = a.escape_step(svars, d, st)
+    })
+    acc
+}
 kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
-        .Return(r) => svars.expr_escapes(derived, r).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
-        .If(f)     => a.kv_escape_body(svars, derived, f.then).kv_kor(a.kv_escape_body(svars, derived, f.els)),
-        .While(w)  => a.kv_escape_body(svars, derived, w.body),
-        _          => 0
+        .Return(r)   => a.expr_escapes(svars, derived, r).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
+        .If(f)       => a.kv_escape_stmts(svars, derived, f.then).kv_kor(a.kv_escape_stmts(svars, derived, f.els)),
+        .While(w)    => a.kv_escape_stmts(svars, derived, w.body),
+        .ExprStmt(e) => a.kv_escape_expr_stmt(svars, derived, e),
+        _            => 0
     })
 }
-kv_escape_trailing = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
-    st.match ({ .ExprStmt(e) => svars.expr_escapes(derived, e).match ({ true => load(e).expr_pos().pos_or(1), false => 0 }), _ => 0 })
+kv_escape_expr_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Match(m) => a.kv_escape_arms(svars, derived, m.arms),
+        .Cond(d)  => a.kv_escape_expr_stmt(svars, derived, d.t).kv_kor(a.kv_escape_expr_stmt(svars, derived, d.e)),
+        .Block(b) => a.kv_escape_stmts(svars, derived, b.stmts),
+        .Loop(l)  => a.kv_escape_stmts(svars, derived, l.body),
+        _         => 0
+    })
+}
+kv_escape_arms = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.kv_escape_arm(svars, derived, ar.body)) })
+    acc
+}
+kv_escape_arm = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: Ptr<Expr>) i32 {
+    load(body).match ({ .Block(b) => a.kv_escape_stmts(svars, derived, b.stmts), _ => 0 })
+}
+kv_escape_trailing = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({ .ExprStmt(e) => a.expr_escapes(svars, derived, e).match ({ true => load(e).expr_pos().pos_or(1), false => 0 }), _ => 0 })
 }
 kv_escape_body = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
@@ -1514,7 +1702,7 @@ kv_escape_body = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList
         acc = acc.kv_kor(a.kv_escape_stmt(svars, d, st))
         d   = a.escape_step(svars, d, st)
     })
-    acc.kv_kor((body.len == 0).match ({ true => 0, false => kv_escape_trailing(svars, d, body[body.len - 1]) }))
+    acc.kv_kor((body.len == 0).match ({ true => 0, false => a.kv_escape_trailing(svars, d, body[body.len - 1]) }))
 }
 kv_escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
     svars := a.scope_params(f.params)

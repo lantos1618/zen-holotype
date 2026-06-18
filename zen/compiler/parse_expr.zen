@@ -230,12 +230,14 @@ is_loop_at = (src: str, pos: i32) bool {
 // Methods/fields are lowercase, so a `.` followed by an UPPERCASE name is never a real field access
 // — it is either a qualified ctor `Type.Variant` (base is an Uppercase type-name Var, handled by
 // parse_field/is_qual_ctor) or a leading-dot ctor. Only the latter BREAKS the chain: an Uppercase
-// `.Name` whose base is NOT an Uppercase type-name Var ends the previous expression. (Mirrors the
-// same-line guard is_index_at uses to stop `[…]` slice-literal statements gluing onto a statement.)
+// `.Name` whose base is NOT an Uppercase type-name Var ends the previous expression. SAME-LINE GATE
+// (mirrors is_index_at): a leading-dot ctor begins a NEW statement so a NEWLINE always precedes it;
+// a `.Uppercase` on the SAME line as its base is genuine UPPERCASE FIELD access (`s.Big`, `o.inner.Val`)
+// and must NOT break. The uppercase-subject carve-out leaves qualified ctors (`Type.Variant`) intact.
 is_variant_break = (src: str, base: PExpr, pos: i32) bool {
     dot := src.scan(pos)
     fld := src.scan(dot.next)
-    is_upper_byte(src.at(fld.tok.start)) && !is_upper_byte(subj_name(base.expr).at(0))
+    src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start)) && !is_upper_byte(subj_name(base.expr).at(0))
 }
 parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
     src.is_match_at(base.next).match ({
@@ -487,6 +489,8 @@ arm_buf = (a: MutPtr<Malloc>) [ArmData] { slice(a.acquire(1024 * sizeof(ArmData)
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
 arm_bind = (a: MutPtr<Malloc>, src: str, pos: i32) BindEnd {
     bt := src.scan(pos)
+    // The payload binding must be an identifier (or `_`); a literal like `.Some(123)` is garbage.
+    is_ident_tok(bt.tok).match ({ true => {}, false => perr_set() })
     bn := a.lexeme(src, bt.tok)
     rp := src.scan(bt.next)
     src.is_rparen(rp.tok).match ({ true => {}, false => perr_set() })
@@ -584,6 +588,10 @@ generic_open = (src: str, after: i32) bool {
     src.is_lparen(sc.tok).match ({ true => src.paren_is_struct(sc.next), false => false })
 }
 tyargs_end* = (src: str, pos: i32, depth: i32) i32 {
+    // DEPTH CAP: bound recursion so pathologically-nested `Ptr<Ptr<…>>` annotations
+    // become a clean parse error (-1) instead of a stack overflow. Real programs never
+    // approach this nesting (the monomorphizer caps well-formed depth at 24).
+    (depth > 256).match ({ true => { return 0 - 1 }, false => {} })
     sc := src.scan(pos)
     src.is_langle(sc.tok).match ({
         true  => src.tyargs_end(sc.next, depth + 1),
