@@ -2615,7 +2615,10 @@ def test_zenc_run_map_growth_and_second_value_type():
 
 
 def test_zenc_run_map_try_result_paths():
-    """Fallible map allocation returns Result errors; failed growth leaves the old map valid."""
+    """Fallible map allocation returns Result errors, releasing partial buffers on failure.
+
+    The hashed Map<T> acquires THREE buffers (keys, vals, hash index); LimitAlloc(left: 2) lets the
+    first two succeed and fails the third, so try_of returns .Err and frees the two it got (no leak)."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
@@ -2679,7 +2682,7 @@ def test_zenc_run_map_try_result_paths():
         '}\n'
         'main = () i32 {\n'
         '    n := success() + failure()\n'
-        '    (n == 7).match ({ true => 0, false => n })\n'
+        '    (n == 84).match ({ true => 0, false => n })\n'   # success()=3 (1+2), failure()=81 (try_of .Err on 3rd buffer)
         '}\n'
     )
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)

@@ -1,45 +1,91 @@
-// std.collections.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the std.collections.vec mold.
-// Every op that allocates takes the allocator as `a: MutPtr<A>` and goes through std.mem.alloc's `Allocator`
-// trait — nothing here hides a malloc. `of` plus `Map.put` is fail-fast like Vec; `try_*`
-// variants return Result<Map<T>, IoError> so callers can handle allocation failure as a value.
-// Lookup is a LINEAR SCAN (v1: fine for the small maps the compiler and examples need; hashing can land
-// behind the same API later).
+// std.collections.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the
+// std.collections.vec mold. Lookup is now an OPEN-ADDRESSING HASH TABLE (O(1) average) behind the
+// same API — earlier this was a linear scan, which made any large map (e.g. the import loader's
+// symbol dedup) O(n^2). Every op that allocates takes `a: MutPtr<A>` through std.mem.alloc's
+// Allocator trait — nothing hides a malloc. `of` + `Map.put` is fail-fast like Vec; `try_*` return
+// Result<Map<T>, IoError>.
 //
-// Layout: two PARALLEL buffers of `cap` slots — `keys` holds `str` key pointers, `vals` holds T's —
-// plus `len` live entries. Keys are BORROWED `str` pointers: the map stores the pointer, not a copy,
-// so a key must outlive the map (string literals always do; `dup` one from std.text.str otherwise). Key
-// comparison is byte-wise `eq` from std.text.str, never pointer `==`.
+// Layout: THREE parallel/index buffers of `cap` slots — `keys` ([str]) and `vals` ([T]) hold the
+// `len` live entries in INSERTION ORDER (so iteration is stable), and `idx` ([i64], -1 = empty) is the
+// hash index mapping a probed slot to an entry position. Keys are BORROWED `str` pointers (the map
+// stores the pointer, not a copy), so a key must outlive the map; comparison is byte-wise `eq`.
 //
 //   alloc := default()
 //   a := alloc.addr()
 //   w := maps.of(a, "the", 1)              // fail-fast Map<i32>; T inferred from the seed
-//   w  = w.put(a, "cat", 2)                // insert — grows through alloc when full
+//   w  = w.put(a, "cat", 2)                // insert — grows through alloc when the table fills
 //   r := maps.try_of(a, "the", 1)          // Result<Map<i32>, IoError>
-//   w  = w.put(a, "the", 9)                // upsert — same key overwrites in place
-//   n := w.get("the", 0)                   // 9; absent keys produce the default
-//   w.free(a)                              // hand both buffers back to alloc
-//
-// Allocator-threaded constructors remain free functions; Map-owned operations live on Map<T>, so
-// callers use w.put(...), w.try_put(...), w.free(...), w.get(...), w.has(...), and w.len().
+//   n := w.get("the", 0)                   // O(1) hashed lookup; absent keys produce the default
+//   w.free(a)                              // hand all buffers back to alloc
 //
 { Allocator, try_acquire } = std.mem.alloc        // explicit allocator trait
 { Result, IoError } = std.core.result
-{ eq } = std.text.str                 // byte-wise str equality (`==` on str compares POINTERS)
+{ eq, view } = std.text.str                       // byte-wise str equality + byte view (for hashing)
 
-// one key slot: a borrowed `str`. Exists for its size — `sizeof(str)` doesn't lower to C (str is no
-// C type name), `sizeof(MKey)` does, and a one-pointer struct is exactly one key slot.
+// one key slot: a borrowed `str`. Exists for its size — `sizeof(str)` doesn't lower to C, `sizeof(MKey)`
+// does, and a one-pointer struct is exactly one key slot.
 MKey: { k: str }
+// one index slot: a single i64 (an entry position, or EMPTY).
+MIdx: { i: i64 }
+
+INIT_CAP   := 8
+EMPTY      := 0 - 1
+MHASH_SEED := 5381                                 // djb2
+MHASH_MULT := 33
+
+// ── concrete hash + probe helpers (concrete on purpose: a recursive GENERIC fn never gets a
+//    monomorphized definition emitted — see the note that used to sit on mscan). ──────────────────
+hash_bytes = (bs: [u8], i: i64, h: i64) i64 {
+    (i >= bs.len).match ({ true => h, false => bs.hash_bytes(i + 1, (h * MHASH_MULT) + to_i64(bs[i])) })
+}
+mhash = (k: str, cap: i64) i64 {
+    h := k.view().hash_bytes(0, MHASH_SEED)
+    ((h % cap) + cap) % cap                          // non-negative slot (h may wrap negative)
+}
+// probe from `slot` for key `k`; returns its entry position, or EMPTY if absent. `tries` bounds the
+// walk to one full table sweep (the table always has at least one empty slot, so it terminates).
+mprobe = (idx: [i64], ks: [str], cap: i64, k: str, slot: i64, tries: i64) i64 {
+    (tries >= cap).match ({
+        true  => EMPTY,
+        false => (idx[slot] == EMPTY).match ({
+            true  => EMPTY,
+            false => eq(ks[idx[slot]], k).match ({
+                true  => idx[slot],
+                false => idx.mprobe(ks, cap, k, (slot + 1) % cap, tries + 1)
+            })
+        })
+    })
+}
+// place entry position `ent` (whose key is ks[ent]) into the index, probing from its hash slot.
+mput_idx = (idx: [i64], ks: [str], cap: i64, ent: i64, slot: i64) void {
+    (idx[slot] == EMPTY).match ({
+        true  => { idx[slot] = ent },
+        false => idx.mput_idx(ks, cap, ent, (slot + 1) % cap)
+    })
+}
+// rebuild the index for the first `len` entries of ks (after a grow / fresh table).
+mrehash = (idx: [i64], ks: [str], cap: i64, len: i64, i: i64) void {
+    (i >= len).match ({
+        true  => {},
+        false => { idx.mput_idx(ks, cap, i, ks[i].mhash(cap))  idx.mrehash(ks, cap, len, i + 1) }
+    })
+}
+mclear = (idx: [i64], cap: i64, i: i64) void {
+    (i >= cap).match ({ true => {}, false => { idx[i] = EMPTY  idx.mclear(cap, i + 1) } })
+}
 
 Map*<T>: {
     keys: RawPtr<u8>,
     vals: RawPtr<u8>,
+    idx:  RawPtr<u8>,
     len: i64,
     cap: i64
 
     keys = (m: Map<T>) [str] { slice(m.keys, m.cap) }
     vals = (m: Map<T>) [T] { slice(m.vals, m.cap) }
+    index = (m: Map<T>) [i64] { slice(m.idx, m.cap) }
     len = (m: Map<T>) i64 { m.len }
-    find = (m: Map<T>, k: str) i64 { mscan(m.keys(), m.len, k, 0) }
+    find = (m: Map<T>, k: str) i64 { m.index().mprobe(m.keys(), m.cap, k, k.mhash(m.cap), 0) }
     set = (m: Map<T>, i: i64, v: T) Map<T> {
         vals := m.vals()
         vals[i] = v
@@ -50,11 +96,18 @@ Map*<T>: {
     }
     get = (m: Map<T>, k: str, dflt: T) T { m.get_at(m.find(k), dflt) }
     has = (m: Map<T>, k: str) bool { m.find(k) >= 0 }
+    // a table is "full enough" to grow at 3/4 load — open addressing needs spare empty slots.
+    crowded = (m: Map<T>) bool { (m.len + 1) * 4 > m.cap * 3 }
     grow<A> = (m: Map<T>, a: MutPtr<A>) Map<T> {
         cap := (m.cap * 2) + 1
-        Map<T>( keys: a.resize(m.keys, cap * sizeof(MKey)),
-                vals: a.resize(m.vals, cap * sizeof(T)),
-                len: m.len, cap: cap )
+        next := Map<T>( keys: a.resize(m.keys, cap * sizeof(MKey)),
+                        vals: a.resize(m.vals, cap * sizeof(T)),
+                        idx:  a.resize(m.idx, cap * sizeof(MIdx)),
+                        len: m.len, cap: cap )
+        ix := next.index()
+        ix.mclear(cap, 0)
+        ix.mrehash(next.keys(), cap, next.len, 0)
+        next
     }
     try_grow<A> = (m: Map<T>, a: MutPtr<A>) Result<Map<T>, IoError> {
         cap := (m.cap * 2) + 1
@@ -62,24 +115,35 @@ Map*<T>: {
             .Ok(kp) => {
                 a.try_acquire(cap * sizeof(T)).match ({
                     .Ok(vp) => {
-                        oldks := m.keys()
-                        oldvs := m.vals()
-                        next := Map<T>( keys: kp, vals: vp, len: m.len, cap: cap )
-                        keys := next.keys()
-                        vals := next.vals()
-                        oldks.loop((h, i, k) {
-                            (i < m.len).match ({
-                                true => {
-                                    keys[i] = k
-                                    vals[i] = oldvs[i]
-                                },
-                                false => { h.break }
-                            })
+                        a.try_acquire(cap * sizeof(MIdx)).match ({
+                            .Ok(xp) => {
+                                oldks := m.keys()
+                                oldvs := m.vals()
+                                next := Map<T>( keys: kp, vals: vp, idx: xp, len: m.len, cap: cap )
+                                keys := next.keys()
+                                vals := next.vals()
+                                oldks.loop((h, i, k) {
+                                    (i < m.len).match ({
+                                        true  => { keys[i] = k  vals[i] = oldvs[i] },
+                                        false => { h.break }
+                                    })
+                                })
+                                ix := next.index()
+                                ix.mclear(cap, 0)
+                                ix.mrehash(keys, cap, next.len, 0)
+                                a.release(m.keys)
+                                a.release(m.vals)
+                                a.release(m.idx)
+                                ok: Result<Map<T>, IoError> := .Ok(next)
+                                ok
+                            },
+                            .Err(e) => {
+                                a.release(kp)
+                                a.release(vp)
+                                err: Result<Map<T>, IoError> := .Err(e)
+                                err
+                            }
                         })
-                        a.release(m.keys)
-                        a.release(m.vals)
-                        ok: Result<Map<T>, IoError> := .Ok(next)
-                        ok
                     },
                     .Err(e) => {
                         a.release(kp)
@@ -94,36 +158,40 @@ Map*<T>: {
             }
         })
     }
+    // insert a NEW key (caller guarantees absence): store at the tail, then index it.
     append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Map<T> {
         k := k
         v := v
-        next := (m.len < m.cap).match ({ true => m, false => m.grow(a) })
+        next := m.crowded().match ({ true => m.grow(a), false => m })
         keys := next.keys()
         vals := next.vals()
         keys[next.len] = k
         vals[next.len] = v
-        Map<T>( keys: next.keys, vals: next.vals, len: next.len + 1, cap: next.cap )
+        next.index().mput_idx(keys, next.cap, next.len, k.mhash(next.cap))
+        Map<T>( keys: next.keys, vals: next.vals, idx: next.idx, len: next.len + 1, cap: next.cap )
     }
     try_append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
         k := k
         v := v
-        out: Result<Map<T>, IoError> := (m.len < m.cap).match ({
-            true => {
+        out: Result<Map<T>, IoError> := m.crowded().match ({
+            false => {
                 keys := m.keys()
                 vals := m.vals()
                 keys[m.len] = k
                 vals[m.len] = v
-                ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: m.keys, vals: m.vals, len: m.len + 1, cap: m.cap ))
+                m.index().mput_idx(keys, m.cap, m.len, k.mhash(m.cap))
+                ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: m.keys, vals: m.vals, idx: m.idx, len: m.len + 1, cap: m.cap ))
                 ok
             },
-            false => {
+            true => {
                 m.try_grow(a).match ({
                     .Ok(next) => {
                         keys := next.keys()
                         vals := next.vals()
                         keys[next.len] = k
                         vals[next.len] = v
-                        ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: next.keys, vals: next.vals, len: next.len + 1, cap: next.cap ))
+                        next.index().mput_idx(keys, next.cap, next.len, k.mhash(next.cap))
+                        ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: next.keys, vals: next.vals, idx: next.idx, len: next.len + 1, cap: next.cap ))
                         ok
                     },
                     .Err(e) => {
@@ -131,7 +199,7 @@ Map*<T>: {
                         err
                     }
                 })
-            }
+            },
         })
         out
     }
@@ -152,54 +220,48 @@ Map*<T>: {
         })
         out
     }
-    free<A> = (m: Map<T>, a: MutPtr<A>) void { a.release(m.keys)  a.release(m.vals) }
+    free<A> = (m: Map<T>, a: MutPtr<A>) void { a.release(m.keys)  a.release(m.vals)  a.release(m.idx) }
 }
 
-// index of k in the first n slots of ks (linear scan from i), or -1 if absent. CONCRETE on purpose:
-// the key columns of every Map<T> are the same [str], and a concrete fn may recurse (a recursive
-// GENERIC fn never gets a monomorphized definition emitted — the inliner unrolls one level and
-// leaves a call to the bare generic name, an undefined symbol; see PR).
-mscan = (ks: [str], n: i64, k: str, i: i64) i64 {
-    (i >= n).match ({
-        true  => -1,
-        false => eq(ks[i], k).match ({ true => i, false => mscan(ks, n, k, i + 1) }),
-    })
-}
-
-// a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
-// (Zen has no call-site type args). Starts at cap 1.
+// a `Map<T>` seeded with one entry, buffers acquired from `a`. T inferred from the seed value. Starts
+// at INIT_CAP so the hash table has spare slots immediately.
 of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Map<T> {
-    m := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)), len: 1, cap: 1 )
+    m := Map<T>( keys: a.acquire(INIT_CAP * sizeof(MKey)), vals: a.acquire(INIT_CAP * sizeof(T)), idx: a.acquire(INIT_CAP * sizeof(MIdx)), len: 1, cap: INIT_CAP )
     keys := m.keys()
     vals := m.vals()
     keys[0] = seed_key
     vals[0] = seed_val
+    ix := m.index()
+    ix.mclear(INIT_CAP, 0)
+    ix.mput_idx(keys, INIT_CAP, 0, seed_key.mhash(INIT_CAP))
     m
 }
 
 try_of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError> {
-    a.try_acquire(sizeof(MKey)).match ({
+    a.try_acquire(INIT_CAP * sizeof(MKey)).match ({
         .Ok(kp) => {
-            a.try_acquire(sizeof(T)).match ({
+            a.try_acquire(INIT_CAP * sizeof(T)).match ({
                 .Ok(vp) => {
-                    m := Map<T>( keys: kp, vals: vp, len: 1, cap: 1 )
-                    keys := m.keys()
-                    vals := m.vals()
-                    keys[0] = seed_key
-                    vals[0] = seed_val
-                    ok: Result<Map<T>, IoError> := .Ok(m)
-                    ok
+                    a.try_acquire(INIT_CAP * sizeof(MIdx)).match ({
+                        .Ok(xp) => {
+                            m := Map<T>( keys: kp, vals: vp, idx: xp, len: 1, cap: INIT_CAP )
+                            keys := m.keys()
+                            vals := m.vals()
+                            keys[0] = seed_key
+                            vals[0] = seed_val
+                            ix := m.index()
+                            ix.mclear(INIT_CAP, 0)
+                            ix.mput_idx(keys, INIT_CAP, 0, seed_key.mhash(INIT_CAP))
+                            ok: Result<Map<T>, IoError> := .Ok(m)
+                            ok
+                        },
+                        .Err(e) => { a.release(kp)  a.release(vp)  sof_err(e) }
+                    })
                 },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<Map<T>, IoError> := .Err(e)
-                    err
-                }
+                .Err(e) => { a.release(kp)  sof_err(e) }
             })
         },
-        .Err(e) => {
-            err: Result<Map<T>, IoError> := .Err(e)
-            err
-        }
+        .Err(e) => sof_err(e)
     })
 }
+sof_err<T> = (e: IoError) Result<Map<T>, IoError> { .Err(e) }
