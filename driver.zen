@@ -172,7 +172,10 @@ main = () i32 {
                         true  => mp.run_file(root, arg(2)),
                         false => eq(cmd, "build").match ({
                             true  => mp.build_file(root, arg(2), build_out(arg(3), arg(4))),
-                            false => mp.default_emit(cmd)   // `zenc <file>` (or stdin) -> raw C on stdout, the oracle filter
+                            false => eq(cmd, "doc").match ({
+                                true  => mp.doc_cmd(root, arg(2)),
+                                false => mp.default_emit(cmd)   // `zenc <file>` (or stdin) -> raw C on stdout, the oracle filter
+                            })
                         })
                     })
                 })
@@ -322,3 +325,29 @@ build_self = (mp: MutPtr<Malloc>, root: str, out_path: str) i32 {
     })
 }
 
+
+// ── doc: a module's public decls + their leading doc comments (ported from driver.c doc_source) ───
+ends_zen = (s: str) bool { v: [u8] := s.view()  (v.len >= 4) && (v[v.len - 4] == '.') && (v[v.len - 3] == 'z') && (v[v.len - 2] == 'e') && (v[v.len - 1] == 'n') }
+is_name_start = (b: u8) bool { ((b >= 'A') && (b <= 'Z')) || ((b >= 'a') && (b <= 'z')) || (b == '_') }
+push_mod = (mp: MutPtr<Malloc>, s: String, v: [u8], i: i64) String { (i >= v.len).match ({ true => s, false => mp.push_mod(s.gstr_push(mp, (v[i] == '.').match ({ true => '/', false => v[i] })), v, i + 1) }) }
+mod_path = (mp: MutPtr<Malloc>, root: str, mod: str) str {
+    ends_zen(mod).match ({ true => mod, false => { rel := mp.push_mod(mp.gstr_string(128).gstr_append(mp, "zen/"), mod.view(), 0).gstr_append(mp, ".zen").gstr_finish(mp)  mp.gstr_string(256).gstr_append(mp, root).gstr_append(mp, "/").gstr_append(mp, rel).gstr_finish(mp) } })
+}
+doc_has_star = (v: [u8], i: i64, t: i64) bool { (i >= t).match ({ true => false, false => (v[i] == '*').match ({ true => true, false => ((v[i] == '=') || (v[i] == ':')).match ({ true => false, false => v.doc_has_star(i + 1, t) }) }) }) }
+doc_is_pub = (v: [u8], p: i64, t: i64) bool { (p >= t).match ({ true => false, false => is_name_start(v[p]) && v.doc_has_star(p, t) }) }
+out_range = (v: [u8], p: i64, t: i64) i64 { out_bytes(slice(v.ptr.offset(p), t - p)) }
+doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
+    ((t - p >= 2) && (v[p] == '/') && (v[p + 1] == '/')).match ({
+        true  => { s := ((p + 2 < t) && (v[p + 2] == ' ')).match ({ true => p + 3, false => p + 2 })  mp.bs_push_range(docs, v, s, t).gstr_push(mp, '\n') },
+        false => (p >= t).match ({
+            true  => mp.gstr_string(256),
+            false => doc_is_pub(v, p, t).match ({ true => { out_bytes(docs.bytes())  v.out_range(p, t)  out("\n")  mp.gstr_string(256) }, false => mp.gstr_string(256) })
+        })
+    })
+}
+doc_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, docs: String) i64 {
+    (p >= v.len).match ({ true => 0, false => { e := v.bs_line_end(p, v.len)  t := v.bs_trim_end(p, e)  d2 := mp.doc_line(v, p, t, docs)  mp.doc_lines(v, (e >= v.len).match ({ true => v.len, false => e + 1 }), d2) } })
+}
+doc_cmd = (mp: MutPtr<Malloc>, root: str, modarg: str) i32 {
+    eq(modarg, "").match ({ true => { derr("usage: zenc doc <std.mod|file.zen>\n")  2 }, false => contents_in(mp, mp.mod_path(root, modarg)).match ({ .Ok(src) => { out("# ")  out(modarg)  out("\n")  mp.doc_lines(src.view(), 0, mp.gstr_string(256))  0 }, .Err(e) => { derr("zenc: doc: cannot open module\n")  1 } }) })
+}
