@@ -1557,9 +1557,21 @@ expr_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>,
             .Match(m)      => a.arms_escape(svars, derived, m.arms),
             .Cond(d)       => a.expr_escapes(svars, derived, d.t) || a.expr_escapes(svars, derived, d.e),
             .Block(b)      => a.block_val_escapes(svars, derived, b.stmts),
+            .Loop(l)       => a.loop_val_escapes(svars, derived, l.body),
             _              => false
         })
     })
+}
+// a loop in VALUE position: it never yields its trailing value, but a `return` inside its body
+// still escapes to the caller, so walk returns only (mirrors the statement-side .Loop handling).
+loop_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, stmts: [Stmt]) bool {
+    f := false
+    d := derived
+    stmts.loop((h, i, st) {
+        st.match ({ .Return(r) => { f = a.expr_escapes(svars, d, r).match ({ true => true, false => f }) }, _ => {} })
+        d = a.escape_step(svars, d, st)
+    })
+    f
 }
 inits_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, inits: [FieldInit]) bool {
     f := false
