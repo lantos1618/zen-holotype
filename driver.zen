@@ -7,7 +7,7 @@
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc   // the seed's String API (string.zen isn't in the manifest)
 
-{ contents_in, out, out_bytes, O_WRTRUNC, MODE_644 } = std.io.file
+{ contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
 { open, read, write, close, system } = std.c.libc
 { parse_module } = compiler.parse
 { resolve_module } = compiler.check
@@ -172,9 +172,12 @@ main = () i32 {
                         true  => mp.run_file(root, arg(2)),
                         false => eq(cmd, "build").match ({
                             true  => mp.build_file(root, arg(2), build_out(arg(3), arg(4))),
-                            false => eq(cmd, "doc").match ({
+                            false => eq(cmd, "fmt").match ({
+                                true  => mp.fmt_cmd(arg(2), arg(3)),
+                                false => eq(cmd, "doc").match ({
                                 true  => mp.doc_cmd(root, arg(2)),
                                 false => mp.default_emit(cmd)   // `zenc <file>` (or stdin) -> raw C on stdout, the oracle filter
+                            })
                             })
                         })
                     })
@@ -350,4 +353,80 @@ doc_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, docs: String) i64 {
 }
 doc_cmd = (mp: MutPtr<Malloc>, root: str, modarg: str) i32 {
     eq(modarg, "").match ({ true => { derr("usage: zenc doc <std.mod|file.zen>\n")  2 }, false => contents_in(mp, mp.mod_path(root, modarg)).match ({ .Ok(src) => { out("# ")  out(modarg)  out("\n")  mp.doc_lines(src.view(), 0, mp.gstr_string(256))  0 }, .Err(e) => { derr("zenc: doc: cannot open module\n")  1 } }) })
+}
+
+// ── fmt: reindent by brace depth + trim whitespace (ported from driver.c fmt_source) ──────────────
+FmtDepth*: { depth: i32, in_block: bool }
+fmt_lstrip = (v: [u8], p: i64, e: i64) i64 { (p >= e).match ({ true => e, false => bs_is_space(v[p]).match ({ true => v.fmt_lstrip(p + 1, e), false => p }) }) }
+fmt_next = (v: [u8], e: i64) i64 { (e >= v.len).match ({ true => v.len, false => ((v[e] == '\r') && (e + 1 < v.len) && (v[e + 1] == '\n')).match ({ true => e + 2, false => e + 1 }) }) }
+fmt_indent = (mp: MutPtr<Malloc>, o: String, n: i32) String { (n <= 0).match ({ true => o, false => mp.fmt_indent(o.gstr_push(mp, ' '), n - 1) }) }
+// scan v[i..e) updating brace depth + in_block-comment, skipping strings/chars/line-comments.
+fmt_scan = (v: [u8], i: i64, e: i64, depth: i32, in_block: bool, in_str: bool, in_char: bool, esc: bool) FmtDepth {
+    (i >= e).match ({
+        true  => FmtDepth(depth: depth, in_block: in_block),
+        false => {
+            c := v[i]
+            in_block.match ({
+                true  => ((c == '*') && (i + 1 < e) && (v[i + 1] == '/')).match ({ true => v.fmt_scan(i + 2, e, depth, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, true, false, false, false) }),
+                false => in_str.match ({
+                    true  => esc.match ({ true => v.fmt_scan(i + 1, e, depth, false, true, false, false), false => (c == '\\').match ({ true => v.fmt_scan(i + 1, e, depth, false, true, false, true), false => (c == '"').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, false, true, false, false) }) }) }),
+                    false => in_char.match ({
+                        true  => esc.match ({ true => v.fmt_scan(i + 1, e, depth, false, false, true, false), false => (c == '\\').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, true, true), false => (c == '\'').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, false, false, true, false) }) }) }),
+                        false => v.fmt_normal(i, e, depth, c)
+                    })
+                })
+            })
+        }
+    })
+}
+fmt_normal = (v: [u8], i: i64, e: i64, depth: i32, c: u8) FmtDepth {
+    ((c == '/') && (i + 1 < e) && (v[i + 1] == '/')).match ({
+        true  => FmtDepth(depth: depth, in_block: false),
+        false => ((c == '/') && (i + 1 < e) && (v[i + 1] == '*')).match ({
+            true  => v.fmt_scan(i + 2, e, depth, true, false, false, false),
+            false => (c == '"').match ({ true => v.fmt_scan(i + 1, e, depth, false, true, false, false), false => (c == '\'').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, true, false), false => (c == '{').match ({ true => v.fmt_scan(i + 1, e, depth + 1, false, false, false, false), false => ((c == '}') && (depth > 0)).match ({ true => v.fmt_scan(i + 1, e, depth - 1, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, false, false, false, false) }) }) }) })
+        })
+    })
+}
+fmt_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, o: String, depth: i32, in_block: bool) String {
+    (p >= v.len).match ({
+        true  => o,
+        false => {
+            e := v.bs_line_end(p, v.len)
+            s := v.fmt_lstrip(p, e)
+            t := v.bs_trim_end(s, e)
+            (s == t).match ({
+                true  => mp.fmt_lines(v, v.fmt_next(e), o.gstr_push(mp, '\n'), depth, in_block),
+                false => {
+                    indent := ((!in_block) && (v[s] == '}') && (depth > 0)).match ({ true => depth - 1, false => depth })
+                    o3 := mp.bs_push_range(mp.fmt_indent(o, indent * 4), v, s, t).gstr_push(mp, '\n')
+                    fd := v.fmt_scan(s, t, depth, in_block, false, false, false)
+                    mp.fmt_lines(v, v.fmt_next(e), o3, fd.depth, fd.in_block)
+                }
+            })
+        }
+    })
+}
+fmt_source = (mp: MutPtr<Malloc>, src: str) String { mp.fmt_lines(src.view(), 0, mp.gstr_string(1024), 0, false) }
+fmt_file = (mp: MutPtr<Malloc>, path: str, check: bool) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => {
+            o    := mp.fmt_source(src)
+            outs := o.gstr_finish(mp)
+            (eq(src, outs)).match ({
+                true  => 0,
+                false => check.match ({
+                    true  => { derr("zenc: ")  derr(path)  derr(": needs formatting\n")  1 },
+                    false => save(path, outs, o.len).match ({ .Ok(n) => 0, .Err(e) => 1 })
+                })
+            })
+        },
+        .Err(e) => { derr("zenc: fmt: cannot open input\n")  1 }
+    })
+}
+fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
+    eq(a2, "--check").match ({
+        true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a3, true) }),
+        false => eq(a2, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a2, false) })
+    })
 }
