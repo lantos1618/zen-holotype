@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, get } = std.collections.map        // DeclIndex fields are Map<i64>; env_* helpers call .get on them
 { at, is_alnum } = std.text.bytes
@@ -198,6 +198,39 @@ check_call = (env: Env, c: CallData) i32 {
 // param types still carry unbound tparams that cross-module inference can't resolve at the call site,
 // so a strict check there false-rejects real code (text/fmt, concurrent/actor, core/slice).
 is_imported_generic = (f: Func) bool { (f.tparams.len > 0) && (f.body.len == 0) }
+
+// ── bounded generics: `f<A: Trait>` ─────────────────────────────────────────────
+// A tparam carries a trait BOUND in its `ty` slot (Named(traitname)); plain tparams leave it Void.
+tparam_bound = (tp: Param) str { tp.ty.match ({ .Named(n) => n, _ => "" }) }
+// Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
+type_impls_trait = (decls: [Decl], tyname: str, trname: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({
+        .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, trname)).match ({ true => true, false => found }),
+        _ => found }) })
+    found
+}
+// Enforce ONE bounded tparam at a call site: bind A to its concrete targ, then require the bound.
+// Conservative — only fires when A resolves to a known CONCRETE struct (allocators are structs);
+// an unresolved / primitive / generic-passthrough targ defers (0), so plain generics never regress.
+bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
+    tr := tp.tparam_bound()
+    is_empty(tr).match ({
+        true  => 0,                                                   // unbounded tparam: nothing to check
+        false => {
+            tn := env.call_targ(f, c.args, tp.name).recv_name()       // concrete type A binds to
+            (is_empty(tn) || (env.decls.is_struct(tn) == false)).match ({
+                true  => 0,                                            // unresolved / not a concrete struct: defer
+                false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 })
+            })
+        }
+    })
+}
+bound_errs = (env: Env, f: Func, c: CallData) i32 {
+    acc := 0
+    f.tparams.loop((h, i, tp) { acc = acc + env.bound_err(f, c, tp) })
+    acc
+}
 call_errs = (env: Env, c: CallData) i32 {
     f  := env.env_func(c.fn)
     ps := env.env_params(c.fn)
@@ -961,6 +994,7 @@ KDUPFN        = () i32 { 12 }   // two top-level fns share a name (Zen has no ov
 KVALPOSRETURN = () i32 { 13 }   // an early (dropped) return in a value-position block arm
 KPARSE        = () i32 { 14 }   // unparseable top-level input (the parser's __syntax_error sentinel)
 KOWNERSHIP    = () i32 { 15 }   // use of a local owner after release/drop
+KTRAITBOUND   = () i32 { 16 }   // a type bound to `A: Trait` at a call site does not impl Trait
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1013,6 +1047,7 @@ diagnostic_kind_name = (code: i32) str {
         13 => "value-pos-return",
         14 => "parse",
         15 => "ownership",
+        16 => "trait-bound",
         _ => "type"
     })
 }
@@ -1033,6 +1068,7 @@ diagnostic_message = (code: i32) str {
         13 => "early `return` in a value-position match arm",
         14 => "syntax error: unparseable top-level input",
         15 => "use of an owner after release/drop",
+        16 => "type argument does not satisfy the trait bound",
         _ => "type error"
     })
 }
@@ -1053,6 +1089,7 @@ diagnostic_hint = (code: i32) str {
         13 => "return a value from the arm instead of using early `return` in value position",
         14 => "check the syntax around this top-level declaration",
         15 => "after release/drop, bind a fresh owner instead of reusing the consumed local",
+        16 => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
         _ => ""
     })
 }
@@ -1060,11 +1097,11 @@ check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => {
-            code := packed & 15
+            code := packed & 31
             CheckDiagnostic(
                 code: code,
                 kind: code.diagnostic_kind_name(),
-                source_offset: packed >> 4,
+                source_offset: packed >> 5,
                 span_width: 1,
                 count: count.positive_count(),
                 message: code.diagnostic_message(),
@@ -1120,12 +1157,12 @@ diagnostic_from_source* = (src: str, packed: i32, count: i32) Diagnostic {
 kv_kor = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
 // a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
 kv_one = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
-// pack a SOURCE POSITION into a kind code: kinds are 1..15 (4 bits), so `kind + pos*16` carries the
+// pack a SOURCE POSITION into a kind code: kinds are 1..31 (5 bits), so `kind + pos*32` carries the
 // error's byte offset alongside it (pos 0 = unknown/synthesized — the bare kind, the old encoding).
-// Consumers unpack with `& 15` / `>> 4`. Applied only at leaves that HAVE a pos (Call/Var); an
-// already-packed nested result is never re-packed: values above 15 already carry an offset.
+// Consumers unpack with `& 31` / `>> 5`. Applied only at leaves that HAVE a pos (Call/Var); an
+// already-packed nested result is never re-packed: values above 31 already carry an offset.
 kv_at = (k: i32, p: i32) i32 {
-    ((k == 0) || (k > 15) || (p <= 0)).match ({ true => k, false => k + (p * 16) })
+    ((k == 0) || (k > 31) || (p <= 0)).match ({ true => k, false => k + (p * 32) })
 }
 
 expr_pos = (e: Expr) i32 {
@@ -1236,6 +1273,8 @@ kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
 }
 // a known local fn: wrong arity → KARITY; right arity but a mistyped CONCRETE arg → KARGTYPE. Slots
 // typed by the callee's own tparams are skipped, mirroring call_errs (so count and kind stay in agreement).
+// (Trait-BOUND violations are caught by the separate pre-inline bound pass, since local generic calls
+// are inlined away before this resolved-decls pass runs.)
 kv_call_errs_kind = (env: Env, c: CallData) i32 {
     f  := env.env_func(c.fn)
     ps := env.env_params(c.fn)
@@ -1392,6 +1431,83 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
 kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
     a.kv_check_body_kind(env, f.body).kv_kor(env.kv_trailing_kind(f.body))
+}
+
+// ── bounded-generics enforcement over RAW (pre-inline) decls ─────────────────────────────
+// Local generic calls are INLINED during resolve_module, so by check_module time the call site is
+// gone. This pass therefore runs on the raw, pre-inline decls (like the M5 escape check), walking
+// every function body and emitting KTRAITBOUND when a call binds a tparam `A: Trait` to a concrete
+// type that does not impl Trait. It reports ONLY this one kind, so an unresolved generic body never
+// false-positives the other validation kinds. Imported/foreign generics defer (bound_errs is 0).
+kvb_call_kind = (env: Env, c: CallData) i32 {
+    env.decls.is_known_fn(c.fn).match ({
+        true  => env.bound_errs(env.decls.the_func(c.fn), c).kv_one(KTRAITBOUND()).kv_at(c.pos),
+        false => 0
+    })
+}
+kvb_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => env.kvb_call_kind(c).kv_kor(env.kvb_args_kind(c.args)),
+        .Index(ix)      => env.kvb_expr_kind(ix.seq).kv_kor(env.kvb_expr_kind(ix.idx)),
+        .Bin(b)         => env.kvb_expr_kind(b.lhs).kv_kor(env.kvb_expr_kind(b.rhs)),
+        .Cond(d)        => env.kvb_expr_kind(d.c).kv_kor(env.kvb_expr_kind(d.t)).kv_kor(env.kvb_expr_kind(d.e)),
+        .Member(m)      => env.kvb_expr_kind(m.obj),
+        .Arrow(ar)      => env.kvb_expr_kind(ar.obj),
+        .Match(m)       => env.kvb_expr_kind(m.subj).kv_kor(env.kvb_arms_kind(env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)   => env.kvb_expr_kind(mk.payload),
+        .MakeStruct(sd) => env.kvb_inits_kind(sd.inits),
+        .Block(b)       => env.a.kvb_body_kind(env, b.stmts),
+        .Loop(l)        => env.kvb_expr_kind(l.seq).kv_kor(env.a.kvb_body_kind(env, l.body)),
+        _               => 0
+    })
+}
+kvb_args_kind = (env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(env.kvb_expr_kind(ar.addr())) })
+    acc
+}
+kvb_inits_kind = (env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc.kv_kor(env.kvb_expr_kind(fi.value)) })
+    acc
+}
+kvb_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body)) })
+    acc
+}
+kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.kvb_expr_kind(l.value),
+        .Assign(x)   => env.kvb_expr_kind(x.target).kv_kor(env.kvb_expr_kind(x.value)),
+        .Return(r)   => env.kvb_expr_kind(r),
+        .ExprStmt(e) => env.kvb_expr_kind(e),
+        .If(f)       => env.kvb_expr_kind(f.c).kv_kor(a.kvb_body_kind(env, f.then)).kv_kor(a.kvb_body_kind(env, f.els)),
+        .While(w)    => env.kvb_expr_kind(w.c).kv_kor(a.kvb_body_kind(env, w.body)),
+        .IndexSet(x) => env.kvb_expr_kind(x.seq).kv_kor(env.kvb_expr_kind(x.idx)).kv_kor(env.kvb_expr_kind(x.value))
+    })
+}
+kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    body.loop((h, i, st) { acc = acc.kv_kor(a.kvb_stmt_kind(e, st))  e = a.extend_env(e, st) })
+    acc
+}
+kvb_func_kind = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+    a.kvb_body_kind(env, f.body)
+}
+check_module_bound_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kvb_func_kind(decls, f), _ => 0 })) })
+    acc
+}
+check_module_bound_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := a.check_module_bound_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => src.check_diagnostic_from_source(packed, 1)
+    })
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
 kv_method_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 { a.method_err(decls, im, f).kv_one(KCONFORMANCE()) }

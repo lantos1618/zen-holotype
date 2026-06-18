@@ -1,6 +1,6 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, lit, ti32, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, lit, ti32, tnamed, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
@@ -15,6 +15,9 @@ no_body = (a: MutPtr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 parse_decl_at = (a: MutPtr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)
     name   := a.lexeme(src, nt.tok)
+    // An EXPLICIT tparam list `<A, B: Trait>` sits right after the name (before the `=` value
+    // marker): `bump<AllocT> = (…)`. It carries trait BOUNDS that can't be inferred from usage;
+    // tparams without a bound are also collected implicitly from tyvar-shaped param/return types.
     tp     := a.parse_tparams(src, src.skip_name_star(pos))
     buf    := a.param_buf()
     pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)
@@ -52,11 +55,25 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: str, pos: i32) TParamEnd {
     te  := a.fill_tparams(src, pos, buf, 0)
     TParamEnd( names: buf.take_params(te.count), count: te.count, next: te.next )
 }
+// A tparam may carry a trait bound: `<A: Allocator>`. The bound is stored in the Param's `ty`
+// slot as a `Named(traitname)` (tparams otherwise leave `ty` = tvoid()); the checker enforces it
+// at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
 record_tparam = (a: MutPtr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: sc.next ) }, false => {} })
-    buf[i] = param(a.lexeme(src, sc.tok), tvoid())
-    a.fill_tparams(src, sc.next, buf, i + 1)
+    nm    := a.lexeme(src, sc.tok)
+    colon := src.scan(sc.next)                           // peek: a `:` introduces a trait bound
+    src.is_colon(colon.tok).match ({
+        true  => {
+            tr := src.scan(colon.next)                   // the bound trait name
+            buf[i] = param(nm, tnamed(a.lexeme(src, tr.tok)))
+            a.fill_tparams(src, tr.next, buf, i + 1)
+        },
+        false => {
+            buf[i] = param(nm, tvoid())
+            a.fill_tparams(src, sc.next, buf, i + 1)
+        }
+    })
 }
 fill_tparams = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)

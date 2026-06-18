@@ -11,7 +11,7 @@
 { open, read, write, close, system } = std.c.libc
 { parse_module } = compiler.parse
 { resolve_module } = compiler.check
-{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source } = compiler.check_validate
+{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { diag_user_span, render_diagnostic } = compiler.diagnostic
 { resolve_program_data, first_user_import_in } = std.internal.resolve
@@ -26,7 +26,13 @@ check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDi
     (cd1.code == 0).match ({
         true  => {
             cd2 := mp.check_module_escape_diagnostic_from_source(raw, flat)
-            (cd2.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd2 })
+            (cd2.code == 0).match ({
+                true  => {
+                    cd3 := mp.check_module_bound_diagnostic_from_source(raw, flat)   // bounded generics `A: Trait`
+                    (cd3.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd3 })
+                },
+                false => cd2
+            })
         },
         false => cd1
     })

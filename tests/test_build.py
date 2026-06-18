@@ -162,7 +162,7 @@ def test_diagnostic_value_exposes_nested_span_shape():
         "{ to_exit } = std.core.bool\n"
         "{ eq } = std.text.str\n"
         "main = () i32 {\n"
-        "    diag := diagnostic_from_source(\"main = () i32 { missing_name() }\\n\", 259, 1)\n"
+        "    diag := diagnostic_from_source(\"main = () i32 { missing_name() }\\n\", 515, 1)\n"
         "    ok := eq(diag.kind, \"undefined-name\")\n"
         "        && (diag.span.start == 16)\n"
         "        && (diag.span.width == 12)\n"
