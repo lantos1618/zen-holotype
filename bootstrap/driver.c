@@ -401,7 +401,7 @@ static Diagnostic diagnostic_from_check(CheckDiagnostic cd){
  * — the exact token cc links against — so scan the emitted C for that 13-byte substring. (A fn named
  * `mainframe` emits `int32_t mainframe(`, which this does NOT match because of the trailing `(`.) */
 static int emits_main(String out){
-    static const char NEEDLE[] = "int32_t main(";
+    static const char NEEDLE[] = "int32_t zen_main(";
     size_t nlen = sizeof(NEEDLE) - 1;
     if ((size_t)out.len < nlen) return 0;
     for (size_t i = 0; i + nlen <= (size_t)out.len; i++)

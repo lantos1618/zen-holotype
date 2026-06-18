@@ -18,3 +18,19 @@ ZWEAK void* heap(int64_t n){ return malloc(n); }
  *   std.text.str.view(s)        = slice(s, strlen(s))                       ([u8] view over a str's bytes) */
 ZWEAK uint8_t* alloc(int64_t n){ return (uint8_t*)malloc(n); }
 ZWEAK zslice view(const char* s){ zslice z; z.ptr = (void*)s; z.len = (int64_t)strlen(s); return z; }
+
+/* OS entry: the real main lives here, stashes argc/argv into globals that std.os reads, then calls
+ * the Zen entry (emitted as `zen_main`). WEAK so that during the driver->Zen migration the zenc binary
+ * — which still links bootstrap/driver.c and its own strong main — overrides this one (the weak body,
+ * with its zen_main reference, is dropped at link). User programs (compiled with just <prog>.c +
+ * zenrt.c, no driver.c) get this entry, which calls the program's own zen_main. */
+int32_t __zen_argc = 0;
+char**  __zen_argv = 0;
+/* Weak stub so the zenc binary (whose weak main below is overridden by driver.c and never runs) still
+ * links — a user program emits its own strong zen_main, which overrides this. */
+ZWEAK int32_t zen_main(void){ return 0; }
+ZWEAK int main(int argc, char** argv){
+    __zen_argc = (int32_t)argc;
+    __zen_argv = argv;
+    return (int)zen_main();
+}

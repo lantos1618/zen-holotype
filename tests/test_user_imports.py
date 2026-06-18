@@ -1167,4 +1167,4 @@ def test_stdin_without_sibling_imports_stays_the_classic_filter():
     """the oracle's source→C filter mode is untouched for import-free source."""
     r = subprocess.run([_zenc()], input="main = () i32 { 6 * 7 }\n", capture_output=True, text=True)
     assert r.returncode == 0
-    assert "int32_t main(" in r.stdout
+    assert "int32_t zen_main(" in r.stdout    # the Zen `main` is emitted as zen_main; zenrt.c owns the OS main

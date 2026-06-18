@@ -24,7 +24,8 @@ SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c $(HERE)driver.c
 
 .PHONY: zenc regen clean
 
-# The standalone, Python-free compiler binary.
+# The standalone, Python-free compiler binary. zenrt.c's OS main is weak, so driver.c's strong main
+# wins here (driver.c is deleted once main.zen owns the entry, then zenrt's main takes over).
 zenc:
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC)
 
