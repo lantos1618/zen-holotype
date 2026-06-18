@@ -26,6 +26,10 @@ ZWEAK zslice view(const char* s){ zslice z; z.ptr = (void*)s; z.len = (int64_t)s
  * zenrt.c, no driver.c) get this entry, which calls the program's own zen_main. */
 int32_t __zen_argc = 0;
 char**  __zen_argv = 0;
+/* std.os reads argv through these (never touches the globals directly). Bounds-checked so an out-of-
+ * range index is an empty string, not a crash. */
+int32_t zen_argc(void){ return __zen_argc; }
+const char* zen_argv_at(int32_t i){ return (i >= 0 && i < __zen_argc) ? __zen_argv[i] : ""; }
 /* Weak stub so the zenc binary (whose weak main below is overridden by driver.c and never runs) still
  * links — a user program emits its own strong zen_main, which overrides this. */
 ZWEAK int32_t zen_main(void){ return 0; }

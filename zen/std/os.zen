@@ -1,9 +1,15 @@
-// std.os — thin, growing wrappers over the raw POSIX bindings in std.c.libc.
+// std.os — thin wrappers over the process environment and command line.
 //
-// For now this is just the environment accessor. `getEnv` forwards straight to
-// libc.getenv; proper null/empty handling (returning Result/Option) is a
-// follow-up — kept a thin wrapper so it parses and lowers cleanly.
+// argv reaches Zen through zenrt.c: the OS `main(argc,argv)` (in zenrt) stashes them into globals,
+// and `zen_argc`/`zen_argv_at` (also in zenrt) expose them here. Explicit calls, never ambient —
+// `main` chooses to read them. (Owned `args(a) [str]` + typed `parse(a, T)` come in a later wave.)
 
 { getenv } = std.c.libc
 
-getEnv* = (name: str) str { getenv(name) }
+// bound to zenrt.c (bodyless = foreign).
+zen_argc*    = () i32
+zen_argv_at* = (i: i32) str
+
+argc*   = () i32 { zen_argc() }                 // os.argc()  — number of CLI args (incl. argv[0])
+arg*    = (i: i32) str { zen_argv_at(i) }        // os.arg(i)  — the i-th arg ("" if out of range)
+getEnv* = (name: str) str { getenv(name) }       // os.getEnv("PATH")
