@@ -1,0 +1,77 @@
+// tour.zen — a one-file tour of Zen's working surface.
+//   $ zenc run examples/tour.zen      → prints the demo, exits 0
+//
+// Covered: imports · fmt · structs · enums w/ payloads · traits + impl + UFCS dispatch ·
+//          generics (fn + Vec<T>) · match-only control flow · Result + .or_return() · recursion.
+
+{ println }            = std.text.fmt
+{ Result, IoError }    = std.core.result
+vec                    = std.collections.vec
+alloc                  = std.mem.alloc
+
+// ── enums: variants, with and without payloads ──────────────────────────────────────────────
+Shape*: Circle(i32) | Rect(RectDims) | Unit
+RectDims*: { w: i32, h: i32 }
+
+// ── traits: one interface, dispatched by receiver type (UFCS `x.area()`) ─────────────────────
+Area*: { area: (Ptr<Self>) i32 }
+Circle*: { r: i32 }
+Box*:    { w: i32, h: i32 }
+Circle.impl(Area, { area = (c: Ptr<Circle>) i32 { 3 * c.r * c.r } })
+Box.impl(Area,    { area = (b: Ptr<Box>) i32 { b.w * b.h } })
+
+// ── match-only control flow: a value-position match IS the conditional ───────────────────────
+shape_area = (s: Shape) i32 {
+    s.match ({
+        .Circle(r)  => 3 * r * r,
+        .Rect(d)    => d.w * d.h,
+        .Unit       => 0
+    })
+}
+
+// ── Result + early return: `.or_return()` propagates the Err with no keyword ──────────────────
+checked_div = (n: i32, d: i32) Result<i32, IoError> {
+    (d == 0).match ({
+        true  => .Err(.NotFound),       // division by zero → error value
+        false => .Ok(n / d)
+    })
+}
+half_of = (n: i32) Result<i32, IoError> {
+    q := checked_div(n, 2).or_return()   // unwraps Ok, or returns the Err from here
+    .Ok(q + 1)
+}
+
+// ── generics + recursion: sum a Vec<i32> without a loop keyword ───────────────────────────────
+sum_from = (v: vec.Vec<i32>, i: i64) i32 {
+    (i >= v.len()).match ({
+        true  => 0,
+        false => v.get(i) + v.sum_from(i + 1)
+    })
+}
+
+report = (r: Result<i32, IoError>) i32 {
+    r.match ({ .Ok(v) => v, .Err(e) => 0 - 1 })
+}
+
+main = () i32 {
+    m := alloc.default()
+
+    // structs + trait dispatch
+    c := Circle(r: 5)
+    b := Box(w: 6, h: 7)
+    println(c.addr().area())            // 75
+    println(b.addr().area())            // 42
+
+    // enums through a match
+    println(shape_area(.Circle(4)))     // 48
+    println(shape_area(.Rect(RectDims(w: 3, h: 9))))  // 27
+
+    // generic Vec + recursion
+    v := vec.of(m.addr(), [3, 7, 2, 8, 5])
+    println(v.sum_from(0))              // 25
+
+    // Result flow
+    println(report(half_of(10)))        // 6
+    println(report(half_of(0)))         // 1  (0/2=0, +1)
+    0
+}

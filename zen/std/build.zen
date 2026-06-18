@@ -1,0 +1,46 @@
+// std.build — the build IS a Zen program, not a TOML file.
+//
+// A project drops a `build.zen` next to its sources with a `build` fn:
+//
+//   { Build, Target, exe } = std.build
+//   build = (b: Build) Target {
+//       exe("manifest-demo")
+//           .root("src")
+//           .main("main.zen")
+//           .links("m pthread")
+//           .out("fixture-bin")
+//   }
+//
+// `zenc build <dir>` runs that `build(b)` and links the Target it returns. No allocator threads
+// through the chain (the spec is plain data), so there is no hidden heap behind `exe`.
+
+{ println } = std.text.fmt
+
+// reserved builder context (carries nothing yet; future: target triple, profile, flags).
+Build*: { _: i32 }
+
+// a configured executable target; each setter returns a fresh Target so the chain reads top-down.
+Target*: {
+    name:   str
+    root_:  str
+    main_:  str
+    out_:   str
+    links_: str
+
+    root  = (t: Target, p: str) Target { Target(name: t.name, root_: p,       main_: t.main_, out_: t.out_, links_: t.links_) }
+    main  = (t: Target, p: str) Target { Target(name: t.name, root_: t.root_,  main_: p,       out_: t.out_, links_: t.links_) }
+    out   = (t: Target, p: str) Target { Target(name: t.name, root_: t.root_,  main_: t.main_, out_: p,      links_: t.links_) }
+    links = (t: Target, l: str) Target { Target(name: t.name, root_: t.root_,  main_: t.main_, out_: t.out_, links_: l) }
+
+    // emit the resolved spec the driver reads back: five lines, fixed order (empty line = unset).
+    emit_spec = (t: Target) void {
+        println(t.name)
+        println(t.root_)
+        println(t.main_)
+        println(t.out_)
+        println(t.links_)
+    }
+}
+
+// start an executable target named `name`.
+exe* = (name: str) Target { Target(name: name, root_: "", main_: "", out_: "", links_: "") }

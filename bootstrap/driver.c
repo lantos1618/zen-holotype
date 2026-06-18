@@ -600,9 +600,77 @@ static int build_program(const char* argv0, const char* in_path, const char* out
     return 0;
 }
 
+/* M6 (real build): if <dir>/build.zen exists, the build IS a Zen program. Append a `main` that runs
+ * its `build(b)` and calls `.emit_spec()`, compile+run that, and read the five spec lines it prints
+ * (name, root, main, out, link) back into the same ProjectSpec the zen.toml path produced. One module
+ * (build.zen + appended main), so std imports resolve and there is no sibling-name collision. */
+static ProjectSpec build_zen_spec(Malloc* a, const char* argv0, const char* project_dir){
+    ProjectSpec spec = { 0 };
+    char* build_path = join_root_path(a, project_dir, "build.zen");
+    struct stat bst;
+    if (stat(build_path, &bst) != 0){ driver_release(a, build_path); return spec; }  /* no build.zen -> zen.toml */
+    size_t blen = 0;
+    char* bsrc = slurp(a, build_path, &blen);
+    if (!bsrc){ driver_release(a, build_path); return spec; }
+
+    const char* tail = "\nmain = () i32 { build(Build(_: 0)).emit_spec()  0 }\n";
+    size_t tlen = strlen(tail);
+    char* entry = driver_alloc(a, blen + tlen + 1);
+    memcpy(entry, bsrc, blen);
+    memcpy(entry + blen, tail, tlen);
+    entry[blen + tlen] = 0;
+    driver_release(a, bsrc);
+
+    char entry_path[4096];
+    snprintf(entry_path, sizeof entry_path, "%s/.zenbuild_entry_%d.zen", project_dir, (int)getpid());
+    FILE* ef = fopen(entry_path, "wb");
+    if (!ef){ fprintf(stderr, "zenc: build.zen: cannot write build entry in %s\n", project_dir); driver_release(a, entry); driver_release(a, build_path); return spec; }
+    fwrite(entry, 1, blen + tlen, ef);
+    fclose(ef);
+    driver_release(a, entry);
+
+    char bin_path[4096];
+    snprintf(bin_path, sizeof bin_path, "/tmp/zenbuild_spec_%d", (int)getpid());
+    int brc = build_program(argv0, entry_path, bin_path, NULL, NULL, 0);
+    unlink(entry_path);
+    if (brc != 0){ fprintf(stderr, "zenc: build.zen: the build program did not compile\n"); driver_release(a, build_path); return spec; }
+
+    char name[1024]={0}, root[1024]={0}, mainf[1024]={0}, outf[1024]={0}, link[1024]={0};
+    char* fields[5] = { name, root, mainf, outf, link };
+    int fi = 0;
+    FILE* p = popen(bin_path, "r");
+    if (p){
+        char line[1024];
+        while (fi < 5 && fgets(line, sizeof line, p)){
+            size_t n = strlen(line);
+            while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+            memcpy(fields[fi], line, n + 1);
+            fi++;
+        }
+        pclose(p);
+    }
+    unlink(bin_path);
+
+    if (!root[0] || !mainf[0]){
+        fprintf(stderr, "zenc: build.zen: target is missing root/main (got %d field(s))\n", fi);
+        driver_release(a, build_path);
+        return spec;
+    }
+    char* root_path = join_root_path(a, project_dir, root);
+    spec.source = join_root_path(a, root_path, mainf);
+    const char* out_name = outf[0] ? outf : (name[0] ? name : NULL);
+    spec.out = out_name ? join_root_path(a, project_dir, out_name) : NULL;
+    spec.links = link[0] ? link_flags(a, link) : NULL;
+    driver_release(a, root_path);
+    driver_release(a, build_path);
+    return spec;
+}
+
 static int build_input(const char* argv0, const char* in_path, const char* out_path, int run){
     Malloc m = { 0 };
-    ProjectSpec spec = input_spec(&m, in_path);
+    ProjectSpec spec = { 0 };
+    if (path_is_dir(in_path)) spec = build_zen_spec(&m, argv0, in_path);  /* build.zen wins over zen.toml */
+    if (!spec.source) spec = input_spec(&m, in_path);                     /* fallback: zen.toml or a single file */
     if (!spec.source) return 1;
     const char* final_out = out_path;
     if (!run && !final_out) final_out = spec.out ? spec.out : "a.out";

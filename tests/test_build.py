@@ -473,6 +473,28 @@ def test_zenc_project_manifest_fixture_build_run_check():
     assert exe.stdout == "fixture project\n"
 
 
+def test_zenc_build_zen_program_drives_the_build():
+    """M6 (real build): a project with a `build.zen` is built by RUNNING that Zen program. `zenc build`
+    appends a main that calls its `build(b)` and reads back the Target (root/main/out/link) it returns
+    — the build is code, not a TOML file. The fixture's build.zen sets out="fixture-bin"; main.zen also
+    imports a project sibling (util.zen), proving sibling resolution survives the build path."""
+    zenc = _zenc()
+    project = Path(tempfile.mkdtemp()) / "build_zen_demo"
+    shutil.copytree(PROJECT_FIXTURES / "build_zen_demo", project)
+
+    built = subprocess.run([zenc, "build", str(project)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    out = project / "fixture-bin"
+    assert out.exists(), built.stderr
+    exe = subprocess.run([str(out)], capture_output=True, text=True)
+    assert exe.returncode == 42, exe.stderr           # score(40) = 42
+    assert exe.stdout == "built from build.zen\n"      # the program's output, NOT the build spec
+
+    run = subprocess.run([zenc, "run", str(project)], capture_output=True, text=True)
+    assert run.returncode == 42, run.stderr
+    assert run.stdout == "built from build.zen\n"
+
+
 def test_zenc_project_manifest_link_directive_links_c_library():
     """M6 (build graph): a `link = "m"` manifest directive adds `-l<lib>` to the cc link line, so a
     program that calls a libm symbol links + runs. We use Bessel `j0` (gcc has no const-folding path
