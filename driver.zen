@@ -1,0 +1,229 @@
+// driver.zen — the zenc CLI, in Zen. Dispatches on the command line and drives the compiler
+// (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
+// once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
+
+{ arg } = std.os
+{ Malloc } = std.mem.alloc
+{ eq, view } = std.text.str
+{ gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc   // the seed's String API (string.zen isn't in the manifest)
+
+{ contents_in, out, out_bytes, O_WRTRUNC, MODE_644 } = std.io.file
+{ open, write, close, system } = std.c.libc
+{ parse_module } = compiler.parse
+{ resolve_module } = compiler.check
+{ check_module } = compiler.check_validate
+{ genModuleIn } = compiler.genc_emit
+{ resolve_program_data } = std.internal.resolve
+
+say = (s: str) i64 { out(s)  out("\n") }
+
+// run/build temp.c swaps the emitted HEAD typedef for the zenrt.h include; the PROG variant also
+// suppresses zenrt's String (the program emits its own). --build-self uses the plain seed variant.
+// module-level str CONSTS don't emit as C globals in the seed, so these are zero-arg fns.
+HEAD      = () str { "typedef struct { void* ptr; int64_t len; } zslice; " }
+HEAD_REPL = () str { "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n" }
+TMPC   = () str { "/tmp/zenc_zd.c" }
+TMPBIN = () str { "/tmp/zenc_zd.bin" }
+
+// ── path helpers ────────────────────────────────────────────────────────────────────────────────
+dirname = (mp: MutPtr<Malloc>, p: str) str {
+    v := p.view()
+    cut := last_slash(v, 0, 0 - 1)
+    (cut < 0).match ({ true => ".", false => mp.cstr_prefix(p, cut) })
+}
+last_slash = (v: [u8], i: i64, best: i64) i64 {
+    (i >= v.len).match ({
+        true  => best,
+        false => v.last_slash(i + 1, (v[i] == '/').match ({ true => i, false => best }))
+    })
+}
+// the first `n` bytes of `p` as an owned str — built through the allocator (no raw malloc).
+cstr_prefix = (mp: MutPtr<Malloc>, p: str, n: i64) str {
+    push_prefix(mp.gstr_string(n + 1), mp, p.view(), 0, n).gstr_finish(mp)
+}
+push_prefix = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
+    (i >= n).match ({ true => s, false => push_prefix(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
+}
+
+// ── the compile pipeline (resolve imports -> parse -> resolve_module) ─────────────────────────────
+// flatten imports from disk: root = dir of the zenc binary (holds zen/std + zen/compiler), progdir =
+// dir of the program (holds its siblings). Import-free programs pass through unchanged.
+flatten = (mp: MutPtr<Malloc>, root: str, path: str, src: str) str {
+    mp.resolve_program_data(root, mp.dirname(path), path, src).flat
+}
+decls_of = (mp: MutPtr<Malloc>, root: str, path: str, src: str) [Decl] {
+    mp.resolve_module(mp.parse_module(mp.flatten(root, path, src)))
+}
+
+// write the runnable temp.c: zenrt.h-include head, then the emitted body (after HEAD).
+write_runnable_c = (gen: String) bool {
+    hl := HEAD().view().len
+    fd := TMPC().open(O_WRTRUNC, MODE_644)
+    (fd < 0).match ({
+        true  => false,
+        false => { hv := HEAD_REPL().view()  fd.write(hv.ptr, hv.len)  fd.write(gen.ptr.offset(hl), gen.len - hl)  fd.close()  true }
+    })
+}
+// cc -std=gnu11 -w -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c -o <out>
+cc_command = (mp: MutPtr<Malloc>, root: str, out: str) str {
+    mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ")
+        .gstr_append(mp, TMPC()).gstr_append(mp, " ")
+        .gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c -o ").gstr_append(mp, out).gstr_finish(mp)
+}
+compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str) bool {
+    gen := mp.genModuleIn(mp.decls_of(root, path, src))
+    write_runnable_c(gen).match ({ true => (mp.cc_command(root, out).system() == 0), false => false })
+}
+
+// ── subcommands ───────────────────────────────────────────────────────────────────────────────────
+emit_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => { out_bytes(mp.genModuleIn(mp.parse_module(mp.flatten(root, path, src))).bytes())  0 },
+        .Err(e)  => { say("zenc: cannot read input")  1 }
+    })
+}
+check_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => {
+            n := mp.check_module(mp.decls_of(root, path, src))
+            (n == 0).match ({ true => { say("ok")  0 }, false => { say("zenc: check failed")  1 } })
+        },
+        .Err(e) => { say("zenc: cannot read input")  1 }
+    })
+}
+build_file = (mp: MutPtr<Malloc>, root: str, path: str, out: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => mp.compile_to(root, path, src, out).match ({ true => 0, false => 1 }),
+        .Err(e)  => { say("zenc: cannot read input")  1 }
+    })
+}
+run_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => mp.compile_to(root, path, src, TMPBIN()).match ({ true => TMPBIN().system() / 256, false => 1 }),
+        .Err(e)  => { say("zenc: cannot read input")  1 }
+    })
+}
+
+main = () i32 {
+    m    := Malloc(_: 0)
+    mp   := m.addr()
+    root := mp.dirname(arg(0))
+    cmd  := arg(1)
+    eq(cmd, "--version").match ({
+        true  => { say("zenc 0.2.0-dev (self-hosted; zen driver)")  0 },
+        false => eq(cmd, "--build-self").match ({
+            true  => mp.build_self(arg(3), arg(2)),       // --build-self <out.c> <srcroot>
+            false => eq(cmd, "emit").match ({
+                true  => mp.emit_file(root, arg(2)),
+                false => eq(cmd, "check").match ({
+                    true  => mp.check_file(root, arg(2)),
+                    false => eq(cmd, "run").match ({
+                        true  => mp.run_file(root, arg(2)),
+                        false => eq(cmd, "build").match ({
+                            true  => mp.build_file(root, arg(2), build_out(arg(3), arg(4))),
+                            false => { say("usage: zenc <run|build|check|emit|--build-self|--version> <file>")  1 }
+                        })
+                    })
+                })
+            })
+        })
+    })
+}
+// build output path: `build <file> -o <out>` -> <out>, else "a.out".
+build_out = (flag: str, out: str) str { eq(flag, "-o").match ({ true => out, false => "a.out" }) }
+
+// ── --build-self: regenerate the seed (ported from bootstrap/driver.c build_self) ─────────────────
+BS_HEAD      = () str { "typedef struct { void* ptr; int64_t len; } zslice; " }
+BS_HEAD_REPL = () str { "#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n" }
+
+bs_is_space = (b: u8) bool {
+    (b == ' ').match ({ true => true, false => (b == '\t').match ({ true => true, false => (b == '\n').match ({ true => true, false => (b == '\r').match ({ true => true, false => (b == 11).match ({ true => true, false => (b == 12) }) }) }) }) })
+}
+bs_skip_space = (v: [u8], i: i64, e: i64) i64 {
+    (i >= e).match ({ true => e, false => bs_is_space(v[i]).match ({ true => v.bs_skip_space(i + 1, e), false => i }) })
+}
+bs_trim_end = (v: [u8], s: i64, e: i64) i64 {
+    (e <= s).match ({ true => s, false => bs_is_space(v[e - 1]).match ({ true => v.bs_trim_end(s, e - 1), false => e }) })
+}
+bs_line_end = (v: [u8], p: i64, n: i64) i64 {
+    (p >= n).match ({ true => n, false => (v[p] == '\n').match ({ true => p, false => v.bs_line_end(p + 1, n) }) })
+}
+bs_eq_run = (v: [u8], at: i64, nv: [u8], i: i64) bool {
+    (i >= nv.len).match ({ true => true, false => (v[at + i] == nv[i]).match ({ true => v.bs_eq_run(at, nv, i + 1), false => false }) })
+}
+bs_match_at = (v: [u8], at: i64, e: i64, needle: str) bool {
+    nv := needle.view()
+    (at + nv.len > e).match ({ true => false, false => v.bs_eq_run(at, nv, 0) })
+}
+bs_has_needle = (v: [u8], p: i64, e: i64) bool {
+    (p >= e).match ({ true => false, false => v.bs_match_at(p, e, "= std.").match ({ true => true, false => v.bs_match_at(p, e, "= compiler.").match ({ true => true, false => v.bs_has_needle(p + 1, e) }) }) })
+}
+bs_is_import = (v: [u8], p: i64, e: i64) bool {
+    s := v.bs_skip_space(p, e)
+    (s + 1 < e).match ({ true => (v[s] == '{').match ({ true => (v[s + 1] == ' ').match ({ true => v.bs_has_needle(p, e), false => false }), false => false }), false => false })
+}
+bs_push_range = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, e: i64) String {
+    (p >= e).match ({ true => out, false => mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e) })
+}
+bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first: bool) String {
+    (p >= n).match ({
+        true  => out,
+        false => {
+            e    := v.bs_line_end(p, n)
+            drop := v.bs_is_import(p, e)
+            o2   := drop.match ({ true => out, false => { sep := first.match ({ true => out, false => out.gstr_push(mp, '\n') })  mp.bs_push_range(sep, v, p, e) } })
+            nf   := drop.match ({ true => first, false => false })
+            (e >= n).match ({ true => o2, false => mp.bs_strip_file(o2, v, e + 1, n, nf) })
+        }
+    })
+}
+bs_join = (mp: MutPtr<Malloc>, root: str, rel: str) str { mp.gstr_string(256).gstr_append(mp, root).gstr_append(mp, "/").gstr_append(mp, rel).gstr_finish(mp) }
+bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) str { mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp) }
+bs_add_source = (mp: MutPtr<Malloc>, out: String, root: str, rel: str) String {
+    path := mp.bs_join(root, rel)
+    contents_in(mp, path).match ({
+        .Ok(src) => { sv := src.view()  mp.bs_strip_file(out, sv, 0, sv.len, true) },
+        .Err(e)  => { say("zenc: --build-self: cannot read a source file")  out }
+    })
+}
+bs_walk_manifest = (mp: MutPtr<Malloc>, out: String, root: str, mv: [u8], p: i64, n: i64, count: i64) String {
+    (p >= n).match ({
+        true  => out,
+        false => {
+            e    := mv.bs_line_end(p, n)
+            s    := mv.bs_skip_space(p, e)
+            t    := mv.bs_trim_end(s, e)
+            keep := (s < t).match ({ true => (mv[s] != '#'), false => false })
+            o2   := keep.match ({ true => { sep := (count > 0).match ({ true => out.gstr_push(mp, '\n'), false => out })  rel := mp.bs_rel(mv, s, t)  mp.bs_add_source(sep, root, rel) }, false => out })
+            nc   := keep.match ({ true => count + 1, false => count })
+            (e >= n).match ({ true => o2, false => mp.bs_walk_manifest(o2, root, mv, e + 1, n, nc) })
+        }
+    })
+}
+bs_gen_end = (gv: [u8], n: i64) i64 {
+    (n <= 0).match ({ true => 0, false => bs_is_space(gv[n - 1]).match ({ true => gv.bs_gen_end(n - 1), false => n }) })
+}
+bs_write = (out_path: str, gen: String) bool {
+    hl  := BS_HEAD().view().len
+    end := gen.bytes().bs_gen_end(gen.len)
+    fd  := out_path.open(O_WRTRUNC, MODE_644)
+    (fd < 0).match ({
+        true  => false,
+        false => { hv := BS_HEAD_REPL().view()  fd.write(hv.ptr, hv.len)  fd.write(gen.ptr.offset(hl), end - hl)  fd.close()  true }
+    })
+}
+build_self = (mp: MutPtr<Malloc>, root: str, out_path: str) i32 {
+    mpath := mp.bs_join(root, "bootstrap/sources.txt")
+    contents_in(mp, mpath).match ({
+        .Ok(man) => {
+            mv   := man.view()
+            flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
+            gen  := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))
+            gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
+                true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
+                false => { say("zenc: --build-self: emitted C did not start with the expected head")  1 }
+            })
+        },
+        .Err(e) => { say("zenc: --build-self: cannot read bootstrap/sources.txt")  1 }
+    })
+}

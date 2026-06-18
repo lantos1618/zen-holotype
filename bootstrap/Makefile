@@ -20,12 +20,11 @@ CC      ?= cc
 CFLAGS  ?= -std=gnu11 -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
-SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c $(HERE)driver.c
+SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 
 .PHONY: zenc regen clean
 
-# The standalone, Python-free compiler binary. zenrt.c's OS main is weak, so driver.c's strong main
-# wins here (driver.c is deleted once main.zen owns the entry, then zenrt's main takes over).
+# The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 zenc:
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC)
 

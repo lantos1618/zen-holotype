@@ -23,7 +23,7 @@ def _build(tmp_path):
     """cc the committed bootstrap sources into a binary — NO Python toolchain involved."""
     exe = tmp_path / "zenc"
     r = subprocess.run(["cc", "-std=gnu11", "-w",
-                        str(BOOT / "zenc.gen.c"), str(BOOT / "zenrt.c"), str(BOOT / "driver.c"),
+                        str(BOOT / "zenc.gen.c"), str(BOOT / "zenrt.c"),
                         "-o", str(exe)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return exe
