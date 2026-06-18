@@ -1,13 +1,33 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
+{ Map, get } = std.collections.map        // DeclIndex fields are Map<i64>; env_* helpers call .get on them
 { at, is_alnum } = std.text.bytes
 { eq, is_empty, starts_with, ends_with } = std.text.str
 
-// Local fn is known iff the_func finds it by name (sentinel name is "").
+// Local fn is known iff the_func finds it by name (sentinel name is ""). The linear `is_known_fn`
+// remains for the few decls-only callers; Env-reachable sites use `env_known_fn` (O(1) via the index).
 is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
+env_known_fn = (env: Env, fn: str) bool { eq(env.env_func(fn).name, fn) }
+env_params = (env: Env, fn: str) [Param] { env.env_func(fn).params }
+// O(1) indexed struct presence/field lookups (Env carries the decl index).
+env_is_struct = (env: Env, name: str) bool { env.didx.struct_idx.get(name, 0 - 1) >= 0 }
+env_struct_fields = (env: Env, name: str) [Field] {
+    i := env.didx.struct_idx.get(name, 0 - 1)
+    (i >= 0 && i < env.decls.len).match ({
+        true  => env.decls[i].match ({ .DStruct(sd) => sd.fields, _ => no_fields() }),
+        false => no_fields()
+    })
+}
+// O(1) for concrete struct/enum names (the common case); only generics fall back to the linear scan.
+env_named_declared = (env: Env, n: str) bool {
+    (env.didx.struct_idx.get(n, 0 - 1) >= 0 || env.didx.enum_idx.get(n, 0 - 1) >= 0).match ({
+        true  => true,
+        false => env.decls.named_declared(n)
+    })
+}
 // Uninferable types are skipped so validation does not false-reject imported/generic residue.
 is_uninferable = (t: Ty) bool {
     t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(p) => load(p).is_void_ty(), _ => false })
@@ -32,7 +52,7 @@ unknown_ty = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
         false => t.match ({
-            .Named(n)   => env.decls.named_declared(n).match ({ true => false, false => true }),
+            .Named(n)   => env.env_named_declared(n).match ({ true => false, false => true }),
             .Ptr(p)     => env.unknown_ty(load(p)),
             .Slice(e)   => env.unknown_ty(load(e)),
             .Generic(g) => true,
@@ -164,7 +184,7 @@ check_call = (env: Env, c: CallData) i32 {
         true => 1,
         false => env.is_unresolved_trait_call(c).match ({
         true  => 0,
-        false => env.decls.is_known_fn(c.fn).match ({
+        false => env.env_known_fn(c.fn).match ({
             true  => env.call_errs(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),
@@ -179,8 +199,8 @@ check_call = (env: Env, c: CallData) i32 {
 // so a strict check there false-rejects real code (text/fmt, concurrent/actor, core/slice).
 is_imported_generic = (f: Func) bool { (f.tparams.len > 0) && (f.body.len == 0) }
 call_errs = (env: Env, c: CallData) i32 {
-    f  := env.decls.the_func(c.fn)
-    ps := env.decls.fn_params(c.fn)
+    f  := env.env_func(c.fn)
+    ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({
         false => 1,
         true  => f.is_imported_generic().match ({ true => 0, false => env.arg_type_errs(f.tparams, ps, c.args) })
@@ -328,7 +348,7 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
             true  => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), env.decls.gen_struct_fields(m.ty), m.inits),
             false => 0                                                 // unknown gen-struct (template residue) -> lenient
         }),
-        false => env.decls.is_struct(m.ty).match ({ true => env.struct_init_errs(env.decls.struct_fields(m.ty), m.inits), false => 0 })
+        false => env.env_is_struct(m.ty).match ({ true => env.struct_init_errs(env.env_struct_fields(m.ty), m.inits), false => 0 })
     })
 }
 // Field access checks only known concrete struct receivers.
@@ -337,8 +357,8 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
         true  => 1,
         false => {
             sname := env.infer_expr(obj).enum_name()
-            env.decls.is_struct(sname).match ({
-                true  => env.decls.struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
+            env.env_is_struct(sname).match ({
+                true  => env.env_struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
                 false => 0
             })
         }
@@ -519,7 +539,7 @@ check_block = (env: Env, stmts: [Stmt]) i32 {
 // Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
 var_err = (env: Env, name: str) i32 {
     (eq(name, "true") || eq(name, "false")
-        || env.is_bound(name) || env.decls.is_known_fn(name) || env.decls.is_imported(name)
+        || env.is_bound(name) || env.env_known_fn(name) || env.decls.is_imported(name)
         || env.decls.is_trait_method(name) || name.is_intrinsic()
         || env.decls.is_tag_const(env.a, name)).match ({ true => 0, false => 1 })
 }
@@ -790,17 +810,18 @@ own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) 
     })
     acc
 }
-own_check_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+own_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
     a.own_body_err(env, a.dead_nil(), f.body)
 }
 check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
-    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.own_check_func(decls, f), _ => 0 }) })
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.own_check_func(decls, idx, f), _ => 0 }) })
     acc
 }
-check_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
     a.check_body(env, f.body) + env.trailing_err(f.body)
 }
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
@@ -908,7 +929,8 @@ dup_name_errs = (decls: [Decl]) i32 {
 }
 check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs()
-    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, f), .DImpl(im) => a.impl_errs(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => 1, false => 0 }), _ => 0 }) })
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) { acc = acc + d.match ({ .DFunc(f) => a.check_func(decls, idx, f), .DImpl(im) => a.impl_errs(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => 1, false => 0 }), _ => 0 }) })
     acc
 }
 
@@ -1192,13 +1214,14 @@ kv_own_body_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stm
     })
     acc
 }
-kv_own_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+kv_own_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
     a.kv_own_body_kind(env, a.dead_nil(), f.body)
 }
 check_module_ownership_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
-    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_own_check_func_kind(decls, f), _ => 0 })) })
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_own_check_func_kind(decls, idx, f), _ => 0 })) })
     acc
 }
 
@@ -1214,8 +1237,8 @@ kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
 // a known local fn: wrong arity → KARITY; right arity but a mistyped CONCRETE arg → KARGTYPE. Slots
 // typed by the callee's own tparams are skipped, mirroring call_errs (so count and kind stay in agreement).
 kv_call_errs_kind = (env: Env, c: CallData) i32 {
-    f  := env.decls.the_func(c.fn)
-    ps := env.decls.fn_params(c.fn)
+    f  := env.env_func(c.fn)
+    ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({
         false => KARITY(),
         true  => f.is_imported_generic().match ({ true => 0, false => env.kv_arg_type_kind(f.tparams, ps, c.args) })
@@ -1226,7 +1249,7 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
         true => KUNDEFINED(),
         false => env.is_unresolved_trait_call(c).match ({
         true  => 0,                                       // deferred UFCS trait-method call (see check_call)
-        false => env.decls.is_known_fn(c.fn).match ({
+        false => env.env_known_fn(c.fn).match ({
             true  => env.kv_call_errs_kind(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
@@ -1366,8 +1389,8 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
         })
     })
 }
-kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
-    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
     a.kv_check_body_kind(env, f.body).kv_kor(env.kv_trailing_kind(f.body))
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
@@ -1388,7 +1411,8 @@ kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
 // (which exits with the count) keeps working unchanged.
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs().kv_one(KDUPFN())
-    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE(), false => 0 }), _ => 0 })) })
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, idx, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE(), false => 0 }), _ => 0 })) })
     acc
 }
 check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
