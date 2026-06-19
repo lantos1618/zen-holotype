@@ -194,7 +194,6 @@ def test_zenc_check_position_survives_import_flattening():
     )
 
 
-@pytest.mark.xfail(reason="driver.zen follow-up: multi-module diagnostic spans need per-module flat-offset ranges (ModuleTable resolves by id, not offset)", strict=False)
 def test_zenc_check_reports_imported_sibling_source_location():
     """Errors inside an imported sibling should render against that sibling's original file/source,
     not the root module that triggered flattening."""
@@ -214,7 +213,6 @@ def test_zenc_check_reports_imported_sibling_source_location():
     )
 
 
-@pytest.mark.xfail(reason="driver.zen follow-up: multi-module diagnostic spans need per-module flat-offset ranges (ModuleTable resolves by id, not offset)", strict=False)
 def test_zenc_check_reports_namespace_imported_sibling_source_location():
     """Namespace-bound imports rewrite exported names in the flat source. Diagnostics still need
     to land on the original sibling source line."""

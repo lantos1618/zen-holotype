@@ -14,7 +14,7 @@
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry } = std.internal.resolve
 
 say = (s: str) i64 { out(s)  out("\n") }
 derr = (s: str) i64 { v := s.view()  write(2, v.ptr, v.len) }   // diagnostics go to stderr
@@ -37,14 +37,34 @@ check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDi
         false => cd1
     })
 }
+// which (path, source) an error renders against: the main file if its span maps there, else the
+// imported module whose source the flat offset maps cleanly into (diag_user_span fails -> line 0).
+RenderTarget*: { path: str, src: str }
+pick_module = (flat: str, mods: [ModuleEntry], i: i64, off: i32, w: i32, rpath: str, rsrc: str) RenderTarget {
+    (i >= mods.len).match ({
+        true  => RenderTarget(path: rpath, src: rsrc),
+        false => {
+            m  := mods[i]
+            sp := diag_user_span(flat, m.source, off, w)
+            (sp.line > 0).match ({ true => RenderTarget(path: m.path, src: m.source), false => flat.pick_module(mods, i + 1, off, w, rpath, rsrc) })
+        }
+    })
+}
+pick_render = (rp: ResolvedProgram, off: i32, w: i32, rpath: str, rsrc: str) RenderTarget {
+    diag_user_span(rp.flat, rsrc, off, w).line.match ({
+        0 => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc),
+        _ => RenderTarget(path: rpath, src: rsrc)
+    })
+}
 // 0 if clean; else render the diagnostic (file:line:col + caret) to stderr and return the error count.
-report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str, path: str, user: str) i32 {
-    cd := mp.check_diag(raw, decls, flat)
+report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram, path: str, user: str) i32 {
+    cd := mp.check_diag(raw, decls, rp.flat)
     (cd.code == 0).match ({
         true  => 0,
         false => {
-            sp := diag_user_span(flat, user, cd.source_offset, cd.span_width)
-            derr(mp.render_diagnostic(path, user, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            rt := pick_render(rp, cd.source_offset, cd.span_width, path, user)
+            sp := diag_user_span(rp.flat, rt.src, cd.source_offset, cd.span_width)
+            derr(mp.render_diagnostic(rt.path, rt.src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
             cd.count
         }
     })
@@ -84,6 +104,11 @@ push_prefix = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
 flatten = (mp: MutPtr<Malloc>, root: str, path: str, src: str) str {
     mp.resolve_program_data(root, mp.dirname(path), path, src).flat
 }
+// the full resolved program (flat + per-module table) — check/build keep it so a diagnostic can
+// render against the imported module its error actually lives in.
+resolve_prog = (mp: MutPtr<Malloc>, root: str, path: str, src: str) ResolvedProgram {
+    mp.resolve_program_data(root, mp.dirname(path), path, src)
+}
 decls_of = (mp: MutPtr<Malloc>, root: str, path: str, src: str) [Decl] {
     mp.resolve_module(mp.parse_module(mp.flatten(root, path, src)))
 }
@@ -108,10 +133,10 @@ cc_command = (mp: MutPtr<Malloc>, root: str, out: str, ccflags: str, links: str)
 }
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc failure.
 compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccflags: str, links: str) i32 {
-    flat  := mp.flatten(root, path, src)
-    raw   := mp.parse_module(flat)
+    rp    := mp.resolve_prog(root, path, src)
+    raw   := mp.parse_module(rp.flat)
     decls := mp.resolve_module(raw)
-    (mp.report_check(raw, decls, flat, path, src) == 0).match ({
+    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
         false => 1,
         true  => {
             gen := mp.genModuleIn(decls)
@@ -132,10 +157,10 @@ emit_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
 check_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
-            flat  := mp.flatten(root, spec.source, src)
-            raw   := mp.parse_module(flat)
+            rp    := mp.resolve_prog(root, spec.source, src)
+            raw   := mp.parse_module(rp.flat)
             decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, flat, spec.source, src) == 0).match ({
+            (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
                 true  => { derr("zenc: ")  derr(spec.source)  derr(": ok\n")  0 },   // <path>: ok -> stderr
                 false => 1
             })
