@@ -19,8 +19,11 @@ DeclIndex*: {
     struct_idx: Map<i64>,   // DStruct.name → index
     enum_idx:   Map<i64>,   // DEnum.name → index
     global_idx: Map<i64>,   // DGlobal.name → index
-    impl_idx:   Map<i64>    // DImpl.ty → presence marker (a type with at least one impl)
+    impl_idx:   Map<i64>,   // DImpl.ty → presence marker (a type with at least one impl)
+    tdef_idx:   Map<i64>    // (trait "\t" method) → presence: the trait provides a default for the method
 }
+// the combined key for a trait-default lookup; trait/method are identifiers, so a TAB can't collide.
+tdkey = (a: MutPtr<Malloc>, tr: str, m: str) str { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a) }
 build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
     seed: i64 := 0 - 1
     idx := DeclIndex(
@@ -28,16 +31,18 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
         struct_idx: of(a, "", seed),
         enum_idx:   of(a, "", seed),
         global_idx: of(a, "", seed),
-        impl_idx:   of(a, "", seed)
+        impl_idx:   of(a, "", seed),
+        tdef_idx:   of(a, "", seed)
     )
     decls.loop((h, i, d) {
         d.match ({
-            .DFunc(f)    => { idx = DeclIndex( func_idx: idx.func_idx.put(a, f.name, i), struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx ) },
-            .DForeign(f) => { idx = DeclIndex( func_idx: idx.func_idx.put(a, f.name, i), struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx ) },
-            .DStruct(s)  => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx.put(a, s.name, i), enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx ) },
-            .DEnum(e)    => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx.put(a, e.name, i), global_idx: idx.global_idx, impl_idx: idx.impl_idx ) },
-            .DGlobal(g)  => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx.put(a, g.name, i), impl_idx: idx.impl_idx ) },
-            .DImpl(im)   => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx.put(a, im.ty, i) ) },
+            .DFunc(f)    => { idx = DeclIndex( func_idx: idx.func_idx.put(a, f.name, i), struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DForeign(f) => { idx = DeclIndex( func_idx: idx.func_idx.put(a, f.name, i), struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DStruct(s)  => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx.put(a, s.name, i), enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DEnum(e)    => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx.put(a, e.name, i), global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DGlobal(g)  => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx.put(a, g.name, i), impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DImpl(im)   => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx.put(a, im.ty, i), tdef_idx: idx.tdef_idx ) },
+            .DTraitDefault(td) => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i) ) },
             _            => {}
         })
     })
@@ -340,12 +345,13 @@ trait_default_exists = (decls: [Decl], trname: str, m: str) bool {
         _ => found }) })
     found
 }
-dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], fn: str, tyname: str) str {
+dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: str, tyname: str) str {
     found := ""
     decls.loop((h, i, d) {
         found = d.match ({
             .DImpl(im) => eq(im.ty, tyname).match ({
-                true  => (im.methods.method_in(fn) || decls.trait_default_exists(im.trname, fn)).match ({ true => a.impl_cname_in(im.trname, im.ty, fn), false => found }),
+                // trait-default check is now an O(1) index lookup instead of a full decl scan per impl.
+                true  => (im.methods.method_in(fn) || (didx.tdef_idx.get(a.tdkey(im.trname, fn), 0 - 1) >= 0)).match ({ true => a.impl_cname_in(im.trname, im.ty, fn), false => found }),
                 false => found
             }),
             _ => found
@@ -361,7 +367,7 @@ dispatch_name = (env: Env, c: CallData) str {
             // impl scan entirely (the common case for primitive/struct receivers).
             (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
                 true  => c.fn,
-                false => env.a.dispatch_recv(env.decls, c.fn, tyname)
+                false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname)
             })
         },
         false => c.fn
