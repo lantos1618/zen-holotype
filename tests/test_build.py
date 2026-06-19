@@ -476,7 +476,6 @@ def test_zenc_project_manifest_fixture_build_run_check():
     assert exe.stdout == "fixture project\n"
 
 
-@pytest.mark.xfail(reason="driver.zen follow-up: project mode (zen.toml / build.zen directory input) needs stat+popen bindings and the build.zen-run flow", strict=False)
 def test_zenc_build_zen_program_drives_the_build():
     """M6 (real build): a project with a `build.zen` is built by RUNNING that Zen program. `zenc build`
     appends a main that calls its `build(b)` and reads back the Target (root/main/out/link) it returns

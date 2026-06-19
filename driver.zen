@@ -8,7 +8,7 @@
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc   // the seed's String API (string.zen isn't in the manifest)
 
 { contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
-{ open, read, write, close, system } = std.c.libc
+{ open, read, write, close, system, unlink } = std.c.libc
 { parse_module } = compiler.parse
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source } = compiler.check_validate
@@ -182,11 +182,11 @@ main = () i32 {
             false => eq(cmd, "emit").match ({
                 true  => mp.emit_file(root, arg(2)),
                 false => eq(cmd, "check").match ({
-                    true  => mp.check_spec(root, mp.resolve_spec(arg(2))),
+                    true  => mp.check_spec(root, mp.resolve_spec(root, arg(2))),
                     false => eq(cmd, "run").match ({
-                        true  => mp.run_spec(root, mp.resolve_spec(arg(2))),
+                        true  => mp.run_spec(root, mp.resolve_spec(root, arg(2))),
                         false => eq(cmd, "build").match ({
-                            true  => mp.build_spec(root, mp.resolve_spec(arg(2)), arg(3), arg(4)),
+                            true  => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)),
                             false => eq(cmd, "fmt").match ({
                                 true  => mp.fmt_cmd(arg(2), arg(3)),
                                 false => eq(cmd, "doc").match ({
@@ -486,7 +486,66 @@ proj_spec = (mp: MutPtr<Malloc>, dir: str) Spec {
     })
 }
 // arg -> Spec: a directory with zen.toml is a project; otherwise a single file (empty cc/links/out).
-resolve_spec = (mp: MutPtr<Malloc>, arg: str) Spec {
-    s := mp.proj_spec(arg)
-    s.ok.match ({ true => s, false => Spec(source: arg, out: "", ccflags: "", links: "", ok: true) })
+resolve_spec = (mp: MutPtr<Malloc>, root: str, arg: str) Spec {
+    bz := mp.build_zen_spec(root, arg)
+    bz.ok.match ({
+        true  => bz,
+        false => {
+            s := mp.proj_spec(arg)
+            s.ok.match ({ true => s, false => Spec(source: arg, out: "", ccflags: "", links: "", ok: true) })
+        }
+    })
+}
+
+// ── build.zen mode: the build IS a Zen program. Append a main that prints its Target's spec, compile
+// + run it (capturing stdout to a file), parse the 5 fields back. Wins over zen.toml. ─────────────
+BUILDBIN  = () str { "/tmp/zenbuild_spec.bin" }
+SPECFILE  = () str { "/tmp/zenbuild_spec.txt" }
+BUILD_TAIL = () str { "\nmain = () i32 { build(Build(_: 0)).emit_spec()  0 }\n" }
+// the [start,end) of line `idx` (0-based) in v; field idx of the emitted spec.
+line_start = (v: [u8], idx: i32, p: i64) i64 { (idx <= 0).match ({ true => p, false => (p >= v.len).match ({ true => p, false => v.line_start(idx - 1, v.bs_line_end(p, v.len) + 1) }) }) }
+spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) str {
+    s := v.line_start(idx, 0)
+    e := v.bs_line_end(s, v.len)
+    mp.bs_push_range(mp.gstr_string(e - s + 1), v, s, e).gstr_finish(mp)
+}
+parse_spec = (mp: MutPtr<Malloc>, dir: str, specsrc: str) Spec {
+    v: [u8] := specsrc.view()
+    name := mp.spec_field(v, 0)
+    root := mp.spec_field(v, 1)
+    main := mp.spec_field(v, 2)
+    out  := mp.spec_field(v, 3)
+    link := mp.spec_field(v, 4)
+    (eq(root, "") || eq(main, "")).match ({
+        true  => { derr("zenc: build.zen: target is missing root/main\n")  Spec(source: "", out: "", ccflags: "", links: "", ok: false) },
+        false => Spec(
+            source:  mp.join2(mp.join2(dir, root), main),
+            out:     eq(out, "").match ({ true => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }), false => mp.join2(dir, out) }),
+            ccflags: "",
+            links:   eq(link, "").match ({ true => "", false => mp.link_flag(link) }),
+            ok: true
+        )
+    })
+}
+build_zen_spec = (mp: MutPtr<Malloc>, root: str, dir: str) Spec {
+    contents_in(mp, mp.join2(dir, "build.zen")).match ({
+        .Ok(bsrc) => {
+            es    := mp.gstr_string(1024).gstr_append(mp, bsrc).gstr_append(mp, BUILD_TAIL())
+            entry := es.gstr_finish(mp)
+            epath := mp.join2(dir, ".zenbuild_entry.zen")
+            save(epath, entry, es.len).match ({ .Ok(n) => {}, .Err(e) => {} })
+            rc := mp.compile_to(root, epath, entry, BUILDBIN(), "", "")
+            unlink(epath)                                    // don't leave the entry in the project dir
+            (rc == 0).match ({
+                false => { derr("zenc: build.zen: the build program did not compile\n")  Spec(source: "", out: "", ccflags: "", links: "", ok: false) },
+                true  => {
+                    mp.gstr_string(256).gstr_append(mp, BUILDBIN()).gstr_append(mp, " > ").gstr_append(mp, SPECFILE()).gstr_finish(mp).system()
+                    sp := contents_in(mp, SPECFILE()).match ({ .Ok(spec) => mp.parse_spec(dir, spec), .Err(e) => Spec(source: "", out: "", ccflags: "", links: "", ok: false) })
+                    unlink(BUILDBIN())  unlink(SPECFILE())
+                    sp
+                }
+            })
+        },
+        .Err(e) => Spec(source: "", out: "", ccflags: "", links: "", ok: false)   // no build.zen -> try zen.toml
+    })
 }
