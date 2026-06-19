@@ -13,7 +13,7 @@
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
-{ diag_user_span, render_diagnostic } = compiler.diagnostic
+{ diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { resolve_program_data, first_user_import_in } = std.internal.resolve
 
 say = (s: str) i64 { out(s)  out("\n") }
@@ -97,14 +97,17 @@ write_runnable_c = (gen: String) bool {
         false => { hv := HEAD_REPL().view()  fd.write(hv.ptr, hv.len)  fd.write(gen.ptr.offset(hl), gen.len - hl)  fd.close()  true }
     })
 }
-// cc -std=gnu11 -w -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c -o <out>
-cc_command = (mp: MutPtr<Malloc>, root: str, out: str) str {
+// cc -std=gnu11 -w -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
+// ccflags/links come from a project's zen.toml (extra .c files + `-l` libs); empty for single files.
+cc_command = (mp: MutPtr<Malloc>, root: str, out: str, ccflags: str, links: str) str {
     mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ")
         .gstr_append(mp, TMPC()).gstr_append(mp, " ")
-        .gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c -o ").gstr_append(mp, out).gstr_finish(mp)
+        .gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ")
+        .gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links)
+        .gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp)
 }
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc failure.
-compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str) i32 {
+compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccflags: str, links: str) i32 {
     flat  := mp.flatten(root, path, src)
     raw   := mp.parse_module(flat)
     decls := mp.resolve_module(raw)
@@ -112,7 +115,7 @@ compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str) i32 
         false => 1,
         true  => {
             gen := mp.genModuleIn(decls)
-            write_runnable_c(gen).match ({ true => (mp.cc_command(root, out).system() == 0).match ({ true => 0, false => 1 }), false => 1 })
+            write_runnable_c(gen).match ({ true => (mp.cc_command(root, out, ccflags, links).system() == 0).match ({ true => 0, false => 1 }), false => 1 })
         }
     })
 }
@@ -124,26 +127,32 @@ emit_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
         .Err(e)  => { derr("zenc: cannot read input\n")  1 }
     })
 }
-check_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
-    contents_in(mp, path).match ({
+// check/build/run operate on a Spec (a single file, or a zen.toml project). spec.source is the
+// entry; spec.ccflags/links/out come from a project's manifest (empty for a single file).
+check_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
+    contents_in(mp, spec.source).match ({
         .Ok(src) => {
-            flat  := mp.flatten(root, path, src)
+            flat  := mp.flatten(root, spec.source, src)
             raw   := mp.parse_module(flat)
             decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, flat, path, src) == 0).match ({ true => { say("ok")  0 }, false => 1 })
+            (mp.report_check(raw, decls, flat, spec.source, src) == 0).match ({
+                true  => { derr("zenc: ")  derr(spec.source)  derr(": ok\n")  0 },   // <path>: ok -> stderr
+                false => 1
+            })
         },
         .Err(e) => { derr("zenc: cannot open input\n")  1 }
     })
 }
-build_file = (mp: MutPtr<Malloc>, root: str, path: str, out: str) i32 {
-    contents_in(mp, path).match ({
-        .Ok(src) => mp.compile_to(root, path, src, out),
+build_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec, flag: str, outarg: str) i32 {
+    out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })   // -o flag, or zen.toml `out`
+    contents_in(mp, spec.source).match ({
+        .Ok(src) => mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links),
         .Err(e)  => { derr("zenc: cannot open input\n")  1 }
     })
 }
-run_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
-    contents_in(mp, path).match ({
-        .Ok(src) => (mp.compile_to(root, path, src, TMPBIN()) == 0).match ({ true => TMPBIN().system() / 256, false => 1 }),
+run_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
+    contents_in(mp, spec.source).match ({
+        .Ok(src) => (mp.compile_to(root, spec.source, src, TMPBIN(), spec.ccflags, spec.links) == 0).match ({ true => TMPBIN().system() / 256, false => 1 }),
         .Err(e)  => { derr("zenc: cannot open input\n")  1 }
     })
 }
@@ -173,11 +182,11 @@ main = () i32 {
             false => eq(cmd, "emit").match ({
                 true  => mp.emit_file(root, arg(2)),
                 false => eq(cmd, "check").match ({
-                    true  => mp.check_file(root, arg(2)),
+                    true  => mp.check_spec(root, mp.resolve_spec(arg(2))),
                     false => eq(cmd, "run").match ({
-                        true  => mp.run_file(root, arg(2)),
+                        true  => mp.run_spec(root, mp.resolve_spec(arg(2))),
                         false => eq(cmd, "build").match ({
-                            true  => mp.build_file(root, arg(2), build_out(arg(3), arg(4))),
+                            true  => mp.build_spec(root, mp.resolve_spec(arg(2)), arg(3), arg(4)),
                             false => eq(cmd, "fmt").match ({
                                 true  => mp.fmt_cmd(arg(2), arg(3)),
                                 false => eq(cmd, "doc").match ({
@@ -435,4 +444,49 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
         true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a3, true) }),
         false => eq(a2, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a2, false) })
     })
+}
+
+// ── project mode: `zenc build|run|check <dir>` driven by <dir>/zen.toml ───────────────────────────
+Spec*: { source: str, out: str, ccflags: str, links: str, ok: bool }
+join2 = (mp: MutPtr<Malloc>, a: str, b: str) str { mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp) }
+link_flag = (mp: MutPtr<Malloc>, lk: str) str { mp.gstr_string(8).gstr_append(mp, "-l").gstr_append(mp, lk).gstr_finish(mp) }
+// src[start .. start+n) as an owned str.
+substr = (mp: MutPtr<Malloc>, s: str, start: i32, n: i32) str {
+    v: [u8] := s.view()
+    mp.bs_push_range(mp.gstr_string(n + 1), v, start, start + n).gstr_finish(mp)
+}
+// a zen.toml `key = "value"` -> the value (or "" if absent), via the Zen manifest parser.
+manifest_value = (mp: MutPtr<Malloc>, src: str, key: str) str {
+    sp := manifest_value_span(src, to_i32(src.view().len), key, 0)
+    (sp.start < 0).match ({ true => "", false => mp.substr(src, sp.start, sp.len) })
+}
+// read <dir>/zen.toml -> a project Spec (ok=false if absent or missing root/main).
+proj_spec = (mp: MutPtr<Malloc>, dir: str) Spec {
+    contents_in(mp, mp.join2(dir, "zen.toml")).match ({
+        .Ok(src) => {
+            root := mp.manifest_value(src, "root")
+            main := mp.manifest_value(src, "main")
+            (eq(root, "") || eq(main, "")).match ({
+                true  => Spec(source: "", out: "", ccflags: "", links: "", ok: false),
+                false => {
+                    out := mp.manifest_value(src, "out")
+                    cc  := mp.manifest_value(src, "ccflags")
+                    lk  := mp.manifest_value(src, "link")
+                    Spec(
+                        source:  mp.join2(mp.join2(dir, root), main),
+                        out:     eq(out, "").match ({ true => "", false => mp.join2(dir, out) }),
+                        ccflags: cc,
+                        links:   eq(lk, "").match ({ true => "", false => mp.link_flag(lk) }),
+                        ok: true
+                    )
+                }
+            })
+        },
+        .Err(e) => Spec(source: "", out: "", ccflags: "", links: "", ok: false)
+    })
+}
+// arg -> Spec: a directory with zen.toml is a project; otherwise a single file (empty cc/links/out).
+resolve_spec = (mp: MutPtr<Malloc>, arg: str) Spec {
+    s := mp.proj_spec(arg)
+    s.ok.match ({ true => s, false => Spec(source: arg, out: "", ccflags: "", links: "", ok: true) })
 }

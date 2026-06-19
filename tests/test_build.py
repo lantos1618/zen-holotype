@@ -415,7 +415,6 @@ def test_scope_generic_field_dispatch():
     assert r.returncode == 105, r.stderr
 
 
-@pytest.mark.xfail(reason="driver.zen follow-up: project mode (zen.toml / build.zen directory input) needs stat+popen bindings and the build.zen-run flow", strict=False)
 def test_zenc_project_manifest_build_run_check():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
@@ -455,7 +454,6 @@ def test_zenc_project_manifest_build_run_check():
     assert exe.stdout == "project\n"
 
 
-@pytest.mark.xfail(reason="driver.zen follow-up: project mode (zen.toml / build.zen directory input) needs stat+popen bindings and the build.zen-run flow", strict=False)
 def test_zenc_project_manifest_fixture_build_run_check():
     zenc = _zenc()
     project = Path(tempfile.mkdtemp()) / "manifest_demo"
@@ -501,7 +499,6 @@ def test_zenc_build_zen_program_drives_the_build():
     assert run.stdout == "built from build.zen\n"
 
 
-@pytest.mark.xfail(reason="driver.zen follow-up: project mode (zen.toml / build.zen directory input) needs stat+popen bindings and the build.zen-run flow", strict=False)
 def test_zenc_project_manifest_link_directive_links_c_library():
     """M6 (build graph): a `link = "m"` manifest directive adds `-l<lib>` to the cc link line, so a
     program that calls a libm symbol links + runs. We use Bessel `j0` (gcc has no const-folding path
