@@ -381,11 +381,18 @@ dispatch_recv_name = (t: Ty) str {
         _           => t.recv_name()
     })
 }
+fnt_ret = (t: Ty) Ty { t.match ({ .FnT(ft) => load(ft.ret), _ => tvoid() }) }
 gen_call_ret = (env: Env, c: CallData) Ty {
-    f := env.env_func(env.dispatch_name(c))
-    (f.tparams.len > 0).match ({
-        true  => env.a.subst_ty_in(f.tparams, env.call_targs(f, c.args), f.ret),
-        false => f.ret
+    dn := env.dispatch_name(c)
+    f  := env.env_func(dn)
+    eq(f.name, "").match ({
+        // not a known function: an INDIRECT call through a function-VALUE (a fn-valued local or field
+        // bound to a local) — its result type is the value's FnT return type.
+        true  => env.var_or_global(c.fn).fnt_ret(),
+        false => (f.tparams.len > 0).match ({
+            true  => env.a.subst_ty_in(f.tparams, env.call_targs(f, c.args), f.ret),
+            false => f.ret
+        })
     })
 }
 // Bounds-safe operand inference for 1-arg intrinsics.
@@ -833,6 +840,29 @@ call_arg_exp = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param]
         })
     })
 }
+// `b.op(args)` desugars to `op(b, args)`; when `op` names no function but IS a function-VALUE field of
+// b's type (FnT), this is an INDIRECT call through that field (M1 closures). Detect it: the callee is
+// not a known/dispatched function and arg0 has an FnT field of that name.
+fnfield_ty = (env: Env, recv: Ptr<Expr>, field: str) Ty { env.infer_expr(env.a.cenode(member(recv, field))) }
+is_fn_field_call = (env: Env, dn: str, args: [Expr]) bool {
+    (eq(env.env_func(dn).name, "") && (args.len > 0)).match ({
+        true  => env.fnfield_ty(args[0].addr(), dn).is_fnt(),
+        false => false
+    })
+}
+// rewrite `op(b, x, y)` -> `({ __zclos_recv := b.op   __zclos_recv(x, y) })`: bind the field value to a
+// local, then call the local. This reuses the existing local-fn-value call path (C `__auto_type` +
+// native indirect call) — no new genc call node. Block scoping keeps the fixed temp name nesting-safe.
+rewrite_fn_field_call = (a: MutPtr<Malloc>, env: Env, field: str, buf: [Expr]) Ptr<Expr> {
+    rest := a.cebuf(buf.len - 1)
+    buf.loop((h, i, e) { (i > 0).match ({ true => { rest[i - 1] = e }, false => {} }) })
+    letst := slet("__zclos_recv", a.cenode(member(buf[0].addr(), field)))
+    callx := a.cenode(call("__zclos_recv", rest))
+    sbuf2 := a.sbuf(2)
+    sbuf2[0] = letst
+    sbuf2[1] = sexpr(callx)
+    a.cenode(block(sbuf2))
+}
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     dn    := env.dispatch_name(c)
     fn    := env.env_func(dn)
@@ -844,7 +874,10 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex     := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf))
+    env.is_fn_field_call(dn, buf).match ({
+        true  => a.rewrite_fn_field_call(env, c.fn, buf),
+        false => a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf))
+    })
 }
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
 // it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
