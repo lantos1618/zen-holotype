@@ -215,7 +215,10 @@ is_generic_fn* = (f: Func) bool { (f.params.has_fnt_param() || (f.tparams.len > 
 is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.is_generic_fn(), _ => false }) }
 // a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no
 // runtime representation in the monomorphic/inline model — the impl methods are plain functions —
-// so genModule skips it, exactly like a template function.
+// so genModule skips it, exactly like a template function. NOTE: a data struct holding a function-
+// VALUE field (a closure) is ALSO all-/some-FnT-shaped and indistinguishable here by shape alone; the
+// emit pipeline (genc_emit) disambiguates by USAGE — a constructed struct is real, a trait is only
+// impl'd, never constructed — via `struct_is_trait_emit`.
 struct_is_trait = (sd: StructDecl) bool {
     found := false
     sd.fields.loop((h, i, f) { found = f.ty.is_fnt().match ({ true => true, false => found }) })
@@ -454,8 +457,15 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
         .Ptr(p)     => tptr(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(p)))),
         .Slice(e)   => tslice(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(e)))),
         .Generic(g) => a.subst_generic_in(tparams, args, g),   // a nested generic field: substitute its args, re-mangle
+        .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),       // a function-VALUE field `(S, i32) S`: substitute inside the signature
         _           => t
     })
+}
+// substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
+subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty {
+    ptys := a.mono_tybuf_in(ft.params.len)
+    ft.params.loop((h, i, p) { ptys[i] = a.subst_ty_in(tparams, args, p) })
+    fntype(ptys, a.mono_tynode_in(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
 subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {

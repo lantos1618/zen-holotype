@@ -203,6 +203,11 @@ VALUE_CASES = [
     ('RGB*: { r: i32, g: i32, b: i32 }\nColour*: Red = RGB(r: 255, g: 0, b: 0) | Green | Blue | Custom(RGB)\ntest* = () i32 {\n  c := Colour.Red\n  c.match ({ .Red(v) => v.r, .Custom(v) => v.r, .Green => 0, .Blue => 0 })\n}', 255),   # struct default
     ('Lvl*: Low = 1 | High = 9 | Exact(i32)\nf* = (l: Lvl) i32 { l.match ({ .Low(v) => v, .High(v) => v, .Exact(v) => v }) }\ntest* = () i32 { f(Lvl.Low) + f(Lvl.High) }', 10),                                              # scalar defaults
     ('Lvl*: Low = 1 | High = 9 | Exact(i32)\nf* = (l: Lvl) i32 { l.match ({ .Low(v) => v, .High(v) => v, .Exact(v) => v }) }\ntest* = () i32 { f(.Low) + f(.Exact(40)) }', 41),                                                # leading-dot default + payload
+# --- first-class function VALUES (closures M1, non-capturing): a function stored in a struct field and
+#     called through it, a fn-valued local called indirectly, and a generic Store{reducer} record. ---
+    ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 {\n  f := add\n  f(2, 3)\n}', 5),                                                  # named fn as a local value, indirect call
+    ('add* = (a: i32, b: i32) i32 { a + b }\nBox*: { op: (i32, i32) i32 }\ntest* = () i32 {\n  b := Box(op: add)\n  b.op(4, 5)\n}', 9),         # named fn stored in a struct field, called through it
+    ('Store*<S>: { state: S, reducer: (S, i32) S }\nAppState*: { count: i32 }\nreduce* = (s: AppState, a: i32) AppState { AppState(count: s.count + a) }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 0), reducer: reduce)\n  ns := st.reducer(st.state, 5)\n  ns2 := st.reducer(ns, 6)\n  ns2.count\n}', 11),   # generic Store{reducer} record, closure field dispatched (twice)
 # --- f64 floats (Goal R): a literal carries its TEXT through the compiler (the compiler itself has
 #     no float values); f64 op f64 only for + - * / and comparisons; the int<->float boundary is
 #     crossed ONLY by the explicit to_f64 / to_i64 / to_i32 casts (C truncation toward zero). ---
