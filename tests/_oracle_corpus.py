@@ -264,6 +264,22 @@ VALUE_CASES = [
     ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 {\n  e := .B(10, 20)\n  sum(e)\n}', 30),  # bare ctor
     ('T*: N | V(i32, i32, i32)\nsum = (t: T) i32 { t.match({ .N => 0, .V(p) => p._0 + p._1 + p._2 }) }\ntest* = () i32 { sum(T.V(1, 2, 3)) }', 6),  # three fields
     ('O*: Some(i32) | None\nun = (o: O) i32 { o.match({ .Some(x) => x, .None => 0 }) }\ntest* = () i32 { un(O.Some(42)) }', 42),     # single payload unchanged (regression guard)
+
+    # --- std.text.str.trim — the ASCII-whitespace scan that backs trim/ltrim/rtrim_view. Walks a [u8]
+    #     view, finds the first/last non-whitespace index; result encodes ws_start*100 + trimmed_len.
+    #     For "  hi \n": ws_start=2, trimmed_len=2 -> 202 (guards both the offset AND the length). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\nws_start = (v: [u8]) i64 { lo: i64 := v.len  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { lo = i  h.break } }) })  lo }\nws_end = (v: [u8]) i64 { hi: i64 := 0  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { hi = i + 1 } }) })  hi }\ntest* = () i32 { s := "  hi \\n"  v: [u8] := slice(s, strlen(s))  to_i32(ws_start(v) * 100 + (ws_end(v) - ws_start(v))) }', 202),
+
+    # --- std.text.str.split_in — the sep-scan that emits each field's (start, len). Walks a [u8] view,
+    #     accumulating per-field lengths as a base-10 checksum (acc = acc*10 + field_len). For "a,,b"
+    #     on ',' the fields are 1,0,1 bytes -> 101 (the EMPTY middle field is what 0 guards). ---
+    ('strlen = (s: str) i64\ntest* = () i32 { s := "a,,b"  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0  v.loop((h, i, b) { (b == \',\').match ({ true => { acc = acc * 10 + (i - start)  start = i + 1 }, _ => {} }) })  acc = acc * 10 + (v.len - start)  to_i32(acc) }', 101),
+
+    # --- std.text.str.words_in — split on RUNS of whitespace, dropping empties. Walks the [u8] view,
+    #     opening a word at the first non-ws byte and closing it at the next ws, accumulating each
+    #     word's length as a base-10 checksum. "  the  cat sat " -> words 3,3,3 -> 333 (the leading,
+    #     doubled, and trailing whitespace must all collapse — any leaked empty would skew the digits). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\ntest* = () i32 { s := "  the  cat sat "  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }', 333),
 ]
 
 # (src, verdict) the check binary must produce.
