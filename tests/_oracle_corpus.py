@@ -208,6 +208,9 @@ VALUE_CASES = [
     ('add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 {\n  f := add\n  f(2, 3)\n}', 5),                                                  # named fn as a local value, indirect call
     ('add* = (a: i32, b: i32) i32 { a + b }\nBox*: { op: (i32, i32) i32 }\ntest* = () i32 {\n  b := Box(op: add)\n  b.op(4, 5)\n}', 9),         # named fn stored in a struct field, called through it
     ('Store*<S>: { state: S, reducer: (S, i32) S }\nAppState*: { count: i32 }\nreduce* = (s: AppState, a: i32) AppState { AppState(count: s.count + a) }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 0), reducer: reduce)\n  ns := st.reducer(st.state, 5)\n  ns2 := st.reducer(ns, 6)\n  ns2.count\n}', 11),   # generic Store{reducer} record, closure field dispatched (twice)
+# --- M1b: a non-capturing lambda LITERAL stored in a field is LIFTED to a top-level fn + called ---
+    ('Box*: { op: (i32, i32) i32 }\ntest* = () i32 {\n  b := Box(op: (x, y) { x + y })\n  b.op(4, 5)\n}', 9),                                              # stored lambda literal, lifted + called
+    ('Store*<S>: { state: S, reducer: (S, i32) S }\nAppState*: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 0), reducer: (s, a) { AppState(count: s.count + a) })\n  ns := st.reducer(st.state, 7)\n  ns.count\n}', 7),   # generic store, INLINE lambda reducer lifted
 # --- f64 floats (Goal R): a literal carries its TEXT through the compiler (the compiler itself has
 #     no float values); f64 op f64 only for + - * / and comparisons; the int<->float boundary is
 #     crossed ONLY by the explicit to_f64 / to_i64 / to_i32 casts (C truncation toward zero). ---
@@ -443,13 +446,13 @@ VERDICT_CASES = [
     ('test* = () i32 { b := 1.5 == 1\n 0 }', 'reject'),                  # mixed equality is the mix too
     ('eat* = (x: f64) f64 { x }\ntest* = () f64 { eat(2) }', 'reject'),  # int arg ⊀ f64 param
     ('test* = () i32 { x := 3\n x.match ({ 0.25 => 1, _ => 9 }) }', 'reject'),   # a float label on an int subject
-    # --- lambda-value (LAMBDA-2 safety net): a lambda the inliner can't splice — stored in a field or
-    #     returned — is rejected cleanly (was: leaked unlowered C). A local-bound lambda used as a call
-    #     arg is NOT here (it's aliased/spliced — see the VALUE cases above). Pinned `reject` (count):
-    #     the kind code is 18 and the oracle's check-kind harness masks `& 15`, so the exact
-    #     `lambda-value` kind is verified through the driver in test_resolver_fixes.py. ---
-    ('S*: { f: (i32) i32 }\ntest* = () i32 {\n  s := S(f: (n) { n + 1 })\n  0\n}', 'reject'),
+    # --- lambda-value (closures): a lambda the compiler can't yet make a value of is rejected cleanly
+    #     (was: leaked unlowered C). A RETURNED lambda needs an FnT-return typedef (deferred), so it
+    #     still rejects. (A field-stored non-capturing lambda is now LIFTED — see the VALUE cases. A
+    #     CAPTURING lambda also still rejects — captures are M2.) Pinned `reject` (count): kind 18 and
+    #     the check-kind harness masks `& 15`, so the exact kind is verified via the driver test. ---
     ('mk* = () (i32) i32 { (n) { n + 1 } }\ntest* = () i32 { 0 }', 'reject'),
+    ('Box*: { op: (i32) i32 }\ntest* = () i32 {\n  k := 10\n  b := Box(op: (n) { n + k })\n  b.op(5)\n}', 'reject'),
 ]
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════

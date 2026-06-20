@@ -211,11 +211,19 @@ def test_lambda_bound_local_used_as_hof_arg_ok():
     assert r.returncode == 0, r.stderr
 
 
-def test_lambda_stored_in_field_rejected():
-    r = _check("S*: { f: (i32) i32 }\nmain = () i32 {\n  s := S(f: (n) { n + 1 })\n  0\n}\n")
+# closures M1b: a non-capturing lambda literal stored in a field is now LIFTED to a top-level fn (accepts).
+def test_lambda_stored_in_field_lifted_ok():
+    r = _check("S*: { f: (i32) i32 }\nmain = () i32 {\n  s := S(f: (n) { n + 1 })\n  s.f(41)\n}\n")
+    assert r.returncode == 0, r.stderr
+
+
+# a CAPTURING field lambda still rejects (captures are M2).
+def test_capturing_lambda_in_field_rejected():
+    r = _check("S*: { f: (i32) i32 }\nmain = () i32 {\n  k := 10\n  s := S(f: (n) { n + k })\n  s.f(41)\n}\n")
     assert r.returncode != 0 and "lambda-value" in r.stderr, r.stderr
 
 
+# a RETURNED lambda still rejects (FnT-return typedef is deferred, M1c).
 def test_lambda_returned_rejected():
     r = _check("mk = () (i32) i32 { (n) { n + 1 } }\nmain = () i32 { 0 }\n")
     assert r.returncode != 0 and "lambda-value" in r.stderr, r.stderr

@@ -2095,6 +2095,195 @@ mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     })
 }
 
+// ── M1b: lift a NON-CAPTURING lambda LITERAL in a value position to a top-level function ──────────
+// A lambda stored in a struct field or returned can't be inline-spliced; lift its body to a generated
+// top-level fn (params typed from the expected FnT) and replace the literal with the fn name (a fn
+// value, M1). A CAPTURING lambda (one that references an enclosing local) is NOT lifted — it falls
+// through to the clean error[lambda-value] (real captures need the M2 env/lifetime design).
+
+// capture analysis: does this lambda body reference a FREE variable — a name that is neither one of the
+// lambda's params, a binder introduced inside the body, a top-level fn/global, nor true/false? Such a
+// name is a captured enclosing local. `bound` threads the in-scope binder names (scope-correct).
+lift_toplevel = (idx: DeclIndex, decls: [Decl], n: str) bool { (idx.func_idx.get(n, 0 - 1) >= 0) || (idx.global_idx.get(n, 0 - 1) >= 0) }
+lift_is_captured = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: str) bool {
+    (bound.var_bound(n) || idx.lift_toplevel(decls, n) || eq(n, "true") || eq(n, "false")).match ({ true => false, false => true })
+}
+lift_extend = (a: MutPtr<Malloc>, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
+    st.match ({ .Let(l) => a.vcons(l.name, tvoid(), bound), _ => bound })
+}
+lift_lamparams = (a: MutPtr<Malloc>, bound: Ptr<VList>, ps: [Param]) Ptr<VList> {
+    out := bound
+    ps.loop((h, i, p) { out = a.vcons(p.name, tvoid(), out) })
+    out
+}
+lift_args_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, xs: [Expr]) bool {
+    found := false
+    xs.loop((h, i, x) { found = found.match ({ true => true, false => a.lift_expr_cap(decls, idx, bound, x.addr()) }) })
+    found
+}
+lift_inits_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, inits: [FieldInit]) bool {
+    found := false
+    inits.loop((h, i, fi) { found = found.match ({ true => true, false => a.lift_expr_cap(decls, idx, bound, fi.value) }) })
+    found
+}
+lift_arms_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, arms: [ArmData]) bool {
+    found := false
+    arms.loop((h, i, ar) { found = found.match ({ true => true, false => a.lift_expr_cap(decls, idx, a.vcons(ar.bind, tvoid(), bound), ar.body) }) })
+    found
+}
+lift_body_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, body: [Stmt]) bool {
+    found := false
+    b := bound
+    body.loop((h, i, st) { found = found.match ({ true => true, false => a.lift_stmt_cap(decls, idx, b, st) })  b = a.lift_extend(b, st) })
+    found
+}
+lift_stmt_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, st: Stmt) bool {
+    st.match ({
+        .Let(l)      => a.lift_expr_cap(decls, idx, bound, l.value),
+        .Assign(x)   => a.lift_expr_cap(decls, idx, bound, x.target) || a.lift_expr_cap(decls, idx, bound, x.value),
+        .Return(r)   => a.lift_expr_cap(decls, idx, bound, r),
+        .ExprStmt(e) => a.lift_expr_cap(decls, idx, bound, e),
+        .If(f)       => a.lift_expr_cap(decls, idx, bound, f.c) || a.lift_body_cap(decls, idx, bound, f.then) || a.lift_body_cap(decls, idx, bound, f.els),
+        .While(w)    => a.lift_expr_cap(decls, idx, bound, w.c) || a.lift_body_cap(decls, idx, bound, w.body),
+        .IndexSet(x) => a.lift_expr_cap(decls, idx, bound, x.seq) || a.lift_expr_cap(decls, idx, bound, x.idx) || a.lift_expr_cap(decls, idx, bound, x.value)
+    })
+}
+lift_expr_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)        => lift_is_captured(decls, idx, bound, v.name),
+        .Bin(b)        => a.lift_expr_cap(decls, idx, bound, b.lhs) || a.lift_expr_cap(decls, idx, bound, b.rhs),
+        .Call(c)       => a.lift_args_cap(decls, idx, bound, c.args),
+        .Cond(d)       => a.lift_expr_cap(decls, idx, bound, d.c) || a.lift_expr_cap(decls, idx, bound, d.t) || a.lift_expr_cap(decls, idx, bound, d.e),
+        .Member(m)     => a.lift_expr_cap(decls, idx, bound, m.obj),
+        .Arrow(ar)     => a.lift_expr_cap(decls, idx, bound, ar.obj),
+        .MakeEnum(mk)  => a.lift_expr_cap(decls, idx, bound, mk.payload),
+        .MakeStruct(s) => a.lift_inits_cap(decls, idx, bound, s.inits),
+        .Match(m)      => a.lift_expr_cap(decls, idx, bound, m.subj) || a.lift_arms_cap(decls, idx, bound, m.arms),
+        .Index(ix)     => a.lift_expr_cap(decls, idx, bound, ix.seq) || a.lift_expr_cap(decls, idx, bound, ix.idx),
+        .SliceLit(sd)  => a.lift_args_cap(decls, idx, bound, sd.items),
+        .Loop(l)       => a.lift_expr_cap(decls, idx, bound, l.seq) || a.lift_body_cap(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), l.body),
+        .Block(bl)     => a.lift_body_cap(decls, idx, bound, bl.stmts),
+        .Lambda(la)    => a.lift_body_cap(decls, idx, a.lift_lamparams(bound, la.params), la.body),
+        _              => false
+    })
+}
+// a lambda is liftable iff it does NOT capture (only its own params + body binders + top-level names).
+lift_liftable = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool {
+    a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false
+}
+// --- the lift transform: replace each liftable lambda (in a field-init / return value) with the name
+//     of a freshly generated top-level fn, collected (with a shared counter) for appending. ---
+lift_digit = (n: i64) u8 { ('0'.to_i64() + n).to_u8() }
+lift_digits = (a: MutPtr<Malloc>, s: String, n: i64) String {
+    base := (n >= 10).match ({ true => a.lift_digits(s, n / 10), false => s })
+    base.gstr_push(a, lift_digit(n % 10))
+}
+lift_name = (a: MutPtr<Malloc>, k: i64) str {
+    s := a.gstr_string(24).gstr_append(a, "__lam_")
+    a.lift_digits(s, k).gstr_finish(a)
+}
+// the (function) type of struct `sty`'s field `fname` — substituted for a generic instance's targs.
+field_fnt = (a: MutPtr<Malloc>, decls: [Decl], sty: str, targs: [Ty], fname: str) Ty {
+    (targs.len > 0).match ({ true => a.gen_struct_field(decls, sty, fname, targs), false => decls.struct_field(sty, fname) })
+}
+// generate the top-level fn for a lifted lambda: params typed from the expected FnT, body = lambda body.
+lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: str) Decl {
+    ps := a.pbuf(lm.params.len)
+    lm.params.loop((h, i, p) { ps[i] = param(p.name, (i < ft.params.len).match ({ true => ft.params[i], false => tvoid() })) })
+    dfunc(Func( name: name, params: ps, ret: load(ft.ret), tparams: empty_params(), body: lm.body ))
+}
+// lift the value `val` if it is a liftable lambda whose expected type `fnt` is a function type; else
+// recurse so nested lift sites are still found.
+lift_at = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], fnt: Ty, val: Ptr<Expr>) Ptr<Expr> {
+    load(val).match ({
+        .Lambda(lm) => fnt.match ({
+            .FnT(ft) => a.lift_liftable(decls, idx, lm).match ({
+                true  => {
+                    k  := load_i64(gcp)
+                    nm := a.lift_name(k)
+                    gen[k.to_i32()] = a.lift_func_of(lm, ft, nm)
+                    store_i64(gcp, k + 1)
+                    a.cenode(vref(nm))
+                },
+                false => a.lift_rw_expr(decls, idx, gcp, gen, val)
+            }),
+            _ => a.lift_rw_expr(decls, idx, gcp, gen, val)
+        }),
+        _ => a.lift_rw_expr(decls, idx, gcp, gen, val)
+    })
+}
+lift_rw_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], xs: [Expr]) [Expr] {
+    buf := a.cebuf(xs.len)
+    xs.loop((h, i, x) { buf[i] = load(a.lift_rw_expr(decls, idx, gcp, gen, x.addr())) })
+    buf
+}
+lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], sty: str, targs: [Ty], inits: [FieldInit]) [FieldInit] {
+    buf := a.fbuf(inits.len)
+    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, sty, targs, fi.name), fi.value)) })
+    buf
+}
+lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] {
+    buf := a.abuf(arms.len)
+    arms.loop((h, i, ar) { buf[i] = arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body)) })
+    buf
+}
+lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], e: Ptr<Expr>) Ptr<Expr> {
+    load(e).match ({
+        .MakeStruct(s) => a.cenode(mkstructg(s.ty, s.mty, s.targs, a.lift_rw_inits(decls, idx, gcp, gen, s.ty, s.targs, s.inits))),
+        .Bin(b)        => a.cenode(bin_at(b.op, a.lift_rw_expr(decls, idx, gcp, gen, b.lhs), a.lift_rw_expr(decls, idx, gcp, gen, b.rhs), b.pos)),
+        .Cond(d)       => a.cenode(cond(a.lift_rw_expr(decls, idx, gcp, gen, d.c), a.lift_rw_expr(decls, idx, gcp, gen, d.t), a.lift_rw_expr(decls, idx, gcp, gen, d.e))),
+        .Member(m)     => a.cenode(member(a.lift_rw_expr(decls, idx, gcp, gen, m.obj), m.field)),
+        .Arrow(ar)     => a.cenode(arrow(a.lift_rw_expr(decls, idx, gcp, gen, ar.obj), ar.field)),
+        .Call(c)       => a.recall(c, c.fn, a.lift_rw_args(decls, idx, gcp, gen, c.args)),
+        .MakeEnum(mk)  => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.lift_rw_expr(decls, idx, gcp, gen, mk.payload))),
+        .Match(m)      => m.ptr.match ({ true  => a.cenode(ematchp(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))),
+                                         false => a.cenode(ematch(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))) }),
+        .Index(ix)     => a.cenode(eindex(a.lift_rw_expr(decls, idx, gcp, gen, ix.seq), a.lift_rw_expr(decls, idx, gcp, gen, ix.idx), ix.elem)),
+        .SliceLit(sd)  => a.cenode(slit(sd.elem, a.lift_rw_args(decls, idx, gcp, gen, sd.items))),
+        .Loop(l)       => a.cenode(eloop(a.lift_rw_expr(decls, idx, gcp, gen, l.seq), l.idx, l.elem, l.elemTy, a.lift_rw_body(decls, idx, gcp, gen, l.body), l.h)),
+        .Block(bl)     => a.cenode(block(a.lift_rw_body(decls, idx, gcp, gen, bl.stmts))),
+        .Lambda(lm)    => a.cenode(lam(lm.params, a.lift_rw_body(decls, idx, gcp, gen, lm.body))),
+        _              => e
+    })
+}
+// M1b lifts lambdas only in STRUCT-FIELD-INIT value positions (the std.store / callback-record case).
+// A lambda RETURNED from a function needs a precise FnT C return type (a typedef) so the caller can
+// call the result — that's deferred (FnT-return-typedefs, M1c); a returned lambda stays the clean
+// error[lambda-value] for now. So Return / tail expressions are only recursed, never lifted.
+lift_rw_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], st: Stmt) Stmt {
+    st.match ({
+        .Let(l)      => slett(l.name, l.ty, a.lift_rw_expr(decls, idx, gcp, gen, l.value)),
+        .Assign(x)   => sassign_at(a.lift_rw_expr(decls, idx, gcp, gen, x.target), a.lift_rw_expr(decls, idx, gcp, gen, x.value), x.pos),
+        .Return(r)   => sret(a.lift_rw_expr(decls, idx, gcp, gen, r)),
+        .ExprStmt(e) => sexpr(a.lift_rw_expr(decls, idx, gcp, gen, e)),
+        .If(f)       => sif(a.lift_rw_expr(decls, idx, gcp, gen, f.c), a.lift_rw_body(decls, idx, gcp, gen, f.then), a.lift_rw_body(decls, idx, gcp, gen, f.els)),
+        .While(w)    => swhile(a.lift_rw_expr(decls, idx, gcp, gen, w.c), a.lift_rw_body(decls, idx, gcp, gen, w.body)),
+        .IndexSet(x) => sidxset_at(a.lift_rw_expr(decls, idx, gcp, gen, x.seq), a.lift_rw_expr(decls, idx, gcp, gen, x.idx), x.elem, a.lift_rw_expr(decls, idx, gcp, gen, x.value), x.pos)
+    })
+}
+lift_rw_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], body: [Stmt]) [Stmt] {
+    buf := a.sbuf(body.len)
+    body.loop((h, i, st) { buf[i] = a.lift_rw_stmt(decls, idx, gcp, gen, st) })
+    buf
+}
+lift_rw_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], d: Decl) Decl {
+    d.match ({
+        .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.lift_rw_body(decls, idx, gcp, gen, f.body) )),
+        _         => d
+    })
+}
+lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+    gcp: RawPtr<u8> := a.acquire(8)
+    store_i64(gcp, 0)
+    gen := a.dbuf(4096)
+    out := a.dbuf(decls.len + 4096)
+    decls.loop((h, i, d) { out[i] = a.lift_rw_decl(decls, idx, gcp, gen, d) })
+    n := load_i64(gcp)
+    k := decls.len
+    gen.loop((h, i, g) { (i < n.to_i32()).match ({ true => { out[k] = g  k = k + 1 }, false => {} }) })
+    slice(out.ptr, k)
+}
+
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     decls0 := a.expand_defaults(a.desugar_method_calls(raw))
     decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
@@ -2116,9 +2305,13 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     // emit one concrete fn per recursive-generic instance BEFORE the final resolve, so each instance
     // body gets resolved (dispatch on its concrete types) and resolve_call rewrites recursive calls to it.
     exp2 := a.mono_rec(inl2, i2idx)
-    eidx := a.build_decl_index(exp2)
-    out2 := a.dbuf(exp2.len)
-    exp2.loop((h, i, d) { out2[i] = a.resolve_decl(exp2, eidx, d) })
+    // lift non-capturing lambda LITERALS in value positions (struct-field inits / returns) to top-level
+    // fns BEFORE the final resolve, so the generated fns + the fn-value references they leave behind get
+    // resolved. Capturing lambdas are left for check_validate's error[lambda-value].
+    lifted := a.lift_lambdas(exp2, a.build_decl_index(exp2))
+    eidx := a.build_decl_index(lifted)
+    out2 := a.dbuf(lifted.len)
+    lifted.loop((h, i, d) { out2[i] = a.resolve_decl(lifted, eidx, d) })
     out2
 }
 
