@@ -255,6 +255,35 @@ split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
 }
 split*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] { a.split_in(s, sep) }
 
+// split `s` on RUNS of ASCII whitespace, dropping empty fields: "  the  cat sat " -> ["the","cat","sat"];
+// "" / all-whitespace -> [] (an empty slice).
+words_in*<A> = (a: MutPtr<A>, s: str) [str] {
+    sv := s.view()
+    nw: i64 := 0        // word count = whitespace(or start)->non-whitespace transitions
+    inw := false        // currently inside a word?
+    sv.loop((h, i, b) {
+        b.is_ws().match ({
+            true  => { inw = false },
+            false => inw.match ({ true => {}, false => { inw = true  nw = nw + 1 } })
+        })
+    })
+    out: [str] := a.nbuf("", nw)
+    wi:    i64 := 0      // next word slot
+    start: i64 := 0 - 1  // current word's start offset, -1 when between words
+    sv.loop((h, i, b) {
+        b.is_ws().match ({
+            true  => (start >= 0).match ({
+                true  => { out[wi] = a.substr_in(s, start, i - start)  wi = wi + 1  start = 0 - 1 },
+                false => {}
+            }),
+            false => (start < 0).match ({ true => { start = i }, false => {} })
+        })
+    })
+    (start >= 0).match ({ true => { out[wi] = a.substr_in(s, start, sv.len - start)  wi = wi + 1 }, false => {} })
+    out
+}
+words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
+
 // ── numbers ─────────────────────────────────────────────────────────────────
 
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of

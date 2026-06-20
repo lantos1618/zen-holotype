@@ -225,6 +225,12 @@ VALUE_CASES = [
     #     accumulating per-field lengths as a base-10 checksum (acc = acc*10 + field_len). For "a,,b"
     #     on ',' the fields are 1,0,1 bytes -> 101 (the EMPTY middle field is what 0 guards). ---
     ('strlen = (s: str) i64\ntest* = () i32 { s := "a,,b"  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0  v.loop((h, i, b) { (b == \',\').match ({ true => { acc = acc * 10 + (i - start)  start = i + 1 }, _ => {} }) })  acc = acc * 10 + (v.len - start)  to_i32(acc) }', 101),
+
+    # --- std.text.str.words_in — split on RUNS of whitespace, dropping empties. Walks the [u8] view,
+    #     opening a word at the first non-ws byte and closing it at the next ws, accumulating each
+    #     word's length as a base-10 checksum. "  the  cat sat " -> words 3,3,3 -> 333 (the leading,
+    #     doubled, and trailing whitespace must all collapse — any leaked empty would skew the digits). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\ntest* = () i32 { s := "  the  cat sat "  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }', 333),
 ]
 
 # (src, verdict) the check binary must produce.
