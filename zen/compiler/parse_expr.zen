@@ -3,7 +3,7 @@
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
@@ -118,7 +118,7 @@ parse_other = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
     src.is_minus(sc.tok).match ({ true => { return a.parse_neg(src, sc) }, _ => {} })
     src.is_lbracket(sc.tok).match ({ true => { return a.parse_slicelit(src, sc) }, _ => {} })
     src.is_lparen(sc.tok).match ({ true => {}, _ => { return a.parse_garbage(src, sc) } })
-    src.lam_open(sc).match ({
+    a.lam_open(src, sc).match ({
         true  => a.parse_lambda(src, sc),
         _     => a.parse_paren(src, sc)
     })
@@ -821,27 +821,44 @@ parse_slicelit = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     ae  := a.fill_sitems(src, open.next, buf, 0)
     a.parse_postfix(src, PExpr( expr: a.enode(slit(tvoid(), buf.take_args(ae.count))), next: ae.next ))
 }
-// Lambda opening is `(names){`, otherwise `(` starts a parenthesized expression.
-lam_brace = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
-lam_open = (src: str, open: Scan) bool { src.lam_params_ok(open.next) }
-lam_params_ok = (src: str, pos: i32) bool {
+// Lambda opening is `(params){`, otherwise `(` starts a parenthesized expression. Params may carry an
+// optional `: Type` each, and the `)` may be followed by an optional return type before the `{` — so the
+// detector (and parser) skip those with parse_ty. The compiler's own untyped lambdas `(h,i,x){…}` never
+// hit a `:`/return-type, so parse_ty is not invoked for them (the seed is unaffected).
+// `)` followed by `{`, or by a return TYPE then `{`.
+lam_ret_brace = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
+    src.is_lbrace(src.scan(pos).tok).match ({
+        true  => true,
+        false => src.is_lbrace(src.scan(a.parse_ty(src, pos).next).tok)   // skip a return type, then '{'
+    })
+}
+lam_open = (a: MutPtr<Malloc>, src: str, open: Scan) bool { a.lam_params_ok(src, open.next) }
+lam_params_ok = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({
-        true  => src.lam_brace(sc.next),
+        true  => a.lam_ret_brace(src, sc.next),
         false => sc.tok.kind.match ({
-            .Ident => src.lam_after_name(sc.next),
+            .Ident => a.lam_after_name(src, sc.next),
             _      => false
         })
     })
 }
-lam_after_name = (src: str, pos: i32) bool {
+lam_after_name = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
     sc := src.scan(pos)
-    src.is_comma(sc.tok).match ({
-        true  => src.lam_params_ok(sc.next),
-        false => src.is_rparen(sc.tok).match ({ true => src.lam_brace(sc.next), false => false })
+    src.is_op(sc.tok, ':').match ({
+        true  => a.lam_after_sep(src, src.scan(a.parse_ty(src, sc.next).next)),   // skip `: Type`
+        false => a.lam_after_sep(src, sc)
     })
 }
-// Lambda params are names only; FnT context supplies the real types.
+// After a param (and its optional type): a ',' starts another param, a ')' ends the list.
+lam_after_sep = (a: MutPtr<Malloc>, src: str, sep: Scan) bool {
+    src.is_comma(sep.tok).match ({
+        true  => a.lam_params_ok(src, sep.next),
+        false => src.is_rparen(sep.tok).match ({ true => a.lam_ret_brace(src, sep.next), false => false })
+    })
+}
+// Lambda params accept an optional `: Type` each; the type is discarded (FnT context supplies the real
+// types when the lambda is inline-spliced), so the body still binds the names as before.
 fill_lnames = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_lname(src, pos, buf, i) })
@@ -851,16 +868,24 @@ fill_lname = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd 
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     nt    := src.scan(pos)
     buf[i] = param(a.lexeme(src, nt.tok), tvoid())
-    after := src.scan(nt.next)
-    src.is_comma(after.tok).match ({
-        true  => a.fill_lnames(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )
+    sep0  := src.scan(nt.next)
+    sep   := src.is_op(sep0.tok, ':').match ({                  // optional `: Type` — discard the type
+        true  => src.scan(a.parse_ty(src, sep0.next).next),
+        false => sep0
+    })
+    src.is_comma(sep.tok).match ({
+        true  => a.fill_lnames(src, sep.next, buf, i + 1),
+        false => PEnd( count: i + 1, next: sep.next )
     })
 }
 parse_lambda = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     buf  := a.param_buf()
     pe   := a.fill_lnames(src, open.next, buf, 0)
-    ob   := src.scan(pe.next)
+    bpos := src.is_lbrace(src.scan(pe.next).tok).match ({       // optional return type before the body '{'
+        true  => pe.next,
+        false => a.parse_ty(src, pe.next).next
+    })
+    ob   := src.scan(bpos)
     body := a.build_body(src, ob.next)
     endp := src.skip_block(ob.next)
     a.parse_postfix(src, PExpr( expr: a.enode(lam(buf.take_params(pe.count), body)), next: endp ))

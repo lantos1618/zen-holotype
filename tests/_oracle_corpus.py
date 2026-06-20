@@ -201,6 +201,14 @@ VALUE_CASES = [
     ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("\\x41", 0) }', 65),  # \x41 → byte 'A'
     ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("a\\\\b", 1) }', 92),  # \\ stays a backslash (byte 92)
     ('cnt = (s: str, i: i32) i32 { (s.offset(i).load() == 0).match({ true => i, false => cnt(s, i + 1) }) }\ntest* = () i32 { cnt("\\x41", 0) }', 1),  # \x41 is ONE byte (len 1, not 3)
+    # --- LAMBDA-1: typed lambda literals — optional `: Type` per param and an optional return type
+    #     must PARSE (the types are discarded; FnT context supplies them on inline-splice) ---
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y: i32) { x + y }, 3, 4) }', 7),   # typed params
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) i32 { x + y }, 5, 6) }', 11),       # untyped params + return type
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y: i32) i32 { x + y }, 8, 9) }', 17),  # typed params + return type
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y) { x + y }, 2, 5) }', 7),        # mixed typed/untyped params
+    ('fold<T> = (xs: [T], init: T, f: (T, T) T) T {\n  acc := init\n  xs.loop((h, i, x) { acc = f(acc, x) })\n  acc\n}\ntest* = () i32 { [1, 2, 3].fold(0, (x: i32, y: i32) { x + y }) }', 6),  # the motivating fold repro
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) { x + y }, 4, 5) }', 9),            # untyped lambda still works (regression guard)
 ]
 
 # (src, verdict) the check binary must produce.
