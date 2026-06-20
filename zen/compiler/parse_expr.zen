@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -112,7 +112,7 @@ parse_garbage = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
 }
 // Non-literal atoms: ctor, prefix op, slice literal, lambda, parenthesized expr.
 parse_other = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
-    src.is_lbrace(sc.tok).match ({ true => { return a.parse_postfix(src, a.parse_arm_block(src, sc)) }, _ => {} })
+    src.is_lbrace(sc.tok).match ({ true => { return a.parse_postfix(src, src.looks_anon_struct(sc.next).match ({ true => a.parse_anon_struct_lit(src, sc.next), false => a.parse_arm_block(src, sc) })) }, _ => {} })
     src.is_dot(sc.tok).match ({ true => { return a.parse_ctor(src, sc) }, _ => {} })
     src.is_not(sc.tok).match ({ true => { return a.parse_not(src, sc) }, _ => {} })
     src.is_minus(sc.tok).match ({ true => { return a.parse_neg(src, sc) }, _ => {} })
@@ -614,6 +614,87 @@ parse_generic_struct_lit = (a: MutPtr<Malloc>, src: str, name: str, pos: i32) PE
     mty   := a.mangle_str_in(name, ta.args)
     inits := buf.take_inits(fe.count)
     PExpr( expr: a.enode(mkstructg(name, mty, ta.args, inits)), next: fe.next )
+}
+// ── anonymous (structural) struct literal `{ q: v, r: v }` ────────────────────────
+// Distinguished from a brace BLOCK (`{ stmts }`) by the leading shape `ident :` (single colon) whose
+// first top-level separator is a `,` or the closing `}` — NOT a `:=` (which would make it a typed-let
+// block `{ x: T := … }`). The literal's structural name (mangle_anon_in over the field names) matches
+// the one parse_type synthesizes for the corresponding `{ q: T, r: T }` TYPE, so they share a C struct.
+is_walrus_tok = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == ':') && (src.at(t.start + 1) == '='), _ => false }) }
+looks_anon_struct* = (src: str, pos: i32) bool {   // pos just past '{'
+    id := src.scan(pos)
+    is_ident_tok(id.tok).match ({
+        false => false,
+        true  => {
+            c := src.scan(id.next)
+            src.is_field_colon(c.tok).match ({ true => (src.anon_scan_kind(c.next, 0) == 1), false => false })
+        }
+    })
+}
+// 1 = anon struct (a top-level ',' or the closing '}'), 0 = block (a top-level ':='), -1 = EOF/garbage.
+anon_scan_kind = (src: str, pos: i32, depth: i32) i32 {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => 0 - 1,
+        _    => src.is_lbrace(sc.tok).match ({
+            true  => src.anon_scan_kind(sc.next, depth + 1),
+            false => src.is_rbrace(sc.tok).match ({
+                true  => (depth == 0).match ({ true => 1, false => src.anon_scan_kind(sc.next, depth - 1) }),
+                false => src.anon_scan_open(sc, depth)
+            })
+        })
+    })
+}
+anon_scan_open = (src: str, sc: Scan, depth: i32) i32 {
+    (src.is_lparen(sc.tok) || src.is_lbracket(sc.tok)).match ({
+        true  => src.anon_scan_kind(sc.next, depth + 1),
+        false => (src.is_rparen(sc.tok) || src.is_rbracket(sc.tok)).match ({
+            true  => src.anon_scan_kind(sc.next, depth - 1),
+            false => (depth == 0).match ({
+                true  => src.is_walrus_tok(sc.tok).match ({
+                    true  => 0,
+                    false => src.is_comma(sc.tok).match ({ true => 1, false => src.anon_scan_kind(sc.next, depth) })
+                }),
+                false => src.anon_scan_kind(sc.next, depth)
+            })
+        })
+    })
+}
+afield_lit_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }
+inits_as_fields = (a: MutPtr<Malloc>, inits: [FieldInit]) [Field] {
+    buf := a.afield_lit_buf()
+    inits.loop((h, i, fi) { buf[i] = field(fi.name, tvoid()) })   // names-only: types are unknown at the literal
+    slice(buf.ptr, inits.len)
+}
+parse_anon_struct_lit = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {   // pos just past '{'
+    buf   := a.finit_buf()
+    fe    := a.fill_ainits(src, pos, buf, 0)
+    inits := buf.take_inits(fe.count)
+    name  := a.mangle_anon_in(a.inits_as_fields(inits))
+    PExpr( expr: a.enode(mkstruct(name, inits)), next: fe.next )
+}
+fill_ainits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },
+        _    => src.is_rbrace(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_ainit(src, pos, buf, i) })
+    })
+}
+fill_ainit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    nt    := src.scan(pos)                               // field name
+    nm    := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)                           // ':'
+    v     := a.parse_or(src, colon.next)                 // the value expression
+    buf[i] = finit(nm, v.expr)
+    after := src.scan(v.next)                            // ',' / next field / '}'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_ainits(src, after.next, buf, i + 1),
+        false => is_ident_tok(after.tok).match ({
+            true  => a.fill_ainits(src, v.next, buf, i + 1),
+            false => PEnd( count: i + 1, next: after.next )
+        })
+    })
 }
 // Paren struct construction: `Name(field: value, ...)`.
 finit_buf = (a: MutPtr<Malloc>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }

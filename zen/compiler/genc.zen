@@ -297,6 +297,32 @@ mangle_str_in* = (a: MutPtr<Malloc>, base: str, args: [Ty]) str {
     end := buf.mangle_write_args(buf.write_str(0, base), args)
     buf.finish_buf(end)
 }
+// ── anonymous (structural) struct naming ──────────────────────────────────────────
+// An anon struct `{ q: i32, r: i32 }` (type position) and its literal `{ q: …, r: … }` are given a
+// STRUCTURAL name synthesized from the ORDERED field NAMES: `__anon_q_r`. The type position and the
+// literal both produce the SAME name (the literal has no field types at parse time, so the scheme is
+// names-only), so two identical shapes share one synthesized C struct and compose inside generics
+// (`Result<{q,r}, E>`). The synthesized StructDecl (carrying the real field types from the type
+// position) is hoisted into the module decl list by the parser.
+anon_fields_len = (fields: [Field]) i64 {
+    n := 0
+    fields.loop((h, i, f) { n = n + 1 + f.name.view().len })   // 1 for the '_' separator
+    n
+}
+anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: [Field]) i64 {
+    out := at
+    fields.loop((h, i, f) {
+        out = dst.write_str(out, "_")
+        out = dst.write_str(out, f.name)
+    })
+    out
+}
+mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) str {
+    n   := 6 + fields.anon_fields_len()                        // "__anon" = 6 bytes
+    buf: RawPtr<u8> := a.acquire(n + 1)
+    end := buf.anon_write_fields(buf.write_str(0, "__anon"), fields)
+    buf.finish_buf(end)
+}
 // the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
 // types implementing the same trait method emit DISTINCT C functions. UFCS dispatch routes `x.m()` to
 // the impl for x's type (compiler.check dispatch_name).
@@ -344,7 +370,7 @@ fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     ps.loop((h, i, p) { buf[i] = p.ty })
     buf
 }
-ty_node_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
+ty_node_in* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
 fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty { fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret)) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything

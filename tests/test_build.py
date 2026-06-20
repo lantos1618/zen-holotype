@@ -3230,3 +3230,115 @@ def test_runtime_arena_constructors_accept_explicit_backing_allocator():
     )
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ── anonymous (structural) struct types + literals ──────────────────────────────────────────────
+# `{ q: i32, r: i32 }` is a structural struct TYPE; `{ q: …, r: … }` its literal. Structural identity
+# is by ORDERED field names: the same shape shares one synthesized C struct, so a function's declared
+# `{q,r}` return unifies with a `{q,r}` literal and composes inside generics (`Result<{q,r}, E>`).
+def test_zenc_run_anonymous_struct_in_result_generic():
+    """The task program: divmod returns Result<{q,r}, IoError> and constructs the {q,r} literal in
+    the .Ok payload; the caller matches and reads v.q / v.r. Prints 3 then 1."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println } = std.text.fmt\n"
+        "{ Result, IoError } = std.core.result\n"
+        "divmod = (n: i32, d: i32) Result<{ q: i32, r: i32 }, IoError> {\n"
+        "    (d == 0).match ({\n"
+        "        true  => .Err(.NotFound),\n"
+        "        false => .Ok({ q: n / d, r: n % d }),\n"
+        "    })\n"
+        "}\n"
+        "main = () i32 {\n"
+        "    divmod(7, 2).match ({\n"
+        "        .Ok(v)  => { println(v.q)  println(v.r) },\n"
+        "        .Err(e) => println(0 - 1),\n"
+        "    })\n"
+        "    0\n"
+        "}\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "3\n1\n", repr(r.stdout)
+
+
+def test_zenc_run_anonymous_struct_plain_and_nested():
+    """An anon struct as a PLAIN return type (`() { q: i32 }`) and NESTED inside another anon struct,
+    with field access through both levels. Identical shapes share one synthesized C struct."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        "{ println } = std.text.fmt\n"
+        "mk = () { q: i32 } { { q: 42 } }\n"
+        "nested = () { p: { x: i32, y: i32 }, z: i32 } {\n"
+        "    { p: { x: 1, y: 2 }, z: 3 }\n"
+        "}\n"
+        "main = () i32 {\n"
+        "    println(mk().q)\n"
+        "    b := nested()\n"
+        "    println(b.p.x)\n"
+        "    println(b.p.y)\n"
+        "    println(b.z)\n"
+        "    0\n"
+        "}\n"
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "42\n1\n2\n3\n", repr(r.stdout)
+
+
+def test_zenc_run_implicit_trait_bound_param():
+    """A param whose declared type is a trait NAME is sugar for a bounded implicit generic:
+    `(a: Allocator)` desugars to `<A: Allocator>(a: MutPtr<A>)`. Two params of the SAME trait
+    get TWO DISTINCT tparams. The desugared form goes through the existing bounded-generic +
+    monomorphization machinery, so it is byte-for-byte the explicit form."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    counting = (
+        "{ Allocator, Heap, default } = std.mem.alloc\n"
+        "Counting: { heap: Heap, acquired: i32 }\n"
+        "Counting.impl(Allocator, {\n"
+        "    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {\n"
+        "        a.acquired = a.acquired + 1\n"
+        "        a.heap.addr().acquire(n)\n"
+        "    }\n"
+        "    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.heap.addr().resize(p, n) }\n"
+        "    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void { a.heap.addr().release(p) }\n"
+        "})\n"
+    )
+    # implicit trait-bound param sugar, incl. TWO params of the same trait (distinct tparams)
+    sugar = (
+        counting +
+        "grab = (a: Allocator, n: i64) RawPtr<u8> { a.acquire(n) }\n"
+        "both = (dst: Allocator, src: Allocator, n: i64) i64 {\n"
+        "    p := dst.acquire(n)\n"
+        "    q := src.acquire(n)\n"
+        "    n\n"
+        "}\n"
+        "main = () i32 {\n"
+        "    c := Counting(heap: default(), acquired: 0)\n"
+        "    a := c.addr()\n"
+        "    p := a.grab(8)\n"
+        "    r := a.both(a, 4)\n"
+        "    ((c.acquired == 3) && (r == 4)).match({ true => 0, false => 1 })\n"
+        "}\n"
+    )
+    (d / "sugar.zen").write_text(sugar)
+    r = subprocess.run([zenc, "run", str(d / "sugar.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    # the EXACT explicit equivalent must emit byte-identical C.
+    explicit = sugar.replace(
+        "grab = (a: Allocator, n: i64)",
+        "grab = <A: Allocator>(a: MutPtr<A>, n: i64)",
+    ).replace(
+        "both = (dst: Allocator, src: Allocator, n: i64)",
+        "both = <A: Allocator, B: Allocator>(dst: MutPtr<A>, src: MutPtr<B>, n: i64)",
+    )
+    (d / "explicit.zen").write_text(explicit)
+    cs = subprocess.run([zenc, "emit", str(d / "sugar.zen")], capture_output=True, text=True)
+    ce = subprocess.run([zenc, "emit", str(d / "explicit.zen")], capture_output=True, text=True)
+    assert cs.returncode == 0, cs.stderr
+    assert ce.returncode == 0, ce.stderr
+    assert cs.stdout == ce.stdout, "implicit trait-bound param must desugar to the explicit form"

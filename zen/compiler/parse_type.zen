@@ -4,11 +4,12 @@
 // (is_lbrace/is_comma/is_rparen/…/tok_eq) and the param buffer used by both expr and decl parsers.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Param, Ty, param, fntype, mangle_str_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
+{ Param, Ty, Field, StructDecl, param, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.bytes
+{ eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ is_op, is_lparen, lexeme } = compiler.parse_expr
+{ is_op, is_lparen, is_ident_tok, lexeme } = compiler.parse_expr
 
 // ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
 // The recursive-descent parsers have no error channel (every result is a plain value), so a parse
@@ -21,6 +22,36 @@ parse_failed := 0
 perr_set*   = () void { parse_failed = 1 }
 perr_reset* = () void { parse_failed = 0 }
 perr_get*   = () bool { parse_failed == 1 }
+
+// ── anonymous (structural) struct accumulator ─────────────────────────────────────
+// Anonymous struct TYPES `{ q: i32, r: i32 }` are desugared, at parse time, to a synthesized named
+// StructDecl (`__anon_q_r`, the structural name from mangle_anon_in) referenced as a `Named` type.
+// Each distinct shape is registered ONCE here (dedup by name); parse_module hoists the collected
+// StructDecls into the module decl list, so the checker + codegen see ordinary named structs.
+// The buffer is (re)allocated per parse_module run; registration is a no-op until then (so the
+// resolver's decl-span probes, which call parse_ty without a buffer, never write through null).
+anon_decls := no_sdecls()
+anon_n := 0
+no_sdecls = () [StructDecl] { slice(null_ptr(), 0) }
+anon_reset* = (a: MutPtr<Malloc>) void {
+    anon_decls = slice(a.acquire(4096 * sizeof(StructDecl)), 4096)
+    anon_n = 0
+}
+anon_decls_get* = () [StructDecl] { slice(anon_decls.ptr, anon_n) }
+anon_has = (name: str) bool {
+    found := false
+    anon_decls.loop((h, i, sd) { found = (i < anon_n).match ({ true => (found || eq(sd.name, name)), false => found }) })
+    found
+}
+register_anon = (name: str, fields: [Field]) void {
+    (anon_n < anon_decls.len).match ({
+        true  => anon_has(name).match ({
+            true  => {},
+            false => { anon_decls[anon_n] = sdef(name, fields)  anon_n = anon_n + 1 }
+        }),
+        false => {}
+    })
+}
 
 // ── type tokens ──────────────────────────────────────────────────────────────────
 is_lbrace* = (src: str, t: Token) bool { src.is_op(t, '{') }
@@ -97,7 +128,9 @@ is_lbracket* = (src: str, t: Token) bool { src.is_op(t, '[') }
 is_rbracket* = (src: str, t: Token) bool { src.is_op(t, ']') }
 parse_ty* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
-    src.is_lbracket(tt.tok).match ({
+    src.is_lbrace(tt.tok).match ({
+        true  => a.parse_anon_ty(src, tt.next),          // { name: T, … } -> a structural anon struct
+        false => src.is_lbracket(tt.tok).match ({
         true  => a.parse_slice_ty(src, tt.next),         // [ T ]
         false => src.is_lparen(tt.tok).match ({
             true  => a.parse_fn_ty(src, tt.next),        // ( A, T ) R -> FnT (a closure/template param)
@@ -105,6 +138,44 @@ parse_ty* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
                 true  => a.parse_ptr_ty(src, tt.next),   // Ptr<inner> / RawPtr<inner> -> inner*
                 false => a.parse_leaf_ty(src, tt)        // a leaf type, maybe a generic instance N<…>
             })
+        })
+        })
+    })
+}
+// An anonymous struct type `{ name: T, … }` -> a synthesized named struct (structural identity by
+// ordered field names). `pos` is just past the opening `{`. Registers the shape so parse_module hoists
+// its StructDecl, and returns the type as `Named(__anon_…)` so the rest of the pipeline is unchanged.
+afield_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }
+take_afields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
+parse_anon_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '{'
+    buf    := a.afield_buf()
+    fe     := a.fill_anon_fields(src, pos, buf, 0)
+    fields := buf.take_afields(fe.count)
+    name   := a.mangle_anon_in(fields)
+    register_anon(name, fields)
+    TyEnd( ty: tnamed(name), next: fe.next )
+}
+fill_anon_fields = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => { perr_set()  PEnd( count: i, next: sc.next ) },   // unterminated `{…`: flag, terminate
+        _    => src.is_rbrace(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_anon_field(src, pos, buf, i) })
+    })
+}
+fill_anon_field = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    nt    := src.scan(pos)                               // field name
+    nm    := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)                           // ':'
+    te    := a.parse_ty(src, colon.next)                 // the field type (may be Ptr<…>, nested anon, …)
+    buf[i] = field(nm, te.ty)
+    after := src.scan(te.next)                           // ',' / next field / '}'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_anon_fields(src, after.next, buf, i + 1),
+        false => is_ident_tok(after.tok).match ({        // whitespace-separated fields (no comma)
+            true  => a.fill_anon_fields(src, te.next, buf, i + 1),
+            false => PEnd( count: i + 1, next: after.next )
         })
     })
 }
