@@ -209,6 +209,11 @@ VALUE_CASES = [
     ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y) { x + y }, 2, 5) }', 7),        # mixed typed/untyped params
     ('fold<T> = (xs: [T], init: T, f: (T, T) T) T {\n  acc := init\n  xs.loop((h, i, x) { acc = f(acc, x) })\n  acc\n}\ntest* = () i32 { [1, 2, 3].fold(0, (x: i32, y: i32) { x + y }) }', 6),  # the motivating fold repro
     ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) { x + y }, 4, 5) }', 9),            # untyped lambda still works (regression guard)
+    # --- LVALUE-1: nested store targets — any `ident (.field | [i])*` place expression is assignable ---
+    ('S*: { buf: [i32] }\ntest* = () i32 { s := S(buf: [1, 2, 3])  s.buf[0] = 9  s.buf[0] + s.buf[1] }', 11),                       # member then index
+    ('P*: { x: i32, y: i32 }\ntest* = () i32 { a := [P(x: 1, y: 2), P(x: 3, y: 4)]  a[0].x = 7  a[0].x + a[1].x }', 10),            # index then field
+    ('In*: { p: [i32] }\nS*: { inner: In }\ntest* = () i32 { s := S(inner: In(p: [10, 20]))  s.inner.p[1] = 5  s.inner.p[0] + s.inner.p[1] }', 15),  # member.member.index
+    ('test* = () i32 { a := [1, 2, 3]  a[1] = 8  a[0] + a[1] }', 9),                                                                 # plain name[i] = v still works (SIdx path)
 ]
 
 # (src, verdict) the check binary must produce.
