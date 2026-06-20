@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -1548,8 +1548,82 @@ expand_defaults = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
 // Resolve module: defaults, resolve, inline templates, then re-resolve concrete inline residue.
 // Lambdas splice bodies back into their caller, so that re-resolve can expose more template calls
 // such as captured generic receiver methods; run one more inline/resolve pass for that residue.
+// ── DESUGAR: faithful MethodCall -> flat Call (UFCS lowering) ───────────────────────────────
+// parse_module keeps `recv.method(args)` as a faithful MethodCall (so the formatter sees the surface
+// UFCS form). This pass — run at the very START of resolve_module, before any other pass — rewrites each
+// MethodCall back into the EXACT flat `Call(fn: method, args: [recv] ++ args, pos: method-pos, raw: false)`
+// the old flattening parser produced, so the resolve/inline/genc pipeline downstream is byte-for-byte
+// unchanged. The walk mutates IN PLACE: parse_module builds a fresh tree (no aliased nodes), so each
+// child node is rewritten through its own Ptr/slice slot, touching nothing but the MethodCall sites.
+desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
+    decls.loop((h, i, d) { a.dmc_decl(d) })
+    decls
+}
+dmc_decl = (a: MutPtr<Malloc>, d: Decl) void {
+    d.match ({
+        .DFunc(f)          => a.dmc_body(f.body),
+        .DGlobal(g)        => a.dmc_expr(g.init),
+        .DTraitDefault(td) => a.dmc_body(td.fn.body),
+        _                  => {}
+    })
+}
+dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
+    body.loop((h, i, st) { a.dmc_stmt(body[i].addr()) })
+}
+dmc_stmt = (a: MutPtr<Malloc>, sp: Ptr<Stmt>) void {
+    sp.match ({
+        .Let(l)      => a.dmc_expr(l.value),
+        .Assign(asn) => { a.dmc_expr(asn.target)  a.dmc_expr(asn.value) },
+        .Return(e)   => a.dmc_expr(e),
+        .If(f)       => { a.dmc_expr(f.c)  a.dmc_body(f.then)  a.dmc_body(f.els) },
+        .While(w)    => { a.dmc_expr(w.c)  a.dmc_body(w.body) },
+        .IndexSet(x) => { a.dmc_expr(x.seq)  a.dmc_expr(x.idx)  a.dmc_expr(x.value) },
+        .ExprStmt(e) => a.dmc_expr(e)
+    })
+}
+dmc_args = (a: MutPtr<Malloc>, args: [Expr]) void {
+    args.loop((h, i, ar) { a.dmc_expr(args[i].addr()) })
+}
+dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
+    inits.loop((h, i, fi) { a.dmc_expr(fi.value) })
+}
+dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
+    arms.loop((h, i, ar) { a.dmc_expr(ar.body) })
+}
+// `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
+// old parse_method built (buf[0] = recv, method args from index 1, via call_at).
+dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
+    buf := a.cebuf(mc.args.len + 1)
+    buf[0] = load(mc.recv)
+    mc.args.loop((h, i, ar) { buf[i + 1] = mc.args[i] })
+    call_at(mc.method, buf, mc.pos)
+}
+dmc_expr = (a: MutPtr<Malloc>, ep: Ptr<Expr>) void {
+    ep.match ({
+        .Bin(b)        => { a.dmc_expr(b.lhs)  a.dmc_expr(b.rhs) },
+        .Call(c)       => a.dmc_args(c.args),
+        .MethodCall(mc) => {
+            a.dmc_expr(mc.recv)
+            a.dmc_args(mc.args)
+            store(ep, a.dmc_lower(mc))
+        },
+        .Cond(d)       => { a.dmc_expr(d.c)  a.dmc_expr(d.t)  a.dmc_expr(d.e) },
+        .Member(m)     => a.dmc_expr(m.obj),
+        .Arrow(ar)     => a.dmc_expr(ar.obj),
+        .MakeEnum(m)   => a.dmc_expr(m.payload),
+        .MakeStruct(m) => a.dmc_inits(m.inits),
+        .Match(m)      => { a.dmc_expr(m.subj)  a.dmc_arms(m.arms) },
+        .SliceLit(sd)  => a.dmc_args(sd.items),
+        .Index(ix)     => { a.dmc_expr(ix.seq)  a.dmc_expr(ix.idx) },
+        .Loop(l)       => { a.dmc_expr(l.seq)  a.dmc_body(l.body) },
+        .Lambda(lm)    => a.dmc_body(lm.body),
+        .Block(b)      => a.dmc_body(b.stmts),
+        _              => {}
+    })
+}
+
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
-    decls := a.expand_defaults(raw)
+    decls := a.expand_defaults(a.desugar_method_calls(raw))
     // Decl order/count are stable across resolve+inline passes (each rebuilds bodies in place), so a
     // name→index map is rebuilt once per pass over the current slice.
     didx := a.build_decl_index(decls)

@@ -19,6 +19,11 @@
 VarData*: { name: str, pos: i32 }                      // pos = byte offset of the name in the source (0 = synthesized)
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>, pos: i32 }   // lhs op rhs; pos = operator byte offset when source-backed
 CallData*: { fn: str, args: [Expr], pos: i32, raw: bool }  // fn(a, b, …) or @fn(a, b, …); pos = fn byte offset (0 = synthesized)
+// a FAITHFUL method call `recv.method(args)` — preserves the UFCS surface syntax that the parser would
+// otherwise FLATTEN into a `Call(fn: method, args: [recv] ++ args)`. parse_module keeps MethodCall (so the
+// formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
+// resolve/genc, so the C backend never sees it. pos = method-name byte offset (matches the old Call's pos).
+MethodCallData*: { recv: Ptr<Expr>, method: str, args: [Expr], pos: i32 }
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
 ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
@@ -52,7 +57,7 @@ BlockData*: { stmts: [Stmt] }
 // `FloatLit` is a FLOAT literal carried as its SOURCE TEXT, verbatim (the compiler is written in
 // Zen, which had no floats — so it never holds a float VALUE; the text "1.5" IS a C double
 // literal and a JS number as-is). Typed f64 by the checker.
-Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
+Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call(CallData) | MethodCall(MethodCallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
      | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
@@ -180,6 +185,7 @@ bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
 call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args, pos: 0, raw: false )) }
 call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: false )) }
 raw_call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: true )) }
+emcall* = (recv: Ptr<Expr>, method: str, args: [Expr], p: i32) Expr { .MethodCall(MethodCallData( recv: recv, method: method, args: args, pos: p )) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData( c: c, t: t, e: e )) }
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData( obj: o, field: f )) }
 arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData( obj: o, field: f )) }

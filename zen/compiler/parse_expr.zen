@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -321,11 +321,13 @@ parse_qual_payload = (a: MutPtr<Malloc>, src: str, tyname: str, vn: str, lp: Sca
         false => a.reject_match(rp.next)
     })
 }
+// FAITHFUL: `recv.method(args)` -> MethodCall(recv, method, args) — keeps the UFCS surface form. The
+// args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls
+// lowers it back to the flat `Call(fn: method, args: [recv] ++ args, pos: at)` the old parser produced.
 parse_method = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, lp: Scan, at: i32) PExpr {
     buf    := a.arg_buf()
-    buf[0] = load(base.expr)
-    ae     := a.fill_args(src, lp.next, buf, 1)
-    a.parse_postfix(src, PExpr( expr: a.enode(call_at(name, buf.take_args(ae.count), at)), next: ae.next ))
+    ae     := a.fill_args(src, lp.next, buf, 0)
+    a.parse_postfix(src, PExpr( expr: a.enode(emcall(base.expr, name, buf.take_args(ae.count), at)), next: ae.next ))
 }
 // Match arm body: brace block or single expression.
 parse_arm_body = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
