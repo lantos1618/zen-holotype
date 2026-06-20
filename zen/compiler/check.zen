@@ -589,11 +589,42 @@ genlit_g = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit])
     nt := a.infer_struct_targs(env, env.decls.gstruct_of(sd.ty), sd.targs, inits)
     a.cenode(mkstructg(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits))
 }
+// the expected type's args, when it names generic struct `base` — the authoritative source for a bare
+// literal's type args under a `st: Store<AppState> := …` annotation (or any expected-type position).
+exp_targs_for = (exp: Ty, base: str) [Ty] {
+    exp.match ({ .Generic(g) => eq(g.name, base).match ({ true => g.args, false => no_tys() }), _ => no_tys() })
+}
+// Type args for a BARE generic-struct literal (no explicit `<…>`): the expected/annotation type wins,
+// else infer each tparam by unifying its declared field types against the supplied field-value types.
+bare_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, inits: [FieldInit]) [Ty] {
+    exp_args := env.exp.exp_targs_for(gsd.name)
+    (exp_args.len == gsd.tparams.len).match ({
+        true  => exp_args,
+        false => {
+            buf := a.tbuf(gsd.tparams.len)
+            gsd.tparams.loop((h, i, tp) { buf[i] = env.struct_targ_one(gsd.fields, inits, tp.name) })
+            buf
+        }
+    })
+}
+// A bare `Store(state: …)` literal of a GENERIC struct carries no type args; infer them so the instance
+// is mangled (mty) and discovered/emitted by compiler.mono, exactly like the explicit `Store<…>(…)` form.
+// A bare literal of a plain (non-generic) struct is unchanged.
+resolve_genlit_bare = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
+    gsd := env.decls.gstruct_of(sd.ty)
+    is_empty(gsd.name).match ({
+        true  => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, inits)),
+        false => {
+            nt := a.bare_struct_targs(env, gsd, inits)
+            a.cenode(mkstructg(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits))
+        }
+    })
+}
 resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
     inits := a.resolve_inits(env.clr_exp(), sd.inits)
     (sd.targs.len > 0).match ({
         true  => a.genlit_g(env, sd, inits),
-        false => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, inits))
+        false => a.resolve_genlit_bare(env, sd, inits)
     })
 }
 // Rebuild expressions with resolved enum, constructor, member, and loop metadata.
