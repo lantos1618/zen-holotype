@@ -215,6 +215,11 @@ VALUE_CASES = [
     ('test* = () i64 { to_i64(2.9) }', 2),                                                    # to_i64 truncates a double the C way
     ('test* = () i32 {\n  x := 0.25\n  x.match ({ 0.25 => 1, 1.5 => 2, _ => 9 })\n}', 1),     # a float-literal match is an `==` chain
     ('g := 1.5\ntest* = () i32 { to_i32(g * 2.0) }', 3),                                      # a module-global f64 (constant init)
+
+    # --- std.text.str.trim — the ASCII-whitespace scan that backs trim/ltrim/rtrim_view. Walks a [u8]
+    #     view, finds the first/last non-whitespace index; result encodes ws_start*100 + trimmed_len.
+    #     For "  hi \n": ws_start=2, trimmed_len=2 -> 202 (guards both the offset AND the length). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\nws_start = (v: [u8]) i64 { lo: i64 := v.len  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { lo = i  h.break } }) })  lo }\nws_end = (v: [u8]) i64 { hi: i64 := 0  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { hi = i + 1 } }) })  hi }\ntest* = () i32 { s := "  hi \\n"  v: [u8] := slice(s, strlen(s))  to_i32(ws_start(v) * 100 + (ws_end(v) - ws_start(v))) }', 202),
 ]
 
 # (src, verdict) the check binary must produce.
