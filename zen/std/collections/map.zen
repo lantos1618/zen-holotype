@@ -210,6 +210,19 @@ Map*<T>: {
         out
     }
     free<A> = (m: Map<T>, a: MutPtr<A>) void { a.release(m.keys)  a.release(m.vals)  a.release(m.idx) }
+    // Visit every live entry as (key, value) together, in insertion order. `f` is invoked DIRECTLY in
+    // the loop body so an inline lambda splices in (like iter.each). Walking `keys()`/`vals()` in
+    // parallel at the call site is no longer needed: `m.each_pair((k, v){ … })`.
+    each_pair = (m: Map<T>, f: (str, T) void) void {
+        ks := m.keys()
+        vs := m.vals()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({
+                true  => { f(k, vs[i]) },
+                false => { h.break }
+            })
+        })
+    }
 }
 
 // FNV-1a hash of k's bytes, folded into [0, cap). cap is always >= 1 at call sites.
