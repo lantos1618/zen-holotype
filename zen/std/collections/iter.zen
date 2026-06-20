@@ -88,6 +88,34 @@ try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], Io
     })
 }
 
+// In-place insertion sort of a mutable `[T]`, ordered by the comparator `less(a, b)` (true when
+// `a` must come before `b`). Allocates nothing — it permutes `xs` directly. Stable. O(n^2), which is
+// fine for the small slices these collections produce; callers wanting more can sort into a Vec.
+// `xs := [3,1,2]  xs.sort((a, b){ a < b })` leaves `xs` == [1,2,3]; a `(a,b){ a > b }` comparator
+// sorts descending. The comparator `less` is invoked DIRECTLY in the loop body (never forwarded to a
+// helper) so an inline lambda splices in, exactly as it does for `fold`/`each`.
+sort*<T> = (xs: [T], less: (T, T) bool) void {
+    // Outer pass: insert each xs[i] into the already-sorted prefix [0, i).
+    xs.loop((ho, i, _) {
+        // Inner pass: sink element at j = i - k leftward while it precedes its neighbour. The break
+        // closes the inner loop only (its own handler `hi`), leaving the outer pass running.
+        xs.loop((hi, k, _) {
+            j := i - k
+            (j <= 0).match ({
+                true  => { hi.break },
+                false => less(xs[j], xs[j - 1]).match ({
+                    true => {
+                        tmp := xs[j]
+                        xs[j] = xs[j - 1]
+                        xs[j - 1] = tmp
+                    },
+                    false => { hi.break }
+                })
+            })
+        })
+    })
+}
+
 map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] { a.map_in(xs, f) }
 
 try_map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> { a.try_map_in(xs, f) }
