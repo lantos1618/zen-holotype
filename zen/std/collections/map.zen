@@ -210,6 +210,19 @@ Map*<T>: {
         out
     }
     free<A> = (m: Map<T>, a: MutPtr<A>) void { a.release(m.keys)  a.release(m.vals)  a.release(m.idx) }
+    // Visit every live entry as (key, value) together, in insertion order. `f` is invoked DIRECTLY in
+    // the loop body so an inline lambda splices in (like iter.each). Walking `keys()`/`vals()` in
+    // parallel at the call site is no longer needed: `m.each_pair((k, v){ … })`.
+    each_pair = (m: Map<T>, f: (str, T) void) void {
+        ks := m.keys()
+        vs := m.vals()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({
+                true  => { f(k, vs[i]) },
+                false => { h.break }
+            })
+        })
+    }
 }
 
 // FNV-1a hash of k's bytes, folded into [0, cap). cap is always >= 1 at call sites.
@@ -232,6 +245,16 @@ mchain = (ks: [str], ix: [i64], cap: i64, e: i64, k: str) i64 {
         true  => -1,
         false => eq(ks[e], k).match ({ true => e, false => mchain(ks, ix, cap, ix[cap + e], k) }),
     })
+}
+
+// a zero-entry `Map<T>` with capacity for at least one entry (so `put` has a slot before the first
+// grow). Unlike `of`, no seed pins T, so it comes from the LHS annotation: `m: Map<i32> := maps.empty(a)`.
+// A is inferred from `a`. The index is reindexed (its single bucket head cleared to -1) so `find`/`get`
+// on the empty map return absent immediately. Pair with `put`/`get`/`free` like `of`.
+empty*<T, A> = (a: MutPtr<A>) Map<T> {
+    m := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)),
+                 idx: a.acquire(2 * sizeof(MIdx)), len: 0, cap: 1 )
+    m.reindex()
 }
 
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value

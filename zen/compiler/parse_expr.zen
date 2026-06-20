@@ -1,9 +1,9 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
@@ -118,12 +118,12 @@ parse_other = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
     src.is_minus(sc.tok).match ({ true => { return a.parse_neg(src, sc) }, _ => {} })
     src.is_lbracket(sc.tok).match ({ true => { return a.parse_slicelit(src, sc) }, _ => {} })
     src.is_lparen(sc.tok).match ({ true => {}, _ => { return a.parse_garbage(src, sc) } })
-    src.lam_open(sc).match ({
+    a.lam_open(src, sc).match ({
         true  => a.parse_lambda(src, sc),
         _     => a.parse_paren(src, sc)
     })
 }
-// Backslash escape byte value.
+// Backslash escape byte value. `\\ \" \'` fall through `_ => e` (the char itself).
 esc_byte = (e: u8) u8 {
     e.match ({
         'n' => 10,
@@ -133,9 +133,18 @@ esc_byte = (e: u8) u8 {
         _ => e
     })
 }
+// Two hex digits at `pos`,`pos+1` → one byte value (0..255) for `\xNN`. Returns i32 (the arithmetic
+// type); the store/char-lit sites narrow to the byte, matching how `char_val` carries byte values as i32.
+hex2 = (src: str, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
 char_val = (src: str, start: i32) i32 {
     b := src.at(start + 1)
-    (b == '\\').match ({ true => esc_byte(src.at(start + 2)), false => b })
+    (b == '\\').match ({
+        true  => (src.at(start + 2) == 'x').match ({
+            true  => src.hex2(start + 3),                 // '\xNN'
+            false => esc_byte(src.at(start + 2))
+        }),
+        false => b
+    })
 }
 // String literal value: copy content and resolve escapes.
 str_val = (a: MutPtr<Malloc>, src: str, t: Token) str {
@@ -154,8 +163,16 @@ unescape_one = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     })
 }
 unescape_esc = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    store(offset(dst, di), esc_byte(src.at(pos + 1)))
-    src.unescape(pos + 2, end, dst, di + 1)
+    (src.at(pos + 1) == 'x').match ({
+        true  => {
+            store(offset(dst, di), src.hex2(pos + 2))     // `\xNN` → one byte, consume 4 chars
+            src.unescape(pos + 4, end, dst, di + 1)
+        },
+        false => {
+            store(offset(dst, di), esc_byte(src.at(pos + 1)))
+            src.unescape(pos + 2, end, dst, di + 1)
+        }
+    })
 }
 unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     store(offset(dst, di), src.at(pos))
@@ -185,12 +202,28 @@ parse_ctor_empty = (a: MutPtr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
     PExpr( expr: a.enode(mktag("", vn)), next: rp.next )
 }
 parse_ctor_payload = (a: MutPtr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
-    arg := a.parse_or(src, lp.next)
-    rp  := src.scan(arg.next)
-    // A variant payload is exactly one expression.
-    src.is_rparen(rp.tok).match ({
-        true  => PExpr( expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next ),     // `.Variant(arg)` -> MakeEnum
-        false => a.reject_match(rp.next)
+    pl := a.parse_payload_args(src, lp)                                               // `.Variant(a, b, …)` payload
+    PExpr( expr: a.enode(mkenum("", vn, pl.expr)), next: pl.next )
+}
+// Parse the `(a, b, …)` args of a variant constructor into the payload EXPR: one arg is the payload
+// directly; 2+ args become an anon struct `{_0: a, _1: b, …}` matching the multi-field decl synthesis.
+parse_payload_args = (a: MutPtr<Malloc>, src: str, lp: Scan) PExpr {
+    buf   := a.finit_buf()
+    pe    := a.fill_payload_args(src, lp.next, buf, 0)
+    inits := buf.take_inits(pe.count)
+    (pe.count == 1).match ({
+        true  => PExpr( expr: inits[0].value, next: pe.next ),                        // single payload: the arg itself
+        false => PExpr( expr: a.enode(mkstruct(a.mangle_anon_in(a.inits_as_fields(inits)), inits)), next: pe.next )
+    })
+}
+fill_payload_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    v     := a.parse_or(src, pos)
+    buf[i] = finit(a.payload_fname(i), v.expr)
+    after := src.scan(v.next)
+    src.is_comma(after.tok).match ({
+        true  => a.fill_payload_args(src, after.next, buf, i + 1),
+        false => { src.is_rparen(after.tok).match ({ true => {}, false => perr_set() })  PEnd( count: i + 1, next: after.next ) }   // past ')'
     })
 }
 // a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
@@ -295,17 +328,22 @@ parse_field = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
         false => a.parse_field_plain(src, base, name, fld)
     })
 }
+// SAME-LINE GATE (mirrors parse_qual_ctor / parse_ident): the method-call `(` must sit on the same line
+// as the `.field` — a NEWLINE before it makes `base.field` a plain member access and the `(` a new
+// statement (`nd := 10 + ed.w` ⏎ `(nd < 100).match(…)`), not `ed.w(nd < 100)`.
 parse_field_plain = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, fld: Scan) PExpr {
     nx := src.scan(fld.next)
-    src.is_lparen(nx.tok).match ({
+    (src.is_lparen(nx.tok) && !src.nl_between(fld.next, nx.tok.start)).match ({
         true  => a.parse_method(src, base, name, nx, fld.tok.start),
         false => a.parse_postfix(src, PExpr( expr: a.enode(member(base.expr, name)), next: fld.next ))
     })
 }
-// Qualified enum constructors preserve the explicit type.
+// Qualified enum constructors preserve the explicit type. SAME-LINE GATE (mirrors parse_ident): the
+// payload `(` must sit on the same line as the variant — a NEWLINE before it makes `Type.Variant` a
+// nullary tag and the `(` a new statement (`a := State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
 parse_qual_ctor = (a: MutPtr<Malloc>, src: str, tyname: str, vn: str, fld: Scan) PExpr {
     nx := src.scan(fld.next)
-    src.is_lparen(nx.tok).match ({
+    (src.is_lparen(nx.tok) && !src.nl_between(fld.next, nx.tok.start)).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => PExpr( expr: a.enode(mktag(tyname, vn)), next: src.scan(nx.next).next ),
             false => a.parse_qual_payload(src, tyname, vn, nx)
@@ -314,12 +352,8 @@ parse_qual_ctor = (a: MutPtr<Malloc>, src: str, tyname: str, vn: str, fld: Scan)
     })
 }
 parse_qual_payload = (a: MutPtr<Malloc>, src: str, tyname: str, vn: str, lp: Scan) PExpr {
-    arg := a.parse_or(src, lp.next)
-    rp  := src.scan(arg.next)
-    src.is_rparen(rp.tok).match ({
-        true  => PExpr( expr: a.enode(mkenum(tyname, vn, arg.expr)), next: rp.next ),
-        false => a.reject_match(rp.next)
-    })
+    pl := a.parse_payload_args(src, lp)                                               // `Type.Variant(a, b, …)` payload
+    PExpr( expr: a.enode(mkenum(tyname, vn, pl.expr)), next: pl.next )
 }
 // FAITHFUL: `recv.method(args)` -> MethodCall(recv, method, args) — keeps the UFCS surface form. The
 // args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls
@@ -329,12 +363,27 @@ parse_method = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, lp: Scan, a
     ae     := a.fill_args(src, lp.next, buf, 0)
     a.parse_postfix(src, PExpr( expr: a.enode(emcall(base.expr, name, buf.take_args(ae.count), at)), next: ae.next ))
 }
-// Match arm body: brace block or single expression.
+// A bare `return` keyword (not braced) in arm-body position.
+is_return_arm = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "return"), _ => false }) }
+// A one-statement `[Stmt]` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
+ret_arm_stmts = (a: MutPtr<Malloc>, v: Ptr<Expr>) [Stmt] {
+    buf := slice(a.acquire(sizeof(Stmt)), 1)
+    buf[0] = sret(v)
+    buf
+}
+parse_arm_return = (a: MutPtr<Malloc>, src: str, kw: Scan) PExpr {
+    v := a.parse_or(src, kw.next)                                  // the returned value
+    PExpr( expr: a.enode(block(a.ret_arm_stmts(v.expr))), next: v.next )
+}
+// Match arm body: brace block, a bare `return expr`, or a single expression.
 parse_arm_body = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     src.is_lbrace(sc.tok).match ({
         true  => a.parse_arm_block(src, sc),
-        false => a.parse_or(src, pos)
+        false => src.is_return_arm(sc.tok).match ({
+            true  => a.parse_arm_return(src, sc),
+            false => a.parse_or(src, pos)
+        })
     })
 }
 parse_arm_block = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
@@ -486,17 +535,48 @@ parse_lit_arm_val = (a: MutPtr<Malloc>, src: str, subj: PExpr, pos: i32) LitArmE
 }
 subj_name = (e: Ptr<Expr>) str { load(e).match ({ .Var(v) => v.name, _ => "" }) }
 // Variant match arms; compiler.check fills the enum name.
-BindEnd*: { bind: str, next: i32 }
 arm_buf = (a: MutPtr<Malloc>) [ArmData] { slice(a.acquire(1024 * sizeof(ArmData)), 1024) }
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
-arm_bind = (a: MutPtr<Malloc>, src: str, pos: i32) BindEnd {
+// A comma-separated payload binder list `(x, y, …)` — one entry for a single binder, N for a destructure.
+BindList*: { names: [str], count: i32, next: i32 }
+// one binder slot: a borrowed `str`. Exists for its size — `sizeof(str)` doesn't lower to C (str is no
+// C type name), `sizeof(NameSlot)` does, and a one-pointer struct is exactly one binder slot (see map.zen).
+NameSlot: { s: str }
+bind_buf = (a: MutPtr<Malloc>) [str] { slice(a.acquire(64 * sizeof(NameSlot)), 64) }
+fill_binds = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [str], i: i32) BindList {
+    (i >= buf.len).match ({ true => { perr_set()  return BindList( names: buf, count: i, next: pos ) }, false => {} })
     bt := src.scan(pos)
-    // The payload binding must be an identifier (or `_`); a literal like `.Some(123)` is garbage.
+    // Each binder must be an identifier (or `_`); a literal like `.Some(123)` is garbage.
     is_ident_tok(bt.tok).match ({ true => {}, false => perr_set() })
-    bn := a.lexeme(src, bt.tok)
-    rp := src.scan(bt.next)
-    src.is_rparen(rp.tok).match ({ true => {}, false => perr_set() })
-    BindEnd( bind: bn, next: rp.next )
+    buf[i] = a.lexeme(src, bt.tok)
+    nx := src.scan(bt.next)
+    src.is_comma(nx.tok).match ({
+        true  => a.fill_binds(src, nx.next, buf, i + 1),
+        false => {
+            src.is_rparen(nx.tok).match ({ true => {}, false => perr_set() })
+            BindList( names: buf, count: i + 1, next: nx.next )
+        }
+    })
+}
+arm_binds = (a: MutPtr<Malloc>, src: str, pos: i32) BindList { a.fill_binds(src, pos, a.bind_buf(), 0) }
+// Multi-binder destructure `.A(x, y) => body` desugars to ONE synthetic binder `__zen_payload` bound to
+// the anon-struct payload, plus prepended `x := __zen_payload._0  y := __zen_payload._1 …` lets, then the
+// original body as the trailing value — lowering to the existing single-binder + field-access form.
+fill_destr = (a: MutPtr<Malloc>, bl: BindList, stm: [Stmt], k: i32) void {
+    (k < bl.count).match ({
+        true  => {
+            stm[k] = slet(bl.names[k], a.enode(member(a.enode(vref("__zen_payload")), a.payload_fname(k))))
+            a.fill_destr(bl, stm, k + 1)
+        },
+        false => {}
+    })
+}
+destr_body = (a: MutPtr<Malloc>, bl: BindList, body: Ptr<Expr>) Ptr<Expr> {
+    n   := bl.count
+    stm := slice(a.acquire((n + 1) * sizeof(Stmt)), n + 1)
+    a.fill_destr(bl, stm, 0)
+    stm[n] = sexpr(body)
+    a.enode(block(stm))
 }
 fill_arms = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     sc := src.scan(pos)
@@ -519,9 +599,23 @@ fill_varm = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
     vt  := src.scan(dot.next)
     vn  := a.lexeme(src, vt.tok)
     pk  := src.scan(vt.next)
-    be  := src.is_lparen(pk.tok).match ({ true => a.arm_bind(src, pk.next), false => BindEnd( bind: "", next: vt.next ) })
-    rhs := a.arm_rhs(src, be.next, false)
-    buf[i] = arm(vn, be.bind, rhs.expr)
+    src.is_lparen(pk.tok).match ({
+        true  => a.fill_varm_bound(src, vn, pk.next, buf, i),
+        false => {
+            rhs := a.arm_rhs(src, vt.next, false)
+            buf[i] = arm(vn, "", rhs.expr)
+            a.arm_tail(src, rhs.next, buf, i)
+        }
+    })
+}
+// `.Variant(binders…) => body`: a single binder keeps the existing form; multiple binders desugar.
+fill_varm_bound = (a: MutPtr<Malloc>, src: str, vn: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+    bl  := a.arm_binds(src, pos)
+    rhs := a.arm_rhs(src, bl.next, false)
+    buf[i] = (bl.count == 1).match ({
+        true  => arm(vn, bl.names[0], rhs.expr),
+        false => arm(vn, "__zen_payload", a.destr_body(bl, rhs.expr))
+    })
     a.arm_tail(src, rhs.next, buf, i)
 }
 // Distinguish `_ => body` from terminal bare `_`.
@@ -805,27 +899,44 @@ parse_slicelit = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     ae  := a.fill_sitems(src, open.next, buf, 0)
     a.parse_postfix(src, PExpr( expr: a.enode(slit(tvoid(), buf.take_args(ae.count))), next: ae.next ))
 }
-// Lambda opening is `(names){`, otherwise `(` starts a parenthesized expression.
-lam_brace = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
-lam_open = (src: str, open: Scan) bool { src.lam_params_ok(open.next) }
-lam_params_ok = (src: str, pos: i32) bool {
+// Lambda opening is `(params){`, otherwise `(` starts a parenthesized expression. Params may carry an
+// optional `: Type` each, and the `)` may be followed by an optional return type before the `{` — so the
+// detector (and parser) skip those with parse_ty. The compiler's own untyped lambdas `(h,i,x){…}` never
+// hit a `:`/return-type, so parse_ty is not invoked for them (the seed is unaffected).
+// `)` followed by `{`, or by a return TYPE then `{`.
+lam_ret_brace = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
+    src.is_lbrace(src.scan(pos).tok).match ({
+        true  => true,
+        false => src.is_lbrace(src.scan(a.parse_ty(src, pos).next).tok)   // skip a return type, then '{'
+    })
+}
+lam_open = (a: MutPtr<Malloc>, src: str, open: Scan) bool { a.lam_params_ok(src, open.next) }
+lam_params_ok = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({
-        true  => src.lam_brace(sc.next),
+        true  => a.lam_ret_brace(src, sc.next),
         false => sc.tok.kind.match ({
-            .Ident => src.lam_after_name(sc.next),
+            .Ident => a.lam_after_name(src, sc.next),
             _      => false
         })
     })
 }
-lam_after_name = (src: str, pos: i32) bool {
+lam_after_name = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
     sc := src.scan(pos)
-    src.is_comma(sc.tok).match ({
-        true  => src.lam_params_ok(sc.next),
-        false => src.is_rparen(sc.tok).match ({ true => src.lam_brace(sc.next), false => false })
+    src.is_op(sc.tok, ':').match ({
+        true  => a.lam_after_sep(src, src.scan(a.parse_ty(src, sc.next).next)),   // skip `: Type`
+        false => a.lam_after_sep(src, sc)
     })
 }
-// Lambda params are names only; FnT context supplies the real types.
+// After a param (and its optional type): a ',' starts another param, a ')' ends the list.
+lam_after_sep = (a: MutPtr<Malloc>, src: str, sep: Scan) bool {
+    src.is_comma(sep.tok).match ({
+        true  => a.lam_params_ok(src, sep.next),
+        false => src.is_rparen(sep.tok).match ({ true => a.lam_ret_brace(src, sep.next), false => false })
+    })
+}
+// Lambda params accept an optional `: Type` each; the type is discarded (FnT context supplies the real
+// types when the lambda is inline-spliced), so the body still binds the names as before.
 fill_lnames = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_lname(src, pos, buf, i) })
@@ -835,16 +946,24 @@ fill_lname = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd 
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     nt    := src.scan(pos)
     buf[i] = param(a.lexeme(src, nt.tok), tvoid())
-    after := src.scan(nt.next)
-    src.is_comma(after.tok).match ({
-        true  => a.fill_lnames(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )
+    sep0  := src.scan(nt.next)
+    sep   := src.is_op(sep0.tok, ':').match ({                  // optional `: Type` — discard the type
+        true  => src.scan(a.parse_ty(src, sep0.next).next),
+        false => sep0
+    })
+    src.is_comma(sep.tok).match ({
+        true  => a.fill_lnames(src, sep.next, buf, i + 1),
+        false => PEnd( count: i + 1, next: sep.next )
     })
 }
 parse_lambda = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     buf  := a.param_buf()
     pe   := a.fill_lnames(src, open.next, buf, 0)
-    ob   := src.scan(pe.next)
+    bpos := src.is_lbrace(src.scan(pe.next).tok).match ({       // optional return type before the body '{'
+        true  => pe.next,
+        false => a.parse_ty(src, pe.next).next
+    })
+    ob   := src.scan(bpos)
     body := a.build_body(src, ob.next)
     endp := src.skip_block(ob.next)
     a.parse_postfix(src, PExpr( expr: a.enode(lam(buf.take_params(pe.count), body)), next: endp ))
