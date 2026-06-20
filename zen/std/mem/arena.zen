@@ -34,14 +34,18 @@ Arena*: {
     free<A> = (a: MutPtr<Arena>, backing: MutPtr<A>) void { a.free_in(backing) }
 }
 
-new_in*<A> = (backing: MutPtr<A>, cap: i64) Arena {
+// `make_in` (not `new_in`): the allocator-constructor name is unique per result type so two such
+// modules can be imported into one program. string/rc/arc/own keep `new_in`; arena's would
+// otherwise collide with std.text.string's `new_in` whenever both reach one flattened program
+// (e.g. a String builder beside a std.concurrent.actor, which pulls arena in transitively).
+make_in*<A> = (backing: MutPtr<A>, cap: i64) Arena {
     Arena( buf: backing.acquire(cap), off: 0, cap: cap )
 }
 
 arena_ok = (a: Arena) Result<Arena, IoError> { .Ok(a) }
 arena_err = (e: IoError) Result<Arena, IoError> { .Err(e) }
 
-try_new_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError> {
+try_make_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError> {
     backing.try_acquire(cap).match ({
         .Ok(p)  => arena_ok(Arena( buf: p, off: 0, cap: cap )),
         .Err(e) => arena_err(e)

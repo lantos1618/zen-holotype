@@ -1,13 +1,13 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, lit, ti32, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
+{ parse_or, parse_bxor, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
-{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get } = compiler.parse_type
+{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get, anon_reset, anon_decls_get } = compiler.parse_type
 
 // `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: { func: Func, next: i32, foreign: bool }
@@ -15,6 +15,9 @@ no_body = (a: MutPtr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 parse_decl_at = (a: MutPtr<Malloc>, src: str, pos: i32) DeclEnd {
     nt     := src.scan(pos)
     name   := a.lexeme(src, nt.tok)
+    // An EXPLICIT tparam list `<A, B: Trait>` sits right after the name (before the `=` value
+    // marker): `bump<AllocT> = (…)`. It carries trait BOUNDS that can't be inferred from usage;
+    // tparams without a bound are also collected implicitly from tyvar-shaped param/return types.
     tp     := a.parse_tparams(src, src.skip_name_star(pos))
     buf    := a.param_buf()
     pe     := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)
@@ -52,11 +55,25 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: str, pos: i32) TParamEnd {
     te  := a.fill_tparams(src, pos, buf, 0)
     TParamEnd( names: buf.take_params(te.count), count: te.count, next: te.next )
 }
+// A tparam may carry a trait bound: `<A: Allocator>`. The bound is stored in the Param's `ty`
+// slot as a `Named(traitname)` (tparams otherwise leave `ty` = tvoid()); the checker enforces it
+// at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
 record_tparam = (a: MutPtr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: sc.next ) }, false => {} })
-    buf[i] = param(a.lexeme(src, sc.tok), tvoid())
-    a.fill_tparams(src, sc.next, buf, i + 1)
+    nm    := a.lexeme(src, sc.tok)
+    colon := src.scan(sc.next)                           // peek: a `:` introduces a trait bound
+    src.is_colon(colon.tok).match ({
+        true  => {
+            tr := src.scan(colon.next)                   // the bound trait name
+            buf[i] = param(nm, tnamed(a.lexeme(src, tr.tok)))
+            a.fill_tparams(src, tr.next, buf, i + 1)
+        },
+        false => {
+            buf[i] = param(nm, tvoid())
+            a.fill_tparams(src, sc.next, buf, i + 1)
+        }
+    })
 }
 fill_tparams = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
@@ -155,6 +172,9 @@ data_fields = (a: MutPtr<Malloc>, fields: [Field]) [Field] {
 // Enum variants end at the first token that is not `|`.
 EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }
 VPay*:    { ty: Ty, next: i32 }
+VDf*:     { vdf: VariantDef, next: i32 }
+// a single `=` (not `==`/`=>`) introduces a variant default expr: `Name = expr`.
+is_eq1 = (src: str, t: Token) bool { (t.len == 1) && src.is_op(t, '=') }
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '|'), _ => false }) }
 variant_buf = (a: MutPtr<Malloc>) [VariantDef] { slice(a.acquire(1024 * sizeof(VariantDef)), 1024) }
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
@@ -176,12 +196,22 @@ fill_variant = (a: MutPtr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: nt.next ) }, false => {} })
     nm   := a.lexeme(src, nt.tok)
     pk   := src.scan(nt.next)
-    vp   := src.is_lparen(pk.tok).match ({ true => a.variant_payload(src, pk.next), false => VPay( ty: tvoid(), next: nt.next ) })
-    buf[i] = vdef(nm, vp.ty)
-    after := src.scan(vp.next)
+    vd   := a.variant_after(src, nm, nt, pk)
+    buf[i] = vd.vdf
+    after := src.scan(vd.next)
     src.is_bar(after.tok).match ({
         true  => a.fill_variants(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: vp.next )
+        false => PEnd( count: i + 1, next: vd.next )
+    })
+}
+// After the variant name, dispatch on the next token: `(Type)` payload, `= expr` default, or bare.
+variant_after = (a: MutPtr<Malloc>, src: str, nm: str, nt: Scan, pk: Scan) VDf {
+    src.is_lparen(pk.tok).match ({
+        true  => { vp := a.variant_payload(src, pk.next)  VDf( vdf: vdef(nm, vp.ty), next: vp.next ) },
+        false => src.is_eq1(pk.tok).match ({
+            true  => { de := a.parse_bxor(src, pk.next)  VDf( vdf: vdef_default(nm, tvoid(), de.expr), next: de.next ) },
+            false => VDf( vdf: vdef(nm, tvoid()), next: nt.next )
+        })
     })
 }
 skip_to_colon = (src: str, pos: i32) i32 {
@@ -228,6 +258,28 @@ decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).
 
 decl_buf = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
+
+// ── EXPORT markers (the `*` after a top-level decl name) ─────────────────────────────────────────
+// `skip_name_star` discards the `*` from the AST, but it is load-bearing (cross-module export +
+// flatten dedup). The formatter needs it, so parse_module records the starred top-level names in a
+// module-level buffer (mirroring the anon-struct state) — NOT in the AST, so the compiler pipeline is
+// untouched. The driver reads `exports_get()` after parse_module and hands it to the formatter.
+exports_buf := no_exports()
+exports_n := 0
+no_exports = () [Param] { slice(null_ptr(), 0) }
+exports_reset* = (a: MutPtr<Malloc>) void {
+    exports_buf = slice(a.acquire(16384 * sizeof(Param)), 16384)
+    exports_n = 0
+}
+exports_get* = () [Param] { slice(exports_buf.ptr, exports_n) }
+note_export = (name: str) void {
+    (exports_n < exports_buf.len).match ({ true => { exports_buf[exports_n] = param(name, tvoid())  exports_n = exports_n + 1 }, false => {} })
+}
+// record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
+note_export_if_starred = (a: MutPtr<Malloc>, src: str, pos: i32) void {
+    nt := src.scan(pos)
+    src.is_star(src.scan(nt.next).tok).match ({ true => note_export(a.lexeme(src, nt.tok)), false => {} })
+}
 // Imports carry no code, but their names become DImport records for the checker.
 decl_is_import = (src: str, pos: i32) bool { src.is_lbrace(src.scan(pos).tok) }
 skip_path = (src: str, pos: i32) i32 {
@@ -279,6 +331,7 @@ decl_is_impl = (src: str, pos: i32) bool {
     src.is_dot(dot.tok).match ({ true => src.tok_eq(src.scan(dot.next).tok, "impl"), false => false })
 }
 fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    a.note_export_if_starred(src, pos)
     src.decl_is_impl(pos).match ({
         true  => a.fill_impl(src, pos, buf, i),
         false => src.decl_is_global(pos).match ({
@@ -421,9 +474,29 @@ fill_struct = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 fill_import = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     nbuf := a.import_buf()
     ie   := a.fill_import_names(src, src.scan(pos).next, nbuf, 0)
-    buf[i] = dimport(nbuf.take_params(ie.count))
     eq   := src.scan(ie.next)
-    a.fill_decls(src, src.skip_path(eq.next), buf, i + 1)
+    pth  := a.read_import_path(src, eq.next)         // capture `std.text.fmt` text (kept for the formatter)
+    buf[i] = dimport(nbuf.take_params(ie.count), pth.text)
+    a.fill_decls(src, pth.next, buf, i + 1)
+}
+// Read the dotted module path `a.b.c` after an import `=`, returning its verbatim text + resume pos.
+ImportPath*: { text: str, next: i32 }
+path_end_tok = (src: str, pos: i32) Token {
+    id  := src.scan(pos)
+    dot := src.scan(id.next)
+    src.is_dot(dot.tok).match ({ true => src.path_end_tok(dot.next), false => id.tok })
+}
+read_import_path = (a: MutPtr<Malloc>, src: str, pos: i32) ImportPath {
+    first := src.scan(pos)
+    last  := src.path_end_tok(pos)
+    n     := (last.start + last.len) - first.tok.start
+    p: RawPtr<u8> := a.acquire(n + 1)
+    src.path_copy_into(first.tok.start, p, 0, n)
+    p.offset(n).store(0)
+    ImportPath( text: cstr(p), next: src.skip_path(pos) )
+}
+path_copy_into = (src: str, from: i32, dst: RawPtr<u8>, i: i32, n: i32) void {
+    (i >= n).match ({ true => {}, false => { dst.offset(i).store(load(offset(src, from + i)))  src.path_copy_into(from, dst, i + 1, n) } })
 }
 // ── implicit type parameters (M2): a free, short ALL-CAPS name (A, T, E, R, K, V, T1, …) used in a
 //    param / field / payload TYPE position introduces the type parameter, so the `<A>` declaration list
@@ -522,12 +595,73 @@ collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
     decls.loop((h, i, d) { n = buf.collect_decltype(n, d) })
     buf.take_params(n)
 }
-augment_func = (a: MutPtr<Malloc>, types: [Param], f: Func) Func {
+// ── implicit trait-bound params: a param `name: Trait` (Trait a DECLARED trait) is sugar for a
+//    bounded implicit generic — `(a: Allocator)` ≡ `<A: Allocator>(a: MutPtr<A>)`. We synthesize a
+//    fresh single-letter tparam bounded by Named(Trait), rewrite the param's type to MutPtr<fresh>,
+//    and let the existing bounded-generic + monomorphization machinery do everything else. Two params
+//    of the SAME trait get two DISTINCT tparams. A trait is detected as a trait-shaped DStruct (all
+//    fields are methods) or a cross-type `Type.impl(Trait)` (ty != trname; a data struct's self-impl
+//    has ty == trname and must NOT count) or a defaulted trait method.
+collect_trait = (buf: [Param], cnt: i32, d: Decl) i32 {
+    d.match ({
+        .DStruct(sd)       => d.is_trait().match ({ true => buf.tv_add_name(cnt, sd.name), false => cnt }),
+        .DImpl(im)         => eq(im.ty, im.trname).match ({ true => cnt, false => buf.tv_add_name(cnt, im.trname) }),
+        .DTraitDefault(td) => buf.tv_add_name(cnt, td.trname),
+        _                  => cnt
+    })
+}
+collect_traits = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
+    buf := a.decltype_buf(decls.len + 8)
+    n := 0
+    decls.loop((h, i, d) { n = buf.collect_trait(n, d) })
+    buf.take_params(n)
+}
+// MutPtr<T> lowers to T* — the same Ty an explicit `MutPtr<A>` produces.
+mutptr_of = (a: MutPtr<Malloc>, t: Ty) Ty { tptr(a.ty_node_in(t)) }
+// a one-character, NUL-terminated tparam name (`A`, `B`, …).
+make_letter = (a: MutPtr<Malloc>, c: u8) str {
+    p: RawPtr<u8> := a.acquire(2)
+    p.offset(0).store(c)
+    p.offset(1).store(0)
+    cstr(p)
+}
+// the next single-letter name (from `c`) not already used as a tparam in buf[0..cnt].
+fresh_tparam_name = (a: MutPtr<Malloc>, buf: [Param], cnt: i32, c: u8) str {
+    nm := a.make_letter(c)
+    (buf.tv_seen(cnt, nm) && (c < 'Z')).match ({
+        true  => a.fresh_tparam_name(buf, cnt, c + 1),
+        false => nm
+    })
+}
+is_trait_param = (traits: [Param], p: Param) bool {
+    p.ty.match ({ .Named(n) => traits.param_names_has(n), _ => false })
+}
+// rewrite each trait-typed param to MutPtr<fresh>, appending the fresh bounded tparam to `buf`
+// (starting at `cnt`). Returns the new param list and the resulting tparam count.
+TDesugar*: { params: [Param], ntp: i32 }
+desugar_trait_params = (a: MutPtr<Malloc>, traits: [Param], buf: [Param], cnt: i32, params: [Param]) TDesugar {
+    out := a.param_buf()
+    n := cnt
+    params.loop((h, i, p) {
+        traits.is_trait_param(p).match ({
+            true  => {
+                nm := a.fresh_tparam_name(buf, n, 'A')
+                buf[n] = param(nm, p.ty)                       // bound = Named(trait) = p.ty
+                n = n + 1
+                out[i] = param(p.name, a.mutptr_of(tnamed(nm)))
+            },
+            false => { out[i] = p }
+        })
+    })
+    TDesugar( params: out.take_params(params.len), ntp: n )
+}
+augment_func = (a: MutPtr<Malloc>, types: [Param], traits: [Param], f: Func) Func {
     buf := a.param_buf()
     n0  := buf.copy_tparams(f.tparams)
     n1  := buf.collect_tv_params(types, n0, f.params)
     n2  := buf.collect_tv_ty(types, n1, f.ret)
-    Func( name: f.name, params: f.params, ret: f.ret, tparams: buf.take_params(n2), body: f.body )
+    td  := a.desugar_trait_params(traits, buf, n2, f.params)
+    Func( name: f.name, params: td.params, ret: f.ret, tparams: buf.take_params(td.ntp), body: f.body )
 }
 augment_dstruct = (a: MutPtr<Malloc>, types: [Param], sd: StructDecl) Decl {
     buf := a.param_buf()
@@ -557,10 +691,10 @@ augment_dgenenum = (a: MutPtr<Malloc>, types: [Param], g: GenEnumDecl) Decl {
     n1  := buf.collect_tv_variants(types, n0, g.variants)
     dgenenum(genumdef(g.name, buf.take_params(n1), g.variants))
 }
-rewrite_decl = (a: MutPtr<Malloc>, types: [Param], d: Decl) Decl {
+rewrite_decl = (a: MutPtr<Malloc>, types: [Param], traits: [Param], d: Decl) Decl {
     d.match ({
-        .DFunc(f)      => dfunc(a.augment_func(types, f)),
-        .DForeign(f)   => dforeign(a.augment_func(types, f)),
+        .DFunc(f)      => dfunc(a.augment_func(types, traits, f)),
+        .DForeign(f)   => dforeign(a.augment_func(types, traits, f)),
         .DStruct(sd)   => a.augment_dstruct(types, sd),
         .DGenStruct(g) => a.augment_dgenstruct(types, g),
         .DEnum(ed)     => a.augment_denum(types, ed),
@@ -569,21 +703,32 @@ rewrite_decl = (a: MutPtr<Malloc>, types: [Param], d: Decl) Decl {
     })
 }
 implicit_tparams = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
-    types := a.collect_decltypes(decls)
-    decls.loop((h, i, d) { decls[i] = a.rewrite_decl(types, d) })
+    types  := a.collect_decltypes(decls)
+    traits := a.collect_traits(decls)
+    decls.loop((h, i, d) { decls[i] = a.rewrite_decl(types, traits, d) })
     decls
 }
 
 parse_module* = (a: MutPtr<Malloc>, src: str) [Decl] {
     perr_reset()
     lerr_reset()
+    a.anon_reset()
+    a.exports_reset()
     buf := a.decl_buf()
     n   := a.fill_decls(src, 0, buf, 0)
+    n2  := a.append_anon_decls(buf, n)            // hoist synthesized anon-struct decls
     decls := (perr_get() || lerr_get()).match ({
-        true  => a.prepend_syntax_error(buf, n),
-        false => buf.take_decls(n)
+        true  => a.prepend_syntax_error(buf, n2),
+        false => buf.take_decls(n2)
     })
     a.implicit_tparams(decls)
+}
+// Append the distinct anonymous-struct shapes collected during the parse as ordinary DStructs, so the
+// checker + codegen treat them as named structs. Guarded against the decl buffer's syntax-error slot.
+append_anon_decls = (a: MutPtr<Malloc>, buf: [Decl], n: i32) i32 {
+    i := n
+    anon_decls_get().loop((h, j, sd) { (i < buf.len - 1).match ({ true => { buf[i] = dstruct(sd)  i = i + 1 }, false => { perr_set() } }) })
+    i
 }
 // Parser totality: any parse/lex failure plants a leading syntax sentinel.
 prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {

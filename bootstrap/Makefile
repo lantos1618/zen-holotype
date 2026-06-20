@@ -20,11 +20,11 @@ CC      ?= cc
 CFLAGS  ?= -std=gnu11 -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
-SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c $(HERE)driver.c
+SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 
 .PHONY: zenc regen clean
 
-# The standalone, Python-free compiler binary.
+# The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 zenc:
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC)
 

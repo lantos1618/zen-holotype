@@ -1,20 +1,71 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
 { at } = std.text.bytes
+{ Map, of } = std.collections.map
+
+// ── DECLARATION INDEX ───────────────────────────────────────────────────────
+// name → decl array index, an O(1) hash map (std.collections.map). Built once per
+// resolve/check pass from the (immutable, within a pass) decls slice and threaded through Env,
+// replacing the O(n) linear `the_func`/sibling scans that dominated compile time. `put` overwrites,
+// so each name maps to its LAST occurrence — identical to the old last-match scans (top-level names
+// are unique post-dedup anyway). -1 means absent.
+DeclIndex*: {
+    func_idx:   Map<i64>,   // DFunc.name | DForeign.name → index
+    struct_idx: Map<i64>,   // DStruct.name → index
+    enum_idx:   Map<i64>,   // DEnum.name → index
+    global_idx: Map<i64>,   // DGlobal.name → index
+    impl_idx:   Map<i64>,   // DImpl.ty → presence marker (a type with at least one impl)
+    tdef_idx:   Map<i64>    // (trait "\t" method) → presence: the trait provides a default for the method
+}
+// the combined key for a trait-default lookup; trait/method are identifiers, so a TAB can't collide.
+tdkey = (a: MutPtr<Malloc>, tr: str, m: str) str { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a) }
+build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
+    seed: i64 := 0 - 1
+    idx := DeclIndex(
+        func_idx:   of(a, "", seed),
+        struct_idx: of(a, "", seed),
+        enum_idx:   of(a, "", seed),
+        global_idx: of(a, "", seed),
+        impl_idx:   of(a, "", seed),
+        tdef_idx:   of(a, "", seed)
+    )
+    decls.loop((h, i, d) {
+        d.match ({
+            .DFunc(f)    => { idx = DeclIndex( func_idx: idx.func_idx.put(a, f.name, i), struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DForeign(f) => { idx = DeclIndex( func_idx: idx.func_idx.put(a, f.name, i), struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DStruct(s)  => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx.put(a, s.name, i), enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DEnum(e)    => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx.put(a, e.name, i), global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DGlobal(g)  => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx.put(a, g.name, i), impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx ) },
+            .DImpl(im)   => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx.put(a, im.ty, i), tdef_idx: idx.tdef_idx ) },
+            .DTraitDefault(td) => { idx = DeclIndex( func_idx: idx.func_idx, struct_idx: idx.struct_idx, enum_idx: idx.enum_idx, global_idx: idx.global_idx, impl_idx: idx.impl_idx, tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i) ) },
+            _            => {}
+        })
+    })
+    idx
+}
 
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
 VCell*: { name: str, ty: Ty, tail: Ptr<VList> }
 // exp is the current expected type; tvoid() means no expectation.
-Env*: { vars: Ptr<VList>, decls: [Decl], exp: Ty, a: MutPtr<Malloc> }   // a = allocator (heap-alloc in infer)
-with_exp = (env: Env, t: Ty) Env { Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }
+Env*: { vars: Ptr<VList>, decls: [Decl], didx: DeclIndex, exp: Ty, a: MutPtr<Malloc> }   // a = allocator (heap-alloc in infer); didx = name→decl index
+with_exp = (env: Env, t: Ty) Env { Env( vars: env.vars, decls: env.decls, didx: env.didx, exp: t, a: env.a ) }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
-let_exp = (env: Env, t: Ty) Env { t.is_void_ty().match ({ true => env.clr_exp(), false => Env( vars: env.vars, decls: env.decls, exp: t, a: env.a ) }) }
+let_exp = (env: Env, t: Ty) Env { t.is_void_ty().match ({ true => env.clr_exp(), false => Env( vars: env.vars, decls: env.decls, didx: env.didx, exp: t, a: env.a ) }) }
+// O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
+// remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
+env_func* = (env: Env, name: str) Func {
+    i := env.didx.func_idx.get(name, 0 - 1)
+    (i >= 0 && i < env.decls.len).match ({
+        true  => env.decls[i].match ({ .DFunc(f) => f, .DForeign(f) => f, _ => Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() ) }),
+        false => Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() )
+    })
+}
 
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
 cebuf<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
@@ -61,19 +112,21 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
 }
 // Infer global init types; bind the global name while doing so to avoid self-recursive lookup.
 infer_global_init = (env: Env, name: str, init: Ptr<Expr>) Ty {
-    env2 := Env( vars: env.a.vcons(name, tnamed(""), env.vars), decls: env.decls, exp: env.exp, a: env.a )
+    env2 := Env( vars: env.a.vcons(name, tnamed(""), env.vars), decls: env.decls, didx: env.didx, exp: env.exp, a: env.a )
     env2.infer_expr(init)
 }
 global_ty = (env: Env, name: str) Ty {
-    found := tvoid()
-    env.decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => env.infer_global_init(g.name, g.init), false => found }), _ => found }) })
-    found
+    i := env.didx.global_idx.get(name, 0 - 1)
+    (i >= 0 && i < env.decls.len).match ({
+        true  => env.decls[i].match ({ .DGlobal(g) => env.infer_global_init(g.name, g.init), _ => tvoid() }),
+        false => tvoid()
+    })
 }
 // a bare reference to a top-level function NAME is a first-class function value: its type is the
 // function's FnT signature (its params + ret). This lets `f := some_fn` bind `f` to a fn value and
 // `f()` call through it (an indirect call). Falls back after locals + globals so a same-named local wins.
 fn_value_ty = (env: Env, name: str) Ty {
-    f := env.decls.the_func(name)
+    f := env.env_func(name)
     eq(f.name, name).match ({ true => env.a.fnt_from_func_in(f), false => tvoid() })
 }
 global_or_fn = (env: Env, name: str) Ty {
@@ -94,12 +147,7 @@ var_ty = (env: Env, name: str) Ty {
 var_bound = (v: Ptr<VList>, name: str) bool {
     v.match ({ .VNil => false, .VCons(c) => eq(c.name, name).match ({ true => true, false => c.tail.var_bound(name) }) })
 }
-global_bound = (decls: [Decl], name: str) bool {
-    found := false
-    decls.loop((h, i, d) { found = d.match ({ .DGlobal(g) => eq(g.name, name).match ({ true => true, false => found }), _ => found }) })
-    found
-}
-is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || env.decls.global_bound(name) }
+is_bound* = (env: Env, name: str) bool { env.vars.var_bound(name) || (env.didx.global_idx.get(name, 0 - 1) >= 0) }
 ty_name = (t: Ty) str { t.match ({ .Named(n) => n, _ => "" }) }
 recv_name* = (t: Ty) str {
     t.match ({
@@ -156,6 +204,14 @@ struct_field = (decls: [Decl], sname: str, fname: str) Ty {
     found := tvoid()
     decls.loop((h, i, d) { found = d.match ({ .DStruct(sd) => eq(sd.name, sname).match ({ true => sd.field_ty(fname), false => found }), _ => found }) })
     found
+}
+// O(1) indexed struct-field lookup for the light/inline path.
+idx_struct_field* = (idx: DeclIndex, decls: [Decl], sname: str, fname: str) Ty {
+    i := idx.struct_idx.get(sname, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({ .DStruct(sd) => sd.field_ty(fname), _ => tvoid() }),
+        false => tvoid()
+    })
 }
 is_cmp_op = (op: str) bool {
     // Bool-result ops; bitwise ops keep the lhs type.
@@ -266,7 +322,7 @@ targ_of = (env: Env, params: [Param], args: [Expr], tp: str) Ty {
 ret_targ_of = (env: Env, ret: Ty, tp: str) Ty {
     env.exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(env.exp, tp) })
 }
-call_targ = (env: Env, f: Func, args: [Expr], tp: str) Ty {
+call_targ* = (env: Env, f: Func, args: [Expr], tp: str) Ty {
     arg := env.targ_of(f.params, args, tp)
     arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
 }
@@ -289,12 +345,13 @@ trait_default_exists = (decls: [Decl], trname: str, m: str) bool {
         _ => found }) })
     found
 }
-dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], fn: str, tyname: str) str {
+dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: str, tyname: str) str {
     found := ""
     decls.loop((h, i, d) {
         found = d.match ({
             .DImpl(im) => eq(im.ty, tyname).match ({
-                true  => (im.methods.method_in(fn) || decls.trait_default_exists(im.trname, fn)).match ({ true => a.impl_cname_in(im.trname, im.ty, fn), false => found }),
+                // trait-default check is now an O(1) index lookup instead of a full decl scan per impl.
+                true  => (im.methods.method_in(fn) || (didx.tdef_idx.get(a.tdkey(im.trname, fn), 0 - 1) >= 0)).match ({ true => a.impl_cname_in(im.trname, im.ty, fn), false => found }),
                 false => found
             }),
             _ => found
@@ -304,7 +361,15 @@ dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], fn: str, tyname: str) str {
 }
 dispatch_name = (env: Env, c: CallData) str {
     (c.args.len > 0).match ({
-        true  => env.a.dispatch_recv(env.decls, c.fn, env.infer_expr(c.args[0].addr()).dispatch_recv_name()),
+        true  => {
+            tyname := env.infer_expr(c.args[0].addr()).dispatch_recv_name()
+            // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
+            // impl scan entirely (the common case for primitive/struct receivers).
+            (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
+                true  => c.fn,
+                false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname)
+            })
+        },
         false => c.fn
     })
 }
@@ -316,7 +381,7 @@ dispatch_recv_name = (t: Ty) str {
     })
 }
 gen_call_ret = (env: Env, c: CallData) Ty {
-    f := env.decls.the_func(env.dispatch_name(c))
+    f := env.env_func(env.dispatch_name(c))
     (f.tparams.len > 0).match ({
         true  => env.a.subst_ty_in(f.tparams, env.call_targs(f, c.args), f.ret),
         false => f.ret
@@ -400,7 +465,7 @@ infer_field = (env: Env, oty: Ty, field: str) Ty {
     oty.ty_under_ptr().match ({
         .Generic(g) => env.a.gen_struct_field(env.decls, g.name, field, g.args),
         .Slice(e)   => env.a.slice_member(field),
-        _           => env.decls.struct_field(oty.enum_name(), field)
+        _           => env.didx.idx_struct_field(env.decls, oty.enum_name(), field)
     })
 }
 infer_member = (env: Env, m: MemberData) Ty { env.infer_field(env.infer_expr(m.obj), m.field) }
@@ -451,16 +516,25 @@ resolve_mkenum_fresh = (a: MutPtr<Malloc>, env: Env, variant: str, p: Ptr<Expr>)
 }
 resolve_mktag = (a: MutPtr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str) Ptr<Expr> {
     (etargs.len > 0).match ({
-        true  => a.cenode(mktagg(ety, emty, etargs, variant)),
+        true  => a.emit_tag_or_default(env, ety, emty, etargs, variant),
         false => eq(ety, "").match ({
             true  => a.resolve_mktag_fresh(env, variant),
-            false => a.cenode(mktagg(ety, emty, no_tys(), variant))
+            false => a.emit_tag_or_default(env, ety, emty, no_tys(), variant)
         })
     })
 }
 resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: str) Ptr<Expr> {
     inst := env.enum_inst_tag(variant)
-    a.cenode(mktagg(inst.base, inst.mty, inst.targs, variant))
+    a.emit_tag_or_default(env, inst.base, inst.mty, inst.targs, variant)
+}
+// A zero-arg `.Name` / `Type.Name`: if the variant declares a default (`Name = expr`), build the
+// payload constructor with the baked-in constant; otherwise the bare tag.
+emit_tag_or_default = (a: MutPtr<Malloc>, env: Env, base: str, mty: str, targs: [Ty], variant: str) Ptr<Expr> {
+    def := env.didx.idx_variant_default(env.decls, base, variant)
+    def.is_expr_null().match ({
+        true  => a.cenode(mktagg(base, mty, targs, variant)),
+        false => a.cenode(mkenumg(base, mty, targs, variant, a.resolve_expr(env.clr_exp(), def)))
+    })
 }
 // Keep concrete slice element types across re-resolve.
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty {
@@ -557,7 +631,7 @@ resolve_member = (a: MutPtr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
 // Resolve foreach body with index and element bindings.
 resolve_loop = (a: MutPtr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     et   := env.keep_elem(l.elemTy, l.seq)
-    env2 := Env( vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, exp: env.exp, a: env.a )
+    env2 := Env( vars: a.vcons(l.elem, et, a.vcons(l.idx, ti32(), env.vars)), decls: env.decls, didx: env.didx, exp: env.exp, a: env.a )
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
 }
 fbuf = (a: MutPtr<Malloc>, n: i64) [FieldInit] { slice(a.acquire(n * sizeof(FieldInit)), n) }
@@ -579,11 +653,32 @@ concrete_variant_payload = (decls: [Decl], ename: str, vn: str) Ty {
     }) })
     found
 }
+// O(1) indexed variant-payload lookup for an enum named `ename`.
+idx_variant_payload* = (idx: DeclIndex, decls: [Decl], ename: str, vn: str) Ty {
+    i := idx.enum_idx.get(ename, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({ .DEnum(ed) => ed.variants.vdef_payload(vn), _ => tvoid() }),
+        false => tvoid()
+    })
+}
+// The default constant expr for a `Name = expr` variant, or a null Ptr<Expr> when the variant has none.
+vdef_default_of = (vs: [VariantDef], vn: str) Ptr<Expr> {
+    found := expr_null()
+    vs.loop((h, i, v) { found = eq(v.name, vn).match ({ true => v.dflt, false => found }) })
+    found
+}
+idx_variant_default* = (idx: DeclIndex, decls: [Decl], ename: str, vn: str) Ptr<Expr> {
+    i := idx.enum_idx.get(ename, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({ .DEnum(ed) => ed.variants.vdef_default_of(vn), _ => expr_null() }),
+        false => expr_null()
+    })
+}
 // Concrete payload type for a match arm bind, including generic enum substitution.
 subj_variant_payload* = (env: Env, t: Ty, variant: str) Ty {
     t.match ({
         .Generic(g) => env.decls.find_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
-        _           => env.decls.concrete_variant_payload(t.enum_name(), variant)
+        _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant)
     })
 }
 gsubst = (pty: Ty, env: Env, g: GenericData) Ty { env.a.subst_ty_in(env.decls.find_genenum(g.name).tparams, g.args, pty) }
@@ -631,8 +726,9 @@ resolve_f64_neg = (a: MutPtr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Pt
 }
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     dn   := env.dispatch_name(c)
-    ps   := env.decls.fn_params(dn)
-    tmpl := env.decls.is_template_call(dn)
+    fn   := env.env_func(dn)
+    ps   := fn.params
+    tmpl := fn.is_generic_fn()
     buf  := a.cebuf(c.args.len)
     c.args.loop((h, i, ar) {
         ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
@@ -644,7 +740,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
 arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
     eq(ar.bind, "").match ({
         true  => env,
-        false => Env( vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars), decls: env.decls, exp: env.exp, a: env.a )
+        false => Env( vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars), decls: env.decls, didx: env.didx, exp: env.exp, a: env.a )
     })
 }
 resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
@@ -890,22 +986,22 @@ fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32
 }
 extend_env* = (a: MutPtr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
-        .Let(l) => Env( vars: a.vcons(l.name, l.ty.is_void_ty().match ({ true => env.infer_expr(l.value), false => l.ty }), env.vars), decls: env.decls, exp: env.exp, a: env.a ),
+        .Let(l) => Env( vars: a.vcons(l.name, l.ty.is_void_ty().match ({ true => env.infer_expr(l.value), false => l.ty }), env.vars), decls: env.decls, didx: env.didx, exp: env.exp, a: env.a ),
         _       => env
     })
 }
 
 // Rebuild decls with resolved bodies/inits.
-resolve_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) Func {
-    env := Env( vars: a.params_env(f.params), decls: decls, exp: f.ret, a: a )
+resolve_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) Func {
+    env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
     Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.resolve_body(env, f.body) )
 }
-resolve_global = (a: MutPtr<Malloc>, decls: [Decl], g: GlobalData) Decl {
-    env := Env( vars: a.params_env(empty_params()), decls: decls, exp: tvoid(), a: a )
+resolve_global = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) Decl {
+    env := Env( vars: a.params_env(empty_params()), decls: decls, didx: idx, exp: tvoid(), a: a )
     dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init))
 }
-resolve_decl = (a: MutPtr<Malloc>, decls: [Decl], d: Decl) Decl {
-    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, f)), .DGlobal(g) => a.resolve_global(decls, g), _ => d })
+resolve_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
+    d.match ({ .DFunc(f) => dfunc(a.resolve_func(decls, idx, f)), .DGlobal(g) => a.resolve_global(decls, idx, g), _ => d })
 }
 
 // Template/lambda inlining pass.
@@ -973,7 +1069,16 @@ the_func* = (decls: [Decl], name: str) Func {
     decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => f, false => found }), .DForeign(f) => eq(f.name, name).match ({ true => f, false => found }), _ => found }) })
     found
 }
+// O(1) indexed Func lookup for the inline/template path (mirrors env_func; same last-match result).
+idx_func* = (idx: DeclIndex, decls: [Decl], name: str) Func {
+    i := idx.func_idx.get(name, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({ .DFunc(f) => f, .DForeign(f) => f, _ => Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() ) }),
+        false => Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() )
+    })
+}
 is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).is_generic_fn() }
+idx_template_call = (idx: DeclIndex, decls: [Decl], name: str) bool { idx.idx_func(decls, name).is_generic_fn() }
 subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
     (idx < 0).match ({ true => e, false => args[idx].addr() })
@@ -996,26 +1101,26 @@ blockify = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
         false => a.block_of(stmts)
     })
 }
-xform_args = (a: MutPtr<Malloc>, decls: [Decl], args: [Expr], params: [Param], fargs: [Expr], env: Ptr<VList>) [Expr] {
+xform_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, args: [Expr], params: [Param], fargs: [Expr], env: Ptr<VList>) [Expr] {
     buf := a.cebuf(args.len)
-    args.loop((h, i, ar) { buf[i] = load(a.xform_expr(decls, ar.addr(), params, fargs, env)) })
+    args.loop((h, i, ar) { buf[i] = load(a.xform_expr(decls, idx, ar.addr(), params, fargs, env)) })
     buf
 }
-xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmData) Ty {
+xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: str, ar: ArmData) Ty {
     subj.match ({
         .Generic(g) => a.subst_ty_in(decls.find_genenum(g.name).tparams, g.args, decls.find_genenum(g.name).gen_variant_payload(ar.variant)),
-        _           => decls.concrete_variant_payload(ename, ar.variant)
+        _           => idx.idx_variant_payload(decls, ename, ar.variant)
     })
 }
-xform_arm_env = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
+xform_arm_env = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: str, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
     out := env
     eq(ar.bind, "").match ({
         true  => {},
-        false => { out = a.vcons(ar.bind, a.xform_arm_payload(decls, subj, ename, ar), env) }
+        false => { out = a.vcons(ar.bind, a.xform_arm_payload(decls, idx, subj, ename, ar), env) }
     })
     out
 }
-xform_arms = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [ArmData] {
+xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: str, arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
         bind := ""
@@ -1030,13 +1135,13 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], subj: Ty, ename: str, arms: [Arm
             }
         })
         br := arm(ar.variant, bind, ar.body)
-        buf[i] = arm(ar.variant, bind, a.xform_expr_exp(decls, ar.body, ps, xs, a.xform_arm_env(decls, subj, ename, br, env), exp))
+        buf[i] = arm(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, a.xform_arm_env(decls, idx, subj, ename, br, env), exp))
     })
     buf
 }
-inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
-        .Lambda(lm) => a.blockify(a.xform_body(decls, lm.body, lm.params, cargs, env, tvoid())),
+        .Lambda(lm) => a.blockify(a.xform_body(decls, idx, lm.body, lm.params, cargs, env, tvoid())),
         .Var(v)     => a.var_call(v, cargs),
         _           => a.cenode(lamx)
     })
@@ -1044,86 +1149,86 @@ inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], lamx: Expr, cargs: [Expr], en
 // Generic template calls infer type args at the call site before splicing.
 // Light types are enough to unify tparams, including local Var args.
 lty_node = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.tnode(t) }
-light_sl_elem = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl]) Ty {
-    (items.len == 0).match ({ true => tvoid(), false => items[0].addr().light_ty(a, env, decls) })
+light_sl_elem = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    (items.len == 0).match ({ true => tvoid(), false => items[0].addr().light_ty(a, env, decls, idx) })
 }
-light_slice = (a: MutPtr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl]) Ty {
+light_slice = (a: MutPtr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     sd.elem.is_void_ty().match ({
-        true  => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls))),
+        true  => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls, idx))),
         false => tslice(a.lty_node(sd.elem))
     })
 }
 // Light call type mirrors infer_call for template-splice inference.
-light_one = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+light_one = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     found := tvoid()
-    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls), tp), false => found }), false => found }) })
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls, idx), tp), false => found }), false => found }) })
     found
 }
 light_ret_one = (ret: Ty, exp: Ty, tp: str) Ty {
     exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(exp, tp) })
 }
-light_targ = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
-    arg := f.params.light_one(a, args, tp, env, decls)
+light_targ = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    arg := f.params.light_one(a, args, tp, env, decls, idx)
     arg.is_void_ty().match ({ true => f.ret.light_ret_one(exp, tp), false => arg })
 }
-light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList>, decls: [Decl]) [Ty] {
+light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
     buf := a.tbuf(f.tparams.len)
-    f.tparams.loop((h, i, tp) { buf[i] = f.light_targ(a, args, exp, tp.name, env, decls) })
+    f.tparams.loop((h, i, tp) { buf[i] = f.light_targ(a, args, exp, tp.name, env, decls, idx) })
     buf
 }
-light_call_ty = (decls: [Decl], a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
+light_call_ty = (decls: [Decl], idx: DeclIndex, a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
     eq(c.fn, "cstr").match ({
         true  => tcstr(),
         false => {
-            f := decls.the_func(c.fn)
+            f := idx.idx_func(decls, c.fn)
             (f.tparams.len > 0).match ({
-                true  => a.subst_ty_in(f.tparams, f.light_targs(a, c.args, tvoid(), env, decls), f.ret),
+                true  => a.subst_ty_in(f.tparams, f.light_targs(a, c.args, tvoid(), env, decls, idx), f.ret),
                 false => f.ret
             })
         }
     })
 }
-light_last_stmt_ty = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl]) Ty {
-    stmts[stmts.len - 1].match ({ .ExprStmt(e) => e.light_ty(a, env, decls), .Return(r) => r.light_ty(a, env, decls), _ => tvoid() })
+light_last_stmt_ty = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    stmts[stmts.len - 1].match ({ .ExprStmt(e) => e.light_ty(a, env, decls, idx), .Return(r) => r.light_ty(a, env, decls, idx), _ => tvoid() })
 }
-light_extend = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl]) Ptr<VList> {
-    st.match ({ .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({ true => l.value.light_ty(a, env, decls), false => l.ty }), env), _ => env })
+light_extend = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], idx: DeclIndex) Ptr<VList> {
+    st.match ({ .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({ true => l.value.light_ty(a, env, decls, idx), false => l.ty }), env), _ => env })
 }
-light_block_ty_from = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], i: i32) Ty {
+light_block_ty_from = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], idx: DeclIndex, i: i32) Ty {
     (i >= stmts.len).match ({
         true  => tvoid(),
         false => (i == stmts.len - 1).match ({
-            true  => a.light_last_stmt_ty(stmts, env, decls),
-            false => a.light_block_ty_from(stmts, a.light_extend(env, stmts[i], decls), decls, i + 1)
+            true  => a.light_last_stmt_ty(stmts, env, decls, idx),
+            false => a.light_block_ty_from(stmts, a.light_extend(env, stmts[i], decls, idx), decls, idx, i + 1)
         })
     })
 }
-light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl]) Ty {
-    a.light_block_ty_from(b.stmts, env, decls, 0)
+light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    a.light_block_ty_from(b.stmts, env, decls, idx, 0)
 }
-light_member_ty = (a: MutPtr<Malloc>, decls: [Decl], obj: Ty, field: str) Ty {
+light_member_ty = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, obj: Ty, field: str) Ty {
     obj.ty_under_ptr().match ({
         .Generic(g) => a.gen_struct_field(decls, g.name, field, g.args),
         .Slice(e)   => a.slice_member(field),
-        _           => decls.struct_field(obj.enum_name(), field)
+        _           => idx.idx_struct_field(decls, obj.enum_name(), field)
     })
 }
-light_ty = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl]) Ty {
+light_ty = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
-        .Block(b)      => a.light_block_ty(b, env, decls),
+        .Block(b)      => a.light_block_ty(b, env, decls, idx),
         .Byte(n)       => tu8(),
         .FloatLit(ft)  => tf64(),
         .StrLit(s)     => ttext(),
         .MakeStruct(m) => (m.targs.len > 0).match ({ true => tgeneric(m.ty, m.targs, m.mty), false => tnamed(m.ty) }),
         .MakeEnum(mk)  => (mk.targs.len > 0).match ({ true => tgeneric(mk.ty, mk.targs, mk.mty), false => tnamed(mk.ty) }),
         .Tag(t)        => (t.targs.len > 0).match ({ true => tgeneric(t.ty, t.targs, t.mty), false => tnamed(t.ty) }),
-        .SliceLit(sd)  => a.light_slice(sd, env, decls),
+        .SliceLit(sd)  => a.light_slice(sd, env, decls, idx),
         .Var(v)        => env.lookup_var(v.name),
-        .Call(c)       => decls.light_call_ty(a, c, env),
-        .Member(m)     => a.light_member_ty(decls, m.obj.light_ty(a, env, decls), m.field),
-        .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(a, env, decls)),
-        .Cond(d)       => d.t.light_ty(a, env, decls),
+        .Call(c)       => light_call_ty(decls, idx, a, c, env),
+        .Member(m)     => a.light_member_ty(decls, idx, m.obj.light_ty(a, env, decls, idx), m.field),
+        .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(a, env, decls, idx)),
+        .Cond(d)       => d.t.light_ty(a, env, decls, idx),
         _              => tvoid()
     })
 }
@@ -1142,18 +1247,18 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: str) Ty {
     pargs.loop((h, i, pa) { found = found.is_void_ty().match ({ true => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }), false => found }) })
     found
 }
-infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
+infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     found := tvoid()
-    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(a, env, decls), tp), false => found }), false => found }) })
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(a, env, decls, idx), tp), false => found }), false => found }) })
     found
 }
-infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl]) Ty {
-    arg := params.infer_one(a, cargs, tp, env, decls)
+infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    arg := params.infer_one(a, cargs, tp, env, decls, idx)
     arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
 }
-infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl]) [Ty] {
+infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
     buf := a.tbuf(tparams.len)
-    tparams.loop((h, i, tp) { buf[i] = params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls) })
+    tparams.loop((h, i, tp) { buf[i] = params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls, idx) })
     buf
 }
 // Substitute tparams in type-bearing expression/statement nodes.
@@ -1262,112 +1367,112 @@ is_inlining = (v: Ptr<VList>, name: str) bool {
         .VCons(c) => (eq(c.name, name) && c.ty.is_empty_named()).match ({ true => true, false => c.tail.is_inlining(name) })
     })
 }
-inline_template = (a: MutPtr<Malloc>, decls: [Decl], name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
-    tf   := decls.the_func(name)
+inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+    tf   := idx.idx_func(decls, name)
     ienv := a.vcons(name, tnamed(""), env)
     body := (tf.tparams.len > 0).match ({
-        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls), tf.body),
+        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx), tf.body),
         false => tf.body
     })
-    a.blockify(a.xform_body(decls, body, tf.params, cargs, ienv, exp))
+    a.blockify(a.xform_body(decls, idx, body, tf.params, cargs, ienv, exp))
 }
-maybe_template = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
-    decls.is_template_call(c.fn).match ({
+maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+    idx.idx_template_call(decls, c.fn).match ({
         true  => env.is_inlining(c.fn).match ({
             true  => a.recall(c, c.fn, cargs),
-            false => (decls.the_func(c.fn).params.len == cargs.len).match ({
-                true  => a.inline_template(decls, c.fn, cargs, env, exp),
+            false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({
+                true  => a.inline_template(decls, idx, c.fn, cargs, env, exp),
                 false => a.recall(c, c.fn, cargs)
             })
         }),
         false => a.recall(c, c.fn, cargs)
     })
 }
-xform_call = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
-    cargs := a.xform_args(decls, c.args, params, fargs, env)
+xform_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+    cargs := a.xform_args(decls, idx, c.args, params, fargs, env)
     fi    := params.param_index(c.fn)
     (fi < 0).match ({
-        true  => a.maybe_template(decls, c, cargs, env, exp),
+        true  => a.maybe_template(decls, idx, c, cargs, env, exp),
         false => params[fi].ty.is_fnt().match ({
-            true  => a.inline_lambda(decls, fargs[fi], cargs, env),
+            true  => a.inline_lambda(decls, idx, fargs[fi], cargs, env),
             // an indirect call through a renamed local (a fn-value let): the substituted arg is the
             // renamed local's Var, so recall through its renamed C name (not the stale original).
             false => a.recall(c, fargs[fi].callee_subst_name(c.fn), cargs)
         })
     })
 }
-xform_match = (a: MutPtr<Malloc>, decls: [Decl], m: MatchData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
-    subj := a.xform_expr(decls, m.subj, params, fargs, env)
-    st   := subj.light_ty(a, env, decls)
-    arms := a.xform_arms(decls, st, m.ename, m.arms, params, fargs, env, exp)
+xform_match = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: MatchData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+    subj := a.xform_expr(decls, idx, m.subj, params, fargs, env)
+    st   := subj.light_ty(a, env, decls, idx)
+    arms := a.xform_arms(decls, idx, st, m.ename, m.arms, params, fargs, env, exp)
     out := a.cenode(ematch(subj, m.ename, arms))
     m.ptr.match ({ true => { out = a.cenode(ematchp(subj, m.ename, arms)) }, _ })
     out
 }
-xform_inits = (a: MutPtr<Malloc>, decls: [Decl], inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
+xform_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
     buf := a.fbuf(inits.len)
-    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.xform_expr(decls, fi.value, params, fargs, env)) })
+    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.xform_expr(decls, idx, fi.value, params, fargs, env)) })
     buf
 }
-xform_lambda = (a: MutPtr<Malloc>, decls: [Decl], lm: LambdaData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+xform_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     ps := params
     xs := fargs
     lm.params.loop((h, i, p) {
         ps = a.add_subst_param(ps, p.name)
         xs = a.add_subst_arg(xs, p.name)
     })
-    a.cenode(lam(lm.params, a.xform_body(decls, lm.body, ps, xs, env, tvoid())))
+    a.cenode(lam(lm.params, a.xform_body(decls, idx, lm.body, ps, xs, env, tvoid())))
 }
-xform_expr = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
-    a.xform_expr_exp(decls, e, params, fargs, env, tvoid())
+xform_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+    a.xform_expr_exp(decls, idx, e, params, fargs, env, tvoid())
 }
-xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     out := e
     load(e).match ({
         .Var(v)       => { out = a.subst_var(params, fargs, v.name, e) },
-        .Call(c)      => { out = a.xform_call(decls, c, params, fargs, env, exp) },
-        .Bin(b)       => { out = a.cenode(bin_at(b.op, a.xform_expr(decls, b.lhs, params, fargs, env), a.xform_expr(decls, b.rhs, params, fargs, env), b.pos)) },
-        .Cond(d)      => { out = a.cenode(cond(a.xform_expr(decls, d.c, params, fargs, env), a.xform_expr_exp(decls, d.t, params, fargs, env, exp), a.xform_expr_exp(decls, d.e, params, fargs, env, exp))) },
-        .Member(m)    => { out = a.cenode(member(a.xform_expr(decls, m.obj, params, fargs, env), m.field)) },
-        .Arrow(ar)    => { out = a.cenode(arrow(a.xform_expr(decls, ar.obj, params, fargs, env), ar.field)) },
-        .MakeEnum(mk) => { out = a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, mk.payload, params, fargs, env))) },
-        .MakeStruct(sd) => { out = a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, sd.inits, params, fargs, env))) },
-        .Match(m)     => { out = a.xform_match(decls, m, params, fargs, env, exp) },
-        .Index(ix)    => { out = a.cenode(eindex(a.xform_expr(decls, ix.seq, params, fargs, env), a.xform_expr(decls, ix.idx, params, fargs, env), ix.elem)) },
+        .Call(c)      => { out = a.xform_call(decls, idx, c, params, fargs, env, exp) },
+        .Bin(b)       => { out = a.cenode(bin_at(b.op, a.xform_expr(decls, idx, b.lhs, params, fargs, env), a.xform_expr(decls, idx, b.rhs, params, fargs, env), b.pos)) },
+        .Cond(d)      => { out = a.cenode(cond(a.xform_expr(decls, idx, d.c, params, fargs, env), a.xform_expr_exp(decls, idx, d.t, params, fargs, env, exp), a.xform_expr_exp(decls, idx, d.e, params, fargs, env, exp))) },
+        .Member(m)    => { out = a.cenode(member(a.xform_expr(decls, idx, m.obj, params, fargs, env), m.field)) },
+        .Arrow(ar)    => { out = a.cenode(arrow(a.xform_expr(decls, idx, ar.obj, params, fargs, env), ar.field)) },
+        .MakeEnum(mk) => { out = a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, idx, mk.payload, params, fargs, env))) },
+        .MakeStruct(sd) => { out = a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, idx, sd.inits, params, fargs, env))) },
+        .Match(m)     => { out = a.xform_match(decls, idx, m, params, fargs, env, exp) },
+        .Index(ix)    => { out = a.cenode(eindex(a.xform_expr(decls, idx, ix.seq, params, fargs, env), a.xform_expr(decls, idx, ix.idx, params, fargs, env), ix.elem)) },
         .Loop(l)      => {
-            idx  := a.local_name_at(l.idx, env, params.len)
+            lidx := a.local_name_at(l.idx, env, params.len)
             elem := a.local_name_at(l.elem, env, params.len + 1)
             hnd  := a.local_name_at(l.h, env, params.len + 2)
             ps1  := a.add_subst_param(a.add_subst_param(a.add_subst_param(params, l.idx), l.elem), l.h)
-            xs1  := a.add_subst_arg(a.add_subst_arg(a.add_subst_arg(fargs, idx), elem), hnd)
-            out = a.cenode(eloop(a.xform_expr(decls, l.seq, params, fargs, env), idx, elem, l.elemTy, a.xform_body(decls, l.body, ps1, xs1, env, tvoid()), hnd))
+            xs1  := a.add_subst_arg(a.add_subst_arg(a.add_subst_arg(fargs, lidx), elem), hnd)
+            out = a.cenode(eloop(a.xform_expr(decls, idx, l.seq, params, fargs, env), lidx, elem, l.elemTy, a.xform_body(decls, idx, l.body, ps1, xs1, env, tvoid()), hnd))
         },
-        .Lambda(lm)   => { out = a.xform_lambda(decls, lm, params, fargs, env) },
-        .SliceLit(sd) => { out = a.cenode(slit(sd.elem, a.xform_args(decls, sd.items, params, fargs, env))) },
-        .Block(b)     => { out = a.cenode(block(a.xform_body(decls, b.stmts, params, fargs, env, exp))) },
+        .Lambda(lm)   => { out = a.xform_lambda(decls, idx, lm, params, fargs, env) },
+        .SliceLit(sd) => { out = a.cenode(slit(sd.elem, a.xform_args(decls, idx, sd.items, params, fargs, env))) },
+        .Block(b)     => { out = a.cenode(block(a.xform_body(decls, idx, b.stmts, params, fargs, env, exp))) },
         _             => {}
     })
     out
 }
-xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
+xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
     out := st
     st.match ({
-        .Let(l)      => { out = slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, l.value, params, fargs, env, l.ty)) },
-        .Assign(x)   => { out = sassign_at(a.xform_expr(decls, x.target, params, fargs, env), a.xform_expr(decls, x.value, params, fargs, env), x.pos) },
-        .Return(r)   => { out = sret(a.xform_expr_exp(decls, r, params, fargs, env, exp)) },
-        .ExprStmt(e) => { out = sexpr(a.xform_expr_exp(decls, e, params, fargs, env, exp)) },
-        .If(f)       => { out = sif(a.xform_expr(decls, f.c, params, fargs, env), a.xform_body(decls, f.then, params, fargs, env, tvoid()), a.xform_body(decls, f.els, params, fargs, env, tvoid())) },
-        .While(w)    => { out = swhile(a.xform_expr(decls, w.c, params, fargs, env), a.xform_body(decls, w.body, params, fargs, env, tvoid())) },
-        .IndexSet(x) => { out = sidxset_at(a.xform_expr(decls, x.seq, params, fargs, env), a.xform_expr(decls, x.idx, params, fargs, env), x.elem, a.xform_expr(decls, x.value, params, fargs, env), x.pos) }
+        .Let(l)      => { out = slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty)) },
+        .Assign(x)   => { out = sassign_at(a.xform_expr(decls, idx, x.target, params, fargs, env), a.xform_expr(decls, idx, x.value, params, fargs, env), x.pos) },
+        .Return(r)   => { out = sret(a.xform_expr_exp(decls, idx, r, params, fargs, env, exp)) },
+        .ExprStmt(e) => { out = sexpr(a.xform_expr_exp(decls, idx, e, params, fargs, env, exp)) },
+        .If(f)       => { out = sif(a.xform_expr(decls, idx, f.c, params, fargs, env), a.xform_body(decls, idx, f.then, params, fargs, env, tvoid()), a.xform_body(decls, idx, f.els, params, fargs, env, tvoid())) },
+        .While(w)    => { out = swhile(a.xform_expr(decls, idx, w.c, params, fargs, env), a.xform_body(decls, idx, w.body, params, fargs, env, tvoid())) },
+        .IndexSet(x) => { out = sidxset_at(a.xform_expr(decls, idx, x.seq, params, fargs, env), a.xform_expr(decls, idx, x.idx, params, fargs, env), x.elem, a.xform_expr(decls, idx, x.value, params, fargs, env), x.pos) }
     })
     out
 }
 // Thread local light types so generic call args can infer from Vars.
-xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], params: [Param]) Ptr<VList> {
+xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], idx: DeclIndex, params: [Param]) Ptr<VList> {
     out := env
     st.match ({ .Let(l) => {
         ty := l.ty
-        l.ty.is_void_ty().match ({ true => { ty = l.value.light_ty(a, env, decls) }, _ })
+        l.ty.is_void_ty().match ({ true => { ty = l.value.light_ty(a, env, decls, idx) }, _ })
         out = a.vcons(a.local_name_at(l.name, env, params.len), ty, env)
     }, _ })
     out
@@ -1382,7 +1487,7 @@ xform_arg_shadow = (a: MutPtr<Malloc>, args: [Expr], st: Stmt, params: [Param], 
     st.match ({ .Let(l) => { out = a.add_subst_arg(args, a.local_name_at(l.name, env, params.len)) }, _ })
     out
 }
-xform_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
+xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
     buf := a.sbuf(body.len)
     e   := env
     ps  := params
@@ -1390,16 +1495,16 @@ xform_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], params: [Param], f
     body.loop((h, i, st) {
         want := tvoid()
         (i == body.len - 1).match ({ true => { want = exp }, _ })
-        buf[i] = a.xform_stmt(decls, st, ps, xs, e, want)
-        e = a.xform_let_ext(e, st, decls, ps)
+        buf[i] = a.xform_stmt(decls, idx, st, ps, xs, e, want)
+        e = a.xform_let_ext(e, st, decls, idx, ps)
         xs = a.xform_arg_shadow(xs, st, ps, e)
         ps = a.xform_param_shadow(ps, st)
     })
     buf
 }
-inline_decl = (a: MutPtr<Malloc>, decls: [Decl], d: Decl) Decl {
+inline_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
     d.match ({
-        .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, f.body, empty_params(), empty_args(), a.params_env(f.params), f.ret) )),
+        .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.xform_body(decls, idx, f.body, empty_params(), empty_args(), a.params_env(f.params), f.ret) )),
         _         => d
     })
 }
@@ -1465,18 +1570,123 @@ expand_defaults = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
 // Resolve module: defaults, resolve, inline templates, then re-resolve concrete inline residue.
 // Lambdas splice bodies back into their caller, so that re-resolve can expose more template calls
 // such as captured generic receiver methods; run one more inline/resolve pass for that residue.
-resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
-    decls := a.expand_defaults(raw)
+// ── DESUGAR: faithful MethodCall -> flat Call (UFCS lowering) ───────────────────────────────
+// parse_module keeps `recv.method(args)` as a faithful MethodCall (so the formatter sees the surface
+// UFCS form). This pass — run at the very START of resolve_module, before any other pass — rewrites each
+// MethodCall back into the EXACT flat `Call(fn: method, args: [recv] ++ args, pos: method-pos, raw: false)`
+// the old flattening parser produced, so the resolve/inline/genc pipeline downstream is byte-for-byte
+// unchanged. The walk mutates IN PLACE: parse_module builds a fresh tree (no aliased nodes), so each
+// child node is rewritten through its own Ptr/slice slot, touching nothing but the MethodCall sites.
+desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
+    decls.loop((h, i, d) { a.dmc_decl(d) })
+    decls
+}
+dmc_decl = (a: MutPtr<Malloc>, d: Decl) void {
+    d.match ({
+        .DFunc(f)          => a.dmc_body(f.body),
+        .DGlobal(g)        => a.dmc_expr(g.init),
+        .DTraitDefault(td) => a.dmc_body(td.fn.body),
+        _                  => {}
+    })
+}
+dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
+    body.loop((h, i, st) { a.dmc_stmt(body[i].addr()) })
+}
+dmc_stmt = (a: MutPtr<Malloc>, sp: Ptr<Stmt>) void {
+    sp.match ({
+        .Let(l)      => a.dmc_expr(l.value),
+        .Assign(asn) => { a.dmc_expr(asn.target)  a.dmc_expr(asn.value) },
+        .Return(e)   => a.dmc_expr(e),
+        .If(f)       => { a.dmc_expr(f.c)  a.dmc_body(f.then)  a.dmc_body(f.els) },
+        .While(w)    => { a.dmc_expr(w.c)  a.dmc_body(w.body) },
+        .IndexSet(x) => { a.dmc_expr(x.seq)  a.dmc_expr(x.idx)  a.dmc_expr(x.value) },
+        .ExprStmt(e) => a.dmc_expr(e)
+    })
+}
+dmc_args = (a: MutPtr<Malloc>, args: [Expr]) void {
+    args.loop((h, i, ar) { a.dmc_expr(args[i].addr()) })
+}
+dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
+    inits.loop((h, i, fi) { a.dmc_expr(fi.value) })
+}
+dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
+    arms.loop((h, i, ar) { a.dmc_expr(ar.body) })
+}
+// `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
+// old parse_method built (buf[0] = recv, method args from index 1, via call_at).
+dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
+    buf := a.cebuf(mc.args.len + 1)
+    buf[0] = load(mc.recv)
+    mc.args.loop((h, i, ar) { buf[i + 1] = mc.args[i] })
+    call_at(mc.method, buf, mc.pos)
+}
+dmc_expr = (a: MutPtr<Malloc>, ep: Ptr<Expr>) void {
+    ep.match ({
+        .Bin(b)        => { a.dmc_expr(b.lhs)  a.dmc_expr(b.rhs) },
+        .Call(c)       => a.dmc_args(c.args),
+        .MethodCall(mc) => {
+            a.dmc_expr(mc.recv)
+            a.dmc_args(mc.args)
+            store(ep, a.dmc_lower(mc))
+        },
+        .Cond(d)       => { a.dmc_expr(d.c)  a.dmc_expr(d.t)  a.dmc_expr(d.e) },
+        .Member(m)     => a.dmc_expr(m.obj),
+        .Arrow(ar)     => a.dmc_expr(ar.obj),
+        .MakeEnum(m)   => a.dmc_expr(m.payload),
+        .MakeStruct(m) => a.dmc_inits(m.inits),
+        .Match(m)      => { a.dmc_expr(m.subj)  a.dmc_arms(m.arms) },
+        .SliceLit(sd)  => a.dmc_args(sd.items),
+        .Index(ix)     => { a.dmc_expr(ix.seq)  a.dmc_expr(ix.idx) },
+        .Loop(l)       => { a.dmc_expr(l.seq)  a.dmc_body(l.body) },
+        .Lambda(lm)    => a.dmc_body(lm.body),
+        .Block(b)      => a.dmc_body(b.stmts),
+        _              => {}
+    })
+}
+
+// Enum-variant defaults (`Name = expr`) are parsed with a void payload + the default expr; before any
+// other pass, infer each default's type into the payload so codegen lays out the union slot and match
+// arms bind correctly.
+vbuf = (a: MutPtr<Malloc>, n: i64) [VariantDef] { slice(a.acquire(n * sizeof(VariantDef)), n) }
+default_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, v: VariantDef) Ty {
+    v.dflt.is_expr_null().match ({
+        true  => v.payload,
+        false => v.dflt.light_ty(a, a.vnil(), decls, idx)
+    })
+}
+fill_variant_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, vs: [VariantDef]) [VariantDef] {
+    buf := a.vbuf(vs.len)
+    vs.loop((h, i, v) { buf[i] = VariantDef( name: v.name, payload: a.default_payload(decls, idx, v), dflt: v.dflt ) })
+    buf
+}
+fill_enum_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     buf := a.dbuf(decls.len)
-    decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, d) })
+    decls.loop((h, i, d) { buf[i] = d.match ({
+        .DEnum(ed) => .DEnum(EnumDecl( name: ed.name, variants: a.fill_variant_defaults(decls, idx, ed.variants) )),
+        _          => d
+    }) })
+    buf
+}
+resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
+    decls0 := a.expand_defaults(a.desugar_method_calls(raw))
+    decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
+    // Decl order/count are stable across resolve+inline passes (each rebuilds bodies in place), so a
+    // name→index map is rebuilt once per pass over the current slice.
+    didx := a.build_decl_index(decls)
+    buf := a.dbuf(decls.len)
+    decls.loop((h, i, d) { buf[i] = a.resolve_decl(decls, didx, d) })
+    bidx := a.build_decl_index(buf)
     inl := a.dbuf(buf.len)
-    buf.loop((h, i, d) { inl[i] = a.inline_decl(buf, d) })
+    buf.loop((h, i, d) { inl[i] = a.inline_decl(buf, bidx, d) })
+    iidx := a.build_decl_index(inl)
     out := a.dbuf(inl.len)
-    inl.loop((h, i, d) { out[i] = a.resolve_decl(inl, d) })
+    inl.loop((h, i, d) { out[i] = a.resolve_decl(inl, iidx, d) })
+    oidx := a.build_decl_index(out)
     inl2 := a.dbuf(out.len)
-    out.loop((h, i, d) { inl2[i] = a.inline_decl(out, d) })
+    out.loop((h, i, d) { inl2[i] = a.inline_decl(out, oidx, d) })
+    i2idx := a.build_decl_index(inl2)
     out2 := a.dbuf(inl2.len)
-    inl2.loop((h, i, d) { out2[i] = a.resolve_decl(inl2, d) })
+    inl2.loop((h, i, d) { out2[i] = a.resolve_decl(inl2, i2idx, d) })
     out2
 }
 
@@ -1502,11 +1712,15 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), .Named(b) => eq(ga.mangled, b), _ => false })
     })
 }
+// `RawPtr<u8>` is the raw-pointer floor: it fits any typed pointer slot (this is what `null_ptr()`
+// returns, so a null can initialize/assign any `Ptr<T>` field/param without a cast).
+is_raw_ptr_ty* = (t: Ty) bool { t.match ({ .Ptr(p) => load(p).match ({ .U8 => true, _ => false }), _ => false }) }
+is_ptr_ty_g* = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
     numeric.match ({
         true  => g.ty_rank() <= w.ty_rank(),
-        false => g.ty_eq(w)
+        false => (g.is_raw_ptr_ty() && w.is_ptr_ty_g()).match ({ true => true, false => g.ty_eq(w) })
     })
 }
 

@@ -65,22 +65,19 @@ is_import_line* = (s: str, p: i32) bool {
 
 import_end = (s: str, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
 
+// Position just past the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that
+// starts at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total
+// with constant stack.
 next_line = (s: str, p: i32) i32 {
-    pos := p
     bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < p).match ({
-            true => {},
-            false => (b == '\n').match ({
-                true => {
-                    pos = ii + 1
-                    h.break
-                },
-                false => { pos = ii + 1 }
-            })
+    pos := p
+    (p < to_i32(bs.len)).match ({ true => {
+        span: [u8] := slice(s.offset(p), bs.len - to_i64(p))
+        span.loop((h, i, b) {
+            pos = p + to_i32(i) + 1
+            (b == '\n').match ({ true => { h.break }, _ })
         })
-    })
+    }, _ })
     pos
 }
 
@@ -94,22 +91,18 @@ strip_count* = (s: str, p: i32, n: i32) i32 {
     })
 }
 
+// Position of the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that starts
+// at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total with
+// constant stack.
 line_end = (s: str, p: i32) i32 {
-    pos := p
     bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < p).match ({
-            true => {},
-            false => (b == '\n').match ({
-                true => {
-                    pos = ii
-                    h.break
-                },
-                false => { pos = ii + 1 }
-            })
+    pos := p
+    (p < to_i32(bs.len)).match ({ true => {
+        span: [u8] := slice(s.offset(p), bs.len - to_i64(p))
+        span.loop((h, i, b) {
+            (b == '\n').match ({ true => { pos = p + to_i32(i)  h.break }, false => { pos = p + to_i32(i) + 1 } })
         })
-    })
+    }, _ })
     pos
 }
 
@@ -403,19 +396,15 @@ mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
     })
     cur
 }
+// Append s[p..e) (stopping early at NUL) to `out`. Iterates a sub-slice that starts at `p` — NOT a
+// scan from 0, and NOT recursive — so copying a span out of a large flattened source is O(e-p) and
+// uses constant stack regardless of span length.
 mappend_span = (a: MutPtr<Malloc>, out: String, s: str, p: i32, e: i32) String {
     cur := out
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < p).match ({
-            true => {},
-            false => ((ii >= e) || (b == 0)).match ({
-                true  => { h.break },
-                false => { cur = cur.gstr_push(a, b) }
-            })
-        })
-    })
+    (p < e).match ({ true => {
+        span: [u8] := slice(s.offset(p), to_i64(e - p))
+        span.loop((h, i, b) { (b == 0).match ({ true => { h.break }, false => { cur = cur.gstr_push(a, b) } }) })
+    }, _ })
     cur
 }
 rpush = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
@@ -1193,19 +1182,14 @@ symbol_name_len = (src: str, p: i32, e: i32, escape: bool) i64 {
     base := to_i64(e - p)
     (escape && src.is_c_kw_name_span(p, e)).match ({ true => base + 3, false => base })
 }
+// Copy src[p..e) into buf[0..), returning the count written. Iterates a sub-slice that starts at `p`
+// — NOT a scan from 0, and NOT recursive — so it is O(e-p) with constant stack.
 copy_symbol_span_to = (buf: RawPtr<u8>, src: str, p: i32, e: i32) i64 {
     cur: i64 := 0
-    bs: [u8] := src.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < p).match ({
-            true => {},
-            false => (ii >= e).match ({
-                true  => { h.break },
-                false => { buf.offset(cur).store(b)  cur = cur + 1 }
-            })
-        })
-    })
+    (p < e).match ({ true => {
+        span: [u8] := slice(src.offset(p), to_i64(e - p))
+        span.loop((h, i, b) { buf.offset(cur).store(b)  cur = cur + 1 })
+    }, _ })
     cur
 }
 finish_symbol_name = (buf: RawPtr<u8>, src: str, p: i32, e: i32, escape: bool) str {

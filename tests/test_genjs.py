@@ -31,7 +31,7 @@ NODE = shutil.which("node")
 # but genc_emit defines helpers genjs leans on via the shared module), the lexer/parser, the checker
 # (resolve_module lives in parse/resolve path), PLUS compiler/genjs.zen — the backend under test.
 _GENJS_SOURCES = ["zen/compiler/genc.zen", "zen/std/core/result.zen", "zen/compiler/mono.zen", "zen/compiler/genc_emit.zen",
-                  "zen/std/text/bytes.zen",
+                  "zen/std/text/bytes.zen", "zen/std/collections/map.zen",
                   "zen/compiler/lex.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_type.zen",
                   "zen/compiler/parse_stmt.zen", "zen/compiler/parse.zen", "zen/compiler/check.zen",
                   "zen/compiler/genjs.zen"]
@@ -75,7 +75,7 @@ def _build_emit():
         d = Path(tempfile.mkdtemp())
         exe = d / "zenc"
         r = subprocess.run(_CC + [str(BOOT / "zenc.gen.c"), str(BOOT / "zenrt.c"),
-                                  str(BOOT / "driver.c"), "-o", str(exe)],
+ "-o", str(exe)],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         _emit_exe = exe

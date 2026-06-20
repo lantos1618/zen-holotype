@@ -19,6 +19,11 @@
 VarData*: { name: str, pos: i32 }                      // pos = byte offset of the name in the source (0 = synthesized)
 BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>, pos: i32 }   // lhs op rhs; pos = operator byte offset when source-backed
 CallData*: { fn: str, args: [Expr], pos: i32, raw: bool }  // fn(a, b, …) or @fn(a, b, …); pos = fn byte offset (0 = synthesized)
+// a FAITHFUL method call `recv.method(args)` — preserves the UFCS surface syntax that the parser would
+// otherwise FLATTEN into a `Call(fn: method, args: [recv] ++ args)`. parse_module keeps MethodCall (so the
+// formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
+// resolve/genc, so the C backend never sees it. pos = method-name byte offset (matches the old Call's pos).
+MethodCallData*: { recv: Ptr<Expr>, method: str, args: [Expr], pos: i32 }
 CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
 ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
@@ -52,7 +57,7 @@ BlockData*: { stmts: [Stmt] }
 // `FloatLit` is a FLOAT literal carried as its SOURCE TEXT, verbatim (the compiler is written in
 // Zen, which had no floats — so it never holds a float VALUE; the text "1.5" IS a C double
 // literal and a JS number as-is). Typed f64 by the checker.
-Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call(CallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
+Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call(CallData) | MethodCall(MethodCallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
      | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
@@ -83,7 +88,7 @@ StructDecl*: { name: str, fields: [Field] }             // typedef struct { fiel
 // `Box<concrete>` used, substituting tparam→arg in the field types. genModule drops the DGenStruct.
 GenStructDecl*: { name: str, tparams: [Param], fields: [Field] }   // tparams = name-only Params (no sizeof(str))
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
-VariantDef*: { name: str, payload: Ty }
+VariantDef*: { name: str, payload: Ty, dflt: Ptr<Expr> }   // dflt = constant for the zero-arg ctor (`Name = expr`); null_ptr() = no default. NOT named `default` — that's a C keyword and collides with the `default()` allocator ctor under keyword-mangling.
 EnumDecl*: { name: str, variants: [VariantDef] }
 // a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
 // The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
@@ -101,7 +106,7 @@ ImplData*: { ty: str, trname: str, methods: [Param], pos: i32 }
 // `[Param]` buffer needs no `sizeof(str)`). It carries no code (modules link separately, so
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
-ImportData*: { names: [Param] }
+ImportData*: { names: [Param], module: str }   // module = the imported module path text ("std.text.fmt"), kept for the formatter
 // DGlobal is a module-level MUTABLE global `name := init` (Goal Z E1 — scheduler/runtime state).
 // It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
 // `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
@@ -180,6 +185,7 @@ bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
 call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args, pos: 0, raw: false )) }
 call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: false )) }
 raw_call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: true )) }
+emcall* = (recv: Ptr<Expr>, method: str, args: [Expr], p: i32) Expr { .MethodCall(MethodCallData( recv: recv, method: method, args: args, pos: p )) }
 cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData( c: c, t: t, e: e )) }
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData( obj: o, field: f )) }
 arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData( obj: o, field: f )) }
@@ -297,6 +303,32 @@ mangle_str_in* = (a: MutPtr<Malloc>, base: str, args: [Ty]) str {
     end := buf.mangle_write_args(buf.write_str(0, base), args)
     buf.finish_buf(end)
 }
+// ── anonymous (structural) struct naming ──────────────────────────────────────────
+// An anon struct `{ q: i32, r: i32 }` (type position) and its literal `{ q: …, r: … }` are given a
+// STRUCTURAL name synthesized from the ORDERED field NAMES: `__anon_q_r`. The type position and the
+// literal both produce the SAME name (the literal has no field types at parse time, so the scheme is
+// names-only), so two identical shapes share one synthesized C struct and compose inside generics
+// (`Result<{q,r}, E>`). The synthesized StructDecl (carrying the real field types from the type
+// position) is hoisted into the module decl list by the parser.
+anon_fields_len = (fields: [Field]) i64 {
+    n := 0
+    fields.loop((h, i, f) { n = n + 1 + f.name.view().len })   // 1 for the '_' separator
+    n
+}
+anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: [Field]) i64 {
+    out := at
+    fields.loop((h, i, f) {
+        out = dst.write_str(out, "_")
+        out = dst.write_str(out, f.name)
+    })
+    out
+}
+mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) str {
+    n   := 6 + fields.anon_fields_len()                        // "__anon" = 6 bytes
+    buf: RawPtr<u8> := a.acquire(n + 1)
+    end := buf.anon_write_fields(buf.write_str(0, "__anon"), fields)
+    buf.finish_buf(end)
+}
 // the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
 // types implementing the same trait method emit DISTINCT C functions. UFCS dispatch routes `x.m()` to
 // the impl for x's type (compiler.check dispatch_name).
@@ -318,13 +350,16 @@ sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl( name: nm, fields: fs ) }
 gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl { GenStructDecl( name: nm, tparams: tps, fields: fs ) }
 genumdef* = (nm: str, tps: [Param], vs: [VariantDef]) GenEnumDecl { GenEnumDecl( name: nm, tparams: tps, variants: vs ) }
 tvoid* = () Ty { .Void() }
-vdef* = (nm: str, p: Ty) VariantDef { VariantDef( name: nm, payload: p ) }
+vdef* = (nm: str, p: Ty) VariantDef { VariantDef( name: nm, payload: p, dflt: null_ptr() ) }
+vdef_default* = (nm: str, p: Ty, e: Ptr<Expr>) VariantDef { VariantDef( name: nm, payload: p, dflt: e ) }
+expr_null* = () Ptr<Expr> { vdef("", tvoid()).dflt }       // a null Ptr<Expr> carrying the right static type
+is_expr_null* = (e: Ptr<Expr>) bool { e == null_ptr() }
 edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl( name: nm, variants: vs ) }
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
-dimport* = (names: [Param]) Decl { .DImport(ImportData( names: names )) }
+dimport* = (names: [Param], module: str) Decl { .DImport(ImportData( names: names, module: module )) }
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: 0 )) }
@@ -344,7 +379,7 @@ fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     ps.loop((h, i, p) { buf[i] = p.ty })
     buf
 }
-ty_node_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
+ty_node_in* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
 fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty { fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret)) }
 draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
                                                         // pragma, intrinsic decl, anything

@@ -151,6 +151,11 @@ VALUE_CASES = [
     ('test* = () i32 { v := (1 < 2).match ({ false => 5, _ => 9, })  v }', 9),                          # bool + `_ => body`, trailing comma
     ('test* = () i32 { (2).match ({ 1 => 10, 2 => 20, _ => 99, }) }', 20),                              # literal arms, trailing comma
     ('C*: A | B\ntest* = () i32 { c := C.B()  c.match ({ .A => 1, .B => 2, }) }', 2),                   # variant arms, trailing comma
+# --- enum variant DEFAULT values (`Name = expr`): a zero-arg `.Name` bakes in the constant; payload
+#     and bare variants still mix in the same declaration. ---
+    ('RGB*: { r: i32, g: i32, b: i32 }\nColour*: Red = RGB(r: 255, g: 0, b: 0) | Green | Blue | Custom(RGB)\ntest* = () i32 {\n  c := Colour.Red\n  c.match ({ .Red(v) => v.r, .Custom(v) => v.r, .Green => 0, .Blue => 0 })\n}', 255),   # struct default
+    ('Lvl*: Low = 1 | High = 9 | Exact(i32)\nf* = (l: Lvl) i32 { l.match ({ .Low(v) => v, .High(v) => v, .Exact(v) => v }) }\ntest* = () i32 { f(Lvl.Low) + f(Lvl.High) }', 10),                                              # scalar defaults
+    ('Lvl*: Low = 1 | High = 9 | Exact(i32)\nf* = (l: Lvl) i32 { l.match ({ .Low(v) => v, .High(v) => v, .Exact(v) => v }) }\ntest* = () i32 { f(.Low) + f(.Exact(40)) }', 41),                                                # leading-dot default + payload
 # --- f64 floats (Goal R): a literal carries its TEXT through the compiler (the compiler itself has
 #     no float values); f64 op f64 only for + - * / and comparisons; the int<->float boundary is
 #     crossed ONLY by the explicit to_f64 / to_i64 / to_i32 casts (C truncation toward zero). ---

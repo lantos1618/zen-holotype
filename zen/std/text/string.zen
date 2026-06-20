@@ -57,7 +57,13 @@ new_in*<A> = (a: MutPtr<A>) String { a.init(16) }
 grow_in<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
     String( ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap )
 }
+// Force `s` to a local FIRST: this function is inlined (generic over A), and `s` is read 4×. If the
+// caller passes a non-trivial expression — e.g. a long `.push_in(…).push_in(…)` builder chain — an
+// unbound `s` splices that whole subtree in at every read, and nested builders compound it to
+// EXPONENTIAL inlined size (and compile time). Binding once emits the subtree a single time; the
+// four reads reference the cheap local. Keeps allocator-threaded String builders linear to inline.
 reserve_in<A> = (a: MutPtr<A>, s: String, need: i64) String {
+    s := s
     (s.len + need > s.cap).match ({
         true  => a.grow_in(s, (s.cap + need) * 2),
         false => s
