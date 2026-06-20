@@ -34,6 +34,16 @@ VALUE_CASES = [
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 {\n  o := .Some(7)\n  unwrap(o, 0)\n}', 7),
     ('first<T> = (xs: [T]) T { xs[0] }\ntest* = () i32 { first([7, 8]) }', 7),
     ('pick2<T> = (xs: [T], a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }', 9),
+    # --- VARIADIC PARAMS: a trailing `...T` collects the surplus call args into a `[T]` slice ---
+    ('sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { sum(1, 2, 3, 4) }', 10),
+    ('sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { sum() }', 0),
+    ('sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { sum(7) }', 7),
+    # a fixed param BEFORE the variadic one: base + collected sum
+    ('addv = (base: i32, xs: ...i32) i32 { t := base  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { addv(100, 1, 2, 3) }', 106),
+    # str varargs after a fixed str: the body counts the collected names
+    ('join = (sep: str, xs: ...str) i32 { n := 0  xs.loop((h, i, x) { n = n + 1 })  n }\ntest* = () i32 { join(", ", "a", "b") }', 2),
+    # varargs of a STRUCT type (the motivating DSL case: div(child, child, ...))
+    ('Node*: { tag: i32, val: i32 }\ndiv = (kids: ...Node) i32 { s := 0  kids.loop((h, i, c) { s = s + c.val })  s }\ntest* = () i32 { div(Node(tag: 1, val: 10), Node(tag: 2, val: 20)) }', 30),
     ('Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\nget<T> = (b: Box<T>) T { b.v }\ntest* = () i32 {\n  b := mk(42)\n  b.get()\n}', 42),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
@@ -178,6 +188,9 @@ VERDICT_CASES = [
     ('test* = () i32 { x: i32 := 4294967296  to_i32(x) }', 'reject'),
     ('test* = () i32 { x := 50  (1 < x < 10).match ({ true => 1, false => 0 }) }', 'reject'),
     ('pick<T> = (xs: [T], a: T) T { a }\ntest* = () i32 { pick([1, 2]) }', 'reject'),
+    # --- VARIADIC PARAMS: a `...T` param must be LAST and there may be at most ONE (parse rejects otherwise) ---
+    ('bad = (xs: ...i32, y: i32) i32 { y }\ntest* = () i32 { bad(1, 2, 3) }', 'reject'),
+    ('bad = (xs: ...i32, ys: ...i32) i32 { 0 }\ntest* = () i32 { bad(1) }', 'reject'),
     # --- test_self_hosted_rejects ---
     ('test* = () i32 {  }', 'reject'),
     ('test* = () i32 {\n  x := 5\n}', 'reject'),
