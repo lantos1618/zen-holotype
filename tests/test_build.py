@@ -568,7 +568,7 @@ def test_type_import_keeps_actor_methods_available():
         "    cell: ActorCell<Msg> := heap.addr().cell(4)\n"
         "    reply_to: ReplyRef<i32> := cell.reply(heap.addr())\n"
         "    ref: ActorRef<Msg> := cell.ref()\n"
-        "    ref.tell(.Ping(reply_to))\n"
+        "    ref.send(.Ping(reply_to))\n"
         "    room := Room(n: 0)\n"
         "    cell.drain(room.addr())\n"
         "    out := reply_to.await(heap.addr())\n"
@@ -1134,6 +1134,28 @@ def test_vec_and_string_push_coexist_by_receiver_type():
         "}\n"
     )
     assert subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True).returncode == 31
+
+
+def test_string_builder_chain_inlines_linearly_not_exponentially():
+    """Regression (BUG #2): a deep chain of generic String-builder helpers used to blow up the
+    template inliner EXPONENTIALLY (`reserve_in` read its `s` arg 4×, so each nested
+    `.push_in(…)` level spliced the whole receiver subtree in 4× — k links ≈ 4^k inlined size).
+    `reserve_in` now binds `s` to a local first, so the receiver is emitted once per level and an
+    8-deep generic builder chain compiles in well under a second. Guard with a tight timeout."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    chain = "".join(".push_byte(a, 'x')" for _ in range(8))
+    (d / "p.zen").write_text(
+        "{ to_exit } = std.core.bool\n"
+        "{ String, new_in } = std.text.string\n"
+        "alloc = std.mem.alloc\n"
+        "push_byte<A> = (s: String, a: MutPtr<A>, v: u8) String { s.push_in(a, v).push_in(a, v) }\n"
+        f"build<A> = (a: MutPtr<A>) str {{ a.new_in(){chain}.finish_in(a) }}\n"
+        "main = () i32 { heap := alloc.default()  s := build(heap.addr())  (s.len() == 16).to_exit() }\n"
+    )
+    # 30s is ~100× the linear time and far below the (timed-out) exponential blowup.
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
 
 
 def test_zenc_run_string_explicit_allocator_and_result():
@@ -1839,8 +1861,8 @@ def test_zenc_doc_lists_public_declarations_and_nearby_docs():
 
     arena = subprocess.run([zenc, "doc", "std.mem.arena"], capture_output=True, text=True)
     assert arena.returncode == 0, arena.stderr
-    assert "new_in*<A>" in arena.stdout
-    assert "try_new_in*<A>" in arena.stdout
+    assert "make_in*<A>" in arena.stdout
+    assert "try_make_in*<A>" in arena.stdout
     assert "arena_new" not in arena.stdout
     assert "try_arena_new" not in arena.stdout
 
@@ -2538,7 +2560,7 @@ def test_zenc_run_str_tokenizer():
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
         '{ default } = std.mem.alloc\n'
-        '{ Arena, new_in } = std.mem.arena\n'
+        '{ Arena, make_in } = std.mem.arena\n'
         '{ find, substr, parse_int, len } = std.text.str\n'
         '{ println } = std.text.fmt\n'
         '// print the words of s[from..] (split on \' \'), each followed by its parse_int\n'
@@ -2557,7 +2579,7 @@ def test_zenc_run_str_tokenizer():
         '}\n'
         'main = () i32 {\n'
         '  heap := default()\n'
-        '  scratch: Arena := heap.addr().new_in(4096)\n'
+        '  scratch: Arena := heap.addr().make_in(4096)\n'
         '  scratch.addr().words("zen has 3 frontends and -1 regrets", 0)\n'
         '  scratch.addr().free_in(heap.addr())\n'
         '  0\n'
@@ -2804,7 +2826,7 @@ def test_zenc_run_arena_uses_explicit_backing_allocator():
         "success = () bool {\n"
         "    backing := Counting(acquired: 0, released: 0)\n"
         "    a := backing.addr()\n"
-        "    ar: arena.Arena := arena.new_in(a, 64)\n"
+        "    ar: arena.Arena := arena.make_in(a, 64)\n"
         "    p := ar.addr().acquire(8)\n"
         "    p.store_i64(33)\n"
         "    ok := (backing.acquired == 1) && (ar.addr().used() == 8) && (p.load_i64() == 33)\n"
@@ -2813,7 +2835,7 @@ def test_zenc_run_arena_uses_explicit_backing_allocator():
         "}\n"
         "failure = () bool {\n"
         "    lim := LimitAlloc(_: 0)\n"
-        "    r: Result<arena.Arena, IoError> := arena.try_new_in(lim.addr(), 64)\n"
+        "    r: Result<arena.Arena, IoError> := arena.try_make_in(lim.addr(), 64)\n"
         "    r.match({\n"
         "        .Err(e) => e.match({ .NotFound => true, _ => false }),\n"
         "        .Ok(a) => false\n"

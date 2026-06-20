@@ -103,7 +103,7 @@ def test_resolver_exposes_structured_import_edges():
             "arena = std.mem.arena\n"
             "main = () i32 {\n"
             "    heap := default()\n"
-            "    a := arena.new_in(heap.addr(), 4096)\n"
+            "    a := arena.make_in(heap.addr(), 4096)\n"
             "    src := \"{ println } = std.text.fmt\\nactor = std.concurrent.actor\\nhelper = helper\\nmain = () i32 { 0 }\\n\"\n"
             "    edges := a.addr().import_edges(src)\n"
             "    ok := (edges.len == 3)\n"
@@ -269,7 +269,7 @@ def test_resolver_exposes_structured_provided_symbols():
             "main = () i32 {\n"
             "    scratch := Malloc(_: 0)\n"
             "    heap := default()\n"
-            "    a := arena.new_in(heap.addr(), 4096)\n"
+            "    a := arena.make_in(heap.addr(), 4096)\n"
             "    src := \"{ helper } = dep\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n"
             "    symbols := scratch.addr().provided_symbols_in(a.addr(), src)\n"
             "    ok := (symbols.len == 4)\n"
@@ -348,7 +348,7 @@ def test_resolver_provided_symbols_handles_many_symbols_without_recursive_stack_
             "main = () i32 {\n"
             "    scratch := Malloc(_: 0)\n"
             "    heap := default()\n"
-            "    a := arena.new_in(heap.addr(), 65536)\n"
+            "    a := arena.make_in(heap.addr(), 65536)\n"
             f"    src := \"{escaped}\"\n"
             "    symbols := scratch.addr().provided_symbols_in(a.addr(), src)\n"
             "    g := scratch.addr().module_graph_in(a.addr(), src)\n"
@@ -381,7 +381,7 @@ def test_resolver_exposes_module_graph_imports_and_symbols():
             "main = () i32 {\n"
             "    scratch := Malloc(_: 0)\n"
             "    heap := default()\n"
-            "    a := arena.new_in(heap.addr(), 4096)\n"
+            "    a := arena.make_in(heap.addr(), 4096)\n"
             "    src := \"{ helper, if } = dep\\nbytes = std.text.bytes\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n"
             "    g := scratch.addr().module_graph_in(a.addr(), src)\n"
             "    ok := (g.import_count() == 2) && (g.symbol_count() == 5)\n"
@@ -629,7 +629,7 @@ def test_namespace_bound_std_ownership_modules_can_export_same_constructor_names
             "{ default } = std.mem.alloc\n"
             "main = () i32 {\n"
             "    alloc := default()\n"
-            "    ar := arena.new_in(alloc.addr(), 64)\n"
+            "    ar := arena.make_in(alloc.addr(), 64)\n"
             "    r := rc.new_in(alloc.addr(), 11)\n"
             "    a := arc.new_in(alloc.addr(), 13)\n"
             "    o := own.new_in(alloc.addr(), own.Resource(id: 17, slot: 0))\n"
@@ -1017,6 +1017,52 @@ def test_namespace_bound_std_actor_cell_request_survives_export_name_collision()
             "    out: i32 := cell.request(heap.addr(), room.addr(), (reply_to) { .Ping(reply_to) })\n"
             "    cell.free(heap.addr())\n"
             "    ((out + right.cell(35)) == 77).to_exit()\n"
+            "}\n"
+        ),
+    })
+    r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_std_string_and_actor_imports_coexist_without_new_in_collision():
+    """Regression (BUG #4): importing both std.text.string and std.concurrent.actor used to
+    flatten two bare `new_in` decls (string's arity-1 builder vs arena's arity-2, pulled in via
+    actor->runtime->arena), so `m.addr().new_in()` resolved to the wrong arity and cascaded into
+    ~50 struct-field/arity errors. arena is now namespace-imported inside runtime.zen, so its
+    `new_in` is qualified and no longer leaks a bare global. Both modules build + run together."""
+    d = _program({
+        "p.zen": (
+            "{ to_exit } = std.core.bool\n"
+            "{ String, new_in } = std.text.string\n"
+            "alloc = std.mem.alloc\n"
+            "actor = std.concurrent.actor\n"
+            "Colour*: { r: u8, g: u8, b: u8 }\n"
+            "hex_digit = (n: u8) u8 { (n < 10).match({ true => '0' + n, false => ('a' + n) - 10 }) }\n"
+            "push_byte<A> = (s: String, a: MutPtr<A>, v: u8) String {\n"
+            "    s2 := s.push_in(a, hex_digit(v / 16))\n"
+            "    s2.push_in(a, hex_digit(v % 16))\n"
+            "}\n"
+            "PixelMsg*: Draw(Colour) | Clear\n"
+            "Canvas*: { drawn: i32 }\n"
+            "Canvas.impl(actor.Receiver<PixelMsg>, {\n"
+            "    receive = (cv: MutPtr<Canvas>, ctx: actor.Context<PixelMsg>) void {\n"
+            "        ctx.msg.match({ .Draw(c) => { cv.drawn = cv.drawn + 1 }, .Clear => { cv.drawn = 0 } })\n"
+            "    }\n"
+            "})\n"
+            "main = () i32 {\n"
+            "    heap := alloc.default()\n"
+            "    a := heap.addr()\n"
+            "    c := Colour(r: 255, g: 128, b: 0)\n"
+            "    s := a.new_in().push_in(a, '#').push_byte(a, c.r).push_byte(a, c.g).push_byte(a, c.b)\n"
+            "    hx := s.finish_in(a)\n"
+            "    canvas: actor.ActorHandle<PixelMsg, Canvas> := actor.spawn(a, 8, Canvas(drawn: 0))\n"
+            "    canvas.send(.Draw(c))\n"
+            "    canvas.send(.Clear)\n"
+            "    canvas.send(.Draw(c))\n"
+            "    canvas.run()\n"
+            "    canvas.free(a)\n"
+            "    ok := (hx.at(0) == '#') && (hx.at(1) == 'f') && (hx.at(2) == 'f') && (hx.at(3) == '8')\n"
+            "    ok.to_exit()\n"
             "}\n"
         ),
     })
