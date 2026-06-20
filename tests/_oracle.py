@@ -86,9 +86,9 @@ int main(int argc, char** argv){
     int c; while ((c = fgetc(in)) != EOF){ if (len + 1 >= cap){ cap *= 2; buf = realloc(buf, cap); } buf[len++] = (char)c; }
     buf[len] = 0;
     Malloc m = { 0 };
-    /* check_module_kind packs the first error's byte offset alongside the kind (kind + pos*16,
-     * U1.4 Phase 2); the exit code is 8-bit, so return the bare kind. */
-    return check_module_kind(&m, resolve_module(&m, parse_module(&m, buf))) & 15;
+    /* check_module_kind packs the first error's byte offset alongside the kind (kind + pos*32,
+     * 5-bit kind since kinds now reach 18); the exit code is 8-bit, so return the bare kind. */
+    return check_module_kind(&m, resolve_module(&m, parse_module(&m, buf))) & 31;
 }
 """
 
@@ -99,7 +99,7 @@ KIND_NAME = {
     5: "exhaustiveness", 6: "dup-variant", 7: "operand-type", 8: "index", 9: "return-fit",
     10: "assign-fit", 11: "conformance", 12: "dup-fn", 13: "value-pos-return",
     14: "parse",   # KPARSE — the parser's `__syntax_error` sentinel (parser-totality rejects)
-    15: "ownership",
+    15: "ownership", 16: "trait-bound", 17: "unknown-type", 18: "lambda-value",
 }
 
 # ── S1 CROSS-MODULE TYPE-CHECK driver (check_validate.check_linked) ─────────────────────────────

@@ -61,6 +61,27 @@ VALUE_CASES = [
     ('Store<S>: { state: S }\nAppState: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 5))\n  st.state.count\n}', 5),
     # multi-tparam inferred from field values
     ('Pair<A, B>: { a: A, b: B }\ntest* = () i32 {\n  p := Pair(a: 7, b: 9)\n  p.a + p.b\n}', 16),
+    # --- GENERIC DISPATCH on a STATEMENT-MATCH payload binding: the lowered binding must be TYPED so
+    #     the generic call (trait dispatch) monomorphizes (was: link error, undefined trait method) ---
+    ('Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nE*: Num(i64) | Add(i64)\ntest* = () i64 {\n  c := Cell(x: 0)\n  e := E.Num(21)\n  e.match({ .Num(n) => store_i64(c.addr(), apply(n)), .Add(m) => store_i64(c.addr(), apply(m)) })\n  load_i64(c.addr())\n}', 42),
+    # same, but the generic call is on a MEMBER of the payload binding (`apply(ps.len)`)
+    ('Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nW*: Obj([i32]) | None\ntest* = () i64 {\n  c := Cell(x: 0)\n  w := W.Obj([10, 20, 30])\n  w.match({ .Obj(ps) => store_i64(c.addr(), apply(ps.len)), .None => store_i64(c.addr(), 0-1) })\n  load_i64(c.addr())\n}', 6),
+    # STATEMENT-position match whose SUBJECT is an enclosing arm's payload binding (`.Bin(bo)` then
+    # `bo.match(...)` on the RHS of `=`): the binding must be TYPED so the inner match recovers `bo`'s
+    # enum name and emits qualified case labels (`B_OpAdd`, not bare `_OpAdd` → cc undeclared).
+    ('B*: OpAdd | OpSub\nO*: Bin(B)\nf = (op: O) i32 { r := 0  op.match({ .Bin(bo) => { r = bo.match({ .OpAdd => 1, .OpSub => 2 }) } })  r }\ntest* = () i32 { f(O.Bin(B.OpSub)) }', 2),
+    # --- ENUM `==`/`!=`: lower to a TAG comparison (raw struct == is invalid C) ---
+    ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Idle\n  b := State.Idle\n  r := (a == b).to_i32()\n  r\n}', 1),
+    ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Idle\n  b := State.Run(5)\n  r := (a != b).to_i32()\n  r\n}', 1),
+    # `==` against a variant literal (different tag → 0)
+    ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Run(2)\n  r := (a == State.Idle).to_i32()\n  r\n}', 0),
+    # --- bare variant ctor arg to a GENERIC fn: the inferred type arg disambiguates which enum owns
+    #     the shared variant name (`.Num` exists on both Tok and Expr; T=Tok from the other arg) ---
+    ('Tok*: Num(i64) | End\nExpr*: Num(i64) | Bin(i64)\nsecond<T> = (a: T, b: T) T { b }\nunNum = (t: Tok) i64 { t.match({ .Num(n) => n, .End => 0-1 }) }\ntest* = () i64 {\n  base := Tok.End\n  r := second(base, .Num(7))\n  unNum(r)\n}', 7),
+    # --- a lambda bound to a LOCAL (`g := (n){…}`) is a compile-time alias: spliced at each use (HOF
+    #     arg + direct call), captures the enclosing scope, reused — no zen__unlowered_lambda / undef ---
+    ('apply = (f: (i32) i32, x: i32) i32 { f(x) }\ntest* = () i32 {\n  k := 10\n  g := (n) { n + k }\n  apply(g, 41) + apply(g, 2)\n}', 63),
+    ('twice = (f: (i32) i32, x: i32) i32 { f(f(x)) }\ntest* = () i32 {\n  g := (n) { n + 3 }\n  twice(g, 1)\n}', 7),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
@@ -417,6 +438,13 @@ VERDICT_CASES = [
     ('test* = () i32 { b := 1.5 == 1\n 0 }', 'reject'),                  # mixed equality is the mix too
     ('eat* = (x: f64) f64 { x }\ntest* = () f64 { eat(2) }', 'reject'),  # int arg ⊀ f64 param
     ('test* = () i32 { x := 3\n x.match ({ 0.25 => 1, _ => 9 }) }', 'reject'),   # a float label on an int subject
+    # --- lambda-value (LAMBDA-2 safety net): a lambda the inliner can't splice — stored in a field or
+    #     returned — is rejected cleanly (was: leaked unlowered C). A local-bound lambda used as a call
+    #     arg is NOT here (it's aliased/spliced — see the VALUE cases above). Pinned `reject` (count):
+    #     the kind code is 18 and the oracle's check-kind harness masks `& 15`, so the exact
+    #     `lambda-value` kind is verified through the driver in test_resolver_fixes.py. ---
+    ('S*: { f: (i32) i32 }\ntest* = () i32 {\n  s := S(f: (n) { n + 1 })\n  0\n}', 'reject'),
+    ('mk* = () (i32) i32 { (n) { n + 1 } }\ntest* = () i32 { 0 }', 'reject'),
 ]
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════

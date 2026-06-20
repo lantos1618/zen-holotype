@@ -175,3 +175,47 @@ def test_std_ast_decl_buffer_uses_explicit_allocator():
         "}\n")
     r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ── RESOLVE-2: undefined type names in annotations are rejected (was: leaked to C as `unknown type
+#    name 'X'` at cc time). Driver-only check (runs on the flattened decls), so it's exercised here
+#    through the binary, not via the oracle corpus. ──────────────────────────────────────────────────
+def test_undefined_type_in_annotation_rejected():
+    r = _check("f = (m: MutPtr<TotallyUndefinedType>, n: i64) i64 { n }\nmain = () i32 { 0 }\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_undefined_return_type_rejected():
+    r = _check("f = () Nonexistent { 0 }\nmain = () i32 { 0 }\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_defined_and_imported_types_not_flagged():
+    # a user type, a tparam, and an imported std type must all pass (no false positive)
+    src = ("{ println } = std.text.fmt\n"
+           "alloc = std.mem.alloc\n"
+           "Pt*: { x: i32 }\n"
+           "idp<T> = (p: MutPtr<T>) MutPtr<T> { p }\n"
+           "useit = (m: MutPtr<alloc.Heap>, q: MutPtr<Pt>) i32 { q.x }\n"
+           "main = () i32 { 0 }\n")
+    r = _check(src)
+    assert r.returncode == 0, r.stderr
+
+
+# ── LAMBDA-2: a local-bound lambda used as a call arg is lowered (alias-spliced) and compiles; a
+#    lambda the inliner can't splice — stored in a field or returned — is rejected cleanly with
+#    error[lambda-value] instead of leaking `zen__unlowered_lambda` into the C. ────────────────────────
+def test_lambda_bound_local_used_as_hof_arg_ok():
+    r = _check("apply = (f: (i32) i32, x: i32) i32 { f(x) }\n"
+               "main = () i32 {\n  k := 10\n  g := (n) { n + k }\n  apply(g, 41)\n}\n")
+    assert r.returncode == 0, r.stderr
+
+
+def test_lambda_stored_in_field_rejected():
+    r = _check("S*: { f: (i32) i32 }\nmain = () i32 {\n  s := S(f: (n) { n + 1 })\n  0\n}\n")
+    assert r.returncode != 0 and "lambda-value" in r.stderr, r.stderr
+
+
+def test_lambda_returned_rejected():
+    r = _check("mk = () (i32) i32 { (n) { n + 1 } }\nmain = () i32 { 0 }\n")
+    assert r.returncode != 0 and "lambda-value" in r.stderr, r.stderr
