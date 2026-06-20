@@ -1916,8 +1916,8 @@ def test_zenc_doc_lists_public_declarations_and_nearby_docs():
 
     text = subprocess.run([zenc, "doc", "std.text.str"], capture_output=True, text=True)
     assert text.returncode == 0, text.stderr
-    assert "dup*<A> = (a: MutPtr<A>, s: str) [u8]" in text.stdout
-    assert "try_dup*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>" in text.stdout
+    assert "dup_bytes*<A> = (a: MutPtr<A>, s: str) [u8]" in text.stdout
+    assert "try_dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>" in text.stdout
     assert "substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str" in text.stdout
     assert "try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>" in text.stdout
     assert "at* = (s: str, i: i64) u8" in text.stdout
@@ -2533,8 +2533,8 @@ def test_zenc_check_rejects_default_str_allocating_helpers():
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     cases = {
-        "dup.zen": "text = std.text.str\nmain = () i32 { bs := text.dup(\"xy\")  0 }\n",
-        "try_dup.zen": "text = std.text.str\nmain = () i32 { r := text.try_dup(\"xy\")  0 }\n",
+        "dup.zen": "text = std.text.str\nmain = () i32 { bs := text.dup_bytes(\"xy\")  0 }\n",
+        "try_dup.zen": "text = std.text.str\nmain = () i32 { r := text.try_dup_bytes(\"xy\")  0 }\n",
         "substr.zen": "text = std.text.str\nmain = () i32 { s := text.substr(\"hello\", 1, 3)  0 }\n",
         "try_substr.zen": "text = std.text.str\nmain = () i32 { r := text.try_substr(\"hello\", 1, 3)  0 }\n",
     }

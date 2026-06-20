@@ -2,7 +2,7 @@
 
 Surfaced while building the Colour demo (hex `String` formatting beside a `Canvas` actor).
 Each entry is a real, reproducible limit with a minimal repro, the root cause, and the
-workaround. Two were FIXED (#4, #2); two are documented LIMITS (#1, #3).
+workaround. Three were FIXED (#4, #2, #1); one is a documented LIMIT (#3).
 
 `ZEN_ROOT=<checkout> ./zenc build <file>.zen` / `./zenc run <file>.zen` reproduces all of these.
 
@@ -52,7 +52,7 @@ expressions can trigger super-linear inlined size.
 
 ---
 
-## LIMIT — recursive generic functions are not monomorphized ("BUG #1")
+## FIXED — recursive generic functions are now monomorphized (was "BUG #1")
 
 ```
 f = (s: String, a: Allocator, b: i32) String {
@@ -60,37 +60,40 @@ f = (s: String, a: Allocator, b: i32) String {
 }
 ```
 
-A generic function that calls ITSELF miscompiles:
+A generic function that calls ITSELF used to miscompile:
 
 * explicit generic (`f<A> = (a: MutPtr<A>, …)` calling `f`) → link error
   `undefined reference to 'f'`;
 * the `(a: Allocator)` sugar → C `type mismatch in conditional expression` / `error[arg-type]`.
 
-Root cause: generic functions are realized by INLINING (templates), never emitted as concrete C
-functions. `compiler.mono` monomorphizes generic STRUCTS and ENUMS but explicitly skips generic
-functions (`mono.zen`: "a generic fn is inlined; skip its T-params"). The inliner breaks
-recursion (`check.zen` `maybe_template` → `is_inlining` → `recall`) by emitting a literal call to
-the template name `f`, but no concrete `f` is ever generated, so the recursive call dangles.
+Old root cause: generic functions are realized by INLINING (templates), never emitted as concrete
+C functions. `compiler.mono` monomorphizes generic STRUCTS and ENUMS but skips generic functions.
+The inliner broke recursion by emitting a literal call to the template name `f`, but no concrete
+`f` was ever generated, so the recursive call dangled.
 
-Note this is reached by allocator-threaded code without writing `<A>` explicitly: `(a: Allocator)`
-is sugar for an implicit `<A: Allocator>` generic (`parse.zen` `desugar_trait_params`), so a
-RECURSIVE function with an `(a: Allocator)` param is a recursive generic and hits this.
+Fix: a function-monomorphization pass for recursive generics, in `compiler.check` (`mono_rec`),
+mirroring the struct/enum monomorphizer in `compiler.mono`:
 
-NON-recursive generics are fine — including nested `(a: Allocator)` params threaded through
-several calls (the Colour demo's `to_hex` → `push_byte` → `push_in` proves it). Only direct (or
-mutual) self-recursion of a generic function is affected.
+* `maybe_template` no longer inlines a recursive generic — it leaves the call as a bare call to
+  the template name (`rc_is_rec_gen_f` detects a tparam generic — not FnT-splice — whose body
+  calls itself directly);
+* `mono_rec` runs after inlining: it discovers every distinct `(template, concrete-targs)` the
+  program uses (Env-threaded so `addr`/dispatch/return-type inference is exact), transitively
+  closes over instance bodies, and appends one concrete `DFunc` per instance — tparam→arg
+  substituted, with a deterministic mangled name via the same `mangle_str_in` scheme as generic
+  structs/enums (`sumv` + `[Heap]` → `sumv_Heap`);
+* `resolve_call` rewrites each recursive-generic call to its mangled instance once that instance
+  decl exists (idempotent across resolve passes; unchanged for every non-recursive call).
 
-Workarounds:
-* make the helper non-generic (concrete allocator type, e.g. `MutPtr<Heap>`) — a concrete
-  function CAN recurse; or
-* make the recursion non-generic: keep the generic entry point thin and recurse through a
-  concrete inner function; or
-* express the repetition with `.loop` / `@while` instead of self-recursion.
+Only DIRECT type-param self-recursion is handled. FnT-splice generics still inline as before;
+MUTUAL recursion of generics is not yet monomorphized (still inlines → may dangle). Polymorphic
+recursion (self-call with strictly deeper targs) is bounded and dropped past depth 24, exactly as
+`compiler.mono`'s struct/enum worklist does.
 
-Proper fix (roadmap, NOT a demo-scoped change): a function-monomorphization pass — mangle each
-recursive generic per concrete type-arg set, rewrite self-calls to the mangled name, and emit the
-instances as concrete `DFunc`s (mirroring the struct/enum monomorphizer in `compiler.mono`).
-Risky to the byte-exact seed; deferred deliberately.
+The byte-exact seed is preserved: NON-recursive generics are untouched (the compiler's own
+internals are full of them and self-compile to a byte-exact fixpoint), and the compiler contained
+zero *instantiated* recursive generics before this (they could not link), so nothing it relied on
+changed. `(a: Allocator)` sugar is covered (it desugars to an implicit `<A: Allocator>` generic).
 
 ---
 
