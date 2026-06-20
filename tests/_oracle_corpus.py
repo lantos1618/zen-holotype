@@ -243,6 +243,10 @@ VALUE_CASES = [
     #     parenthesized expr), not a payload glued onto the ctor (`State.Idle` ⏎ `(a).q()`) ---
     ('State*: Idle | Run\nq = (s: State) i32 { 7 }\ntest* = () i32 {\n  a := State.Idle\n  (a).q()\n}', 7),                            # newline un-glues the '('
     ('E*: A(i32) | B\nval = (e: E) i32 { e.match({ .A(x) => x, .B => 0 }) }\ntest* = () i32 { val(E.A(42)) }', 42),                  # same-line payload still glues (regression guard)
+    # --- GLUE-2: a statement-leading `(` after a MEMBER-ACCESS `.field` tail starts a NEW statement, not
+    #     a method call glued across the newline (`nd := 10 + ed.w` ⏎ `(nd < 100).match(…)`) ---
+    ('E*: { w: i32 }\ntest* = () i32 {\n  ed := E(w: 5)\n  nd := 10 + ed.w\n  (nd < 100).match({ true => 7, false => 0 })\n}', 7),  # newline un-glues `.field` from `(`
+    ('S*: { n: i32 }\ndbl = (x: i32) i32 { x + x }\ntest* = () i32 { s := S(n: 4)  s.n.dbl() }', 8),                              # same-line `.field(args)` still a method call (regression guard)
     # --- G1: multi-field enum payloads — `B(i32, i32)` ≡ `B({_0: i32, _1: i32})`; `.B(a, b)` constructs
     #     the anon struct, `.B(p)` binds it (fields `_0`, `_1`, …). NON-generic enums only — a generic
     #     anon-struct payload (`Cons(T, …)`) hits a pre-existing checker/mono limit, same as the explicit
