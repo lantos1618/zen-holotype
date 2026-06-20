@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty } = std.text.str
@@ -739,13 +739,31 @@ str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf[1] = load(rhs)
     buf
 }
+// An enum VALUE is a tagged union; raw C `==` on the struct is invalid. `==`/`!=` between two enum
+// VALUES of the same type lower to a TAG comparison (concrete + generic-instance enums). A POINTER to
+// an enum is NOT included: `p == null_ptr()` / `p1 == p2` are pointer-identity comparisons (valid C),
+// not value equality — including Ptr here mis-lowered `e == null_ptr()` (e: Ptr<Expr>, Expr an enum)
+// to `e->tag == …`. NOTE: tag-only compares the active VARIANT, not the payload — `Run(1) == Run(2)`
+// is `true`; payloadless / state-style enums (the common case) compare exactly; full structural
+// (payload) equality is a deliberate follow-up.
+is_enum_ty = (env: Env, t: Ty) bool {
+    t.match ({
+        .Named(n)   => env.didx.enum_idx.get(n, 0 - 1) >= 0,
+        .Generic(g) => is_empty(env.decls.find_genenum(g.name).name) == false,
+        _           => false
+    })
+}
 resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     lhs := a.resolve_expr(env.clr_exp(), b.lhs)
     rhs := a.resolve_expr(env.clr_exp(), b.rhs)
     cmp := eq(b.op, "==") || eq(b.op, "!=")
-    (cmp && env.infer_expr(lhs).is_str_t() && env.infer_expr(rhs).is_str_t()).match ({
+    lty := env.infer_expr(lhs)
+    (cmp && lty.is_str_t() && env.infer_expr(rhs).is_str_t()).match ({
         true  => a.cenode(call(eq(b.op, "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))),
-        false => a.resolve_f64_neg(env, b.op, lhs, rhs, b.pos)
+        false => (cmp && env.is_enum_ty(lty)).match ({
+            true  => a.cenode(bin_at(b.op, a.subj_tag(lhs, lty.ty_is_ptr()), a.subj_tag(rhs, lty.ty_is_ptr()), b.pos)),
+            false => a.resolve_f64_neg(env, b.op, lhs, rhs, b.pos)
+        })
     })
 }
 // Prefix `-f64` parses as `0 - x`; rewrite that zero to `0.0`.
@@ -799,14 +817,31 @@ collect_varargs = (a: MutPtr<Malloc>, ps: [Param], args: [Expr]) [Expr] {
         }
     })
 }
+// The expected type for argument `i` of a (generic or plain) call. For a generic fn, the param type may
+// name a tparam (`x: T`); substituting the inferred type args gives the CONCRETE expected type, which
+// lets a bare variant ctor argument (`.Num(n)` for a `Vec<Tok>.push`) resolve against the right enum
+// instead of guessing by variant name. FnT (lambda) params keep the void expected-type they had before
+// (they are spliced/inlined later), so existing template-lambda resolution is unchanged. A variadic
+// param's collected args take element type T (via arg_exp_v) before any tparam substitution.
+call_arg_exp = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param], i: i32) Ty {
+    pty := ps.arg_exp_v(i)
+    tmpl.match ({
+        false => pty,
+        true  => pty.is_fnt().match ({
+            true  => tvoid(),
+            false => env.a.subst_ty_in(tparams, targs, pty)
+        })
+    })
+}
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
-    dn   := env.dispatch_name(c)
-    fn   := env.env_func(dn)
-    ps   := fn.params
-    tmpl := fn.is_generic_fn()
-    buf  := a.cebuf(c.args.len)
+    dn    := env.dispatch_name(c)
+    fn    := env.env_func(dn)
+    ps    := fn.params
+    tmpl  := fn.is_generic_fn()
+    targs := tmpl.match ({ true => env.call_targs(fn, c.args), false => no_tys() })
+    buf   := a.cebuf(c.args.len)
     c.args.loop((h, i, ar) {
-        ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp_v(i) })
+        ex     := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
     a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf))
@@ -893,12 +928,16 @@ subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr
     ptr.match ({ true => { u = a.cenode(arrow(subj, "u")) }, _ })
     a.cenode(member(u, variant))
 }
-arm_then = (a: MutPtr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
+arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
     body := a.branch_stmts(ar.body)
     out := body
     eq(ar.bind, "").match ({
         true  => {},
-        false => { out = a.cons_stmt(slet(ar.bind, a.subj_payload(m.subj, ar.variant, m.ptr)), body) }
+        // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
+        // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
+        // generic call on it (`println(n)`) fails to monomorphize → link error. Same fix the or_return
+        // lowering already uses (slett with subj_variant_payload). Void payload type falls back to slet.
+        false => { out = a.cons_stmt(slett(ar.bind, env.subj_variant_payload(t, ar.variant), a.subj_payload(m.subj, ar.variant, m.ptr)), body) }
     })
     out
 }
@@ -909,7 +948,7 @@ cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
     buf
 }
 // Build if/else chain over enum arms.
-lower_match_arms = (a: MutPtr<Malloc>, m: MatchData, i: i32) [Stmt] {
+lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
     out := no_stmts()
     (i >= m.arms.len).match ({
         true  => {},
@@ -919,15 +958,16 @@ lower_match_arms = (a: MutPtr<Malloc>, m: MatchData, i: i32) [Stmt] {
                 true  => { out = a.branch_stmts(ar.body) },
                 false => {
                     cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(a.tag_const(m.ename, ar.variant)))))
-                    out = a.one_stmt(sif(cond, a.arm_then(m, ar), a.lower_match_arms(m, i + 1)))
+                    out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
                 }
             })
         }
     })
     out
 }
-lower_match_stmt = (a: MutPtr<Malloc>, m: MatchData) Stmt {
-    stmts := a.lower_match_arms(m, 0)
+lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
+    t     := env.infer_expr(m.subj)
+    stmts := a.lower_match_arms(env, t, m, 0)
     out := sexpr(a.cenode(block(stmts)))
     (stmts.len == 1).match ({ true => { out = stmts[0] }, _ })
     out
@@ -949,7 +989,7 @@ lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
     out := sexpr(e)
     load(e).match ({
         .Match(m) => env.decls.match_lowerable(m).match ({
-            true => { out = a.lower_match_stmt(m) },
+            true => { out = a.lower_match_stmt(env, m) },
             _    => { out = sexpr(e) }
         }),
         .Cond(d)  => { out = a.lower_cond_stmt(d) },
@@ -1151,6 +1191,30 @@ add_subst_arg = (a: MutPtr<Malloc>, args: [Expr], name: str) [Expr] {
     args.loop((h, i, e) { buf[i] = e })
     buf[args.len] = vref(name)
     buf
+}
+// A lambda bound to a local (`g := (n){…}`) has no C closure value. Instead the inliner treats the
+// local as a COMPILE-TIME ALIAS: shadow the name as an FnT "param" whose substituted "arg" is the
+// (already-xformed) lambda, so every later use — a direct call `g(x)` or a HOF arg `apply(g,…)` —
+// splices the lambda exactly like a directly-passed one. The `g := …` statement itself is dropped.
+add_fnt_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
+    base := a.hide_param(params, name)
+    buf := a.pbuf(base.len + 1)
+    base.loop((h, i, p) { buf[i] = p })
+    buf[base.len] = Param( name: name, ty: fntype(no_tys(), a.tnode(tvoid())) )
+    buf
+}
+add_lambda_arg = (a: MutPtr<Malloc>, args: [Expr], lamx: Ptr<Expr>) [Expr] {
+    buf := a.cebuf(args.len + 1)
+    args.loop((h, i, e) { buf[i] = e })
+    buf[args.len] = load(lamx)
+    buf
+}
+// is this Let's value a lambda literal? (drives the alias lowering above)
+let_value_lambda = (st: Stmt) bool {
+    st.match ({
+        .Let(l) => load(l.value).match ({ .Lambda(lm) => true, _ => false }),
+        _       => false
+    })
 }
 the_func* = (decls: [Decl], name: str) Func {
     found := Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() )
@@ -1549,7 +1613,10 @@ xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>
 xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
     out := st
     st.match ({
-        .Let(l)      => { out = slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty)) },
+        .Let(l)      => { out = st.let_value_lambda().match ({
+                              true  => sexpr(a.cenode(block(no_stmts()))),   // lambda-alias let: dropped (spliced at uses)
+                              false => slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty))
+                          }) },
         .Assign(x)   => { out = sassign_at(a.xform_expr(decls, idx, x.target, params, fargs, env), a.xform_expr(decls, idx, x.value, params, fargs, env), x.pos) },
         .Return(r)   => { out = sret(a.xform_expr_exp(decls, idx, r, params, fargs, env, exp)) },
         .ExprStmt(e) => { out = sexpr(a.xform_expr_exp(decls, idx, e, params, fargs, env, exp)) },
@@ -1571,12 +1638,18 @@ xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], id
 }
 xform_param_shadow = (a: MutPtr<Malloc>, params: [Param], st: Stmt) [Param] {
     out := params
-    st.match ({ .Let(l) => { out = a.add_subst_param(params, l.name) }, _ })
+    st.match ({ .Let(l) => { out = st.let_value_lambda().match ({
+                                 true  => a.add_fnt_param(params, l.name),
+                                 false => a.add_subst_param(params, l.name)
+                             }) }, _ })
     out
 }
-xform_arg_shadow = (a: MutPtr<Malloc>, args: [Expr], st: Stmt, params: [Param], env: Ptr<VList>) [Expr] {
+xform_arg_shadow = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, args: [Expr], st: Stmt, params: [Param], env: Ptr<VList>) [Expr] {
     out := args
-    st.match ({ .Let(l) => { out = a.add_subst_arg(args, a.local_name_at(l.name, env, params.len)) }, _ })
+    st.match ({ .Let(l) => { out = st.let_value_lambda().match ({
+                                 true  => a.add_lambda_arg(args, a.xform_expr(decls, idx, l.value, params, args, env)),
+                                 false => a.add_subst_arg(args, a.local_name_at(l.name, env, params.len))
+                             }) }, _ })
     out
 }
 xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
@@ -1589,7 +1662,7 @@ xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], pa
         (i == body.len - 1).match ({ true => { want = exp }, _ })
         buf[i] = a.xform_stmt(decls, idx, st, ps, xs, e, want)
         e = a.xform_let_ext(e, st, decls, idx, ps)
-        xs = a.xform_arg_shadow(xs, st, ps, e)
+        xs = a.xform_arg_shadow(decls, idx, xs, st, ps, e)
         ps = a.xform_param_shadow(ps, st)
     })
     buf

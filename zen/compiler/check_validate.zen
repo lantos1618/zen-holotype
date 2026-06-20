@@ -623,6 +623,11 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         .Block(b)       => env.check_block(b.stmts),
         .Var(v)         => env.var_err(v.name),
+        // A Lambda that SURVIVES resolution is a lambda used as a value the inliner couldn't splice:
+        // a directly-passed HOF lambda is inlined away and a local-bound one is now spliced too (the
+        // alias lowering), so a remaining Lambda was stored in a field / returned — no first-class
+        // representation; reject it cleanly instead of leaking `zen__unlowered_lambda` into the C.
+        .Lambda(lm)     => 1,
         _               => 0
     })
 }
@@ -995,6 +1000,8 @@ KVALPOSRETURN = () i32 { 13 }   // an early (dropped) return in a value-position
 KPARSE        = () i32 { 14 }   // unparseable top-level input (the parser's __syntax_error sentinel)
 KOWNERSHIP    = () i32 { 15 }   // use of a local owner after release/drop
 KTRAITBOUND   = () i32 { 16 }   // a type bound to `A: Trait` at a call site does not impl Trait
+KUNKNOWNTYPE  = () i32 { 17 }   // a type annotation names a type that is not declared/imported/a tparam
+KLAMBDAVALUE  = () i32 { 18 }   // a lambda used as a value the inliner can't splice (stored/returned)
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1048,6 +1055,8 @@ diagnostic_kind_name = (code: i32) str {
         14 => "parse",
         15 => "ownership",
         16 => "trait-bound",
+        17 => "unknown-type",
+        18 => "lambda-value",
         _ => "type"
     })
 }
@@ -1069,6 +1078,8 @@ diagnostic_message = (code: i32) str {
         14 => "syntax error: unparseable top-level input",
         15 => "use of an owner after release/drop",
         16 => "type argument does not satisfy the trait bound",
+        17 => "unknown type name",
+        18 => "a lambda can only be used directly as a call argument",
         _ => "type error"
     })
 }
@@ -1090,6 +1101,8 @@ diagnostic_hint = (code: i32) str {
         14 => "check the syntax around this top-level declaration",
         15 => "after release/drop, bind a fresh owner instead of reusing the consumed local",
         16 => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
+        17 => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
+        18 => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
         _ => ""
     })
 }
@@ -1375,6 +1388,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
         .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
+        .Lambda(lm)     => KLAMBDAVALUE(),   // a surviving lambda = used as a value (see check_expr)
         _               => 0
     })
 }
@@ -1504,6 +1518,75 @@ check_module_bound_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 }
 check_module_bound_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_bound_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => src.check_diagnostic_from_source(packed, 1)
+    })
+}
+
+// ── undefined type names in annotations (a standalone, driver-only pass) ───────────────────────────
+// `m: MutPtr<TotallyUndefinedType>` type-checked "ok" then leaked an unknown C type name. A Named (or
+// Generic-base) type in a signature / field / payload that is NOT a primitive, a DECLARED type
+// (struct/enum/gen-struct/gen-enum, incl. anon structs), an in-scope tparam, or `Self` is a real
+// "unknown type". Runs ONLY in the driver check chain, on the FULLY-FLATTENED decls — where every
+// legitimate (incl. imported) type is present — so an undeclared name is genuinely undefined, not the
+// cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
+// part of check_module's count/kind (the oracle runs that on NON-flattened source), so the oracle is
+// untouched. Pointer/slice elements and generic args recurse; FnT internals are left to later checks.
+ut_has_tparam = (tparams: [Param], n: str) bool {
+    f := false
+    tparams.loop((h, i, tp) { f = eq(tp.name, n).match ({ true => true, false => f }) })
+    f
+}
+ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
+    t.match ({
+        .Named(n)   => (eq(n, "Self") || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => 0, false => 1 }),
+        .Generic(g) => env.env_named_declared(g.name).match ({ true => env.ut_unknown_tys(tparams, g.args), false => 1 }),
+        .Ptr(p)     => env.ut_unknown_ty(tparams, load(p)),
+        .Slice(e)   => env.ut_unknown_ty(tparams, load(e)),
+        _           => 0
+    })
+}
+ut_unknown_tys = (env: Env, tparams: [Param], ts: [Ty]) i32 {
+    acc := 0
+    ts.loop((h, i, t) { acc = acc.kv_kor(env.ut_unknown_ty(tparams, t)) })
+    acc
+}
+ut_params_kind = (env: Env, tparams: [Param], ps: [Param]) i32 {
+    acc := 0
+    ps.loop((h, i, p) { acc = acc.kv_kor(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE())) })
+    acc
+}
+ut_fields_kind = (env: Env, tparams: [Param], fs: [Field]) i32 {
+    acc := 0
+    fs.loop((h, i, f) { acc = acc.kv_kor(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE())) })
+    acc
+}
+ut_payloads_kind = (env: Env, tparams: [Param], vs: [VariantDef]) i32 {
+    acc := 0
+    vs.loop((h, i, v) { acc = acc.kv_kor(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE())) })
+    acc
+}
+ut_func_kind = (env: Env, f: Func) i32 {
+    env.ut_params_kind(f.tparams, f.params).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()))
+}
+check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    idx := a.build_decl_index(decls)
+    env := Env( vars: a.params_env(cv_no_params()), decls: decls, didx: idx, exp: tvoid(), a: a )
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({
+        .DFunc(f)      => env.ut_func_kind(f),
+        .DForeign(f)   => env.ut_func_kind(f),
+        .DStruct(sd)   => env.ut_fields_kind(cv_no_params(), sd.fields),
+        .DEnum(ed)     => env.ut_payloads_kind(cv_no_params(), ed.variants),
+        .DGenStruct(g) => env.ut_fields_kind(g.tparams, g.fields),
+        .DGenEnum(g)   => env.ut_payloads_kind(g.tparams, g.variants),
+        _              => 0
+    })) })
+    acc
+}
+check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := a.check_module_unknown_type_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => src.check_diagnostic_from_source(packed, 1)
