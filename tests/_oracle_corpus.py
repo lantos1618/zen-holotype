@@ -83,6 +83,19 @@ VALUE_CASES = [
     ('apply = (f: (i32) i32, x: i32) i32 { f(x) }\ntest* = () i32 {\n  k := 10\n  g := (n) { n + k }\n  apply(g, 41) + apply(g, 2)\n}', 63),
     ('twice = (f: (i32) i32, x: i32) i32 { f(f(x)) }\ntest* = () i32 {\n  g := (n) { n + 3 }\n  twice(g, 1)\n}', 7),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
+    # --- generic in-place sort with an INLINE-LAMBDA comparator (std.collections.iter.sort shape):
+    #     the comparator `less` is invoked DIRECTLY inside the generic fn's nested loops (never
+    #     forwarded to a helper, which would leave a `zen__unlowered_lambda`), so it splices like fold.
+    ('srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a < b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}', 12345),
+    # same sort, DESCENDING comparator (a > b) → [5,4,3,2,1]
+    ('srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a > b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}', 54321),
+    # --- zero-element generic constructor whose T comes from the LHS annotation (std.collections
+    #     Vec/Map `empty` shape): `v: Vec<i32> := empty()` infers T=i32 with no seed arg, then push/get.
+    ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nempty<T> = () Vec<T> { Vec<T>(ptr: malloc(sizeof(T)), len: 0, cap: 1) }\npush<T> = (v: Vec<T>, x: T) Vec<T> { b := v.buf()  b[v.len] = x  Vec<T>(ptr: v.ptr, len: v.len + 1, cap: v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\ntest* = () i32 {\n  v: Vec<i32> := empty()\n  v = v.push(42)\n  v.get(0)\n}', 42),
+    # --- pair-iteration: a generic struct METHOD takes a 2-arg fn param and invokes an INLINE LAMBDA
+    #     directly (std.collections.map.each_pair shape — visits key+value together), mutating an
+    #     outer-scope local through the closure. Splices like iter.each; no zen__unlowered_lambda.
+    ('Pairs<T>: { ks: [str], vs: [T]\n    each_pair = (p: Pairs<T>, f: (str, T) void) void {\n        p.ks.loop((h, i, k) { f(k, p.vs[i]) })\n    }\n}\ntest* = () i32 {\n    p := Pairs<i32>(ks: ["a", "b", "c"], vs: [10, 20, 30])\n    s := 0\n    p.each_pair((k, v){ s = s + v })\n    s\n}', 60),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
     ('A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A(v: 5)\n  b := B(v: 6)\n  a.addr().area() + b.addr().area()\n}', 41),
