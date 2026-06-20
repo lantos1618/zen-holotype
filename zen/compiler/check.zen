@@ -739,13 +739,31 @@ str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf[1] = load(rhs)
     buf
 }
+// An enum VALUE is a tagged union; raw C `==` on the struct is invalid. `==`/`!=` between two enum
+// VALUES of the same type lower to a TAG comparison (concrete + generic-instance enums). A POINTER to
+// an enum is NOT included: `p == null_ptr()` / `p1 == p2` are pointer-identity comparisons (valid C),
+// not value equality — including Ptr here mis-lowered `e == null_ptr()` (e: Ptr<Expr>, Expr an enum)
+// to `e->tag == …`. NOTE: tag-only compares the active VARIANT, not the payload — `Run(1) == Run(2)`
+// is `true`; payloadless / state-style enums (the common case) compare exactly; full structural
+// (payload) equality is a deliberate follow-up.
+is_enum_ty = (env: Env, t: Ty) bool {
+    t.match ({
+        .Named(n)   => env.didx.enum_idx.get(n, 0 - 1) >= 0,
+        .Generic(g) => is_empty(env.decls.find_genenum(g.name).name) == false,
+        _           => false
+    })
+}
 resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     lhs := a.resolve_expr(env.clr_exp(), b.lhs)
     rhs := a.resolve_expr(env.clr_exp(), b.rhs)
     cmp := eq(b.op, "==") || eq(b.op, "!=")
-    (cmp && env.infer_expr(lhs).is_str_t() && env.infer_expr(rhs).is_str_t()).match ({
+    lty := env.infer_expr(lhs)
+    (cmp && lty.is_str_t() && env.infer_expr(rhs).is_str_t()).match ({
         true  => a.cenode(call(eq(b.op, "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))),
-        false => a.resolve_f64_neg(env, b.op, lhs, rhs, b.pos)
+        false => (cmp && env.is_enum_ty(lty)).match ({
+            true  => a.cenode(bin_at(b.op, a.subj_tag(lhs, lty.ty_is_ptr()), a.subj_tag(rhs, lty.ty_is_ptr()), b.pos)),
+            false => a.resolve_f64_neg(env, b.op, lhs, rhs, b.pos)
+        })
     })
 }
 // Prefix `-f64` parses as `0 - x`; rewrite that zero to `0.0`.

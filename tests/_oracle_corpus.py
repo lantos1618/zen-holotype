@@ -60,6 +60,11 @@ VALUE_CASES = [
     # `bo.match(...)` on the RHS of `=`): the binding must be TYPED so the inner match recovers `bo`'s
     # enum name and emits qualified case labels (`B_OpAdd`, not bare `_OpAdd` → cc undeclared).
     ('B*: OpAdd | OpSub\nO*: Bin(B)\nf = (op: O) i32 { r := 0  op.match({ .Bin(bo) => { r = bo.match({ .OpAdd => 1, .OpSub => 2 }) } })  r }\ntest* = () i32 { f(O.Bin(B.OpSub)) }', 2),
+    # --- ENUM `==`/`!=`: lower to a TAG comparison (raw struct == is invalid C) ---
+    ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Idle\n  b := State.Idle\n  r := (a == b).to_i32()\n  r\n}', 1),
+    ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Idle\n  b := State.Run(5)\n  r := (a != b).to_i32()\n  r\n}', 1),
+    # `==` against a variant literal (different tag → 0)
+    ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Run(2)\n  r := (a == State.Idle).to_i32()\n  r\n}', 0),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
