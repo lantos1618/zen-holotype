@@ -329,6 +329,20 @@ mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) str {
     end := buf.anon_write_fields(buf.write_str(0, "__anon"), fields)
     buf.finish_buf(end)
 }
+// The positional field name `_<i>` (`_0`, `_1`, …) for a synthesized multi-field variant payload struct
+// (`B(i32, i32)` ≡ `B({_0: i32, _1: i32})`). The SAME generator feeds the enum-decl payload type and the
+// `.B(a, b)` constructor, so their anon-struct names mangle identically.
+pf_digit = (d: i32) u8 { load(offset("0123456789", d)) }
+pf_write = (dst: RawPtr<u8>, at: i64, v: i32) i64 {
+    (v < 10).match ({
+        true  => { dst.offset(at).store(pf_digit(v))  at + 1 },
+        false => { np := dst.pf_write(at, v / 10)  dst.offset(np).store(pf_digit(v % 10))  np + 1 }
+    })
+}
+payload_fname* = (a: MutPtr<Malloc>, idx: i32) str {
+    buf: RawPtr<u8> := a.acquire(24)
+    buf.finish_buf(buf.pf_write(buf.write_str(0, "_"), idx))
+}
 // the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
 // types implementing the same trait method emit DISTINCT C functions. UFCS dispatch routes `x.m()` to
 // the impl for x's type (compiler.check dispatch_name).

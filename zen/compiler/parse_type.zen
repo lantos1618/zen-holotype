@@ -4,7 +4,7 @@
 // (is_lbrace/is_comma/is_rparen/…/tok_eq) and the param buffer used by both expr and decl parsers.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Param, Ty, Field, StructDecl, param, pvariadic, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
+{ Param, Ty, Field, StructDecl, param, pvariadic, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, payload_fname, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.bytes
 { eq } = std.text.str
@@ -154,6 +154,32 @@ parse_anon_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just pa
     name   := a.mangle_anon_in(fields)
     register_anon(name, fields)
     TyEnd( ty: tnamed(name), next: fe.next )
+}
+// A variant payload: `(T)` keeps the single type as-is; `(T1, T2, …)` synthesizes an anon struct
+// `{_0: T1, _1: T2, …}` (positional fields) so multi-field payloads reuse the existing anon-struct
+// lowering with NO checker/codegen changes. `pos` is just past the '('; returns the type + pos past ')'.
+parse_variant_payload* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
+    buf := a.afield_buf()
+    fe  := a.fill_payload_tys(src, pos, buf, 0)
+    (fe.count == 1).match ({
+        true  => TyEnd( ty: buf[0].ty, next: fe.next ),                 // single payload: the bare type
+        false => {
+            fields := buf.take_afields(fe.count)
+            name   := a.mangle_anon_in(fields)
+            register_anon(name, fields)
+            TyEnd( ty: tnamed(name), next: fe.next )
+        }
+    })
+}
+fill_payload_tys = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    te    := a.parse_ty(src, pos)
+    buf[i] = field(a.payload_fname(i), te.ty)
+    after := src.scan(te.next)
+    src.is_comma(after.tok).match ({
+        true  => a.fill_payload_tys(src, after.next, buf, i + 1),
+        false => { src.is_rparen(after.tok).match ({ true => {}, false => perr_set() })  PEnd( count: i + 1, next: after.next ) }   // past ')'
+    })
 }
 fill_anon_fields = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     sc := src.scan(pos)

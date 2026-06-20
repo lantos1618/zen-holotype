@@ -215,6 +215,42 @@ VALUE_CASES = [
     ('test* = () i64 { to_i64(2.9) }', 2),                                                    # to_i64 truncates a double the C way
     ('test* = () i32 {\n  x := 0.25\n  x.match ({ 0.25 => 1, 1.5 => 2, _ => 9 })\n}', 1),     # a float-literal match is an `==` chain
     ('g := 1.5\ntest* = () i32 { to_i32(g * 2.0) }', 3),                                      # a module-global f64 (constant init)
+    # --- ESCAPE-1: `\xNN` hex escape → one byte; `\\` keeps the backslash (no silent drop) ---
+    # (use \x41='A' in STRING cases — a raw high byte in emitted C breaks the text-mode oracle harness;
+    #  the high-byte value path is covered by the char-literal case, which lowers to a numeric literal.)
+    ("test* = () i32 { '\\xc8' }", 200),                                                       # char-literal \xNN → 200
+    ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("\\x41", 0) }', 65),  # \x41 → byte 'A'
+    ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("a\\\\b", 1) }', 92),  # \\ stays a backslash (byte 92)
+    ('cnt = (s: str, i: i32) i32 { (s.offset(i).load() == 0).match({ true => i, false => cnt(s, i + 1) }) }\ntest* = () i32 { cnt("\\x41", 0) }', 1),  # \x41 is ONE byte (len 1, not 3)
+    # --- LAMBDA-1: typed lambda literals — optional `: Type` per param and an optional return type
+    #     must PARSE (the types are discarded; FnT context supplies them on inline-splice) ---
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y: i32) { x + y }, 3, 4) }', 7),   # typed params
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) i32 { x + y }, 5, 6) }', 11),       # untyped params + return type
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y: i32) i32 { x + y }, 8, 9) }', 17),  # typed params + return type
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y) { x + y }, 2, 5) }', 7),        # mixed typed/untyped params
+    ('fold<T> = (xs: [T], init: T, f: (T, T) T) T {\n  acc := init\n  xs.loop((h, i, x) { acc = f(acc, x) })\n  acc\n}\ntest* = () i32 { [1, 2, 3].fold(0, (x: i32, y: i32) { x + y }) }', 6),  # the motivating fold repro
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) { x + y }, 4, 5) }', 9),            # untyped lambda still works (regression guard)
+    # --- LVALUE-1: nested store targets — any `ident (.field | [i])*` place expression is assignable ---
+    ('S*: { buf: [i32] }\ntest* = () i32 { s := S(buf: [1, 2, 3])  s.buf[0] = 9  s.buf[0] + s.buf[1] }', 11),                       # member then index
+    ('P*: { x: i32, y: i32 }\ntest* = () i32 { a := [P(x: 1, y: 2), P(x: 3, y: 4)]  a[0].x = 7  a[0].x + a[1].x }', 10),            # index then field
+    ('In*: { p: [i32] }\nS*: { inner: In }\ntest* = () i32 { s := S(inner: In(p: [10, 20]))  s.inner.p[1] = 5  s.inner.p[0] + s.inner.p[1] }', 15),  # member.member.index
+    ('test* = () i32 { a := [1, 2, 3]  a[1] = 8  a[0] + a[1] }', 9),                                                                 # plain name[i] = v still works (SIdx path)
+    # --- PARSE-RETURN-ARM: a bare `return expr` in arm-body position (not just braced `{ return expr }`) ---
+    ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => return 999, false => 0 })\n}', 999),                                  # bare return arm fires
+    ('test* = () i32 {\n  n := 50\n  (n > 100).match({ true => return 999, false => 7 })\n}', 7),                                     # other arm still a value
+    ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => { return 999 }, false => 0 })\n}', 999),                              # braced form unchanged (regression guard)
+    # --- TAILPAREN-1: a statement-leading `(` after a qualified ctor starts a NEW statement (a
+    #     parenthesized expr), not a payload glued onto the ctor (`State.Idle` ⏎ `(a).q()`) ---
+    ('State*: Idle | Run\nq = (s: State) i32 { 7 }\ntest* = () i32 {\n  a := State.Idle\n  (a).q()\n}', 7),                            # newline un-glues the '('
+    ('E*: A(i32) | B\nval = (e: E) i32 { e.match({ .A(x) => x, .B => 0 }) }\ntest* = () i32 { val(E.A(42)) }', 42),                  # same-line payload still glues (regression guard)
+    # --- G1: multi-field enum payloads — `B(i32, i32)` ≡ `B({_0: i32, _1: i32})`; `.B(a, b)` constructs
+    #     the anon struct, `.B(p)` binds it (fields `_0`, `_1`, …). NON-generic enums only — a generic
+    #     anon-struct payload (`Cons(T, …)`) hits a pre-existing checker/mono limit, same as the explicit
+    #     `Cons({_0: T, …})` form, so it is out of parser scope. ---
+    ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 { sum(E.B(3, 4)) }', 7),    # qualified ctor
+    ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 {\n  e := .B(10, 20)\n  sum(e)\n}', 30),  # bare ctor
+    ('T*: N | V(i32, i32, i32)\nsum = (t: T) i32 { t.match({ .N => 0, .V(p) => p._0 + p._1 + p._2 }) }\ntest* = () i32 { sum(T.V(1, 2, 3)) }', 6),  # three fields
+    ('O*: Some(i32) | None\nun = (o: O) i32 { o.match({ .Some(x) => x, .None => 0 }) }\ntest* = () i32 { un(O.Some(42)) }', 42),     # single payload unchanged (regression guard)
 ]
 
 # (src, verdict) the check binary must produce.
