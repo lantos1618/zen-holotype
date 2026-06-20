@@ -140,3 +140,35 @@ try_reverse_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
 reverse*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.reverse_in(xs) }
 
 try_reverse*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_reverse_in(xs) }
+
+// --- search -------------------------------------------------------------------------------------
+// index_of/contains rely on `==`, which lowers to C `==`: valid for scalar element types
+// (i8..i64, u8..u64, bool, ptr/enum-tag). For struct/aggregate elements use find_by with an
+// explicit predicate instead.
+index_of*<T> = (xs: [T], x: T) i64 {
+    r := 0 - 1
+    xs.loop((h, i, e) {
+        (e == x).match ({
+            true  => (r < 0).match ({ true => { r = i }, false => {} }),
+            false => {}
+        })
+    })
+    r
+}
+
+contains*<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }
+
+// find_by(xs, pred) — index of the first element satisfying pred, or -1. Works for ANY element
+// type (no equality needed); any_by reports whether such an element exists.
+find_by*<T> = (xs: [T], pred: (T) bool) i64 {
+    r := 0 - 1
+    xs.loop((h, i, e) {
+        pred(e).match ({
+            true  => (r < 0).match ({ true => { r = i }, false => {} }),
+            false => {}
+        })
+    })
+    r
+}
+
+any_by*<T> = (xs: [T], pred: (T) bool) bool { xs.find_by(pred) >= 0 }
