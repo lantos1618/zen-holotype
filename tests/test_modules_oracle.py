@@ -80,6 +80,29 @@ def test_header_is_load_bearing():
     assert _oracle.check_linked_count_src(bad, _LIB) > 0
 
 
+def _emit_project(main_src, helper_src):
+    # Drive the committed EMIT binary's `emit <file>` subcommand (full import resolution) on a 2-file
+    # project; return the emitted C. NO Python compiler in the loop.
+    import subprocess, tempfile
+    d = Path(tempfile.mkdtemp())
+    (d / "helper.zen").write_text(helper_src)
+    (d / "main.zen").write_text(main_src)
+    return subprocess.run([str(_oracle._build_emit()), "emit", str(d / "main.zen")],
+                          capture_output=True, text=True, timeout=30).stdout
+
+
+_HELPER = "addh* = (a: i32, b: i32) i32 { a + b }\n"
+
+
+def test_import_no_space_after_brace_resolves():
+    # IMPORT-SPACE regression: `{addh}` (no space after `{`) must resolve the sibling import exactly
+    # like `{ addh }` — std.internal.resolve.opens_import / driver.bs_is_import used to require a
+    # space, so the binding was silently dropped (the importee was never pulled in -> link error).
+    for opener in ("{addh}", "{ addh }", "{addh }", "{ addh}"):
+        c = _emit_project(opener + " = helper\ntest* = () i32 { addh(3, 4) }\n", _HELPER)
+        assert "return addh(3, 4)" in c and "int32_t addh(" in c, (opener, c)
+
+
 def test_modules_oracle_has_no_python_frontend_dependency():
     # Same guarantee test_oracle makes: this whole net runs on the BINARY (cc + the committed zenc),
     # never on a Python reference frontend. There is no zen.* import anywhere in the loop.
