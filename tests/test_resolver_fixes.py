@@ -175,3 +175,28 @@ def test_std_ast_decl_buffer_uses_explicit_allocator():
         "}\n")
     r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ── RESOLVE-2: undefined type names in annotations are rejected (was: leaked to C as `unknown type
+#    name 'X'` at cc time). Driver-only check (runs on the flattened decls), so it's exercised here
+#    through the binary, not via the oracle corpus. ──────────────────────────────────────────────────
+def test_undefined_type_in_annotation_rejected():
+    r = _check("f = (m: MutPtr<TotallyUndefinedType>, n: i64) i64 { n }\nmain = () i32 { 0 }\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_undefined_return_type_rejected():
+    r = _check("f = () Nonexistent { 0 }\nmain = () i32 { 0 }\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_defined_and_imported_types_not_flagged():
+    # a user type, a tparam, and an imported std type must all pass (no false positive)
+    src = ("{ println } = std.text.fmt\n"
+           "alloc = std.mem.alloc\n"
+           "Pt*: { x: i32 }\n"
+           "idp<T> = (p: MutPtr<T>) MutPtr<T> { p }\n"
+           "useit = (m: MutPtr<alloc.Heap>, q: MutPtr<Pt>) i32 { q.x }\n"
+           "main = () i32 { 0 }\n")
+    r = _check(src)
+    assert r.returncode == 0, r.stderr
