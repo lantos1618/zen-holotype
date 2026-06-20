@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty } = std.text.str
@@ -1148,6 +1148,29 @@ add_subst_arg = (a: MutPtr<Malloc>, args: [Expr], name: str) [Expr] {
     buf[args.len] = vref(name)
     buf
 }
+// A lambda bound to a local (`g := (n){…}`) has no C closure value. Instead the inliner treats the
+// local as a COMPILE-TIME ALIAS: shadow the name as an FnT "param" whose substituted "arg" is the
+// (already-xformed) lambda, so every later use — a direct call `g(x)` or a HOF arg `apply(g,…)` —
+// splices the lambda exactly like a directly-passed one. The `g := …` statement itself is dropped.
+add_fnt_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
+    base := a.hide_param(params, name)
+    buf := a.pbuf(base.len + 1)
+    base.loop((h, i, p) { buf[i] = p })
+    buf[base.len] = Param( name: name, ty: fntype(no_tys(), a.tnode(tvoid())) )
+    buf
+}
+add_lambda_arg = (a: MutPtr<Malloc>, args: [Expr], lamx: Ptr<Expr>) [Expr] {
+    buf := a.cebuf(args.len + 1)
+    args.loop((h, i, e) { buf[i] = e })
+    buf[args.len] = load(lamx)
+    buf
+}
+// is this Let's value a lambda literal? (drives the alias lowering above)
+let_value_lambda = (st: Stmt) bool {
+    out := false
+    st.match ({ .Let(l) => { load(l.value).match ({ .Lambda(lm) => { out = true }, _ => {} }) }, _ => {} })
+    out
+}
 the_func* = (decls: [Decl], name: str) Func {
     found := Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() )
     decls.loop((h, i, d) { found = d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => f, false => found }), .DForeign(f) => eq(f.name, name).match ({ true => f, false => found }), _ => found }) })
@@ -1545,7 +1568,10 @@ xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>
 xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Stmt {
     out := st
     st.match ({
-        .Let(l)      => { out = slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty)) },
+        .Let(l)      => { out = st.let_value_lambda().match ({
+                              true  => sexpr(a.cenode(block(no_stmts()))),   // lambda-alias let: dropped (spliced at uses)
+                              false => slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty))
+                          }) },
         .Assign(x)   => { out = sassign_at(a.xform_expr(decls, idx, x.target, params, fargs, env), a.xform_expr(decls, idx, x.value, params, fargs, env), x.pos) },
         .Return(r)   => { out = sret(a.xform_expr_exp(decls, idx, r, params, fargs, env, exp)) },
         .ExprStmt(e) => { out = sexpr(a.xform_expr_exp(decls, idx, e, params, fargs, env, exp)) },
@@ -1567,12 +1593,18 @@ xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], id
 }
 xform_param_shadow = (a: MutPtr<Malloc>, params: [Param], st: Stmt) [Param] {
     out := params
-    st.match ({ .Let(l) => { out = a.add_subst_param(params, l.name) }, _ })
+    st.match ({ .Let(l) => { out = st.let_value_lambda().match ({
+                                 true  => a.add_fnt_param(params, l.name),
+                                 false => a.add_subst_param(params, l.name)
+                             }) }, _ })
     out
 }
-xform_arg_shadow = (a: MutPtr<Malloc>, args: [Expr], st: Stmt, params: [Param], env: Ptr<VList>) [Expr] {
+xform_arg_shadow = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, args: [Expr], st: Stmt, params: [Param], env: Ptr<VList>) [Expr] {
     out := args
-    st.match ({ .Let(l) => { out = a.add_subst_arg(args, a.local_name_at(l.name, env, params.len)) }, _ })
+    st.match ({ .Let(l) => { out = st.let_value_lambda().match ({
+                                 true  => a.add_lambda_arg(args, a.xform_expr(decls, idx, l.value, params, args, env)),
+                                 false => a.add_subst_arg(args, a.local_name_at(l.name, env, params.len))
+                             }) }, _ })
     out
 }
 xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
@@ -1585,7 +1617,7 @@ xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], pa
         (i == body.len - 1).match ({ true => { want = exp }, _ })
         buf[i] = a.xform_stmt(decls, idx, st, ps, xs, e, want)
         e = a.xform_let_ext(e, st, decls, idx, ps)
-        xs = a.xform_arg_shadow(xs, st, ps, e)
+        xs = a.xform_arg_shadow(decls, idx, xs, st, ps, e)
         ps = a.xform_param_shadow(ps, st)
     })
     buf

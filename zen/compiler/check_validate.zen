@@ -623,6 +623,11 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         .Block(b)       => env.check_block(b.stmts),
         .Var(v)         => env.var_err(v.name),
+        // A Lambda that SURVIVES resolution is a lambda used as a value the inliner couldn't splice:
+        // a directly-passed HOF lambda is inlined away and a local-bound one is now spliced too (the
+        // alias lowering), so a remaining Lambda was stored in a field / returned — no first-class
+        // representation; reject it cleanly instead of leaking `zen__unlowered_lambda` into the C.
+        .Lambda(lm)     => 1,
         _               => 0
     })
 }
@@ -996,6 +1001,7 @@ KPARSE        = () i32 { 14 }   // unparseable top-level input (the parser's __s
 KOWNERSHIP    = () i32 { 15 }   // use of a local owner after release/drop
 KTRAITBOUND   = () i32 { 16 }   // a type bound to `A: Trait` at a call site does not impl Trait
 KUNKNOWNTYPE  = () i32 { 17 }   // a type annotation names a type that is not declared/imported/a tparam
+KLAMBDAVALUE  = () i32 { 18 }   // a lambda used as a value the inliner can't splice (stored/returned)
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1050,6 +1056,7 @@ diagnostic_kind_name = (code: i32) str {
         15 => "ownership",
         16 => "trait-bound",
         17 => "unknown-type",
+        18 => "lambda-value",
         _ => "type"
     })
 }
@@ -1072,6 +1079,7 @@ diagnostic_message = (code: i32) str {
         15 => "use of an owner after release/drop",
         16 => "type argument does not satisfy the trait bound",
         17 => "unknown type name",
+        18 => "a lambda can only be used directly as a call argument",
         _ => "type error"
     })
 }
@@ -1094,6 +1102,7 @@ diagnostic_hint = (code: i32) str {
         15 => "after release/drop, bind a fresh owner instead of reusing the consumed local",
         16 => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
         17 => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
+        18 => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
         _ => ""
     })
 }
@@ -1379,6 +1388,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
         .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
+        .Lambda(lm)     => KLAMBDAVALUE(),   // a surviving lambda = used as a value (see check_expr)
         _               => 0
     })
 }
