@@ -9,7 +9,7 @@
 
 { contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
 { open, read, write, close, system, unlink } = std.c.libc
-{ parse_module } = compiler.parse
+{ parse_module, exports_get } = compiler.parse
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
@@ -479,7 +479,12 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
 // `s.len()` round-trips as `s.len()` (not the flattened `len(s)`).
 fmt_ast = (mp: MutPtr<Malloc>, path: str) i32 {
     contents_in(mp, path).match ({
-        .Ok(src) => { out_bytes(mp.genfmt_module_in(mp.parse_module(src)).bytes())  0 },
+        .Ok(src) => {
+            decls := mp.parse_module(src)          // faithful AST (keeps MethodCall)
+            exps  := exports_get()                 // the `*` export markers parse_module recorded
+            out_bytes(mp.genfmt_module_in(decls, exps).bytes())
+            0
+        },
         .Err(e)  => { derr("zenc: fmt: cannot open input\n")  1 }
     })
 }
