@@ -100,3 +100,22 @@ try_node*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> { a.try_node_in(v
 concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) [T] { a.concat_in(xs, ys) }
 
 try_concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> { a.try_concat_in(xs, ys) }
+
+// --- views (zero-copy) --------------------------------------------------------------------------
+// `offset` is BYTE arithmetic, so a sub-view advances the ptr by `lo * sizeof(T)`.
+sl_clamp = (v: i64, lo: i64, hi: i64) i64 {
+    (v < lo).match ({ true => lo, false => (v > hi).match ({ true => hi, false => v }) })
+}
+
+// sub(xs, lo, hi) — a zero-copy view of xs[lo..hi). lo/hi are clamped to [0, xs.len] (and hi >= lo),
+// so out-of-range bounds yield a shorter/empty view rather than reading past the buffer.
+sub*<T> = (xs: [T], lo: i64, hi: i64) [T] {
+    l := sl_clamp(lo, 0, xs.len)
+    h := sl_clamp(hi, l, xs.len)
+    slice(xs.ptr.offset(l * sizeof(T)), h - l)
+}
+
+// take(xs, n) — the first n elements; drop(xs, n) — all but the first n. Both are views.
+take*<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }
+
+drop*<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }

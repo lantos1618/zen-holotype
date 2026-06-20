@@ -180,6 +180,9 @@ VALUE_CASES = [
     ('test* = () i32 { (5 < 3).match({ true => 1, false => 0 }) }', 0),
 # --- recovered breadth: slice write-then-read ---
     ('test* = () i32 { s := [1, 2, 3]\n s[1] = 20\n s[0] + s[1] + s[2] }', 24),
+# --- std.core.slice: sub/take/drop zero-copy VIEWS (ptr = base + lo*sizeof(T), len = hi-lo). Bounds
+#     are clamped to [0, len] so an out-of-range hi yields a shorter view, not an OOB read. ---
+    ('sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match({ true => lo, false => (v > hi).match({ true => hi, false => v }) }) }\nsub<T> = (xs: [T], lo: i64, hi: i64) [T] { l := sl_clamp(lo, 0, xs.len)  h := sl_clamp(hi, l, xs.len)  slice(xs.ptr.offset(l * sizeof(T)), h - l) }\ntake<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }\ndrop<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  v: [i32] := s.sub(1, 3)\n  t: [i32] := s.take(2)\n  d: [i32] := s.drop(3)\n  o: [i32] := s.sub(2, 99)\n  v.len.to_i32() * 1000 + v[0] * 10 + v[1] + t[0] + d[0] + o.len.to_i32()\n}', 2282),
 # --- recovered breadth: arithmetic precedence + recursion ---
     ('test* = () i32 { 2 + 3 * 4 - 1 }', 13),
     ('fac* = (n: i32) i32 { (n == 0).match({ true => 1, false => n * fac(n - 1) }) }\ntest* = () i32 { fac(5) }', 120),
