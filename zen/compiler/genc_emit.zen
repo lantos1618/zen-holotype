@@ -2,7 +2,7 @@
 
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, gen_ty, ty_cname_in, is_template, is_trait, call, lit, arm, block, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, is_template, is_trait, call, lit, arm, block, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
 
@@ -486,9 +486,27 @@ gen_proto = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
 }
 
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
+// the C arg list of a function type: `i32, i32` (empty -> `void`).
+gen_fnt_params = (s: String, alloc: MutPtr<Malloc>, ps: [Ty]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })
+        out = out.gstr_append(alloc, alloc.ty_cname_in(p))
+    })
+    (ps.len == 0).match ({ true => out.gstr_append(alloc, "void"), false => out })
+}
+// a struct field declaration. A function-VALUE field (FnT) is emitted as a precise C function-pointer
+// declarator `Ret (*name)(Args)` — so the field is natively callable and a same-signature function or
+// lifted lambda assigns to it with no cast (M1 closures, non-capturing). All other fields are `T name`.
+gen_field_decl = (s: String, alloc: MutPtr<Malloc>, fld: Field) String {
+    fld.ty.match ({
+        .FnT(ft) => s.gstr_append(alloc, alloc.ty_cname_in(load(ft.ret))).gstr_append(alloc, " (*").gstr_append(alloc, fld.name).gstr_append(alloc, ")(").gen_fnt_params(alloc, ft.params).gstr_append(alloc, "); "),
+        _        => s.gstr_append(alloc, alloc.ty_cname_in(fld.ty)).gstr_append(alloc, " ").gstr_append(alloc, fld.name).gstr_append(alloc, "; ")
+    })
+}
 gen_struct* = (s: String, alloc: MutPtr<Malloc>, sd: StructDecl) String {
     open := s.gstr_append(alloc, "struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " { ")
-    sd.fields.loop((h, i, fld) { open = open.gstr_append(alloc, alloc.ty_cname_in(fld.ty)).gstr_append(alloc, " ").gstr_append(alloc, fld.name).gstr_append(alloc, "; ") })
+    sd.fields.loop((h, i, fld) { open = open.gen_field_decl(alloc, fld) })
     open.gstr_append(alloc, "};")
 }
 
@@ -522,10 +540,23 @@ gen_enum* = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
     out.gstr_append(alloc, " };").gen_tags(alloc, ed.name, ed.variants)
 }
 
+// is struct `name` impl'd anywhere (appears as a DImpl.trname)? A trait IS impl'd; a data struct
+// holding function-VALUE (closure) fields is NOT — that's how the emitter tells a closure record apart
+// from a trait, since both are "structs with FnT fields" by shape.
+struct_is_impld = (decls: [Decl], name: str) bool {
+    found := false
+    decls.loop((h, i, d) { found = d.match ({ .DImpl(im) => eq(im.trname, name).match ({ true => true, false => found }), _ => found }) })
+    found
+}
+// a trait-shaped struct (FnT fields) is treated as a trait — skipped in codegen — ONLY when it is an
+// actual trait (impl'd somewhere). A never-impl'd FnT-field struct is a closure record and IS emitted.
+emit_is_trait = (decls: [Decl], d: Decl) bool {
+    d.is_trait().match ({ true => d.match ({ .DStruct(sd) => decls.struct_is_impld(sd.name), _ => false }), false => false })
+}
 // forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
-gen_fwd = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
+gen_fwd = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], d: Decl) String {
     out := s
-    d.is_trait().match ({
+    decls.emit_is_trait(d).match ({
         true => {},
         false => d.match ({
             .DStruct(sd) => { out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " ").gstr_append(alloc, sd.name).gstr_append(alloc, "; ") },
@@ -624,7 +655,7 @@ gen_types_at = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], cache: [DepthMe
     out := s
     decls.loop((h, i, d) {
         d.match ({
-            .DStruct(sd) => d.is_trait().match ({
+            .DStruct(sd) => decls.emit_is_trait(d).match ({
                 true => {},
                 false => (decls.idx_depth(cache, i) == k).match ({ true => { out = out.gen_decl(alloc, d).gstr_append(alloc, " ") }, _ })
             }),
@@ -699,7 +730,7 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     // heap-promoted slice literals (gen_slicelit) link in standalone programs that don't import std.mem
     // (types match std.mem/std.string foreign decls — compatible redecl).
     s := a.gstr_string(4096).gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); ")
-    decls.loop((h, i, d) { s = s.gen_fwd(a, d) })
+    decls.loop((h, i, d) { s = s.gen_fwd(a, decls, d) })
     decls.loop((h, i, d) { s = s.gen_proto(a, d) })
     s = s.gen_types_upto(a, decls, a.depth_cache(decls), 0, slen(decls))
     decls.loop((h, i, d) { s = s.gen_global(a, d) })
