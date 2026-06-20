@@ -1,0 +1,44 @@
+// std.state.store — a Redux-style store: state + a pure reducer + dispatch.
+//
+// TLDR:
+// - `Reducer<A>` is the reducer trait: `reduce(Self, A) Self` — a PURE
+//   (state, action) -> next-state function. The state type IS `Self`, so any
+//   value type becomes its own reducer via `S.impl(Reducer<A>, { reduce = ... })`.
+// - `Store<S>` is the single state container: just `{ state: S }`.
+// - `create` seeds a store; `dispatch` folds an action through the reducer and
+//   writes the next state back in place; `get` reads the current state.
+//
+// Closures aren't available yet, so the reducer is a trait impl rather than a
+// plain function value. A `subscribe`-style listener hook needs closures (M1)
+// and is intentionally omitted.
+
+// The reducer trait: state is Self, parameterised over the action type A.
+Reducer*<A>: { reduce: (Self, A) Self }
+
+// The store holds exactly one piece of state.
+Store*<S>: { state: S }
+
+// Seed a store with the initial state.
+create*<S> = (initial: S) Store<S> { Store<S>(state: initial) }
+
+// Fold an action through the reducer, writing the next state back in place.
+dispatch*<S, A> = (st: MutPtr<Store<S>>, a: A) void {
+    st.state = st.state.reduce(a)
+}
+
+// Read the current state.
+get*<S> = (st: Store<S>) S { st.state }
+
+// `Counter` is only a concrete fixture so `reduce` is a registered trait method
+// for the standalone checker (mirrors std.mem.own's `Resource` Drop fixture), and
+// a minimal worked example of the Reducer trait.
+Counter*: { n: i32 }
+Step*: Up | Down
+Counter.impl(Reducer<Step>, {
+    reduce = (c: Counter, s: Step) Counter {
+        s.match({
+            .Up   => Counter(n: c.n + 1),
+            .Down => Counter(n: c.n - 1)
+        })
+    }
+})
