@@ -3,6 +3,7 @@
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
+{ panic } = std.core.result
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
 { at } = std.text.bytes
@@ -734,7 +735,20 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex     := tmpl.match ({ true => tvoid(), false => ps.arg_exp(i) })
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    a.recall(c, dn, buf)
+    a.recall(c, env.rec_dispatch(dn, fn, c.args), buf)
+}
+// A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
+// it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
+// for the never-instantiated template itself — it stays the bare template name. This guard keeps
+// resolve_call idempotent across passes and unchanged for every non-recursive call.
+rec_dispatch = (env: Env, dn: str, fn: Func, args: [Expr]) str {
+    (eq(fn.name, dn) && (fn.params.len == args.len) && fn.rc_is_rec_gen_f()).match ({
+        true  => {
+            m := env.a.mangle_str_in(dn, env.call_targs(fn, args))
+            (env.didx.func_idx.get(m, 0 - 1) >= 0).match ({ true => m, false => dn })
+        },
+        false => dn
+    })
 }
 // Arm payload binds get their concrete payload type.
 arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
@@ -1378,7 +1392,11 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
 }
 maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     idx.idx_template_call(decls, c.fn).match ({
-        true  => env.is_inlining(c.fn).match ({
+        // A recursive generic fn cannot be inlined (the splice never terminates); leave the call as a
+        // bare call to the template name. compiler.check's mono_rec emits one concrete C instance per
+        // (template, concrete-targs) and resolve_call rewrites the call to it. (is_inlining is the same
+        // recursion-break, but a recursive generic must NEVER splice even on its first reach.)
+        true  => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).rc_is_rec_gen_f()).match ({
             true  => a.recall(c, c.fn, cargs),
             false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({
                 true  => a.inline_template(decls, idx, c.fn, cargs, env, exp),
@@ -1667,6 +1685,236 @@ fill_enum_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     }) })
     buf
 }
+// ── RECURSIVE GENERIC FUNCTION MONOMORPHIZATION ──────────────────────────────────────────────
+// A generic FUNCTION that calls itself can't be inlined (the splice never terminates), so the inliner
+// leaves the self-call as a bare call to the template name, which links to nothing. This pass mirrors
+// compiler.mono's struct/enum monomorphization for FUNCTIONS: it discovers every distinct (template,
+// concrete-targs) the program uses and emits one concrete C function per instance (tparam→arg
+// substituted), with a deterministic mangled name (the SAME scheme as generic structs/enums, via
+// mangle_str_in). resolve_call then rewrites each recursive-generic call to its mangled instance.
+// Only DIRECT type-param recursion is handled; FnT-splice generics and mutual recursion still inline.
+
+// detection: does `body` contain a DIRECT call to `nm`? (the self-call test)
+rc_calls_es = (xs: [Expr], nm: str) bool {
+    f := false
+    xs.loop((h, i, x) { f = f.match ({ true => true, false => x.addr().rc_calls_e(nm) }) })
+    f
+}
+rc_calls_inits = (inits: [FieldInit], nm: str) bool {
+    f := false
+    inits.loop((h, i, fi) { f = f.match ({ true => true, false => fi.value.rc_calls_e(nm) }) })
+    f
+}
+rc_calls_arms = (arms: [ArmData], nm: str) bool {
+    f := false
+    arms.loop((h, i, ar) { f = f.match ({ true => true, false => ar.body.rc_calls_e(nm) }) })
+    f
+}
+rc_calls_e = (e: Ptr<Expr>, nm: str) bool {
+    load(e).match ({
+        .Call(c)       => eq(c.fn, nm) || c.args.rc_calls_es(nm),
+        .Bin(b)        => b.lhs.rc_calls_e(nm) || b.rhs.rc_calls_e(nm),
+        .Cond(d)       => d.c.rc_calls_e(nm) || d.t.rc_calls_e(nm) || d.e.rc_calls_e(nm),
+        .Member(m)     => m.obj.rc_calls_e(nm),
+        .Arrow(ar)     => ar.obj.rc_calls_e(nm),
+        .MakeEnum(mk)  => mk.payload.rc_calls_e(nm),
+        .MakeStruct(s) => s.inits.rc_calls_inits(nm),
+        .Match(m)      => m.subj.rc_calls_e(nm) || m.arms.rc_calls_arms(nm),
+        .Index(ix)     => ix.seq.rc_calls_e(nm) || ix.idx.rc_calls_e(nm),
+        .SliceLit(sd)  => sd.items.rc_calls_es(nm),
+        .Loop(l)       => l.seq.rc_calls_e(nm) || l.body.rc_calls_body(nm),
+        .Block(bl)     => bl.stmts.rc_calls_body(nm),
+        .Lambda(la)    => la.body.rc_calls_body(nm),
+        _              => false
+    })
+}
+rc_calls_stmt = (st: Stmt, nm: str) bool {
+    st.match ({
+        .Let(l)      => l.value.rc_calls_e(nm),
+        .Assign(x)   => x.target.rc_calls_e(nm) || x.value.rc_calls_e(nm),
+        .Return(r)   => r.rc_calls_e(nm),
+        .ExprStmt(e) => e.rc_calls_e(nm),
+        .If(f)       => f.c.rc_calls_e(nm) || f.then.rc_calls_body(nm) || f.els.rc_calls_body(nm),
+        .While(w)    => w.c.rc_calls_e(nm) || w.body.rc_calls_body(nm),
+        .IndexSet(x) => x.seq.rc_calls_e(nm) || x.idx.rc_calls_e(nm) || x.value.rc_calls_e(nm)
+    })
+}
+rc_calls_body* = (body: [Stmt], nm: str) bool {
+    f := false
+    body.loop((h, i, st) { f = f.match ({ true => true, false => st.rc_calls_stmt(nm) }) })
+    f
+}
+// a recursive generic = type-param generic (NOT FnT-splice) with a body that calls itself directly.
+rc_is_rec_gen_f* = (f: Func) bool {
+    ((f.tparams.len > 0) && (f.params.has_fnt_param() == false)).match ({
+        true  => f.body.rc_calls_body(f.name),
+        false => false
+    })
+}
+
+// instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
+rc_gbuf = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
+rc_has = (buf: [GenericData], cnt: i32, m: str) bool {
+    found := false
+    buf.loop((h, i, e) { found = (i < cnt).match ({ true => eq(e.mangled, m).match ({ true => true, false => found }), false => found }) })
+    found
+}
+rc_ty_depth = (t: Ty) i32 {
+    t.match ({ .Generic(g) => 1 + g.args.rc_tys_depth(), .Ptr(p) => load(p).rc_ty_depth(), .Slice(e) => load(e).rc_ty_depth(), _ => 0 })
+}
+rc_tys_depth = (ts: [Ty]) i32 {
+    d := 0
+    ts.loop((h, i, t) { dd := t.rc_ty_depth()  d = (dd > d).match ({ true => dd, false => d }) })
+    d
+}
+rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+    // a polymorphic-recursive self-call (deeper targs each step) would grow the worklist forever; drop
+    // the absurdly-deep instance (a well-formed one is shallow) and never write past the buffer.
+    ((1 + g.args.rc_tys_depth()) > 24).match ({ true => { return cnt }, false => {} })
+    (cnt >= buf.len).match ({ true => panic("zenc: too many recursive-generic fn instances (rc_gbuf cap; raise it in compiler.check)\n"), false => {} })
+    buf[cnt] = g
+    cnt + 1
+}
+
+// discovery: walk concrete bodies (Env-threaded for full type inference incl. addr/dispatch), recording
+// one instance per recursive-generic call site (targs inferred exactly as resolve_call will mangle them).
+rc_col_es = (env: Env, buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
+    c := cnt
+    xs.loop((h, i, x) { c = env.rc_col_e(buf, c, x.addr()) })
+    c
+}
+rc_col_inits = (env: Env, buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
+    c := cnt
+    inits.loop((h, i, fi) { c = env.rc_col_e(buf, c, fi.value) })
+    c
+}
+rc_col_match = (env: Env, buf: [GenericData], cnt: i32, m: MatchData) i32 {
+    c := env.rc_col_e(buf, cnt, m.subj)
+    t := env.infer_expr(m.subj)
+    m.arms.loop((h, i, ar) { c = env.a.arm_env(env, t, ar).rc_col_e(buf, c, ar.body) })
+    c
+}
+rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
+    c := env.rc_col_e(buf, cnt, l.seq)
+    e := Env( vars: env.a.vcons(l.elem, l.elemTy, env.a.vcons(l.idx, ti64(), env.vars)), decls: env.decls, didx: env.didx, exp: env.exp, a: env.a )
+    e.rc_col_body(buf, c, l.body)
+}
+rc_lam_env = (env: Env, ps: [Param]) Env {
+    e := env
+    ps.loop((h, i, p) { e = Env( vars: e.a.vcons(p.name, p.ty, e.vars), decls: e.decls, didx: e.didx, exp: e.exp, a: e.a ) })
+    e
+}
+rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
+    c2 := env.rc_col_es(buf, cnt, c.args)
+    dn := env.dispatch_name(c)
+    f  := env.env_func(dn)
+    (eq(f.name, dn) && (f.params.len == c.args.len) && f.rc_is_rec_gen_f()).match ({
+        true  => {
+            targs := env.call_targs(f, c.args)
+            m     := env.a.mangle_str_in(dn, targs)
+            buf.rc_has(c2, m).match ({ true => c2, false => buf.rc_add(c2, GenericData( name: dn, args: targs, mangled: m )) })
+        },
+        false => c2
+    })
+}
+rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)       => env.rc_col_call(buf, cnt, c),
+        .Bin(b)        => env.rc_col_e(buf, env.rc_col_e(buf, cnt, b.lhs), b.rhs),
+        .Cond(d)       => env.rc_col_e(buf, env.rc_col_e(buf, env.rc_col_e(buf, cnt, d.c), d.t), d.e),
+        .Member(m)     => env.rc_col_e(buf, cnt, m.obj),
+        .Arrow(ar)     => env.rc_col_e(buf, cnt, ar.obj),
+        .MakeEnum(mk)  => env.rc_col_e(buf, cnt, mk.payload),
+        .MakeStruct(s) => env.rc_col_inits(buf, cnt, s.inits),
+        .Match(m)      => env.rc_col_match(buf, cnt, m),
+        .Index(ix)     => env.rc_col_e(buf, env.rc_col_e(buf, cnt, ix.seq), ix.idx),
+        .SliceLit(sd)  => env.rc_col_es(buf, cnt, sd.items),
+        .Loop(l)       => env.rc_col_loop(buf, cnt, l),
+        .Block(bl)     => env.rc_col_body(buf, cnt, bl.stmts),
+        .Lambda(la)    => env.rc_lam_env(la.params).rc_col_body(buf, cnt, la.body),
+        _              => cnt
+    })
+}
+rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.rc_col_e(buf, cnt, l.value),
+        .Assign(x)   => env.rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
+        .Return(r)   => env.rc_col_e(buf, cnt, r),
+        .ExprStmt(e) => env.rc_col_e(buf, cnt, e),
+        .If(f)       => env.rc_col_body(buf, env.rc_col_body(buf, env.rc_col_e(buf, cnt, f.c), f.then), f.els),
+        .While(w)    => env.rc_col_body(buf, env.rc_col_e(buf, cnt, w.c), w.body),
+        .IndexSet(x) => env.rc_col_e(buf, env.rc_col_e(buf, env.rc_col_e(buf, cnt, x.seq), x.idx), x.value)
+    })
+}
+rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
+    c := cnt
+    e := env
+    body.loop((h, i, st) {
+        c = e.rc_col_stmt(buf, c, st)
+        e = e.a.extend_env(e, st)
+    })
+    c
+}
+// seed from CONCRETE functions only (a template body's self-call has a tparam targ, not a concrete one).
+rc_fn_env = (env: Env, f: Func) Env { Env( vars: env.a.params_env(f.params), decls: env.decls, didx: env.didx, exp: f.ret, a: env.a ) }
+rc_seed = (env: Env, buf: [GenericData], cnt: i32) i32 {
+    c := cnt
+    env.decls.loop((h, i, d) { c = d.match ({
+        .DFunc(f) => f.is_generic_fn().match ({ true => c, false => env.rc_fn_env(f).rc_col_body(buf, c, f.body) }),
+        _         => c
+    }) })
+    c
+}
+// the substituted param list of one instance (tparam→arg in each param type).
+rc_subst_params = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ps: [Param]) [Param] {
+    buf := a.pbuf(ps.len)
+    ps.loop((h, i, p) { buf[i] = param(p.name, a.subst_ty_in(tparams, targs, p.ty)) })
+    buf
+}
+// transitive closure: each instance's substituted body may name further instances (its own self-call,
+// or a call to another recursive generic), so walk every instance body until no new ones appear.
+rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
+    g       := buf[i]
+    tf      := env.didx.idx_func(env.decls, g.name)
+    iparams := env.a.rc_subst_params(tf.tparams, g.args, tf.params)
+    ibody   := env.a.subst_body(tf.tparams, g.args, tf.body)
+    ienv    := Env( vars: env.a.params_env(iparams), decls: env.decls, didx: env.didx, exp: env.a.subst_ty_in(tf.tparams, g.args, tf.ret), a: env.a )
+    env.rc_expand(buf, ienv.rc_col_body(buf, count, ibody), i + 1)
+}
+rc_expand = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
+    (i >= count).match ({ true => count, false => env.rc_expand_one(buf, count, i) })
+}
+// the concrete DFunc for one instance: template params/ret/body with tparam→arg substituted, given the
+// mangled name. Its self-call stays the bare template name; the final resolve_call mangles it (the
+// instance decl now exists), which also resolves dispatch (e.g. allocator methods) on the concrete type.
+rc_gen = (env: Env, g: GenericData) Decl {
+    tf := env.didx.idx_func(env.decls, g.name)
+    dfunc(Func(
+        name: g.mangled,
+        params: env.a.rc_subst_params(tf.tparams, g.args, tf.params),
+        ret: env.a.subst_ty_in(tf.tparams, g.args, tf.ret),
+        tparams: empty_params(),
+        body: env.a.subst_body(tf.tparams, g.args, tf.body)
+    ))
+}
+// append one concrete C function per discovered recursive-generic instance. The templates stay in the
+// decl list (emit skips them via is_template); resolve_call — run after this — rewrites the calls.
+mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+    base := Env( vars: a.vnil(), decls: decls, didx: idx, exp: tvoid(), a: a )
+    buf  := a.rc_gbuf(4096)
+    cnt  := base.rc_expand(buf, base.rc_seed(buf, 0), 0)
+    (cnt == 0).match ({
+        true  => decls,
+        false => {
+            out := a.dbuf(decls.len + cnt)
+            decls.loop((h, i, d) { out[i] = d })
+            k := decls.len
+            buf.loop((h, i, g) { (i < cnt).match ({ true => { out[k] = base.rc_gen(g)  k = k + 1 }, false => {} }) })
+            slice(out.ptr, k)
+        }
+    })
+}
+
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     decls0 := a.expand_defaults(a.desugar_method_calls(raw))
     decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
@@ -1685,8 +1933,12 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     inl2 := a.dbuf(out.len)
     out.loop((h, i, d) { inl2[i] = a.inline_decl(out, oidx, d) })
     i2idx := a.build_decl_index(inl2)
-    out2 := a.dbuf(inl2.len)
-    inl2.loop((h, i, d) { out2[i] = a.resolve_decl(inl2, i2idx, d) })
+    // emit one concrete fn per recursive-generic instance BEFORE the final resolve, so each instance
+    // body gets resolved (dispatch on its concrete types) and resolve_call rewrites recursive calls to it.
+    exp2 := a.mono_rec(inl2, i2idx)
+    eidx := a.build_decl_index(exp2)
+    out2 := a.dbuf(exp2.len)
+    exp2.loop((h, i, d) { out2[i] = a.resolve_decl(exp2, eidx, d) })
     out2
 }
 
