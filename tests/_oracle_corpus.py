@@ -61,6 +61,10 @@ VALUE_CASES = [
     ('Store<S>: { state: S }\nAppState: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 5))\n  st.state.count\n}', 5),
     # multi-tparam inferred from field values
     ('Pair<A, B>: { a: A, b: B }\ntest* = () i32 {\n  p := Pair(a: 7, b: 9)\n  p.a + p.b\n}', 16),
+    # --- std.state.store shape: a Redux-style store + a pure reducer TRAIT + generic dispatch.
+    #     A value type IS its own reducer (Self == state); dispatch folds an action through it
+    #     in place via MutPtr field-write. Asserts count after Inc/Add(10)/Dec == 10. ---
+    ('Reducer<A>: { reduce: (Self, A) Self }\nStore<S>: { state: S }\nAppState: { count: i32, clicks: i32 }\nAction: Inc | Dec | Add(i32)\nAppState.impl(Reducer<Action>, { reduce = (s: AppState, a: Action) AppState { a.match({ .Inc => AppState(count: s.count + 1, clicks: s.clicks + 1), .Dec => AppState(count: s.count - 1, clicks: s.clicks + 1), .Add(n) => AppState(count: s.count + n, clicks: s.clicks + 1) }) } })\ndispatch<S, A> = (st: MutPtr<Store<S>>, a: A) void { st.state = st.state.reduce(a) }\ntest* = () i32 {\n  st := Store(state: AppState(count: 0, clicks: 0))\n  p := st.addr()\n  dispatch(p, Action.Inc)\n  dispatch(p, Action.Add(10))\n  dispatch(p, Action.Dec)\n  st.state.count\n}', 10),
     # --- GENERIC DISPATCH on a STATEMENT-MATCH payload binding: the lowered binding must be TYPED so
     #     the generic call (trait dispatch) monomorphizes (was: link error, undefined trait method) ---
     ('Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nE*: Num(i64) | Add(i64)\ntest* = () i64 {\n  c := Cell(x: 0)\n  e := E.Num(21)\n  e.match({ .Num(n) => store_i64(c.addr(), apply(n)), .Add(m) => store_i64(c.addr(), apply(m)) })\n  load_i64(c.addr())\n}', 42),
