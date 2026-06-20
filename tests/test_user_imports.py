@@ -558,7 +558,7 @@ def test_namespace_bound_std_modules_can_export_same_function_name():
             "main = () i32 {\n"
             "    heap := alloc.default()\n"
             "    nums := slice.dup(heap.addr(), [10, 20])\n"
-            "    bytes := text.dup(heap.addr(), \"ab\")\n"
+            "    bytes := text.dup_bytes(heap.addr(), \"ab\")\n"
             "    ok := (nums[0] == 10) && (nums[1] == 20) && (bytes[0] == 'a') && (bytes[1] == 'b')\n"
             "    ok.match({ true => 0, false => 1 })\n"
             "}\n"
@@ -1068,6 +1068,33 @@ def test_std_string_and_actor_imports_coexist_without_new_in_collision():
     })
     r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_std_slice_and_text_imports_coexist_without_dup_in_collision():
+    """Regression (COLLIDE-1): std.core.slice exported `dup_in<A,T>(a, [T])` (element copy) and
+    std.text.str exported `dup_in<A>(a, str)` (byte copy). Flattened together (str loaded via
+    std.text.fmt for println), str's bare `dup_in` shadowed slice's, so `slice.node_in`/`dup`
+    mis-resolved to the str version -> arg-type error, or (via node_in) a C-miscompile that sized
+    the allocation as `len` bytes instead of `len*sizeof(T)` -> heap corruption for T>u8. str's
+    family is now `dup_bytes`/`dup_bytes_in`, so slice's `dup_in`/`node_in` resolve correctly even
+    when str is loaded. Both build + run."""
+    d = _program({
+        "p.zen": (
+            "{ println } = std.text.fmt\n"          # pulls in std.text.str
+            "alloc = std.mem.alloc\n"
+            "{ dup, node_in } = std.core.slice\n"
+            "main = () i32 {\n"
+            "    m := alloc.default()\n"
+            "    xs: [i32] := m.addr().dup([10, 20, 30])\n"   # slice element-copy, not str byte-copy
+            "    p := m.addr().node_in(777)\n"                # heap-alloc a node (the miscompile path)
+            "    println(xs[2] + p.load())\n"                 # 30 + 777 = 807
+            "    0\n"
+            "}\n"
+        ),
+    })
+    r = subprocess.run([_zenc(), "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "807", r.stdout
 
 
 def test_namespace_bound_std_cown_can_export_natural_buf_file_without_collision():

@@ -774,13 +774,57 @@ resolve_f64_neg = (a: MutPtr<Malloc>, env: Env, op: str, lhs: Ptr<Expr>, rhs: Pt
         false => a.cenode(bin_at(op, lhs, rhs, p))
     })
 }
+// ── variadic params: a trailing `...T` param collects the surplus call args into a `[T]` ──
+// Detect the marker (set by the parser), the element type T, and the per-arg expected type
+// (T for a collected element). Lowering happens AFTER arg resolution, in resolve_call.
+last_variadic = (ps: [Param]) bool { (ps.len > 0).match ({ true => ps[ps.len - 1].variadic, false => false }) }
+vararg_elem = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => t }) }
+// expected type for arg i: the element type T for any arg in a variadic param's collected tail.
+arg_exp_v = (ps: [Param], i: i32) Ty {
+    last_variadic(ps).match ({
+        false => ps.arg_exp(i),
+        true  => {
+            fixed := ps.len - 1
+            (i < fixed).match ({ true => ps.arg_exp(i), false => ps[fixed].ty.vararg_elem() })
+        }
+    })
+}
+// resolve_module re-runs resolve_decl several times (resolve/inline passes), so collection must be
+// IDEMPOTENT: a call already lowered has exactly param-count args with a SliceLit in the variadic
+// slot. Re-collecting it would nest `[[…]]`. Detect that shape and leave it untouched.
+is_slicelit_expr = (e: Expr) bool { e.match ({ .SliceLit(s) => true, _ => false }) }
+already_collected = (ps: [Param], args: [Expr]) bool {
+    (args.len == ps.len).match ({ true => (args.len > 0).match ({ true => is_slicelit_expr(args[args.len - 1]), false => false }), false => false })
+}
+// rewrite `f(a, b, c)` with `f = (x: X, ys: ...Y)` into `f(a, [b, c])`: surplus args → one SliceLit.
+collect_varargs = (a: MutPtr<Malloc>, ps: [Param], args: [Expr]) [Expr] {
+    (last_variadic(ps) && (ps.already_collected(args) == false)).match ({
+        false => args,
+        true  => {
+            fixed := ps.len - 1
+            (args.len < fixed).match ({
+                true  => args,                                          // too few args: let the validator report arity
+                false => {
+                    elem := ps[fixed].ty.vararg_elem()
+                    vbuf := a.cebuf(args.len - fixed)
+                    args.loop((h, j, e) { (j >= fixed).match ({ true => { vbuf[j - fixed] = e }, false => {} }) })
+                    out  := a.cebuf(fixed + 1)
+                    args.loop((h, j, e) { (j < fixed).match ({ true => { out[j] = e }, false => {} }) })
+                    out[fixed] = slit(elem, vbuf)
+                    out
+                }
+            })
+        }
+    })
+}
 // The expected type for argument `i` of a (generic or plain) call. For a generic fn, the param type may
 // name a tparam (`x: T`); substituting the inferred type args gives the CONCRETE expected type, which
 // lets a bare variant ctor argument (`.Num(n)` for a `Vec<Tok>.push`) resolve against the right enum
 // instead of guessing by variant name. FnT (lambda) params keep the void expected-type they had before
-// (they are spliced/inlined later), so existing template-lambda resolution is unchanged.
+// (they are spliced/inlined later), so existing template-lambda resolution is unchanged. A variadic
+// param's collected args take element type T (via arg_exp_v) before any tparam substitution.
 call_arg_exp = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param], i: i32) Ty {
-    pty := ps.arg_exp(i)
+    pty := ps.arg_exp_v(i)
     tmpl.match ({
         false => pty,
         true  => pty.is_fnt().match ({
@@ -800,7 +844,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex     := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    a.recall(c, env.rec_dispatch(dn, fn, c.args), buf)
+    a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf))
 }
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
 // it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
@@ -1104,7 +1148,7 @@ hide_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
         true  => params,
         false => {
             buf := a.pbuf(params.len)
-            params.loop((h, i, p) { buf[i] = eq(p.name, name).match ({ true => Param( name: "", ty: p.ty ), false => p }) })
+            params.loop((h, i, p) { buf[i] = eq(p.name, name).match ({ true => Param( name: "", ty: p.ty, variadic: p.variadic ), false => p }) })
             buf
         }
     })
@@ -1139,7 +1183,7 @@ add_subst_param = (a: MutPtr<Malloc>, params: [Param], name: str) [Param] {
     base := a.hide_param(params, name)
     buf := a.pbuf(base.len + 1)
     base.loop((h, i, p) { buf[i] = p })
-    buf[base.len] = Param( name: name, ty: tvoid() )
+    buf[base.len] = Param( name: name, ty: tvoid(), variadic: false )
     buf
 }
 add_subst_arg = (a: MutPtr<Malloc>, args: [Expr], name: str) [Expr] {
@@ -1167,9 +1211,10 @@ add_lambda_arg = (a: MutPtr<Malloc>, args: [Expr], lamx: Ptr<Expr>) [Expr] {
 }
 // is this Let's value a lambda literal? (drives the alias lowering above)
 let_value_lambda = (st: Stmt) bool {
-    out := false
-    st.match ({ .Let(l) => { load(l.value).match ({ .Lambda(lm) => { out = true }, _ => {} }) }, _ => {} })
-    out
+    st.match ({
+        .Let(l) => load(l.value).match ({ .Lambda(lm) => true, _ => false }),
+        _       => false
+    })
 }
 the_func* = (decls: [Decl], name: str) Func {
     found := Func( name: "", params: empty_params(), ret: tvoid(), tparams: empty_params(), body: no_stmts() )
