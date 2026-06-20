@@ -850,12 +850,16 @@ subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr
     ptr.match ({ true => { u = a.cenode(arrow(subj, "u")) }, _ })
     a.cenode(member(u, variant))
 }
-arm_then = (a: MutPtr<Malloc>, m: MatchData, ar: ArmData) [Stmt] {
+arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
     body := a.branch_stmts(ar.body)
     out := body
     eq(ar.bind, "").match ({
         true  => {},
-        false => { out = a.cons_stmt(slet(ar.bind, a.subj_payload(m.subj, ar.variant, m.ptr)), body) }
+        // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
+        // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
+        // generic call on it (`println(n)`) fails to monomorphize → link error. Same fix the or_return
+        // lowering already uses (slett with subj_variant_payload). Void payload type falls back to slet.
+        false => { out = a.cons_stmt(slett(ar.bind, env.subj_variant_payload(t, ar.variant), a.subj_payload(m.subj, ar.variant, m.ptr)), body) }
     })
     out
 }
@@ -866,7 +870,7 @@ cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
     buf
 }
 // Build if/else chain over enum arms.
-lower_match_arms = (a: MutPtr<Malloc>, m: MatchData, i: i32) [Stmt] {
+lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
     out := no_stmts()
     (i >= m.arms.len).match ({
         true  => {},
@@ -876,15 +880,16 @@ lower_match_arms = (a: MutPtr<Malloc>, m: MatchData, i: i32) [Stmt] {
                 true  => { out = a.branch_stmts(ar.body) },
                 false => {
                     cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(a.tag_const(m.ename, ar.variant)))))
-                    out = a.one_stmt(sif(cond, a.arm_then(m, ar), a.lower_match_arms(m, i + 1)))
+                    out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
                 }
             })
         }
     })
     out
 }
-lower_match_stmt = (a: MutPtr<Malloc>, m: MatchData) Stmt {
-    stmts := a.lower_match_arms(m, 0)
+lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
+    t     := env.infer_expr(m.subj)
+    stmts := a.lower_match_arms(env, t, m, 0)
     out := sexpr(a.cenode(block(stmts)))
     (stmts.len == 1).match ({ true => { out = stmts[0] }, _ })
     out
@@ -906,7 +911,7 @@ lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
     out := sexpr(e)
     load(e).match ({
         .Match(m) => env.decls.match_lowerable(m).match ({
-            true => { out = a.lower_match_stmt(m) },
+            true => { out = a.lower_match_stmt(env, m) },
             _    => { out = sexpr(e) }
         }),
         .Cond(d)  => { out = a.lower_cond_stmt(d) },

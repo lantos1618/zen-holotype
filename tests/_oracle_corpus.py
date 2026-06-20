@@ -51,6 +51,15 @@ VALUE_CASES = [
     ('Store<S>: { state: S }\nAppState: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 5))\n  st.state.count\n}', 5),
     # multi-tparam inferred from field values
     ('Pair<A, B>: { a: A, b: B }\ntest* = () i32 {\n  p := Pair(a: 7, b: 9)\n  p.a + p.b\n}', 16),
+    # --- GENERIC DISPATCH on a STATEMENT-MATCH payload binding: the lowered binding must be TYPED so
+    #     the generic call (trait dispatch) monomorphizes (was: link error, undefined trait method) ---
+    ('Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nE*: Num(i64) | Add(i64)\ntest* = () i64 {\n  c := Cell(x: 0)\n  e := E.Num(21)\n  e.match({ .Num(n) => store_i64(c.addr(), apply(n)), .Add(m) => store_i64(c.addr(), apply(m)) })\n  load_i64(c.addr())\n}', 42),
+    # same, but the generic call is on a MEMBER of the payload binding (`apply(ps.len)`)
+    ('Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nW*: Obj([i32]) | None\ntest* = () i64 {\n  c := Cell(x: 0)\n  w := W.Obj([10, 20, 30])\n  w.match({ .Obj(ps) => store_i64(c.addr(), apply(ps.len)), .None => store_i64(c.addr(), 0-1) })\n  load_i64(c.addr())\n}', 6),
+    # STATEMENT-position match whose SUBJECT is an enclosing arm's payload binding (`.Bin(bo)` then
+    # `bo.match(...)` on the RHS of `=`): the binding must be TYPED so the inner match recovers `bo`'s
+    # enum name and emits qualified case labels (`B_OpAdd`, not bare `_OpAdd` → cc undeclared).
+    ('B*: OpAdd | OpSub\nO*: Bin(B)\nf = (op: O) i32 { r := 0  op.match({ .Bin(bo) => { r = bo.match({ .OpAdd => 1, .OpSub => 2 }) } })  r }\ntest* = () i32 { f(O.Bin(B.OpSub)) }', 2),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
