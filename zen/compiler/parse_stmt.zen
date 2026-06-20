@@ -60,13 +60,23 @@ is_typed_let_here = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
 }
 // is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
 is_eq = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '='), _ => false }) }
-skip_dots = (src: str, pos: i32) i32 {                 // skip a `(. ident)*` lvalue field chain
+// Skip a place-expression suffix: a chain of `.field` and `[index]` postfixes after the head ident, so
+// `s.buf[i]`, `a[i].x`, `s.inner.p[i]` are all recognized as store targets. parse_atom re-parses the
+// same chain for the real LHS, and gen_expr lowers an Index target to the same valid C lvalue a read
+// produces (`((elem*)(seq).ptr)[idx]`), so sassign stores through it directly.
+skip_place = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
-    src.is_dot(sc.tok).match ({ true => src.skip_dots(src.scan(sc.next).next), false => pos })
+    src.is_dot(sc.tok).match ({
+        true  => src.skip_place(src.scan(sc.next).next),         // `.field` -> skip the dot and the field name
+        false => src.is_lbracket(sc.tok).match ({
+            true  => src.skip_place(src.skip_brackets(sc.next)), // `[ … ]` -> skip past the matching ']'
+            false => pos
+        })
+    })
 }
 is_set_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
-    sc.tok.kind.match ({ .Ident => src.is_eq(src.scan(src.skip_dots(sc.next)).tok), _ => false })   // ident (.field)* '='
+    sc.tok.kind.match ({ .Ident => src.is_eq(src.scan(src.skip_place(sc.next)).tok), _ => false })   // ident (.field | [i])* '='
 }
 // is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
 skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'

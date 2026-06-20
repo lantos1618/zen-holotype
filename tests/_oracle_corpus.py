@@ -61,6 +61,10 @@ VALUE_CASES = [
     ('Store<S>: { state: S }\nAppState: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 5))\n  st.state.count\n}', 5),
     # multi-tparam inferred from field values
     ('Pair<A, B>: { a: A, b: B }\ntest* = () i32 {\n  p := Pair(a: 7, b: 9)\n  p.a + p.b\n}', 16),
+    # --- std.state.store shape: a Redux-style store + a pure reducer TRAIT + generic dispatch.
+    #     A value type IS its own reducer (Self == state); dispatch folds an action through it
+    #     in place via MutPtr field-write. Asserts count after Inc/Add(10)/Dec == 10. ---
+    ('Reducer<A>: { reduce: (Self, A) Self }\nStore<S>: { state: S }\nAppState: { count: i32, clicks: i32 }\nAction: Inc | Dec | Add(i32)\nAppState.impl(Reducer<Action>, { reduce = (s: AppState, a: Action) AppState { a.match({ .Inc => AppState(count: s.count + 1, clicks: s.clicks + 1), .Dec => AppState(count: s.count - 1, clicks: s.clicks + 1), .Add(n) => AppState(count: s.count + n, clicks: s.clicks + 1) }) } })\ndispatch<S, A> = (st: MutPtr<Store<S>>, a: A) void { st.state = st.state.reduce(a) }\ntest* = () i32 {\n  st := Store(state: AppState(count: 0, clicks: 0))\n  p := st.addr()\n  dispatch(p, Action.Inc)\n  dispatch(p, Action.Add(10))\n  dispatch(p, Action.Dec)\n  st.state.count\n}', 10),
     # --- GENERIC DISPATCH on a STATEMENT-MATCH payload binding: the lowered binding must be TYPED so
     #     the generic call (trait dispatch) monomorphizes (was: link error, undefined trait method) ---
     ('Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nE*: Num(i64) | Add(i64)\ntest* = () i64 {\n  c := Cell(x: 0)\n  e := E.Num(21)\n  e.match({ .Num(n) => store_i64(c.addr(), apply(n)), .Add(m) => store_i64(c.addr(), apply(m)) })\n  load_i64(c.addr())\n}', 42),
@@ -83,6 +87,19 @@ VALUE_CASES = [
     ('apply = (f: (i32) i32, x: i32) i32 { f(x) }\ntest* = () i32 {\n  k := 10\n  g := (n) { n + k }\n  apply(g, 41) + apply(g, 2)\n}', 63),
     ('twice = (f: (i32) i32, x: i32) i32 { f(f(x)) }\ntest* = () i32 {\n  g := (n) { n + 3 }\n  twice(g, 1)\n}', 7),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
+    # --- generic in-place sort with an INLINE-LAMBDA comparator (std.collections.iter.sort shape):
+    #     the comparator `less` is invoked DIRECTLY inside the generic fn's nested loops (never
+    #     forwarded to a helper, which would leave a `zen__unlowered_lambda`), so it splices like fold.
+    ('srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a < b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}', 12345),
+    # same sort, DESCENDING comparator (a > b) → [5,4,3,2,1]
+    ('srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a > b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}', 54321),
+    # --- zero-element generic constructor whose T comes from the LHS annotation (std.collections
+    #     Vec/Map `empty` shape): `v: Vec<i32> := empty()` infers T=i32 with no seed arg, then push/get.
+    ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nempty<T> = () Vec<T> { Vec<T>(ptr: malloc(sizeof(T)), len: 0, cap: 1) }\npush<T> = (v: Vec<T>, x: T) Vec<T> { b := v.buf()  b[v.len] = x  Vec<T>(ptr: v.ptr, len: v.len + 1, cap: v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\ntest* = () i32 {\n  v: Vec<i32> := empty()\n  v = v.push(42)\n  v.get(0)\n}', 42),
+    # --- pair-iteration: a generic struct METHOD takes a 2-arg fn param and invokes an INLINE LAMBDA
+    #     directly (std.collections.map.each_pair shape — visits key+value together), mutating an
+    #     outer-scope local through the closure. Splices like iter.each; no zen__unlowered_lambda.
+    ('Pairs<T>: { ks: [str], vs: [T]\n    each_pair = (p: Pairs<T>, f: (str, T) void) void {\n        p.ks.loop((h, i, k) { f(k, p.vs[i]) })\n    }\n}\ntest* = () i32 {\n    p := Pairs<i32>(ks: ["a", "b", "c"], vs: [10, 20, 30])\n    s := 0\n    p.each_pair((k, v){ s = s + v })\n    s\n}', 60),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
     ('A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A(v: 5)\n  b := B(v: 6)\n  a.addr().area() + b.addr().area()\n}', 41),
@@ -180,6 +197,13 @@ VALUE_CASES = [
     ('test* = () i32 { (5 < 3).match({ true => 1, false => 0 }) }', 0),
 # --- recovered breadth: slice write-then-read ---
     ('test* = () i32 { s := [1, 2, 3]\n s[1] = 20\n s[0] + s[1] + s[2] }', 24),
+# --- std.core.slice: sub/take/drop zero-copy VIEWS (ptr = base + lo*sizeof(T), len = hi-lo). Bounds
+#     are clamped to [0, len] so an out-of-range hi yields a shorter view, not an OOB read. ---
+    ('sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match({ true => lo, false => (v > hi).match({ true => hi, false => v }) }) }\nsub<T> = (xs: [T], lo: i64, hi: i64) [T] { l := sl_clamp(lo, 0, xs.len)  h := sl_clamp(hi, l, xs.len)  slice(xs.ptr.offset(l * sizeof(T)), h - l) }\ntake<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }\ndrop<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  v: [i32] := s.sub(1, 3)\n  t: [i32] := s.take(2)\n  d: [i32] := s.drop(3)\n  o: [i32] := s.sub(2, 99)\n  v.len.to_i32() * 1000 + v[0] * 10 + v[1] + t[0] + d[0] + o.len.to_i32()\n}', 2282),
+# --- std.core.slice: reverse_in allocates a NEW slice and copies xs in reverse (out[len-1-i] = x). ---
+    ('Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) Ptr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: [T]) [T] { out := a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h := Heap(z: 0)\n  r: [i32] := h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}', 4321),
+# --- std.core.slice: index_of/contains (via `==`, scalar elems) and find_by (predicate, any elem). ---
+    ('index_of<T> = (xs: [T], x: T) i64 { r := 0 - 1  xs.loop((h, i, e) { (e == x).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ncontains<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }\nis30 = (x: i32) bool { x == 30 }\nfind_by<T> = (xs: [T], pred: (T) bool) i64 { r := 0 - 1  xs.loop((h, i, e) { pred(e).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  ix := s.index_of(30)\n  miss := s.index_of(99)\n  has := s.contains(40).match({ true => 1, false => 0 })\n  fb := s.find_by(is30)\n  ix.to_i32() * 1000 + (miss + 1).to_i32() * 100 + has * 10 + fb.to_i32()\n}', 2012),
 # --- recovered breadth: arithmetic precedence + recursion ---
     ('test* = () i32 { 2 + 3 * 4 - 1 }', 13),
     ('fac* = (n: i32) i32 { (n == 0).match({ true => 1, false => n * fac(n - 1) }) }\ntest* = () i32 { fac(5) }', 120),
@@ -220,6 +244,58 @@ VALUE_CASES = [
     ('test* = () i64 { to_i64(2.9) }', 2),                                                    # to_i64 truncates a double the C way
     ('test* = () i32 {\n  x := 0.25\n  x.match ({ 0.25 => 1, 1.5 => 2, _ => 9 })\n}', 1),     # a float-literal match is an `==` chain
     ('g := 1.5\ntest* = () i32 { to_i32(g * 2.0) }', 3),                                      # a module-global f64 (constant init)
+    # --- ESCAPE-1: `\xNN` hex escape → one byte; `\\` keeps the backslash (no silent drop) ---
+    # (use \x41='A' in STRING cases — a raw high byte in emitted C breaks the text-mode oracle harness;
+    #  the high-byte value path is covered by the char-literal case, which lowers to a numeric literal.)
+    ("test* = () i32 { '\\xc8' }", 200),                                                       # char-literal \xNN → 200
+    ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("\\x41", 0) }', 65),  # \x41 → byte 'A'
+    ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("a\\\\b", 1) }', 92),  # \\ stays a backslash (byte 92)
+    ('cnt = (s: str, i: i32) i32 { (s.offset(i).load() == 0).match({ true => i, false => cnt(s, i + 1) }) }\ntest* = () i32 { cnt("\\x41", 0) }', 1),  # \x41 is ONE byte (len 1, not 3)
+    # --- LAMBDA-1: typed lambda literals — optional `: Type` per param and an optional return type
+    #     must PARSE (the types are discarded; FnT context supplies them on inline-splice) ---
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y: i32) { x + y }, 3, 4) }', 7),   # typed params
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) i32 { x + y }, 5, 6) }', 11),       # untyped params + return type
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y: i32) i32 { x + y }, 8, 9) }', 17),  # typed params + return type
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x: i32, y) { x + y }, 2, 5) }', 7),        # mixed typed/untyped params
+    ('fold<T> = (xs: [T], init: T, f: (T, T) T) T {\n  acc := init\n  xs.loop((h, i, x) { acc = f(acc, x) })\n  acc\n}\ntest* = () i32 { [1, 2, 3].fold(0, (x: i32, y: i32) { x + y }) }', 6),  # the motivating fold repro
+    ('apply = (f: (i32, i32) i32, a: i32, b: i32) i32 { f(a, b) }\ntest* = () i32 { apply((x, y) { x + y }, 4, 5) }', 9),            # untyped lambda still works (regression guard)
+    # --- LVALUE-1: nested store targets — any `ident (.field | [i])*` place expression is assignable ---
+    ('S*: { buf: [i32] }\ntest* = () i32 { s := S(buf: [1, 2, 3])  s.buf[0] = 9  s.buf[0] + s.buf[1] }', 11),                       # member then index
+    ('P*: { x: i32, y: i32 }\ntest* = () i32 { a := [P(x: 1, y: 2), P(x: 3, y: 4)]  a[0].x = 7  a[0].x + a[1].x }', 10),            # index then field
+    ('In*: { p: [i32] }\nS*: { inner: In }\ntest* = () i32 { s := S(inner: In(p: [10, 20]))  s.inner.p[1] = 5  s.inner.p[0] + s.inner.p[1] }', 15),  # member.member.index
+    ('test* = () i32 { a := [1, 2, 3]  a[1] = 8  a[0] + a[1] }', 9),                                                                 # plain name[i] = v still works (SIdx path)
+    # --- PARSE-RETURN-ARM: a bare `return expr` in arm-body position (not just braced `{ return expr }`) ---
+    ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => return 999, false => 0 })\n}', 999),                                  # bare return arm fires
+    ('test* = () i32 {\n  n := 50\n  (n > 100).match({ true => return 999, false => 7 })\n}', 7),                                     # other arm still a value
+    ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => { return 999 }, false => 0 })\n}', 999),                              # braced form unchanged (regression guard)
+    # --- TAILPAREN-1: a statement-leading `(` after a qualified ctor starts a NEW statement (a
+    #     parenthesized expr), not a payload glued onto the ctor (`State.Idle` ⏎ `(a).q()`) ---
+    ('State*: Idle | Run\nq = (s: State) i32 { 7 }\ntest* = () i32 {\n  a := State.Idle\n  (a).q()\n}', 7),                            # newline un-glues the '('
+    ('E*: A(i32) | B\nval = (e: E) i32 { e.match({ .A(x) => x, .B => 0 }) }\ntest* = () i32 { val(E.A(42)) }', 42),                  # same-line payload still glues (regression guard)
+    # --- G1: multi-field enum payloads — `B(i32, i32)` ≡ `B({_0: i32, _1: i32})`; `.B(a, b)` constructs
+    #     the anon struct, `.B(p)` binds it (fields `_0`, `_1`, …). NON-generic enums only — a generic
+    #     anon-struct payload (`Cons(T, …)`) hits a pre-existing checker/mono limit, same as the explicit
+    #     `Cons({_0: T, …})` form, so it is out of parser scope. ---
+    ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 { sum(E.B(3, 4)) }', 7),    # qualified ctor
+    ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 {\n  e := .B(10, 20)\n  sum(e)\n}', 30),  # bare ctor
+    ('T*: N | V(i32, i32, i32)\nsum = (t: T) i32 { t.match({ .N => 0, .V(p) => p._0 + p._1 + p._2 }) }\ntest* = () i32 { sum(T.V(1, 2, 3)) }', 6),  # three fields
+    ('O*: Some(i32) | None\nun = (o: O) i32 { o.match({ .Some(x) => x, .None => 0 }) }\ntest* = () i32 { un(O.Some(42)) }', 42),     # single payload unchanged (regression guard)
+
+    # --- std.text.str.trim — the ASCII-whitespace scan that backs trim/ltrim/rtrim_view. Walks a [u8]
+    #     view, finds the first/last non-whitespace index; result encodes ws_start*100 + trimmed_len.
+    #     For "  hi \n": ws_start=2, trimmed_len=2 -> 202 (guards both the offset AND the length). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\nws_start = (v: [u8]) i64 { lo: i64 := v.len  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { lo = i  h.break } }) })  lo }\nws_end = (v: [u8]) i64 { hi: i64 := 0  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { hi = i + 1 } }) })  hi }\ntest* = () i32 { s := "  hi \\n"  v: [u8] := slice(s, strlen(s))  to_i32(ws_start(v) * 100 + (ws_end(v) - ws_start(v))) }', 202),
+
+    # --- std.text.str.split_in — the sep-scan that emits each field's (start, len). Walks a [u8] view,
+    #     accumulating per-field lengths as a base-10 checksum (acc = acc*10 + field_len). For "a,,b"
+    #     on ',' the fields are 1,0,1 bytes -> 101 (the EMPTY middle field is what 0 guards). ---
+    ('strlen = (s: str) i64\ntest* = () i32 { s := "a,,b"  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0  v.loop((h, i, b) { (b == \',\').match ({ true => { acc = acc * 10 + (i - start)  start = i + 1 }, _ => {} }) })  acc = acc * 10 + (v.len - start)  to_i32(acc) }', 101),
+
+    # --- std.text.str.words_in — split on RUNS of whitespace, dropping empties. Walks the [u8] view,
+    #     opening a word at the first non-ws byte and closing it at the next ws, accumulating each
+    #     word's length as a base-10 checksum. "  the  cat sat " -> words 3,3,3 -> 333 (the leading,
+    #     doubled, and trailing whitespace must all collapse — any leaked empty would skew the digits). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\ntest* = () i32 { s := "  the  cat sat "  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }', 333),
 ]
 
 # (src, verdict) the check binary must produce.

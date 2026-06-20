@@ -7,7 +7,7 @@
 { Malloc } = std.mem.alloc
 { parse_or, parse_bxor, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
-{ parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get, anon_reset, anon_decls_get } = compiler.parse_type
+{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get, anon_reset, anon_decls_get } = compiler.parse_type
 
 // `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: { func: Func, next: i32, foreign: bool }
@@ -179,10 +179,8 @@ is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (sr
 variant_buf = (a: MutPtr<Malloc>) [VariantDef] { slice(a.acquire(1024 * sizeof(VariantDef)), 1024) }
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
 variant_payload = (a: MutPtr<Malloc>, src: str, pos: i32) VPay {
-    te := a.parse_ty(src, pos)
-    rp := src.scan(te.next)
-    src.is_rparen(rp.tok).match ({ true => {}, false => perr_set() })
-    VPay( ty: te.ty, next: rp.next )
+    te := a.parse_variant_payload(src, pos)         // `(T)` single, or `(T1, T2, …)` -> anon struct
+    VPay( ty: te.ty, next: te.next )
 }
 fill_variants = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i32) PEnd {
     nt := src.scan(pos)
