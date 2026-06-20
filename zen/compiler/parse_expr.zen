@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, sret, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, sret, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -133,8 +133,9 @@ esc_byte = (e: u8) u8 {
         _ => e
     })
 }
-// Two hex digits at `pos`,`pos+1` → one byte (for `\xNN`).
-hex2 = (src: str, pos: i32) u8 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
+// Two hex digits at `pos`,`pos+1` → one byte value (0..255) for `\xNN`. Returns i32 (the arithmetic
+// type); the store/char-lit sites narrow to the byte, matching how `char_val` carries byte values as i32.
+hex2 = (src: str, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
 char_val = (src: str, start: i32) i32 {
     b := src.at(start + 1)
     (b == '\\').match ({
@@ -201,12 +202,28 @@ parse_ctor_empty = (a: MutPtr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
     PExpr( expr: a.enode(mktag("", vn)), next: rp.next )
 }
 parse_ctor_payload = (a: MutPtr<Malloc>, src: str, vn: str, lp: Scan) PExpr {
-    arg := a.parse_or(src, lp.next)
-    rp  := src.scan(arg.next)
-    // A variant payload is exactly one expression.
-    src.is_rparen(rp.tok).match ({
-        true  => PExpr( expr: a.enode(mkenum("", vn, arg.expr)), next: rp.next ),     // `.Variant(arg)` -> MakeEnum
-        false => a.reject_match(rp.next)
+    pl := a.parse_payload_args(src, lp)                                               // `.Variant(a, b, …)` payload
+    PExpr( expr: a.enode(mkenum("", vn, pl.expr)), next: pl.next )
+}
+// Parse the `(a, b, …)` args of a variant constructor into the payload EXPR: one arg is the payload
+// directly; 2+ args become an anon struct `{_0: a, _1: b, …}` matching the multi-field decl synthesis.
+parse_payload_args = (a: MutPtr<Malloc>, src: str, lp: Scan) PExpr {
+    buf   := a.finit_buf()
+    pe    := a.fill_payload_args(src, lp.next, buf, 0)
+    inits := buf.take_inits(pe.count)
+    (pe.count == 1).match ({
+        true  => PExpr( expr: inits[0].value, next: pe.next ),                        // single payload: the arg itself
+        false => PExpr( expr: a.enode(mkstruct(a.mangle_anon_in(a.inits_as_fields(inits)), inits)), next: pe.next )
+    })
+}
+fill_payload_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    v     := a.parse_or(src, pos)
+    buf[i] = finit(a.payload_fname(i), v.expr)
+    after := src.scan(v.next)
+    src.is_comma(after.tok).match ({
+        true  => a.fill_payload_args(src, after.next, buf, i + 1),
+        false => { src.is_rparen(after.tok).match ({ true => {}, false => perr_set() })  PEnd( count: i + 1, next: after.next ) }   // past ')'
     })
 }
 // a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
@@ -332,12 +349,8 @@ parse_qual_ctor = (a: MutPtr<Malloc>, src: str, tyname: str, vn: str, fld: Scan)
     })
 }
 parse_qual_payload = (a: MutPtr<Malloc>, src: str, tyname: str, vn: str, lp: Scan) PExpr {
-    arg := a.parse_or(src, lp.next)
-    rp  := src.scan(arg.next)
-    src.is_rparen(rp.tok).match ({
-        true  => PExpr( expr: a.enode(mkenum(tyname, vn, arg.expr)), next: rp.next ),
-        false => a.reject_match(rp.next)
-    })
+    pl := a.parse_payload_args(src, lp)                                               // `Type.Variant(a, b, …)` payload
+    PExpr( expr: a.enode(mkenum(tyname, vn, pl.expr)), next: pl.next )
 }
 // FAITHFUL: `recv.method(args)` -> MethodCall(recv, method, args) — keeps the UFCS surface form. The
 // args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls

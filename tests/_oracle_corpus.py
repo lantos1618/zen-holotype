@@ -222,6 +222,14 @@ VALUE_CASES = [
     #     parenthesized expr), not a payload glued onto the ctor (`State.Idle` ⏎ `(a).q()`) ---
     ('State*: Idle | Run\nq = (s: State) i32 { 7 }\ntest* = () i32 {\n  a := State.Idle\n  (a).q()\n}', 7),                            # newline un-glues the '('
     ('E*: A(i32) | B\nval = (e: E) i32 { e.match({ .A(x) => x, .B => 0 }) }\ntest* = () i32 { val(E.A(42)) }', 42),                  # same-line payload still glues (regression guard)
+    # --- G1: multi-field enum payloads — `B(i32, i32)` ≡ `B({_0: i32, _1: i32})`; `.B(a, b)` constructs
+    #     the anon struct, `.B(p)` binds it (fields `_0`, `_1`, …). NON-generic enums only — a generic
+    #     anon-struct payload (`Cons(T, …)`) hits a pre-existing checker/mono limit, same as the explicit
+    #     `Cons({_0: T, …})` form, so it is out of parser scope. ---
+    ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 { sum(E.B(3, 4)) }', 7),    # qualified ctor
+    ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 {\n  e := .B(10, 20)\n  sum(e)\n}', 30),  # bare ctor
+    ('T*: N | V(i32, i32, i32)\nsum = (t: T) i32 { t.match({ .N => 0, .V(p) => p._0 + p._1 + p._2 }) }\ntest* = () i32 { sum(T.V(1, 2, 3)) }', 6),  # three fields
+    ('O*: Some(i32) | None\nun = (o: O) i32 { o.match({ .Some(x) => x, .None => 0 }) }\ntest* = () i32 { un(O.Some(42)) }', 42),     # single payload unchanged (regression guard)
 ]
 
 # (src, verdict) the check binary must produce.
