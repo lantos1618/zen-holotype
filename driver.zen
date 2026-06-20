@@ -13,6 +13,7 @@
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
+{ genfmt_module_in } = compiler.genfmt
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry } = std.internal.resolve
 
@@ -465,9 +466,21 @@ fmt_file = (mp: MutPtr<Malloc>, path: str, check: bool) i32 {
     })
 }
 fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
-    eq(a2, "--check").match ({
-        true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a3, true) }),
-        false => eq(a2, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a2, false) })
+    eq(a2, "--ast").match ({
+        true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt --ast <in.zen>\n")  2 }, false => mp.fmt_ast(a3) }),
+        false => eq(a2, "--check").match ({
+            true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a3, true) }),
+            false => eq(a2, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a2, false) })
+        })
+    })
+}
+// `fmt --ast <file>`: parse the file FAITHFULLY (parse_module keeps MethodCall — UFCS preserved), then
+// pretty-print the AST back to canonical Zen text via compiler.genfmt. NO resolve/lowering, so a
+// `s.len()` round-trips as `s.len()` (not the flattened `len(s)`).
+fmt_ast = (mp: MutPtr<Malloc>, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => { out_bytes(mp.genfmt_module_in(mp.parse_module(src)).bytes())  0 },
+        .Err(e)  => { derr("zenc: fmt: cannot open input\n")  1 }
     })
 }
 

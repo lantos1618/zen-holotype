@@ -65,4 +65,72 @@ def test_run_ufcs_method_with_extra_args():
     assert r.returncode == 21, r.stderr
 
 
-# ── PHASE 2: fmt --ast preserves UFCS — added with the genfmt formatter ─────────
+# ── PHASE 2: fmt --ast preserves UFCS ──────────────────────────────────────────
+def test_fmt_ast_preserves_ufcs():
+    """THE POINT: `fmt --ast` of a UFCS program keeps `x.len()` as `x.len()`, not `len(x)`."""
+    zenc = _zenc()
+    src = _write("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    r = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "x.len()" in r.stdout, r.stdout
+    assert "len(x)" not in r.stdout, r.stdout
+
+
+def test_fmt_ast_preserves_ufcs_chain_with_args():
+    """A multi-arg method chain round-trips as UFCS with the method args inside the parens."""
+    zenc = _zenc()
+    src = _write(
+        "add = (a: i32, b: i32) i32 { a + b }\n"
+        "main = () i32 { 1.add(2).add(3) }\n"
+    )
+    r = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "1.add(2).add(3)" in r.stdout, r.stdout
+
+
+def test_fmt_ast_match_arms_align_and_trailing_comma():
+    """A multi-arm `.match` splits one arm per line, `=>` aligned, trailing comma on the last arm —
+    and the arm bodies keep their UFCS (`n.add(1)`)."""
+    zenc = _zenc()
+    src = _write(
+        "add = (a: i32, b: i32) i32 { a + b }\n"
+        "Opt: Some(i32) | None\n"
+        "classify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\n"
+    )
+    r = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert ".Some(n) => n.add(1)," in r.stdout, r.stdout
+    assert ".None    => 0," in r.stdout, r.stdout   # padded so `=>` aligns with the longer pattern
+
+
+def test_fmt_ast_is_idempotent():
+    """Formatting the formatted output is a fixpoint."""
+    zenc = _zenc()
+    src = _write(
+        "Point: { x: i32, y: i32 }\n"
+        "Opt: Some(i32) | None\n"
+        "add = (a: i32, b: i32) i32 { a + b }\n"
+        "classify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\n"
+        "main = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n"
+    )
+    once = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert once.returncode == 0, once.stderr
+    fmt1 = _write(once.stdout)
+    twice = subprocess.run([zenc, "fmt", "--ast", str(fmt1)], capture_output=True, text=True)
+    assert twice.returncode == 0, twice.stderr
+    assert once.stdout == twice.stdout, "fmt --ast is not idempotent"
+
+
+def test_fmt_ast_output_recompiles_and_runs():
+    """The formatted source is valid Zen: it builds and runs to the same value as the original."""
+    zenc = _zenc()
+    src = _write(
+        "inc = (n: i32) i32 { n + 1 }\n"
+        "dbl = (n: i32) i32 { n * 2 }\n"
+        "main = () i32 { 5.inc().dbl() }\n"   # (5+1)*2 = 12
+    )
+    fmt = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert fmt.returncode == 0, fmt.stderr
+    formatted = _write(fmt.stdout)
+    r = subprocess.run([zenc, "run", str(formatted)], capture_output=True, text=True)
+    assert r.returncode == 12, r.stderr

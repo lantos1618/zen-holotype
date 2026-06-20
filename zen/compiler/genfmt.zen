@@ -1,0 +1,366 @@
+// compiler.genfmt — an AST pretty-printer (canonical Zen text) over the shared genc AST.  @self-hosted-only
+//
+// Unlike genc_emit/genjs (which consume the LOWERED AST), genfmt consumes the FAITHFUL parse_module
+// output — the parser keeps `recv.method(args)` as a `MethodCall` node, so the formatter prints it back
+// as `recv.method(args)` with the UFCS surface syntax PRESERVED (the whole point: `s.len()` formats as
+// `s.len()`, never the flattened `len(s)`).
+//
+// Style: 4-space indent; a multi-arm `.match ({ … })` splits one arm per line with `=>` aligned and a
+// trailing comma on the last arm; multi-field struct literals split one field per line; short single-arm
+// / single-expr bodies stay inline.
+//
+// Same fluent UFCS String-builder walk as genjs, allocator explicit: `s.ff_append(a, x).ff_expr(a, e)`.
+
+{ String } = std.text.string
+{ view, is_empty, eq } = std.text.str
+{ Malloc } = std.mem.alloc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
+  BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData,
+  IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData,
+  ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData,
+  gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+
+// ── String builder shims (reuse the canonical genc String API) ───────────────
+ff_string = (a: MutPtr<Malloc>, cap: i64) String { String(ptr: a.acquire(cap), len: 0, cap: cap) }
+ff_append = (s: String, a: MutPtr<Malloc>, t: str) String { s.gstr_append(a, t) }
+ff_push   = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
+
+// integer rendering, byte-only (mirrors genc_emit so this self-hosts)
+ffbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+ffdigit = (d: i64) u8 { ffbyte("0123456789", d) }
+ff_int_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n > 0 - 10).match ({
+        true  => s.ff_push(a, ffdigit(0 - n)),
+        false => { hs := s.ff_int_neg(a, n / 10)  hs.ff_push(a, ffdigit(0 - (n % 10))) }
+    })
+}
+ff_int = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 0).match ({ true => s.ff_append(a, "-").ff_int_neg(a, n), false => s.ff_int_nat(a, n) })
+}
+ff_int_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({
+        true  => s.ff_push(a, ffdigit(n)),
+        false => { hs := s.ff_int(a, n / 10)  hs.ff_push(a, ffdigit(n % 10)) }
+    })
+}
+
+// n levels of 4-space indentation
+ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String {
+    (n <= 0).match ({ true => s, false => s.ff_append(a, "    ").ff_indent(a, n - 1) })
+}
+
+// ── types ────────────────────────────────────────────────────────────────────
+ff_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
+    t.match ({
+        .I32       => s.ff_append(a, "i32"),
+        .I64       => s.ff_append(a, "i64"),
+        .U8        => s.ff_append(a, "u8"),
+        .F64       => s.ff_append(a, "f64"),
+        .Bool      => s.ff_append(a, "bool"),
+        .Void      => s.ff_append(a, "void"),
+        .Str       => s.ff_append(a, "str"),
+        .Cstr      => s.ff_append(a, "Cstr"),
+        .Text      => s.ff_append(a, "Text"),
+        .Named(nm) => s.ff_append(a, nm),
+        .Ptr(p)    => s.ff_append(a, "Ptr<").ff_ty(a, load(p)).ff_append(a, ">"),
+        .Slice(p)  => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
+        .FnT(ft)   => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
+        .Generic(g) => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">")
+    })
+}
+ff_tys = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
+    out := s
+    ts.loop((h, i, t) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_ty(a, t)
+    })
+    out
+}
+
+// ── expressions ────────────────────────────────────────────────────────────────
+ff_expr = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
+    e.match ({
+        .Int(n)        => s.ff_int(a, n),
+        .Byte(n)       => s.ff_int(a, n),                          // char-literal byte value (lexeme lost in the AST)
+        .FloatLit(ft)  => s.ff_append(a, ft),
+        .Var(v)        => s.ff_append(a, v.name),
+        .StrLit(sl)    => s.ff_strlit(a, sl.value),
+        .Bin(b)        => s.ff_expr(a, b.lhs, ind).ff_append(a, " ").ff_append(a, b.op).ff_append(a, " ").ff_expr(a, b.rhs, ind),
+        .MethodCall(mc) => s.ff_expr(a, mc.recv, ind).ff_append(a, ".").ff_append(a, mc.method).ff_append(a, "(").ff_args(a, mc.args, ind).ff_append(a, ")"),
+        .Call(c)       => s.ff_call(a, c, ind),
+        .Cond(d)       => s.ff_cond(a, d, ind),
+        .Member(m)     => s.ff_expr(a, m.obj, ind).ff_append(a, ".").ff_append(a, m.field),
+        .Arrow(ar)     => s.ff_expr(a, ar.obj, ind).ff_append(a, ".").ff_append(a, ar.field),
+        .MakeEnum(m)   => s.ff_mkenum(a, m, ind),
+        .MakeStruct(m) => s.ff_mkstruct(a, m, ind),
+        .Tag(t)        => s.ff_tag(a, t),
+        .Match(m)      => s.ff_match(a, m, ind),
+        .SliceLit(sd)  => s.ff_append(a, "[").ff_args(a, sd.items, ind).ff_append(a, "]"),
+        .Index(ix)     => s.ff_expr(a, ix.seq, ind).ff_append(a, "[").ff_expr(a, ix.idx, ind).ff_append(a, "]"),
+        .Loop(l)       => s.ff_loop(a, l, ind),
+        .Lambda(lm)    => s.ff_lambda(a, lm, ind),
+        .Block(b)      => s.ff_block(a, b.stmts, ind)
+    })
+}
+
+ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
+    out := s
+    args.loop((h, i, ar) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_expr(a, ar.addr(), ind)
+    })
+    out
+}
+
+ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
+    head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
+    head.ff_append(a, c.fn).ff_append(a, "(").ff_args(a, c.args, ind).ff_append(a, ")")
+}
+
+// bool .match lowers to a Cond in the AST — print it back as `c.match ({ true => t, false => e })`.
+ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    s.ff_expr(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })")
+}
+
+// `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
+ff_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData, ind: i32) String {
+    head := is_empty(m.ty).match ({ true => s.ff_append(a, "."), false => s.ff_append(a, m.ty).ff_append(a, ".") })
+    head.ff_append(a, m.variant).ff_append(a, "(").ff_expr(a, m.payload, ind).ff_append(a, ")")
+}
+ff_tag = (s: String, a: MutPtr<Malloc>, t: TagData) String {
+    is_empty(t.ty).match ({ true => s.ff_append(a, ".").ff_append(a, t.variant), false => s.ff_append(a, t.ty).ff_append(a, ".").ff_append(a, t.variant) })
+}
+
+// struct literal `Ty(f: v, …)` — split one field per line when there is more than one field.
+ff_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData, ind: i32) String {
+    (m.inits.len > 1).match ({
+        true  => {
+            open := s.ff_append(a, m.ty).ff_append(a, "(\n")
+            body := open.ff_struct_fields(a, m.inits, ind + 1)
+            body.ff_indent(a, ind).ff_append(a, ")")
+        },
+        false => s.ff_append(a, m.ty).ff_append(a, "(").ff_struct_inline(a, m.inits, ind).ff_append(a, ")")
+    })
+}
+ff_struct_inline = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
+    out := s
+    inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind)
+    })
+    out
+}
+ff_struct_fields = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
+    out := s
+    inits.loop((h, i, fi) {
+        out = out.ff_indent(a, ind).ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind).ff_append(a, ",\n")
+    })
+    out
+}
+
+// foreach: `seq.loop((h, i, x) { body })`
+ff_loop = (s: String, a: MutPtr<Malloc>, l: LoopData, ind: i32) String {
+    head := s.ff_expr(a, l.seq, ind).ff_append(a, ".loop((").ff_append(a, l.h).ff_append(a, ", ").ff_append(a, l.idx).ff_append(a, ", ").ff_append(a, l.elem).ff_append(a, ") ")
+    head.ff_block(a, l.body, ind).ff_append(a, ")")
+}
+
+ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
+    s.ff_append(a, "(").ff_params(a, lm.params).ff_append(a, ") ").ff_block(a, lm.body, ind)
+}
+
+// ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
+arm_pat_len = (ar: ArmData) i32 {
+    eq(ar.variant, "_").match ({
+        true  => 1,
+        false => is_empty(ar.bind).match ({
+            true  => 1 + to_i32(view(ar.variant).len),
+            false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len)
+        })
+    })
+}
+arms_max_pat = (arms: [ArmData]) i32 {
+    m := 0
+    arms.loop((h, i, ar) { w := arm_pat_len(ar)  m = (w > m).match ({ true => w, false => m }) })
+    m
+}
+ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+    eq(ar.variant, "_").match ({
+        true  => s.ff_append(a, "_"),
+        false => is_empty(ar.bind).match ({
+            true  => s.ff_append(a, ".").ff_append(a, ar.variant),
+            false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")")
+        })
+    })
+}
+ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String {
+    (n <= 0).match ({ true => s, false => s.ff_append(a, " ").ff_pad(a, n - 1) })
+}
+ff_match = (s: String, a: MutPtr<Malloc>, m: MatchData, ind: i32) String {
+    maxw := arms_max_pat(m.arms)
+    open := s.ff_expr(a, m.subj, ind).ff_append(a, ".match ({\n")
+    body := open.ff_arms(a, m.arms, maxw, ind + 1)
+    body.ff_indent(a, ind).ff_append(a, "})")
+}
+ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) String {
+    out := s
+    arms.loop((h, i, ar) {
+        line := out.ff_indent(a, ind).ff_arm_pat(a, ar)
+        padded := line.ff_pad(a, maxw - arm_pat_len(ar))
+        out = padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",\n")
+    })
+    out
+}
+
+// ── string literal escaping (mirrors genjs) ────────────────────────────────────
+ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    (b == '"').match ({
+        true  => s.ff_append(a, "\\\""),
+        false => (b == '\\').match ({
+            true  => s.ff_append(a, "\\\\"),
+            false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => s.ff_push(a, b) })
+        })
+    })
+}
+ff_strlit = (s: String, a: MutPtr<Malloc>, v: str) String {
+    s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"")
+}
+ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String {
+    (ffbyte(v, i) == 0).match ({
+        true  => s,
+        false => s.ff_escape_byte(a, ffbyte(v, i)).ff_escape_from(a, v, i + 1)
+    })
+}
+
+// ── statements ─────────────────────────────────────────────────────────────────
+ff_block = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32) String {
+    (body.len == 0).match ({
+        true  => s.ff_append(a, "{ }"),
+        false => {
+            open := s.ff_append(a, "{\n")
+            inner := open.ff_stmts(a, body, ind + 1)
+            inner.ff_indent(a, ind).ff_append(a, "}")
+        }
+    })
+}
+ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32) String {
+    out := s
+    body.loop((h, i, st) { out = out.ff_indent(a, ind).ff_stmt(a, st, ind).ff_append(a, "\n") })
+    out
+}
+ff_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) String {
+    st.match ({
+        .Let(l)      => s.ff_let(a, l, ind),
+        .Assign(asn) => s.ff_expr(a, asn.target, ind).ff_append(a, " = ").ff_expr(a, asn.value, ind),
+        .Return(e)   => s.ff_append(a, "return ").ff_expr(a, e, ind),
+        .ExprStmt(e) => s.ff_expr(a, e, ind),
+        .If(f)       => s.ff_append(a, "if (").ff_expr(a, f.c, ind).ff_append(a, ") ").ff_block(a, f.then, ind).ff_append(a, " else ").ff_block(a, f.els, ind),
+        .While(w)    => s.ff_append(a, "@while (").ff_expr(a, w.c, ind).ff_append(a, ") ").ff_block(a, w.body, ind),
+        .IndexSet(x) => s.ff_expr(a, x.seq, ind).ff_append(a, "[").ff_expr(a, x.idx, ind).ff_append(a, "] = ").ff_expr(a, x.value, ind)
+    })
+}
+// `name := value` (inferred) or `name: T := value` (annotated)
+ff_let = (s: String, a: MutPtr<Malloc>, l: LetData, ind: i32) String {
+    head := l.ty.match ({ .Void => s.ff_append(a, l.name), _ => s.ff_append(a, l.name).ff_append(a, ": ").ff_ty(a, l.ty) })
+    head.ff_append(a, " := ").ff_expr(a, l.value, ind)
+}
+
+// ── declarations ────────────────────────────────────────────────────────────────
+ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty)
+    })
+    out
+}
+// generic type params `<A, B>` (with optional bound `<A: Bound>`)
+ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    (ps.len == 0).match ({
+        true  => s,
+        false => {
+            open := s.ff_append(a, "<")
+            body := open
+            ps.loop((h, i, p) {
+                body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+                body = p.ty.match ({ .Void => body.ff_append(a, p.name), _ => body.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty) })
+            })
+            body.ff_append(a, ">")
+        }
+    })
+}
+ff_func = (s: String, a: MutPtr<Malloc>, f: Func) String {
+    sig := s.ff_append(a, f.name).ff_tparams(a, f.tparams).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ")")
+    rt  := f.ret.match ({ .Void => sig, _ => sig.ff_append(a, " ").ff_ty(a, f.ret) })
+    rt.ff_append(a, " ").ff_block(a, f.body, 0)
+}
+ff_foreign = (s: String, a: MutPtr<Malloc>, f: Func) String {
+    sig := s.ff_append(a, f.name).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ")")
+    f.ret.match ({ .Void => sig, _ => sig.ff_append(a, " ").ff_ty(a, f.ret) })
+}
+ff_struct = (s: String, a: MutPtr<Malloc>, sd: StructDecl) String {
+    open := s.ff_append(a, sd.name).ff_append(a, ": {\n")
+    body := open
+    sd.fields.loop((h, i, fl) { body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n") })
+    body.ff_append(a, "}")
+}
+ff_enum = (s: String, a: MutPtr<Malloc>, ed: EnumDecl) String {
+    head := s.ff_append(a, ed.name).ff_append(a, ": ")
+    body := head
+    ed.variants.loop((h, i, vd) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
+        body = vd.payload.match ({ .Void => body.ff_append(a, vd.name), _ => body.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")") })
+    })
+    body
+}
+ff_genstruct = (s: String, a: MutPtr<Malloc>, g: GenStructDecl) String {
+    open := s.ff_append(a, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
+    body := open
+    g.fields.loop((h, i, fl) { body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n") })
+    body.ff_append(a, "}")
+}
+ff_genenum = (s: String, a: MutPtr<Malloc>, g: GenEnumDecl) String {
+    head := s.ff_append(a, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ")
+    body := head
+    g.variants.loop((h, i, vd) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
+        body = vd.payload.match ({ .Void => body.ff_append(a, vd.name), _ => body.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")") })
+    })
+    body
+}
+ff_decl = (s: String, a: MutPtr<Malloc>, d: Decl) String {
+    d.match ({
+        .DFunc(f)      => s.ff_func(a, f),
+        .DStruct(sd)   => s.ff_struct(a, sd),
+        .DEnum(ed)     => s.ff_enum(a, ed),
+        .DGenStruct(g) => s.ff_genstruct(a, g),
+        .DGenEnum(g)   => s.ff_genenum(a, g),
+        .DForeign(f)   => s.ff_foreign(a, f),
+        .DImpl(im)     => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", { })"),
+        .DGlobal(g)    => s.ff_append(a, g.name).ff_append(a, " := ").ff_expr(a, g.init, 0),
+        .DImport(im)   => s.ff_import(a, im),
+        .DTraitDefault(td) => s.ff_func(a, td.fn),
+        .DRaw(c)       => s.ff_append(a, c)
+    })
+}
+ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+    open := s.ff_append(a, "{ ")
+    body := open
+    im.names.loop((h, i, p) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+        body = body.ff_append(a, p.name)
+    })
+    body.ff_append(a, " }")
+}
+
+// ── module: each decl, blank-line separated ────────────────────────────────────
+genfmt_module_in* = (a: MutPtr<Malloc>, decls: [Decl]) String {
+    s := a.ff_string(4096)
+    out := s
+    decls.loop((h, i, d) { out = out.ff_decl(a, d).ff_append(a, "\n") })
+    out
+}
+// compatibility shim (default heap allocator)
+genfmt_module* = (decls: [Decl]) String {
+    a := Malloc(_: 0)
+    a.addr().genfmt_module_in(decls)
+}

@@ -15,6 +15,9 @@ ATWHILE_ALLOWED = {
     Path("zen/compiler/parse.zen"),
     Path("zen/compiler/parse_expr.zen"),
     Path("zen/compiler/parse_stmt.zen"),
+    # genfmt EMITS the `@while` token as formatter output text (pretty-printing a While stmt back to
+    # source) — codegen text, not a control-flow use; same category as genc_emit's allow-listed malloc.
+    Path("zen/compiler/genfmt.zen"),
 }
 
 RAW_ALLOC_ALLOWED = {
