@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { view, eq, is_empty } = std.text.str
 { String } = std.text.string
@@ -516,16 +516,25 @@ resolve_mkenum_fresh = (a: MutPtr<Malloc>, env: Env, variant: str, p: Ptr<Expr>)
 }
 resolve_mktag = (a: MutPtr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str) Ptr<Expr> {
     (etargs.len > 0).match ({
-        true  => a.cenode(mktagg(ety, emty, etargs, variant)),
+        true  => a.emit_tag_or_default(env, ety, emty, etargs, variant),
         false => eq(ety, "").match ({
             true  => a.resolve_mktag_fresh(env, variant),
-            false => a.cenode(mktagg(ety, emty, no_tys(), variant))
+            false => a.emit_tag_or_default(env, ety, emty, no_tys(), variant)
         })
     })
 }
 resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: str) Ptr<Expr> {
     inst := env.enum_inst_tag(variant)
-    a.cenode(mktagg(inst.base, inst.mty, inst.targs, variant))
+    a.emit_tag_or_default(env, inst.base, inst.mty, inst.targs, variant)
+}
+// A zero-arg `.Name` / `Type.Name`: if the variant declares a default (`Name = expr`), build the
+// payload constructor with the baked-in constant; otherwise the bare tag.
+emit_tag_or_default = (a: MutPtr<Malloc>, env: Env, base: str, mty: str, targs: [Ty], variant: str) Ptr<Expr> {
+    def := env.didx.idx_variant_default(env.decls, base, variant)
+    def.is_expr_null().match ({
+        true  => a.cenode(mktagg(base, mty, targs, variant)),
+        false => a.cenode(mkenumg(base, mty, targs, variant, a.resolve_expr(env.clr_exp(), def)))
+    })
 }
 // Keep concrete slice element types across re-resolve.
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty {
@@ -650,6 +659,19 @@ idx_variant_payload* = (idx: DeclIndex, decls: [Decl], ename: str, vn: str) Ty {
     (i >= 0 && i < decls.len).match ({
         true  => decls[i].match ({ .DEnum(ed) => ed.variants.vdef_payload(vn), _ => tvoid() }),
         false => tvoid()
+    })
+}
+// The default constant expr for a `Name = expr` variant, or a null Ptr<Expr> when the variant has none.
+vdef_default_of = (vs: [VariantDef], vn: str) Ptr<Expr> {
+    found := expr_null()
+    vs.loop((h, i, v) { found = eq(v.name, vn).match ({ true => v.dflt, false => found }) })
+    found
+}
+idx_variant_default* = (idx: DeclIndex, decls: [Decl], ename: str, vn: str) Ptr<Expr> {
+    i := idx.enum_idx.get(ename, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({ .DEnum(ed) => ed.variants.vdef_default_of(vn), _ => expr_null() }),
+        false => expr_null()
     })
 }
 // Concrete payload type for a match arm bind, including generic enum substitution.
@@ -1622,8 +1644,32 @@ dmc_expr = (a: MutPtr<Malloc>, ep: Ptr<Expr>) void {
     })
 }
 
+// Enum-variant defaults (`Name = expr`) are parsed with a void payload + the default expr; before any
+// other pass, infer each default's type into the payload so codegen lays out the union slot and match
+// arms bind correctly.
+vbuf = (a: MutPtr<Malloc>, n: i64) [VariantDef] { slice(a.acquire(n * sizeof(VariantDef)), n) }
+default_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, v: VariantDef) Ty {
+    v.dflt.is_expr_null().match ({
+        true  => v.payload,
+        false => v.dflt.light_ty(a, a.vnil(), decls, idx)
+    })
+}
+fill_variant_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, vs: [VariantDef]) [VariantDef] {
+    buf := a.vbuf(vs.len)
+    vs.loop((h, i, v) { buf[i] = VariantDef( name: v.name, payload: a.default_payload(decls, idx, v), dflt: v.dflt ) })
+    buf
+}
+fill_enum_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+    buf := a.dbuf(decls.len)
+    decls.loop((h, i, d) { buf[i] = d.match ({
+        .DEnum(ed) => .DEnum(EnumDecl( name: ed.name, variants: a.fill_variant_defaults(decls, idx, ed.variants) )),
+        _          => d
+    }) })
+    buf
+}
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
-    decls := a.expand_defaults(a.desugar_method_calls(raw))
+    decls0 := a.expand_defaults(a.desugar_method_calls(raw))
+    decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
     // Decl order/count are stable across resolve+inline passes (each rebuilds bodies in place), so a
     // name→index map is rebuilt once per pass over the current slice.
     didx := a.build_decl_index(decls)
@@ -1666,11 +1712,15 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), .Named(b) => eq(ga.mangled, b), _ => false })
     })
 }
+// `RawPtr<u8>` is the raw-pointer floor: it fits any typed pointer slot (this is what `null_ptr()`
+// returns, so a null can initialize/assign any `Ptr<T>` field/param without a cast).
+is_raw_ptr_ty* = (t: Ty) bool { t.match ({ .Ptr(p) => load(p).match ({ .U8 => true, _ => false }), _ => false }) }
+is_ptr_ty_g* = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
     numeric.match ({
         true  => g.ty_rank() <= w.ty_rank(),
-        false => g.ty_eq(w)
+        false => (g.is_raw_ptr_ty() && w.is_ptr_ty_g()).match ({ true => true, false => g.ty_eq(w) })
     })
 }
 

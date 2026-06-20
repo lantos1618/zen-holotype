@@ -1,11 +1,11 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ parse_or, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
+{ parse_or, parse_bxor, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_reset, perr_get, anon_reset, anon_decls_get } = compiler.parse_type
 
@@ -172,6 +172,9 @@ data_fields = (a: MutPtr<Malloc>, fields: [Field]) [Field] {
 // Enum variants end at the first token that is not `|`.
 EnumEnd*: { ed: EnumDecl, tparams: [Param], ntp: i32, next: i32 }
 VPay*:    { ty: Ty, next: i32 }
+VDf*:     { vdf: VariantDef, next: i32 }
+// a single `=` (not `==`/`=>`) introduces a variant default expr: `Name = expr`.
+is_eq1 = (src: str, t: Token) bool { (t.len == 1) && src.is_op(t, '=') }
 is_bar = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '|'), _ => false }) }
 variant_buf = (a: MutPtr<Malloc>) [VariantDef] { slice(a.acquire(1024 * sizeof(VariantDef)), 1024) }
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
@@ -193,12 +196,22 @@ fill_variant = (a: MutPtr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: nt.next ) }, false => {} })
     nm   := a.lexeme(src, nt.tok)
     pk   := src.scan(nt.next)
-    vp   := src.is_lparen(pk.tok).match ({ true => a.variant_payload(src, pk.next), false => VPay( ty: tvoid(), next: nt.next ) })
-    buf[i] = vdef(nm, vp.ty)
-    after := src.scan(vp.next)
+    vd   := a.variant_after(src, nm, nt, pk)
+    buf[i] = vd.vdf
+    after := src.scan(vd.next)
     src.is_bar(after.tok).match ({
         true  => a.fill_variants(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: vp.next )
+        false => PEnd( count: i + 1, next: vd.next )
+    })
+}
+// After the variant name, dispatch on the next token: `(Type)` payload, `= expr` default, or bare.
+variant_after = (a: MutPtr<Malloc>, src: str, nm: str, nt: Scan, pk: Scan) VDf {
+    src.is_lparen(pk.tok).match ({
+        true  => { vp := a.variant_payload(src, pk.next)  VDf( vdf: vdef(nm, vp.ty), next: vp.next ) },
+        false => src.is_eq1(pk.tok).match ({
+            true  => { de := a.parse_bxor(src, pk.next)  VDf( vdf: vdef_default(nm, tvoid(), de.expr), next: de.next ) },
+            false => VDf( vdf: vdef(nm, tvoid()), next: nt.next )
+        })
     })
 }
 skip_to_colon = (src: str, pos: i32) i32 {
