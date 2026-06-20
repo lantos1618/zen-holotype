@@ -160,6 +160,130 @@ at* = (s: str, i: i64) u8 {
     (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
 }
 
+// ── trimming: leading/trailing ASCII whitespace (' ', '\t', '\n', '\r') ───────
+//
+// `str` is NUL-terminated, so a *both-ends* trimmed `str` can't be a zero-copy view — the trailing
+// boundary has no NUL in the original buffer. Two honest shapes are offered:
+//   • `*_view` → a `[u8]` sub-slice — ZERO-COPY (length-carrying, points into `s`), NO allocation.
+//   • `trim_in` / `rtrim_in` → an allocator-owned NUL-terminated `str` copy (reuses `substr_in`).
+// `ltrim` alone can stay a zero-copy `str`: dropping a prefix only advances the start pointer, and the
+// original NUL still terminates the tail.
+
+is_ws = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r') }
+
+// first non-whitespace index, or `v.len` when `v` is empty / all whitespace.
+ws_start = (v: [u8]) i64 {
+    lo: i64 := v.len
+    v.loop((h, i, b) { b.is_ws().match ({ true => {}, false => { lo = i  h.break } }) })
+    lo
+}
+// one past the last non-whitespace index, or 0 when `v` is empty / all whitespace.
+ws_end = (v: [u8]) i64 {
+    hi: i64 := 0
+    v.loop((h, i, b) { b.is_ws().match ({ true => {}, false => { hi = i + 1 } }) })
+    hi
+}
+
+// zero-copy `[u8]` sub-views (no allocation) — both ends / leading / trailing.
+trim_view* = (s: str) [u8] {
+    v: [u8] := s.view()
+    lo := v.ws_start()
+    hi := v.ws_end()
+    (hi > lo).match ({ true => slice(v.ptr.offset(lo), hi - lo), false => slice(v.ptr, 0) })
+}
+ltrim_view* = (s: str) [u8] {
+    v: [u8] := s.view()
+    lo := v.ws_start()
+    slice(v.ptr.offset(lo), v.len - lo)
+}
+rtrim_view* = (s: str) [u8] {
+    v: [u8] := s.view()
+    slice(v.ptr, v.ws_end())
+}
+
+// leading-only trim AS A STR — zero-copy: the original NUL terminator still ends the result.
+ltrim* = (s: str) str {
+    v: [u8] := s.view()
+    cstr(v.ptr.offset(v.ws_start()))
+}
+
+// allocator-owned NUL-terminated trimmed copies (both ends / trailing).
+trim_in*<A> = (a: MutPtr<A>, s: str) str {
+    v: [u8] := s.view()
+    lo := v.ws_start()
+    hi := v.ws_end()
+    a.substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 }))
+}
+trim*<A> = (a: MutPtr<A>, s: str) str { a.trim_in(s) }
+rtrim_in*<A> = (a: MutPtr<A>, s: str) str {
+    v: [u8] := s.view()
+    a.substr_in(s, 0, v.ws_end())
+}
+rtrim*<A> = (a: MutPtr<A>, s: str) str { a.rtrim_in(s) }
+
+// ── splitting: fields and words ───────────────────────────────────────────────
+//
+// A returned `[str]` holds NUL-terminated COPIES of each field, not zero-copy sub-views: `str` is
+// NUL-terminated, so a field can't both share `s`'s buffer AND end at a separator. The slice backbone
+// and every field are acquired from the caller's allocator (reusing `substr_in` for each copy).
+
+// an allocator-owned `[T]` of `n` slots, uninitialised. `seed` is unread — it only pins T (sizeof(T)
+// is rewritten per concrete element type at monomorphization). `n == 0` yields an empty slice.
+nbuf*<T, A> = (a: MutPtr<A>, seed: T, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
+
+// split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
+// kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
+split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
+    sv := s.view()
+    nf: i64 := 1
+    sv.loop((h, i, b) { (b == sep).match ({ true => { nf = nf + 1 }, _ => {} }) })
+    out: [str] := a.nbuf("", nf)
+    fi:    i64 := 0     // next field slot
+    start: i64 := 0     // current field's start offset
+    sv.loop((h, i, b) {
+        (b == sep).match ({
+            true => {
+                out[fi] = a.substr_in(s, start, i - start)
+                fi    = fi + 1
+                start = i + 1
+            },
+            _ => {}
+        })
+    })
+    out[fi] = a.substr_in(s, start, sv.len - start)
+    out
+}
+split*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] { a.split_in(s, sep) }
+
+// split `s` on RUNS of ASCII whitespace, dropping empty fields: "  the  cat sat " -> ["the","cat","sat"];
+// "" / all-whitespace -> [] (an empty slice).
+words_in*<A> = (a: MutPtr<A>, s: str) [str] {
+    sv := s.view()
+    nw: i64 := 0        // word count = whitespace(or start)->non-whitespace transitions
+    inw := false        // currently inside a word?
+    sv.loop((h, i, b) {
+        b.is_ws().match ({
+            true  => { inw = false },
+            false => inw.match ({ true => {}, false => { inw = true  nw = nw + 1 } })
+        })
+    })
+    out: [str] := a.nbuf("", nw)
+    wi:    i64 := 0      // next word slot
+    start: i64 := 0 - 1  // current word's start offset, -1 when between words
+    sv.loop((h, i, b) {
+        b.is_ws().match ({
+            true  => (start >= 0).match ({
+                true  => { out[wi] = a.substr_in(s, start, i - start)  wi = wi + 1  start = 0 - 1 },
+                false => {}
+            }),
+            false => (start < 0).match ({ true => { start = i }, false => {} })
+        })
+    })
+    (start >= 0).match ({ true => { out[wi] = a.substr_in(s, start, sv.len - start)  wi = wi + 1 }, false => {} })
+    out
+}
+words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
+
 // ── numbers ─────────────────────────────────────────────────────────────────
 
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of

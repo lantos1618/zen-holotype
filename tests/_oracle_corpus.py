@@ -83,6 +83,19 @@ VALUE_CASES = [
     ('apply = (f: (i32) i32, x: i32) i32 { f(x) }\ntest* = () i32 {\n  k := 10\n  g := (n) { n + k }\n  apply(g, 41) + apply(g, 2)\n}', 63),
     ('twice = (f: (i32) i32, x: i32) i32 { f(f(x)) }\ntest* = () i32 {\n  g := (n) { n + 3 }\n  twice(g, 1)\n}', 7),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
+    # --- generic in-place sort with an INLINE-LAMBDA comparator (std.collections.iter.sort shape):
+    #     the comparator `less` is invoked DIRECTLY inside the generic fn's nested loops (never
+    #     forwarded to a helper, which would leave a `zen__unlowered_lambda`), so it splices like fold.
+    ('srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a < b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}', 12345),
+    # same sort, DESCENDING comparator (a > b) → [5,4,3,2,1]
+    ('srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a > b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}', 54321),
+    # --- zero-element generic constructor whose T comes from the LHS annotation (std.collections
+    #     Vec/Map `empty` shape): `v: Vec<i32> := empty()` infers T=i32 with no seed arg, then push/get.
+    ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nempty<T> = () Vec<T> { Vec<T>(ptr: malloc(sizeof(T)), len: 0, cap: 1) }\npush<T> = (v: Vec<T>, x: T) Vec<T> { b := v.buf()  b[v.len] = x  Vec<T>(ptr: v.ptr, len: v.len + 1, cap: v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\ntest* = () i32 {\n  v: Vec<i32> := empty()\n  v = v.push(42)\n  v.get(0)\n}', 42),
+    # --- pair-iteration: a generic struct METHOD takes a 2-arg fn param and invokes an INLINE LAMBDA
+    #     directly (std.collections.map.each_pair shape — visits key+value together), mutating an
+    #     outer-scope local through the closure. Splices like iter.each; no zen__unlowered_lambda.
+    ('Pairs<T>: { ks: [str], vs: [T]\n    each_pair = (p: Pairs<T>, f: (str, T) void) void {\n        p.ks.loop((h, i, k) { f(k, p.vs[i]) })\n    }\n}\ntest* = () i32 {\n    p := Pairs<i32>(ks: ["a", "b", "c"], vs: [10, 20, 30])\n    s := 0\n    p.each_pair((k, v){ s = s + v })\n    s\n}', 60),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
     ('A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A(v: 5)\n  b := B(v: 6)\n  a.addr().area() + b.addr().area()\n}', 41),
@@ -180,6 +193,13 @@ VALUE_CASES = [
     ('test* = () i32 { (5 < 3).match({ true => 1, false => 0 }) }', 0),
 # --- recovered breadth: slice write-then-read ---
     ('test* = () i32 { s := [1, 2, 3]\n s[1] = 20\n s[0] + s[1] + s[2] }', 24),
+# --- std.core.slice: sub/take/drop zero-copy VIEWS (ptr = base + lo*sizeof(T), len = hi-lo). Bounds
+#     are clamped to [0, len] so an out-of-range hi yields a shorter view, not an OOB read. ---
+    ('sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match({ true => lo, false => (v > hi).match({ true => hi, false => v }) }) }\nsub<T> = (xs: [T], lo: i64, hi: i64) [T] { l := sl_clamp(lo, 0, xs.len)  h := sl_clamp(hi, l, xs.len)  slice(xs.ptr.offset(l * sizeof(T)), h - l) }\ntake<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }\ndrop<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  v: [i32] := s.sub(1, 3)\n  t: [i32] := s.take(2)\n  d: [i32] := s.drop(3)\n  o: [i32] := s.sub(2, 99)\n  v.len.to_i32() * 1000 + v[0] * 10 + v[1] + t[0] + d[0] + o.len.to_i32()\n}', 2282),
+# --- std.core.slice: reverse_in allocates a NEW slice and copies xs in reverse (out[len-1-i] = x). ---
+    ('Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) Ptr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: [T]) [T] { out := a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h := Heap(z: 0)\n  r: [i32] := h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}', 4321),
+# --- std.core.slice: index_of/contains (via `==`, scalar elems) and find_by (predicate, any elem). ---
+    ('index_of<T> = (xs: [T], x: T) i64 { r := 0 - 1  xs.loop((h, i, e) { (e == x).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ncontains<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }\nis30 = (x: i32) bool { x == 30 }\nfind_by<T> = (xs: [T], pred: (T) bool) i64 { r := 0 - 1  xs.loop((h, i, e) { pred(e).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  ix := s.index_of(30)\n  miss := s.index_of(99)\n  has := s.contains(40).match({ true => 1, false => 0 })\n  fb := s.find_by(is30)\n  ix.to_i32() * 1000 + (miss + 1).to_i32() * 100 + has * 10 + fb.to_i32()\n}', 2012),
 # --- recovered breadth: arithmetic precedence + recursion ---
     ('test* = () i32 { 2 + 3 * 4 - 1 }', 13),
     ('fac* = (n: i32) i32 { (n == 0).match({ true => 1, false => n * fac(n - 1) }) }\ntest* = () i32 { fac(5) }', 120),
@@ -251,6 +271,22 @@ VALUE_CASES = [
     ('E*: A | B(i32, i32)\nsum = (e: E) i32 { e.match({ .A => 0, .B(p) => p._0 + p._1 }) }\ntest* = () i32 {\n  e := .B(10, 20)\n  sum(e)\n}', 30),  # bare ctor
     ('T*: N | V(i32, i32, i32)\nsum = (t: T) i32 { t.match({ .N => 0, .V(p) => p._0 + p._1 + p._2 }) }\ntest* = () i32 { sum(T.V(1, 2, 3)) }', 6),  # three fields
     ('O*: Some(i32) | None\nun = (o: O) i32 { o.match({ .Some(x) => x, .None => 0 }) }\ntest* = () i32 { un(O.Some(42)) }', 42),     # single payload unchanged (regression guard)
+
+    # --- std.text.str.trim — the ASCII-whitespace scan that backs trim/ltrim/rtrim_view. Walks a [u8]
+    #     view, finds the first/last non-whitespace index; result encodes ws_start*100 + trimmed_len.
+    #     For "  hi \n": ws_start=2, trimmed_len=2 -> 202 (guards both the offset AND the length). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\nws_start = (v: [u8]) i64 { lo: i64 := v.len  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { lo = i  h.break } }) })  lo }\nws_end = (v: [u8]) i64 { hi: i64 := 0  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { hi = i + 1 } }) })  hi }\ntest* = () i32 { s := "  hi \\n"  v: [u8] := slice(s, strlen(s))  to_i32(ws_start(v) * 100 + (ws_end(v) - ws_start(v))) }', 202),
+
+    # --- std.text.str.split_in — the sep-scan that emits each field's (start, len). Walks a [u8] view,
+    #     accumulating per-field lengths as a base-10 checksum (acc = acc*10 + field_len). For "a,,b"
+    #     on ',' the fields are 1,0,1 bytes -> 101 (the EMPTY middle field is what 0 guards). ---
+    ('strlen = (s: str) i64\ntest* = () i32 { s := "a,,b"  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0  v.loop((h, i, b) { (b == \',\').match ({ true => { acc = acc * 10 + (i - start)  start = i + 1 }, _ => {} }) })  acc = acc * 10 + (v.len - start)  to_i32(acc) }', 101),
+
+    # --- std.text.str.words_in — split on RUNS of whitespace, dropping empties. Walks the [u8] view,
+    #     opening a word at the first non-ws byte and closing it at the next ws, accumulating each
+    #     word's length as a base-10 checksum. "  the  cat sat " -> words 3,3,3 -> 333 (the leading,
+    #     doubled, and trailing whitespace must all collapse — any leaked empty would skew the digits). ---
+    ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\ntest* = () i32 { s := "  the  cat sat "  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }', 333),
 ]
 
 # (src, verdict) the check binary must produce.
