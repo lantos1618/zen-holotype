@@ -218,6 +218,10 @@ VALUE_CASES = [
     ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => return 999, false => 0 })\n}', 999),                                  # bare return arm fires
     ('test* = () i32 {\n  n := 50\n  (n > 100).match({ true => return 999, false => 7 })\n}', 7),                                     # other arm still a value
     ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => { return 999 }, false => 0 })\n}', 999),                              # braced form unchanged (regression guard)
+    # --- TAILPAREN-1: a statement-leading `(` after a qualified ctor starts a NEW statement (a
+    #     parenthesized expr), not a payload glued onto the ctor (`State.Idle` ⏎ `(a).q()`) ---
+    ('State*: Idle | Run\nq = (s: State) i32 { 7 }\ntest* = () i32 {\n  a := State.Idle\n  (a).q()\n}', 7),                            # newline un-glues the '('
+    ('E*: A(i32) | B\nval = (e: E) i32 { e.match({ .A(x) => x, .B => 0 }) }\ntest* = () i32 { val(E.A(42)) }', 42),                  # same-line payload still glues (regression guard)
 ]
 
 # (src, verdict) the check binary must produce.
