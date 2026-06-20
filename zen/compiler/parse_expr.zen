@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, sret, mkstructg, mangle_str_in, mangle_anon_in, field, param, tvoid } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -345,12 +345,27 @@ parse_method = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, lp: Scan, a
     ae     := a.fill_args(src, lp.next, buf, 0)
     a.parse_postfix(src, PExpr( expr: a.enode(emcall(base.expr, name, buf.take_args(ae.count), at)), next: ae.next ))
 }
-// Match arm body: brace block or single expression.
+// A bare `return` keyword (not braced) in arm-body position.
+is_return_arm = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "return"), _ => false }) }
+// A one-statement `[Stmt]` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
+ret_arm_stmts = (a: MutPtr<Malloc>, v: Ptr<Expr>) [Stmt] {
+    buf := slice(a.acquire(sizeof(Stmt)), 1)
+    buf[0] = sret(v)
+    buf
+}
+parse_arm_return = (a: MutPtr<Malloc>, src: str, kw: Scan) PExpr {
+    v := a.parse_or(src, kw.next)                                  // the returned value
+    PExpr( expr: a.enode(block(a.ret_arm_stmts(v.expr))), next: v.next )
+}
+// Match arm body: brace block, a bare `return expr`, or a single expression.
 parse_arm_body = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     src.is_lbrace(sc.tok).match ({
         true  => a.parse_arm_block(src, sc),
-        false => a.parse_or(src, pos)
+        false => src.is_return_arm(sc.tok).match ({
+            true  => a.parse_arm_return(src, sc),
+            false => a.parse_or(src, pos)
+        })
     })
 }
 parse_arm_block = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {

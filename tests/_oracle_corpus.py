@@ -214,6 +214,10 @@ VALUE_CASES = [
     ('P*: { x: i32, y: i32 }\ntest* = () i32 { a := [P(x: 1, y: 2), P(x: 3, y: 4)]  a[0].x = 7  a[0].x + a[1].x }', 10),            # index then field
     ('In*: { p: [i32] }\nS*: { inner: In }\ntest* = () i32 { s := S(inner: In(p: [10, 20]))  s.inner.p[1] = 5  s.inner.p[0] + s.inner.p[1] }', 15),  # member.member.index
     ('test* = () i32 { a := [1, 2, 3]  a[1] = 8  a[0] + a[1] }', 9),                                                                 # plain name[i] = v still works (SIdx path)
+    # --- PARSE-RETURN-ARM: a bare `return expr` in arm-body position (not just braced `{ return expr }`) ---
+    ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => return 999, false => 0 })\n}', 999),                                  # bare return arm fires
+    ('test* = () i32 {\n  n := 50\n  (n > 100).match({ true => return 999, false => 7 })\n}', 7),                                     # other arm still a value
+    ('test* = () i32 {\n  n := 150\n  (n > 100).match({ true => { return 999 }, false => 0 })\n}', 999),                              # braced form unchanged (regression guard)
 ]
 
 # (src, verdict) the check binary must produce.
