@@ -223,7 +223,7 @@ def test_capturing_lambda_in_field_rejected():
     assert r.returncode != 0 and "lambda-value" in r.stderr, r.stderr
 
 
-# a RETURNED lambda still rejects (FnT-return typedef is deferred, M1c).
-def test_lambda_returned_rejected():
-    r = _check("mk = () (i32) i32 { (n) { n + 1 } }\nmain = () i32 { 0 }\n")
-    assert r.returncode != 0 and "lambda-value" in r.stderr, r.stderr
+# closures M1c: a RETURNED non-capturing lambda is lifted (precise FnT-return typedef) and callable.
+def test_lambda_returned_lifted_ok():
+    r = _check("mk = () (i32) i32 { (n) { n + 1 } }\nmain = () i32 {\n  f := mk()\n  f(5)\n}\n")
+    assert r.returncode == 0, r.stderr

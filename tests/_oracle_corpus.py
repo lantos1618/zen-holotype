@@ -211,6 +211,9 @@ VALUE_CASES = [
 # --- M1b: a non-capturing lambda LITERAL stored in a field is LIFTED to a top-level fn + called ---
     ('Box*: { op: (i32, i32) i32 }\ntest* = () i32 {\n  b := Box(op: (x, y) { x + y })\n  b.op(4, 5)\n}', 9),                                              # stored lambda literal, lifted + called
     ('Store*<S>: { state: S, reducer: (S, i32) S }\nAppState*: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 0), reducer: (s, a) { AppState(count: s.count + a) })\n  ns := st.reducer(st.state, 7)\n  ns.count\n}', 7),   # generic store, INLINE lambda reducer lifted
+# --- M1c: a function VALUE RETURNED from a function (precise FnT-return typedef) + called ---
+    ('mk* = () (i32) i32 { (n) { n + 1 } }\ntest* = () i32 {\n  f := mk()\n  f(41)\n}', 42),                                                       # returned lambda, lifted + called
+    ('add1* = (n: i32) i32 { n + 1 }\nmk2* = () (i32) i32 { add1 }\ntest* = () i32 {\n  f := mk2()\n  f(41)\n}', 42),                                # returned NAMED fn value, called
 # --- f64 floats (Goal R): a literal carries its TEXT through the compiler (the compiler itself has
 #     no float values); f64 op f64 only for + - * / and comparisons; the int<->float boundary is
 #     crossed ONLY by the explicit to_f64 / to_i64 / to_i32 casts (C truncation toward zero). ---
@@ -446,12 +449,10 @@ VERDICT_CASES = [
     ('test* = () i32 { b := 1.5 == 1\n 0 }', 'reject'),                  # mixed equality is the mix too
     ('eat* = (x: f64) f64 { x }\ntest* = () f64 { eat(2) }', 'reject'),  # int arg ⊀ f64 param
     ('test* = () i32 { x := 3\n x.match ({ 0.25 => 1, _ => 9 }) }', 'reject'),   # a float label on an int subject
-    # --- lambda-value (closures): a lambda the compiler can't yet make a value of is rejected cleanly
-    #     (was: leaked unlowered C). A RETURNED lambda needs an FnT-return typedef (deferred), so it
-    #     still rejects. (A field-stored non-capturing lambda is now LIFTED — see the VALUE cases. A
-    #     CAPTURING lambda also still rejects — captures are M2.) Pinned `reject` (count): kind 18 and
-    #     the check-kind harness masks `& 15`, so the exact kind is verified via the driver test. ---
-    ('mk* = () (i32) i32 { (n) { n + 1 } }\ntest* = () i32 { 0 }', 'reject'),
+    # --- lambda-value (closures): a CAPTURING lambda (refs an enclosing local) can't yet be made a
+    #     value — rejected cleanly (was: leaked unlowered C); captures are M2. Non-capturing lambdas
+    #     stored in fields / returned are now lifted (see the VALUE cases). Pinned `reject` (count):
+    #     kind 18 and the check-kind harness masks `& 15`, so the exact kind is verified via the driver. ---
     ('Box*: { op: (i32) i32 }\ntest* = () i32 {\n  k := 10\n  b := Box(op: (n) { n + k })\n  b.op(5)\n}', 'reject'),
 ]
 

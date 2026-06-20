@@ -2240,35 +2240,34 @@ lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
                                          false => a.cenode(ematch(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))) }),
         .Index(ix)     => a.cenode(eindex(a.lift_rw_expr(decls, idx, gcp, gen, ix.seq), a.lift_rw_expr(decls, idx, gcp, gen, ix.idx), ix.elem)),
         .SliceLit(sd)  => a.cenode(slit(sd.elem, a.lift_rw_args(decls, idx, gcp, gen, sd.items))),
-        .Loop(l)       => a.cenode(eloop(a.lift_rw_expr(decls, idx, gcp, gen, l.seq), l.idx, l.elem, l.elemTy, a.lift_rw_body(decls, idx, gcp, gen, l.body), l.h)),
-        .Block(bl)     => a.cenode(block(a.lift_rw_body(decls, idx, gcp, gen, bl.stmts))),
-        .Lambda(lm)    => a.cenode(lam(lm.params, a.lift_rw_body(decls, idx, gcp, gen, lm.body))),
+        .Loop(l)       => a.cenode(eloop(a.lift_rw_expr(decls, idx, gcp, gen, l.seq), l.idx, l.elem, l.elemTy, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), l.body), l.h)),
+        .Block(bl)     => a.cenode(block(a.lift_rw_body(decls, idx, gcp, gen, tvoid(), bl.stmts))),
+        .Lambda(lm)    => a.cenode(lam(lm.params, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), lm.body))),
         _              => e
     })
 }
-// M1b lifts lambdas only in STRUCT-FIELD-INIT value positions (the std.store / callback-record case).
-// A lambda RETURNED from a function needs a precise FnT C return type (a typedef) so the caller can
-// call the result — that's deferred (FnT-return-typedefs, M1c); a returned lambda stays the clean
-// error[lambda-value] for now. So Return / tail expressions are only recursed, never lifted.
-lift_rw_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], st: Stmt) Stmt {
+// Lambdas lift in value positions the inliner can't splice: STRUCT-FIELD inits (lift_rw_inits) and
+// RETURN / tail-expression positions (a body's implicit return) when the declared return type is a
+// function type — `fnret` carries that type; `tail` marks the body's last (implicit-return) statement.
+lift_rw_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], fnret: Ty, tail: bool, st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slett(l.name, l.ty, a.lift_rw_expr(decls, idx, gcp, gen, l.value)),
         .Assign(x)   => sassign_at(a.lift_rw_expr(decls, idx, gcp, gen, x.target), a.lift_rw_expr(decls, idx, gcp, gen, x.value), x.pos),
-        .Return(r)   => sret(a.lift_rw_expr(decls, idx, gcp, gen, r)),
-        .ExprStmt(e) => sexpr(a.lift_rw_expr(decls, idx, gcp, gen, e)),
-        .If(f)       => sif(a.lift_rw_expr(decls, idx, gcp, gen, f.c), a.lift_rw_body(decls, idx, gcp, gen, f.then), a.lift_rw_body(decls, idx, gcp, gen, f.els)),
-        .While(w)    => swhile(a.lift_rw_expr(decls, idx, gcp, gen, w.c), a.lift_rw_body(decls, idx, gcp, gen, w.body)),
+        .Return(r)   => sret(a.lift_at(decls, idx, gcp, gen, fnret, r)),
+        .ExprStmt(e) => sexpr(tail.match ({ true => a.lift_at(decls, idx, gcp, gen, fnret, e), false => a.lift_rw_expr(decls, idx, gcp, gen, e) })),
+        .If(f)       => sif(a.lift_rw_expr(decls, idx, gcp, gen, f.c), a.lift_rw_body(decls, idx, gcp, gen, fnret, f.then), a.lift_rw_body(decls, idx, gcp, gen, fnret, f.els)),
+        .While(w)    => swhile(a.lift_rw_expr(decls, idx, gcp, gen, w.c), a.lift_rw_body(decls, idx, gcp, gen, tvoid(), w.body)),
         .IndexSet(x) => sidxset_at(a.lift_rw_expr(decls, idx, gcp, gen, x.seq), a.lift_rw_expr(decls, idx, gcp, gen, x.idx), x.elem, a.lift_rw_expr(decls, idx, gcp, gen, x.value), x.pos)
     })
 }
-lift_rw_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], body: [Stmt]) [Stmt] {
+lift_rw_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], fnret: Ty, body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
-    body.loop((h, i, st) { buf[i] = a.lift_rw_stmt(decls, idx, gcp, gen, st) })
+    body.loop((h, i, st) { buf[i] = a.lift_rw_stmt(decls, idx, gcp, gen, fnret, i == body.len - 1, st) })
     buf
 }
 lift_rw_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], d: Decl) Decl {
     d.match ({
-        .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.lift_rw_body(decls, idx, gcp, gen, f.body) )),
+        .DFunc(f) => dfunc(Func( name: f.name, params: f.params, ret: f.ret, tparams: f.tparams, body: a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body) )),
         _         => d
     })
 }

@@ -2,7 +2,7 @@
 
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, is_template, is_trait, call, lit, arm, block, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
 
@@ -443,8 +443,28 @@ gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
 // (it stashes argv and calls zen_main). Every other function keeps its source name.
 c_func_name = (name: str) str { eq(name, "main").match ({ true => "zen_main", false => name }) }
 // a function signature `ret name(params)` — shared by the definition and the forward proto
+// the C name for a return type: a function-VALUE return (FnT) uses its precise typedef (M1c) so the
+// caller can call the result; everything else is the plain C type name.
+ret_cname = (alloc: MutPtr<Malloc>, ret: Ty) str {
+    ret.match ({ .FnT(ft) => alloc.fnt_cname(ft), _ => alloc.ty_cname_in(ret) })
+}
 gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
-    s.gstr_append(alloc, alloc.ty_cname_in(f.ret)).gstr_append(alloc, " ").gstr_append(alloc, c_func_name(f.name)).gstr_append(alloc, "(").gen_params(alloc, f.params).gstr_append(alloc, ")")
+    s.gstr_append(alloc, alloc.ret_cname(f.ret)).gstr_append(alloc, " ").gstr_append(alloc, c_func_name(f.name)).gstr_append(alloc, "(").gen_params(alloc, f.params).gstr_append(alloc, ")")
+}
+// `typedef Ret (*__fnt_…)(Args);` for every function-RETURN type that is itself a function type, so a
+// fn returning a function value has a precise, callable C return type. C11 allows an identical typedef
+// to repeat, so no dedup is needed. Emitted after the forward struct typedefs (a fn-pointer typedef may
+// reference an as-yet-incomplete struct) and before the prototypes that use it as a return type.
+gen_fnt_typedef_ret = (s: String, alloc: MutPtr<Malloc>, ret: Ty) String {
+    ret.match ({
+        .FnT(ft) => s.gstr_append(alloc, "typedef ").gstr_append(alloc, alloc.ty_cname_in(load(ft.ret))).gstr_append(alloc, " (*").gstr_append(alloc, alloc.fnt_cname(ft)).gstr_append(alloc, ")(").gen_fnt_params(alloc, ft.params).gstr_append(alloc, "); "),
+        _        => s
+    })
+}
+gen_fnt_typedefs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
+    out := s
+    decls.loop((h, i, d) { out = d.match ({ .DFunc(f) => out.gen_fnt_typedef_ret(alloc, f.ret), .DForeign(f) => out.gen_fnt_typedef_ret(alloc, f.ret), _ => out }) })
+    out
 }
 gen_func* = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     out := s.gen_sig(alloc, f)
@@ -731,6 +751,7 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     // (types match std.mem/std.string foreign decls — compatible redecl).
     s := a.gstr_string(4096).gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); ")
     decls.loop((h, i, d) { s = s.gen_fwd(a, decls, d) })
+    s = s.gen_fnt_typedefs(a, decls)
     decls.loop((h, i, d) { s = s.gen_proto(a, d) })
     s = s.gen_types_upto(a, decls, a.depth_cache(decls), 0, slen(decls))
     decls.loop((h, i, d) { s = s.gen_global(a, d) })
