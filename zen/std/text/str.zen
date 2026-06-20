@@ -221,6 +221,40 @@ rtrim_in*<A> = (a: MutPtr<A>, s: str) str {
 }
 rtrim*<A> = (a: MutPtr<A>, s: str) str { a.rtrim_in(s) }
 
+// ── splitting: fields and words ───────────────────────────────────────────────
+//
+// A returned `[str]` holds NUL-terminated COPIES of each field, not zero-copy sub-views: `str` is
+// NUL-terminated, so a field can't both share `s`'s buffer AND end at a separator. The slice backbone
+// and every field are acquired from the caller's allocator (reusing `substr_in` for each copy).
+
+// an allocator-owned `[T]` of `n` slots, uninitialised. `seed` is unread — it only pins T (sizeof(T)
+// is rewritten per concrete element type at monomorphization). `n == 0` yields an empty slice.
+nbuf*<T, A> = (a: MutPtr<A>, seed: T, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
+
+// split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
+// kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
+split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
+    sv := s.view()
+    nf: i64 := 1
+    sv.loop((h, i, b) { (b == sep).match ({ true => { nf = nf + 1 }, _ => {} }) })
+    out: [str] := a.nbuf("", nf)
+    fi:    i64 := 0     // next field slot
+    start: i64 := 0     // current field's start offset
+    sv.loop((h, i, b) {
+        (b == sep).match ({
+            true => {
+                out[fi] = a.substr_in(s, start, i - start)
+                fi    = fi + 1
+                start = i + 1
+            },
+            _ => {}
+        })
+    })
+    out[fi] = a.substr_in(s, start, sv.len - start)
+    out
+}
+split*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] { a.split_in(s, sep) }
+
 // ── numbers ─────────────────────────────────────────────────────────────────
 
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of
