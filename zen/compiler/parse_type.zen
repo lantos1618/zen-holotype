@@ -4,7 +4,7 @@
 // (is_lbrace/is_comma/is_rparen/…/tok_eq) and the param buffer used by both expr and decl parsers.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Param, Ty, Field, StructDecl, param, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
+{ Param, Ty, Field, StructDecl, param, pvariadic, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.bytes
 { eq } = std.text.str
@@ -269,18 +269,55 @@ fill_params* = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEn
         _    => src.is_rparen(sc.tok).match ({ true => PEnd( count: i, next: sc.next ), false => a.fill_one(src, pos, buf, i) })
     })
 }
+// `...` (a variadic-param marker before the element type). Three consecutive `.` Sym tokens — the
+// lexer never glues them, so detect/skip them token-by-token.
+is_ellipsis* = (src: str, pos: i32) bool {
+    d1 := src.scan(pos)
+    src.is_op(d1.tok, '.').match ({
+        false => false,
+        true  => {
+            d2 := src.scan(d1.next)
+            src.is_op(d2.tok, '.').match ({
+                false => false,
+                true  => src.is_op(src.scan(d2.next).tok, '.')
+            })
+        }
+    })
+}
+ellipsis_skip = (src: str, pos: i32) i32 {            // pos at the first `.`; return pos past the third
+    d1 := src.scan(pos)
+    d2 := src.scan(d1.next)
+    src.scan(d2.next).next
+}
 fill_one = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
     nt    := src.scan(pos)                               // param name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
-    te    := a.parse_ty(src, colon.next)                 // the type (may be Ptr<…>)
+    src.is_ellipsis(colon.next).match ({
+        true  => a.fill_variadic(src, nm, colon.next, buf, i),
+        false => a.fill_fixed(src, nm, colon.next, buf, i)
+    })
+}
+fill_fixed = (a: MutPtr<Malloc>, src: str, nm: str, tpos: i32, buf: [Param], i: i32) PEnd {
+    te    := a.parse_ty(src, tpos)                       // the type (may be Ptr<…>)
     buf[i] = param(nm, te.ty)
     after := src.scan(te.next)                           // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_params(src, after.next, buf, i + 1),
         false => PEnd( count: i + 1, next: after.next )  // ')'
+    })
+}
+// a trailing `name: ...T` param: store it as the collected `[T]` (the body sees a normal slice) and
+// flag the param variadic. It MUST be last — a `,` after it (another param follows) is a parse error.
+fill_variadic = (a: MutPtr<Malloc>, src: str, nm: str, dotpos: i32, buf: [Param], i: i32) PEnd {
+    te    := a.parse_ty(src, src.ellipsis_skip(dotpos))  // the element type T
+    buf[i] = pvariadic(nm, tslice(a.tynode(te.ty)))      // body sees `[T]`
+    after := src.scan(te.next)                           // must be ')'
+    src.is_comma(after.tok).match ({
+        true  => { perr_set()  PEnd( count: i + 1, next: after.next ) },  // a param after the variadic one — reject
+        false => PEnd( count: i + 1, next: after.next )                   // ')'
     })
 }
 
