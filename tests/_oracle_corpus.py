@@ -194,6 +194,13 @@ VALUE_CASES = [
     ('test* = () i64 { to_i64(2.9) }', 2),                                                    # to_i64 truncates a double the C way
     ('test* = () i32 {\n  x := 0.25\n  x.match ({ 0.25 => 1, 1.5 => 2, _ => 9 })\n}', 1),     # a float-literal match is an `==` chain
     ('g := 1.5\ntest* = () i32 { to_i32(g * 2.0) }', 3),                                      # a module-global f64 (constant init)
+    # --- ESCAPE-1: `\xNN` hex escape → one byte; `\\` keeps the backslash (no silent drop) ---
+    # (use \x41='A' in STRING cases — a raw high byte in emitted C breaks the text-mode oracle harness;
+    #  the high-byte value path is covered by the char-literal case, which lowers to a numeric literal.)
+    ("test* = () i32 { '\\xc8' }", 200),                                                       # char-literal \xNN → 200
+    ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("\\x41", 0) }', 65),  # \x41 → byte 'A'
+    ('at = (s: str, i: i32) u8 { s.offset(i).load() }\ntest* = () i32 { at("a\\\\b", 1) }', 92),  # \\ stays a backslash (byte 92)
+    ('cnt = (s: str, i: i32) i32 { (s.offset(i).load() == 0).match({ true => i, false => cnt(s, i + 1) }) }\ntest* = () i32 { cnt("\\x41", 0) }', 1),  # \x41 is ONE byte (len 1, not 3)
 ]
 
 # (src, verdict) the check binary must produce.

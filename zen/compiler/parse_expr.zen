@@ -123,7 +123,7 @@ parse_other = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
         _     => a.parse_paren(src, sc)
     })
 }
-// Backslash escape byte value.
+// Backslash escape byte value. `\\ \" \'` fall through `_ => e` (the char itself).
 esc_byte = (e: u8) u8 {
     e.match ({
         'n' => 10,
@@ -133,9 +133,17 @@ esc_byte = (e: u8) u8 {
         _ => e
     })
 }
+// Two hex digits at `pos`,`pos+1` → one byte (for `\xNN`).
+hex2 = (src: str, pos: i32) u8 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
 char_val = (src: str, start: i32) i32 {
     b := src.at(start + 1)
-    (b == '\\').match ({ true => esc_byte(src.at(start + 2)), false => b })
+    (b == '\\').match ({
+        true  => (src.at(start + 2) == 'x').match ({
+            true  => src.hex2(start + 3),                 // '\xNN'
+            false => esc_byte(src.at(start + 2))
+        }),
+        false => b
+    })
 }
 // String literal value: copy content and resolve escapes.
 str_val = (a: MutPtr<Malloc>, src: str, t: Token) str {
@@ -154,8 +162,16 @@ unescape_one = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     })
 }
 unescape_esc = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    store(offset(dst, di), esc_byte(src.at(pos + 1)))
-    src.unescape(pos + 2, end, dst, di + 1)
+    (src.at(pos + 1) == 'x').match ({
+        true  => {
+            store(offset(dst, di), src.hex2(pos + 2))     // `\xNN` → one byte, consume 4 chars
+            src.unescape(pos + 4, end, dst, di + 1)
+        },
+        false => {
+            store(offset(dst, di), esc_byte(src.at(pos + 1)))
+            src.unescape(pos + 2, end, dst, di + 1)
+        }
+    })
 }
 unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     store(offset(dst, di), src.at(pos))
