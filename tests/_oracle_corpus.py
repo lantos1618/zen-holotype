@@ -65,6 +65,9 @@ VALUE_CASES = [
     ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Idle\n  b := State.Run(5)\n  r := (a != b).to_i32()\n  r\n}', 1),
     # `==` against a variant literal (different tag → 0)
     ('State*: Idle | Run(i32)\ntest* = () i32 {\n  a := State.Run(2)\n  r := (a == State.Idle).to_i32()\n  r\n}', 0),
+    # --- bare variant ctor arg to a GENERIC fn: the inferred type arg disambiguates which enum owns
+    #     the shared variant name (`.Num` exists on both Tok and Expr; T=Tok from the other arg) ---
+    ('Tok*: Num(i64) | End\nExpr*: Num(i64) | Bin(i64)\nsecond<T> = (a: T, b: T) T { b }\nunNum = (t: Tok) i64 { t.match({ .Num(n) => n, .End => 0-1 }) }\ntest* = () i64 {\n  base := Tok.End\n  r := second(base, .Num(7))\n  unNum(r)\n}', 7),
     ('Vec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v := Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b := v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v := of([10, 20, 30])\n  v.get(0) + v.get(2)\n}', 40),
     ('Opt<T>: Some(T) | None\nu<T> = (o: Opt<T>) i32 { o.match({ .Some(x) => 1, .None => 0 }) }\ntest* = () i32 { u(.Some(42)) }', 1),
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 { unwrap(.Some(7), 0) }', 7),
