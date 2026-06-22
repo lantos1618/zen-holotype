@@ -3,7 +3,7 @@
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
-{ Map } = std.collections.map        // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
+{ Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
 { eq, is_empty, starts_with, ends_with } = std.text.str
 
@@ -48,6 +48,11 @@ named_declared = (decls: [Decl], n: str) bool {
 // uninferable residue, an UNDECLARED Named (a generic type param like `T`), a Ptr/Slice WHOSE element
 // is itself unknown (`Ptr<T>`, `[T]`), or a generic INSTANCE (`Result<Mailbox, IoError>`) whose
 // concrete decl only exists after monomorphization.
+// the narrow int/float widths arrive as Named("u32") etc. (no Ty variant), but they ARE valid
+// primitives that genc lowers to C types — so the unknown-type pass must treat them as KNOWN.
+is_prim_width = (n: str) bool {
+    eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32")
+}
 unknown_ty = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
@@ -1101,6 +1106,7 @@ KOWNERSHIP    = () i32 { 15 }   // use of a local owner after release/drop
 KTRAITBOUND   = () i32 { 16 }   // a type bound to `A: Trait` at a call site does not impl Trait
 KUNKNOWNTYPE  = () i32 { 17 }   // a type annotation names a type that is not declared/imported/a tparam
 KLAMBDAVALUE  = () i32 { 18 }   // a lambda used as a value the inliner can't splice (stored/returned)
+KMUSTUSE      = () i32 { 19 }   // a value-mold `(Self,…) Self` self-mutation whose result is discarded
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1156,6 +1162,7 @@ diagnostic_kind_name = (code: i32) str {
         16 => "trait-bound",
         17 => "unknown-type",
         18 => "lambda-value",
+        19 => "must-use",
         _ => "type"
     })
 }
@@ -1179,6 +1186,7 @@ diagnostic_message = (code: i32) str {
         16 => "type argument does not satisfy the trait bound",
         17 => "unknown type name",
         18 => "a lambda can only be used directly as a call argument",
+        19 => "result of a self-mutating container method is discarded; the receiver is invalid after this call",
         _ => "type error"
     })
 }
@@ -1202,6 +1210,7 @@ diagnostic_hint = (code: i32) str {
         16 => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
         17 => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
         18 => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
+        19 => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
         _ => ""
     })
 }
@@ -1666,7 +1675,7 @@ ut_has_tparam = (tparams: [Param], n: str) bool {
 }
 ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
-        .Named(n)   => (eq(n, "Self") || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => 0, false => 1 }),
+        .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => 0, false => 1 }),
         .Generic(g) => env.env_named_declared(g.name).match ({ true => env.ut_unknown_tys(tparams, g.args), false => 1 }),
         .Ptr(p)     => env.ut_unknown_ty(tparams, load(p)),
         .Slice(e)   => env.ut_unknown_ty(tparams, load(e)),
@@ -1693,16 +1702,56 @@ ut_payloads_kind = (env: Env, tparams: [Param], vs: [VariantDef]) i32 {
     vs.loop((h, i, v) { acc = acc.kv_kor(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE())) })
     acc
 }
-ut_func_kind = (env: Env, f: Func) i32 {
-    env.ut_params_kind(f.tparams, f.params).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()))
+// also walk the body: a LOCAL `let` with an explicit annotation (`x: Foo := e`) names a type, and an
+// undefined one leaked an unknown C type just like a param/field/return would. Recurse through nested
+// control flow (Block/Loop/Match/Cond) so a deeply-nested `let` annotation is checked too.
+ut_arms_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.ut_expr_kind(env, tparams, ar.body)) })
+    acc
+}
+ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b)  => a.ut_body_kind(env, tparams, b.stmts),
+        .Loop(l)   => a.ut_body_kind(env, tparams, l.body),
+        .Match(m)  => a.ut_arms_kind(env, tparams, m.arms),
+        .Cond(d)   => a.ut_expr_kind(env, tparams, d.t).kv_kor(a.ut_expr_kind(env, tparams, d.e)),
+        _          => 0
+    })
+}
+// a LOCAL `let` annotation (`x: T := e`); tvoid means unannotated, so nothing to check.
+ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 {
+    l.ty.is_void_ty().match ({
+        true  => 0,
+        false => env.ut_unknown_ty(tparams, l.ty).kv_one(KUNKNOWNTYPE()).kv_at(load(l.value).expr_pos())
+    })
+}
+ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.ut_let_kind(env, tparams, l).kv_kor(a.ut_expr_kind(env, tparams, l.value)),
+        .Assign(x)   => a.ut_expr_kind(env, tparams, x.value),
+        .Return(r)   => a.ut_expr_kind(env, tparams, r),
+        .ExprStmt(e) => a.ut_expr_kind(env, tparams, e),
+        .If(f)       => a.ut_expr_kind(env, tparams, f.c).kv_kor(a.ut_body_kind(env, tparams, f.then)).kv_kor(a.ut_body_kind(env, tparams, f.els)),
+        .While(w)    => a.ut_expr_kind(env, tparams, w.c).kv_kor(a.ut_body_kind(env, tparams, w.body)),
+        .IndexSet(x) => a.ut_expr_kind(env, tparams, x.value)
+    })
+}
+ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
+    acc := 0
+    body.loop((h, i, st) { acc = acc.kv_kor(a.ut_stmt_kind(env, tparams, st)) })
+    acc
+}
+ut_func_kind = (a: MutPtr<Malloc>, env: Env, f: Func) i32 {
+    env.ut_params_kind(f.tparams, f.params).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE())).kv_kor(a.ut_body_kind(env, f.tparams, f.body))
 }
 check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
     env := Env( vars: a.params_env(cv_no_params()), decls: decls, didx: idx, exp: tvoid(), a: a )
     acc := 0
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({
-        .DFunc(f)      => env.ut_func_kind(f),
-        .DForeign(f)   => env.ut_func_kind(f),
+        .DFunc(f)      => a.ut_func_kind(env, f),
+        .DForeign(f)   => a.ut_func_kind(env, f),
         .DStruct(sd)   => env.ut_fields_kind(cv_no_params(), sd.fields),
         .DEnum(ed)     => env.ut_payloads_kind(cv_no_params(), ed.variants),
         .DGenStruct(g) => env.ut_fields_kind(g.tparams, g.fields),
@@ -1713,6 +1762,144 @@ check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 }
 check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_unknown_type_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => src.check_diagnostic_from_source(packed, 1)
+    })
+}
+
+// ── must-use: a DISCARDED value-mold ((Self,…) Self) self-mutation (Stage-2 A.1) ───────────────────────
+// A value-mold CONTAINER method (`Map.put`, `Set.add`, … — shape `(Self, …) Self`) RETURNS the updated
+// container and INVALIDATES the receiver: a grow reallocs the backing buffer, so the input header is left
+// dangling. Discarding the result in statement position — `m.put(a, k, v)` as a bare statement, then
+// `m.get(...)` — segfaults while `check` says ok (the #1 trust-killer for a newcomer). This driver-only
+// pass runs on the RAW pre-inline decls (where the call is still a MethodCall; by check_module time the
+// generic method is INLINED away) and rejects such a discard with KMUSTUSE.
+//
+// Scope chosen to be SAFE against the pervasive free-function builder pattern (`s = s.gen_x(…)` threads a
+// `String` accumulator — those are FREE functions, never inherent methods, so they are untouched):
+//   • only INHERENT struct methods (declared inside a struct body) count, and only when EVERY inherent
+//     method of that name is value-mold (an ambiguous name shared with a non-value-mold method is skipped);
+//   • only NON-TAIL statements are flagged — a body's last expression is its produced VALUE, not a discard,
+//     so a value-mold method used as a return value / match-arm value / fluent-chain tail is never flagged.
+mu_ty_is_container = (t: Ty) bool { t.match ({ .Named(n) => true, .Generic(g) => true, _ => false }) }
+// the `(Self, …) Self` shape: first param and return are the SAME non-pointer, non-primitive type.
+mu_is_value_mold = (f: Func) bool {
+    (f.params.len == 0).match ({
+        true  => false,
+        false => {
+            p0 := f.params[0].ty
+            (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({
+                true  => eq(p0.recv_name(), f.ret.recv_name()),
+                false => false
+            })
+        }
+    })
+}
+mu_methods_have = (methods: [Param], m: str) bool {
+    f := false
+    methods.loop((h, i, p) { f = eq(p.name, m).match ({ true => true, false => f }) })
+    f
+}
+// the hoisted inherent func `impl_<Ty>_<Ty>_<m>` (fill_inherent_methods), looked up O(1) via the index.
+mu_func_value_mold = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, ty: str, m: str) bool {
+    cname := a.impl_cname_in(ty, ty, m)
+    i     := idx.func_idx.get(cname, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({ .DFunc(f) => f.mu_is_value_mold(), _ => false }),
+        false => false
+    })
+}
+// fold one inherent-struct impl's methods into the name→state map (0 unseen, 1 value-mold-only, 2 tainted).
+mu_index_methods = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64>, ty: str, methods: [Param], j: i32) Map<i64> {
+    (j >= methods.len).match ({
+        true  => m,
+        false => {
+            p    := methods[j]
+            vm   := a.mu_func_value_mold(decls, idx, ty, p.name)
+            prev := m.get(p.name, 0)
+            next: i64 := vm.match ({ true => prev.match ({ 0 => 1, 1 => 1, _ => 2 }), false => 2 })
+            a.mu_index_methods(decls, idx, m.put(a, p.name, next), ty, methods, j + 1)
+        }
+    })
+}
+mu_index_impl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64>, im: ImplData) Map<i64> {
+    eq(im.ty, im.trname).match ({
+        true  => a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0),
+        false => m
+    })
+}
+// method name → 1 iff it is an inherent method AND value-mold on EVERY struct that declares it.
+mu_build_index = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
+    seed: i64 := 0 - 1
+    m := of(a, "", seed)
+    decls.loop((h, i, d) { m = d.match ({ .DImpl(im) => a.mu_index_impl(decls, idx, m, im), _ => m }) })
+    m
+}
+// flag a discarded MethodCall to a safe-to-flag value-mold inherent method.
+// In the normal parse, UFCS `recv.m(args)` lowers to a flat `Call(fn: m, args: [recv] ++ args)` whose
+// `fn` is the SIMPLE method name — exactly the index key. (The faithful MethodCall form is fmt-only, but
+// match it too for safety.) Flag a discarded call whose callee is a safe-to-flag value-mold method.
+// the value-mold DANGER is reusing a STALE NAMED LOCAL after a discarded self-mutation (`m.put(...)`
+// then `m.get(...)`). A fresh FLUENT CHAIN (`put("x=").i(3).nl()` — receiver is itself a call, not a
+// reused binding) carries no stale-local risk, so it must NOT be flagged (else builder APIs break).
+// Gate: only flag when the receiver (first arg / recv) is a bare Var.
+mu_is_var = (e: Expr) bool { e.match ({ .Var(v) => true, _ => false }) }
+mu_call_kind = (mvm: Map<i64>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => ((mvm.get(c.fn, 0) == 1) && (c.args.len > 0) && mu_is_var(c.args[0])).match ({ true => KMUSTUSE().kv_at(c.pos), false => 0 }),
+        .MethodCall(mc) => ((mvm.get(mc.method, 0) == 1) && mu_is_var(load(mc.recv))).match ({ true => KMUSTUSE().kv_at(mc.pos), false => 0 }),
+        _               => 0
+    })
+}
+mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.mu_expr_kind(mvm, ar.body)) })   // arm body = the arm's VALUE (tail)
+    acc
+}
+// recurse into nested control-flow whose bodies can hold discarded statements.
+mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b) => a.mu_body_kind(mvm, b.stmts),
+        .Loop(l)  => a.mu_body_kind(mvm, l.body),
+        .Match(m) => a.mu_arms_kind(mvm, m.arms),
+        .Cond(d)  => a.mu_expr_kind(mvm, d.t).kv_kor(a.mu_expr_kind(mvm, d.e)),
+        _         => 0
+    })
+}
+// an ExprStmt: flag a discarded value-mold call when NOT in tail position, and always recurse for nested
+// discards. (Extracted so the nested `is_tail.match(...)` is a plain statement, not a chained arm body.)
+mu_exprstmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>, is_tail: bool) i32 {
+    head := is_tail.match ({ true => 0, false => mvm.mu_call_kind(e) })
+    head.kv_kor(a.mu_expr_kind(mvm, e))
+}
+mu_stmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, st: Stmt, is_tail: bool) i32 {
+    st.match ({
+        .ExprStmt(e) => a.mu_exprstmt_kind(mvm, e, is_tail),
+        .Let(l)      => a.mu_expr_kind(mvm, l.value),
+        .Assign(x)   => a.mu_expr_kind(mvm, x.value),
+        .Return(r)   => a.mu_expr_kind(mvm, r),
+        .If(f)       => a.mu_body_kind(mvm, f.then).kv_kor(a.mu_body_kind(mvm, f.els)),
+        .While(w)    => a.mu_body_kind(mvm, w.body),
+        .IndexSet(x) => a.mu_expr_kind(mvm, x.value)
+    })
+}
+// the body's LAST statement is its produced value (tail) — never a discard; every earlier ExprStmt is.
+mu_body_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, body: [Stmt]) i32 {
+    acc := 0
+    n   := body.len
+    body.loop((h, i, st) { acc = acc.kv_kor(a.mu_stmt_kind(mvm, st, i == (n - 1))) })
+    acc
+}
+check_module_mustuse_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    idx := a.build_decl_index(decls)
+    mvm := a.mu_build_index(decls, idx)
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.mu_body_kind(mvm, f.body), _ => 0 })) })
+    acc
+}
+check_module_mustuse_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := a.check_module_mustuse_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => src.check_diagnostic_from_source(packed, 1)

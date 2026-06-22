@@ -13,11 +13,11 @@
 { perr_get } = compiler.parse_type
 { lerr_get } = compiler.lex
 { resolve_module } = compiler.check
-{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source } = compiler.check_validate
+{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { genfmt_module_in } = compiler.genfmt
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists } = std.internal.resolve
 
 say = (s: str) i64 { out(s)  out("\n") }
 derr = (s: str) i64 { v := s.view()  write(2, v.ptr, v.len) }   // diagnostics go to stderr
@@ -35,7 +35,13 @@ check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDi
                     (cd3.code == 0).match ({
                         true  => {
                             cd4 := mp.check_module_unknown_type_diagnostic_from_source(decls, flat)   // undefined type names in annotations
-                            (cd4.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd4 })
+                            (cd4.code == 0).match ({
+                                true  => {
+                                    cd5 := mp.check_module_mustuse_diagnostic_from_source(raw, flat)   // discarded value-mold (Self,…)Self result
+                                    (cd5.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd5 })
+                                },
+                                false => cd4
+                            })
                         },
                         false => cd3
                     })
@@ -189,6 +195,12 @@ emit_checked = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
 // check/build/run operate on a Spec (a single file, or a zen.toml project). spec.source is the
 // entry; spec.ccflags/links/out come from a project's manifest (empty for a single file).
 check_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
+    spec.ok.match ({
+        false => 1,                                                                  // resolve_spec already reported why
+        true  => mp.check_spec_ok(root, spec)
+    })
+}
+check_spec_ok = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
             rp    := mp.resolve_prog(root, spec.source, src)
@@ -203,16 +215,30 @@ check_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
     })
 }
 build_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec, flag: str, outarg: str) i32 {
-    out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })   // -o flag, or zen.toml `out`
-    contents_in(mp, spec.source).match ({
-        .Ok(src) => mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links),
-        .Err(e)  => { derr("zenc: cannot open input\n")  1 }
+    spec.ok.match ({
+        false => 1,                                                                  // resolve_spec already reported why
+        true  => {
+            out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })   // -o flag, or zen.toml `out`
+            contents_in(mp, spec.source).match ({
+                .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links) == 0).match ({
+                    false => { derr("zenc: build failed: ")  derr(spec.source)  derr("\n")  1 },
+                    true  => file_exists(out).match ({                               // never exit 0 with no binary on disk
+                        true  => { derr("zenc: wrote ")  derr(out)  derr("\n")  0 },
+                        false => { derr("zenc: build produced no binary: ")  derr(out)  derr(" (compiler reported success but the file is missing)\n")  1 }
+                    })
+                }),
+                .Err(e) => { derr("zenc: cannot open input: ")  derr(spec.source)  derr("\n")  1 }
+            })
+        }
     })
 }
 run_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
-    contents_in(mp, spec.source).match ({
-        .Ok(src) => (mp.compile_to(root, spec.source, src, TMPBIN(), spec.ccflags, spec.links) == 0).match ({ true => TMPBIN().system() / 256, false => 1 }),
-        .Err(e)  => { derr("zenc: cannot open input\n")  1 }
+    spec.ok.match ({
+        false => 1,
+        true  => contents_in(mp, spec.source).match ({
+            .Ok(src) => (mp.compile_to(root, spec.source, src, TMPBIN(), spec.ccflags, spec.links) == 0).match ({ true => TMPBIN().system() / 256, false => 1 }),
+            .Err(e)  => { derr("zenc: cannot open input: ")  derr(spec.source)  derr("\n")  1 }
+        })
     })
 }
 
@@ -573,15 +599,22 @@ proj_spec = (mp: MutPtr<Malloc>, dir: str) Spec {
         .Err(e) => Spec(source: "", out: "", ccflags: "", links: "", ok: false)
     })
 }
-// arg -> Spec: a directory with zen.toml is a project; otherwise a single file (empty cc/links/out).
+// arg -> Spec: a directory with build.zen/zen.toml is a project; otherwise a single file (empty
+// cc/links/out). A manifest that EXISTS but is malformed (missing root/main, won't compile) is a loud
+// error (ok=false) — NOT a silent fall-through to treating the directory itself as a source file.
 resolve_spec = (mp: MutPtr<Malloc>, root: str, arg: str) Spec {
-    bz := mp.build_zen_spec(root, arg)
-    bz.ok.match ({
-        true  => bz,
-        false => {
-            s := mp.proj_spec(arg)
-            s.ok.match ({ true => s, false => Spec(source: arg, out: "", ccflags: "", links: "", ok: true) })
-        }
+    file_exists(mp.join2(arg, "build.zen")).match ({
+        true  => mp.build_zen_spec(root, arg),                   // build.zen wins; prints its own errors on failure
+        false => file_exists(mp.join2(arg, "zen.toml")).match ({
+            true  => {
+                s := mp.proj_spec(arg)
+                s.ok.match ({
+                    true  => s,
+                    false => { derr("zenc: ")  derr(mp.join2(arg, "zen.toml"))  derr(": invalid manifest (need both `root` and `main` keys)\n")  s }
+                })
+            },
+            false => Spec(source: arg, out: "", ccflags: "", links: "", ok: true)   // a single .zen file
+        })
     })
 }
 

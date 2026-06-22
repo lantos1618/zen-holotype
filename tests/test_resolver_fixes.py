@@ -190,6 +190,53 @@ def test_undefined_return_type_rejected():
     assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
 
 
+def test_undefined_type_in_local_let_rejected():
+    # a LOCAL `let` annotation (`x: Foo := e`) names a type too; an undefined one used to type-check
+    # "ok" then leak `unknown type name 'Foo'` to cc. The unknown-type pass now walks func bodies.
+    r = _check("main = () i32 { x: Foo := 5  0 }\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_undefined_type_in_nested_let_rejected():
+    # nested inside a match arm body — the body walk recurses through Block/Loop/Match/Cond.
+    r = _check("main = () i32 {\n  x := 1\n  x.match ({ _ => { y: Nope := 2  y } })\n}\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+# ── MUST-USE: a discarded value-mold `(Self,…) Self` self-mutation (Stage-2 A.1). A container method
+#    like `Map.put` RETURNS the updated container and INVALIDATES the receiver (a grow reallocs); using it
+#    as a bare statement and reading the receiver afterwards used to SEGV while `check` said ok. Driver-only
+#    (raw, pre-inline), so exercised here through the binary. ────────────────────────────────────────────
+_VMOLD = ("Box*: {\n"
+          "    v: i32\n"
+          "    bump = (b: Box, n: i32) Box { Box( v: b.v + n ) }\n"
+          "    get = (b: Box) i32 { b.v }\n"
+          "}\n")
+
+def test_discarded_value_mold_result_rejected():
+    # `b.bump(5)` as a non-tail statement discards the updated container — the receiver is now stale.
+    r = _check(_VMOLD + "main = () i32 {\n  b := Box( v: 1 )\n  b.bump(5)\n  b.get()\n}\n")
+    assert r.returncode != 0 and "must-use" in r.stderr, r.stderr
+
+def test_rebound_value_mold_result_ok():
+    # rebinding the result (`b = b.bump(...)`) is the correct usage and must pass.
+    r = _check(_VMOLD + "main = () i32 {\n  b := Box( v: 1 )\n  b = b.bump(5)\n  b.get()\n}\n")
+    assert r.returncode == 0, r.stderr
+
+def test_value_mold_in_tail_position_ok():
+    # a value-mold call used as a produced VALUE (fluent-chain tail) is not a discard — must pass.
+    r = _check(_VMOLD + "main = () i32 {\n  b := Box( v: 1 )\n  b.bump(5).get()\n}\n")
+    assert r.returncode == 0, r.stderr
+
+
+def test_defined_type_in_local_let_ok():
+    # a declared/primitive/generic local-let annotation must still pass (no false positive)
+    src = ("Box*: { v: i32 }\n"
+           "main = () i32 {\n  b: Box := Box( v: 3 )\n  p: MutPtr<Box> := b.addr()\n  n: i32 := b.v\n  n\n}\n")
+    r = _check(src)
+    assert r.returncode == 0, r.stderr
+
+
 def test_defined_and_imported_types_not_flagged():
     # a user type, a tparam, and an imported std type must all pass (no false positive)
     src = ("{ println } = std.text.fmt\n"

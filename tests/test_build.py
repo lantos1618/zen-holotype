@@ -462,6 +462,41 @@ def test_zenc_project_manifest_build_run_check():
     assert exe.stdout == "project\n"
 
 
+def test_zenc_build_project_writes_binary_and_reports_path():
+    """Regression: `zenc build <projectdir>` must WRITE the `out` binary and announce its path — never
+    a silent exit-0-with-no-binary. A newcomer following the documented happy path gets a real file."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "src"
+    src.mkdir()
+    (src / "main.zen").write_text("main = () i32 { 7 }\n")
+    (d / "zen.toml").write_text('root = "src"\nmain = "main.zen"\nout = "app"\n')
+
+    built = subprocess.run([zenc, "build", str(d)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    out = d / "app"
+    assert out.exists(), "zenc build produced no binary"
+    assert str(out) in built.stderr, f"build did not report the output path: {built.stderr!r}"
+    assert subprocess.run([str(out)]).returncode == 7
+
+
+def test_zenc_build_broken_manifest_errors_loudly():
+    """Regression: a zen.toml that EXISTS but is malformed (wrong/missing keys) must fail loudly with a
+    clear manifest error and produce NO binary — not silently fall back to treating the dir as a file
+    (which used to surface a misleading 'cannot open input')."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    src = d / "src"
+    src.mkdir()
+    (src / "main.zen").write_text("main = () i32 { 0 }\n")
+    (d / "zen.toml").write_text('rootdir = "src"\nentry = "main.zen"\n')
+
+    built = subprocess.run([zenc, "build", str(d)], capture_output=True, text=True)
+    assert built.returncode != 0, "broken manifest should fail loudly"
+    assert "invalid manifest" in built.stderr, built.stderr
+    assert "cannot open input" not in built.stderr, "should not surface the misleading file error"
+
+
 def test_zenc_project_manifest_fixture_build_run_check():
     zenc = _zenc()
     project = Path(tempfile.mkdtemp()) / "manifest_demo"
@@ -751,6 +786,18 @@ def test_zenc_run_prints_str_and_string():
     r = _run_fixture(zenc, "print_str_and_string.zen")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "borrowed\nalias\nowned!\nowned\n", repr(r.stdout)
+
+
+def test_zenc_run_prints_formatted_mixed_type_line():
+    """Section B.6: std.text.fmt's Printer builds a mixed-type formatted line in one chain.
+
+    `put(prefix).i(int).s(str).f(float).b(bool).owned(String).sp().nl()` streams each
+    typed piece to stdout, so a newcomer can print `x=<int> y=<str> z=<float>` on one
+    line — the first wall `println` (single value) hits."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "print_formatted_line.zen")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "x=3 y=hello z=3.14\nthe: 5\nok=true\ng=world 5\n", repr(r.stdout)
 
 
 def test_zenc_run_fmt_numeric_write_uses_explicit_allocator():
