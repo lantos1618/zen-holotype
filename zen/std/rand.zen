@@ -1,0 +1,46 @@
+// std.rand — a tiny deterministic PRNG (xorshift). Pure: no allocator, no hidden heap.
+//
+// The backend has no u64 (primitives are i32/i64/u8/f64/bool), so the generator runs in i64 with
+// every step masked to 32 bits. Keeping the state in [0, 2^32) means it is always non-negative, so
+// the right-shift in the xorshift step behaves as a logical shift (no sign extension) — the
+// sequence is portable and reproducible for a given seed, independent of platform.
+//
+// NAMING / FLAT-NAMESPACE NOTE: `seed`, `next`, and `range` are common identifiers. This module is
+// only flattened into a program that imports it, but a program that also defines its own `next` (or
+// imports another module that exports one) would collide at flatten time. Import the names you use
+// (`{ seed, next } = std.rand`) and rename on your side if needed.
+
+RNG_MASK := 4294967295            // 2^32 - 1
+RNG_DEFAULT := 2463534242         // non-zero fallback seed (xorshift must never sit at 0)
+
+// 32-bit state container. Construct with `seed`, advance with `next`.
+Rng*: { state: i64 }
+
+// build an Rng from a seed. Any seed works; 0 maps to a fixed non-zero default (xorshift fixed point).
+seed* = (s: i64) Rng {
+    masked := s & RNG_MASK
+    Rng( state: (masked == 0).match ({ true => RNG_DEFAULT, false => masked }) )
+}
+
+// advance the generator and return the next value in [0, 2^32). Mutates the Rng in place.
+next* = (r: MutPtr<Rng>) i64 {
+    x := r.state
+    x = (x ^ (x << 13)) & RNG_MASK
+    x = x ^ (x >> 17)
+    x = (x ^ (x << 5)) & RNG_MASK
+    r.state = x
+    x
+}
+
+// uniform-ish integer in [lo, hi) (hi exclusive). Returns lo when hi <= lo.
+range* = (r: MutPtr<Rng>, lo: i64, hi: i64) i64 {
+    (hi <= lo).match ({
+        true  => lo,
+        false => lo + (r.next() % (hi - lo)),
+    })
+}
+
+// a float in [0.0, 1.0).
+next_f64* = (r: MutPtr<Rng>) f64 {
+    to_f64(r.next()) / 4294967296.0
+}
