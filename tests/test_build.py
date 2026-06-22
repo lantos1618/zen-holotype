@@ -140,6 +140,67 @@ def test_zenc_check_diagnostics_have_kind_span_message_and_hint():
             19,
             1,
         ),
+        # Stage-2 B.8: error kinds that used to be FILE-ONLY now carry file:line:col + a caret.
+        # assign-fit on a STRING LITERAL value (literal nodes had no position before).
+        (
+            "assign_lit.zen",
+            'main = () i32 {\n    x: i32 := "hi"\n    0\n}\n',
+            ":2:15: error[assign-fit]: assigned value does not fit the variable's type\n",
+            "hint: make the assigned value fit the target's type\n",
+            '    x: i32 := "hi"',
+            15,
+            4,
+        ),
+        # return-fit on a string-literal trailing value; the caret spans the quotes.
+        (
+            "return_lit.zen",
+            'f = () i32 { "hi" }\nmain = () i32 { 0 }\n',
+            ":1:14: error[return-fit]: returned value does not fit the declared return type\n",
+            "hint: make the returned value fit the function's declared return type\n",
+            'f = () i32 { "hi" }',
+            14,
+            4,
+        ),
+        # struct-field: an unknown member access carets the receiver object.
+        (
+            "member.zen",
+            "P: { x: i32, y: i32 }\nf = (p: P) i32 {\n    p.nofield\n}\nmain = () i32 { 0 }\n",
+            ":3:5: error[struct-field]: unknown struct field or invalid field access\n",
+            "hint: check the struct literal or field access against the declared fields\n",
+            "    p.nofield",
+            5,
+            1,
+        ),
+        # exhaustiveness: the caret lands on the matched subject.
+        (
+            "exhaust.zen",
+            "C: Red | Green | Blue\nf = (c: C) i32 {\n    c.match ({ .Red => 1, .Green => 2 })\n}\nmain = () i32 { 0 }\n",
+            ":3:5: error[exhaustiveness]: match does not cover every variant\n",
+            "hint: add arms for every variant, or add an explicit `_` arm\n",
+            "    c.match ({ .Red => 1, .Green => 2 })",
+            5,
+            1,
+        ),
+        # dup-variant: the caret lands on the matched subject.
+        (
+            "dupvariant.zen",
+            "C: Red | Green | Blue\nf = (c: C) i32 {\n    c.match ({ .Red => 1, .Red => 2, _ => 3 })\n}\nmain = () i32 { 0 }\n",
+            ":3:5: error[dup-variant]: duplicate match arm variant\n",
+            "hint: remove the repeated match arm for this variant\n",
+            "    c.match ({ .Red => 1, .Red => 2, _ => 3 })",
+            5,
+            1,
+        ),
+        # parse: the syntax-error sentinel now carets the failing token (the unexpected `=`).
+        (
+            "parse.zen",
+            "main = () i32 {\n    x := = 5\n    0\n}\n",
+            ":2:10: error[parse]: syntax error: unparseable top-level input\n",
+            "hint: check the syntax around this top-level declaration\n",
+            "    x := = 5",
+            10,
+            1,
+        ),
     ]
     for case in cases:
         name, text, diagnostic, hint, source_line, col = case[:6]
