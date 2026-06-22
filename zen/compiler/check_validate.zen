@@ -48,11 +48,16 @@ named_declared = (decls: [Decl], n: str) bool {
 // uninferable residue, an UNDECLARED Named (a generic type param like `T`), a Ptr/Slice WHOSE element
 // is itself unknown (`Ptr<T>`, `[T]`), or a generic INSTANCE (`Result<Mailbox, IoError>`) whose
 // concrete decl only exists after monomorphization.
+// the narrow int/float widths arrive as Named("u32") etc. (no Ty variant), but they ARE valid
+// primitives that genc lowers to C types — so the unknown-type pass must treat them as KNOWN.
+is_prim_width = (n: str) bool {
+    eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32")
+}
 unknown_ty = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
         false => t.match ({
-            .Named(n)   => env.env_named_declared(n).match ({ true => false, false => true }),
+            .Named(n)   => is_prim_width(n).match ({ true => false, false => env.env_named_declared(n).match ({ true => false, false => true }) }),
             .Ptr(p)     => env.unknown_ty(load(p)),
             .Slice(e)   => env.unknown_ty(load(e)),
             .Generic(g) => true,
