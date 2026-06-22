@@ -193,6 +193,30 @@ call_kind = (name: str) EmitCallKind {
     eq(name, "sizeof").match ({ true => { kind = EmitCallKind.Sizeof() }, _ })
     kind
 }
+// is this expression a C lvalue (so `&expr` is legal as-is)? Var/field/arrow/index and a `load`
+// deref always are; everything else (a call result, literal, struct/enum value, …) is a temporary.
+is_lvalue = (e: Ptr<Expr>) bool {
+    e.match ({
+        .Var(v)    => true,
+        .Member(m) => is_lvalue(m.obj),
+        .Arrow(a)  => true,
+        .Index(ix) => true,
+        .Call(c)   => eq(c.fn, "load"),
+        _          => false
+    })
+}
+// `expr.addr()` → `&expr`. Taking the address of a TEMPORARY (e.g. `default().addr()`) is a cc
+// "lvalue required" error, so for non-lvalues spill into a 1-element-array compound literal:
+// `(__typeof__(e)[1]){ e }` copy-inits the whole value (works for scalars AND structs — a plain
+// `(T){e}` would mis-init T's first FIELD with e), has the enclosing block's lifetime, and decays
+// to a `T*` pointing at element 0 — exactly the wanted address. typeof's operand is unevaluated,
+// so the inner expression runs exactly once (in the initializer).
+gen_addr = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
+    ((c.args.len > 0) && is_lvalue(c.args[0].addr())).match ({
+        true  => s.gstr_append(alloc, "(&(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
+        false => s.gstr_append(alloc, "((__typeof__(").gen_arg_at(alloc, c, 0).gstr_append(alloc, ")[1]){ ").gen_arg_at(alloc, c, 0).gstr_append(alloc, " })")
+    })
+}
 gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     s.gstr_append(alloc, c.fn).gstr_append(alloc, "(").gen_args(alloc, c.args).gstr_append(alloc, ")")
 }
@@ -206,7 +230,7 @@ gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
         .LoadI64 => s.gstr_append(alloc, "(*(int64_t*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
         .StoreI64 => s.gstr_append(alloc, "(*(int64_t*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, ") = ").gen_arg_at(alloc, c, 1).gstr_append(alloc, ")"),
         .AtomicAddI64 => s.gstr_append(alloc, "__atomic_add_fetch((int64_t*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "), (").gen_arg_at(alloc, c, 1).gstr_append(alloc, "), 5)"),
-        .Addr => s.gstr_append(alloc, "(&(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
+        .Addr => s.gen_addr(alloc, c),
         .CStr => s.gstr_append(alloc, "((const char*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
         .Slice => s.gstr_append(alloc, "(zslice){ .ptr = (void*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "), .len = (").gen_arg_at(alloc, c, 1).gstr_append(alloc, ") }"),
         .NullPtr => s.gstr_append(alloc, "0"),
