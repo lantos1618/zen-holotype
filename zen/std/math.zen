@@ -1,0 +1,143 @@
+// std.math — integer and float math. Pure: no allocator, no libm, no hidden heap.
+//
+// NAMING / FLAT-NAMESPACE NOTE: this module is only flattened into a program that imports it,
+// so its names never reach the compiler or an unrelated std module. Even so, several exports use
+// conventional math names that a user program might also define — importing both halves would
+// collide at flatten time. The ones to watch: `abs`, `min`, `max`, `clamp`, `sign`, `pow_i`,
+// `gcd`, `sqrt`, `floor`, `ceil`, `round`. The float helpers (`fabs`/`fmin`/`fmax`/`fpow`) are
+// deliberately f-prefixed to stay clear of common identifiers.
+//
+// No u64 in the backend (primitives are i32/i64/u8/f64/bool), so integer math is i64-based.
+
+// ── integer math ──────────────────────────────────────────────────────────────────────────
+
+// |x|. NOTE: abs(min-i64) overflows (two's-complement has no positive counterpart); caller's domain.
+abs* = (x: i64) i64 {
+    (x < 0).match ({
+        true  => 0 - x,
+        false => x,
+    })
+}
+
+// sign of x: -1, 0, or 1.
+sign* = (x: i64) i64 {
+    (x > 0).match ({
+        true  => 1,
+        false => (x < 0).match ({
+            true  => 0 - 1,
+            false => 0,
+        }),
+    })
+}
+
+// generic min/max/clamp — monomorphized per use; work for any type whose values support `<`
+// (verified for i64 and f64). `clamp` assumes lo <= hi.
+min*<T> = (a: T, b: T) T { (a < b).match ({ true => a, false => b }) }
+max*<T> = (a: T, b: T) T { (a > b).match ({ true => a, false => b }) }
+clamp*<T> = (x: T, lo: T, hi: T) T {
+    (x < lo).match ({
+        true  => lo,
+        false => (x > hi).match ({
+            true  => hi,
+            false => x,
+        }),
+    })
+}
+
+// greatest common divisor (Euclid), always >= 0. gcd(0,0) = 0.
+gcd* = (a: i64, b: i64) i64 {
+    (b == 0).match ({
+        true  => a.abs(),
+        false => gcd(b, a % b),
+    })
+}
+
+// least common multiple, always >= 0. lcm(0, n) = 0.
+lcm* = (a: i64, b: i64) i64 {
+    (a == 0 || b == 0).match ({
+        true  => 0,
+        false => (a / gcd(a, b) * b).abs(),
+    })
+}
+
+// integer power: base ** exp for exp >= 0. exp < 0 returns 0 (no integer result). pow_i(_, 0) = 1.
+pow_i* = (base: i64, exp: i64) i64 {
+    (exp < 0).match ({
+        true  => 0,
+        false => (exp == 0).match ({
+            true  => 1,
+            false => base * pow_i(base, exp - 1),
+        }),
+    })
+}
+
+// ── float math ────────────────────────────────────────────────────────────────────────────
+
+// |x| for f64.
+fabs* = (x: f64) f64 {
+    (x < 0.0).match ({
+        true  => 0.0 - x,
+        false => x,
+    })
+}
+
+// float min/max. (the generic min/max above also work on f64; these are explicit f64 aliases.)
+fmin* = (a: f64, b: f64) f64 { (a < b).match ({ true => a, false => b }) }
+fmax* = (a: f64, b: f64) f64 { (a > b).match ({ true => a, false => b }) }
+
+// floor/ceil/round return f64. to_i64 truncates toward zero, so we correct for sign.
+// DOMAIN: |x| must fit in i64 (~9.2e18); beyond that to_i64 overflows.
+floor* = (x: f64) f64 {
+    t := to_f64(to_i64(x))
+    (t > x).match ({
+        true  => t - 1.0,
+        false => t,
+    })
+}
+ceil* = (x: f64) f64 {
+    t := to_f64(to_i64(x))
+    (t < x).match ({
+        true  => t + 1.0,
+        false => t,
+    })
+}
+// round half up toward +inf: round(2.5)=3, round(-2.5)=-2.
+round* = (x: f64) f64 { floor(x + 0.5) }
+
+// trunc toward zero, as f64.
+trunc* = (x: f64) f64 { to_f64(to_i64(x)) }
+
+// sqrt via Newton's method (no libm). x < 0 returns 0.0 (no real root); sqrt(0)=0.
+// Iterates until the estimate stops changing (quadratic convergence), capped at 100 steps.
+sqrt_iter = (x: f64, g: f64, n: i64) f64 {
+    (n == 0).match ({
+        true  => g,
+        false => {
+            ng := (g + x / g) / 2.0
+            (ng == g).match ({
+                true  => g,
+                false => sqrt_iter(x, ng, n - 1),
+            })
+        },
+    })
+}
+sqrt* = (x: f64) f64 {
+    (x <= 0.0).match ({
+        true  => 0.0,
+        false => sqrt_iter(x, (x < 1.0).match ({ true => 1.0, false => x }), 100),
+    })
+}
+
+// float raised to an integer power. fpow(b, 0) = 1.0; negative exp via reciprocal.
+fpow_pos = (base: f64, exp: i64) f64 {
+    (exp == 0).match ({
+        true  => 1.0,
+        false => base * fpow_pos(base, exp - 1),
+    })
+}
+fpow* = (base: f64, exp: i64) f64 {
+    (exp < 0).match ({
+        true  => 1.0 / fpow_pos(base, 0 - exp),
+        false => fpow_pos(base, exp),
+    })
+}
