@@ -80,6 +80,19 @@ def test_header_is_load_bearing():
     assert _oracle.check_linked_count_src(bad, _LIB) > 0
 
 
+def test_slice_len_does_not_misdispatch_to_imported_str_len():
+    # B.7 regression: `ws.len()` on a `[str]` must NOT resolve to an imported `len(str)` (whose
+    # receiver is `str`, not `[str]`) — that mis-dispatch produced a misleading arg-type error
+    # pointing at `len`. A slice's `.len()` is its length field, resolved receiver-type-aware. With
+    # the str `len` header IN scope (load-bearing) it must still type-check cleanly (0 errors).
+    lib = "len* = (s: str) i64 { 0 }\n"
+    src = '{ len } = std.x\ntest* = () i32 {\n  ws: [str] := ["a", "b"]\n  ws.len().to_i32()\n}\n'
+    assert _oracle.check_linked_count_src(src, lib) == 0
+    # control: the str `len` is still a real, callable import on a str receiver (no over-broad rewrite)
+    ok = '{ len } = std.x\ntest* = () i64 {\n  s := "hi"\n  s.len()\n}\n'
+    assert _oracle.check_linked_count_src(ok, lib) == 0
+
+
 def _emit_project(main_src, helper_src):
     # Drive the committed EMIT binary's `emit <file>` subcommand (full import resolution) on a 2-file
     # project; return the emitted C. NO Python compiler in the loop.

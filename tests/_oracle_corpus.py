@@ -44,6 +44,10 @@ VALUE_CASES = [
     ('Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 {\n  o := .Some(7)\n  unwrap(o, 0)\n}', 7),
     ('first<T> = (xs: [T]) T { xs[0] }\ntest* = () i32 { first([7, 8]) }', 7),
     ('pick2<T> = (xs: [T], a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }', 9),
+    # SLICE-LEN (B.7): `xs.len()` (method-call form) on a slice is its length field, resolved
+    # receiver-type-aware — and agrees with `xs.len` (field form). Newcomers reach for `.len()`.
+    ('test* = () i64 {\n  xs := [10, 20, 30]\n  xs.len()\n}', 3),
+    ('test* = () i64 {\n  xs := [10, 20, 30]\n  xs.len() + xs.len\n}', 6),
     # --- VARIADIC PARAMS: a trailing `...T` collects the surplus call args into a `[T]` slice ---
     ('sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { sum(1, 2, 3, 4) }', 10),
     ('sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { sum() }', 0),
