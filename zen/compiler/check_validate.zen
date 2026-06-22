@@ -1675,7 +1675,7 @@ ut_has_tparam = (tparams: [Param], n: str) bool {
 }
 ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
-        .Named(n)   => (eq(n, "Self") || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => 0, false => 1 }),
+        .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => 0, false => 1 }),
         .Generic(g) => env.env_named_declared(g.name).match ({ true => env.ut_unknown_tys(tparams, g.args), false => 1 }),
         .Ptr(p)     => env.ut_unknown_ty(tparams, load(p)),
         .Slice(e)   => env.ut_unknown_ty(tparams, load(e)),
@@ -1840,10 +1840,15 @@ mu_build_index = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
 // In the normal parse, UFCS `recv.m(args)` lowers to a flat `Call(fn: m, args: [recv] ++ args)` whose
 // `fn` is the SIMPLE method name — exactly the index key. (The faithful MethodCall form is fmt-only, but
 // match it too for safety.) Flag a discarded call whose callee is a safe-to-flag value-mold method.
+// the value-mold DANGER is reusing a STALE NAMED LOCAL after a discarded self-mutation (`m.put(...)`
+// then `m.get(...)`). A fresh FLUENT CHAIN (`put("x=").i(3).nl()` — receiver is itself a call, not a
+// reused binding) carries no stale-local risk, so it must NOT be flagged (else builder APIs break).
+// Gate: only flag when the receiver (first arg / recv) is a bare Var.
+mu_is_var = (e: Expr) bool { e.match ({ .Var(v) => true, _ => false }) }
 mu_call_kind = (mvm: Map<i64>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => (mvm.get(c.fn, 0) == 1).match ({ true => KMUSTUSE().kv_at(c.pos), false => 0 }),
-        .MethodCall(mc) => (mvm.get(mc.method, 0) == 1).match ({ true => KMUSTUSE().kv_at(mc.pos), false => 0 }),
+        .Call(c)        => ((mvm.get(c.fn, 0) == 1) && (c.args.len > 0) && mu_is_var(c.args[0])).match ({ true => KMUSTUSE().kv_at(c.pos), false => 0 }),
+        .MethodCall(mc) => ((mvm.get(mc.method, 0) == 1) && mu_is_var(load(mc.recv))).match ({ true => KMUSTUSE().kv_at(mc.pos), false => 0 }),
         _               => 0
     })
 }
