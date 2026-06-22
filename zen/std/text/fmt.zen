@@ -82,16 +82,64 @@ write_frac_digits = (n: i64, w: i64) i64 {
 write_fparts = (ip: i64, scaled: i64) i64 {
     whole := write_uint(ip)
     scaled.match ({
-        0 => whole,
+        // Always emit at least one fractional digit so a float is visibly a
+        // float (e.g. 2.0 prints "2.0", never "2").
+        0 => whole + ".0".write_text(),
         _ => whole + ".".write_text() + write_frac_digits(scaled, 6)
     })
 }
-write_fabs_digits = (x: f64) i64 {
+// Fixed 6-decimal path for "normal" magnitudes (~1e-4 .. 1e15).
+write_fnorm = (x: f64) i64 {
     ip     := to_i64(x)
     scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
     (scaled >= 1000000).match ({
         true  => write_fparts(ip + 1, 0),
         false => write_fparts(ip, scaled)
+    })
+}
+// Scientific notation for magnitudes outside the fixed-decimal range, so tiny
+// nonzero values (e.g. 1e-7) and very large ones keep their significant digits
+// instead of underflowing to "0" or overflowing the i64 whole part.
+sci_exp_small = (x: f64, e: i64) i64 {
+    (x >= 1.0).match ({
+        true  => e,
+        false => sci_exp_small(x * 10.0, e + 1)
+    })
+}
+sci_exp_large = (x: f64, e: i64) i64 {
+    (x < 10.0).match ({
+        true  => e,
+        false => sci_exp_large(x / 10.0, e + 1)
+    })
+}
+scale_up = (x: f64, n: i64) f64 {
+    (n == 0).match ({ true => x, false => scale_up(x * 10.0, n - 1) })
+}
+scale_down = (x: f64, n: i64) f64 {
+    (n == 0).match ({ true => x, false => scale_down(x / 10.0, n - 1) })
+}
+write_sci_small = (x: f64) i64 {
+    e    := sci_exp_small(x, 0)
+    mant := scale_up(x, e)
+    write_fnorm(mant) + "e-".write_text() + write_uint(e)
+}
+write_sci_large = (x: f64) i64 {
+    e    := sci_exp_large(x, 0)
+    mant := scale_down(x, e)
+    write_fnorm(mant) + "e+".write_text() + write_uint(e)
+}
+// x is the non-negative magnitude. Choose scientific notation only outside the
+// range where the fixed 6-decimal representation keeps full significant digits.
+write_fabs_digits = (x: f64) i64 {
+    (x == 0.0).match ({
+        true  => write_fnorm(x),
+        false => (x < 0.0001).match ({
+            true  => write_sci_small(x),
+            false => (x >= 1000000000000000.0).match ({
+                true  => write_sci_large(x),
+                false => write_fnorm(x)
+            })
+        })
     })
 }
 write_float = (x: f64) i64 {
