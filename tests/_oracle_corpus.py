@@ -336,6 +336,24 @@ VALUE_CASES = [
     ('mk = () {x: i32, y: i32} { {x: 10, y: 7} }\ntest* = () i32 { p := mk()  p.x + p.y }', 17),
     # an anon literal passed as an argument
     ('sum = (p: {x: i32, y: i32}) i32 { p.x + p.y }\ntest* = () i32 { sum({x: 4, y: 5}) }', 9),
+    # --- std.math: the integer/float algorithms compiled standalone (the oracle compiles each snippet
+    #     in isolation, so these inline the same logic std.math exports — pinning that the COMPILER
+    #     computes them, the silent-miscompile guard for recursion + `%` + bitwise + Newton float). ---
+    # gcd(12,18)=6 via recursive Euclid (%): the headline regression.
+    ('gcd = (a: i64, b: i64) i64 { (b == 0).match ({ true => a, false => gcd(b, a % b) }) }\ntest* = () i64 { gcd(12, 18) }', 6),
+    # pow_i(2,10)=1024 via recursion.
+    ('pow_i = (base: i64, exp: i64) i64 { (exp == 0).match ({ true => 1, false => base * pow_i(base, exp - 1) }) }\ntest* = () i64 { pow_i(2, 10) }', 1024),
+    # abs(-7)=7 ; clamp(15,0,10)=10.
+    ('abs = (x: i64) i64 { (x < 0).match ({ true => 0 - x, false => x }) }\ntest* = () i64 { abs(0 - 7) }', 7),
+    ('clamp = (x: i64, lo: i64, hi: i64) i64 { (x < lo).match ({ true => lo, false => (x > hi).match ({ true => hi, false => x }) }) }\ntest* = () i64 { clamp(15, 0, 10) }', 10),
+    # sqrt(16.0)=4.0 via Newton's method (no libm), truncated to i64.
+    ('sqrt_iter = (x: f64, g: f64, n: i64) f64 { (n == 0).match ({ true => g, false => { ng := (g + x / g) / 2.0  (ng == g).match ({ true => g, false => sqrt_iter(x, ng, n - 1) }) } }) }\ntest* = () i64 { to_i64(sqrt_iter(16.0, 16.0, 100)) }', 4),
+    # sqrt(2.0) ~ 1.414213 (Newton), scaled by 1e6 to assert as an int.
+    ('sqrt_iter = (x: f64, g: f64, n: i64) f64 { (n == 0).match ({ true => g, false => { ng := (g + x / g) / 2.0  (ng == g).match ({ true => g, false => sqrt_iter(x, ng, n - 1) }) } }) }\ntest* = () i64 { to_i64(sqrt_iter(2.0, 2.0, 100) * 1000000.0) }', 1414213),
+
+    # --- std.rand: the xorshift step, masked to 32 bits, is deterministic for a given seed. seed
+    #     12345 -> first value 3336926330 (matches std.rand.next on a fresh seed(12345)). ---
+    ('test* = () i64 { x: i64 := 12345  x = (x ^ (x << 13)) & 4294967295  x = x ^ (x >> 17)  x = (x ^ (x << 5)) & 4294967295  x }', 3336926330),
 ]
 
 # (src, verdict) the check binary must produce.
