@@ -144,7 +144,33 @@ gen_arg_at = (s: String, alloc: MutPtr<Malloc>, c: CallData, i: i32) String {
     (i < c.args.len).match ({ true => s.gen_expr(alloc, c.args[i].addr()), false => s.gstr_append(alloc, "0") })
 }
 
-EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | Addr | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64
+EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | Addr | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64 | Sizeof
+
+// map a sizeof type-arg name to its C type name. Primitives (i64→int64_t, bool→…) must NOT leak the
+// Zen keyword into C; struct names and already-substituted tparams (sizeof(T)→sizeof(Expr)) pass through.
+sizeof_cname = (n: str) str {
+    eq(n, "i32").match ({ true => "int32_t", false =>
+    eq(n, "i64").match ({ true => "int64_t", false =>
+    eq(n, "u8").match ({ true => "uint8_t", false =>
+    eq(n, "f64").match ({ true => "double", false =>
+    eq(n, "bool").match ({ true => "bool", false =>
+    eq(n, "str").match ({ true => "const char*", false =>
+    eq(n, "Cstr").match ({ true => "const char*", false =>
+    eq(n, "text").match ({ true => "const char*", false =>
+    eq(n, "void").match ({ true => "void", false => n }) }) }) }) }) }) }) }) })
+}
+// `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
+gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
+    out := s.gstr_append(alloc, "sizeof(")
+    body := (c.args.len > 0).match ({
+        true  => c.args[0].addr().match ({
+            .Var(v) => out.gstr_append(alloc, sizeof_cname(v.name)),
+            _       => out.gen_arg_at(alloc, c, 0)
+        }),
+        false => out.gstr_append(alloc, "0")
+    })
+    body.gstr_append(alloc, ")")
+}
 
 call_kind = (name: str) EmitCallKind {
     kind := EmitCallKind.Normal()
@@ -164,6 +190,7 @@ call_kind = (name: str) EmitCallKind {
     eq(name, "to_i64").match ({ true => { kind = EmitCallKind.ToI64() }, _ })
     eq(name, "to_u8").match ({ true => { kind = EmitCallKind.ToU8() }, _ })
     eq(name, "to_f64").match ({ true => { kind = EmitCallKind.ToF64() }, _ })
+    eq(name, "sizeof").match ({ true => { kind = EmitCallKind.Sizeof() }, _ })
     kind
 }
 gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
@@ -187,6 +214,7 @@ gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
         .ToI64 => s.gstr_append(alloc, "((int64_t)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
         .ToU8 => s.gstr_append(alloc, "((uint8_t)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
         .ToF64 => s.gstr_append(alloc, "((double)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
+        .Sizeof => s.gen_sizeof(alloc, c),
         .Normal => s.gen_call_default(alloc, c)
     })
 }

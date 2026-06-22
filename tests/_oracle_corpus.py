@@ -14,6 +14,16 @@ zen/*.py. These golden expectations are what keeps coverage.
 VALUE_CASES = [
 
 # --- test_self_hosted_computes_value ---
+    # sizeof(<primitive>) must lower to the C type, not leak the Zen keyword (SIZEOF-1)
+    ('test* = () i64 { sizeof(i64) }', 8),
+    ('test* = () i64 { sizeof(i32) }', 4),
+    ('test* = () i64 { sizeof(u8) }', 1),
+    ('test* = () i64 { sizeof(bool) }', 1),
+    ('test* = () i64 { sizeof(f64) }', 8),
+    # the idiomatic `n * sizeof(T)` allocation size
+    ('test* = () i64 {\n  n: i64 := 4\n  n * sizeof(i64)\n}', 32),
+    # sizeof's result type must resolve generic dispatch (SIZEOF-2): id<T> picks T = i64
+    ('id<T> = (x: T) T { x }\ntest* = () i64 { id(sizeof(i64)) }', 8),
     ('test* = () i64 { 10000000000 / 10 }', 1000000000),
     ('test* = () i64 { 9999999999 - 9999999990 }', 9),
     ('test* = () i64 { 5000000000 + 5000000000 }', 10000000000),
