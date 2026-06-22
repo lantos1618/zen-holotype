@@ -865,6 +865,17 @@ rewrite_fn_field_call = (a: MutPtr<Malloc>, env: Env, field: str, buf: [Expr]) P
     sbuf2[1] = sexpr(callx)
     a.cenode(block(sbuf2))
 }
+// `recv.len()` on a slice `[T]` is the slice's length FIELD (the element count). Resolving it
+// receiver-type-aware here means it NEVER mis-dispatches to a same-named free fn (e.g. str.len, whose
+// receiver is `str`, not `[T]`) — which otherwise yields a misleading arg-type error. Rewriting to the
+// `.len` Member reuses the fully-supported field path (infer/validate/genc) and stays idempotent: a
+// later resolve pass sees a Member, not a Call.
+is_slice_len_call = (env: Env, fn: str, buf: [Expr]) bool {
+    (eq(fn, "len") && (buf.len == 1)).match ({
+        true  => env.infer_expr(buf[0].addr()).match ({ .Slice(e) => true, _ => false }),
+        false => false
+    })
+}
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     dn    := env.dispatch_name(c)
     fn    := env.env_func(dn)
@@ -876,9 +887,12 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex     := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    env.is_fn_field_call(dn, buf).match ({
-        true  => a.rewrite_fn_field_call(env, c.fn, buf),
-        false => a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf))
+    env.is_slice_len_call(c.fn, buf).match ({
+        true  => a.cenode(member(buf[0].addr(), "len")),
+        false => env.is_fn_field_call(dn, buf).match ({
+            true  => a.rewrite_fn_field_call(env, c.fn, buf),
+            false => a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf))
+        })
     })
 }
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
