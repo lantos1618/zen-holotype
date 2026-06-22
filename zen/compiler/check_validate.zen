@@ -1943,9 +1943,12 @@ kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := decls.dup_name_errs().kv_one(KDUPFN())
     idx := a.build_decl_index(decls)
-    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, idx, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE(), false => 0 }), _ => 0 })) })
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.kv_check_func_kind(decls, idx, f), .DImpl(im) => a.kv_impl_kind(decls, im), .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => KPARSE().kv_at(g.init.kparse_off()), false => 0 }), _ => 0 })) })
     acc
 }
+// the __syntax_error sentinel carries the failing token's byte offset in its Int init value (0 = none);
+// the Int passes through resolve unchanged (`_ => e`), so the offset survives to this post-resolve pass.
+kparse_off = (init: Ptr<Expr>) i32 { load(init).match ({ .Int(n) => n.to_i32(), _ => 0 }) }
 check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({

@@ -191,6 +191,16 @@ def test_zenc_check_diagnostics_have_kind_span_message_and_hint():
             5,
             1,
         ),
+        # parse: the syntax-error sentinel now carets the failing token (the unexpected `=`).
+        (
+            "parse.zen",
+            "main = () i32 {\n    x := = 5\n    0\n}\n",
+            ":2:10: error[parse]: syntax error: unparseable top-level input\n",
+            "hint: check the syntax around this top-level declaration\n",
+            "    x := = 5",
+            10,
+            1,
+        ),
     ]
     for case in cases:
         name, text, diagnostic, hint, source_line, col = case[:6]

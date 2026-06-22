@@ -3,7 +3,7 @@
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, register_anon } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, register_anon } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
@@ -96,7 +96,7 @@ parse_base = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
             false => PExpr( expr: a.enode(strlit_at(a.str_val(src, sc.tok), sc.tok.start)), next: sc.next )
         }),
         .Ident => a.parse_ident(src, sc),
-        .Eof   => { perr_set()  PExpr( expr: a.enode(lit(0)), next: sc.next ) },
+        .Eof   => { perr_set_at(sc.tok.start)  PExpr( expr: a.enode(lit(0)), next: sc.next ) },
         _      => src.is_raw_at(sc.tok).match ({
             true  => a.parse_raw_call(src, sc),
             false => a.parse_other(src, sc)
@@ -105,9 +105,9 @@ parse_base = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
 }
 // Unterminated string tokens run to end-of-file.
 str_open = (src: str, t: Token) bool { (t.len < 2) || (src.at(t.start + t.len - 1) != '"') }
-// Bad atom: flag, consume one token for progress, and produce a placeholder.
+// Bad atom: flag (with the offending token's offset), consume one token for progress, placeholder.
 parse_garbage = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
-    perr_set()
+    perr_set_at(sc.tok.start)
     PExpr( expr: a.enode(lit(0)), next: sc.next )
 }
 // Non-literal atoms: ctor, prefix op, slice literal, lambda, parenthesized expr.
