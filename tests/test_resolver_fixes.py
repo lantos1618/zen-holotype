@@ -190,6 +190,27 @@ def test_undefined_return_type_rejected():
     assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
 
 
+def test_undefined_type_in_local_let_rejected():
+    # a LOCAL `let` annotation (`x: Foo := e`) names a type too; an undefined one used to type-check
+    # "ok" then leak `unknown type name 'Foo'` to cc. The unknown-type pass now walks func bodies.
+    r = _check("main = () i32 { x: Foo := 5  0 }\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_undefined_type_in_nested_let_rejected():
+    # nested inside a match arm body — the body walk recurses through Block/Loop/Match/Cond.
+    r = _check("main = () i32 {\n  x := 1\n  x.match ({ _ => { y: Nope := 2  y } })\n}\n")
+    assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
+
+
+def test_defined_type_in_local_let_ok():
+    # a declared/primitive/generic local-let annotation must still pass (no false positive)
+    src = ("Box*: { v: i32 }\n"
+           "main = () i32 {\n  b: Box := Box( v: 3 )\n  p: MutPtr<Box> := b.addr()\n  n: i32 := b.v\n  n\n}\n")
+    r = _check(src)
+    assert r.returncode == 0, r.stderr
+
+
 def test_defined_and_imported_types_not_flagged():
     # a user type, a tparam, and an imported std type must all pass (no false positive)
     src = ("{ println } = std.text.fmt\n"
