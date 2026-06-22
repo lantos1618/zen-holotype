@@ -1133,13 +1133,24 @@ diagnostic_width_from = (src: str, pos: i32, n: i32) i32 {
         false => n
     })
 }
+// a string literal carets across its quotes (`"hi"` -> `^~~~`), not just the opening `"`.
+diagnostic_strlit_width = (src: str, pos: i32, n: i32) i32 {
+    b := src.at(pos + n)
+    ((b == 0) || (b == '\n')).match ({
+        true  => n,
+        false => (b == '"').match ({ true => n + 1, false => src.diagnostic_strlit_width(pos, n + 1) })
+    })
+}
 diagnostic_span_width = (src: str, pos: i32) i32 {
     (pos <= 0).match ({
         true  => 1,
-        false => {
-            n := src.diagnostic_width_from(pos, 0)
-            (n < 1).match ({ true => 1, false => n })
-        }
+        false => (src.at(pos) == '"').match ({
+            true  => src.diagnostic_strlit_width(pos, 1),
+            false => {
+                n := src.diagnostic_width_from(pos, 0)
+                (n < 1).match ({ true => 1, false => n })
+            }
+        })
     })
 }
 diagnostic_kind_name = (code: i32) str {
@@ -1297,6 +1308,7 @@ expr_pos = (e: Expr) i32 {
         .Cond(d)      => load(d.c).expr_pos(),
         .Match(m)     => load(m.subj).expr_pos(),
         .MakeEnum(mk) => load(mk.payload).expr_pos(),
+        .StrLit(s)    => s.pos,
         .MakeStruct(sd) => sd.inits.len.match ({ 0 => 0, _ => load(sd.inits[0].value).expr_pos() }),
         .SliceLit(sd) => sd.items.len.match ({ 0 => 0, _ => sd.items[0].expr_pos() }),
         .Block(b)     => b.stmts.len.match ({ 0 => 0, _ => b.stmts[0].stmt_pos() }),
@@ -1462,15 +1474,22 @@ kv_check_inits_kind = (env: Env, inits: [FieldInit]) i32 {
     inits.loop((h, i, fi) { acc = acc.kv_kor(env.kv_check_expr_kind(fi.value)) })
     acc
 }
-kv_makestruct_kind = (env: Env, m: MakeStructData) i32 { env.makestruct_err(m).kv_one(KSTRUCTFIELD()) }
-kv_member_kind     = (env: Env, obj: Ptr<Expr>, field: str) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()) }
-// a match: exhaustiveness vs duplicate-variant, split out from match_err.
+// struct-literal init: caret on the first init value's source position when it's positioned
+// (a Var/Call/StrLit survives resolve; bare numeric literals carry none — best-effort, else file-only).
+kv_makestruct_kind = (env: Env, m: MakeStructData) i32 {
+    env.makestruct_err(m).kv_one(KSTRUCTFIELD()).kv_at(m.inits.len.match ({ 0 => 0, _ => load(m.inits[0].value).expr_pos() }))
+}
+// member access caret on the receiver object (a Var/Call survives resolve).
+kv_member_kind     = (env: Env, obj: Ptr<Expr>, field: str) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()).kv_at(load(obj).expr_pos()) }
+// a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
+// matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
 kv_match_kind = (env: Env, m: MatchData) i32 {
+    sp := load(m.subj).expr_pos()
     base := m.arms.has_wildcard().match ({
-        true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()),
-        false => env.exhaustive_err(m).kv_one(KEXHAUST()).kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()))
+        true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp),
+        false => env.exhaustive_err(m).kv_one(KEXHAUST()).kv_at(sp).kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp))
     })
-    base.kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()))
+    base.kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
 }
 kv_index_kind   = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
 kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()) }
