@@ -155,9 +155,34 @@ compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccfl
 }
 
 // ── subcommands ───────────────────────────────────────────────────────────────────────────────────
-emit_file = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
+// `emit <file>` type-checks FIRST (like check/build) and STOPS on any error, so a type-broken program
+// never produces C that references undefined names. `emit --force <file>` (or `--no-check`) restores the
+// raw source→C path for compiler debugging. flag may sit before OR after the path.
+emit_file = (mp: MutPtr<Malloc>, root: str, a2: str, a3: str) i32 {
+    flag2 := eq(a2, "--force") || eq(a2, "--no-check")
+    path  := flag2.match ({ true => a3, false => a2 })
+    force := flag2 || eq(a3, "--force") || eq(a3, "--no-check")
+    force.match ({ true => mp.emit_raw(root, path), false => mp.emit_checked(root, path) })
+}
+// raw: resolve imports + emit, NO type-check (the --force escape hatch).
+emit_raw = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => { out_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(mp.flatten(root, path, src)))).bytes())  0 },
+        .Err(e)  => { derr("zenc: cannot read input\n")  1 }
+    })
+}
+// checked: run the full report_check pipeline; emit only when clean, else exit 1 with the diagnostic.
+emit_checked = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => {
+            rp    := mp.resolve_prog(root, path, src)
+            raw   := mp.parse_module(rp.flat)
+            decls := mp.resolve_module(raw)
+            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                true  => { out_bytes(mp.genModuleIn(decls).bytes())  0 },
+                false => 1
+            })
+        },
         .Err(e)  => { derr("zenc: cannot read input\n")  1 }
     })
 }
@@ -214,7 +239,7 @@ main = () i32 {
                 false => mp.build_self(arg(3), arg(2))
             }),
             false => eq(cmd, "emit").match ({
-                true  => mp.emit_file(root, arg(2)),
+                true  => mp.emit_file(root, arg(2), arg(3)),
                 false => eq(cmd, "check").match ({
                     true  => mp.check_spec(root, mp.resolve_spec(root, arg(2))),
                     false => eq(cmd, "run").match ({
