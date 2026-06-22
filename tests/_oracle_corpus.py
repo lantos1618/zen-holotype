@@ -470,6 +470,14 @@ VERDICT_CASES = [
     ('S*: { op: (i32) i32 }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { s := S(op: g)  s.op(41) }', 'accept'),  # exact match
     ('Store*<S>: { reducer: (S, i32) S }\nA*: { c: i32 }\nred* = (s: A, n: i32) A { A(c: s.c + n) }\ntest* = () i32 { st := Store<A>(reducer: red)  st.reducer(A(c: 0), 5).c }', 'accept'),  # generic FnT field: tparam S defers
 
+    # --- GENERIC STRUCT LITERAL FIELDS: an explicit targ (`Box<i32>`) binds the tparam, so a field
+    #     typed by that tparam (`v: T`) is fit-checked CONCRETELY. Previously the value slipped past SEMA
+    #     and the C backend choked (incompatible init). ---
+    ('Box*<T>: { v: T }\nP*: { x: i32 }\ntest* = () i32 { b := Box<i32>(v: P(x: 1))  0 }', 'reject'),     # P ⊀ i32 field
+    ('Box*<T>: { v: T }\nbig* = () i64 { 5 }\ntest* = () i32 { b := Box<i32>(v: big())  b.v }', 'reject'),  # i64 ⊀ i32 field
+    ('Box*<T>: { v: T }\ntest* = () i32 { b := Box<i32>(v: 5)  b.v }', 'accept'),                          # literal fits the bound tparam
+    ('Box*<T>: { v: T }\nP*: { x: i32 }\ntest* = () i32 { b := Box<P>(v: P(x: 7))  b.v.x }', 'accept'),    # struct fits its own tparam
+
     # --- FIELD ACCESS: obj.field must name a real field of obj's struct (value + Ptr receiver) ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 5)  p.nope }', 'reject'),
     ('P*: { x: i32 }\nget* = (p: Ptr<P>) i32 { p.bad }\ntest* = () i32 { q := P(x: 1)  get(q.addr()) }', 'reject'),

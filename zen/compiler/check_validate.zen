@@ -1,6 +1,6 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map } = std.collections.map        // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -392,21 +392,30 @@ gen_struct_tparams = (decls: [Decl], name: str) [Param] {
     decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g.tparams, false => found }), _ => found }) })
     found
 }
-gen_field_fit_err = (env: Env, tps: [Param], fields: [Field], fi: FieldInit) i32 {
-    tps.ty_mentions_tparam(fields.field_in(fi.name)).match ({
-        true  => 0,                                                  // a tparam-typed field -> lenient
-        false => env.field_fit_err(fields, fi)                       // a concrete field -> check the fit
+// A generic-struct literal `Box<i32>(v: …)` binds each tparam to its explicit targ, so a field typed
+// by a tparam (`v: T`) becomes CONCRETE (`v: i32`) and IS fit-checked — closing the hole where a wrong
+// value (`Box<i32>(v: P(…))`) slipped past SEMA and broke at cc. A field whose type stays a tparam after
+// substitution (no matching targ) remains lenient, deferred to monomorphization.
+gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: FieldInit) i32 {
+    fty := fields.field_in(fi.name)
+    cty := (targs.len == tps.len).match ({ true => env.a.subst_ty_in(tps, targs, fty), false => fty })
+    tps.ty_mentions_tparam(cty).match ({
+        true  => 0,                                                  // still a tparam -> lenient
+        false => (fi.value.is_lit_numeric() && cty.ty_rank() >= 0).match ({  // polymorphic literal -> any numeric field
+            true  => 0,
+            false => env.fit_err(env.infer_expr(fi.value), cty)      // a concrete field -> check the fit
+        })
     })
 }
-gen_struct_init_errs = (env: Env, tps: [Param], fields: [Field], inits: [FieldInit]) i32 {
+gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], inits: [FieldInit]) i32 {
     acc := 0
-    inits.loop((h, i, fi) { acc = acc + fields.has_field(fi.name).match ({ true => env.gen_field_fit_err(tps, fields, fi), false => 1 }) })
+    inits.loop((h, i, fi) { acc = acc + fields.has_field(fi.name).match ({ true => env.gen_field_fit_err(tps, targs, fields, fi), false => 1 }) })
     acc
 }
 makestruct_err = (env: Env, m: MakeStructData) i32 {
     (m.targs.len > 0).match ({
         true  => env.decls.cv_is_gen_struct(m.ty).match ({                // a generic literal: check concrete fields
-            true  => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), env.decls.gen_struct_fields(m.ty), m.inits),
+            true  => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, env.decls.gen_struct_fields(m.ty), m.inits),
             false => 0                                                 // unknown gen-struct (template residue) -> lenient
         }),
         false => env.env_is_struct(m.ty).match ({ true => env.struct_init_errs(env.env_struct_fields(m.ty), m.inits), false => 0 })
