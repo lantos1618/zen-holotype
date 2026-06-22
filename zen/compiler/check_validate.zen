@@ -421,15 +421,25 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
         false => env.env_is_struct(m.ty).match ({ true => env.struct_init_errs(env.env_struct_fields(m.ty), m.inits), false => 0 })
     })
 }
-// Field access checks only known concrete struct receivers.
+// the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
+gen_base_of = (t: Ty) str { t.match ({ .Generic(g) => g.name, .Ptr(p) => load(p).gen_base_of(), _ => "" }) }
+// Field access checks known concrete struct receivers AND generic-struct instances (field names don't
+// depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be).
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
     obj.is_lit_numeric().match ({
         true  => 1,
         false => {
-            sname := env.infer_expr(obj).enum_name()
+            rty   := env.infer_expr(obj)
+            sname := rty.enum_name()
             env.env_is_struct(sname).match ({
                 true  => env.env_struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
-                false => 0
+                false => {
+                    base := rty.gen_base_of()
+                    (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({
+                        true  => env.decls.gen_struct_fields(base).has_field(field).match ({ true => 0, false => 1 }),
+                        false => 0                                       // unknown receiver (residue) -> lenient
+                    })
+                }
             })
         }
     })
@@ -643,9 +653,29 @@ is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: str) bool {
         _ => found }) })
     found
 }
+// every element of a slice literal must fit the element type (inferred from the first item). genc
+// types the emitted C array by that first element, so a CATEGORY mismatch (a str in an int slice)
+// would be silently coerced under -w — a miscompile. Numeric elements stay lenient (C widens them),
+// and unknown/generic-residue elements defer (fit_err handles both).
+sl_elem_fit = (env: Env, ety: Ty, it: Expr) i32 {
+    ity := env.infer_expr(it.addr())
+    (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).match ({ true => 0, false => env.fit_err(ity, ety) })
+}
+slicelit_err = (env: Env, items: [Expr]) i32 {
+    (items.len == 0).match ({
+        true  => 0,
+        false => {
+            ety := env.infer_expr(items[0].addr())
+            acc := 0
+            items.loop((h, i, it) { acc = acc + env.sl_elem_fit(ety, it) })
+            acc
+        }
+    })
+}
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.check_call(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
+        .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
@@ -1409,10 +1439,23 @@ kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     stmts.loop((h, i, st) { acc = (acc.kv_kor(e.kv_check_block_stmt_kind(st)))  e = e.a.extend_env(e, st) })
     acc
 }
+// mirrors slicelit_err: a slice-literal element whose type doesn't fit the first element's → KARGTYPE.
+kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
+    (items.len == 0).match ({
+        true  => 0,
+        false => {
+            ety := env.infer_expr(items[0].addr())
+            acc := 0
+            items.loop((h, i, it) { acc = acc.kv_kor(env.sl_elem_fit(ety, it).kv_one(KARGTYPE()).kv_at(it.expr_pos())) })
+            acc
+        }
+    })
+}
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
+        .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
         .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),

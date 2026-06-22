@@ -477,6 +477,16 @@ VERDICT_CASES = [
     ('Box*<T>: { v: T }\nbig* = () i64 { 5 }\ntest* = () i32 { b := Box<i32>(v: big())  b.v }', 'reject'),  # i64 ⊀ i32 field
     ('Box*<T>: { v: T }\ntest* = () i32 { b := Box<i32>(v: 5)  b.v }', 'accept'),                          # literal fits the bound tparam
     ('Box*<T>: { v: T }\nP*: { x: i32 }\ntest* = () i32 { b := Box<P>(v: P(x: 7))  b.v.x }', 'accept'),    # struct fits its own tparam
+    ('Box*<T>: { v: T }\ntest* = () i32 { b := Box<i32>(v: 5)  b.nope }', 'reject'),                       # field access on a generic instance: no field `nope`
+    ('Box*<T>: { v: T }\ntest* = () i32 { b := Box<i32>(v: 5)  b.v }', 'accept'),                          # the real field exists
+
+    # --- SLICE-LITERAL ELEMENTS: genc types the C array by the first element, so a category mismatch
+    #     (a str in an int slice) would be silently coerced under -w. Reject it; numeric stays lenient. ---
+    ('test* = () i32 { xs := [1, "two", 3]  0 }', 'reject'),                                                # str in an int slice
+    ('P*: { x: i32 }\ntest* = () i32 { xs := [1, P(x: 2)]  0 }', 'reject'),                                 # struct in an int slice
+    ('test* = () i32 { xs := ["a", "b", "c"]  0 }', 'accept'),                                              # homogeneous str slice
+    ('test* = () i32 { xs := [1, 2, 3]  xs[0] }', 'accept'),                                                # homogeneous int slice
+    ('P*: { x: i32 }\ntest* = () i32 { xs := [P(x: 1), P(x: 2)]  0 }', 'accept'),                           # homogeneous struct slice
 
     # --- FIELD ACCESS: obj.field must name a real field of obj's struct (value + Ptr receiver) ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 5)  p.nope }', 'reject'),
