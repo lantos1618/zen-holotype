@@ -2757,6 +2757,121 @@ def test_zenc_run_map_try_result_paths():
     assert r.returncode == 0, r.stderr
 
 
+# ── std.collections.set: a generic Set<T> hash set with an EXPLICIT allocator (byte-FNV open hash) ─────
+def test_zenc_run_set_add_has_len_dedup_remove():
+    """THE std.collections.set acceptance: add/has/len with dedup (adding an element twice keeps len 1),
+    growth across the cap-1->3->7 reindexes, and remove. Exercises both an i64 set (byte/value hashing)
+    and a str set (literal interning => content dedup)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ default } = std.mem.alloc\n'
+        'sets = std.collections.set\n'
+        '{ println } = std.text.fmt\n'
+        'main = () i32 {\n'
+        '    alloc := default()\n'
+        '    a := alloc.addr()\n'
+        '    s := sets.of(a, 10)\n'
+        '    s = s.add(a, 10)\n'                       # dup of the seed -> no-op
+        '    println(s.len())\n'                       # 1
+        '    s = s.add(a, 20)\n'
+        '    s = s.add(a, 30)\n'
+        '    s = s.add(a, 40)\n'                       # forces growth past cap 1
+        '    s = s.add(a, 20)\n'                       # dup -> no-op
+        '    println(s.len())\n'                       # 4
+        '    println(s.has(30).match ({ true => 1, false => 0 }))\n'  # 1
+        '    println(s.has(99).match ({ true => 1, false => 0 }))\n'  # 0
+        '    s = s.remove(a, 30)\n'
+        '    println(s.len())\n'                       # 3
+        '    println(s.has(30).match ({ true => 1, false => 0 }))\n'  # 0
+        '    sum := 0\n'
+        '    s.each((x){ sum = sum + x })\n'
+        '    println(sum)\n'                           # 10+20+40 = 70
+        '    w: sets.Set<str> := sets.empty(a)\n'
+        '    w = w.add(a, "the")\n'
+        '    w = w.add(a, "cat")\n'
+        '    w = w.add(a, "the")\n'                    # dup literal -> no-op
+        '    println(w.len())\n'                       # 2
+        '    println(w.has("cat").match ({ true => 1, false => 0 }))\n'  # 1
+        '    println(w.has("dog").match ({ true => 1, false => 0 }))\n'  # 0
+        '    s.free(a)\n'
+        '    w.free(a)\n'
+        '    0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "1\n4\n1\n0\n3\n0\n70\n2\n1\n0\n", repr(r.stdout)
+
+
+def test_zenc_run_set_union_intersect_difference():
+    """Set algebra over two i64 sets {1,2,3} and {3,4,5}: union has 5 elements, intersection {3} has 1,
+    difference x\\y = {1,2} has 2. The inputs are untouched (each operator builds a fresh set)."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ default } = std.mem.alloc\n'
+        'sets = std.collections.set\n'
+        '{ println } = std.text.fmt\n'
+        'main = () i32 {\n'
+        '    alloc := default()\n'
+        '    a := alloc.addr()\n'
+        '    x := sets.of(a, 1)\n'
+        '    x = x.add(a, 2)\n'
+        '    x = x.add(a, 3)\n'
+        '    y := sets.of(a, 3)\n'
+        '    y = y.add(a, 4)\n'
+        '    y = y.add(a, 5)\n'
+        '    u := sets.union(a, x, y)\n'
+        '    println(u.len())\n'                       # 5
+        '    n := sets.intersect(a, x, y)\n'
+        '    println(n.len())\n'                       # 1
+        '    println(n.has(3).match ({ true => 1, false => 0 }))\n'  # 1
+        '    d2 := sets.difference(a, x, y)\n'
+        '    println(d2.len())\n'                      # 2
+        '    println(d2.has(1).match ({ true => 1, false => 0 }))\n'  # 1
+        '    println(d2.has(3).match ({ true => 1, false => 0 }))\n'  # 0
+        '    println(x.len())\n'                       # 3: input untouched
+        '    x.free(a)  y.free(a)  u.free(a)  n.free(a)  d2.free(a)\n'
+        '    0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "5\n1\n1\n2\n1\n0\n3\n", repr(r.stdout)
+
+
+def test_zenc_run_set_clone_isolation():
+    """`clone` gives a Set INDEPENDENT storage: adding to the clone (incl. a grow that reallocs its
+    buffers) is invisible through the original. The documented tool for value semantics."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ default } = std.mem.alloc\n'
+        'sets = std.collections.set\n'
+        '{ println } = std.text.fmt\n'
+        'main = () i32 {\n'
+        '    alloc := default()\n'
+        '    a := alloc.addr()\n'
+        '    x := sets.of(a, 1)\n'
+        '    x = x.add(a, 2)\n'                        # {1,2}
+        '    c := x.clone(a)\n'
+        '    c = c.add(a, 3)\n'                        # grow the clone
+        '    c = c.add(a, 4)\n'
+        '    println(c.len())\n'                       # 4
+        '    println(x.len())\n'                       # 2: original unaffected
+        '    println(x.has(3).match ({ true => 1, false => 0 }))\n'  # 0
+        '    println(c.has(1).match ({ true => 1, false => 0 }))\n'  # 1: clone kept originals
+        '    x.free(a)\n'
+        '    c.free(a)\n'
+        '    0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "4\n2\n0\n1\n", repr(r.stdout)
+
+
 def test_zenc_run_allocator_try_acquire_result_path():
     """std.mem.try_acquire lifts allocator null sentinels into Result instead of leaking raw NULL handling."""
     zenc = _zenc()
