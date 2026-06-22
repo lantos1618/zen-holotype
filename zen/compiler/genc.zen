@@ -411,6 +411,17 @@ draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an a
                                                         // pragma, intrinsic decl, anything
 
 
+// map a narrow int/float type name to its C type; any other name passes through unchanged.
+// the checker accepts i8/i16/u16/u32/u64/f32 but they reach genc as Named(name), so without
+// this they'd leak the Zen name (`u32`, `f32`, …) straight to cc as an unknown C type.
+width_cname* = (n: str) str {
+    eq(n, "i8").match ({ true => "int8_t", false =>
+    eq(n, "i16").match ({ true => "int16_t", false =>
+    eq(n, "u16").match ({ true => "uint16_t", false =>
+    eq(n, "u32").match ({ true => "uint32_t", false =>
+    eq(n, "u64").match ({ true => "uint64_t", false =>
+    eq(n, "f32").match ({ true => "float", false => n })})})})})})
+}
 // append a C type — recurses for pointers (`T*`), so it can't be a plain str-returning fn
 gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
     out := s
@@ -424,7 +435,7 @@ gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
         .Str => { out = out.gstr_append(a, "const char*") },
         .Cstr => { out = out.gstr_append(a, "const char*") },
         .Text => { out = out.gstr_append(a, "const char*") },
-        .Named(n) => { out = out.gstr_append(a, n) },
+        .Named(n) => { out = out.gstr_append(a, width_cname(n)) },
         .Ptr(p) => {
             inner := out.gen_ty(a, p)
             out = inner.gstr_append(a, "*")
@@ -440,7 +451,7 @@ gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
 cname_len = (t: Ty) i64 {
     t.match ({
         .I32 => 7, .I64 => 7, .U8 => 7, .F64 => 6, .Bool => 4, .Void => 4, .Str => 11, .Cstr => 11, .Text => 11,
-        .Named(n)   => n.view().len,
+        .Named(n)   => width_cname(n).view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(p)     => load(p).cname_len() + 1,
         .Slice(e)   => 6,
@@ -451,7 +462,7 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
         .I32 => dst.write_str(at, "int32_t"), .I64 => dst.write_str(at, "int64_t"), .U8 => dst.write_str(at, "uint8_t"), .F64 => dst.write_str(at, "double"),
         .Bool => dst.write_str(at, "bool"), .Void => dst.write_str(at, "void"), .Str => dst.write_str(at, "const char*"), .Cstr => dst.write_str(at, "const char*"), .Text => dst.write_str(at, "const char*"),
-        .Named(n)   => dst.write_str(at, n),
+        .Named(n)   => dst.write_str(at, width_cname(n)),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(p)     => dst.write_str(dst.cname_write(at, load(p)), "*"),
         .Slice(e)   => dst.write_str(at, "zslice"),
