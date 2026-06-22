@@ -1,9 +1,9 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, register_anon } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
@@ -757,16 +757,32 @@ anon_scan_open = (src: str, sc: Scan, depth: i32) i32 {
     })
 }
 afield_lit_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }
+// Syntactically infer a literal field VALUE's type, mirroring the checker's infer_expr for the forms a
+// struct-literal field can take directly (int/byte/float/string literals and nested struct literals). The
+// structural NAME is names-only, so this only feeds the synthesized StructDecl's C field types; a value the
+// parser can't read (a var/call result) falls back to i32 (the un-annotated default).
+infer_lit_ty = (value: Ptr<Expr>) Ty {
+    load(value).match ({
+        .Int(n)        => ((n > 2147483647) || (n < 0 - 2147483648)).match ({ true => ti64(), false => ti32() }),
+        .Byte(b)       => tu8(),
+        .FloatLit(ft)  => tf64(),
+        .StrLit(s)     => ttext(),
+        .MakeStruct(s) => tnamed(s.ty),
+        _              => ti32(),
+    })
+}
 inits_as_fields = (a: MutPtr<Malloc>, inits: [FieldInit]) [Field] {
     buf := a.afield_lit_buf()
-    inits.loop((h, i, fi) { buf[i] = field(fi.name, tvoid()) })   // names-only: types are unknown at the literal
+    inits.loop((h, i, fi) { buf[i] = field(fi.name, infer_lit_ty(fi.value)) })   // names-only mangle; types feed the hoisted StructDecl
     slice(buf.ptr, inits.len)
 }
 parse_anon_struct_lit = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {   // pos just past '{'
-    buf   := a.finit_buf()
-    fe    := a.fill_ainits(src, pos, buf, 0)
-    inits := buf.take_inits(fe.count)
-    name  := a.mangle_anon_in(a.inits_as_fields(inits))
+    buf    := a.finit_buf()
+    fe     := a.fill_ainits(src, pos, buf, 0)
+    inits  := buf.take_inits(fe.count)
+    fields := a.inits_as_fields(inits)
+    name   := a.mangle_anon_in(fields)
+    register_anon(name, fields)                       // hoist the synthesized struct decl (a bare literal has no type-position decl)
     PExpr( expr: a.enode(mkstruct(name, inits)), next: fe.next )
 }
 fill_ainits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
