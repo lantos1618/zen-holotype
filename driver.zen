@@ -13,7 +13,7 @@
 { perr_get } = compiler.parse_type
 { lerr_get } = compiler.lex
 { resolve_module } = compiler.check
-{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source } = compiler.check_validate
+{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { genfmt_module_in } = compiler.genfmt
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
@@ -35,7 +35,13 @@ check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDi
                     (cd3.code == 0).match ({
                         true  => {
                             cd4 := mp.check_module_unknown_type_diagnostic_from_source(decls, flat)   // undefined type names in annotations
-                            (cd4.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd4 })
+                            (cd4.code == 0).match ({
+                                true  => {
+                                    cd5 := mp.check_module_mustuse_diagnostic_from_source(raw, flat)   // discarded value-mold (Self,…)Self result
+                                    (cd5.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd5 })
+                                },
+                                false => cd4
+                            })
                         },
                         false => cd3
                     })
