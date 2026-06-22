@@ -184,6 +184,42 @@ def test_fmt_ast_prints_whole_import_and_exports():
     assert "helper* = (n: i32) i32" in r.stdout, r.stdout
 
 
+def test_fmt_ast_lambda_params_untyped():
+    """A lambda's `: Type` annotations are DISCARDED by the parser (LambdaData keeps only names), so the
+    formatter prints bare names — `(x)`, never `(x: void)` which would mis-reparse as a void-typed param.
+    The formatted output must still build + run."""
+    zenc = _zenc()
+    src = _write(
+        "apply = (f: (i32) i32, n: i32) i32 { f(n) }\n"
+        "main = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n"   # 8
+    )
+    r = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "(x) {" in r.stdout, r.stdout
+    assert "x: void" not in r.stdout, r.stdout
+    run = subprocess.run([zenc, "run", str(_write(r.stdout))], capture_output=True, text=True)
+    assert run.returncode == 8, run.stderr
+
+
+def test_fmt_ast_variadic_param():
+    """A `...T` variadic param round-trips as `...T` (its AST type is the collected `[T]`), NOT `[T]`
+    which would reparse as a plain slice param and drop the variadic marker."""
+    zenc = _zenc()
+    src = _write("sum = (xs: ...i32) i32 { 0 }\n")
+    r = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "xs: ...i32" in r.stdout, r.stdout
+
+
+def test_fmt_ast_variant_default():
+    """A zero-arg variant with a default constant (`Name = expr`) keeps its ` = expr` tail."""
+    zenc = _zenc()
+    src = _write("Pixel: RGB(i32) | Blank = RGB(255)\n")
+    r = subprocess.run([zenc, "fmt", "--ast", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "Blank = RGB(255)" in r.stdout, r.stdout
+
+
 # ── THE acceptance criterion: round-trip over a REAL corpus ────────────────────────────────────────
 # For every corpus file F: emit(fmt(F)) must equal emit(F) — i.e. the formatted output reparses to the
 # SAME resolved AST (a far stronger check than text equality; it catches dropped parens / returns /

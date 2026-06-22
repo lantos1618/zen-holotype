@@ -10,6 +10,8 @@
 { contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
 { open, read, write, close, system, unlink } = std.c.libc
 { parse_module, exports_get } = compiler.parse
+{ perr_get } = compiler.parse_type
+{ lerr_get } = compiler.lex
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
@@ -485,13 +487,23 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
 // `fmt --ast <file>`: parse the file FAITHFULLY (parse_module keeps MethodCall — UFCS preserved), then
 // pretty-print the AST back to canonical Zen text via compiler.genfmt. NO resolve/lowering, so a
 // `s.len()` round-trips as `s.len()` (not the flattened `len(s)`).
+// fmt --ast parses the RAW (pre-flatten) source. parse_module is otherwise only ever fed POST-flatten
+// source, so namespace constructs it never sees in normal use — module-alias lines (`v = std.x.y`),
+// qualified types (`v.Vec<T>`) — make it plant `__syntax_error` sentinels and mangle following decls.
+// Rather than emit that corruption, fail cleanly when the parse hit any error: a faithful printer must
+// refuse a file it cannot represent, not silently rewrite it.
 fmt_ast = (mp: MutPtr<Malloc>, path: str) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
             decls := mp.parse_module(src)          // faithful AST (keeps MethodCall)
-            exps  := exports_get()                 // the `*` export markers parse_module recorded
-            out_bytes(mp.genfmt_module_in(decls, exps).bytes())
-            0
+            (perr_get() || lerr_get()).match ({
+                true  => { derr("zenc: fmt --ast: cannot faithfully format (parse error: namespace aliases / qualified types are not supported by --ast)\n")  1 },
+                false => {
+                    exps := exports_get()          // the `*` export markers parse_module recorded
+                    out_bytes(mp.genfmt_module_in(decls, exps).bytes())
+                    0
+                }
+            })
         },
         .Err(e)  => { derr("zenc: fmt: cannot open input\n")  1 }
     })
