@@ -1189,6 +1189,23 @@ def test_name_collision_between_sibling_modules_is_rejected():
     assert "'c2'" in r.stderr                      # the redefining module is named
 
 
+def test_dup_user_error_names_origin_and_suggests_qualified_import():
+    """Stopgap UX (design option b): the collision diagnostic must NAME the origin module the name
+    was first provided by AND suggest the qualified-import fix — not just say 'duplicate'."""
+    d = _program({
+        "c1.zen": "dupf* = () i32 { 1 }\n",
+        "c2.zen": "dupf* = () i32 { 2 }\n",
+        "p.zen": "{ dupf } = c1\n{ dupf } = c2\nmain = () i32 { dupf() }\n",
+    })
+    r = subprocess.run([_zenc(), "check", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert "duplicate top-level definition 'dupf'" in r.stderr   # names the symbol
+    assert "'c2'" in r.stderr                                    # names the redefining module
+    assert "'c1'" in r.stderr                                    # names the ORIGIN module (new)
+    assert "hint:" in r.stderr                                   # actionable hint (new)
+    assert "m = c1" in r.stderr and "m.dupf" in r.stderr         # suggests qualified access (new)
+
+
 def test_keyword_safe_name_collision_between_siblings_is_rejected():
     d = _program({
         "c1.zen": "default* = () i32 { 1 }\n",
