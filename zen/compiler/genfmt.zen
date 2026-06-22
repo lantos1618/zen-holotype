@@ -18,7 +18,7 @@
   BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData,
   IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData,
   ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData,
-  impl_cname_in, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+  impl_cname_in, is_expr_null, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 
 // ── String builder shims (reuse the canonical genc String API) ───────────────
 ff_string = (a: MutPtr<Malloc>, cap: i64) String { String(ptr: a.acquire(cap), len: 0, cap: cap) }
@@ -217,7 +217,7 @@ ff_loop = (s: String, a: MutPtr<Malloc>, l: LoopData, ind: i32) String {
 }
 
 ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
-    s.ff_append(a, "(").ff_params(a, lm.params).ff_append(a, ") ").ff_block(a, lm.body, ind, true)
+    s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ").ff_block(a, lm.body, ind, true)
 }
 
 // ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
@@ -329,11 +329,27 @@ ff_let = (s: String, a: MutPtr<Malloc>, l: LetData, ind: i32) String {
 }
 
 // ── declarations ────────────────────────────────────────────────────────────────
+// a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
+ff_slice_elem = (t: Ty) Ty { t.match ({ .Slice(p) => load(p), _ => t }) }
 ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
-        out = out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty)
+        out = p.variadic.match ({
+            true  => out.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
+            false => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty)
+        })
+    })
+    out
+}
+// lambda params: the parser DISCARDS each `: Type` annotation (LambdaData keeps only names; the FnT
+// context supplies the real types when the lambda is spliced), so print bare NAMES — `(x)`, never
+// `(x: void)` which would mis-reparse as a void-typed param.
+ff_lparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_append(a, p.name)
     })
     out
 }
@@ -454,23 +470,24 @@ ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) Stri
         }
     })
 }
-ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], ed: EnumDecl) String {
-    head := s.ff_name(a, exp, ed.name).ff_append(a, ": ")
-    body := head
-    ed.variants.loop((h, i, vd) {
+// one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
+ff_variant = (s: String, a: MutPtr<Malloc>, vd: VariantDef) String {
+    base := vd.payload.match ({ .Void => s.ff_append(a, vd.name), _ => s.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")") })
+    vd.dflt.is_expr_null().match ({ true => base, false => base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0) })
+}
+ff_variants = (s: String, a: MutPtr<Malloc>, vs: [VariantDef]) String {
+    body := s
+    vs.loop((h, i, vd) {
         body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
-        body = vd.payload.match ({ .Void => body.ff_append(a, vd.name), _ => body.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")") })
+        body = body.ff_variant(a, vd)
     })
     body
 }
+ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], ed: EnumDecl) String {
+    s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, ed.variants)
+}
 ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], g: GenEnumDecl) String {
-    head := s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ")
-    body := head
-    g.variants.loop((h, i, vd) {
-        body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
-        body = vd.payload.match ({ .Void => body.ff_append(a, vd.name), _ => body.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")") })
-    })
-    body
+    s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, g.variants)
 }
 ff_decl = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
     d.match ({
