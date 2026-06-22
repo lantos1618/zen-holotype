@@ -336,6 +336,10 @@ VALUE_CASES = [
     ('sqrt_iter = (x: f64, g: f64, n: i64) f64 { (n == 0).match ({ true => g, false => { ng := (g + x / g) / 2.0  (ng == g).match ({ true => g, false => sqrt_iter(x, ng, n - 1) }) } }) }\ntest* = () i64 { to_i64(sqrt_iter(16.0, 16.0, 100)) }', 4),
     # sqrt(2.0) ~ 1.414213 (Newton), scaled by 1e6 to assert as an int.
     ('sqrt_iter = (x: f64, g: f64, n: i64) f64 { (n == 0).match ({ true => g, false => { ng := (g + x / g) / 2.0  (ng == g).match ({ true => g, false => sqrt_iter(x, ng, n - 1) }) } }) }\ntest* = () i64 { to_i64(sqrt_iter(2.0, 2.0, 100) * 1000000.0) }', 1414213),
+
+    # --- std.rand: the xorshift step, masked to 32 bits, is deterministic for a given seed. seed
+    #     12345 -> first value 3336926330 (matches std.rand.next on a fresh seed(12345)). ---
+    ('test* = () i64 { x: i64 := 12345  x = (x ^ (x << 13)) & 4294967295  x = x ^ (x >> 17)  x = (x ^ (x << 5)) & 4294967295  x }', 3336926330),
 ]
 
 # (src, verdict) the check binary must produce.
