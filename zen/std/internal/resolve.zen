@@ -859,13 +859,28 @@ fail_unknown_name = (a: MutPtr<Malloc>, inpath: str, nm: String, id: String) i32
     exit(1)
     0
 }
-fail_dup_user = (a: MutPtr<Malloc>, inpath: str, id: String, nm: String) i32 {
-    msg0 := a.gstr_string(160).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: duplicate top-level definition '")
+fail_dup_user = (a: MutPtr<Malloc>, inpath: str, id: String, nm: String, origin: String) i32 {
+    msg0 := a.gstr_string(256).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: duplicate top-level definition '")
     msg1 := a.mappend_string(msg0, nm)
     in_mod := msg1.gstr_append(a, "' (module '")
     msg2 := a.mappend_id_name(in_mod, id)
-    tail := msg2.gstr_append(a, "' redefines a name another imported module already defines)")
-    line := tail.gstr_push(a, 10)
+    redef := msg2.gstr_append(a, "' redefines '")
+    rnm := a.mappend_string(redef, nm)
+    from := rnm.gstr_append(a, "', already provided by '")
+    msg3 := a.mappend_id_name(from, origin)
+    tail := msg3.gstr_append(a, "')")
+    l1 := tail.gstr_push(a, 10)
+    // actionable hint: rename, or reach the original through a namespace alias instead of a bare import
+    h0 := l1.gstr_append(a, "hint: rename '")
+    h1 := a.mappend_string(h0, nm)
+    h2 := h1.gstr_append(a, "', or import '")
+    h3 := a.mappend_id_name(h2, origin)
+    h4 := h3.gstr_append(a, "' qualified — e.g. `m = ")
+    h5 := a.mappend_id_name(h4, origin)
+    h6 := h5.gstr_append(a, "` then `m.")
+    h7 := a.mappend_string(h6, nm)
+    h8 := h7.gstr_append(a, "(...)`")
+    line := h8.gstr_push(a, 10)
     eprint(line.gstr_finish(a))
     exit(1)
     0
@@ -1558,10 +1573,48 @@ check_head = (src: str, a: MutPtr<Malloc>, p: i32, provided: [ProvidedSymbol], i
     0
 }
 
+// `useen` entries are `key\tORIGIN_ID\n`: the dedup key plus the id of the module that FIRST
+// provided that name, so a later redefinition can name BOTH modules in the diagnostic. Only
+// user_symbol_seen reads/writes useen, so this richer format stays internal to these helpers.
+useen_key_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
+    (j == m).match ({
+        true  => set.res_sbyte(i) == '\t',
+        false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
+            true  => set.useen_key_eq(i + 1, name, j + 1, m),
+            false => false
+        })
+    })
+}
+useen_tab = (set: String, i: i64) i64 {
+    ((i >= set.len) || (set.res_sbyte(i) == '\n')).match ({
+        true  => i,
+        false => (set.res_sbyte(i) == '\t').match ({ true => i + 1, false => set.useen_tab(i + 1) })
+    })
+}
+useen_line_origin = (out: String, a: MutPtr<Malloc>, set: String, i: i64) String {
+    ((i >= set.len) || (set.res_sbyte(i) == '\n')).match ({
+        true  => out,
+        false => out.rpush(a, set.res_sbyte(i)).useen_line_origin(a, set, i + 1)
+    })
+}
+// Origin id of `key` in `useen`, or an empty String if `key` has not been registered yet.
+useen_origin = (a: MutPtr<Malloc>, useen: String, key: String, i: i64) String {
+    (i >= useen.len).match ({
+        true  => a.gstr_string(1),
+        false => useen.useen_key_eq(i, key, 0, key.len).match ({
+            true  => useen_line_origin(a.gstr_string(24), a, useen, useen.useen_tab(i)),
+            false => a.useen_origin(useen, key, useen.snext_line(i))
+        })
+    })
+}
+useen_add = (a: MutPtr<Malloc>, useen: String, key: String, id: String) String {
+    useen.rappend_string(a, key).rpush(a, '\t').rappend_string(a, id).rpush(a, 10)
+}
 user_symbol_seen = (a: MutPtr<Malloc>, useen: String, s: ProvidedSymbol, id: String, inpath: str) String {
-    key := s.symbol_key_in(a)
-    useen.seen_name(key).match ({ true => a.fail_dup_user(inpath, id, s.symbol_name_in(a)), false => 0 })
-    a.madd_name(useen, key)
+    key    := s.symbol_key_in(a)
+    origin := a.useen_origin(useen, key, 0)
+    (origin.len > 0).match ({ true => a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin), false => 0 })
+    a.useen_add(useen, key, id)
 }
 user_decls_from_symbols = (a: MutPtr<Malloc>, useen: String, symbols: [ProvidedSymbol], i: i64, id: String, inpath: str) String {
     cur := useen
