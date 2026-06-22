@@ -1,6 +1,6 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map } = std.collections.map        // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -60,9 +60,37 @@ unknown_ty = (env: Env, t: Ty) bool {
         })
     })
 }
+// FnT-vs-FnT signature compatibility: same arity, each param type and the return type equal —
+// EXCEPT a position whose type is unknown (an unbound tparam like `S`, generic residue) stays lenient,
+// since its concrete type is only known after monomorphization. (Function pointers are not implicitly
+// convertible in C, so the CONCRETE positions demand exact structural equality.)
+fnt_pos_eq = (env: Env, g: Ty, w: Ty) bool { env.unknown_ty(g) || env.unknown_ty(w) || g.ty_eq(w) }
+fnt_tys_eq = (env: Env, ga: [Ty], wa: [Ty], i: i64) bool {
+    (i >= ga.len).match ({ true => true, false => env.fnt_pos_eq(ga[i], wa[i]).match ({ true => env.fnt_tys_eq(ga, wa, i + 1), false => false }) })
+}
+fnt_sig_fits = (env: Env, g: Ty, w: Ty) bool {
+    g.match ({
+        .FnT(ga) => w.match ({
+            .FnT(wa) => (ga.params.len == wa.params.len).match ({
+                true  => env.fnt_tys_eq(ga.params, wa.params, 0).match ({ true => env.fnt_pos_eq(load(ga.ret), load(wa.ret)), false => false }),
+                false => false
+            }),
+            _ => false
+        }),
+        _ => false
+    })
+}
 fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
-    // FnT parameters are checked by C for now.
-    (env.unknown_ty(argty) || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
+    // An FnT param/field requires a matching FnT argument (named or lifted fn-value): wrong arity /
+    // concrete param-type / return, or a non-fn value, is an error. Uninferable args (lambdas infer to
+    // void, generic residue) stay lenient, as do tparam-typed FnT positions (deferred to mono).
+    env.unknown_ty(argty).match ({
+        true  => 0,
+        false => pty.is_fnt().match ({
+            true  => env.fnt_sig_fits(argty, pty).match ({ true => 0, false => 1 }),
+            false => fits(argty, pty).match ({ true => 0, false => 1 })
+        })
+    })
 }
 // Numeric literals fit numeric slots only when in range.
 lit_fits = (e: Ptr<Expr>, t: Ty) bool {
@@ -188,7 +216,10 @@ check_call = (env: Env, c: CallData) i32 {
             true  => env.call_errs(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => 1 })
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({
+                    true  => 0,
+                    false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 })
+                })
             })
         })
     }) })
@@ -237,6 +268,33 @@ call_errs = (env: Env, c: CallData) i32 {
     (ps.len == c.args.len).match ({
         false => 1,
         true  => f.is_imported_generic().match ({ true => 0, false => env.arg_type_errs(f.tparams, ps, c.args) })
+    })
+}
+// An INDIRECT call through a fn-value (`f := g  f(x)`, or an FnT parameter `f`): check the arg COUNT
+// against the FnT's params, then each CONCRETE param's arg type. Param positions typed by an unbound
+// tparam stay lenient (generic FnT-param templates resolve those at mono). Without this, a wrong-arity
+// indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
+fnt_arg_err_at = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
+    (i < ptys.len).match ({
+        true  => env.unknown_ty(ptys[i]).match ({
+            true  => 0,
+            false => (ar.addr().is_lit_numeric() && ptys[i].ty_rank() >= 0 && ar.addr().lit_fits(ptys[i])).match ({
+                true  => 0,
+                false => env.fit_err(env.infer_expr(ar.addr()), ptys[i])
+            })
+        }),
+        false => 0
+    })
+}
+fnt_arg_errs = (env: Env, ptys: [Ty], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc + env.fnt_arg_err_at(ptys, i, ar) })
+    acc
+}
+fnval_call_errs = (env: Env, c: CallData) i32 {
+    env.var_or_global(c.fn).match ({
+        .FnT(ft) => (ft.params.len == c.args.len).match ({ false => 1, true => env.fnt_arg_errs(ft.params, c.args) }),
+        _        => 1
     })
 }
 check_args = (env: Env, args: [Expr]) i32 {
@@ -364,35 +422,54 @@ gen_struct_tparams = (decls: [Decl], name: str) [Param] {
     decls.loop((h, i, d) { found = d.match ({ .DGenStruct(g) => eq(g.name, name).match ({ true => g.tparams, false => found }), _ => found }) })
     found
 }
-gen_field_fit_err = (env: Env, tps: [Param], fields: [Field], fi: FieldInit) i32 {
-    tps.ty_mentions_tparam(fields.field_in(fi.name)).match ({
-        true  => 0,                                                  // a tparam-typed field -> lenient
-        false => env.field_fit_err(fields, fi)                       // a concrete field -> check the fit
+// A generic-struct literal `Box<i32>(v: …)` binds each tparam to its explicit targ, so a field typed
+// by a tparam (`v: T`) becomes CONCRETE (`v: i32`) and IS fit-checked — closing the hole where a wrong
+// value (`Box<i32>(v: P(…))`) slipped past SEMA and broke at cc. A field whose type stays a tparam after
+// substitution (no matching targ) remains lenient, deferred to monomorphization.
+gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: FieldInit) i32 {
+    fty := fields.field_in(fi.name)
+    cty := (targs.len == tps.len).match ({ true => env.a.subst_ty_in(tps, targs, fty), false => fty })
+    tps.ty_mentions_tparam(cty).match ({
+        true  => 0,                                                  // still a tparam -> lenient
+        false => (fi.value.is_lit_numeric() && cty.ty_rank() >= 0).match ({  // polymorphic literal -> any numeric field
+            true  => 0,
+            false => env.fit_err(env.infer_expr(fi.value), cty)      // a concrete field -> check the fit
+        })
     })
 }
-gen_struct_init_errs = (env: Env, tps: [Param], fields: [Field], inits: [FieldInit]) i32 {
+gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], inits: [FieldInit]) i32 {
     acc := 0
-    inits.loop((h, i, fi) { acc = acc + fields.has_field(fi.name).match ({ true => env.gen_field_fit_err(tps, fields, fi), false => 1 }) })
+    inits.loop((h, i, fi) { acc = acc + fields.has_field(fi.name).match ({ true => env.gen_field_fit_err(tps, targs, fields, fi), false => 1 }) })
     acc
 }
 makestruct_err = (env: Env, m: MakeStructData) i32 {
     (m.targs.len > 0).match ({
         true  => env.decls.cv_is_gen_struct(m.ty).match ({                // a generic literal: check concrete fields
-            true  => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), env.decls.gen_struct_fields(m.ty), m.inits),
+            true  => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, env.decls.gen_struct_fields(m.ty), m.inits),
             false => 0                                                 // unknown gen-struct (template residue) -> lenient
         }),
         false => env.env_is_struct(m.ty).match ({ true => env.struct_init_errs(env.env_struct_fields(m.ty), m.inits), false => 0 })
     })
 }
-// Field access checks only known concrete struct receivers.
+// the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
+gen_base_of = (t: Ty) str { t.match ({ .Generic(g) => g.name, .Ptr(p) => load(p).gen_base_of(), _ => "" }) }
+// Field access checks known concrete struct receivers AND generic-struct instances (field names don't
+// depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be).
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
     obj.is_lit_numeric().match ({
         true  => 1,
         false => {
-            sname := env.infer_expr(obj).enum_name()
+            rty   := env.infer_expr(obj)
+            sname := rty.enum_name()
             env.env_is_struct(sname).match ({
                 true  => env.env_struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }),
-                false => 0
+                false => {
+                    base := rty.gen_base_of()
+                    (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({
+                        true  => env.decls.gen_struct_fields(base).has_field(field).match ({ true => 0, false => 1 }),
+                        false => 0                                       // unknown receiver (residue) -> lenient
+                    })
+                }
             })
         }
     })
@@ -606,9 +683,29 @@ is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: str) bool {
         _ => found }) })
     found
 }
+// every element of a slice literal must fit the element type (inferred from the first item). genc
+// types the emitted C array by that first element, so a CATEGORY mismatch (a str in an int slice)
+// would be silently coerced under -w — a miscompile. Numeric elements stay lenient (C widens them),
+// and unknown/generic-residue elements defer (fit_err handles both).
+sl_elem_fit = (env: Env, ety: Ty, it: Expr) i32 {
+    ity := env.infer_expr(it.addr())
+    (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).match ({ true => 0, false => env.fit_err(ity, ety) })
+}
+slicelit_err = (env: Env, items: [Expr]) i32 {
+    (items.len == 0).match ({
+        true  => 0,
+        false => {
+            ety := env.infer_expr(items[0].addr())
+            acc := 0
+            items.loop((h, i, it) { acc = acc + env.sl_elem_fit(ety, it) })
+            acc
+        }
+    })
+}
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.check_call(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
+        .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
         .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
@@ -1307,10 +1404,24 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
             true  => env.kv_call_errs_kind(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => KUNDEFINED() })
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({
+                    true  => 0,
+                    false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => KUNDEFINED() })
+                })
             })
         })
     }) })
+}
+kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(env.fnt_arg_err_at(ptys, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos())) })
+    acc
+}
+kv_fnval_call_kind = (env: Env, c: CallData) i32 {
+    env.var_or_global(c.fn).match ({
+        .FnT(ft) => (ft.params.len == c.args.len).match ({ false => KARITY(), true => env.kv_fnt_arg_kind(ft.params, c.args) }),
+        _        => KUNDEFINED()
+    })
 }
 kv_check_args_kind = (env: Env, args: [Expr]) i32 {
     acc := 0
@@ -1372,10 +1483,23 @@ kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     stmts.loop((h, i, st) { acc = (acc.kv_kor(e.kv_check_block_stmt_kind(st)))  e = e.a.extend_env(e, st) })
     acc
 }
+// mirrors slicelit_err: a slice-literal element whose type doesn't fit the first element's → KARGTYPE.
+kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
+    (items.len == 0).match ({
+        true  => 0,
+        false => {
+            ety := env.infer_expr(items[0].addr())
+            acc := 0
+            items.loop((h, i, it) { acc = acc.kv_kor(env.sl_elem_fit(ety, it).kv_one(KARGTYPE()).kv_at(it.expr_pos())) })
+            acc
+        }
+    })
+}
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
+        .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
         .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
