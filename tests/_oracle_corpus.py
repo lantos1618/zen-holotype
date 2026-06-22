@@ -460,6 +460,16 @@ VERDICT_CASES = [
     ('P*: { x: i32, flag: bool }\ntest* = () i32 { p := P(x: 0, flag: true)  p.x }', 'accept'),
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 0)  p.x }', 'accept'),
 
+    # --- FnT (function-typed) STRUCT FIELDS: a fn-value init must MATCH the field's signature, else the
+    #     C backend would silently assign an incompatible fn-pointer (cc hides it under -w). Lenient on
+    #     tparam-typed positions (generic structs defer those to monomorphization). ---
+    ('S*: { op: (i32) i32 }\ng* = (a: i64) i32 { 0 }\ntest* = () i32 { s := S(op: g)  s.op(3) }', 'reject'),       # param type i64 ⊀ i32
+    ('S*: { op: (i32) i32 }\ng* = (a: i32, b: i32) i32 { 0 }\ntest* = () i32 { s := S(op: g)  0 }', 'reject'),     # wrong arity
+    ('S*: { op: (i32) i64 }\ng* = (a: i32) i32 { 0 }\ntest* = () i32 { s := S(op: g)  0 }', 'reject'),             # return type i32 ≠ i64
+    ('S*: { op: (i32) i32 }\ntest* = () i32 { s := S(op: 5)  0 }', 'reject'),                                      # a non-fn value
+    ('S*: { op: (i32) i32 }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { s := S(op: g)  s.op(41) }', 'accept'),  # exact match
+    ('Store*<S>: { reducer: (S, i32) S }\nA*: { c: i32 }\nred* = (s: A, n: i32) A { A(c: s.c + n) }\ntest* = () i32 { st := Store<A>(reducer: red)  st.reducer(A(c: 0), 5).c }', 'accept'),  # generic FnT field: tparam S defers
+
     # --- FIELD ACCESS: obj.field must name a real field of obj's struct (value + Ptr receiver) ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 5)  p.nope }', 'reject'),
     ('P*: { x: i32 }\nget* = (p: Ptr<P>) i32 { p.bad }\ntest* = () i32 { q := P(x: 1)  get(q.addr()) }', 'reject'),

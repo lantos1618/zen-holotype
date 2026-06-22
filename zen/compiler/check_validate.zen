@@ -60,9 +60,37 @@ unknown_ty = (env: Env, t: Ty) bool {
         })
     })
 }
+// FnT-vs-FnT signature compatibility: same arity, each param type and the return type equal —
+// EXCEPT a position whose type is unknown (an unbound tparam like `S`, generic residue) stays lenient,
+// since its concrete type is only known after monomorphization. (Function pointers are not implicitly
+// convertible in C, so the CONCRETE positions demand exact structural equality.)
+fnt_pos_eq = (env: Env, g: Ty, w: Ty) bool { env.unknown_ty(g) || env.unknown_ty(w) || g.ty_eq(w) }
+fnt_tys_eq = (env: Env, ga: [Ty], wa: [Ty], i: i64) bool {
+    (i >= ga.len).match ({ true => true, false => env.fnt_pos_eq(ga[i], wa[i]).match ({ true => env.fnt_tys_eq(ga, wa, i + 1), false => false }) })
+}
+fnt_sig_fits = (env: Env, g: Ty, w: Ty) bool {
+    g.match ({
+        .FnT(ga) => w.match ({
+            .FnT(wa) => (ga.params.len == wa.params.len).match ({
+                true  => env.fnt_tys_eq(ga.params, wa.params, 0).match ({ true => env.fnt_pos_eq(load(ga.ret), load(wa.ret)), false => false }),
+                false => false
+            }),
+            _ => false
+        }),
+        _ => false
+    })
+}
 fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
-    // FnT parameters are checked by C for now.
-    (env.unknown_ty(argty) || pty.is_fnt()).match ({ true => 0, false => fits(argty, pty).match ({ true => 0, false => 1 }) })
+    // An FnT param/field requires a matching FnT argument (named or lifted fn-value): wrong arity /
+    // concrete param-type / return, or a non-fn value, is an error. Uninferable args (lambdas infer to
+    // void, generic residue) stay lenient, as do tparam-typed FnT positions (deferred to mono).
+    env.unknown_ty(argty).match ({
+        true  => 0,
+        false => pty.is_fnt().match ({
+            true  => env.fnt_sig_fits(argty, pty).match ({ true => 0, false => 1 }),
+            false => fits(argty, pty).match ({ true => 0, false => 1 })
+        })
+    })
 }
 // Numeric literals fit numeric slots only when in range.
 lit_fits = (e: Ptr<Expr>, t: Ty) bool {
