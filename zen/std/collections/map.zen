@@ -25,6 +25,18 @@
 // Allocator-threaded constructors remain free functions; Map-owned operations live on Map<T>, so
 // callers use w.put(...), w.try_put(...), w.free(...), w.get(...), w.has(...), and w.len().
 //
+// VALUE-MOLD CONTRACT (read before sharing a Map handle). A `Map<T>` is a small by-value header
+// {keys, vals, idx, len, cap} over allocator-owned buffers, exactly like std.collections.vec. Two
+// consequences follow from that — both are by-design, not bugs:
+//   1. ALWAYS USE THE RETURNED MAP. `put`/`try_put` may grow, which reallocs the buffers and returns
+//      an updated header whose pointers differ from the input's. A handle captured BEFORE such a grow
+//      then points at freed memory — reading or further mutating it is use-after-free. Treat a Map
+//      like a fresh value each op: `m = m.put(a, k, v)`; never keep and reuse a pre-`put` copy.
+//   2. NO IMPLICIT VALUE SEMANTICS. Two headers copied from the same Map share one backing buffer, so
+//      an in-place upsert (`put` on an existing key) is visible through every copy. If you need an
+//      independent snapshot (e.g. a child scope that must not write through to its parent), take an
+//      explicit deep copy with `m.clone(a)` first, then mutate the copy.
+//
 { Allocator, try_acquire } = std.mem.alloc        // explicit allocator trait
 { Result, IoError } = std.core.result
 { eq, view } = std.text.str           // byte-wise str equality (`==` on str compares POINTERS) + byte view for hashing
@@ -189,6 +201,11 @@ Map*<T>: {
         })
         out
     }
+    // Insert or upsert. RETURNS the updated map — always rebind to the result (`m = m.put(...)`).
+    // On grow the buffers are realloced, so any handle captured before this call dangles (see the
+    // VALUE-MOLD CONTRACT above). On an existing key the value is overwritten IN PLACE, so the new
+    // value is visible through every header that shares this map's storage; `clone` first for an
+    // independent copy.
     put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Map<T> {
         i := m.find(k)
         out: Map<T> := (i < 0).match ({
@@ -197,6 +214,8 @@ Map*<T>: {
         })
         out
     }
+    // Result-returning `put` (allocation failure is a value). Same contract: use the returned map; a
+    // pre-call handle is invalid after a grow, and an upsert mutates shared storage in place.
     try_put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
         i := m.find(k)
         out: Result<Map<T>, IoError> := (i < 0).match ({
@@ -210,6 +229,30 @@ Map*<T>: {
         out
     }
     free<A> = (m: Map<T>, a: MutPtr<A>) void { a.release(m.keys)  a.release(m.vals)  a.release(m.idx) }
+    // Deep-copy the map into fresh buffers from `a`, giving the result INDEPENDENT storage: mutating
+    // the clone (or the original) never writes through to the other. This is the tool for value
+    // semantics the by-value header doesn't provide on its own — clone before handing a Map to a child
+    // scope that must not corrupt its parent. Keys stay BORROWED (the str pointers are copied, not the
+    // bytes — same outlives-the-map rule as everywhere else); values are copied by value. The clone
+    // owns its buffers and must be `free`d independently. O(len).
+    clone<A> = (m: Map<T>, a: MutPtr<A>) Map<T> {
+        cap := m.cap
+        next := Map<T>( keys: a.acquire(cap * sizeof(MKey)),
+                        vals: a.acquire(cap * sizeof(T)),
+                        idx:  a.acquire(cap * 2 * sizeof(MIdx)),
+                        len: m.len, cap: cap )
+        srcks := m.keys()
+        srcvs := m.vals()
+        dstks := next.keys()
+        dstvs := next.vals()
+        srcks.loop((h, i, k) {
+            (i < m.len).match ({
+                true  => { dstks[i] = k  dstvs[i] = srcvs[i] },
+                false => { h.break }
+            })
+        })
+        next.reindex()
+    }
     // Visit every live entry as (key, value) together, in insertion order. `f` is invoked DIRECTLY in
     // the loop body so an inline lambda splices in (like iter.each). Walking `keys()`/`vals()` in
     // parallel at the call site is no longer needed: `m.each_pair((k, v){ … })`.
