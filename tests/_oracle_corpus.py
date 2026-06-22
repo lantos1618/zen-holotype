@@ -488,6 +488,14 @@ VERDICT_CASES = [
     ('test* = () i32 { xs := [1, 2, 3]  xs[0] }', 'accept'),                                                # homogeneous int slice
     ('P*: { x: i32 }\ntest* = () i32 { xs := [P(x: 1), P(x: 2)]  0 }', 'accept'),                           # homogeneous struct slice
 
+    # --- INDIRECT fn-value calls (`f := g  f(...)`): check arity + concrete arg types against the FnT,
+    #     else a wrong-arity call slipped past SEMA and broke at cc ("too few arguments to function …"). ---
+    ('g* = (a: i32) i32 { a }\ntest* = () i32 { f := g  f() }', 'reject'),                                  # wrong arity (too few)
+    ('g* = (a: i32) i32 { a }\ntest* = () i32 { f := g  f(1, 2) }', 'reject'),                               # wrong arity (too many)
+    ('g* = (a: i32) i32 { a }\ntest* = () i32 { f := g  f("hi") }', 'reject'),                               # arg type str ⊀ i32
+    ('g* = (a: i32) i32 { a }\ntest* = () i32 { f := g  f(5) }', 'accept'),                                  # correct indirect call
+    ('apply* = (f: (i32) i32, x: i32) i32 { f(x) }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { apply(g, 5) }', 'accept'),  # FnT-param call
+
     # --- FIELD ACCESS: obj.field must name a real field of obj's struct (value + Ptr receiver) ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 5)  p.nope }', 'reject'),
     ('P*: { x: i32 }\nget* = (p: Ptr<P>) i32 { p.bad }\ntest* = () i32 { q := P(x: 1)  get(q.addr()) }', 'reject'),

@@ -216,7 +216,10 @@ check_call = (env: Env, c: CallData) i32 {
             true  => env.call_errs(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }),
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => 1 })
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({
+                    true  => 0,
+                    false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 })
+                })
             })
         })
     }) })
@@ -265,6 +268,33 @@ call_errs = (env: Env, c: CallData) i32 {
     (ps.len == c.args.len).match ({
         false => 1,
         true  => f.is_imported_generic().match ({ true => 0, false => env.arg_type_errs(f.tparams, ps, c.args) })
+    })
+}
+// An INDIRECT call through a fn-value (`f := g  f(x)`, or an FnT parameter `f`): check the arg COUNT
+// against the FnT's params, then each CONCRETE param's arg type. Param positions typed by an unbound
+// tparam stay lenient (generic FnT-param templates resolve those at mono). Without this, a wrong-arity
+// indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
+fnt_arg_err_at = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
+    (i < ptys.len).match ({
+        true  => env.unknown_ty(ptys[i]).match ({
+            true  => 0,
+            false => (ar.addr().is_lit_numeric() && ptys[i].ty_rank() >= 0 && ar.addr().lit_fits(ptys[i])).match ({
+                true  => 0,
+                false => env.fit_err(env.infer_expr(ar.addr()), ptys[i])
+            })
+        }),
+        false => 0
+    })
+}
+fnt_arg_errs = (env: Env, ptys: [Ty], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc + env.fnt_arg_err_at(ptys, i, ar) })
+    acc
+}
+fnval_call_errs = (env: Env, c: CallData) i32 {
+    env.var_or_global(c.fn).match ({
+        .FnT(ft) => (ft.params.len == c.args.len).match ({ false => 1, true => env.fnt_arg_errs(ft.params, c.args) }),
+        _        => 1
     })
 }
 check_args = (env: Env, args: [Expr]) i32 {
@@ -1374,10 +1404,24 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
             true  => env.kv_call_errs_kind(c),
             false => c.fn.is_intrinsic().match ({
                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }),
-                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn) || env.var_or_global(c.fn).is_fnt()).match ({ true => 0, false => KUNDEFINED() })
+                false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({
+                    true  => 0,
+                    false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => KUNDEFINED() })
+                })
             })
         })
     }) })
+}
+kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(env.fnt_arg_err_at(ptys, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos())) })
+    acc
+}
+kv_fnval_call_kind = (env: Env, c: CallData) i32 {
+    env.var_or_global(c.fn).match ({
+        .FnT(ft) => (ft.params.len == c.args.len).match ({ false => KARITY(), true => env.kv_fnt_arg_kind(ft.params, c.args) }),
+        _        => KUNDEFINED()
+    })
 }
 kv_check_args_kind = (env: Env, args: [Expr]) i32 {
     acc := 0
