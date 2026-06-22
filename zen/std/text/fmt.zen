@@ -157,6 +157,84 @@ write_float = (x: f64) i64 {
 print*<T> = (x: T) i64 { x.fmt_print() }
 println*<T> = (x: T) i64 { x.fmt_println() }
 
+// ── Printer: ergonomic mixed-type formatted output in ONE statement ──────────
+//
+// `println` takes a single value, so the first thing a newcomer wants — printing
+// "x=<int> y=<str> z=<float>" on one line — needs a different surface. Printer is
+// a streaming builder: each piece is written to stdout immediately (no allocation,
+// no temporary buffer), and a running byte count is threaded so the whole line
+// reads as ONE expression mixing values of different kinds:
+//
+//   put("x=").i(x).s(" y=").s(y).s(" z=").f(z).nl()        // x=3 y=hello z=3.14
+//   put(word).s(": ").i(count).nl()                        // the: 5
+//
+//   .s(t)    append a str (string literals and `str` values; also separators)
+//   .i(n)    append an i64                .f(x)      append an f64
+//   .b(x)    append a bool                .owned(g)  append an owned String
+//   .sp()    append a single space        .nl()      end the line (newline)
+//
+// Each op is a NON-GENERIC method picked by name, so the type of every value is
+// explicit at the call site and resolution is unambiguous across modules. Every op
+// returns a `Printer`, so they chain; `.n` is the running byte count.
+//
+// IMPLEMENTATION NOTES (two cross-module gotchas these ops thread around):
+//
+//   * The ops are METHODS on Printer (defined inside the struct), not top-level
+//     `s*`/`i*`/`f*` functions. Imports flatten into one namespace, so exporting
+//     short names like `f` or `s` would clash with an importer's own top-level
+//     `f`/`s` ("duplicate top-level definition"). As methods they're namespaced
+//     under the receiver type and never pollute the global namespace.
+//
+//   * Every Printer-returning body ends in a *direct* `Printer(n: …)` constructor,
+//     never a `.method()`-chain expression. A function whose return EXPRESSION is a
+//     cross-module method-chain has its result type inferred from the chain, and
+//     that inferred type fails to unify with the imported `Printer` at the call site
+//     (assign-fit / arg-type errors). The literal constructor keeps the struct
+//     identity intact across the module boundary.
+//
+// See LIMITATION at the bottom for the broader dispatch story.
+Printer*: {
+    n: i64
+
+    s = (p: Printer, t: str) Printer { Printer(n: p.n + t.write_text()) }
+    i = (p: Printer, k: i64) Printer { Printer(n: p.n + k.write_int()) }
+    f = (p: Printer, x: f64) Printer { Printer(n: p.n + x.write_float()) }
+    b = (p: Printer, x: bool) Printer {
+        t := x.match ({ true => "true", false => "false" })
+        Printer(n: p.n + t.write_text())
+    }
+    owned = (p: Printer, g: String) Printer { Printer(n: p.n + g.write_string()) }
+    sp = (p: Printer) Printer { Printer(n: p.n + " ".write_text()) }
+    nl = (p: Printer) Printer { Printer(n: p.n + newline()) }
+}
+
+// Start a Printer chain with a literal prefix (the common "label=" case).
+// Named `put` (not `out`) to avoid colliding with std.io.file.out (an i64-returning
+// raw byte writer) — a same-named free function in another module would shadow this
+// one's Printer return type at the call site.
+put* = (t: str) Printer { Printer(n: t.write_text()) }
+
+// LIMITATION — why typed ops (.i/.f/.s) and not one generic `.v(x)` or printf:
+//
+//   1. A single generic `v<T>(p: Printer, x: T) Printer` would read cleanest —
+//      `put("x=").v(x).v(y)` — dispatching through the Display trait. But a generic
+//      free function whose body ALSO takes a STRUCT-typed parameter (`p: Printer`)
+//      currently fails arg-type checking when CALLED FROM ANOTHER MODULE. It checks
+//      fine inside this module, and the value-only generics `println<T>`/`print<T>`
+//      work cross-module — only the threaded-Printer generic trips the gap. Typed
+//      ops sidestep it entirely: no generics involved.
+//
+//   2. A true `printf("x={} y={}", x, y)` needs a heterogeneous variadic — one call
+//      carrying args of DIFFERENT types. Zen varargs are single-type (`...T`), so a
+//      mixed (i64, str, f64) pack isn't expressible. A fmt2/fmt3 family could fake
+//      it but would stringify each value into an owned String, forcing allocator
+//      threading at every call site.
+//
+// The streaming Printer avoids both: it composes mixed types one typed op at a time
+// and writes straight to stdout — zero heap, works today. When the compiler closes
+// gap (1) — generic + struct-param dispatch across modules — a single `.v(x)` (and
+// then a `{}`-template `format` on top of it) can layer on without changing this core.
+
 str.impl(Display, {
     fmt_print = (s: str) i64 { s.write_text() }
     fmt_println = (s: str) i64 { s.write_text()  newline() }

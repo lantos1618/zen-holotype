@@ -753,6 +753,18 @@ def test_zenc_run_prints_str_and_string():
     assert r.stdout == "borrowed\nalias\nowned!\nowned\n", repr(r.stdout)
 
 
+def test_zenc_run_prints_formatted_mixed_type_line():
+    """Section B.6: std.text.fmt's Printer builds a mixed-type formatted line in one chain.
+
+    `put(prefix).i(int).s(str).f(float).b(bool).owned(String).sp().nl()` streams each
+    typed piece to stdout, so a newcomer can print `x=<int> y=<str> z=<float>` on one
+    line — the first wall `println` (single value) hits."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "print_formatted_line.zen")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "x=3 y=hello z=3.14\nthe: 5\nok=true\ng=world 5\n", repr(r.stdout)
+
+
 def test_zenc_run_fmt_numeric_write_uses_explicit_allocator():
     """Numeric fmt helpers can use a caller allocator for the temporary String."""
     zenc = _zenc()
