@@ -318,7 +318,13 @@ def test_zenc_build_rejects_illtyped_no_binary():
 
 def test_zenc_run_prints_floats():
     """f64 end-to-end: float literals, arithmetic, and std.text.fmt's generic println.
-    Exact stdout is pinned so formatting cannot silently drift."""
+    Exact stdout is pinned so formatting cannot silently drift.
+
+    Convention (std.text.fmt): a float always prints at least one fractional digit
+    (so 2.0 -> "2.0", never "2", keeping a float distinguishable from an int).
+    Magnitudes outside the fixed 6-decimal range use scientific notation so tiny
+    nonzero values keep their significant digits instead of underflowing to "0":
+    |x| < 1e-4 and |x| >= 1e15 print as `<mant>e-<n>` / `<mant>e+<n>`."""
     zenc = _zenc()
     d = Path(tempfile.mkdtemp())
     (d / "p.zen").write_text(
@@ -326,14 +332,18 @@ def test_zenc_run_prints_floats():
         "main = () i32 {\n"
         "  println(1.5)\n"
         "  println(0.25)\n"
-        "  println(-3.0)\n"
+        "  println(-3.0)\n"           # whole-valued float keeps its decimal -> "-3.0"
         "  println(0.001)\n"
-        "  println(1.5 + 0.25 * 2.0)\n"   # precedence: 1.5 + 0.5 = 2
+        "  println(1.5 + 0.25 * 2.0)\n"   # precedence: 1.5 + 0.5 = 2.0
+        "  println(2.0)\n"            # whole float -> "2.0", not "2"
+        "  println(0.0)\n"           # zero float -> "0.0"
+        "  println(0.1 + 0.2)\n"     # stays decimal -> "0.3"
+        "  println(0.0000001)\n"     # tiny nonzero -> scientific, not "0"
         "  0\n"
         "}\n")
     r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "1.5\n0.25\n-3\n0.001\n2\n", repr(r.stdout)
+    assert r.stdout == "1.5\n0.25\n-3.0\n0.001\n2.0\n2.0\n0.0\n0.3\n1.0e-7\n", repr(r.stdout)
 
 
 # ── U1.3: the binary RESOLVES `{ … } = std.X` imports from disk (std.internal.resolve folded in) ──────────────
