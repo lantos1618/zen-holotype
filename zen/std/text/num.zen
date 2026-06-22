@@ -3,6 +3,7 @@
 { Result, IoError } = std.core.result
 { Allocator, try_acquire } = std.mem.alloc
 { String } = std.text.string
+{ ParseError, try_parse_int } = std.text.str
 
 num_ok = (s: String) Result<String, IoError> { .Ok(s) }
 num_err = (e: IoError) Result<String, IoError> { .Err(e) }
@@ -204,3 +205,160 @@ try_float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> {
 }
 
 try_float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> { a.try_float_in(x) }
+
+// ── parsing: text → number, as values ────────────────────────────────────────
+//
+// The format side above turns numbers into text; these turn text back into numbers.
+// All reuse std.text.str's `ParseError`: NoDigits | Trailing(u8) | Overflow. A bad
+// parse is a value to `.match`, never a silent 0 (that is `parse_int`'s documented job).
+
+// parse_int with errors surfaced: empty/garbage/overflow become Err instead of 0.
+// A thin honest alias over std.text.str.try_parse_int — optional leading '-', then
+// decimal digits to the very end, magnitude must fit i64.
+//   parse_i64_checked("123") => .Ok(123)   parse_i64_checked("12x") => .Err(.Trailing('x'))
+//   parse_i64_checked("")    => .Err(.NoDigits)
+parse_i64_checked* = (s: str) Result<i64, ParseError> { s.try_parse_int() }
+
+pf_ok  = (v: f64) Result<f64, ParseError> { .Ok(v) }
+pf_err = (e: ParseError) Result<f64, ParseError> { .Err(e) }
+
+// 10^e as f64, for any sign of e. Recursive — e is a (small) decimal exponent.
+pf_pow10 = (e: i64) f64 {
+    (e == 0).match ({
+        true  => 1.0,
+        false => (e < 0).match ({
+            true  => pf_pow10(e + 1) / 10.0,
+            false => pf_pow10(e - 1) * 10.0
+        })
+    })
+}
+
+// Parse a decimal float: an optional sign, an integer part, an optional '.' fraction,
+// and an optional 'e'/'E' exponent (itself optionally signed). e.g. "3.14", "-2.5",
+// "1e3", "6.022e23", ".5", "42".
+//
+// PRECISION: hand-rolled, NOT correctly-rounded. The mantissa is accumulated in f64 and
+// scaled by 10^exp (also f64), so each result carries the usual binary-float rounding
+// error — trust ~15 significant digits, not the last bit. No libc strtod is used.
+// OVERFLOW: magnitudes beyond f64 range silently become +/-inf (no Overflow error).
+// ERRORS: empty/sign-only input or a fraction-only "." => .NoDigits; a stray byte
+// (incl. a second '.') => .Trailing(byte); "1e"/"1e+" with no exponent digit => .NoDigits.
+parse_f64* = (s: str) Result<f64, ParseError> {
+    sv := s.view()
+    neg := sv.len > 0 && sv[0] == '-'
+    pos := sv.len > 0 && sv[0] == '+'
+    start: i64 := (neg || pos).match ({ true => 1, false => 0 })
+
+    mant:    f64 := 0.0
+    fracdiv: f64 := 1.0
+    seen_dot   := false
+    seen_e     := false
+    eseen_sign := false
+    eneg       := false
+    eval: i64 := 0
+    ndig: i64 := 0       // mantissa digits (integer + fraction)
+    edig: i64 := 0       // exponent digits
+    bad:  u8  := 0       // first offending byte (0 = none)
+
+    sv.loop((h, i, b) {
+        (i < start).match ({
+            true  => {},
+            false => seen_e.match ({
+                true => ((edig == 0) && (eseen_sign == false) && ((b == '-') || (b == '+'))).match ({
+                    true  => { eseen_sign = true  eneg = b == '-' },
+                    false => (b >= '0' && b <= '9').match ({
+                        true  => { eval = eval * 10 + (b - '0')  edig = edig + 1 },
+                        false => { bad = b  h.break }
+                    })
+                }),
+                false => (b >= '0' && b <= '9').match ({
+                    true  => {
+                        dd: i64 := b - '0'
+                        d := to_f64(dd)
+                        seen_dot.match ({
+                            true  => { fracdiv = fracdiv * 10.0  mant = mant + d / fracdiv },
+                            false => { mant = mant * 10.0 + d }
+                        })
+                        ndig = ndig + 1
+                    },
+                    false => (b == '.').match ({
+                        true  => seen_dot.match ({
+                            true  => { bad = b  h.break },
+                            false => { seen_dot = true }
+                        }),
+                        false => ((b == 'e' || b == 'E') && ndig > 0).match ({
+                            true  => { seen_e = true },
+                            false => { bad = b  h.break }
+                        })
+                    })
+                })
+            })
+        })
+    })
+
+    out: Result<f64, ParseError> := (bad != 0).match ({
+        true  => pf_err(.Trailing(bad)),
+        false => (ndig == 0).match ({
+            true  => pf_err(.NoDigits),
+            false => (seen_e && (edig == 0)).match ({
+                true  => pf_err(.NoDigits),
+                false => {
+                    exp := eneg.match ({ true => 0 - eval, false => eval })
+                    val := mant * pf_pow10(exp)
+                    pf_ok(neg.match ({ true => 0.0 - val, false => val }))
+                }
+            })
+        })
+    })
+    out
+}
+
+pf_okI  = (v: i64) Result<i64, ParseError> { .Ok(v) }
+pf_errI = (e: ParseError) Result<i64, ParseError> { .Err(e) }
+
+// digit value of byte `b` in any base up to 36 ('0'-'9','a'-'z','A'-'Z'); -1 if not a digit.
+pf_digit_val = (b: u8) i64 {
+    (b >= '0' && b <= '9').match ({
+        true  => b - '0',
+        false => (b >= 'a' && b <= 'z').match ({
+            true  => b - 'a' + 10,
+            false => (b >= 'A' && b <= 'Z').match ({
+                true  => b - 'A' + 10,
+                false => 0 - 1
+            })
+        })
+    })
+}
+
+// Parse an integer in an arbitrary base (2..=36): optional '-', then digits valid for
+// `base` to the end. e.g. parse_i64_radix("ff", 16) => .Ok(255), ("1010", 2) => .Ok(10).
+// ERRORS: nothing to parse => .NoDigits; a digit out of range (or stray byte) => .Trailing.
+// No overflow signaling — magnitudes past i64 wrap (caller picks a trusted base/width).
+parse_i64_radix* = (s: str, base: i64) Result<i64, ParseError> {
+    sv := s.view()
+    neg := sv.len > 0 && sv[0] == '-'
+    start: i64 := neg.match ({ true => 1, false => 0 })
+    acc: i64 := 0
+    nd:  i64 := 0
+    bad: u8  := 0
+    sv.loop((h, i, b) {
+        (i < start).match ({
+            true  => {},
+            false => {
+                dv := pf_digit_val(b)
+                ((dv >= 0) && (dv < base)).match ({
+                    true  => { acc = acc * base + dv  nd = nd + 1 },
+                    false => { bad = b  h.break }
+                })
+            }
+        })
+    })
+    out: Result<i64, ParseError> := (nd == 0).match ({
+        true  => pf_errI(.NoDigits),
+        false => (bad != 0).match ({
+            true  => pf_errI(.Trailing(bad)),
+            false => pf_okI(neg.match ({ true => 0 - acc, false => acc }))
+        })
+    })
+    out
+}
