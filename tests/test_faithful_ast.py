@@ -239,7 +239,11 @@ _CORPUS = [
 
 
 def _emit(zenc, path):
-    return subprocess.run([zenc, "emit", str(path)], cwd=str(ROOT),
+    # --force skips the checker: this round-trip emits compiler-source files COPIED out of the
+    # module tree, which double-include their own imports (dup-fn) — harmless here since we only
+    # compare the emitted C of fmt(F) vs F, not its validity. (emit checks by default since the
+    # checker-totality pass; --force preserves the old raw source→C behavior this test needs.)
+    return subprocess.run([zenc, "emit", "--force", str(path)], cwd=str(ROOT),
                           env={**os.environ, "ZEN_ROOT": str(ROOT)},
                           capture_output=True, text=True)
 
