@@ -1693,16 +1693,56 @@ ut_payloads_kind = (env: Env, tparams: [Param], vs: [VariantDef]) i32 {
     vs.loop((h, i, v) { acc = acc.kv_kor(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE())) })
     acc
 }
-ut_func_kind = (env: Env, f: Func) i32 {
-    env.ut_params_kind(f.tparams, f.params).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()))
+// also walk the body: a LOCAL `let` with an explicit annotation (`x: Foo := e`) names a type, and an
+// undefined one leaked an unknown C type just like a param/field/return would. Recurse through nested
+// control flow (Block/Loop/Match/Cond) so a deeply-nested `let` annotation is checked too.
+ut_arms_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.ut_expr_kind(env, tparams, ar.body)) })
+    acc
+}
+ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b)  => a.ut_body_kind(env, tparams, b.stmts),
+        .Loop(l)   => a.ut_body_kind(env, tparams, l.body),
+        .Match(m)  => a.ut_arms_kind(env, tparams, m.arms),
+        .Cond(d)   => a.ut_expr_kind(env, tparams, d.t).kv_kor(a.ut_expr_kind(env, tparams, d.e)),
+        _          => 0
+    })
+}
+// a LOCAL `let` annotation (`x: T := e`); tvoid means unannotated, so nothing to check.
+ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 {
+    l.ty.is_void_ty().match ({
+        true  => 0,
+        false => env.ut_unknown_ty(tparams, l.ty).kv_one(KUNKNOWNTYPE()).kv_at(load(l.value).expr_pos())
+    })
+}
+ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.ut_let_kind(env, tparams, l).kv_kor(a.ut_expr_kind(env, tparams, l.value)),
+        .Assign(x)   => a.ut_expr_kind(env, tparams, x.value),
+        .Return(r)   => a.ut_expr_kind(env, tparams, r),
+        .ExprStmt(e) => a.ut_expr_kind(env, tparams, e),
+        .If(f)       => a.ut_expr_kind(env, tparams, f.c).kv_kor(a.ut_body_kind(env, tparams, f.then)).kv_kor(a.ut_body_kind(env, tparams, f.els)),
+        .While(w)    => a.ut_expr_kind(env, tparams, w.c).kv_kor(a.ut_body_kind(env, tparams, w.body)),
+        .IndexSet(x) => a.ut_expr_kind(env, tparams, x.value)
+    })
+}
+ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
+    acc := 0
+    body.loop((h, i, st) { acc = acc.kv_kor(a.ut_stmt_kind(env, tparams, st)) })
+    acc
+}
+ut_func_kind = (a: MutPtr<Malloc>, env: Env, f: Func) i32 {
+    env.ut_params_kind(f.tparams, f.params).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE())).kv_kor(a.ut_body_kind(env, f.tparams, f.body))
 }
 check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
     env := Env( vars: a.params_env(cv_no_params()), decls: decls, didx: idx, exp: tvoid(), a: a )
     acc := 0
     decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({
-        .DFunc(f)      => env.ut_func_kind(f),
-        .DForeign(f)   => env.ut_func_kind(f),
+        .DFunc(f)      => a.ut_func_kind(env, f),
+        .DForeign(f)   => a.ut_func_kind(env, f),
         .DStruct(sd)   => env.ut_fields_kind(cv_no_params(), sd.fields),
         .DEnum(ed)     => env.ut_payloads_kind(cv_no_params(), ed.variants),
         .DGenStruct(g) => env.ut_fields_kind(g.tparams, g.fields),
