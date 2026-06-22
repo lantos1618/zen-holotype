@@ -203,6 +203,32 @@ def test_undefined_type_in_nested_let_rejected():
     assert r.returncode != 0 and "unknown-type" in r.stderr, r.stderr
 
 
+# ── MUST-USE: a discarded value-mold `(Self,…) Self` self-mutation (Stage-2 A.1). A container method
+#    like `Map.put` RETURNS the updated container and INVALIDATES the receiver (a grow reallocs); using it
+#    as a bare statement and reading the receiver afterwards used to SEGV while `check` said ok. Driver-only
+#    (raw, pre-inline), so exercised here through the binary. ────────────────────────────────────────────
+_VMOLD = ("Box*: {\n"
+          "    v: i32\n"
+          "    bump = (b: Box, n: i32) Box { Box( v: b.v + n ) }\n"
+          "    get = (b: Box) i32 { b.v }\n"
+          "}\n")
+
+def test_discarded_value_mold_result_rejected():
+    # `b.bump(5)` as a non-tail statement discards the updated container — the receiver is now stale.
+    r = _check(_VMOLD + "main = () i32 {\n  b := Box( v: 1 )\n  b.bump(5)\n  b.get()\n}\n")
+    assert r.returncode != 0 and "must-use" in r.stderr, r.stderr
+
+def test_rebound_value_mold_result_ok():
+    # rebinding the result (`b = b.bump(...)`) is the correct usage and must pass.
+    r = _check(_VMOLD + "main = () i32 {\n  b := Box( v: 1 )\n  b = b.bump(5)\n  b.get()\n}\n")
+    assert r.returncode == 0, r.stderr
+
+def test_value_mold_in_tail_position_ok():
+    # a value-mold call used as a produced VALUE (fluent-chain tail) is not a discard — must pass.
+    r = _check(_VMOLD + "main = () i32 {\n  b := Box( v: 1 )\n  b.bump(5).get()\n}\n")
+    assert r.returncode == 0, r.stderr
+
+
 def test_defined_type_in_local_let_ok():
     # a declared/primitive/generic local-let annotation must still pass (no false positive)
     src = ("Box*: { v: i32 }\n"
