@@ -2637,6 +2637,41 @@ def test_zenc_run_map_growth_and_second_value_type():
     assert r.stdout == "9\n0\n80\nPARIS\nmiss\n2\n", repr(r.stdout)
 
 
+def test_zenc_run_map_clone_value_semantics():
+    """`clone` gives a Map an INDEPENDENT deep copy: mutating the original (in-place upsert AND a grow
+    that reallocs its buffers) is invisible through the clone, and vice versa. This is the documented
+    tool for the value semantics the by-value header doesn't provide on its own — a regression guard
+    that clone copies storage rather than sharing it."""
+    zenc = _zenc()
+    d = Path(tempfile.mkdtemp())
+    (d / "p.zen").write_text(
+        '{ default } = std.mem.alloc\n'
+        'maps = std.collections.map\n'
+        '{ println } = std.text.fmt\n'
+        'main = () i32 {\n'
+        '    alloc := default()\n'
+        '    a := alloc.addr()\n'
+        '    e1 := maps.of(a, "x", 2)\n'
+        '    e1 = e1.put(a, "y", 3)\n'
+        '    snap := e1.clone(a)\n'             # independent copy of {x:2, y:3}
+        '    e1 = e1.put(a, "x", 99)\n'         # upsert original in place
+        '    e1 = e1.put(a, "z", 5)\n'          # grow original (reallocs its buffers)
+        '    println(snap.get("x", -1))\n'      # 2: clone unaffected by upsert
+        '    println(snap.get("y", -1))\n'      # 3
+        '    println(snap.get("z", -1))\n'      # -1: grow added to original only
+        '    println(snap.len())\n'             # 2
+        '    println(e1.get("x", -1))\n'        # 99
+        '    println(e1.get("z", -1))\n'        # 5
+        '    snap.free(a)\n'
+        '    e1.free(a)\n'
+        '    0\n'
+        '}\n'
+    )
+    r = subprocess.run([zenc, "run", str(d / "p.zen")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "2\n3\n-1\n2\n99\n5\n", repr(r.stdout)
+
+
 def test_zenc_run_map_try_result_paths():
     """Fallible map allocation returns Result errors, releasing partial buffers on failure.
 
