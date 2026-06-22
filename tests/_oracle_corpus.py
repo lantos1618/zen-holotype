@@ -321,6 +321,21 @@ VALUE_CASES = [
     #     word's length as a base-10 checksum. "  the  cat sat " -> words 3,3,3 -> 333 (the leading,
     #     doubled, and trailing whitespace must all collapse — any leaked empty would skew the digits). ---
     ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\ntest* = () i32 { s := "  the  cat sat "  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }', 333),
+
+    # --- anonymous-struct VALUE literal `{x:1, y:2}` must synthesize AND hoist its struct decl (ANON-LIT).
+    #     A bare literal has no type-position decl, so the parser infers field types from the values and
+    #     registers the synthesized `__anon_…` StructDecl for hoisting — else cc sees an undeclared type. ---
+    ('test* = () i32 { p := {x: 1, y: 2}  p.x + p.y }', 3),
+    # nested anon literal: inner `{x:1}` registers its own decl; the outer field's type is that named struct
+    ('test* = () i32 { p := {a: {x: 1}, b: 2}  p.a.x + p.b }', 3),
+    # two literals of the SAME shape dedup to one struct decl (names-only structural identity)
+    ('test* = () i32 { p := {x: 1, y: 2}  q := {x: 10, y: 20}  p.x + q.y }', 21),
+    # DIFFERENT shapes get DISTINCT decls and don't collide
+    ('test* = () i32 { p := {x: 1, y: 2}  q := {a: 3, b: 4, c: 5}  p.x + q.c }', 6),
+    # an anon literal returned from a fn (annotated return type) and read by the caller
+    ('mk = () {x: i32, y: i32} { {x: 10, y: 7} }\ntest* = () i32 { p := mk()  p.x + p.y }', 17),
+    # an anon literal passed as an argument
+    ('sum = (p: {x: i32, y: i32}) i32 { p.x + p.y }\ntest* = () i32 { sum({x: 4, y: 5}) }', 9),
 ]
 
 # (src, verdict) the check binary must produce.
