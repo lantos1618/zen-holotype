@@ -1,0 +1,43 @@
+{ Allocator, malloc, free } = std.mem.alloc
+{ Result, IoError } = std.core.result
+{ to_exit } = std.core.bool
+arena = std.mem.arena
+Counting: { acquired: i32, released: i32 }
+Counting.impl(Allocator, {
+    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
+        a.acquired = a.acquired + 1
+        malloc(n)
+    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
+        a.released = a.released + 1
+        free(p)
+    }
+})
+LimitAlloc: { _: i32 }
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void {}
+})
+success = () bool {
+    backing := Counting(acquired: 0, released: 0)
+    a := backing.addr()
+    ar: arena.Arena := arena.make_in(a, 64)
+    p := ar.addr().acquire(8)
+    p.store_i64(33)
+    ok := (backing.acquired == 1) && (ar.addr().used() == 8) && (p.load_i64() == 33)
+    ar.addr().free_in(a)
+    ok && (backing.released == 1) && (ar.buf == null_ptr())
+}
+failure = () bool {
+    lim := LimitAlloc(_: 0)
+    r: Result<arena.Arena, IoError> := arena.try_make_in(lim.addr(), 64)
+    r.match({
+        .Err(e) => e.match({ .NotFound => true, _ => false }),
+        .Ok(a) => false
+    })
+}
+main = () i32 {
+    (success() && failure()).to_exit()
+}

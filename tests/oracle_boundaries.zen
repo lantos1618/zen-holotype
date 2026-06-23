@@ -1,37 +1,43 @@
 // tests/oracle_boundaries.zen — BOUNDARY category for the Zen oracle: Zen linting its OWN source for
-// the no-hidden-heap rule. This is the self-hosted port of tests/test_primitive_boundaries.py's
-// `test_raw_allocation_calls_stay_behind_allocator_boundaries`: raw `malloc/calloc/realloc/free`
-// calls must stay behind the std.mem allocator floor (mem/alloc.zen, mem/raw.zen), the OS-thread/
-// scheduler floor (std/thread.zen, std/concurrent/pool.zen), or the codegen text emitters
-// (genc.zen, genc_emit.zen). Every OTHER .zen under examples/tools/zen must thread an allocator
-// instead — so finding a raw alloc call there is a FAILURE.
+// the no-hidden-heap / no-raw-primitive rules. This is the self-hosted port of ALL 8 source-grep
+// tests in tests/test_primitive_boundaries.py — the compiler audits its own tree, in itself, with
+// NO Python. Each sub-suite below mirrors one python test's regex + file-set + allowlist EXACTLY.
 //
-// HOW: enumerate the same file set as the python (rglob *.zen under examples, tools, zen/std,
-// zen/compiler) via `find ... > /tmp/ob_files.txt`, then read+scan each file in Zen. The scan
-// mirrors the python regex `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` over `//`-comment-stripped
-// text: a token preceded by a non-word, non-`.` char (or start) and followed by optional whitespace
-// then `(`. A non-whitelisted file containing such a call counts as one fail.
+// PORTED (python fn → sub-suite):
+//   1. test_examples_stay_above_raw_primitives          → "examples stay above raw primitives"
+//   2. test_raw_checkpoint_stays_behind_…               → "raw checkpoint behind coroutine/runtime"
+//   3. test_atwhile_stays_in_compiler_or_…              → "@while behind compiler/substrate"
+//   4. test_raw_allocation_calls_stay_behind_…          → "raw-alloc behind allocator floor"
+//   5. test_trace_gather_does_not_fall_back_…           → "trace gather uses owned scratch"
+//   6. test_io_contents_allocator_path_uses_try_acquire → "io contents_in uses try_acquire"
+//   7. test_map_try_paths_use_result_allocator_helpers  → "map try paths use result helpers"
+//   8. test_fmt_try_numeric_writes_use_fallible_…       → "fmt try writes use fallible num helpers"
+//
+// HOW: enumerate the python file set (rglob *.zen under examples/tools/zen/std/zen/compiler) via
+// `find ... > /tmp/ob_files.txt`, then read+scan each file in Zen. The byte scanner mirrors the
+// python regexes over `//`-comment-stripped text; the single-file region tests mirror python's
+// `_code(...).split(marker,1)[…]` substring slicing on comment-stripped source.
 { Malloc } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
-{ eq, ne, view, is_empty, split_in, nbuf } = std.text.str
+{ eq, ne, view, is_empty, split_in, nbuf, find, contains, substr } = std.text.str
+{ new_in, push_in, finish_in } = std.text.string
 { run_suite } = oracle_lib
 
-// the RAW_ALLOC_ALLOWED whitelist's COMPLEMENT, mirrored EXACTLY from test_primitive_boundaries.py.
-// Pure `&&` of `ne` (no bool-match), so it composes into other boolean expressions without tripping
-// the stmt-if-in-value-position codegen pitfall. Paths are repo-relative, matching `find`'s output
-// (we run it from the repo root over those same roots).
-not_whitelisted = (path: str) bool {
-    ne(path, "zen/std/mem/alloc.zen")
-    && ne(path, "zen/std/mem/raw.zen")
-    && ne(path, "zen/std/thread.zen")
-    && ne(path, "zen/std/concurrent/pool.zen")
-    && ne(path, "zen/compiler/genc.zen")
-    && ne(path, "zen/compiler/genc_emit.zen")
-}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SHARED byte-scan machinery: faithful port of python's `re` over `_code`-stripped source.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-// `\b` boundary before a keyword: the preceding byte must be outside the regex `\w` class [A-Za-z0-9_]
-// AND not `.` (the `(?<!\.)` lookbehind, which keeps UFCS `.free(` method calls from matching). Written
-// as a pure boolean (range tests, not match) so it slots into the `||`/`&&` chain below.
+// regex `\w` class member: [A-Za-z0-9_].
+is_word_char = (b: u8) bool {
+    (b >= 'a' && b <= 'z')
+    || (b >= 'A' && b <= 'Z')
+    || (b >= '0' && b <= '9')
+    || (b == '_')
+}
+not_word = (b: u8) bool { b.is_word_char().match ({ true => false, false => true }) }
+
+// `(?<!\.)\b` boundary before sv[i]: prev byte is NOT a word char AND NOT `.` (keeps UFCS `.free(`
+// method calls from matching). Written as a pure boolean for the `||`/`&&` chains below.
 is_boundary_before = (b: u8) bool {
     (b < 'a' || b > 'z')
     && (b < 'A' || b > 'Z')
@@ -39,6 +45,11 @@ is_boundary_before = (b: u8) bool {
     && (b != '_')
     && (b != '.')
 }
+
+// `\b` boundary before index i (plain word boundary; `.` is allowed, matching a bare `\bNAME`).
+bb_plain = (sv: [u8], i: i64) bool { (i == 0) || sv[i - 1].not_word() }
+// `(?<!\.)\b` boundary before index i (word boundary that ALSO excludes a preceding `.`).
+bb_dot = (sv: [u8], i: i64) bool { (i == 0) || sv[i - 1].is_boundary_before() }
 
 // `\s` skip: advance past spaces/tabs/newlines/CRs, returning the next index (or len at EOF).
 skip_ws = (sv: [u8], j: i64) i64 {
@@ -63,8 +74,8 @@ tok_at = (sv: [u8], nv: [u8], at: i64) bool {
     ok
 }
 
-// does the keyword `name` start at sv[i] AND get followed by `\s*(` ? (the `\b...\s*\(` tail; the
-// trailing `(` is what rejects e.g. `mallocate` — after the keyword must come whitespace-or-`(`).
+// the `\bNAME\s*\(` tail: keyword `name` starts at sv[i] AND is followed by `\s*(`. The trailing `(`
+// is what rejects e.g. `mallocate` and distinguishes `load(` from `load_i64(`.
 name_matches = (sv: [u8], i: i64, name: str) bool {
     nv := name.view()
     (i + nv.len > sv.len).match ({
@@ -79,20 +90,56 @@ name_matches = (sv: [u8], i: i64, name: str) bool {
     })
 }
 
-// the `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` match anchored at index `i`. Pure `&&`/`||` of the
-// boundary test and the four keyword tests — no value-position bool-match.
-matches_alloc_at = (sv: [u8], i: i64) bool {
-    ((i == 0) || sv[i - 1].is_boundary_before())
-    && (sv.name_matches(i, "malloc")
-        || sv.name_matches(i, "calloc")
-        || sv.name_matches(i, "realloc")
-        || sv.name_matches(i, "free"))
+// the `\bNAME\b` tail: keyword `name` starts at sv[i] AND the byte after it is a word boundary (a
+// non-word char or EOF). Used for the bare `break` / `continue` keywords (no trailing `(`).
+word_matches = (sv: [u8], i: i64, name: str) bool {
+    nv := name.view()
+    (i + nv.len > sv.len).match ({
+        true  => false,
+        false => sv.tok_at(nv, i).match ({
+            false => false,
+            true  => {
+                p := i + nv.len
+                (p >= sv.len) || sv[p].not_word()
+            }
+        })
+    })
 }
 
-// scan a whole file's bytes for any raw-alloc call OUTSIDE a `//` line comment. We track an in-comment
-// flag (set at `//`, cleared at newline) — the same comment-stripping the python `_code` does. Block
-// comments and string literals are NOT special-cased, matching the python (it only strips `//`).
-file_has_raw_alloc = (sv: [u8]) bool {
+// the `@while\b` match anchored at i: literal `@while` followed by a word boundary (no before-anchor
+// — the `@` is a literal char in the pattern, not a `\b`).
+atwhile_at = (sv: [u8], i: i64) bool {
+    nv := "@while".view()
+    (i + nv.len > sv.len).match ({
+        true  => false,
+        false => sv.tok_at(nv, i).match ({
+            false => false,
+            true  => {
+                p := i + nv.len
+                (p >= sv.len) || sv[p].not_word()
+            }
+        })
+    })
+}
+
+// a pattern match anchored at index i. kind selects the regex shape:
+//   0 = `\bNAME\s*\(`        (call, plain word boundary — `.NAME(` still matches, as in python)
+//   1 = `(?<!\.)\bNAME\s*\(` (call, boundary EXCLUDING a leading `.` — e.g. "raw addr")
+//   2 = `\bNAME\b`           (bare keyword — break / continue)
+//   _ = `@while\b`           (the literal @while token; `name` is ignored)
+matches_kind_at = (sv: [u8], i: i64, name: str, kind: i64) bool {
+    kind.match ({
+        0 => sv.bb_plain(i) && sv.name_matches(i, name),
+        1 => sv.bb_dot(i)   && sv.name_matches(i, name),
+        2 => sv.bb_plain(i) && sv.word_matches(i, name),
+        _ => sv.atwhile_at(i)
+    })
+}
+
+// does this file (a `[u8]` view of raw source) contain `pattern` of `kind` OUTSIDE a `//` line
+// comment? We track an in-comment flag (set at `//`, cleared at newline) — the same comment-stripping
+// python's `_code` does. Block comments and string literals are NOT special-cased (matching python).
+file_has = (sv: [u8], name: str, kind: i64) bool {
     found := false
     in_comment := false
     sv.loop((h, i, b) {
@@ -101,7 +148,7 @@ file_has_raw_alloc = (sv: [u8]) bool {
             true  => {},
             false => ((b == '/') && (i + 1 < sv.len) && (sv[i + 1] == '/')).match ({
                 true  => { in_comment = true },
-                false => sv.matches_alloc_at(i).match ({
+                false => sv.matches_kind_at(i, name, kind).match ({
                     true => { found = true  h.break },
                     _    => {}
                 })
@@ -111,39 +158,341 @@ file_has_raw_alloc = (sv: [u8]) bool {
     found
 }
 
-// is this file a raw-alloc VIOLATION? (has a raw call AND is not on the allocator-floor whitelist).
-// Pure booleans — no value-position negation match.
-is_violation = (mp: MutPtr<Malloc>, path: str) bool {
-    mp.contents_in(path).match ({
-        .Ok(src) => src.view().file_has_raw_alloc() && path.not_whitelisted(),
-        .Err(e)  => false       // unreadable listed file → treat as clean (no spurious fail)
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// comment-stripping (python `_code`) + region slicing (python `src.split(marker,1)[…]`).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+// strip `//` line comments, keeping the part before `//` on each line plus the newline — byte-exact
+// port of `_code`'s `"\n".join(line.split("//",1)[0] for line in …)`. (No block-comment/string
+// handling, matching python.) Returns an allocator-owned NUL-terminated copy.
+strip_comments_in = (mp: MutPtr<Malloc>, src: str) str {
+    sv := src.view()
+    s := mp.new_in()
+    in_comment := false
+    sv.loop((h, i, b) {
+        (b == '\n').match ({
+            true  => { s = s.push_in(mp, b)  in_comment = false },
+            false => in_comment.match ({
+                true  => {},
+                false => ((b == '/') && (i + 1 < sv.len) && (sv[i + 1] == '/')).match ({
+                    true  => { in_comment = true },
+                    false => { s = s.push_in(mp, b) }
+                })
+            })
+        })
     })
+    mp.finish_in(s)
 }
 
-// the per-file PASS outcome for the oracle reporter (true = clean/whitelisted). Negation lives only in
-// `pass_of`'s whole-function-body return (the `ne`-style that lowers to a ternary, not a stmt-if).
-pass_of = (violation: bool) bool { violation.match ({ true => false, false => true }) }
-file_passes = (mp: MutPtr<Malloc>, path: str) bool {
+// everything strictly AFTER the first occurrence of `m` (python `src.split(m,1)[1]`); "" if absent.
+after_marker = (mp: MutPtr<Malloc>, src: str, m: str) str {
+    i := src.find(m)
+    (i < 0).match ({
+        true  => "",
+        false => {
+            sv := src.view()
+            start := i + m.view().len
+            mp.substr(src, start, sv.len - start)
+        }
+    })
+}
+// everything strictly BEFORE the first occurrence of `m` (python `s.split(m,1)[0]`); all of `s` if
+// `m` is absent (python returns the whole string as the sole split field).
+before_marker = (mp: MutPtr<Malloc>, s: str, m: str) str {
+    j := s.find(m)
+    (j < 0).match ({ true => s, false => mp.substr(s, 0, j) })
+}
+// the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
+region = (mp: MutPtr<Malloc>, src: str, m1: str, m2: str) str { mp.before_marker(mp.after_marker(src, m1), m2) }
+
+not_contains = (s: str, needle: str) bool { s.contains(needle).match ({ true => false, false => true }) }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// RAW_ALLOC_ALLOWED's complement, mirrored EXACTLY from test_primitive_boundaries.py.
+alloc_not_whitelisted = (path: str) bool {
+    ne(path, "zen/std/mem/alloc.zen")
+    && ne(path, "zen/std/mem/raw.zen")
+    && ne(path, "zen/std/thread.zen")
+    && ne(path, "zen/std/concurrent/pool.zen")
+    && ne(path, "zen/compiler/genc.zen")
+    && ne(path, "zen/compiler/genc_emit.zen")
+}
+
+// `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` anchored at i (kind 1 = dot-excluded boundary).
+file_has_raw_alloc = (sv: [u8]) bool {
+    sv.file_has("malloc", 1)
+    || sv.file_has("calloc", 1)
+    || sv.file_has("realloc", 1)
+    || sv.file_has("free", 1)
+}
+
+alloc_passes = (mp: MutPtr<Malloc>, path: str) bool {
     path.is_empty().match ({
-        true  => true,                          // trailing empty split field → harmless passing dot
-        false => mp.is_violation(path).pass_of()
+        true  => true,
+        false => mp.contents_in(path).match ({
+            .Ok(raw) => (raw.view().file_has_raw_alloc() && path.alloc_not_whitelisted()).match ({ true => false, false => true }),
+            .Err(e)  => true
+        })
     })
 }
 
-oracle_boundaries_run* = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    // enumerate exactly the python file set: rglob *.zen under examples, tools, zen/std, zen/compiler.
-    shell("find examples tools zen/std zen/compiler -name '*.zen' 2>/dev/null | LC_ALL=C sort > /tmp/ob_files.txt")
+alloc_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in("/tmp/ob_files.txt").match ({
         .Ok(listing) => {
             files := mp.split_in(listing, '\n')
-            results: [bool] := mp.nbuf(false, files.len)
-            files.loop((h, i, path) {
-                results[i] = mp.file_passes(path)
-            })
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) { results[i] = mp.alloc_passes(path) })
             run_suite("boundaries: raw-alloc behind allocator floor", results)
         },
         .Err(e) => run_suite("boundaries: raw-alloc (cannot enumerate files)", [false])
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 1: examples stay above raw primitives (EXAMPLE_PRIMITIVES, examples/*.zen, no allowlist).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// kind per python pattern: "raw addr" = 1 (dot-excluded); break/continue = 2 (bare word); @while = 3
+// (literal token); everything else = 0 (plain `\bNAME\s*\(`). `offset`'s `(?:\boffset|\.\s*offset)`
+// alternation is equivalent to `\boffset\s*\(` for matching (both fire iff offset starts at a boundary).
+example_violation = (sv: [u8]) bool {
+    sv.file_has("addr", 1)
+    || sv.file_has("checkpoint_current", 0)
+    || sv.file_has("@while", 3)
+    || sv.file_has("break", 2)
+    || sv.file_has("continue", 2)
+    || sv.file_has("malloc", 0)
+    || sv.file_has("load", 0)
+    || sv.file_has("store", 0)
+    || sv.file_has("load_i64", 0)
+    || sv.file_has("store_i64", 0)
+    || sv.file_has("atomic_add_i64", 0)
+    || sv.file_has("offset", 0)
+    || sv.file_has("null_ptr", 0)
+    || sv.file_has("slice", 0)
+    || sv.file_has("cstr", 0)
+    || sv.file_has("sizeof", 0)
+}
+
+example_passes = (mp: MutPtr<Malloc>, path: str) bool {
+    path.is_empty().match ({
+        true  => true,
+        false => mp.contents_in(path).match ({
+            .Ok(raw) => raw.view().example_violation().match ({ true => false, false => true }),
+            .Err(e)  => true
+        })
+    })
+}
+
+example_suite = (mp: MutPtr<Malloc>) i32 {
+    shell("find examples -name '*.zen' 2>/dev/null | LC_ALL=C sort > /tmp/ob_examples.txt")
+    mp.contents_in("/tmp/ob_examples.txt").match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) { results[i] = mp.example_passes(path) })
+            run_suite("boundaries: examples stay above raw primitives", results)
+        },
+        .Err(e) => run_suite("boundaries: examples (cannot enumerate files)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 2: raw checkpoint_current stays behind std.concurrent.coroutine/runtime.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+checkpoint_allowed = (path: str) bool {
+    eq(path, "zen/std/concurrent/coroutine.zen") || eq(path, "zen/std/concurrent/runtime.zen")
+}
+
+// the import regex `\{[^}\n]*\bcheckpoint_current\b[^}\n]*\}\s*=\s*std\.concurrent\.coroutine`, per
+// (comment-stripped) line: a destructure that brings `checkpoint_current` in from the coroutine module
+// — `{ … checkpoint_current … } = std.concurrent.coroutine` with the import target after the name.
+line_checkpoint_import = (line: str) bool {
+    ci := line.find("checkpoint_current")
+    (ci < 0).match ({
+        true  => false,
+        false => {
+            si := line.find("std.concurrent.coroutine")
+            (si > ci) && line.contains("{") && line.contains("}")
+        }
+    })
+}
+has_checkpoint_import = (mp: MutPtr<Malloc>, clean: str) bool {
+    lines := mp.split_in(clean, '\n')
+    found := false
+    lines.loop((h, i, line) {
+        line.line_checkpoint_import().match ({ true => { found = true  h.break }, _ => {} })
+    })
+    found
+}
+
+checkpoint_passes = (mp: MutPtr<Malloc>, path: str) bool {
+    path.is_empty().match ({
+        true  => true,
+        false => path.checkpoint_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => {
+                    has_call := raw.view().file_has("checkpoint_current", 0)
+                    has_imp := raw.contains("checkpoint_current").match ({
+                        true  => mp.has_checkpoint_import(mp.strip_comments_in(raw)),
+                        false => false
+                    })
+                    (has_call || has_imp).match ({ true => false, false => true })
+                },
+                .Err(e) => true
+            })
+        })
+    })
+}
+
+checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in("/tmp/ob_files.txt").match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) { results[i] = mp.checkpoint_passes(path) })
+            run_suite("boundaries: raw checkpoint behind coroutine/runtime", results)
+        },
+        .Err(e) => run_suite("boundaries: checkpoint (cannot enumerate files)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 3: @while stays in the compiler / named low-level substrate.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+atwhile_allowed = (path: str) bool {
+    eq(path, "zen/compiler/parse.zen")
+    || eq(path, "zen/compiler/parse_expr.zen")
+    || eq(path, "zen/compiler/parse_stmt.zen")
+    || eq(path, "zen/compiler/genfmt.zen")
+}
+
+atwhile_passes = (mp: MutPtr<Malloc>, path: str) bool {
+    path.is_empty().match ({
+        true  => true,
+        false => path.atwhile_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => raw.view().file_has("@while", 3).match ({ true => false, false => true }),
+                .Err(e)  => true
+            })
+        })
+    })
+}
+
+atwhile_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in("/tmp/ob_files.txt").match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) { results[i] = mp.atwhile_passes(path) })
+            run_suite("boundaries: @while behind compiler/substrate", results)
+        },
+        .Err(e) => run_suite("boundaries: @while (cannot enumerate files)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 5: std.mem.trace cc_gather uses collection-owned scratch, not default list growth.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+trace_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in("zen/std/mem/trace.zen").match ({
+        .Ok(raw) => {
+            src := mp.strip_comments_in(raw)
+            gather := mp.region(src, "cc_gather = ", "Node*: ")
+            run_suite("boundaries: trace gather uses owned scratch", [
+                gather.not_contains(".list_push("),
+                gather.contains(".list_push_static(")
+            ])
+        },
+        .Err(e) => run_suite("boundaries: trace gather (unreadable)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 6: std.io.file contents_in allocator path keeps failure in Result flow (try_acquire).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+io_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in("zen/std/io/file.zen").match ({
+        .Ok(raw) => {
+            src := mp.strip_comments_in(raw)
+            body := mp.region(src, "read_file_alloc", "read_file_open")
+            run_suite("boundaries: io contents_in uses try_acquire", [
+                body.contains(".try_acquire("),
+                body.not_contains(".acquire("),
+                src.not_contains("default()")
+            ])
+        },
+        .Err(e) => run_suite("boundaries: io file (unreadable)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 7: std.collections.map try-paths use the Result allocator helpers (try_acquire/try_grow).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+map_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in("zen/std/collections/map.zen").match ({
+        .Ok(raw) => {
+            src := mp.strip_comments_in(raw)
+            grow  := mp.region(src, "try_grow", "append<A>")
+            appnd := mp.region(src, "try_append", "put<A>")
+            of    := mp.after_marker(src, "try_of*")
+            run_suite("boundaries: map try paths use result helpers", [
+                grow.contains(".try_acquire("),
+                grow.not_contains(".acquire("),
+                appnd.contains(".try_grow("),
+                appnd.not_contains(".acquire("),
+                of.contains(".try_acquire("),
+                of.not_contains(".acquire(")
+            ])
+        },
+        .Err(e) => run_suite("boundaries: map (unreadable)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 8: std.text.fmt try-numeric writes use the fallible num helpers; plain writes never do.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+fmt_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in("zen/std/text/fmt.zen").match ({
+        .Ok(raw) => {
+            src := mp.strip_comments_in(raw)
+            ti := mp.region(src, "try_write_int_in", "try_write_float_in")
+            tf := mp.region(src, "try_write_float_in", "write_int = ")
+            wi := mp.region(src, "write_int = ", "write_fpad")
+            // "// Display" is a comment marker — stripped by `_code`, so (faithfully) absent here, which
+            // makes `wf` run from `write_float = ` to EOF (python's split returns the whole remainder).
+            wf := mp.region(src, "write_float = ", "// Display")
+            run_suite("boundaries: fmt try writes use fallible num helpers", [
+                ti.contains(".try_integer_in("),
+                ti.not_contains(".integer_in("),
+                tf.contains(".try_float_in("),
+                tf.not_contains(".float_in("),
+                wi.not_contains(".integer_in(") && wi.not_contains(".write_int_in("),
+                wf.not_contains(".float_in(") && wf.not_contains(".write_float_in("),
+                src.not_contains("default()")
+            ])
+        },
+        .Err(e) => run_suite("boundaries: fmt (unreadable)", [false])
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+oracle_boundaries_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    // enumerate exactly the python full file set: rglob *.zen under examples, tools, zen/std, zen/compiler.
+    shell("find examples tools zen/std zen/compiler -name '*.zen' 2>/dev/null | LC_ALL=C sort > /tmp/ob_files.txt")
+    fails := 0
+    fails = fails + mp.example_suite()
+    fails = fails + mp.checkpoint_suite()
+    fails = fails + mp.atwhile_suite()
+    fails = fails + mp.alloc_suite()
+    fails = fails + mp.trace_suite()
+    fails = fails + mp.io_suite()
+    fails = fails + mp.map_suite()
+    fails = fails + mp.fmt_suite()
+    fails
 }

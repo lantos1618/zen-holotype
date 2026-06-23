@@ -1,0 +1,52 @@
+{ Allocator, malloc, free } = std.mem.alloc
+{ Result, IoError } = std.core.result
+{ to_exit } = std.core.bool
+actor = std.concurrent.actor
+Msg*: Ping
+Room*: { n: i32 }
+Counting: { acquired: i32, released: i32, fail_after: i32 }
+should_fail = (a: MutPtr<Counting>) bool { (a.fail_after >= 0) && (a.acquired >= a.fail_after) }
+Counting.impl(Allocator, {
+    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
+        a.should_fail().match ({
+            true => null_ptr(),
+            false => {
+                a.acquired = a.acquired + 1
+                malloc(n)
+            }
+        })
+    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
+        a.released = a.released + 1
+        free(p)
+    }
+})
+success = () bool {
+    c := Counting(acquired: 0, released: 0, fail_after: -1)
+    a := c.addr()
+    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.try_spawn(a, 4, Room(n: 7))
+    r.match({
+        .Ok(h) => { h.free(a)  (c.acquired == 3) && (c.released == 3) },
+        .Err(e) => false
+    })
+}
+fail_state = () bool {
+    c := Counting(acquired: 0, released: 0, fail_after: 0)
+    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.try_spawn(c.addr(), 4, Room(n: 7))
+    r.match({
+        .Err(e) => e.match({ .NotFound => (c.acquired == 0) && (c.released == 0), _ => false }),
+        .Ok(h) => false
+    })
+}
+fail_queue = () bool {
+    c := Counting(acquired: 0, released: 0, fail_after: 2)
+    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.try_spawn(c.addr(), 4, Room(n: 7))
+    r.match({
+        .Err(e) => e.match({ .NotFound => (c.acquired == 2) && (c.released == 2), _ => false }),
+        .Ok(h) => false
+    })
+}
+main = () i32 {
+    (success() && fail_state() && fail_queue()).to_exit()
+}

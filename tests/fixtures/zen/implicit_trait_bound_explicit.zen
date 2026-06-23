@@ -1,0 +1,23 @@
+{ Allocator, Heap, default } = std.mem.alloc
+Counting: { heap: Heap, acquired: i32 }
+Counting.impl(Allocator, {
+    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
+        a.acquired = a.acquired + 1
+        a.heap.addr().acquire(n)
+    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.heap.addr().resize(p, n) }
+    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void { a.heap.addr().release(p) }
+})
+grab = <A: Allocator>(a: MutPtr<A>, n: i64) RawPtr<u8> { a.acquire(n) }
+both = <A: Allocator, B: Allocator>(dst: MutPtr<A>, src: MutPtr<B>, n: i64) i64 {
+    p := dst.acquire(n)
+    q := src.acquire(n)
+    n
+}
+main = () i32 {
+    c := Counting(heap: default(), acquired: 0)
+    a := c.addr()
+    p := a.grab(8)
+    r := a.both(a, 4)
+    ((c.acquired == 3) && (r == 4)).match({ true => 0, false => 1 })
+}

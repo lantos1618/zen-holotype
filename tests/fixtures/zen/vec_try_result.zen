@@ -1,0 +1,62 @@
+{ Allocator, default, malloc, free } = std.mem.alloc
+{ Result, IoError } = std.core.result
+vec = std.collections.vec
+LimitAlloc: { left: i32 }
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {
+        (a.left > 0).match ({
+            true => {
+                a.left = a.left - 1
+                malloc(n)
+            },
+            false => null_ptr()
+        })
+    }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { free(p) }
+})
+success = () i32 {
+    m := default()
+    a := m.addr()
+    r0: Result<vec.Vec<i32>, IoError> := vec.try_of(a, [1])
+    r0.match ({
+        .Ok(v0) => {
+            r1: Result<vec.Vec<i32>, IoError> := v0.try_push(a, 2)
+            r1.match ({
+                .Ok(v) => {
+                    n := v.get(0) + v.get(1)
+                    v.free(a)
+                    n
+                },
+                .Err(e) => 90
+            })
+        },
+        .Err(e) => 91
+    })
+}
+failure = () i32 {
+    lim := LimitAlloc(left: 1)
+    a := lim.addr()
+    r0: Result<vec.Vec<i32>, IoError> := vec.try_of(a, [4])
+    r0.match ({
+        .Ok(v) => {
+            r1: Result<vec.Vec<i32>, IoError> := v.try_push(a, 5)
+            r1.match ({
+                .Ok(v2) => {
+                    v2.free(a)
+                    80
+                },
+                .Err(e) => {
+                    n := v.get(0)
+                    v.free(a)
+                    n
+                }
+            })
+        },
+        .Err(e) => 81
+    })
+}
+main = () i32 {
+    n := success() + failure()
+    (n == 7).match ({ true => 0, false => n })
+}
