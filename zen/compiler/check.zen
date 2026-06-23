@@ -4,7 +4,7 @@
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
-{ view, eq, is_empty } = std.text.str
+{ view, eq, is_empty, ends_with } = std.text.str
 { String } = std.text.string
 { at } = std.text.bytes
 { Map, of } = std.collections.map
@@ -161,7 +161,14 @@ recv_name* = (t: Ty) str {
 }
 enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }
 ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
-elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), _ => tvoid() }) }
+// is this generic the std `Vec<T>`? The flattened name is import-style dependent: a destructured
+// `{ Vec } = ...` yields bare "Vec", a namespace alias `vec = ...` yields "vec__Vec" (deeper paths
+// add more "__" segments). Match the bare name or any "…__Vec" suffix so both forms resolve.
+ty_is_vec = (g: GenericData) bool { eq(g.name, "Vec") || g.name.ends_with("__Vec") }
+// element type of an iterable receiver: a slice `[T]` yields T, and a `Vec<T>` (Generic over [T], a
+// {ptr,len,cap} struct with an UNTYPED RawPtr buffer) yields its first type arg — so `.loop`/index
+// over a Vec binds T from the receiver's generic param, not void.
+elem_of = (t: Ty) Ty { t.match ({ .Slice(e) => load(e), .Generic(g) => (g.ty_is_vec() && (g.args.len > 0)).match ({ true => g.args[0], false => tvoid() }), _ => tvoid() }) }
 enum_has = (ed: EnumDecl, vn: str) bool {
     f := false
     ed.variants.loop((h, i, v) { f = eq(v.name, vn).match ({ true => true, false => f }) })
