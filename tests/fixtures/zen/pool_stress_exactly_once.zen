@@ -1,0 +1,106 @@
+// STRESS: P producer OS-threads concurrently send to NACT shared actors (true MPSC contention on each
+// mailbox + the scheduled-flag transition). Every accepted message atomically bumps a global counter.
+// After producers join + quiescence, assert counter == total accepted (exactly-once: no message lost to
+// the lost-wakeup race, none duplicated by double-schedule). Mailboxes are over-sized so NOTHING drops
+// → accepted == sent → counter MUST equal P*MSGS. Repeated 50× (races are probabilistic).
+{ pool_open, pool_spawn, pool_send, pool_quiesce_stop, pool_close, pool_actor_free, workers_busy, pool_view, pool_raw, Pool } = std.concurrent.pool
+{ spawn, join, JoinHandle } = std.thread
+{ println } = std.text.fmt
+
+NPROD   := 8       // producer threads
+MSGS    := 2000    // messages per producer
+NACT    := 8       // shared actors
+WORKERS := 4
+ITERS   := 50
+
+processed := malloc(8)
+
+behave = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, 1) }
+
+// producer arg layout: [0]=pool_raw [8]=actors_ptr [16]=pid [24]=ok_out
+PA_POOL := 0
+PA_ACTS := 8
+PA_PID  := 16
+PA_OK   := 24
+
+send_loop = (p: MutPtr<Pool>, acts: RawPtr<u8>, pid: i64, k: i64, ok: i64) i64 {
+    (k >= MSGS).match ({
+        true  => ok,
+        false => {
+            target := (pid + k) % NACT
+            a := acts.offset(target * 8).load_i64().offset(0)
+            sent := p.pool_send(a, 1)
+            send_loop(p, acts, pid, k + 1, sent.match ({ true => ok + 1, false => ok }))
+        }
+    })
+}
+producer = (arg: RawPtr<u8>) RawPtr<u8> {
+    pool_raw := load_i64(arg.offset(PA_POOL)).offset(0)
+    acts := load_i64(arg.offset(PA_ACTS)).offset(0)
+    pid := load_i64(arg.offset(PA_PID))
+    p := pool_view(pool_raw)
+    ok := send_loop(p, acts, pid, 0, 0)
+    arg.offset(PA_OK).store_i64(ok)
+    null_ptr()
+}
+
+spawn_actors = (acts: RawPtr<u8>, i: i64) void {
+    (i < NACT).match ({ true => { acts.offset(i * 8).store_i64(pool_spawn(processed, NPROD * MSGS + 16, behave))  spawn_actors(acts, i + 1) }, false => {} })
+}
+free_actors = (acts: RawPtr<u8>, i: i64) void {
+    (i < NACT).match ({ true => { pool_actor_free(acts.offset(i * 8).load_i64().offset(0))  free_actors(acts, i + 1) }, false => {} })
+}
+start_prods = (pool_raw: RawPtr<u8>, acts: RawPtr<u8>, hs: RawPtr<u8>, ar: RawPtr<u8>, i: i64) void {
+    (i < NPROD).match ({
+        true => {
+            c := ar.offset(i * 32)
+            c.offset(PA_POOL).store_i64(pool_raw)
+            c.offset(PA_ACTS).store_i64(acts)
+            c.offset(PA_PID).store_i64(i)
+            c.offset(PA_OK).store_i64(0)
+            h := spawn(producer, c)
+            hs.offset(i * 8).store_i64(h.tid)
+            start_prods(pool_raw, acts, hs, ar, i + 1)
+        },
+        false => {}
+    })
+}
+join_prods = (hs: RawPtr<u8>, ar: RawPtr<u8>, i: i64, acc: i64) i64 {
+    (i < NPROD).match ({
+        true  => { join(JoinHandle(tid: hs.offset(i * 8).load_i64().offset(0)))  join_prods(hs, ar, i + 1, acc + ar.offset(i * 32).offset(PA_OK).load_i64()) },
+        false => acc
+    })
+}
+
+// one stress iteration: returns 1 on pass, 0 on fail.
+iteration = () i64 {
+    store_i64(processed, 0)
+    acts := malloc(NACT * 8)
+    spawn_actors(acts, 0)
+    p := pool_open(WORKERS, NACT + 8)
+    pool_raw := p.pool_raw()
+    hs := malloc(NPROD * 8)
+    ar := malloc(NPROD * 32)
+    start_prods(pool_raw, acts, hs, ar, 0)
+    sent := join_prods(hs, ar, 0, 0)     // total ACCEPTED sends across producers
+    p.pool_quiesce_stop()
+    got := load_i64(processed)
+    free_actors(acts, 0)
+    p.pool_close()
+    free(acts)  free(hs)  free(ar)
+    (got == sent).match ({ true => (sent == NPROD * MSGS).match ({ true => 1, false => 0 }), false => 0 })
+}
+
+run_iters = (i: i64, passes: i64) i64 {
+    (i >= ITERS).match ({
+        true  => passes,
+        false => run_iters(i + 1, passes + iteration())
+    })
+}
+
+main = () i32 {
+    passes := run_iters(0, 0)
+    println(passes)
+    free(processed)
+    (passes == ITERS).match ({ true => 42, false => 1 })
+}

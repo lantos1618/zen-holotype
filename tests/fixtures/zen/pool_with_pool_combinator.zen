@@ -1,0 +1,29 @@
+// The `with_pool` colorless combinator: open M workers, run the actor-spawning body, drain to
+// quiescence, shut down + free — all in one call (the parallel sibling of std.scope's with_sync).
+// 3 actors each get 3000 messages adding 2 → total 18000 across 4 workers. Exit 9 = exact total.
+{ with_pool, pool_spawn, pool_send, pool_actor_free, Pool } = std.concurrent.pool
+
+NACT := 3
+PERMSG := 3000
+acc := malloc(8)
+slots := malloc(NACT * 8)
+behave = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, msg) }
+
+send_n = (p: MutPtr<Pool>, a: RawPtr<u8>, k: i64) void { (k < PERMSG).match ({ true => { p.pool_send(a, 2)  send_n(p, a, k + 1) }, false => {} }) }
+body = (p: MutPtr<Pool>) i64 {
+    fill(p, 0)
+    0
+}
+fill = (p: MutPtr<Pool>, i: i64) void {
+    (i < NACT).match ({ true => { a := pool_spawn(acc, PERMSG + 8, behave)  slots.offset(i * 8).store_i64(a)  send_n(p, a, 0)  fill(p, i + 1) }, false => {} })
+}
+free_all = (i: i64) void { (i < NACT).match ({ true => { pool_actor_free(slots.offset(i * 8).load_i64().offset(0))  free_all(i + 1) }, false => {} }) }
+
+main = () i32 {
+    store_i64(acc, 0)
+    with_pool(4, NACT + 8, body)
+    total := load_i64(acc)
+    free_all(0)
+    free(acc)  free(slots)
+    (total == NACT * PERMSG * 2).match ({ true => 9, false => 1 })
+}
