@@ -54,8 +54,15 @@ Map*<T>: {
     len: i64,
     cap: i64
 
-    keys = (m: Map<T>) [str] { slice(m.keys, m.cap) }
-    vals = (m: Map<T>) [T] { slice(m.vals, m.cap) }
+    // Live view over the LEN live entries (stored compactly in slots [0, len) in insertion
+    // order — there is no delete, so no gaps). Sized to `len`, NOT `cap`: a `.loop` over the
+    // result iterates only real entries instead of walking the empty/NULL tail of the backing
+    // table (which segfaults). The append writers (`append`/`try_append`/`of`) index slot
+    // `len` (one past) via raw pointer arithmetic, which ignores the slice's `.len`, so writing
+    // the next slot still lands in the cap-sized backing buffer — only `.loop`/`.len` consumers
+    // observe the tighter bound.
+    keys = (m: Map<T>) [str] { slice(m.keys, m.len) }
+    vals = (m: Map<T>) [T] { slice(m.vals, m.len) }
     // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
     index = (m: Map<T>) [i64] { slice(m.idx, m.cap * 2) }
     len = (m: Map<T>) i64 { m.len }
