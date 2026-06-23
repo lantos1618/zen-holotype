@@ -492,6 +492,17 @@ def test_thread_atomic_counter():
     assert r.returncode == 42, r.stderr
 
 
+def test_sync_mutex_counter():
+    """Parallelism LOCKING layer (std.sync over pthread mutex/cond): 4 REAL OS threads each bump a
+    SHARED counter 100000x with a PLAIN (non-atomic) +1 INSIDE a Mutex lock/unlock; the joined total
+    must be exactly 400000. The mutex — not an atomic — is what makes the plain read-modify-write
+    safe (drop the lock and increments are lost). Plus a CondVar ping-pong: a waiter blocks on the
+    condvar until main signals a ready flag under the lock. Exit 42 = both held."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "sync_mutex_counter.zen")
+    assert r.returncode == 42, r.stderr
+
+
 def test_scope_generic_field_dispatch():
     """A1: trait dispatch through a nested-generic struct FIELD receiver across an inlined generic fn.
     `Scope<A>(alloc: a.addr())` monomorphizes to Scope<SyncArena>, and the field receiver `s.alloc`

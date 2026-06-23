@@ -1,0 +1,99 @@
+// Parallelism LOCKING floor (std.sync): 4 REAL OS threads each bump a SHARED counter 100000× using a
+// PLAIN `+ 1` (NOT atomic) inside a Mutex lock/unlock. Only true mutual exclusion makes the plain
+// read-modify-write safe — drop the lock and increments are lost. join all four; the total must be
+// exactly 400000. Plus a CondVar ping-pong: a worker waits on a condvar until main signals a ready
+// flag, proving wait/signal hand off correctly. Exit 42 only when both hold; otherwise exit 1.
+{ spawn, join } = std.thread
+{ Mutex, CondVar, new_mutex, new_cond } = std.sync
+{ println } = std.text.fmt
+
+PER  := 100000
+NTHR := 4
+
+// shared state passed through the thread `arg` pointer (8-byte cells, C-style):
+//   slot[0] = counter   slot[1] = Mutex.raw   slot[2] = CondVar.raw   slot[3] = ready flag
+COUNTER_OFF := 0
+MUTEX_OFF   := 8
+COND_OFF    := 16
+READY_OFF   := 24
+
+// bump the shared counter `n` times with a PLAIN +1 under the mutex (the lock is what makes it safe).
+bump = (ctr: RawPtr<u8>, m: Mutex, n: i64) void {
+    (n <= 0).match ({
+        true  => {},
+        false => {
+            m.lock()
+            store_i64(ctr, load_i64(ctr) + 1)   // plain read-modify-write — racy WITHOUT the lock
+            m.unlock()
+            bump(ctr, m, n - 1)
+        }
+    })
+}
+
+// non-capturing thread body: unpack the shared cells from `arg` and run the protected bumps.
+worker = (arg: RawPtr<u8>) RawPtr<u8> {
+    ctr := arg.offset(COUNTER_OFF)
+    m   := Mutex( raw: load_i64(arg.offset(MUTEX_OFF)).offset(0) )
+    bump(ctr, m, PER)
+    null_ptr()
+}
+
+// condvar waiter: hold the mutex, wait until READY_OFF flips to 1, then write 99 into the counter+1 slot.
+waiter = (arg: RawPtr<u8>) RawPtr<u8> {
+    m     := Mutex( raw: load_i64(arg.offset(MUTEX_OFF)).offset(0) )
+    c     := CondVar( raw: load_i64(arg.offset(COND_OFF)).offset(0) )
+    ready := arg.offset(READY_OFF)
+    m.lock()
+    wait_ready(c, m, ready)
+    m.unlock()
+    arg
+}
+
+// re-check the predicate in a loop (guards against spurious wakeups).
+wait_ready = (c: CondVar, m: Mutex, ready: RawPtr<u8>) void {
+    (load_i64(ready) != 0).match ({
+        true  => {},
+        false => { c.wait(m)  wait_ready(c, m, ready) }
+    })
+}
+
+main = () i32 {
+    shared := malloc(32)
+    store_i64(shared.offset(COUNTER_OFF), 0)
+    store_i64(shared.offset(READY_OFF), 0)
+
+    mtx := new_mutex()
+    cnd := new_cond()
+    store_i64(shared.offset(MUTEX_OFF), mtx.raw)
+    store_i64(shared.offset(COND_OFF), cnd.raw)
+
+    h0 := spawn(worker, shared)
+    h1 := spawn(worker, shared)
+    h2 := spawn(worker, shared)
+    h3 := spawn(worker, shared)
+    join(h0)
+    join(h1)
+    join(h2)
+    join(h3)
+    total := load_i64(shared.offset(COUNTER_OFF))
+    println(total)
+
+    // CondVar ping-pong: start a waiter, set ready under the lock, broadcast, join.
+    wh := spawn(waiter, shared)
+    mtx.lock()
+    store_i64(shared.offset(READY_OFF), 1)
+    cnd.broadcast()
+    mtx.unlock()
+    join(wh)
+    pong := load_i64(shared.offset(READY_OFF))
+    println(pong)
+
+    mtx.destroy()
+    cnd.destroy()
+
+    expected := PER * NTHR
+    (total == expected).match ({
+        true  => (pong == 1).match ({ true => 42, false => 1 }),
+        false => 1
+    })
+}
