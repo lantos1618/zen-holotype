@@ -198,6 +198,13 @@ VALUE_CASES = [
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n r.match({ .Err(e) => { return e }, _ })\n 7\n}\ntest* = () i32 { f(.Err(42)) }', 42),
     ('f* = (n: i32) i32 {\n x := 0\n n.match({ 0 => { x = 1 }, 1 => { x = 2 }, _ })\n x\n}\ntest* = () i32 { f(0)*100 + f(1)*10 + f(9) }', 120),
     ('R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Ok(v) => { return v }, .Err => { return 9 } })\n 0\n}\ntest* = () i32 { f(.Ok(5)) + f(.Err()) }', 14),
+# --- A.1 (TRUST): early `return <bare-ctor>` in a discarded guard match infers its enum from the
+#     DECLARED FUNCTION RETURN TYPE, not void. A GENERIC Result must mangle to Result_i32_str on BOTH
+#     the early `return .Err("neg")` and the trailing `.Ok(n)`; the pre-fix bug mangled the early
+#     return to a distinct C struct (Result_void_text) so the function returned garbage. ---
+    ('Result*<T, E>: Ok(T) | Err(E)\nf = (n: i32) Result<i32, str> {\n  (n < 0).match({ true => return .Err("neg"), false => {} })\n  .Ok(n)\n}\ntest* = () i32 { f(5).match({ .Ok(v) => v, .Err(e) => 0 }) }', 5),
+    ('Result*<T, E>: Ok(T) | Err(E)\nf = (n: i32) Result<i32, str> {\n  (n < 0).match({ true => return .Err("neg"), false => {} })\n  .Ok(n)\n}\ntest* = () i32 { f(0 - 3).match({ .Ok(v) => v, .Err(e) => 42 }) }', 42),
+    ('Result*<T, E>: Ok(T) | Err(E)\nf = (n: i32) Result<i32, str> { (n < 0).match({ true => .Err("neg"), false => .Ok(n) }) }\ntest* = () i32 { f(7).match({ .Ok(v) => v, .Err(e) => 0 }) }', 7),
 # --- test_value_position_trailing_value_accepted (value half) ---
     ('R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }', 6),
     ('f* = (b: bool) i32 {\n v := b.match({ true => { 7 }, false => 0 })\n v\n}\ntest* = () i32 { f(true) }', 7),
