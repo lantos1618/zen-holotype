@@ -386,6 +386,23 @@ VERDICT_CASES = [
     # --- generic-call arity (used to check ok then segfault: the half-bound template was inlined)
     ('test* = () i32 { a: u8 := 300  to_i32(a) }', 'reject'),
     ('test* = () i32 { x: i32 := 4294967296  to_i32(x) }', 'reject'),
+    # --- A.4: every fixed-width int slot range-checks its literal (i8/i16/u16/u32/u64, incl. negatives) ---
+    ('test* = () i32 { a: i8 := 200  0 }', 'reject'),
+    ('test* = () i32 { a: i16 := 40000  0 }', 'reject'),
+    ('test* = () i32 { a: u16 := 70000  0 }', 'reject'),
+    ('test* = () i32 { a: u32 := 0 - 1  0 }', 'reject'),
+    ('test* = () i32 { a: u64 := 0 - 1  0 }', 'reject'),
+    ('test* = () i32 { a: i8 := 127  0 }', 'accept'),
+    ('test* = () i32 { a: i8 := 0 - 128  0 }', 'accept'),
+    ('P*: { x: u8 }\ntest* = () i32 { p := P( x: 300 )  0 }', 'reject'),
+    # --- C.9: passes-check-then-fails-cc holes closed in check_validate ---
+    ('P*: { x: i32 }\ntest* = () i32 { a: P := P( x: 1 )  c := a == P( x: 2 )  0 }', 'reject'),    # struct == struct
+    ('test* = () i32 { x := 5  y := x.foo  0 }', 'reject'),                                        # field access on a scalar
+    ('test* = () i32 { n := 1  v := n.match ({ 1 => 5, _ => "s" })  0 }', 'reject'),               # value-match arms differ (i32 vs str)
+    ('A*: { x: i32 }\nB*: { y: i32 }\ntest* = () i32 { n := 1  v := n.match ({ 1 => A( x: 1 ), _ => B( y: 2 ) })  0 }', 'reject'),  # match arms differ (struct A vs B)
+    ('test* = () i32 { c := true  v := c.match ({ true => 5, false => "s" })  0 }', 'reject'),      # bool-match arms differ
+    ('E*: A(i32) | B\ntest* = () i32 { x := E.A("s")  0 }', 'reject'),                             # enum payload type mismatch
+    ('test* = () i32 { n := 1  v := n.match ({ 1 => 5, _ => 7 })  0 }', 'accept'),                  # value-match arms agree -> ok
     ('test* = () i32 { x := 50  (1 < x < 10).match ({ true => 1, false => 0 }) }', 'reject'),
     ('pick<T> = (xs: [T], a: T) T { a }\ntest* = () i32 { pick([1, 2]) }', 'reject'),
     # --- VARIADIC PARAMS: a `...T` param must be LAST and there may be at most ONE (parse rejects otherwise) ---
