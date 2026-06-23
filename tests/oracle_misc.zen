@@ -14,7 +14,7 @@
 { VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite } = oracle_lib
 { Malloc } = std.mem.alloc
 { out, save, contents_in, shell } = std.io.file
-{ eq, len, contains, starts_with, is_empty } = std.text.str
+{ eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
 
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
@@ -128,14 +128,69 @@ oracle_misc_num_parse = () i32 {
 // ════════════════════════════════════════════════════════════════════════════════
 // acid  <- tests/test_acid.py
 // Every real zen/std/*.zen and zen/compiler/*.zen file is fed THROUGH the EMIT binary AS-IS; the
-// emission must succeed (rc 0) and begin with the zslice HEAD (a non-trivial, well-formed C unit).
+// emission must succeed (rc 0), begin with the zslice HEAD (a non-trivial, well-formed C unit), AND
+// every top-level non-generic, non-exported declaration name must survive into the emitted C — the
+// Zen equivalent of pytest's `for name in _DECL_RE.findall(src): assert name in out`.
 // ════════════════════════════════════════════════════════════════════════════════
+om_is_alpha = (b: u8) bool { ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_') }
+om_is_alnum = (b: u8) bool { om_is_alpha(b) || ((b >= '0') && (b <= '9')) }
+
+// Mirror of `_DECL_RE = ^([a-zA-Z_]\w*)\s*=\s*\(` (re.M): scan `src` for each line-initial
+// `name = (` declaration (col-0 only; `name*`/`name = <T>(` are excluded since the char after the
+// name is not `=`, and a generic's `<` is not `(`), and require every such `name` to appear in `c`.
+// `\s` is approximated by space/tab between the tokens (the only whitespace real source uses there);
+// this only ever matches a SUBSET of the regex, so it can never raise a failure the regex wouldn't.
+// Byte access goes through a single `[u8]` view (O(1) index) — NOT `at` (which re-strlens per call).
+om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
+    sv: [u8] := src.view()
+    n := sv.len
+    i: i64 := 0
+    ls := true            // at a line start?
+    ok := true
+    @while(i < n) {
+        b := sv[i]
+        (ls && om_is_alpha(b)).match ({
+            true => {
+                // identifier [i, e)
+                e := i
+                @while((e < n) && om_is_alnum(sv[e])) { e = e + 1 }
+                // skip spaces/tabs, expect '='
+                q := e
+                @while((q < n) && ((sv[q] == ' ') || (sv[q] == '\t'))) { q = q + 1 }
+                ((q < n) && (sv[q] == '=')).match ({
+                    true => {
+                        // skip spaces/tabs, expect '('
+                        q2 := q + 1
+                        @while((q2 < n) && ((sv[q2] == ' ') || (sv[q2] == '\t'))) { q2 = q2 + 1 }
+                        ((q2 < n) && (sv[q2] == '(')).match ({
+                            true => {
+                                name := mp.substr(src, i, e - i)
+                                contains(c, name).match ({ true => {}, false => { ok = false } })
+                            },
+                            false => {}
+                        })
+                    },
+                    false => {}
+                })
+            },
+            false => {}
+        })
+        ls = (b == '\n')
+        i = i + 1
+    }
+    ok
+}
+
 om_acid_ok = (mp: MutPtr<Malloc>, path: str) bool {
     save("/tmp/zo_misc_acid.c", "", 0)
     rc := shell(mp.om_cat3("./zenc emit ", path, " > /tmp/zo_misc_acid.c 2>/dev/null"))
     txt := mp.om_read_file("/tmp/zo_misc_acid.c")
+    src := mp.om_read_file(path)
     (rc == 0).match ({
-        true  => txt.starts_with(HEAD),
+        true  => txt.starts_with(HEAD).match ({
+            true  => mp.om_decls_survive(src, txt),
+            false => false
+        }),
         false => false
     })
 }
