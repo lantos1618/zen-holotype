@@ -256,6 +256,11 @@ VALUE_CASES = [
 # --- M1b: a non-capturing lambda LITERAL stored in a field is LIFTED to a top-level fn + called ---
     ('Box*: { op: (i32, i32) i32 }\ntest* = () i32 {\n  b := Box(op: (x, y) { x + y })\n  b.op(4, 5)\n}', 9),                                              # stored lambda literal, lifted + called
     ('Store*<S>: { state: S, reducer: (S, i32) S }\nAppState*: { count: i32 }\ntest* = () i32 {\n  st := Store<AppState>(state: AppState(count: 0), reducer: (s, a) { AppState(count: s.count + a) })\n  ns := st.reducer(st.state, 7)\n  ns.count\n}', 7),   # generic store, INLINE lambda reducer lifted
+# --- REPLYREF-1: a generic FnT param `(RR<T>) void` whose T appears in NO return — inferred from the
+#     message-VARIANT payload that declares it, via the inline closure that passes its param straight
+#     into `.Get(reply)` (Get carries RR<i32>). This is the actor ask/request inline-closure reply
+#     handler: without variant-payload inference T=void -> sizeof(void)/ReplyRef_void cc error. ---
+    ('RR<T>: { v: T }\nMsg: Inc | Get(RR<i32>)\nother = (m: Msg) void { }\nmkrr<T> = () RR<T> { RR<T>(v: 7) }\nask<T> = (issue: (RR<T>) void) i32 {\n  r: RR<T> := mkrr()\n  issue(r)\n  r.v\n}\ntest* = () i32 { ask((reply) { other(.Get(reply)) }) }', 7),
 # --- M1c: a function VALUE RETURNED from a function (precise FnT-return typedef) + called ---
     ('mk* = () (i32) i32 { (n) { n + 1 } }\ntest* = () i32 {\n  f := mk()\n  f(41)\n}', 42),                                                       # returned lambda, lifted + called
     ('add1* = (n: i32) i32 { n + 1 }\nmk2* = () (i32) i32 { add1 }\ntest* = () i32 {\n  f := mk2()\n  f(41)\n}', 42),                                # returned NAMED fn value, called

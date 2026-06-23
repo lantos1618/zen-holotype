@@ -1477,10 +1477,87 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: str) Ty {
     pargs.loop((h, i, pa) { found = found.is_void_ty().match ({ true => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }), false => found }) })
     found
 }
+// The declared payload type of variant `vn`, scanning every enum decl (concrete or generic).
+variant_payload_ty = (decls: [Decl], vn: str) Ty {
+    found := tvoid()
+    decls.loop((h, i, d) { found = found.is_void_ty().match ({ true => d.match ({
+        .DEnum(ed)   => ed.enum_variant_payload(vn),
+        .DGenEnum(g) => g.gen_variant_payload(vn),
+        _            => tvoid()
+    }), false => found }) })
+    found
+}
+enum_variant_payload = (ed: EnumDecl, vn: str) Ty {
+    found := tvoid()
+    ed.variants.loop((h, i, v) { found = eq(v.name, vn).match ({ true => v.payload, false => found }) })
+    found
+}
+// Infer a lambda parameter's concrete type from a `.Variant(param)` constructor in the body: the
+// variant declares the payload type (e.g. `Get(ReplyRef<i32>)`), so the param `(reply){...}` that is
+// passed straight into `.Get(reply)` is ReplyRef<i32>. This lets a generic FnT param `(ReplyRef<T>) R`
+// recover T even with no return to flow it from — the actor ask/request inline-closure reply handler.
+lam_param_payload = (decls: [Decl], body: [Stmt], pname: str) Ty {
+    found := tvoid()
+    body.loop((h, i, st) { found = found.is_void_ty().match ({ true => decls.lpp_stmt(st, pname), false => found }) })
+    found
+}
+lpp_stmt = (decls: [Decl], st: Stmt, pname: str) Ty {
+    st.match ({
+        .ExprStmt(e) => decls.lpp_expr(e, pname),
+        .Return(r)   => decls.lpp_expr(r, pname),
+        .Let(l)      => decls.lpp_expr(l.value, pname),
+        .Assign(x)   => decls.lpp_expr(x.value, pname),
+        _            => tvoid()
+    })
+}
+lpp_expr = (decls: [Decl], e: Ptr<Expr>, pname: str) Ty {
+    load(e).match ({
+        .MakeEnum(mk)   => decls.lpp_payload(mk.variant, mk.payload, pname),
+        .Call(c)        => decls.lpp_args(c.args, pname),
+        .MethodCall(mc) => decls.lpp_mcall(mc, pname),
+        .Block(b)       => decls.lam_param_payload(b.stmts, pname),
+        _               => tvoid()
+    })
+}
+lpp_payload = (decls: [Decl], variant: str, payload: Ptr<Expr>, pname: str) Ty {
+    load(payload).match ({
+        .Var(v) => eq(v.name, pname).match ({ true => decls.variant_payload_ty(variant), false => tvoid() }),
+        _       => tvoid()
+    })
+}
+lpp_args = (decls: [Decl], args: [Expr], pname: str) Ty {
+    found := tvoid()
+    args.loop((h, i, ar) { found = found.is_void_ty().match ({ true => decls.lpp_expr(ar.addr(), pname), false => found }) })
+    found
+}
+lpp_mcall = (decls: [Decl], mc: MethodCallData, pname: str) Ty {
+    r := decls.lpp_expr(mc.recv, pname)
+    r.is_void_ty().match ({ true => decls.lpp_args(mc.args, pname), false => r })
+}
+// Unify a generic FnT param `(ReplyRef<T>) R` against a lambda argument by inferring each lambda
+// param's concrete type from its body (the `.Variant(param)` site that declares it).
+lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: str) Ty {
+    fpty.match ({
+        .FnT(ft) => {
+            found := tvoid()
+            ft.params.loop((h, i, pt) { found = found.is_void_ty().match ({ true => (i < lm.params.len).match ({ true => pt.unify_ty(decls.lam_param_payload(lm.body, lm.params[i].name), tp), false => found }), false => found }) })
+            found
+        },
+        _ => tvoid()
+    })
+}
 infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     found := tvoid()
-    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => p.ty.unify_ty(cargs[i].addr().light_ty(a, env, decls, idx), tp), false => found }), false => found }) })
+    params.loop((h, i, p) { found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => a.unify_carg(decls, idx, p.ty, cargs[i].addr(), tp, env), false => found }), false => found }) })
     found
+}
+// A lambda argument carries no inferrable value type (light_ty -> void); recover a tparam in its FnT
+// param position from the lambda body instead. Other args unify against their light type as before.
+unify_carg = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, pty: Ty, carg: Ptr<Expr>, tp: str, env: Ptr<VList>) Ty {
+    load(carg).match ({
+        .Lambda(lm) => decls.lam_unify(pty, lm, tp),
+        _           => pty.unify_ty(carg.light_ty(a, env, decls, idx), tp)
+    })
 }
 infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     arg := params.infer_one(a, cargs, tp, env, decls, idx)
