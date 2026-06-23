@@ -464,7 +464,8 @@ docs. It is a first-pass docs command, not a rich documentation generator.
 | CLI build/run/check/project manifest | [tests/test_build.py](tests/test_build.py) |
 | Examples | [tests/test_build.py::test_all_examples_run](tests/test_build.py) |
 | Lexer/parser/bootstrap/fixpoint | [tests/test_bootstrap.py](tests/test_bootstrap.py), [tests/test_acid.py](tests/test_acid.py) |
-| Accepted/rejected core language behavior | [tests/test_oracle.py](tests/test_oracle.py), [tests/test_oracle_fuzz.py](tests/test_oracle_fuzz.py) |
+| Accepted/rejected core language behavior | [tests/test_oracle.py](tests/test_oracle.py) |
+| Crash-resistance fuzzing (malformed input) | [tests/oracle_fuzz.zen](tests/oracle_fuzz.zen) |
 | Traits and impl conformance | [tests/test_traits.py](tests/test_traits.py) |
 | Imports and resolver behavior | [tests/test_user_imports.py](tests/test_user_imports.py), [tests/test_resolver_oracle.py](tests/test_resolver_oracle.py) |
 | Std module import coverage | [tests/test_modules_oracle.py](tests/test_modules_oracle.py) |
