@@ -34,6 +34,11 @@ VCase*: { src: str, want: str }
 // a VERDICT case: `zenc check src` must accept (should_pass=true) or reject (false). When rejecting
 // and `kind` is non-empty, the diagnostic must contain `error[<kind>]` (e.g. kind: "arity").
 VerdictCase*: { src: str, should_pass: bool, kind: str }
+// a DIAGNOSTIC case: `zenc check src` must REJECT (exit nonzero), and its full diagnostic text (stderr,
+// captured) must CONTAIN every string in `wants` — the precise positioned-diagnostic assertion (kind +
+// `line:col` + the source line + the `^~~` caret + the human message + hint). Substring containment is
+// adversarially sufficient: corrupt any expected piece (a wrong col, a missing caret) and the case fails.
+DiagCase*: { src: str, wants: [str] }
 
 // build the diagnostic needle `error[<kind>]` for a kind label.
 kind_needle = (mp: MutPtr<Malloc>, kind: str) str {
@@ -81,6 +86,28 @@ run_verdict* = (vc: VerdictCase) bool {
     })
 }
 
+// DIAGNOSTIC: `zenc check` must reject (exit nonzero); capture the FULL diagnostic (stdout+stderr) and
+// require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
+run_diag* = (dc: DiagCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save("/tmp/zod_v.zen", dc.src, len(dc.src))
+    rc := shell("./zenc check /tmp/zod_v.zen > /tmp/zod_out.txt 2>&1")
+    (rc == 0).match ({
+        true  => false,                                   // must REJECT
+        false => mp.contents_in("/tmp/zod_out.txt").match ({
+            .Ok(txt) => {
+                all := true
+                dc.wants.loop((h, i, wnt) {
+                    txt.contains(wnt).match ({ true => {}, false => { all = false } })
+                })
+                all
+            },
+            .Err(e) => false
+        })
+    })
+}
+
 // the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
 // temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
 fixpoint_ok* = () bool {
@@ -121,6 +148,18 @@ run_verdicts* = (name: str, cs: [VerdictCase]) i32 {
     fails := 0
     cs.loop((h, i, c) {
         run_verdict(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// batch DIAGNOSTIC runner + reporter: run every case, print '.'/'F', return the failing count.
+run_diags* = (name: str, cs: [DiagCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_diag(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
     })
     out("\n")
     fails

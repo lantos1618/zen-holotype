@@ -1,0 +1,37 @@
+{ Allocator, default } = std.mem.alloc
+{ Result, IoError } = std.core.result
+file = std.io.file
+{ contents_in } = std.io.file
+{ eq } = std.text.str
+{ to_exit } = std.core.bool
+LimitAlloc: { _: i32 }
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void {}
+})
+main = () i32 {
+    heap := default()
+    a := heap.addr()
+    missing := a.contents_in("/tmp/zo_iofile_missing.txt")
+    missing_ok := missing.match({
+        .Err(e) => e.match({ .NotFound => true, _ => false }),
+        .Ok(s) => false
+    })
+    denied := file.save("/tmp/zo_iofile_nope/out.txt", "zen", 3)
+    denied_ok := denied.match({
+        .Err(e) => e.match({ .Denied => true, _ => false }),
+        .Ok(n) => false
+    })
+    wrote := file.save("/tmp/zo_iofile_out.txt", "zen", 3)
+    wrote_ok := wrote.match({ .Ok(n) => n == 3, .Err(e) => false })
+    read := a.contents_in("/tmp/zo_iofile_out.txt")
+    read_ok := read.match({ .Ok(s) => s.eq("zen"), .Err(e) => false })
+    lim := LimitAlloc(_: 0)
+    alloc_fail: Result<str, IoError> := file.contents_in(lim.addr(), "/tmp/zo_iofile_out.txt")
+    alloc_ok := alloc_fail.match({
+        .Err(e) => e.match({ .Errno(code) => code == 12, _ => false }),
+        .Ok(s) => false
+    })
+    (missing_ok && denied_ok && wrote_ok && read_ok && alloc_ok).to_exit()
+}

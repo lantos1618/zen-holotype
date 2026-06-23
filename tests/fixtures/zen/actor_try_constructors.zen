@@ -1,0 +1,66 @@
+{ Allocator, malloc, free } = std.mem.alloc
+{ Result, IoError } = std.core.result
+{ to_exit } = std.core.bool
+{ ActorCell, ReplyRef, try_cell } = std.concurrent.actor
+Msg*: Ping
+Counting: { acquired: i32, released: i32, fail_after: i32 }
+should_fail = (a: MutPtr<Counting>) bool { (a.fail_after >= 0) && (a.acquired >= a.fail_after) }
+Counting.impl(Allocator, {
+    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
+        a.should_fail().match ({
+            true => null_ptr(),
+            false => {
+                a.acquired = a.acquired + 1
+                malloc(n)
+            }
+        })
+    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
+        a.released = a.released + 1
+        free(p)
+    }
+})
+success = () bool {
+    c := Counting(acquired: 0, released: 0, fail_after: -1)
+    a := c.addr()
+    cell_r: Result<ActorCell<Msg>, IoError> := a.try_cell(4)
+    ok_cell := cell_r.match({
+        .Ok(cell) => { cell.free(a)  true },
+        .Err(e) => false
+    })
+    cell2: ActorCell<Msg> := a.cell(4)
+    reply_r: Result<ReplyRef<i32>, IoError> := cell2.try_reply(a)
+    ok_reply := reply_r.match({
+        .Ok(reply) => {
+            reply.send(9)
+            v := reply.await(a)
+            v == 9
+        },
+        .Err(e) => false
+    })
+    cell2.free(a)
+    ok_cell && ok_reply && (c.acquired == 6) && (c.released == 6)
+}
+fail_cell = () bool {
+    c := Counting(acquired: 0, released: 0, fail_after: 1)
+    r: Result<ActorCell<Msg>, IoError> := c.addr().try_cell(4)
+    r.match({
+        .Err(e) => e.match({ .NotFound => (c.acquired == 1) && (c.released == 1), _ => false }),
+        .Ok(cell) => false
+    })
+}
+fail_reply = () bool {
+    c := Counting(acquired: 0, released: 0, fail_after: 3)
+    a := c.addr()
+    cell: ActorCell<Msg> := a.cell(4)
+    r: Result<ReplyRef<i32>, IoError> := cell.try_reply(a)
+    cell.free(a)
+    r.match({
+        .Err(e) => e.match({ .NotFound => (c.acquired == 3) && (c.released == 3), _ => false }),
+        .Ok(reply) => false
+    })
+}
+main = () i32 {
+    (success() && fail_cell() && fail_reply()).to_exit()
+}
