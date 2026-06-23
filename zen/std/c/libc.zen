@@ -48,3 +48,17 @@ getenv* = (name: str) RawPtr<u8>     // char* — NULL when the variable is unse
 popen*  = (cmd: str, mode: str) RawPtr<u8>
 pclose* = (f: RawPtr<u8>) i32
 fgets*  = (buf: RawPtr<u8>, n: i32, f: RawPtr<u8>) RawPtr<u8>
+
+// ── threads (POSIX pthread; binaries that use these must link -lpthread) ──────
+// `pthread_t` is an opaque `unsigned long` (8 bytes) on Linux/glibc, so we model it as a
+// plain i64: pthread_create writes it through a RawPtr<u8> cell (the `thread` out-param), and
+// pthread_join takes it back BY VALUE (an i64 — the C ABI passes it in an integer register,
+// identical to `unsigned long`). `attr` is always null (pass null_ptr()).
+//
+// The start routine is the C `void* (*)(void*)`; we bind it as the fn-type
+// `(RawPtr<u8>) RawPtr<u8>`. genc lowers every fn-type to the single `void(*)(void)` typedef,
+// which is ABI-compatible with `void*(*)(void*)` (all the args/result are pointer-sized). The
+// thread body therefore MUST be a NON-CAPTURING fn (Zen capturing closures can't escape) — all
+// state travels through the single `arg` pointer, C-style. `retval` is a `void**` out-cell.
+pthread_create* = (thread: RawPtr<u8>, attr: RawPtr<u8>, start: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) i32
+pthread_join*   = (thread: i64, retval: RawPtr<u8>) i32

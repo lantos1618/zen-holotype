@@ -482,6 +482,16 @@ def test_scope_colorless_sync_async():
     assert r.returncode == 3, r.stderr
 
 
+def test_thread_atomic_counter():
+    """Parallelism floor (std.thread over pthread): 4 REAL OS threads each bump a SHARED counter
+    100000x via atomic_add_i64 under genuine contention; the joined total must be exactly 400000
+    (a non-atomic increment would lose updates and the total would come up short). A 5th thread
+    returns 42 through its arg pointer. Exit 42 = both held."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "thread_atomic_counter.zen")
+    assert r.returncode == 42, r.stderr
+
+
 def test_scope_generic_field_dispatch():
     """A1: trait dispatch through a nested-generic struct FIELD receiver across an inlined generic fn.
     `Scope<A>(alloc: a.addr())` monomorphizes to Scope<SyncArena>, and the field receiver `s.alloc`

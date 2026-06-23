@@ -1,0 +1,46 @@
+// std.thread — REAL OS threads, the parallelism floor under the cooperative coroutine scheduler.
+//
+// Until now all "concurrency" in zen was cooperative coroutines multiplexed on ONE OS thread
+// (std.concurrent.coroutine). This module is the missing primitive: `spawn` starts a genuine
+// pthread that runs in parallel on another core, and `join` waits for it. With real threads the
+// `atomic_add_i64` fetch-add that std.mem.arc was built on finally does something — it guards a
+// counter against ACTUAL contention, not a hypothetical one.
+//
+// ── THE NON-CAPTURING CONSTRAINT ──────────────────────────────────────────────────────────────
+// A thread body is a NON-CAPTURING fn `(RawPtr<u8>) RawPtr<u8>` — exactly the C `void*(*)(void*)`.
+// Zen capturing closures cannot escape their frame, so a thread fn may NOT close over locals.
+// All state travels through the single `arg` pointer, C-style: pack what the thread needs behind
+// `arg` before spawning, and hand a result back either by writing through `arg` or by returning a
+// RawPtr the joiner reads via `join`. Share mutable state across threads only through atomics
+// (`atomic_add_i64`) or your own locking — plain reads/writes race.
+//
+// Binaries that use this module must link -lpthread (std.build: `.links("pthread")`). On glibc
+// 2.34+ the pthread symbols are folded into libc so the link is a formality, but keep it for
+// portability.
+{ malloc, free } = std.mem.alloc
+{ pthread_create, pthread_join } = std.c.libc
+
+// a handle to a running thread; `tid` points at the 8-byte pthread_t cell pthread_create filled in.
+JoinHandle*: {
+    tid: RawPtr<u8>          // -> pthread_t (an i64 on glibc)
+}
+
+// start `f(arg)` on a fresh OS thread. `f` MUST be non-capturing (see the module header); pass any
+// state it needs through `arg`. Returns a JoinHandle to wait on with `join`.
+spawn* = (f: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) JoinHandle {
+    cell := malloc(8)                        // pthread_t storage; pthread_create writes the id here
+    pthread_create(cell, null_ptr(), f, arg)
+    JoinHandle( tid: cell )
+}
+
+// wait for the thread to finish and return whatever its body returned (the `void*` retval). Frees
+// the handle's backing cells, so a JoinHandle is single-use.
+join* = (h: JoinHandle) RawPtr<u8> {
+    retcell := malloc(8)                     // void* out-cell for the thread's return value
+    pthread_join(load_i64(h.tid), retcell)
+    slot: [RawPtr<u8>] := retcell.slice(1)   // read the stored void* back out
+    r := slot[0]
+    free(retcell)
+    free(h.tid)
+    r
+}
