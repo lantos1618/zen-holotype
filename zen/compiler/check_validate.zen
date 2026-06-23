@@ -732,12 +732,32 @@ eq_mix_err = (env: Env, b: BinData) i32 {
         })
     })
 }
+// A comparison between a SIGNED int and an UNSIGNED int of rank >= 8 (u16/u32/u64) silently uses C's
+// unsigned promotion — `a:i32=-1 < b:u32=1` evaluates FALSE. Reject it. NARROW by design: u8 is
+// excluded so byte/char compares (`b == 'a'`) stay fine (u8 always promotes to a signed int safely).
+is_signed_int = (t: Ty) bool {
+    t.match ({ .I32 => true, .I64 => true, .Named(n) => eq(n, "i8") || eq(n, "i16") || eq(n, "i32") || eq(n, "i64"), _ => false })
+}
+is_unsigned_wide = (t: Ty) bool {
+    t.match ({ .Named(n) => eq(n, "u16") || eq(n, "u32") || eq(n, "u64"), _ => false })
+}
+sign_mismatch = (l: Ty, r: Ty) bool {
+    (l.is_signed_int() && r.is_unsigned_wide()) || (l.is_unsigned_wide() && r.is_signed_int())
+}
+// A numeric LITERAL operand is polymorphic and coerces to the other side's type (`n: u64 < 10` is
+// fine), so only flag when BOTH sides are non-literal values of genuinely mismatched signedness.
+signcmp_err = (env: Env, b: BinData) i32 {
+    ((b.op.is_cmp_op_v() || b.op.is_eq_op_v()) && (b.lhs.is_lit_numeric() == false) && (b.rhs.is_lit_numeric() == false)).match ({
+        true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)).match ({ true => 1, false => 0 }),
+        false => 0
+    })
+}
 operand_err = (env: Env, b: BinData) i32 {
     b.op.is_logic_op().match ({
         true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
         false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
-            true  => env.num_operand_err(b),
-            false => b.op.is_eq_op_v().match ({ true => env.eq_mix_err(b), false => 0 })
+            true  => env.num_operand_err(b) + env.signcmp_err(b),
+            false => b.op.is_eq_op_v().match ({ true => env.eq_mix_err(b) + env.signcmp_err(b), false => 0 })
         })
     })
 }
