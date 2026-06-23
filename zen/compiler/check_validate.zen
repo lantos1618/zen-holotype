@@ -625,6 +625,28 @@ mkenum_err = (env: Env, ty: str, variant: str) i32 {
         false => 0
     })
 }
+// A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
+// Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
+// Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
+enum_payload_err = (env: Env, mk: MakeEnumData) i32 {
+    is_empty(mk.ty).match ({
+        true  => 0,
+        false => {
+            pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+            lv := mk.payload.lit_slot_verdict(pty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => {
+                    vt := env.infer_expr(mk.payload)
+                    (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
+                        true  => 0,
+                        false => fits(vt, pty).match ({ true => 0, false => 1 })
+                    })
+                }
+            })
+        }
+    })
+}
 
 // Every non-wildcard arm must name a declared variant.
 arm_known = (vs: [VariantDef], vname: str) bool {
@@ -876,7 +898,7 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
             subjty := env.infer_expr(m.subj)
             env.check_expr(m.subj) + env.check_arms(subjty, m.arms) + env.match_err(m) + env.match_arm_result_errs(subjty, m.arms) + arm_return_errs(m.arms)
         },
-        .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant),
+        .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant) + env.enum_payload_err(mk),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         .Block(b)       => env.check_block(b.stmts),
@@ -1764,7 +1786,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
             subjty := env.infer_expr(m.subj)
             env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
         },
-        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())),
+        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())).kv_kor(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
