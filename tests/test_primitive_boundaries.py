@@ -29,6 +29,12 @@ RAW_ALLOC_ALLOWED = {
     # the JoinHandle by-value (needs address-of-field — blocked on the .addr()-of-field limit) or
     # thread an allocator through spawn/join, to drop even the floor malloc.
     Path("zen/std/thread.zen"),
+    # std.concurrent.pool is the work-stealing scheduler (Cut 1). Its raw blocks are actor state +
+    # mailbox buffers that must outlive the spawning frame AND be reachable from any worker thread —
+    # cross-thread runtime scratch, the same floor justification as std.thread. FOLLOW-UP (goal item
+    # E, Arc-under-pool): replace these with Arc-backed actor lifetime so the last cross-thread handle
+    # drop frees — which is exactly what makes Arc's atomic refcount load-bearing.
+    Path("zen/std/concurrent/pool.zen"),
     Path("zen/compiler/genc.zen"),
     # genc_emit emits malloc/memcpy as the LOWERING of a heap-promoted slice literal (codegen text,
     # not a call) — same codegen category as genc.zen, which is already allow-listed.
