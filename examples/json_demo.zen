@@ -1,0 +1,54 @@
+json = std.json
+{ Malloc } = std.mem.alloc
+{ println } = std.text.fmt
+
+main = () i32 {
+    mm: Malloc := Malloc(_: 0)
+    a := mm.addr()
+    src := "{\"name\":\"zen\",\"ok\":true,\"nums\":[1,2,3],\"v\":3.14}"
+    println("input:")
+    println(src)
+    r := json.parse(a, src).match ({
+        .Err(e) => {
+            println("parse error")
+            1
+        },
+        .Ok(v)  => {
+            println(".name =")
+            json.get(v, "name").match ({
+                .Some(nv) => json.as_str(nv).match ({ .Some(s) => println(s), _ => println("?") }),
+                .None     => println("absent")
+            })
+            println(".nums[1] =")
+            json.get(v, "nums").match ({
+                .Some(av) => json.as_arr(av).match ({
+                    .Some(xs) => json.as_num(xs[1]).match ({ .Some(n) => println(n), _ => println("?") }),
+                    _         => println("?")
+                }),
+                .None => println("absent")
+            })
+            println(".v =")
+            json.get(v, "v").match ({
+                .Some(vv) => json.as_num(vv).match ({ .Some(n) => println(n), _ => println("?") }),
+                .None     => println("absent")
+            })
+            out := json.stringify(a, v)
+            println("stringify:")
+            println(out)
+            json.parse(a, out).match ({
+                .Err(e2) => {
+                    println("reparse error")
+                    1
+                },
+                .Ok(v2)  => {
+                    json.equals(v, v2).match ({
+                        true  => println("ROUNDTRIP_EQUAL"),
+                        false => println("ROUNDTRIP_DIFF")
+                    })
+                    0
+                }
+            })
+        }
+    })
+    r
+}
