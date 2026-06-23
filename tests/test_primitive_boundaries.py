@@ -29,11 +29,16 @@ RAW_ALLOC_ALLOWED = {
     # the JoinHandle by-value (needs address-of-field — blocked on the .addr()-of-field limit) or
     # thread an allocator through spawn/join, to drop even the floor malloc.
     Path("zen/std/thread.zen"),
-    # std.concurrent.pool is the work-stealing scheduler (Cut 1). Its raw blocks are actor state +
-    # mailbox buffers that must outlive the spawning frame AND be reachable from any worker thread —
-    # cross-thread runtime scratch, the same floor justification as std.thread. FOLLOW-UP (goal item
-    # E, Arc-under-pool): replace these with Arc-backed actor lifetime so the last cross-thread handle
-    # drop frees — which is exactly what makes Arc's atomic refcount load-bearing.
+    # std.concurrent.pool is the work-stealing scheduler. The CROSS-THREAD-SHARED actor state is now
+    # ARC-BACKED (goal item E, DONE): pool_spawn allocates the PoolActor block via std.mem.arc's
+    # new_in, sharing CLONEs the Arc (atomic +1), and the LAST handle drop frees it — so a sender on
+    # one worker can never use-after-free an actor whose owner finished on another (Arc's atomic
+    # refcount is now load-bearing under contention; proven by pool_arc_contention.zen, 50x ASan-clean).
+    # The malloc calls that REMAIN here are NOT the shared actor state: they are (a) the pool's own
+    # SINGLE-OWNER infrastructure (the Pool block, the global run-queue ring, the per-worker stats, the
+    # pthread handle/arg cells) — freed by the one owner in pool_close after the workers join, the same
+    # floor justification as std.thread; and (b) the per-actor mailbox ring, which the Arc'd actor OWNS
+    # and frees in its last-drop destructor (so it too has no free-while-a-sender-holds-a-ref hazard).
     Path("zen/std/concurrent/pool.zen"),
     Path("zen/compiler/genc.zen"),
     # genc_emit emits malloc/memcpy as the LOWERING of a heap-promoted slice literal (codegen text,
