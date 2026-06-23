@@ -111,7 +111,10 @@ ImportData*: { names: [Param], module: str }   // module = the imported module p
 // It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
 // `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
 // the init's inferred type.
-GlobalData*: { name: str, ty: Ty, init: Ptr<Expr> }
+// `tl` = thread-local: emit `static _Thread_local` so each OS thread gets its own copy (coroutine
+// swap state, scheduler per-worker state). Source marks it by wrapping the init in `thread_local(x)`,
+// which the parser unwraps into the bare init + tl=true.
+GlobalData*: { name: str, ty: Ty, init: Ptr<Expr>, tl: bool }
 // DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
 // `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
 // no C of its own: compiler.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
@@ -391,7 +394,8 @@ dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: 0 )) }
 dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: pos )) }
-dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init )) }
+dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false )) }
+dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true )) }
 dtraitdef* = (trname: str, fn: Func) Decl { .DTraitDefault(TraitDefData( trname: trname, fn: fn )) }
 mono_tybuf_in = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {

@@ -1,6 +1,6 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dglobal_tl, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
@@ -344,12 +344,24 @@ fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
+// A module global whose init is `thread_local(x)` becomes a thread-local global with init `x`.
+// The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
+// class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
+global_decl = (a: MutPtr<Malloc>, nm: str, init: Ptr<Expr>) Decl {
+    load(init).match ({
+        .Call(c) => (eq(c.fn, "thread_local") && (c.args.len == 1)).match ({
+            true  => dglobal_tl(nm, tvoid(), a.enode(c.args[0])),
+            false => dglobal(nm, tvoid(), init)
+        }),
+        _ => dglobal(nm, tvoid(), init)
+    })
+}
 fill_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     mk := src.decl_marker(pos)
     pe := a.parse_or(src, mk.next)
-    buf[i] = dglobal(nm, tvoid(), pe.expr)
+    buf[i] = a.global_decl(nm, pe.expr)
     a.fill_decls(src, pe.next, buf, i + 1)
 }
 // Impl methods become mangled functions plus one DImpl conformance record.
