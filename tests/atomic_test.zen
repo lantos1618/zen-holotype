@@ -1,0 +1,71 @@
+// Single-thread correctness test for std.atomic intrinsics + wrappers.
+//   $ zenc run tests/atomic_test.zen   -> prints the results, exits 0 on success
+{ println } = std.text.fmt
+atomic = std.atomic
+raw = std.mem.raw
+
+// spin a CAS loop to increment the cell `n` times; returns final value.
+spin = (a: atomic.AtomicI64, n: i64) i64 {
+    (n <= 0).match ({
+        true  => a.load(),
+        false => {
+            cur := a.load()
+            a.cas(cur, cur + 1).match ({
+                true  => spin(a, n - 1),
+                false => spin(a, n)        // contention retry (no contention single-thread)
+            })
+        }
+    })
+}
+
+main = () i32 {
+    cell := raw.alloc(8)
+    a := atomic.at(cell)
+    a.store(0)
+
+    // 1) load/store round-trip
+    a.store(42)
+    r1 := a.load()
+    println(r1)                            // 42
+
+    // 2) atomic fetch-add
+    a.store(0)
+    nv := a.add(5)
+    println(nv)                            // 5 (new value)
+    println(a.add(0 - 2))                  // 3
+
+    // 3) CAS spin counter: 0 -> 1000
+    a.store(0)
+    fin := spin(a, 1000)
+    println(fin)                           // 1000
+
+    // 4) CAS failure path: expected mismatch returns false, value unchanged
+    a.store(7)
+    ok := a.cas(999, 123)
+    println(ok.match ({ true => 1, false => 0 }))   // 0 (failed)
+    println(a.load())                      // 7 (unchanged)
+    ok2 := a.cas(7, 8)
+    println(ok2.match ({ true => 1, false => 0 }))  // 1 (succeeded)
+    println(a.load())                      // 8
+
+    // 5) fetch_add_cas helper (returns prior value)
+    a.store(100)
+    prior := a.fetch_add_cas(11)
+    println(prior)                         // 100
+    println(a.load())                      // 111
+
+    // 6) fence compiles + runs
+    atomic.afence()
+
+    // 7) AtomicBool round-trip
+    bcell := raw.alloc(8)
+    b := atomic.bool_at(bcell)
+    b.store(true)
+    println(b.load().match ({ true => 1, false => 0 }))    // 1
+    println(b.cas(true, false).match ({ true => 1, false => 0 }))  // 1 (swapped)
+    println(b.load().match ({ true => 1, false => 0 }))    // 0
+
+    raw.release(cell)
+    raw.release(bcell)
+    0
+}
