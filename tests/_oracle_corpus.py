@@ -667,6 +667,12 @@ VERDICT_KIND_CASES = [
     ('f* = (n: i32) i32 {\n n.match({ 0 => 9 })\n}\ntest* = () i32 { f(5) }', 'undefined-name'),                          # single non-`_` literal arm
     ('f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }', 'undefined-name'),                         # `if` parses as an undefined call
     ('f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }', 'undefined-name'),
+    # undefined BARE NAMES inside a `.loop((h,i,v){…})` lambda body must be caught — `.loop` is THE
+    # iteration construct, so most newcomer logic lives in lambdas; before this the checker skipped
+    # lambda/loop bodies and the undefined name leaked to cc as raw C / a linker error (Stage-3 A.1).
+    ('test* = () i32 { xs := [1, 2, 3]  xs.loop((h, i, v) { undefined_here  {} })  0 }', 'undefined-name'),     # bare name in a loop body
+    ('test* = () i32 { t := 0  xs := [1, 2, 3]  xs.loop((h, i, v) { t = t + ghostvar })  t }', 'undefined-name'), # bare name nested in a loop operand
+    ('test* = () i32 { xs := [1, 2, 3]  xs.loop((h, i, v) { (v > 0).match({ true => { ghost  {} }, false => {} }) })  0 }', 'undefined-name'),  # bare name in a match arm inside a loop
 
     # --- struct-field: a struct-literal init field / a member access that names no real field, or a mistyped init ---
     ('P*: { x: i32 }\ntest* = () i32 { p := P(x: 0, y: 1)  p.x }', 'struct-field'),                                   # unknown init field y

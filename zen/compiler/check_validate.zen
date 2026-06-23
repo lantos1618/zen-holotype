@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
@@ -707,6 +707,67 @@ slicelit_err = (env: Env, items: [Expr]) i32 {
         }
     })
 }
+// ── narrowed LOOP/lambda-body walk: undefined BARE NAMES only ────────────────────────────────
+// Loop bodies were never validated, so undefined names inside `.loop((h,i,v){…})` slipped past `check`
+// and surfaced only at cc. This walk reports them — but ONLY for bare `Var` references (var_err, the
+// same predicate top-level uses). It deliberately does NOT run fit / arg-type / operand checks, nor
+// resolve call NAMES or struct FIELDS: a generic template's loop body legitimately calls methods on an
+// unbound type param (`actor.receive`) and narrows str↔text, both valid pre-mono yet unresolvable here —
+// flagging them would false-reject real stdlib. It still RECURSES through every sub-expression (and
+// nested match-arm / loop / let binding envs) so a bare undefined name at any depth is caught.
+lck_args = (env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc + env.lck_expr(ar.addr()) })
+    acc
+}
+lck_inits = (env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc + env.lck_expr(fi.value) })
+    acc
+}
+lck_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc + env.a.arm_env(env, subjty, ar).lck_expr(ar.body) })
+    acc
+}
+lck_expr = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        // only USER-authored names (pos > 0) are name-checked. Inliner-substituted refs (loop bindings,
+        // spliced lets, param→arg) are rebuilt as position-less `vref`s whose binding structure the
+        // validator's env doesn't perfectly reconstruct — re-checking them as "undefined" false-rejects.
+        .Var(v)         => (v.pos > 0).match ({ true => env.var_err(v.name), false => 0 }),
+        .Call(c)        => eq(c.fn, "sizeof").match ({ true => 0, false => env.lck_args(c.args) }),   // sizeof's arg is a TYPE name, not a value (mirrors check_expr)
+        .SliceLit(sd)   => env.lck_args(sd.items),
+        .Index(ix)      => env.lck_expr(ix.seq) + env.lck_expr(ix.idx),
+        .Bin(b)         => env.lck_expr(b.lhs) + env.lck_expr(b.rhs),
+        .Cond(d)        => env.lck_expr(d.c) + env.lck_expr(d.t) + env.lck_expr(d.e),
+        .Member(m)      => env.lck_expr(m.obj),                           // field NAME deferred (h.break_zk etc.)
+        .Arrow(ar)      => env.lck_expr(ar.obj),
+        .Match(m)       => { subjty := env.infer_expr(m.subj)  env.lck_expr(m.subj) + env.lck_arms(subjty, m.arms) },
+        .MakeEnum(mk)   => env.lck_expr(mk.payload),
+        .MakeStruct(sd) => env.lck_inits(sd.inits),
+        .Block(b)       => env.a.lck_body(env, b.stmts),
+        .Loop(l)        => env.lck_expr(l.seq) + env.a.lck_body(env.a.loop_env(env, l), l.body),
+        _               => 0
+    })
+}
+lck_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.lck_expr(l.value),
+        .Assign(x)   => env.lck_expr(x.target) + env.lck_expr(x.value),
+        .Return(r)   => env.lck_expr(r),
+        .ExprStmt(e) => env.lck_expr(e),
+        .If(f)       => env.lck_expr(f.c) + a.lck_body(env, f.then) + a.lck_body(env, f.els),
+        .While(w)    => env.lck_expr(w.c) + a.lck_body(env, w.body),
+        .IndexSet(x) => env.lck_expr(x.seq) + env.lck_expr(x.idx) + env.lck_expr(x.value)
+    })
+}
+lck_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    body.loop((h, i, st) { acc = acc + a.lck_stmt(e, st)  e = a.extend_env(e, st) })
+    acc
+}
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.check_call(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
@@ -725,6 +786,13 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         .Block(b)       => env.check_block(b.stmts),
         .Var(v)         => env.var_err(v.name),
+        // A lowered foreach/loop: WALK the sequence and body (in the loop's element/index/handler binding
+        // env) for UNDEFINED BARE NAMES. `.loop((h,i,v){…})` is THE iteration construct, so most newcomer
+        // logic — and most undefined-name bugs — live here; skipping it let them reach cc as raw C / linker
+        // errors. NARROWED to bare-name resolution (see lck_expr): fit/arg-type and call-NAME/field checks
+        // stay deferred inside loops, because generic templates carry method calls on unbound type params
+        // (`actor.receive`) and str↔text narrowings that are valid pre-mono but unresolvable here.
+        .Loop(l)        => env.lck_expr(l.seq) + env.a.lck_body(env.a.loop_env(env, l), l.body),
         // A Lambda that SURVIVES resolution is a lambda used as a value the inliner couldn't splice:
         // a directly-passed HOF lambda is inlined away and a local-bound one is now spliced too (the
         // alias lowering), so a remaining Lambda was stored in a field / returned — no first-class
@@ -1523,6 +1591,58 @@ kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
         }
     })
 }
+// kind-flavoured mirror of lck_expr: undefined BARE NAMES inside loop bodies, reported as KUNDEFINED at
+// the offending name's position. Same narrowing rationale as lck_expr (no fit/call-name/field checks).
+lkv_args = (env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(env.lkv_expr_kind(ar.addr())) })
+    acc
+}
+lkv_inits = (env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc.kv_kor(env.lkv_expr_kind(fi.value)) })
+    acc
+}
+lkv_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).lkv_expr_kind(ar.body)) })
+    acc
+}
+lkv_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v)         => (v.pos > 0).match ({ true => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos), false => 0 }),
+        .Call(c)        => eq(c.fn, "sizeof").match ({ true => 0, false => env.lkv_args(c.args) }),
+        .SliceLit(sd)   => env.lkv_args(sd.items),
+        .Index(ix)      => env.lkv_expr_kind(ix.seq).kv_kor(env.lkv_expr_kind(ix.idx)),
+        .Bin(b)         => env.lkv_expr_kind(b.lhs).kv_kor(env.lkv_expr_kind(b.rhs)),
+        .Cond(d)        => env.lkv_expr_kind(d.c).kv_kor(env.lkv_expr_kind(d.t)).kv_kor(env.lkv_expr_kind(d.e)),
+        .Member(m)      => env.lkv_expr_kind(m.obj),
+        .Arrow(ar)      => env.lkv_expr_kind(ar.obj),
+        .Match(m)       => { subjty := env.infer_expr(m.subj)  env.lkv_expr_kind(m.subj).kv_kor(env.lkv_arms(subjty, m.arms)) },
+        .MakeEnum(mk)   => env.lkv_expr_kind(mk.payload),
+        .MakeStruct(sd) => env.lkv_inits(sd.inits),
+        .Block(b)       => env.a.lkv_body_kind(env, b.stmts),
+        .Loop(l)        => env.lkv_expr_kind(l.seq).kv_kor(env.a.lkv_body_kind(env.a.loop_env(env, l), l.body)),
+        _               => 0
+    })
+}
+lkv_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.lkv_expr_kind(l.value),
+        .Assign(x)   => env.lkv_expr_kind(x.target).kv_kor(env.lkv_expr_kind(x.value)),
+        .Return(r)   => env.lkv_expr_kind(r),
+        .ExprStmt(e) => env.lkv_expr_kind(e),
+        .If(f)       => env.lkv_expr_kind(f.c).kv_kor(a.lkv_body_kind(env, f.then)).kv_kor(a.lkv_body_kind(env, f.els)),
+        .While(w)    => env.lkv_expr_kind(w.c).kv_kor(a.lkv_body_kind(env, w.body)),
+        .IndexSet(x) => env.lkv_expr_kind(x.seq).kv_kor(env.lkv_expr_kind(x.idx)).kv_kor(env.lkv_expr_kind(x.value))
+    })
+}
+lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    body.loop((h, i, st) { acc = acc.kv_kor(a.lkv_stmt_kind(e, st))  e = a.extend_env(e, st) })
+    acc
+}
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
@@ -1542,6 +1662,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
         .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
+        .Loop(l)        => env.lkv_expr_kind(l.seq).kv_kor(env.a.lkv_body_kind(env.a.loop_env(env, l), l.body)),
         .Lambda(lm)     => KLAMBDAVALUE(),   // a surviving lambda = used as a value (see check_expr)
         _               => 0
     })
