@@ -396,6 +396,28 @@ result_compatible = (want: Ty, got: Ty) bool {
         })
     })
 }
+cond_numlike = (t: Ty) bool { (t.ty_rank() >= 0) || t.is_f64_ty() }
+// A value/bool `.match` (and `if` expression) lowers to a ternary Cond at parse time, so its two
+// value branches escape the enum-match arm checks above. Their result types must still be C-compatible
+// — `c ? A : B` on incompatible types is a hard cc error. A numeric LITERAL branch is polymorphic and
+// coerces to any numeric counterpart (mirrors cond_ty's deferral); void/unknown branches stay lenient.
+cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
+    d.t.is_lit_numeric().match ({
+        true  => et.cond_numlike(),
+        false => d.e.is_lit_numeric().match ({
+            true  => tt.cond_numlike(),
+            false => tt.result_compatible(et)
+        })
+    })
+}
+cond_result_err = (env: Env, d: CondData) i32 {
+    tt := env.infer_expr(d.t)
+    et := env.infer_expr(d.e)
+    (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
+        true  => 0,
+        false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 })
+    })
+}
 arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
     aenv := env.a.arm_env(env, subjty, ar)
     got  := aenv.infer_expr(ar.body)
@@ -847,7 +869,7 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
-        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
+        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return() + env.cond_result_err(d),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
         .Match(m)       => {
@@ -1735,7 +1757,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
-        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
+        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos())),
         .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
         .Match(m)       => {
