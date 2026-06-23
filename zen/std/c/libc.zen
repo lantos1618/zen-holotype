@@ -62,3 +62,23 @@ fgets*  = (buf: RawPtr<u8>, n: i32, f: RawPtr<u8>) RawPtr<u8>
 // state travels through the single `arg` pointer, C-style. `retval` is a `void**` out-cell.
 pthread_create* = (thread: RawPtr<u8>, attr: RawPtr<u8>, start: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) i32
 pthread_join*   = (thread: i64, retval: RawPtr<u8>) i32
+
+// ── locks & condition variables (the parallelism layer over std.thread) ───────
+// `pthread_mutex_t` and `pthread_cond_t` are OPAQUE structs whose storage size is part of the
+// glibc x86-64 ABI: 40 bytes for the mutex, 48 for the condvar (see std.sync's MUTEX_SIZE /
+// COND_SIZE constants). Zen never looks inside them — it hands pthread a `RawPtr<u8>` pointing at a
+// fixed-size byte cell (zero-filled, which is the valid PTHREAD_*_INITIALIZER default) and the C
+// side owns the contents. `attr` is always null (pass null_ptr()). All return `i32` (0 on success).
+//
+// `pthread_cond_wait` ATOMICALLY unlocks `mutex`, blocks on `cond`, and re-locks `mutex` on wake —
+// the caller must hold `mutex` going in. Spurious wakeups are possible, so wait in a predicate loop.
+pthread_mutex_init*    = (m: RawPtr<u8>, attr: RawPtr<u8>) i32
+pthread_mutex_lock*    = (m: RawPtr<u8>) i32
+pthread_mutex_unlock*  = (m: RawPtr<u8>) i32
+pthread_mutex_destroy* = (m: RawPtr<u8>) i32
+
+pthread_cond_init*      = (cond: RawPtr<u8>, attr: RawPtr<u8>) i32
+pthread_cond_wait*      = (cond: RawPtr<u8>, m: RawPtr<u8>) i32
+pthread_cond_signal*    = (cond: RawPtr<u8>) i32
+pthread_cond_broadcast* = (cond: RawPtr<u8>) i32
+pthread_cond_destroy*   = (cond: RawPtr<u8>) i32
