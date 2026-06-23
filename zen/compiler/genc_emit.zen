@@ -5,6 +5,7 @@
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
+{ panic } = std.core.result
 
 
 // Integer rendering stays byte-only so this self-hosts.
@@ -270,7 +271,9 @@ gen_sexpr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         .Bin(b) => s.gstr_append(alloc, "(").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_sexpr(alloc, b.lhs).gstr_append(alloc, " ").gen_sexpr(alloc, b.rhs).gstr_append(alloc, ")"),
         .Call(c) => c.raw.match ({ true => s.gstr_append(alloc, "(@").gstr_append(alloc, c.fn).gen_sargs(alloc, c.args).gstr_append(alloc, ")"), false => s.gstr_append(alloc, "(").gstr_append(alloc, c.fn).gen_sargs(alloc, c.args).gstr_append(alloc, ")") }),
         .Lambda(lm) => s.gen_lam_sexpr(alloc, lm),
-        _ => s.gstr_append(alloc, "?")
+        // NEVER emit a literal `?` placeholder — a silent drop that becomes invalid output. Fail loudly
+        // on any expression kind this renderer doesn't handle so the gap surfaces instead of slipping through.
+        _ => { panic("zenc: gen_sexpr: unsupported expression kind in s-expression rendering\n")  s }
     })
 }
 // `(lambda a x)` — names only (enough to prove a lambda parsed; its body rides the run tests)
