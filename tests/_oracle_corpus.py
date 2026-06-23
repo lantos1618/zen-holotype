@@ -326,6 +326,26 @@ VALUE_CASES = [
     #     doubled, and trailing whitespace must all collapse — any leaked empty would skew the digits). ---
     ('strlen = (s: str) i64\nis_ws = (b: u8) bool { (b == \' \') || (b == \'\\t\') || (b == \'\\n\') || (b == \'\\r\') }\ntest* = () i32 { s := "  the  cat sat "  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  start: i64 := 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }', 333),
 
+    # --- std.text.str.to_upper / to_lower — the ASCII case fold backing to_upper/to_lower. Sums the
+    #     transformed bytes so a wrong shift (or folding non-letters) skews the total. "hi!" upper ->
+    #     H(72)+I(73)+!(33)=178; "HeLLo" lower -> h+e+l+l+o = 532 (the '!' / unchanged bytes guard ASCII-only). ---
+    ('strlen = (s: str) i64\nup = (b: u8) u8 { (b >= \'a\' && b <= \'z\').match({ true => b - (\'a\' - \'A\'), false => b }) }\ntest* = () i32 { s := "hi!"  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  v.loop((h, i, b) { acc = acc + up(b) })  to_i32(acc) }', 178),
+    ('strlen = (s: str) i64\nlo = (b: u8) u8 { (b >= \'A\' && b <= \'Z\').match({ true => b + (\'a\' - \'A\'), false => b }) }\ntest* = () i32 { s := "HeLLo"  v: [u8] := slice(s, strlen(s))  acc: i64 := 0  v.loop((h, i, b) { acc = acc + lo(b) })  to_i32(acc) }', 532),
+
+    # --- std.text.str.repeat — the `out[i] = sv[i % sv.len]` wrap that fills s*n. Fills 6 slots from "ab"
+    #     and reads the a/b pattern back as base-10 (a->0, b->1): correct wrap -> 010101 = 10101. A broken
+    #     modulo index (off-by-one, wrong operand) corrupts the alternation. Pins `%` on the index. ---
+    ('strlen = (s: str) i64\ntest* = () i32 { s := "ab"  sv: [u8] := slice(s, strlen(s))  out := [0, 0, 0, 0, 0, 0]  out.loop((h, i, b) { out[i] = sv[i % sv.len] })  acc: i64 := 0  out.loop((h, i, b) { acc = acc * 10 + (b - \'a\') })  to_i32(acc) }', 10101),
+
+    # --- std.text.str.join — the result-size formula `sum(part lens) + seplen*(n-1)`. ["a","bb","c"] on
+    #     "," -> 1+2+1 + 1*2 = 6. A miscounted separator term or part length throws off the allocation. ---
+    ('strlen = (s: str) i64\ntest* = () i32 { parts: [str] := ["a", "bb", "c"]  sep := ","  total: i64 := 0  parts.loop((h, i, p) { total = total + strlen(p) })  total = total + strlen(sep) * (parts.len - 1)  to_i32(total) }', 6),
+
+    # --- std.text.str.replace — count_occ (NON-overlapping) + the `inlen + cnt*(tolen-flen)` size. "aaaa"
+    #     with from "aa" has 2 NON-overlapping hits (not 3); replacing with a 1-byte `to` -> len 4+2*(1-2)=2.
+    #     Encoded as len*100+cnt = 202 (pins BOTH the overlap-skip AND the grow/shrink sizing). ---
+    ('strlen = (s: str) i64\nhas_at = (sv: [u8], fv: [u8], at: i64) bool { ok := true  fv.loop((h, i, b) { ok.match({ true => (sv[at + i] == b).match({ true => {}, false => { ok = false  h.break } }), false => { h.break } }) })  ok }\ntest* = () i32 { s := "aaaa"  f := "aa"  sv: [u8] := slice(s, strlen(s))  fv: [u8] := slice(f, strlen(f))  cnt: i64 := 0  nextpos: i64 := 0  sv.loop((h, i, b) { ((i >= nextpos) && (i + fv.len <= sv.len) && has_at(sv, fv, i)).match({ true => { cnt = cnt + 1  nextpos = i + fv.len }, _ => {} }) })  tolen := 1  total := sv.len + cnt * (tolen - fv.len)  to_i32(total * 100 + cnt) }', 202),
+
     # --- anonymous-struct VALUE literal `{x:1, y:2}` must synthesize AND hoist its struct decl (ANON-LIT).
     #     A bare literal has no type-position decl, so the parser infers field types from the values and
     #     registers the synthesized `__anon_…` StructDecl for hoisting — else cc sees an undeclared type. ---
