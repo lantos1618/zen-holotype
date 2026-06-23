@@ -1,0 +1,29 @@
+// tests/oracle.zen — the thin MAIN of the Zen-native correctness oracle (the self-hosted replacement
+// for the pytest value/verdict harness). It imports the harness library + each category file and sums
+// their fail counts into the process exit code. NO Python anywhere — the compiler tests itself, in
+// itself, by driving the committed `zenc` binary via std.io.
+//
+//   make -f bootstrap/Makefile oracle      # build this with zenc, run it; exit = total fail count
+//
+// ── ADDING A CATEGORY ────────────────────────────────────────────────────────────────────────────
+// A category agent writes tests/oracle_<cat>.zen exporting `oracle_<cat>_run*() i32` (see oracle_lib.zen
+// for the contract). Wire it in here with two edits: import its run fn, and add it to the sum below.
+// The `oracle_<cat>_run` names are unique, so the flat imports never collide.
+{ fixpoint_ok, run_suite } = oracle_lib
+{ oracle_value_run }   = oracle_value
+{ oracle_verdict_run } = oracle_verdict
+{ out } = std.io.file
+
+main* = () i32 {
+    fails := 0
+    fails = fails + oracle_value_run()
+    fails = fails + oracle_verdict_run()
+    // the self-host fixpoint, reported as its own one-case suite.
+    fails = fails + run_suite("fixpoint", [fixpoint_ok()])
+
+    fails.match ({
+        0 => out("\nzen oracle: ALL PASS\n"),
+        _ => out("\nzen oracle: FAILURES above (see F marks); exit = total fail count\n")
+    })
+    fails
+}

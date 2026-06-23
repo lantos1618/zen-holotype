@@ -1,0 +1,127 @@
+// tests/oracle_lib.zen — the REUSABLE harness library for the Zen-native correctness oracle (the
+// self-hosted replacement for the pytest value/verdict harness). A category test file imports this,
+// declares its cases as Zen data, and calls the batch runners — NO Python anywhere; the compiler
+// tests itself, in itself, by driving the committed `zenc` binary via std.io.
+//
+// ── HOW TO WRITE A CATEGORY FILE (tests/oracle_<cat>.zen) ────────────────────────────────────────
+//
+//   { VCase, VerdictCase, run_values, run_verdicts } = oracle_lib
+//
+//   // Export ONE uniquely-named entry `oracle_<cat>_run*` returning this category's fail count.
+//   oracle_<cat>_run* = () i32 {
+//       v := run_values("<cat> value", [
+//           VCase(src: "test* = () i64 { 6 * 7 }", want: "42"),
+//           // ... `src` defines `test* = () iNN { … }`; the emitted program must print `want`.
+//       ])
+//       d := run_verdicts("<cat> verdict", [
+//           VerdictCase(src: "test* = () i32 { 5 }",      should_pass: true,  kind: ""),
+//           VerdictCase(src: "test* = () i32 { nope() }", should_pass: false, kind: "undefined-name"),
+//           // should_pass=true => `zenc check` must accept. false => must reject; if `kind` is
+//           // non-empty the diagnostic must be `error[<kind>]` (a reject pinned by REASON).
+//       ])
+//       v + d
+//   }
+//
+// A value-only category returns just `run_values(...)`; a verdict-only one returns `run_verdicts(...)`.
+// Then tests/oracle.zen flat-imports each `oracle_<cat>_run` (unique names never collide) and sums them.
+{ Malloc } = std.mem.alloc
+{ out, save, contents_in, shell } = std.io.file
+{ eq, len, contains, is_empty } = std.text.str
+{ new_in, append_in, finish_in } = std.text.string
+
+// a VALUE case: `src` defines `test* = () iNN { … }`; the emitted program must compute (print) `want`.
+VCase*: { src: str, want: str }
+// a VERDICT case: `zenc check src` must accept (should_pass=true) or reject (false). When rejecting
+// and `kind` is non-empty, the diagnostic must contain `error[<kind>]` (e.g. kind: "arity").
+VerdictCase*: { src: str, should_pass: bool, kind: str }
+
+// build the diagnostic needle `error[<kind>]` for a kind label.
+kind_needle = (mp: MutPtr<Malloc>, kind: str) str {
+    s := mp.new_in()
+    s = s.append_in(mp, "error[")
+    s = s.append_in(mp, kind)
+    s = s.append_in(mp, "]")
+    mp.finish_in(s)
+}
+
+// VALUE: emit C for the case, compile it with tests/oracle_runner.c, run it, compare the printed int
+// to `want`. /tmp/zo_out.txt is cleared first so a stale value can't masquerade as a pass when emit
+// or cc fails (the `&&` chain then never runs the program).
+run_value* = (vc: VCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save("/tmp/zo_case.zen", vc.src, len(vc.src))
+    save("/tmp/zo_out.txt", "", 0)
+    shell("./zenc emit /tmp/zo_case.zen > /tmp/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I/tmp tests/oracle_runner.c -o /tmp/zo_prog 2>/dev/null && /tmp/zo_prog > /tmp/zo_out.txt 2>/dev/null")
+    mp.contents_in("/tmp/zo_out.txt").match ({
+        .Ok(got) => eq(got, vc.want),
+        .Err(e)  => false
+    })
+}
+
+// VERDICT: `zenc check` exits 0 on accept, non-zero on reject (it prints exactly one diagnostic, so
+// `contains("error[<kind>]")` is equivalent to matching the first-error kind).
+run_verdict* = (vc: VerdictCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save("/tmp/zo_v.zen", vc.src, len(vc.src))
+    rc := shell("./zenc check /tmp/zo_v.zen > /tmp/zo_chk.txt 2>&1")
+    vc.should_pass.match ({
+        true  => rc == 0,
+        false => (rc == 0).match ({
+            true  => false,
+            false => is_empty(vc.kind).match ({
+                true  => true,
+                false => mp.contents_in("/tmp/zo_chk.txt").match ({
+                    .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
+                    .Err(e)  => false
+                })
+            })
+        })
+    })
+}
+
+// the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
+// temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
+fixpoint_ok* = () bool {
+    shell("./zenc --build-self /tmp/zo_gen_after.c . 2>/dev/null")
+    same := shell("cmp -s /tmp/zo_gen_after.c bootstrap/zenc.gen.c")
+    same == 0
+}
+
+// REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. Use when a caller
+// already has a `[bool]` of outcomes (e.g. the fixpoint suite, or a custom category mix).
+run_suite* = (name: str, results: [bool]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    results.loop((h, i, ok) {
+        ok.match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// batch VALUE runner + reporter: run every case, print '.'/'F', return the failing count.
+run_values* = (name: str, cs: [VCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_value(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// batch VERDICT runner + reporter: run every case, print '.'/'F', return the failing count.
+run_verdicts* = (name: str, cs: [VerdictCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_verdict(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
