@@ -1,0 +1,149 @@
+// tests/oracle_boundaries.zen — BOUNDARY category for the Zen oracle: Zen linting its OWN source for
+// the no-hidden-heap rule. This is the self-hosted port of tests/test_primitive_boundaries.py's
+// `test_raw_allocation_calls_stay_behind_allocator_boundaries`: raw `malloc/calloc/realloc/free`
+// calls must stay behind the std.mem allocator floor (mem/alloc.zen, mem/raw.zen), the OS-thread/
+// scheduler floor (std/thread.zen, std/concurrent/pool.zen), or the codegen text emitters
+// (genc.zen, genc_emit.zen). Every OTHER .zen under examples/tools/zen must thread an allocator
+// instead — so finding a raw alloc call there is a FAILURE.
+//
+// HOW: enumerate the same file set as the python (rglob *.zen under examples, tools, zen/std,
+// zen/compiler) via `find ... > /tmp/ob_files.txt`, then read+scan each file in Zen. The scan
+// mirrors the python regex `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` over `//`-comment-stripped
+// text: a token preceded by a non-word, non-`.` char (or start) and followed by optional whitespace
+// then `(`. A non-whitelisted file containing such a call counts as one fail.
+{ Malloc } = std.mem.alloc
+{ out, contents_in, shell } = std.io.file
+{ eq, ne, view, is_empty, split_in, nbuf } = std.text.str
+{ run_suite } = oracle_lib
+
+// the RAW_ALLOC_ALLOWED whitelist's COMPLEMENT, mirrored EXACTLY from test_primitive_boundaries.py.
+// Pure `&&` of `ne` (no bool-match), so it composes into other boolean expressions without tripping
+// the stmt-if-in-value-position codegen pitfall. Paths are repo-relative, matching `find`'s output
+// (we run it from the repo root over those same roots).
+not_whitelisted = (path: str) bool {
+    ne(path, "zen/std/mem/alloc.zen")
+    && ne(path, "zen/std/mem/raw.zen")
+    && ne(path, "zen/std/thread.zen")
+    && ne(path, "zen/std/concurrent/pool.zen")
+    && ne(path, "zen/compiler/genc.zen")
+    && ne(path, "zen/compiler/genc_emit.zen")
+}
+
+// `\b` boundary before a keyword: the preceding byte must be outside the regex `\w` class [A-Za-z0-9_]
+// AND not `.` (the `(?<!\.)` lookbehind, which keeps UFCS `.free(` method calls from matching). Written
+// as a pure boolean (range tests, not match) so it slots into the `||`/`&&` chain below.
+is_boundary_before = (b: u8) bool {
+    (b < 'a' || b > 'z')
+    && (b < 'A' || b > 'Z')
+    && (b < '0' || b > '9')
+    && (b != '_')
+    && (b != '.')
+}
+
+// `\s` skip: advance past spaces/tabs/newlines/CRs, returning the next index (or len at EOF).
+skip_ws = (sv: [u8], j: i64) i64 {
+    (j >= sv.len).match ({
+        true  => j,
+        false => {
+            b := sv[j]
+            ((b == ' ') || (b == '\t') || (b == '\n') || (b == '\r')).match ({
+                true  => sv.skip_ws(j + 1),
+                false => j
+            })
+        }
+    })
+}
+
+// do `nv`'s bytes appear at sv[at..]? (caller guards at + nv.len <= sv.len)
+tok_at = (sv: [u8], nv: [u8], at: i64) bool {
+    ok := true
+    nv.loop((h, i, b) {
+        (sv[at + i] == b).match ({ true => {}, false => { ok = false  h.break } })
+    })
+    ok
+}
+
+// does the keyword `name` start at sv[i] AND get followed by `\s*(` ? (the `\b...\s*\(` tail; the
+// trailing `(` is what rejects e.g. `mallocate` — after the keyword must come whitespace-or-`(`).
+name_matches = (sv: [u8], i: i64, name: str) bool {
+    nv := name.view()
+    (i + nv.len > sv.len).match ({
+        true  => false,
+        false => sv.tok_at(nv, i).match ({
+            false => false,
+            true  => {
+                j := sv.skip_ws(i + nv.len)
+                (j < sv.len) && (sv[j] == '(')
+            }
+        })
+    })
+}
+
+// the `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` match anchored at index `i`. Pure `&&`/`||` of the
+// boundary test and the four keyword tests — no value-position bool-match.
+matches_alloc_at = (sv: [u8], i: i64) bool {
+    ((i == 0) || sv[i - 1].is_boundary_before())
+    && (sv.name_matches(i, "malloc")
+        || sv.name_matches(i, "calloc")
+        || sv.name_matches(i, "realloc")
+        || sv.name_matches(i, "free"))
+}
+
+// scan a whole file's bytes for any raw-alloc call OUTSIDE a `//` line comment. We track an in-comment
+// flag (set at `//`, cleared at newline) — the same comment-stripping the python `_code` does. Block
+// comments and string literals are NOT special-cased, matching the python (it only strips `//`).
+file_has_raw_alloc = (sv: [u8]) bool {
+    found := false
+    in_comment := false
+    sv.loop((h, i, b) {
+        (b == '\n').match ({ true => { in_comment = false }, _ => {} })
+        in_comment.match ({
+            true  => {},
+            false => ((b == '/') && (i + 1 < sv.len) && (sv[i + 1] == '/')).match ({
+                true  => { in_comment = true },
+                false => sv.matches_alloc_at(i).match ({
+                    true => { found = true  h.break },
+                    _    => {}
+                })
+            })
+        })
+    })
+    found
+}
+
+// is this file a raw-alloc VIOLATION? (has a raw call AND is not on the allocator-floor whitelist).
+// Pure booleans — no value-position negation match.
+is_violation = (mp: MutPtr<Malloc>, path: str) bool {
+    mp.contents_in(path).match ({
+        .Ok(src) => src.view().file_has_raw_alloc() && path.not_whitelisted(),
+        .Err(e)  => false       // unreadable listed file → treat as clean (no spurious fail)
+    })
+}
+
+// the per-file PASS outcome for the oracle reporter (true = clean/whitelisted). Negation lives only in
+// `pass_of`'s whole-function-body return (the `ne`-style that lowers to a ternary, not a stmt-if).
+pass_of = (violation: bool) bool { violation.match ({ true => false, false => true }) }
+file_passes = (mp: MutPtr<Malloc>, path: str) bool {
+    path.is_empty().match ({
+        true  => true,                          // trailing empty split field → harmless passing dot
+        false => mp.is_violation(path).pass_of()
+    })
+}
+
+oracle_boundaries_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    // enumerate exactly the python file set: rglob *.zen under examples, tools, zen/std, zen/compiler.
+    shell("find examples tools zen/std zen/compiler -name '*.zen' 2>/dev/null | LC_ALL=C sort > /tmp/ob_files.txt")
+    mp.contents_in("/tmp/ob_files.txt").match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(false, files.len)
+            files.loop((h, i, path) {
+                results[i] = mp.file_passes(path)
+            })
+            run_suite("boundaries: raw-alloc behind allocator floor", results)
+        },
+        .Err(e) => run_suite("boundaries: raw-alloc (cannot enumerate files)", [false])
+    })
+}

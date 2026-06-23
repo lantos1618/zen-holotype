@@ -1,0 +1,323 @@
+// tests/oracle_modules.zen — the CROSS-MODULE / import-resolution category of the Zen-native oracle.
+// Where oracle_value/oracle_verdict drive single-file `zenc emit`/`zenc check`, this file drives the
+// REAL multi-file path: it writes a small PROJECT (several sibling .zen files) into a temp dir and runs
+// `./zenc run <entry>` / `./zenc check <entry>`, so the committed compiler's import loader
+// (std.internal.resolve) + cross-module type-checker (check_linked) are exercised end-to-end — the
+// dimension the flat oracle structurally cannot reach (it never resolves an import across files).
+//
+// It ports the bulk of the deleted pytest cross-module suites (see PARITY map at the bottom):
+//   tests/test_user_imports.py      — sibling/namespace import loading + value + loader-error quality
+//   tests/test_modules_oracle.py    — cross-module arity/arg-type rejection ("the net is not hollow")
+//   tests/test_resolver_oracle.py   — name-clash namespacing + transitive re-export, as real projects
+//
+// CUSTOM RUNNER: a ModValCase / ModVerdictCase carries `files: [ModFile]` (name + source). The runner
+// `mkdir`s a fresh temp dir, `save`s each file, then drives the committed `./zenc`:
+//   * VALUE   — `zenc run <entry>` exit code must equal `want` (the program's `main` return).
+//   * VERDICT — `zenc check <entry>`: should_pass => accept (rc 0); else reject (rc != 0), and if
+//               `needle` is non-empty the captured stderr must contain it (pins the rejection REASON
+//               — error kind, loader message, or the preserved user source span).
+// NO Python anywhere — the compiler tests itself, multi-module, in itself.
+{ Malloc } = std.mem.alloc
+{ out, save, contents_in, shell } = std.io.file
+{ eq, len, contains, is_empty } = std.text.str
+{ new_in, append_in, finish_in } = std.text.string
+
+// one source file of a project: `name` is the basename (e.g. "p.zen"), `src` its full text.
+ModFile*: { name: str, src: str }
+// a VALUE case: write `files`, `zenc run <entry>`; the program's exit code must equal `want`.
+ModValCase*: { files: [ModFile], entry: str, want: i32 }
+// a VERDICT case: write `files`, `zenc check <entry>`. should_pass => accept; else reject, and when
+// `needle` is non-empty the diagnostic must contain it (error kind / loader message / user source span).
+ModVerdictCase*: { files: [ModFile], entry: str, should_pass: bool, needle: str }
+
+DIR := "/tmp/zo_mods/"
+
+// concat two / three strings through an allocator-owned String (no fixed-buffer assumptions).
+join2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
+    s := mp.new_in()
+    s = s.append_in(mp, a)
+    s = s.append_in(mp, b)
+    mp.finish_in(s)
+}
+join3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str {
+    s := mp.new_in()
+    s = s.append_in(mp, a)
+    s = s.append_in(mp, b)
+    s = s.append_in(mp, c)
+    mp.finish_in(s)
+}
+
+// fresh temp project dir, then every file written into it (paths are DIR + basename).
+write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
+    shell("rm -rf /tmp/zo_mods && mkdir -p /tmp/zo_mods")
+    files.loop((h, i, f) {
+        p := mp.join2(DIR, f.name)
+        save(p, f.src, len(f.src))
+    })
+}
+
+// VALUE: build the project, `zenc run <entry>`, compare its exit code to `want`. (stdout is discarded;
+// the program encodes its result in the exit code, exactly as the ported pytest cases assert.)
+run_mod_value* = (mc: ModValCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    mp.write_files(mc.files)
+    entry := mp.join2(DIR, mc.entry)
+    cmd := mp.join3("./zenc run ", entry, " > /tmp/zo_mods_out.txt 2>&1")
+    rc := shell(cmd)
+    // `shell` returns the raw waitpid status from system(); for a normal exit the program's exit code
+    // is the high byte (WEXITSTATUS), i.e. status / 256. A build/loader failure surfaces as rc != 0
+    // -> a code that won't equal a positive `want`, so the case fails as it should.
+    (rc / 256) == mc.want
+}
+
+// VERDICT: build the project, `zenc check <entry>` (stderr captured). should_pass => rc 0; else rc != 0
+// and (if `needle` non-empty) the captured diagnostic must contain `needle`.
+run_mod_verdict* = (mc: ModVerdictCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    mp.write_files(mc.files)
+    entry := mp.join2(DIR, mc.entry)
+    cmd := mp.join3("./zenc check ", entry, " > /tmp/zo_mods_chk.txt 2>&1")
+    rc := shell(cmd)
+    mc.should_pass.match ({
+        true  => rc == 0,
+        false => (rc == 0).match ({
+            true  => false,
+            false => is_empty(mc.needle).match ({
+                true  => true,
+                false => mp.contents_in("/tmp/zo_mods_chk.txt").match ({
+                    .Ok(txt) => txt.contains(mc.needle),
+                    .Err(e)  => false
+                })
+            })
+        })
+    })
+}
+
+// batch VALUE runner + reporter: run every case, print '.'/'F', return the failing count.
+run_mod_values = (name: str, cs: [ModValCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_mod_value(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// batch VERDICT runner + reporter: run every case, print '.'/'F', return the failing count.
+run_mod_verdicts = (name: str, cs: [ModVerdictCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_mod_verdict(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+oracle_modules_run* = () i32 {
+    v := run_mod_values("modules value (import resolution / value)", [
+        // ── sibling import loading (test_user_imports) ──────────────────────────────────────────
+        ModValCase(files: [
+            ModFile(name: "b.zen", src: "helper* = (x: i32) i32 { x * 2 }\n"),
+            ModFile(name: "p.zen", src: "{ helper } = b\nmain = () i32 { helper(21) }\n"),
+        ], entry: "p.zen", want: 42),
+        ModValCase(files: [
+            ModFile(name: "m1.zen", src: "one* = () i32 { 1 }\n"),
+            ModFile(name: "m2.zen", src: "two* = () i32 { 2 }\n"),
+            ModFile(name: "p.zen",  src: "{ one } = m1\n{ two } = m2\nmain = () i32 { one() + two() }\n"),
+        ], entry: "p.zen", want: 3),
+        // a sibling helper's OWN `{ println } = std.text.fmt` edge is loaded transitively (rc 0).
+        ModValCase(files: [
+            ModFile(name: "h.zen", src: "{ println } = std.text.fmt\nshout* = (s: str) i64 { println(s) }\n"),
+            ModFile(name: "p.zen", src: "{ shout } = h\nmain = () i32 { shout(\"hi\") 0 }\n"),
+        ], entry: "p.zen", want: 0),
+        // a <-> b mutual import: the per-module seen-set breaks the cycle, each body emitted once.
+        ModValCase(files: [
+            ModFile(name: "aa.zen", src: "{ g } = bb\nf* = (n: i32) i32 { (n <= 0).match ({ true => 0, false => g(n - 1) + 1 }) }\n"),
+            ModFile(name: "bb.zen", src: "{ f } = aa\ng* = (n: i32) i32 { (n <= 0).match ({ true => 0, false => f(n - 1) + 1 }) }\n"),
+            ModFile(name: "p.zen",  src: "{ f } = aa\nmain = () i32 { f(7) }\n"),
+        ], entry: "p.zen", want: 7),
+
+        // ── namespace binds `x = mod` + qualified `x.fn()` (test_user_imports) ───────────────────
+        ModValCase(files: [
+            ModFile(name: "left.zen",  src: "thing* = () i32 { 10 }\n"),
+            ModFile(name: "right.zen", src: "thing* = () i32 { 20 }\n"),
+            ModFile(name: "p.zen",     src: "left = left\nright = right\nmain = () i32 { left.thing() + right.thing() }\n"),
+        ], entry: "p.zen", want: 30),
+        ModValCase(files: [
+            ModFile(name: "helper.zen", src: "value* = () i32 { 7 }\n"),
+            ModFile(name: "left.zen",   src: "helper = helper\ncalc* = () i32 { helper.value() + 1 }\n"),
+            ModFile(name: "p.zen",      src: "left = left\nmain = () i32 { left.calc() }\n"),
+        ], entry: "p.zen", want: 8),
+        ModValCase(files: [
+            ModFile(name: "helper.zen", src: "value* = () i32 { 40 }\n"),
+            ModFile(name: "left.zen",   src: "helper = helper\ncalc* = () i32 { helper.value() + 2 }\n"),
+            ModFile(name: "p.zen",      src: "{ calc } = left\nmain = () i32 { calc() }\n"),
+        ], entry: "p.zen", want: 42),
+        // two siblings export the SAME type name `Box`; namespace binds keep them distinct.
+        ModValCase(files: [
+            ModFile(name: "left.zen",  src: "Box*: { v: i32 }\nmake* = () Box { Box(v: 7) }\n"),
+            ModFile(name: "right.zen", src: "Box*: { v: i32 }\nmake* = () Box { Box(v: 9) }\n"),
+            ModFile(name: "p.zen",     src: "left = left\nright = right\nmain = () i32 { left.make().v + right.make().v }\n"),
+        ], entry: "p.zen", want: 16),
+
+        // ── import-head spacing variants all resolve the sibling (test_modules_oracle) ───────────
+        ModValCase(files: [
+            ModFile(name: "helper.zen", src: "addh* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen",      src: "{addh} = helper\nmain = () i32 { addh(3, 4) }\n"),
+        ], entry: "p.zen", want: 7),
+        ModValCase(files: [
+            ModFile(name: "helper.zen", src: "addh* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen",      src: "{ addh} = helper\nmain = () i32 { addh(3, 4) }\n"),
+        ], entry: "p.zen", want: 7),
+        ModValCase(files: [
+            ModFile(name: "helper.zen", src: "addh* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen",      src: "{addh } = helper\nmain = () i32 { addh(3, 4) }\n"),
+        ], entry: "p.zen", want: 7),
+
+        // ── std-export name collisions resolved by namespace binding (test_user_imports) ─────────
+        // std.core.slice.buf vs a sibling `buf` — namespace-qualified, no collision.
+        ModValCase(files: [
+            ModFile(name: "right.zen", src: "buf* = (n: i32) i32 { n + 5 }\n"),
+            ModFile(name: "p.zen",     src: "slice = std.core.slice\nalloc = std.mem.alloc\nright = right\nmain = () i32 {\n  heap := alloc.default()\n  xs := slice.buf(heap.addr(), 2, [0])\n  xs[0] = 30\n  xs[1] = 7\n  xs[0] + xs[1] + right.buf(0)\n}\n"),
+        ], entry: "p.zen", want: 42),
+        // std.mem.alloc.default vs a sibling `default`.
+        ModValCase(files: [
+            ModFile(name: "right.zen", src: "default* = (n: i32) i32 { n + 5 }\n"),
+            ModFile(name: "p.zen",     src: "alloc = std.mem.alloc\nright = right\nmain = () i32 {\n  h := alloc.default()\n  p := h.addr().acquire(8)\n  p.store_i64(30)\n  n := p.load_i64()\n  h.addr().release(p)\n  to_i32(n) + right.default(7)\n}\n"),
+        ], entry: "p.zen", want: 42),
+        // std.collections.vec.of vs a sibling `of`.
+        ModValCase(files: [
+            ModFile(name: "right.zen", src: "of* = (n: i32) i32 { n + 5 }\n"),
+            ModFile(name: "p.zen",     src: "vec = std.collections.vec\nmaps = std.collections.map\nright = right\n{ default } = std.mem.alloc\nmain = () i32 {\n  alloc := default()\n  a := alloc.addr()\n  v := vec.of(a, [10, 20])\n  m := maps.of(a, \"x\", 1)\n  ok := v.get(0) + v.get(1) + m.get(\"x\", 0) + right.of(6)\n  v.free(alloc.addr())\n  m.free(alloc.addr())\n  ok\n}\n"),
+        ], entry: "p.zen", want: 42),
+        // a qualified generic type annotation `vec.Vec<i32>` matches the qualified constructor.
+        ModValCase(files: [
+            ModFile(name: "p.zen", src: "vec = std.collections.vec\nalloc = std.mem.alloc\nsum = (v: vec.Vec<i32>) i32 { v.get(0) + v.get(1) }\nmain = () i32 {\n  heap := alloc.default()\n  v := vec.of(heap.addr(), [19, 23])\n  v.sum()\n}\n"),
+        ], entry: "p.zen", want: 42),
+
+        // ── name-clash namespacing as a REAL project (test_resolver_oracle) ──────────────────────
+        // sm.thing is 2-arg; imported and called with 2 args resolves to sm's sig => 3.
+        ModValCase(files: [
+            ModFile(name: "sm.zen",  src: "thing* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "app.zen", src: "{ thing } = sm\nmain = () i32 { thing(1, 2) }\n"),
+        ], entry: "app.zen", want: 3),
+
+        // ── transitive re-export through the import graph (test_resolver_oracle) ─────────────────
+        // app -> mid -> base: base.Pt is two hops away yet present in app's resolved world.
+        ModValCase(files: [
+            ModFile(name: "base.zen", src: "Pt*: { x: i32, y: i32 }\n"),
+            ModFile(name: "mid.zen",  src: "{ Pt } = base\nmake* = (v: i32) Pt { Pt(x: v, y: v) }\n"),
+            ModFile(name: "app.zen",  src: "{ make } = mid\nmain = () i32 { (make(3)).x }\n"),
+        ], entry: "app.zen", want: 3),
+    ])
+
+    d := run_mod_verdicts("modules verdict (cross-module check / loader errors)", [
+        // ── the net is NOT hollow: cross-module calls are arity/arg-type checked (test_modules_oracle) ──
+        // f expects (i32, i32); a 3-arg call against the resolved import is rejected by ARITY.
+        ModVerdictCase(files: [
+            ModFile(name: "x.zen", src: "f* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen", src: "{ f } = x\nbad* = () i32 { f(1, 2, 3) }\nmain = () i32 { bad() }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "error[arity]"),
+        // a str arg can't fit an i32 param -> rejected by ARG-TYPE (non-numeric, no literal escape hatch).
+        ModVerdictCase(files: [
+            ModFile(name: "x.zen", src: "f* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen", src: "{ f } = x\nbad* = () i32 { f(\"hi\", \"there\") }\nmain = () i32 { bad() }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "error[arg-type]"),
+        // the correct call against the resolved import is ACCEPTED.
+        ModVerdictCase(files: [
+            ModFile(name: "x.zen", src: "f* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen", src: "{ f } = x\ngood* = () i32 { f(1, 2) }\nmain = () i32 { good() }\n"),
+        ], entry: "p.zen", should_pass: true, needle: ""),
+        // a `[str]`'s `.len()` must NOT mis-dispatch to an imported `len(str)` (receiver-type-aware).
+        ModVerdictCase(files: [
+            ModFile(name: "x.zen", src: "len* = (s: str) i64 { 0 }\n"),
+            ModFile(name: "p.zen", src: "{ len } = x\nmain = () i32 {\n  ws: [str] := [\"a\", \"b\"]\n  ws.len().to_i32()\n}\n"),
+        ], entry: "p.zen", should_pass: true, needle: ""),
+
+        // ── transitive / clash rejections (test_resolver_oracle) ─────────────────────────────────
+        // make takes 1 arg; called with 2 against the transitively-resolved sig -> rejected.
+        ModVerdictCase(files: [
+            ModFile(name: "base.zen", src: "Pt*: { x: i32, y: i32 }\n"),
+            ModFile(name: "mid.zen",  src: "{ Pt } = base\nmake* = (v: i32) Pt { Pt(x: v, y: v) }\n"),
+            ModFile(name: "app.zen",  src: "{ make } = mid\nbad* = () i32 { (make(3, 4)).x }\nmain = () i32 { bad() }\n"),
+        ], entry: "app.zen", should_pass: false, needle: "error[arity]"),
+        // the clash imported from the 2-arg sibling: a 1-arg call is rejected (sig follows the import).
+        ModVerdictCase(files: [
+            ModFile(name: "sm.zen",  src: "thing* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "app.zen", src: "{ thing } = sm\nuse* = () i32 { thing(1) }\nmain = () i32 { use() }\n"),
+        ], entry: "app.zen", should_pass: false, needle: "error[arity]"),
+
+        // ── namespace-bound diagnostics keep the USER source span (test_user_imports) ────────────
+        // unknown member of a namespace bind: undefined-name, pointing at the call in the user file.
+        ModVerdictCase(files: [
+            ModFile(name: "left.zen", src: "thing* = () i32 { 10 }\n"),
+            ModFile(name: "p.zen",    src: "left = left\nmain = () i32 {\n    left.nope()\n}\n"),
+        ], entry: "p.zen", should_pass: false, needle: "error[undefined-name]"),
+        // same case, asserting the preserved user source line (not the rewritten flat source).
+        ModVerdictCase(files: [
+            ModFile(name: "left.zen", src: "thing* = () i32 { 10 }\n"),
+            ModFile(name: "p.zen",    src: "left = left\nmain = () i32 {\n    left.nope()\n}\n"),
+        ], entry: "p.zen", should_pass: false, needle: "left.nope()"),
+        // rewritten qualified call with wrong arity: error[arity], span on the user call site.
+        ModVerdictCase(files: [
+            ModFile(name: "left.zen", src: "thing* = (a: i32, b: i32) i32 { a + b }\n"),
+            ModFile(name: "p.zen",    src: "left = left\nmain = () i32 {\n    left.thing(1)\n}\n"),
+        ], entry: "p.zen", should_pass: false, needle: "error[arity]"),
+        // rewritten qualified call with a too-wide arg: error[arg-type] (i64 literal can't fit u8 param).
+        ModVerdictCase(files: [
+            ModFile(name: "left.zen", src: "thing* = (a: u8) i32 { 0 }\n"),
+            ModFile(name: "p.zen",    src: "left = left\nbig = () i64 { 9999999999 }\nmain = () i32 {\n    left.thing(big())\n}\n"),
+        ], entry: "p.zen", should_pass: false, needle: "error[arg-type]"),
+
+        // ── loader-error QUALITY: clean messages, not raw linker spew (test_user_imports) ────────
+        ModVerdictCase(files: [
+            ModFile(name: "p.zen", src: "{ f } = nosuch\nmain = () i32 { f() }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "unknown module 'nosuch'"),
+        ModVerdictCase(files: [
+            ModFile(name: "b.zen", src: "helper* = (x: i32) i32 { x }\n"),
+            ModFile(name: "p.zen", src: "{ nope } = b\nmain = () i32 { 0 }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "unknown name 'nope' in module 'b'"),
+        ModVerdictCase(files: [
+            ModFile(name: "p.zen", src: "{ nosuchname } = std.text.fmt\nmain = () i32 { 0 }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "unknown name 'nosuchname' in module 'std.text.fmt'"),
+        ModVerdictCase(files: [
+            ModFile(name: "p.zen", src: "{ x } = std.nosuchmod\nmain = () i32 { 0 }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "unknown module 'std.nosuchmod'"),
+
+        // ── sibling name COLLISIONS reject with origin + hint (test_user_imports) ────────────────
+        ModVerdictCase(files: [
+            ModFile(name: "c1.zen", src: "dupf* = () i32 { 1 }\n"),
+            ModFile(name: "c2.zen", src: "dupf* = () i32 { 2 }\n"),
+            ModFile(name: "p.zen",  src: "{ dupf } = c1\n{ dupf } = c2\nmain = () i32 { dupf() }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "duplicate top-level definition 'dupf'"),
+        ModVerdictCase(files: [
+            ModFile(name: "c1.zen", src: "dupf* = () i32 { 1 }\n"),
+            ModFile(name: "c2.zen", src: "dupf* = () i32 { 2 }\n"),
+            ModFile(name: "p.zen",  src: "{ dupf } = c1\n{ dupf } = c2\nmain = () i32 { dupf() }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "hint:"),
+        // keyword-safe key collision (default vs default_zk) is still caught.
+        ModVerdictCase(files: [
+            ModFile(name: "c1.zen", src: "default* = () i32 { 1 }\n"),
+            ModFile(name: "c2.zen", src: "default_zk* = () i32 { 2 }\n"),
+            ModFile(name: "p.zen",  src: "{ default } = c1\n{ default_zk } = c2\nmain = () i32 { default() + default_zk() }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "duplicate top-level definition 'default_zk'"),
+        // a name BOTH imported and defined by the main file reaches the validator as a duplicate.
+        ModVerdictCase(files: [
+            ModFile(name: "b.zen", src: "helper* = (x: i32) i32 { x }\n"),
+            ModFile(name: "p.zen", src: "{ helper } = b\nhelper = (x: i32) i32 { x + 1 }\nmain = () i32 { helper(1) }\n"),
+        ], entry: "p.zen", should_pass: false, needle: "duplicate top-level definition"),
+
+        // ── a large namespace-bound compiler module resolves without overflowing the resolver ────
+        ModVerdictCase(files: [
+            ModFile(name: "p.zen", src: "cv = compiler.check_validate\nmain = () i32 { 0 }\n"),
+        ], entry: "p.zen", should_pass: true, needle: ""),
+    ])
+
+    v + d
+}
