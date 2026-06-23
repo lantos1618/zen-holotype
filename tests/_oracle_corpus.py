@@ -410,6 +410,15 @@ VERDICT_CASES = [
     ('test* = () i32 { c := true  v := c.match ({ true => 5, false => "s" })  0 }', 'reject'),      # bool-match arms differ
     ('E*: A(i32) | B\ntest* = () i32 { x := E.A("s")  0 }', 'reject'),                             # enum payload type mismatch
     ('test* = () i32 { n := 1  v := n.match ({ 1 => 5, _ => 7 })  0 }', 'accept'),                  # value-match arms agree -> ok
+    # --- A.2: an unannotated let whose generic call leaves a tparam uninferred (-> Box_void) ---
+    ('Box<T>: { n: i32 }\nempty<T> = (k: i32) Box<T> { Box<T>( n: k ) }\ntest* = () i32 { m := empty(7)  0 }', 'reject'),
+    ('Box<T>: { n: i32 }\nempty<T> = (k: i32) Box<T> { Box<T>( n: k ) }\ntest* = () i32 { m: Box<i32> := empty(7)  0 }', 'accept'),  # annotation pins T
+    ('Box<T>: { n: i32 }\nwrap<T> = (x: T) Box<T> { Box<T>( n: 0 ) }\ntest* = () i32 { b := wrap(5)  0 }', 'accept'),               # T bindable from arg
+    # --- A.5: signed-vs-unsigned-wide comparison silently uses C unsigned promotion ---
+    ('test* = () i32 { a: i32 := 0 - 1  b: u32 := 1  (a < b).match ({ true => 1, false => 0 }) }', 'reject'),
+    ('test* = () i32 { a: i64 := 0 - 1  b: u64 := 1  (a == b).match ({ true => 1, false => 0 }) }', 'reject'),
+    ('test* = () i32 { n: u64 := 5  (n < 10).match ({ true => 1, false => 0 }) }', 'accept'),                                         # unsigned vs literal is fine
+    ("test* = () i32 { a: u8 := 97  (a == 'a').match ({ true => 1, false => 0 }) }", 'accept'),                                       # u8/char compare stays fine
     ('test* = () i32 { x := 50  (1 < x < 10).match ({ true => 1, false => 0 }) }', 'reject'),
     ('pick<T> = (xs: [T], a: T) T { a }\ntest* = () i32 { pick([1, 2]) }', 'reject'),
     # --- VARIADIC PARAMS: a `...T` param must be LAST and there may be at most ONE (parse rejects otherwise) ---

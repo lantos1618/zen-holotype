@@ -732,12 +732,32 @@ eq_mix_err = (env: Env, b: BinData) i32 {
         })
     })
 }
+// A comparison between a SIGNED int and an UNSIGNED int of rank >= 8 (u16/u32/u64) silently uses C's
+// unsigned promotion — `a:i32=-1 < b:u32=1` evaluates FALSE. Reject it. NARROW by design: u8 is
+// excluded so byte/char compares (`b == 'a'`) stay fine (u8 always promotes to a signed int safely).
+is_signed_int = (t: Ty) bool {
+    t.match ({ .I32 => true, .I64 => true, .Named(n) => eq(n, "i8") || eq(n, "i16") || eq(n, "i32") || eq(n, "i64"), _ => false })
+}
+is_unsigned_wide = (t: Ty) bool {
+    t.match ({ .Named(n) => eq(n, "u16") || eq(n, "u32") || eq(n, "u64"), _ => false })
+}
+sign_mismatch = (l: Ty, r: Ty) bool {
+    (l.is_signed_int() && r.is_unsigned_wide()) || (l.is_unsigned_wide() && r.is_signed_int())
+}
+// A numeric LITERAL operand is polymorphic and coerces to the other side's type (`n: u64 < 10` is
+// fine), so only flag when BOTH sides are non-literal values of genuinely mismatched signedness.
+signcmp_err = (env: Env, b: BinData) i32 {
+    ((b.op.is_cmp_op_v() || b.op.is_eq_op_v()) && (b.lhs.is_lit_numeric() == false) && (b.rhs.is_lit_numeric() == false)).match ({
+        true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)).match ({ true => 1, false => 0 }),
+        false => 0
+    })
+}
 operand_err = (env: Env, b: BinData) i32 {
     b.op.is_logic_op().match ({
         true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
         false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
-            true  => env.num_operand_err(b),
-            false => b.op.is_eq_op_v().match ({ true => env.eq_mix_err(b), false => 0 })
+            true  => env.num_operand_err(b) + env.signcmp_err(b),
+            false => b.op.is_eq_op_v().match ({ true => env.eq_mix_err(b) + env.signcmp_err(b), false => 0 })
         })
     })
 }
@@ -753,7 +773,7 @@ index_err = (env: Env, ix: IndexData) i32 {
 // Value-position blocks recurse into statement expressions; full env-threading stays in check_body.
 check_block_stmt = (env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l),
+        .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l) + env.let_needannot_err(l),
         .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
         .Return(r)   => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
@@ -972,9 +992,31 @@ let_fit_err = (env: Env, l: LetData) i32 {
         }
     })
 }
+// A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`.
+// An unbound tparam survives inference as void, so the let's stored (inferred) type becomes Box<void>,
+// which only ever lowers to `Box_void`, never a usable value.
+ty_has_void_targ = (t: Ty) bool {
+    t.match ({
+        .Generic(g) => g.args.tys_mention_void(),
+        .Ptr(p)     => load(p).ty_has_void_targ(),
+        .Slice(e)   => load(e).ty_has_void_targ(),
+        _           => false
+    })
+}
+tys_mention_void = (ts: [Ty]) bool {
+    f := false
+    ts.loop((h, i, t) { f = (t.is_void_ty() || t.ty_has_void_targ()).match ({ true => true, false => f }) })
+    f
+}
+// A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
+// uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
+// `Box_void`). check used to pass; require an annotation so the tparam is pinned.
+let_needannot_err = (env: Env, l: LetData) i32 {
+    l.ty.ty_has_void_targ().match ({ true => 1, false => 0 })
+}
 check_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)    => env.check_expr(l.value) + env.let_fit_err(l),
+        .Let(l)    => env.check_expr(l.value) + env.let_fit_err(l) + env.let_needannot_err(l),
         .Assign(x) => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
         .Return(r) => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
@@ -1304,6 +1346,7 @@ KTRAITBOUND   = () i32 { 16 }   // a type bound to `A: Trait` at a call site doe
 KUNKNOWNTYPE  = () i32 { 17 }   // a type annotation names a type that is not declared/imported/a tparam
 KLAMBDAVALUE  = () i32 { 18 }   // a lambda used as a value the inliner can't splice (stored/returned)
 KMUSTUSE      = () i32 { 19 }   // a value-mold `(Self,…) Self` self-mutation whose result is discarded
+KNEEDANNOT    = () i32 { 20 }   // an unannotated let whose inferred type leaves a tparam uninferred (-> T=void)
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1371,6 +1414,7 @@ diagnostic_kind_name = (code: i32) str {
         17 => "unknown-type",
         18 => "lambda-value",
         19 => "must-use",
+        20 => "need-annotation",
         _ => "type"
     })
 }
@@ -1395,6 +1439,7 @@ diagnostic_message = (code: i32) str {
         17 => "unknown type name",
         18 => "a lambda can only be used directly as a call argument",
         19 => "result of a self-mutating container method is discarded; the receiver is invalid after this call",
+        20 => "cannot infer the type parameter of this binding",
         _ => "type error"
     })
 }
@@ -1419,6 +1464,7 @@ diagnostic_hint = (code: i32) str {
         17 => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
         18 => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
         19 => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
+        20 => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
         _ => ""
     })
 }
@@ -1693,7 +1739,7 @@ kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAN
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)),
+        .Let(l)      => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)).kv_kor(env.kv_let_needannot_kind(l)),
         .Assign(x)   => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
         .Return(r)   => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
@@ -1801,6 +1847,7 @@ pos_or = (p: i32, fallback: i32) i32 {
 }
 kv_ret_kind    = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos()) }
 kv_let_fit_kind = (env: Env, l: LetData) i32 { env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos()) }
+kv_let_needannot_kind = (env: Env, l: LetData) i32 { env.let_needannot_err(l).kv_one(KNEEDANNOT()).kv_at(load(l.value).expr_pos()) }
 kv_assign_kind = (env: Env, x: AssignData) i32 {
     env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos()))
 }
@@ -1810,7 +1857,7 @@ kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
 // mirrors check_stmt: the statement's sub-expressions, then its own fit check.
 kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)    => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)),
+        .Let(l)    => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)).kv_kor(env.kv_let_needannot_kind(l)),
         .Assign(x) => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)),
         .Return(r) => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
