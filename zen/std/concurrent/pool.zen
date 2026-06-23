@@ -1,0 +1,371 @@
+// std.concurrent.pool — PARALLELISM Cut 1: a multi-threaded work-stealing scheduler that runs the
+// actor model across M real OS threads (genuine N-core parallelism), per docs/parallel-scheduler-design.md.
+//
+// This is the FIRST cut from that design: a mutex-guarded GLOBAL run queue + M worker pthreads +
+// mutex-per-mailbox. The scheduled unit is an ACTOR (Pony model): an actor is runnable iff its
+// mailbox has a pending message AND it is not already scheduled/running. A worker pops a runnable
+// actor, runs its behavior over a bounded batch of messages, then reschedules (if more remain) or
+// deschedules (if empty). Genuinely parallel, correct, NO CAS — the contended global lock is the
+// known Cut-1 limitation (Cut 2 = per-worker deques; Cut 3 = lock-free Chase–Lev).
+//
+// ── THE CENTRAL RACE-FREEDOM INVARIANT (design §3.3) ────────────────────────────────────────────
+// An actor is present in at most one run queue AND executing on at most one worker at any instant,
+// enforced by a single `scheduled` flag transition guarded by the mailbox mutex:
+//   - `send` flips scheduled false→true UNDER the mailbox lock; only the false→true winner pushes the
+//     actor to the global queue (no double-schedule). Concurrent senders see `true` and just enqueue.
+//   - a worker that empties the mailbox clears scheduled→false UNDER the same lock, re-reading
+//     `pending` in the same critical section so a message that arrived in the gap is never lost
+//     (the lost-wakeup fix). Because of this invariant the actor's OWN fields need NO lock — only the
+//     mailbox (MPSC) and the run queue need synchronisation.
+//
+// ── COLORLESS ──────────────────────────────────────────────────────────────────────────────────
+// `with_pool` is a THIRD backing/driver alongside std.scope's `with_sync` (inline drain, 1 thread)
+// and `with_async` (cooperative coroutine yield, 1 thread). The actor `behavior` is identical under
+// every driver: `pool_drain_inline` runs it single-threaded; the pool runs the SAME behavior across M
+// workers. spawn/send semantics are unchanged — only WHO drains (caller vs workers) differs.
+//
+// Internal pool/actor storage is malloc'd FFI/thread scratch (the same explicit-alloc justification as
+// std.thread's pthread_t cell and std.sync's mutex storage), not hidden heap.
+{ malloc, free } = std.mem.alloc
+{ Mutex, CondVar, new_mutex, new_cond } = std.sync
+{ spawn, join, JoinHandle } = std.thread
+{ is_null } = std.core.ptr
+
+QUANTUM := 64   // max messages an actor runs per turn before yielding the worker (fairness)
+
+// ── PoolActor: a type-erased runnable actor ─────────────────────────────────────────────────────
+// `behavior(user, msg)` runs the actor's reaction to one i64 message. The mailbox is a fixed-cap ring
+// of i64 messages (a pointer payload rides as an i64 too). `mbmu` guards head/tail/buf AND `sched`.
+PoolActor: {
+    user: RawPtr<u8>,                  // user actor state (opaque to the pool)
+    mbuf: RawPtr<u8>,                  // mailbox ring buffer (i64 slots)
+    head: i64,                         // consumer index (the running worker)
+    tail: i64,                         // producer index (any sender)
+    cap: i64,                          // ring capacity (slots)
+    mbmu: Mutex,                       // guards head/tail/buf + sched (MPSC mailbox lock)
+    sched: i64,                        // scheduled flag: 0 = idle, 1 = queued-or-running (under mbmu)
+    behavior: (RawPtr<u8>, i64) void   // the actor's per-message reaction (non-capturing)
+}
+actor_view = (raw: RawPtr<u8>) MutPtr<PoolActor> { raw.slice(1)[0].addr() }
+
+// build a runnable actor: allocate its block + mailbox ring. NOT enqueued — the first `send` makes it
+// runnable (design: an actor is runnable iff it has a pending message). Returns the opaque handle.
+pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> {
+    blk := malloc(sizeof(PoolActor))
+    mbuf := malloc(mbcap * 8)
+    av: [PoolActor] := blk.slice(1)
+    av[0] = PoolActor(user: user, mbuf: mbuf, head: 0, tail: 0, cap: mbcap, mbmu: new_mutex(), sched: 0, behavior: behavior)
+    blk
+}
+// release an actor's mailbox + lock + block (after the pool has shut down; single owner).
+pool_actor_free* = (raw: RawPtr<u8>) void {
+    a := actor_view(raw)
+    free(a.mbuf)
+    a.mbmu.destroy()
+    free(raw)
+}
+
+// ── Pool: M workers + ONE global run queue behind ONE mutex + condvar (Cut 1) ───────────────────
+Pool: {
+    rqbuf: RawPtr<u8>,    // global run queue ring (i64 slots holding PoolActor block pointers)
+    rqhead: i64,
+    rqtail: i64,
+    rqcap: i64,
+    mu: Mutex,            // guards rq + live + stop
+    work_cv: CondVar,     // idle workers park here; `send` signals it when work arrives
+    done_cv: CondVar,     // the owner thread waits here for quiescence (live == 0)
+    live: i64,            // # of scheduled actors (runnable or running); 0 = quiescent (under mu)
+    stop: i64,            // shutdown flag: 1 = workers should exit when no work (under mu)
+    nworkers: i64,
+    wstats: RawPtr<u8>,   // i64[nworkers]: messages processed per worker (proof of distribution)
+    handles: RawPtr<u8>,  // i64[nworkers]: each worker pthread's JoinHandle.tid
+    args: RawPtr<u8>,     // 16 bytes/worker: each worker's [pool_raw, id] arg cell
+    selfraw: RawPtr<u8>   // the malloc'd Pool block address (for pool_close to free)
+}
+// recover a MutPtr<Pool> from the pool's malloc'd block address (e.g. inside a worker/producer thread
+// body that received the raw pointer through its `arg`).
+pool_view* = (raw: RawPtr<u8>) MutPtr<Pool> { raw.slice(1)[0].addr() }
+// the pool's own backing-block address — pass this through a thread `arg` to reconstruct the pool view.
+pool_raw* = (p: MutPtr<Pool>) RawPtr<u8> { p.selfraw }
+
+// run-queue primitives — caller MUST hold `p.mu`.
+rq_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) void {
+    p.rqbuf.offset((p.rqtail % p.rqcap) * 8).store_i64(actor)
+    p.rqtail = p.rqtail + 1
+}
+rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
+    a := p.rqbuf.offset((p.rqhead % p.rqcap) * 8).load_i64().offset(0)
+    p.rqhead = p.rqhead + 1
+    a
+}
+
+// ── send (race-free) — the hard part (design §3.2/§3.3) ─────────────────────────────────────────
+// Lock the mailbox, push the message, read+set `scheduled`; only if it was FALSE do we push the actor
+// to the global queue + signal a worker. The false→true winner is the SOLE pusher (no double-schedule);
+// concurrent senders see `true` and only enqueue their message. Returns false if the mailbox is full
+// (back-pressure; the message is dropped, never silently corrupting the ring).
+pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
+    a := actor_view(actor)
+    a.mbmu.lock()
+    sent := (a.tail - a.head >= a.cap).match ({
+        true  => false,
+        false => {
+            a.mbuf.offset((a.tail % a.cap) * 8).store_i64(msg)
+            a.tail = a.tail + 1
+            true
+        }
+    })
+    // flip scheduled false→true ONLY when we actually enqueued work; remember if WE won the transition.
+    won := sent.match ({
+        true  => (a.sched == 0).match ({ true => { a.sched = 1  true }, false => false }),
+        false => false
+    })
+    a.mbmu.unlock()
+    won.match ({
+        true => {
+            p.mu.lock()
+            p.rq_push(actor)
+            p.live = p.live + 1
+            p.work_cv.signal()
+            p.mu.unlock()
+        },
+        false => {}
+    })
+    sent
+}
+
+// drain up to QUANTUM messages, running `behavior` OUTSIDE the mailbox lock (so senders never block on
+// user work). Returns the count processed this batch.
+drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
+    (count >= QUANTUM).match ({
+        true  => count,
+        false => {
+            a.mbmu.lock()
+            has := a.head < a.tail
+            msg := has.match ({
+                true  => {
+                    m := a.mbuf.offset((a.head % a.cap) * 8).load_i64()
+                    a.head = a.head + 1
+                    m
+                },
+                false => 0
+            })
+            a.mbmu.unlock()
+            has.match ({
+                true  => { a.behavior(a.user, msg)  drain_batch(a, count + 1) },
+                false => count
+            })
+        }
+    })
+}
+
+// run ONE actor turn, then reschedule (more pending) or deschedule (empty). The deschedule reads
+// `pending` and clears `scheduled` IN THE SAME mailbox critical section — closing the lost-wakeup race.
+run_quantum = (p: MutPtr<Pool>, actor: RawPtr<u8>) i64 {
+    a := actor_view(actor)
+    processed := drain_batch(a, 0)
+    a.mbmu.lock()
+    remaining := a.tail - a.head
+    (remaining > 0).match ({
+        true => {
+            a.mbmu.unlock()                 // still scheduled==1; give other actors a turn (fairness)
+            p.mu.lock()
+            p.rq_push(actor)
+            p.work_cv.signal()
+            p.mu.unlock()
+        },
+        false => {
+            a.sched = 0                      // deschedule UNDER the mailbox lock (lost-wakeup fix)
+            a.mbmu.unlock()
+            p.mu.lock()
+            p.live = p.live - 1
+            (p.live == 0).match ({ true => p.done_cv.broadcast(), false => {} })
+            p.mu.unlock()
+        }
+    })
+    processed
+}
+
+// pop a runnable actor or park until work arrives / shutdown. Caller must hold `p.mu`; returns null to
+// signal "exit the worker loop". The park + the stop-check + the wake all happen under `p.mu`, so a
+// shutdown broadcast can never be lost against a worker about to park.
+pool_next_locked = (p: MutPtr<Pool>) RawPtr<u8> {
+    (p.rqhead < p.rqtail).match ({
+        true  => p.rq_pop(),
+        false => (p.stop != 0).match ({
+            true  => null_ptr(),
+            false => {
+                p.work_cv.wait(p.mu)         // atomically unlock mu, sleep, re-lock on wake
+                pool_next_locked(p)          // re-check predicate (guards spurious wakeups)
+            }
+        })
+    })
+}
+pool_next = (p: MutPtr<Pool>) RawPtr<u8> {
+    p.mu.lock()
+    r := pool_next_locked(p)
+    p.mu.unlock()
+    r
+}
+
+// the worker loop: pop/park, run a quantum, tally messages into this worker's stat slot (only this
+// worker writes its slot → no contention), repeat until shutdown.
+worker_loop = (p: MutPtr<Pool>, wid: i64) void {
+    actor := pool_next(p)
+    is_null(actor).match ({
+        true  => {},
+        false => {
+            n := run_quantum(p, actor)
+            slot := p.wstats.offset(wid * 8)
+            slot.store_i64(slot.load_i64() + n)
+            worker_loop(p, wid)
+        }
+    })
+}
+
+// non-capturing pthread body: arg → [pool_block_ptr, worker_id]; rebuild the pool view and run the loop.
+worker_body = (arg: RawPtr<u8>) RawPtr<u8> {
+    pool_raw := load_i64(arg).offset(0)
+    wid := load_i64(arg.offset(8))
+    p := pool_view(pool_raw)
+    worker_loop(p, wid)
+    null_ptr()
+}
+
+// ── lifecycle ───────────────────────────────────────────────────────────────────────────────────
+// allocate + initialise a Pool block over a malloc'd run queue / locks / condvars / per-worker stats.
+new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
+    blk := malloc(sizeof(Pool))
+    rqbuf := malloc(rqcap * 8)
+    wstats := malloc(nworkers * 8)
+    zero_stats(wstats, 0, nworkers)
+    pv: [Pool] := blk.slice(1)
+    pv[0] = Pool(
+        rqbuf: rqbuf, rqhead: 0, rqtail: 0, rqcap: rqcap,
+        mu: new_mutex(), work_cv: new_cond(), done_cv: new_cond(),
+        live: 0, stop: 0, nworkers: nworkers, wstats: wstats,
+        handles: malloc(nworkers * 8), args: malloc(nworkers * 16), selfraw: blk
+    )
+    blk
+}
+
+// open a running pool: allocate it and spawn the M worker pthreads. The returned pointer is the pool
+// handle; drive it with pool_spawn/pool_send, then pool_quiesce_stop → (read stats) → pool_close.
+pool_open* = (nworkers: i64, rqcap: i64) MutPtr<Pool> {
+    pool_raw := new_pool(nworkers, rqcap)
+    p := pool_view(pool_raw)
+    start_workers(pool_raw, p.handles, p.args, 0, nworkers)
+    p
+}
+zero_stats = (w: RawPtr<u8>, i: i64, n: i64) void {
+    (i < n).match ({ true => { w.offset(i * 8).store_i64(0)  zero_stats(w, i + 1, n) }, false => {} })
+}
+
+// spawn the worker pthreads. `handles` (i64[nworkers]) receives each JoinHandle.tid; `args`
+// (16 bytes/worker) holds each worker's [pool_raw, id] cell. Both are freed after join.
+start_workers = (pool_raw: RawPtr<u8>, handles: RawPtr<u8>, args: RawPtr<u8>, i: i64, n: i64) void {
+    (i < n).match ({
+        true => {
+            ac := args.offset(i * 16)
+            ac.store_i64(pool_raw)
+            ac.offset(8).store_i64(i)
+            h := spawn(worker_body, ac)
+            handles.offset(i * 8).store_i64(h.tid)
+            start_workers(pool_raw, handles, args, i + 1, n)
+        },
+        false => {}
+    })
+}
+join_workers = (handles: RawPtr<u8>, i: i64, n: i64) void {
+    (i < n).match ({
+        true => {
+            join(JoinHandle(tid: handles.offset(i * 8).load_i64().offset(0)))
+            join_workers(handles, i + 1, n)
+        },
+        false => {}
+    })
+}
+
+// block the calling thread until the pool is quiescent (no scheduled actors). Caller holds p.mu.
+wait_quiescent = (p: MutPtr<Pool>) void {
+    (p.live == 0).match ({
+        true  => {},
+        false => { p.done_cv.wait(p.mu)  wait_quiescent(p) }
+    })
+}
+
+// drain-to-quiescence shutdown: wait until all enqueued work is processed, flag stop, wake every parked
+// worker (the broadcast is under p.mu so it can't be lost), join the pthreads. After this returns the
+// pool is idle and joined — stats (workers_busy) are stable and actors are safe to free — but the pool
+// storage is NOT yet freed (call pool_close for that).
+pool_quiesce_stop* = (p: MutPtr<Pool>) void {
+    p.mu.lock()
+    p.wait_quiescent()
+    p.stop = 1
+    p.work_cv.broadcast()
+    p.mu.unlock()
+    join_workers(p.handles, 0, p.nworkers)
+}
+
+// free the pool's backing storage (only after pool_quiesce_stop has joined the workers).
+pool_close* = (p: MutPtr<Pool>) void {
+    free(p.rqbuf)
+    free(p.wstats)
+    free(p.handles)
+    free(p.args)
+    p.mu.destroy()
+    p.work_cv.destroy()
+    p.done_cv.destroy()
+    free(p.selfraw)
+}
+
+// number of workers that processed at least one message (proof that work fanned across cores).
+workers_busy* = (p: MutPtr<Pool>) i64 { count_busy(p.wstats, 0, p.nworkers, 0) }
+count_busy = (w: RawPtr<u8>, i: i64, n: i64, acc: i64) i64 {
+    (i < n).match ({
+        true  => count_busy(w, i + 1, n, (w.offset(i * 8).load_i64() > 0).match ({ true => acc + 1, false => acc })),
+        false => acc
+    })
+}
+
+// ── with_pool: the colorless parallel combinator (3rd driver, alongside with_sync/with_async) ──
+// Start M workers, run the SAME actor-spawning body across the pool, drain to quiescence, shut down,
+// free. `spawn`/`send` (pool_spawn/pool_send) are unchanged from the single-thread surface.
+with_pool*<R> = (nworkers: i64, rqcap: i64, body: (MutPtr<Pool>) R) R {
+    p := pool_open(nworkers, rqcap)
+    out := body(p)
+    p.pool_quiesce_stop()
+    p.pool_close()
+    out
+}
+
+// SYNC driver: run an actor's behavior over its whole mailbox inline on the caller's thread (no pool,
+// no threads). The SAME `behavior` the pool fans out — the colorless proof that the driver, not the
+// actor, decides sync vs parallel. Returns messages processed.
+pool_drain_inline* = (actor: RawPtr<u8>) i64 {
+    a := actor_view(actor)
+    drain_inline_loop(a, 0)
+}
+drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
+    (a.head < a.tail).match ({
+        true => {
+            m := a.mbuf.offset((a.head % a.cap) * 8).load_i64()
+            a.head = a.head + 1
+            a.behavior(a.user, m)
+            drain_inline_loop(a, count + 1)
+        },
+        false => count
+    })
+}
+// post a message to an actor's mailbox with NO scheduling (for the inline sync driver / pre-loading).
+pool_post* = (actor: RawPtr<u8>, msg: i64) bool {
+    a := actor_view(actor)
+    (a.tail - a.head >= a.cap).match ({
+        true  => false,
+        false => {
+            a.mbuf.offset((a.tail % a.cap) * 8).store_i64(msg)
+            a.tail = a.tail + 1
+            true
+        }
+    })
+}

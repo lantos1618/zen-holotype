@@ -511,6 +511,48 @@ def test_sync_mutex_counter():
     assert r.returncode == 42, r.stderr
 
 
+def test_pool_parallel_actors():
+    """PARALLELISM Cut 1 (std.concurrent.pool): the multi-threaded work-stealing scheduler runs the
+    actor model across M real OS threads. 8 actors each receive 5000 messages that atomically bump a
+    SHARED accumulator; run across 4 worker pthreads behind a mutex-guarded global run queue. The
+    total must be EXACT (no message lost to the lost-wakeup race, none duplicated by double-schedule)
+    AND >= 2 workers must have processed messages (work demonstrably fanned across cores). Exit 7 =
+    exact total + parallel; 3 = ran on one core; 1 = lost/duplicated work."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "pool_parallel_actors.zen")
+    assert r.returncode == 7, r.stderr
+
+
+def test_pool_stress_exactly_once():
+    """Race torture for the pool's send path: 8 producer OS-threads concurrently send 2000 messages
+    each to 8 SHARED actors (true MPSC contention on every mailbox + the `scheduled` flag transition).
+    Over-sized mailboxes guarantee no drops, so the global processed-counter MUST equal the total
+    accepted sends — exactly once, no loss (lost-wakeup), no duplication (double-schedule). Repeated
+    50x because the races are probabilistic. Exit 42 = all 50 iterations exact."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "pool_stress_exactly_once.zen")
+    assert r.returncode == 42, r.stderr
+
+
+def test_pool_colorless_driver():
+    """Colorless proof for actors: the SAME `behave` reaction runs under two drivers with the SAME
+    result — `pool_drain_inline` (single-thread, on the caller) and `with_pool`/the pool (fanned over 4
+    worker threads). The pool is the third backing alongside std.scope's with_sync/with_async. Exit 7 =
+    both drivers produce the identical total AND the parallel run used >1 core."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "pool_colorless_driver.zen")
+    assert r.returncode == 7, r.stderr
+
+
+def test_pool_with_pool_combinator():
+    """The `with_pool` colorless combinator: open M workers, run the actor-spawning body, drain to
+    quiescence, shut down + free in one call (the parallel sibling of with_sync). 3 actors x 3000
+    messages adding 2 = 18000 across 4 workers. Exit 9 = exact total after drain-to-quiescence."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "pool_with_pool_combinator.zen")
+    assert r.returncode == 9, r.stderr
+
+
 def test_scope_generic_field_dispatch():
     """A1: trait dispatch through a nested-generic struct FIELD receiver across an inlined generic fn.
     `Scope<A>(alloc: a.addr())` monomorphizes to Scope<SyncArena>, and the field receiver `s.alloc`
