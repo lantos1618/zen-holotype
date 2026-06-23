@@ -66,6 +66,15 @@ write_int = (n: i64) i64 {
         false => write_uint(n)
     })
 }
+// Unsigned decimal for the full u64 range. n is typed u64 so `/` and `%` lower to
+// UNSIGNED C ops — values above i64 max (e.g. 18446744073709551615) print correctly,
+// unlike write_int which would treat the high bit as a sign.
+write_u64 = (n: u64) i64 {
+    (n < 10).match ({
+        true  => write_digit(to_i64(n)),
+        false => write_u64(n / 10) + write_digit(to_i64(n % 10))
+    })
+}
 
 write_fpad = (n: i64, w: i64) i64 {
     (w == 1).match ({
@@ -258,6 +267,34 @@ i64.impl(Display, {
 u8.impl(Display, {
     fmt_print = (n: u8) i64 { n.write_int() }
     fmt_println = (n: u8) i64 { n.write_int()  newline() }
+})
+
+// Narrower signed widths: widen to i64 (sign-preserving) and reuse the integer formatter.
+i8.impl(Display, {
+    fmt_print = (n: i8) i64 { to_i64(n).write_int() }
+    fmt_println = (n: i8) i64 { to_i64(n).write_int()  newline() }
+})
+
+i16.impl(Display, {
+    fmt_print = (n: i16) i64 { to_i64(n).write_int() }
+    fmt_println = (n: i16) i64 { to_i64(n).write_int()  newline() }
+})
+
+// Unsigned u16/u32 fit in i64 (max ~4.29e9 < 9.2e18), so widen and reuse write_int.
+u16.impl(Display, {
+    fmt_print = (n: u16) i64 { to_i64(n).write_int() }
+    fmt_println = (n: u16) i64 { to_i64(n).write_int()  newline() }
+})
+
+u32.impl(Display, {
+    fmt_print = (n: u32) i64 { to_i64(n).write_int() }
+    fmt_println = (n: u32) i64 { to_i64(n).write_int()  newline() }
+})
+
+// u64 can exceed i64 max, so format via the unsigned path.
+u64.impl(Display, {
+    fmt_print = (n: u64) i64 { write_u64(n) }
+    fmt_println = (n: u64) i64 { write_u64(n)  newline() }
 })
 
 f64.impl(Display, {
