@@ -95,6 +95,10 @@ find* = (s: str, needle: str) i64 {
 // does `s` contain `needle`? (the empty needle is contained in everything)
 contains* = (s: str, needle: str) bool { s.find(needle) >= 0 }
 
+// NOTE: `find` IS the index-of operation (first byte index, -1 if absent) — there is no separate
+// `index_of` here on purpose: it would duplicate `find` AND collide on the flattened namespace with
+// std.core.slice's `index_of<T>`. Reach for `find` (raw -1 sentinel) or `find_opt` (Opt<i64>).
+
 // does `s` begin with `prefix`? (every str starts with the empty prefix)
 starts_with* = (s: str, prefix: str) bool {
     sv := s.view()
@@ -221,6 +225,27 @@ rtrim_in*<A> = (a: MutPtr<A>, s: str) str {
 }
 rtrim*<A> = (a: MutPtr<A>, s: str) str { a.rtrim_in(s) }
 
+// strip a leading `prefix` AS A STR — zero-copy (no allocation): like `ltrim`, dropping a prefix only
+// advances the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
+// it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
+trim_prefix* = (s: str, prefix: str) str {
+    s.starts_with(prefix).match ({
+        true  => cstr(s.view().ptr.offset(prefix.len())),
+        false => s
+    })
+}
+// strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
+// own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
+// trim_suffix("file.zen", ".zen") == "file".
+trim_suffix_in*<A> = (a: MutPtr<A>, s: str, suffix: str) str {
+    n := s.len()
+    s.ends_with(suffix).match ({
+        true  => a.substr_in(s, 0, n - suffix.len()),
+        false => a.substr_in(s, 0, n)
+    })
+}
+trim_suffix*<A> = (a: MutPtr<A>, s: str, suffix: str) str { a.trim_suffix_in(s, suffix) }
+
 // ── splitting: fields and words ───────────────────────────────────────────────
 //
 // A returned `[str]` holds NUL-terminated COPIES of each field, not zero-copy sub-views: `str` is
@@ -283,6 +308,156 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
     out
 }
 words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
+
+// ── building new strings: join / replace / case / repeat / pad ─────────────────
+//
+// Each op below ALLOCATES a fresh NUL-terminated `str` from the caller's allocator (a `MutPtr<A>`),
+// the same explicit-allocator contract as `substr_in`. They size the result first, `acquire` once, then
+// fill — no String-builder dependency (str.zen stays free of a std.text.string import cycle).
+//
+// FLAT-NAMESPACE NOTE: `join`, `replace`, `repeat`, `to_lower`, `to_upper`, `pad_left`, `pad_right` are
+// common names. They are unique across std today (grepped) — the only near-miss is std.core.slice's
+// `index_of<T>`, which is why no `index_of` is defined here (use `find`). Keep new globals distinct.
+
+// copy `t`'s bytes into `out` starting at `at`; return the offset just past them.
+copy_at = (out: [u8], at: i64, t: str) i64 {
+    tv := t.view()
+    tv.loop((h, i, b) { out[at + i] = b })
+    at + tv.len
+}
+
+// the 'A'..'Z' / 'a'..'z' case shift; non-letters pass through. ASCII-ONLY (bytes 0x80+ untouched).
+to_ascii_lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + ('a' - 'A'), false => b }) }
+to_ascii_upper = (b: u8) u8 { (b >= 'a' && b <= 'z').match ({ true => b - ('a' - 'A'), false => b }) }
+
+// ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
+// UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
+to_lower_in*<A> = (a: MutPtr<A>, s: str) str {
+    sv := s.view()
+    out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
+    sv.loop((h, i, b) { out[i] = b.to_ascii_lower() })
+    out[sv.len] = 0
+    cstr(out.ptr)
+}
+to_lower*<A> = (a: MutPtr<A>, s: str) str { a.to_lower_in(s) }
+to_upper_in*<A> = (a: MutPtr<A>, s: str) str {
+    sv := s.view()
+    out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
+    sv.loop((h, i, b) { out[i] = b.to_ascii_upper() })
+    out[sv.len] = 0
+    cstr(out.ptr)
+}
+to_upper*<A> = (a: MutPtr<A>, s: str) str { a.to_upper_in(s) }
+
+// `s` concatenated `n` times. `n <= 0` yields ""; an empty `s` also yields "". repeat("ab", 3) == "ababab".
+repeat_in*<A> = (a: MutPtr<A>, s: str, n: i64) str {
+    sv := s.view()
+    cnt := (n < 0).match ({ true => 0, false => n })
+    total := sv.len * cnt
+    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out.loop((h, i, b) {
+        (i < total).match ({
+            true  => { out[i] = sv[i % sv.len] },   // sv.len > 0 whenever total > 0, so `%` is safe
+            false => { out[i] = 0  h.break }
+        })
+    })
+    cstr(out.ptr)
+}
+repeat*<A> = (a: MutPtr<A>, s: str, n: i64) str { a.repeat_in(s, n) }
+
+// join a slice of `str`s with `sep` between each: join(["a","b","c"], ",") == "a,b,c".
+// An empty slice yields "", a one-element slice yields that element (no separator).
+join_in*<A> = (a: MutPtr<A>, parts: [str], sep: str) str {
+    np := parts.len
+    total: i64 := 0
+    parts.loop((h, i, p) { total = total + p.len() })
+    seps := (np > 0).match ({ true => np - 1, false => 0 })
+    total = total + sep.len() * seps
+    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    pos: i64 := 0
+    parts.loop((h, i, p) {
+        (i > 0).match ({ true => { pos = out.copy_at(pos, sep) }, false => {} })
+        pos = out.copy_at(pos, p)
+    })
+    out[total] = 0
+    cstr(out.ptr)
+}
+join*<A> = (a: MutPtr<A>, parts: [str], sep: str) str { a.join_in(parts, sep) }
+
+// count NON-overlapping occurrences of `fv` (len >= 1) in `sv`. `nextpos` skips past a match's bytes so
+// "aaaa" has 2 occurrences of "aa", not 3.
+count_occ = (sv: [u8], fv: [u8]) i64 {
+    cnt:     i64 := 0
+    nextpos: i64 := 0
+    sv.loop((h, i, b) {
+        ((i >= nextpos) && (i + fv.len <= sv.len) && sv.has_at(fv, i)).match ({
+            true => { cnt = cnt + 1  nextpos = i + fv.len },
+            _    => {}
+        })
+    })
+    cnt
+}
+
+// replace ALL non-overlapping occurrences of `from` with `to` (not just the first). An empty `from`
+// matches nothing and returns a copy of `s` unchanged (the strstr convention would loop forever).
+// replace("hello", "l", "L") == "heLLo"; replace("a.b.c", ".", "/") == "a/b/c".
+replace_in*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str {
+    sv := s.view()
+    fv := from.view()
+    (fv.len == 0).match ({
+        true  => a.substr_in(s, 0, sv.len),         // empty pattern: unchanged copy (no infinite loop)
+        false => {
+            cnt   := sv.count_occ(fv)
+            total := sv.len + cnt * (to.len() - fv.len)
+            out: [u8] := a.acquire(total + 1).slice(total + 1)
+            pos:  i64 := 0
+            skip: i64 := 0                           // bytes of an in-progress match to NOT copy verbatim
+            sv.loop((h, i, b) {
+                (i < skip).match ({
+                    true  => {},
+                    false => ((i + fv.len <= sv.len) && sv.has_at(fv, i)).match ({
+                        true  => { pos = out.copy_at(pos, to)  skip = i + fv.len },
+                        false => { out[pos] = b  pos = pos + 1 }
+                    })
+                })
+            })
+            out[total] = 0
+            cstr(out.ptr)
+        }
+    })
+}
+replace*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str { a.replace_in(s, from, to) }
+
+// pad `s` to at least `width` bytes by prepending / appending `fill`; a longer `s` is copied unchanged.
+// pad_left("7", 3, '0') == "007"; pad_right("hi", 4, ' ') == "hi  ".
+pad_left_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
+    sv  := s.view()
+    pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
+    total := pad + sv.len
+    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out.loop((h, i, b) {
+        (i < total).match ({
+            true  => { out[i] = (i < pad).match ({ true => fill, false => sv[i - pad] }) },
+            false => { out[i] = 0  h.break }
+        })
+    })
+    cstr(out.ptr)
+}
+pad_left*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str { a.pad_left_in(s, width, fill) }
+pad_right_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
+    sv  := s.view()
+    pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
+    total := sv.len + pad
+    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out.loop((h, i, b) {
+        (i < total).match ({
+            true  => { out[i] = (i < sv.len).match ({ true => sv[i], false => fill }) },
+            false => { out[i] = 0  h.break }
+        })
+    })
+    cstr(out.ptr)
+}
+pad_right*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str { a.pad_right_in(s, width, fill) }
 
 // ── numbers ─────────────────────────────────────────────────────────────────
 
