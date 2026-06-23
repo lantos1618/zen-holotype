@@ -1,0 +1,24 @@
+// tests/oracle_value.zen — PROOF category for the Zen oracle harness: a small representative slice of
+// VALUE cases (silent-miscompile guards). Demonstrates the file-per-category pattern against
+// oracle_lib. The full corpus port is fanned out across the other tests/oracle_<cat>.zen files.
+{ VCase, run_values } = oracle_lib
+
+oracle_value_run* = () i32 {
+    run_values("value (proof)", [
+        VCase(src: "test* = () i64 { sizeof(i64) }", want: "8"),
+        VCase(src: "test* = () i64 { 10000000000 / 10 }", want: "1000000000"),
+        VCase(src: "test* = () i64 { 9999999999 - 9999999990 }", want: "9"),
+        VCase(src: "test* = () i32 {\n  1 + /* outer /* inner */ still-comment */ 41\n}", want: "42"),
+        VCase(src: "Box<T>: { v: T }\nwrap<T> = (x: T) Box<T> { Box<T>(v: x) }\nget<T> = (b: Box<T>) i32 { b.v }\ntest* = () i32 {\n  n := 5\n  get(wrap(n))\n}", want: "5"),
+        VCase(src: "Opt<T>: Some(T) | None\ntest* = () i32 { (.Some(5)).match({ .Some(x) => x, .None => 0 }) }", want: "5"),
+        VCase(src: "sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\ntest* = () i32 { sum(1, 2, 3, 4) }", want: "10"),
+        VCase(src: "join = (sep: str, xs: ...str) i32 { n := 0  xs.loop((h, i, x) { n = n + 1 })  n }\ntest* = () i32 { join(\", \", \"a\", \"b\") }", want: "2"),
+        VCase(src: "Box<T>: { v: T }\nboxn<T> = (x: T, n: i32) Box<T> { (n <= 0).match({ true => Box<T>(v: x), false => boxn(x, n - 1) }) }\ntest* = () i32 { boxn(7, 3).v }", want: "7"),
+        VCase(src: "srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j := i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp := xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs := [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a > b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}", want: "54321"),
+        VCase(src: "Tok*: Num(i64) | End\nExpr*: Num(i64) | Bin(i64)\nsecond<T> = (a: T, b: T) T { b }\nunNum = (t: Tok) i64 { t.match({ .Num(n) => n, .End => 0-1 }) }\ntest* = () i64 {\n  base := Tok.End\n  r := second(base, .Num(7))\n  unNum(r)\n}", want: "7"),
+        VCase(src: "A*: { v: i32 }\nB*: { v: i32 }\nShow*: { area: (Ptr<Self>) i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\nB.impl(Show, { area = (b: Ptr<B>) i32 { b.v * b.v } })\ntest* = () i32 {\n  a := A(v: 5)\n  b := B(v: 6)\n  a.addr().area() + b.addr().area()\n}", want: "41"),
+        VCase(src: "Arena*: { buf: RawPtr<u8>, off: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nan* = (cap: i64) Arena { Arena(buf: malloc(cap), off: 0, cap: cap) }\nbump* = (a: MutPtr<Arena>, n: i64) RawPtr<u8> { p := a.buf.offset(a.off)  a.off = a.off + n  p }\ntest* = () i64 {\n  a := an(64)\n  p := a.addr().bump(8)\n  store_i64(p, 99)\n  q := a.addr().bump(8)\n  store_i64(q, 1)\n  load_i64(p) + load_i64(q)\n}", want: "100"),
+        VCase(src: "test* = () i32 { x: i64 := 4294967296\n ((x / 1073741824) == 4).match ({ true => 1, false => 0 }) }", want: "1"),
+        VCase(src: "system = (cmd: str) i32\ntest* = () i32 { system(cstr(\"true\")) }", want: "0"),
+    ])
+}
