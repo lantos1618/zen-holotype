@@ -97,15 +97,72 @@ fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
         })
     })
 }
-// Numeric literals fit numeric slots only when in range.
-lit_fits = (e: Ptr<Expr>, t: Ty) bool {
+// Constant-fold a numeric literal expr: an `.Int`, or a +/-/* of folded literals — a negative literal
+// like `-1` lowers to the Bin `0 - 1`, so folding is what lets unsigned slots reject negatives.
+// ok=false when not a foldable integer constant (Byte/Cond/var/shift/…) → range checks stay lenient.
+LitVal*: { ok: bool, v: i64 }
+lit_binop = (op: str, l: i64, r: i64) LitVal {
+    eq(op, "+").match ({ true => LitVal( ok: true, v: l + r ), false =>
+    eq(op, "-").match ({ true => LitVal( ok: true, v: l - r ), false =>
+    eq(op, "*").match ({ true => LitVal( ok: true, v: l * r ), false =>
+    LitVal( ok: false, v: 0 ) }) }) })
+}
+lit_val = (e: Ptr<Expr>) LitVal {
     load(e).match ({
-        .Int(n) => t.match ({
-            .U8  => (n >= 0) && (n <= 255),
-            .I32 => (n >= 0 - 2147483648) && (n <= 2147483647),
-            _    => true
-        }),
-        _ => true
+        .Int(n) => LitVal( ok: true, v: n ),
+        .Bin(b) => {
+            l := b.lhs.lit_val()
+            r := b.rhs.lit_val()
+            (l.ok && r.ok).match ({
+                true  => lit_binop(b.op, l.v, r.v),
+                false => LitVal( ok: false, v: 0 )
+            })
+        },
+        _ => LitVal( ok: false, v: 0 )
+    })
+}
+// The narrow widths arrive as Named("i8")/Named("u32")/… (no Ty variant); range-check them by name.
+// u64 holds values an i64 can't, so only its lower bound (no negatives) is enforced here.
+named_int_range_ok = (nm: str, n: i64) bool {
+    eq(nm, "i8").match  ({ true => (n >= 0 - 128) && (n <= 127), false =>
+    eq(nm, "i16").match ({ true => (n >= 0 - 32768) && (n <= 32767), false =>
+    eq(nm, "u16").match ({ true => (n >= 0) && (n <= 65535), false =>
+    eq(nm, "u32").match ({ true => (n >= 0) && (n <= 4294967295), false =>
+    eq(nm, "u64").match ({ true => (n >= 0), false =>
+    true }) }) }) }) })
+}
+lit_range_ok = (t: Ty, n: i64) bool {
+    t.match ({
+        .U8        => (n >= 0) && (n <= 255),
+        .I32       => (n >= 0 - 2147483648) && (n <= 2147483647),
+        .I64       => true,
+        .Named(nm) => nm.named_int_range_ok(n),
+        _          => true
+    })
+}
+// Numeric literals fit numeric slots only when in range (constant-folded; lenient on non-constants).
+lit_fits = (e: Ptr<Expr>, t: Ty) bool {
+    lv := e.lit_val()
+    lv.ok.match ({
+        true  => t.lit_range_ok(lv.v),
+        false => true
+    })
+}
+// the narrow widths are Named, so ty_rank can't see them — recognize them as int slots here.
+is_int_width = (n: str) bool {
+    eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64")
+}
+is_int_slot = (t: Ty) bool {
+    t.match ({ .Named(n) => is_int_width(n), _ => t.ty_rank() >= 0 })
+}
+// Authoritative verdict for a numeric LITERAL flowing into an int slot: 0 = fits, 1 = overflow,
+// -1 = not a literal-into-int-slot (caller falls back to its structural fit logic). This MUST take
+// precedence over the unknown_ty leniency, else `x: i8 := 200` (i8 is an undeclared Named → "unknown")
+// would silently pass and truncate at cc.
+lit_slot_verdict = (e: Ptr<Expr>, t: Ty) i32 {
+    (e.is_lit_numeric() && t.is_int_slot()).match ({
+        true  => e.lit_fits(t).match ({ true => 0, false => 1 }),
+        false => 0 - 1
     })
 }
 // does a type MENTION an (unbound) generic type param? recurses Ptr/Slice/Generic-args. Concrete
@@ -131,10 +188,13 @@ arg_err_at = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
     (i < params.len).match ({
         true  => tps.ty_mentions_tparam(params[i].ty).match ({
             true  => 0,
-            false => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0 && ar.addr().lit_fits(params[i].ty)).match ({
-                true  => 0,
-                false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
-            })
+            false => {
+                lv := ar.addr().lit_slot_verdict(params[i].ty)
+                (lv >= 0).match ({
+                    true  => lv,
+                    false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
+                })
+            }
         }),
         false => 0
     })
@@ -281,13 +341,16 @@ call_errs = (env: Env, c: CallData) i32 {
 // indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
 fnt_arg_err_at = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
     (i < ptys.len).match ({
-        true  => env.unknown_ty(ptys[i]).match ({
-            true  => 0,
-            false => (ar.addr().is_lit_numeric() && ptys[i].ty_rank() >= 0 && ar.addr().lit_fits(ptys[i])).match ({
-                true  => 0,
-                false => env.fit_err(env.infer_expr(ar.addr()), ptys[i])
+        true  => {
+            lv := ar.addr().lit_slot_verdict(ptys[i])
+            (lv >= 0).match ({
+                true  => lv,
+                false => env.unknown_ty(ptys[i]).match ({
+                    true  => 0,
+                    false => env.fit_err(env.infer_expr(ar.addr()), ptys[i])
+                })
             })
-        }),
+        },
         false => 0
     })
 }
@@ -331,6 +394,28 @@ result_compatible = (want: Ty, got: Ty) bool {
             true  => true,
             false => want.ty_eq(got)
         })
+    })
+}
+cond_numlike = (t: Ty) bool { (t.ty_rank() >= 0) || t.is_f64_ty() }
+// A value/bool `.match` (and `if` expression) lowers to a ternary Cond at parse time, so its two
+// value branches escape the enum-match arm checks above. Their result types must still be C-compatible
+// — `c ? A : B` on incompatible types is a hard cc error. A numeric LITERAL branch is polymorphic and
+// coerces to any numeric counterpart (mirrors cond_ty's deferral); void/unknown branches stay lenient.
+cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
+    d.t.is_lit_numeric().match ({
+        true  => et.cond_numlike(),
+        false => d.e.is_lit_numeric().match ({
+            true  => tt.cond_numlike(),
+            false => tt.result_compatible(et)
+        })
+    })
+}
+cond_result_err = (env: Env, d: CondData) i32 {
+    tt := env.infer_expr(d.t)
+    et := env.infer_expr(d.e)
+    (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
+        true  => 0,
+        false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 })
     })
 }
 arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
@@ -396,8 +481,9 @@ field_in = (fields: [Field], fname: str) Ty {
 }
 field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
     fty := fields.field_in(fi.name)
-    (fi.value.is_lit_numeric() && fty.ty_rank() >= 0).match ({       // polymorphic literal -> any numeric field
-        true  => 0,
+    lv := fi.value.lit_slot_verdict(fty)                            // a numeric literal must fit the field width
+    (lv >= 0).match ({
+        true  => lv,
         false => env.fit_err(env.infer_expr(fi.value), fty)
     })
 }
@@ -436,10 +522,13 @@ gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: F
     cty := (targs.len == tps.len).match ({ true => env.a.subst_ty_in(tps, targs, fty), false => fty })
     tps.ty_mentions_tparam(cty).match ({
         true  => 0,                                                  // still a tparam -> lenient
-        false => (fi.value.is_lit_numeric() && cty.ty_rank() >= 0).match ({  // polymorphic literal -> any numeric field
-            true  => 0,
-            false => env.fit_err(env.infer_expr(fi.value), cty)      // a concrete field -> check the fit
-        })
+        false => {
+            lv := fi.value.lit_slot_verdict(cty)                     // a numeric literal must fit the field width
+            (lv >= 0).match ({
+                true  => lv,
+                false => env.fit_err(env.infer_expr(fi.value), cty)  // a concrete field -> check the fit
+            })
+        }
     })
 }
 gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], inits: [FieldInit]) i32 {
@@ -458,6 +547,8 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
 }
 // the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
 gen_base_of = (t: Ty) str { t.match ({ .Generic(g) => g.name, .Ptr(p) => load(p).gen_base_of(), _ => "" }) }
+// a primitive scalar has no fields, so `x.foo` on it is a hard error (C: "member in something not a struct").
+is_scalar_prim = (t: Ty) bool { t.match ({ .I32 => true, .I64 => true, .U8 => true, .F64 => true, .Bool => true, _ => false }) }
 // Field access checks known concrete struct receivers AND generic-struct instances (field names don't
 // depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be).
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
@@ -472,7 +563,7 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
                     base := rty.gen_base_of()
                     (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({
                         true  => env.decls.gen_struct_fields(base).has_field(field).match ({ true => 0, false => 1 }),
-                        false => 0                                       // unknown receiver (residue) -> lenient
+                        false => rty.is_scalar_prim().match ({ true => 1, false => 0 })   // scalars have no fields; other unknowns (residue) stay lenient
                     })
                 }
             })
@@ -532,6 +623,28 @@ mkenum_err = (env: Env, ty: str, variant: str) i32 {
     is_empty(ty).match ({
         true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
         false => 0
+    })
+}
+// A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
+// Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
+// Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
+enum_payload_err = (env: Env, mk: MakeEnumData) i32 {
+    is_empty(mk.ty).match ({
+        true  => 0,
+        false => {
+            pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+            lv := mk.payload.lit_slot_verdict(pty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => {
+                    vt := env.infer_expr(mk.payload)
+                    (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
+                        true  => 0,
+                        false => fits(vt, pty).match ({ true => 0, false => 1 })
+                    })
+                }
+            })
+        }
     })
 }
 
@@ -601,7 +714,11 @@ same_eq_category = (a: Ty, b: Ty) bool {
         || (a.is_bool_ty() && b.is_bool_ty())
         || (a.is_str_t() && b.is_str_t())
         || (a.is_ptr_ty() && b.is_ptr_ty())
-        || a.ty_eq(b)
+}
+// a NOMINAL ==: only types genc can compare with C's `==` — an enum (tag compare) or a Named non-struct.
+// structs and slices CANNOT (`a == b` on two structs is a hard cc error), so they're excluded here.
+eq_nominal_ok = (env: Env, a: Ty, b: Ty) bool {
+    a.ty_eq(b) && a.match ({ .Named(n) => env.env_is_struct(n).match ({ true => false, false => true }), _ => false })
 }
 // Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).
 eq_mix_err = (env: Env, b: BinData) i32 {
@@ -611,7 +728,7 @@ eq_mix_err = (env: Env, b: BinData) i32 {
         true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).match ({ true => 0, false => 1 }),
         false => (env.unknown_ty(lt) || env.unknown_ty(rt)).match ({
             true  => 0,
-            false => lt.same_eq_category(rt).match ({ true => 0, false => 1 })
+            false => (lt.same_eq_category(rt) || env.eq_nominal_ok(lt, rt)).match ({ true => 0, false => 1 })
         })
     })
 }
@@ -774,14 +891,14 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
-        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return(),
+        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return() + env.cond_result_err(d),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
             env.check_expr(m.subj) + env.check_arms(subjty, m.arms) + env.match_err(m) + env.match_arm_result_errs(subjty, m.arms) + arm_return_errs(m.arms)
         },
-        .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant),
+        .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant) + env.enum_payload_err(mk),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant),
         .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
         .Block(b)       => env.check_block(b.stmts),
@@ -804,29 +921,38 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
 // Return/assign/index-set checks only reject concrete mismatches.
 ret_err = (env: Env, r: Ptr<Expr>) i32 {
     rt := env.infer_expr(r)
-    lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0) && r.lit_fits(env.exp)
-    // a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
-    // treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
-    (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt() || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, env.exp).match ({ true => 0, false => 1 })
+    lv := r.lit_slot_verdict(env.exp)                        // a numeric literal return is decided by range
+    (lv >= 0).match ({
+        true  => lv,
+        // a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
+        // treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
+        false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
+            true  => 0,
+            false => fits(rt, env.exp).match ({ true => 0, false => 1 })
+        })
     })
 }
 assign_err = (env: Env, x: AssignData) i32 {
     vt := env.infer_expr(x.target)
     rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0) && x.value.lit_fits(vt)
-    (env.unknown_ty(vt) || env.unknown_ty(rt) || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, vt).match ({ true => 0, false => 1 })
+    lv := x.value.lit_slot_verdict(vt)
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
+            true  => 0,
+            false => fits(rt, vt).match ({ true => 0, false => 1 })
+        })
     })
 }
 idxset_err = (env: Env, x: IndexSetData) i32 {
     rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0) && x.value.lit_fits(x.elem)
-    (env.unknown_ty(rt) || env.unknown_ty(x.elem) || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, x.elem).match ({ true => 0, false => 1 })
+    lv := x.value.lit_slot_verdict(x.elem)
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
+            true  => 0,
+            false => fits(rt, x.elem).match ({ true => 0, false => 1 })
+        })
     })
 }
 // Annotated lets must fit their declared type; unannotated lets are inferred only.
@@ -835,10 +961,13 @@ let_fit_err = (env: Env, l: LetData) i32 {
         true  => 0,
         false => {
             vt := env.infer_expr(l.value)
-            lit_to_num := l.value.is_lit_numeric() && (l.ty.ty_rank() >= 0) && l.value.lit_fits(l.ty)
-            (env.unknown_ty(vt) || env.unknown_ty(l.ty) || lit_to_num).match ({
-                true  => 0,
-                false => fits(vt, l.ty).match ({ true => 0, false => 1 })
+            lv := l.value.lit_slot_verdict(l.ty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
+                    true  => 0,
+                    false => fits(vt, l.ty).match ({ true => 0, false => 1 })
+                })
             })
         }
     })
@@ -1650,14 +1779,14 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
-        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())),
+        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos())),
         .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
             env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
         },
-        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())),
+        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())).kv_kor(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
         .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),

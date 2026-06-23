@@ -1067,6 +1067,13 @@ resolve_let = (a: MutPtr<Malloc>, env: Env, l: LetData) Stmt {
     })
     slett(l.name, ty, v)
 }
+// A DISCARDED (statement-position) match/cond keeps the enclosing function's expected (return) type, so
+// an early `return .Err(x)` / `return .Ok(v)` inside a branch infers its enum from the DECLARED return
+// type rather than from void context (which otherwise mis-mangled `.Err("x")` to `Result_void_text`).
+// `(c).match({true=>…,false=>…})` parses to a Cond, so both Cond and Match must carry the expectation.
+// Any OTHER discarded expression clears exp — a stray exp would mis-unify a generic call's bare tparam.
+carries_return_e = (e: Ptr<Expr>) bool { load(e).match ({ .Cond(c) => true, .Match(m) => true, _ => false }) }
+disc_env = (env: Env, e: Ptr<Expr>) Env { e.carries_return_e().match ({ true => env, false => env.clr_exp() }) }
 resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
     out := st
     st.match ({
@@ -1079,7 +1086,7 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
                     true  => { out = a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)) },
                     false => { out = sexpr(a.resolve_expr(env, e)) }
                 }),
-                false => { out = a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)) }
+                false => { out = a.lower_stmt_expr(env, a.resolve_expr(env.disc_env(e), e)) }
             })
         },
         .If(f)     => { out = sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els)) },
