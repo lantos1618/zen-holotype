@@ -1,0 +1,125 @@
+// std.sync — the LOCKING layer over std.thread's real OS threads.
+//
+// std.thread gives parallelism; std.atomic gives lock-free i64 cells. Between them sits the case
+// they can't cover: a critical section that must serialise an ARBITRARY block of work across
+// threads — incrementing a plain counter, mutating a shared structure, parking idle workers on a
+// condition. That's what a mutex and a condvar are for, and this module wraps the pthread
+// primitives (declared bodyless in std.c.libc) into Zen-friendly value types.
+//
+// ── OPAQUE STORAGE ────────────────────────────────────────────────────────────────────────────
+// `pthread_mutex_t` / `pthread_cond_t` are opaque C structs. Zen never reads their fields; it only
+// needs a STABLE, correctly-SIZED byte cell to hand pthread by pointer. The sizes below are the
+// glibc x86-64 ABI sizes (40 / 48 bytes). We over-nothing: a zero-filled cell of exactly that size
+// IS the valid PTHREAD_*_INITIALIZER default, and pthread_mutex_init/pthread_cond_init then own the
+// contents. The cell is allocated through std.mem.raw — the EXPLICIT-alloc floor (a fixed-size FFI
+// scratch buffer, the same justification as std.thread's pthread_t cell and coroutine.zen's
+// ucontext buffers), not hidden heap. Wrap caller-owned storage with `at` to skip the allocation.
+//
+// ── THE CRITICAL-SECTION CONSTRAINT ───────────────────────────────────────────────────────────
+// `with` runs a NON-CAPTURING fn `(RawPtr<u8>) void` under the lock — exactly std.thread's thread
+// body shape. Zen capturing closures can't escape their frame, so the protected work travels as a
+// fn + an `arg` pointer, C-style. For inline critical sections, call `lock`/`unlock` directly.
+{ zeroed, release } = std.mem.raw
+{ pthread_mutex_init, pthread_mutex_lock, pthread_mutex_unlock, pthread_mutex_destroy } = std.c.libc
+{ pthread_cond_init, pthread_cond_wait, pthread_cond_signal, pthread_cond_broadcast, pthread_cond_destroy } = std.c.libc
+
+// glibc x86-64 ABI storage sizes for the opaque pthread structs (sizeof on this platform).
+MUTEX_SIZE := 40
+COND_SIZE  := 48
+
+// ── Mutex ─────────────────────────────────────────────────────────────────────────────────────
+// A handle to a pthread_mutex_t. `raw` points at the MUTEX_SIZE-byte storage cell.
+Mutex*: {
+    raw: RawPtr<u8>
+    // block until this thread owns the lock.
+    lock    = (m: Mutex) void { pthread_mutex_lock(m.raw)    {} }
+    // release the lock (the owning thread must call this).
+    unlock  = (m: Mutex) void { pthread_mutex_unlock(m.raw)  {} }
+    // run `body(arg)` with the lock held, releasing it afterwards. `body` must be non-capturing.
+    with    = (m: Mutex, body: (RawPtr<u8>) void, arg: RawPtr<u8>) void {
+        pthread_mutex_lock(m.raw)
+        body(arg)
+        pthread_mutex_unlock(m.raw)
+        {}
+    }
+    // tear the mutex down and hand its storage back to the allocator (single-use after this).
+    destroy = (m: Mutex) void {
+        pthread_mutex_destroy(m.raw)
+        release(m.raw)
+    }
+}
+// allocate + initialise a fresh mutex (storage from std.mem.raw).
+new_mutex* = () Mutex {
+    raw := zeroed(MUTEX_SIZE)
+    pthread_mutex_init(raw, null_ptr())
+    Mutex( raw: raw )
+}
+// wrap a caller-owned MUTEX_SIZE-byte cell (no allocation, caller owns the lifetime); still inits it.
+mutex_at* = (cell: RawPtr<u8>) Mutex {
+    pthread_mutex_init(cell, null_ptr())
+    Mutex( raw: cell )
+}
+
+// ── CondVar ───────────────────────────────────────────────────────────────────────────────────
+// A handle to a pthread_cond_t. The scheduler parks idle workers here: `wait` ATOMICALLY unlocks
+// the paired mutex, sleeps until `signal`/`broadcast`, then re-locks the mutex on wake. The caller
+// MUST hold `m` across `wait`, and — because of spurious wakeups — re-check its predicate in a loop.
+CondVar*: {
+    raw: RawPtr<u8>
+    // atomically unlock `m`, block on the condvar, re-lock `m` when woken.
+    wait      = (c: CondVar, m: Mutex) void { pthread_cond_wait(c.raw, m.raw)  {} }
+    // wake ONE thread waiting on the condvar (no-op if none are waiting).
+    signal    = (c: CondVar) void { pthread_cond_signal(c.raw)     {} }
+    // wake ALL threads waiting on the condvar.
+    broadcast = (c: CondVar) void { pthread_cond_broadcast(c.raw)  {} }
+    // tear the condvar down and free its storage.
+    destroy   = (c: CondVar) void {
+        pthread_cond_destroy(c.raw)
+        release(c.raw)
+    }
+}
+// allocate + initialise a fresh condvar (storage from std.mem.raw).
+new_cond* = () CondVar {
+    raw := zeroed(COND_SIZE)
+    pthread_cond_init(raw, null_ptr())
+    CondVar( raw: raw )
+}
+// wrap a caller-owned COND_SIZE-byte cell (no allocation); still inits it.
+cond_at* = (cell: RawPtr<u8>) CondVar {
+    pthread_cond_init(cell, null_ptr())
+    CondVar( raw: cell )
+}
+
+// ── Once ──────────────────────────────────────────────────────────────────────────────────────
+// Run an initialiser EXACTLY once across all threads. `flag` is an atomic i64 (0 = pending,
+// 1 = done) read on the fast path so an already-initialised `run` takes no lock; the slow path
+// takes `mtx`, double-checks `flag` under it, runs `body`, then publishes the flag. `body` is the
+// non-capturing `(RawPtr<u8>) void` critical-section shape (state via `arg`). The flag is touched
+// with the seq-cst `atomic_load_i64`/`atomic_store_i64` intrinsics (the same floor std.atomic wraps).
+Once*: {
+    flag: RawPtr<u8>     // -> atomic i64 cell
+    mtx:  Mutex
+    run = (o: Once, body: (RawPtr<u8>) void, arg: RawPtr<u8>) void {
+        (atomic_load_i64(o.flag) != 0).match ({
+            true  => {},                              // fast path: already initialised
+            false => {
+                o.mtx.lock()
+                (atomic_load_i64(o.flag) == 0).match ({   // re-check under the lock (another thread may have won)
+                    true  => { body(arg)  atomic_store_i64(o.flag, 1) },
+                    false => {}
+                })
+                o.mtx.unlock()
+            }
+        })
+    }
+    // free the flag cell and the backing mutex.
+    destroy = (o: Once) void {
+        release(o.flag)
+        o.mtx.destroy()
+    }
+}
+// a fresh, not-yet-run Once (allocates the flag cell + mutex storage).
+new_once* = () Once {
+    flag := zeroed(8)
+    Once( flag: flag, mtx: new_mutex() )
+}
