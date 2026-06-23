@@ -23,6 +23,12 @@ ATWHILE_ALLOWED = {
 RAW_ALLOC_ALLOWED = {
     Path("zen/std/mem/alloc.zen"),
     Path("zen/std/mem/raw.zen"),
+    # std.thread is the OS-thread FFI floor (wraps pthread). Its two raw 8-byte cells are the
+    # pthread_t and void*-retval OUT-PARAMS that pthread_create/join write into — raw C threading
+    # scratch, same FFI-floor category as raw.zen. FOLLOW-UP (parallelism cleanup): move these into
+    # the JoinHandle by-value (needs address-of-field — blocked on the .addr()-of-field limit) or
+    # thread an allocator through spawn/join, to drop even the floor malloc.
+    Path("zen/std/thread.zen"),
     Path("zen/compiler/genc.zen"),
     # genc_emit emits malloc/memcpy as the LOWERING of a heap-promoted slice literal (codegen text,
     # not a call) — same codegen category as genc.zen, which is already allow-listed.
