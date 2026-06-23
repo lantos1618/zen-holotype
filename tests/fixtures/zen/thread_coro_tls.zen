@@ -1,0 +1,58 @@
+// Thread-local coroutine swap state (cur/back/flag): TWO real OS threads each drive their OWN
+// stackful coroutine that yields (checkpoint_current) repeatedly. Each coroutine increments its
+// own counter once per resumed segment across MANY yields. If cur/back/flag were process-global the
+// two threads' swapcontext state would stomp each other mid-flight → crash or wrong totals. With
+// per-thread (thread-local) state both totals come out exact. Exit 3 = both held (1 + 2).
+{ spawn, join } = std.thread
+{ spawn_in, checkpoint_current, Coro } = std.concurrent.coroutine
+{ default } = std.mem.alloc
+
+ITERS := 2000
+
+sumA := 0
+sumB := 0
+
+// recursive yielder: increment the per-thread sum, yield, repeat n times.
+stepA = (n: i32) void {
+    (n <= 0).match ({
+        true  => {},
+        false => { sumA = sumA + 1  checkpoint_current()  stepA(n - 1) }
+    })
+}
+stepB = (n: i32) void {
+    (n <= 0).match ({
+        true  => {},
+        false => { sumB = sumB + 1  checkpoint_current()  stepB(n - 1) }
+    })
+}
+
+// non-capturing coroutine bodies
+workA = () void { stepA(ITERS) }
+workB = () void { stepB(ITERS) }
+
+// drive a coroutine to completion: resume() returns 1 while it has yielded, 0 when finished.
+drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => {} }) }
+
+// non-capturing thread bodies: each builds its OWN coroutine and runs it to completion.
+threadA = (arg: RawPtr<u8>) RawPtr<u8> {
+    h := default()
+    c := h.addr().spawn_in(workA)
+    drive(c)
+    null_ptr()
+}
+threadB = (arg: RawPtr<u8>) RawPtr<u8> {
+    h := default()
+    c := h.addr().spawn_in(workB)
+    drive(c)
+    null_ptr()
+}
+
+main = () i32 {
+    ha := spawn(threadA, null_ptr())
+    hb := spawn(threadB, null_ptr())
+    join(ha)
+    join(hb)
+    okA := (sumA == ITERS).match ({ true => 1, false => 0 })
+    okB := (sumB == ITERS).match ({ true => 2, false => 0 })
+    okA + okB
+}

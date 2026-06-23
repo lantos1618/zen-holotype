@@ -492,6 +492,16 @@ def test_thread_atomic_counter():
     assert r.returncode == 42, r.stderr
 
 
+def test_thread_coro_thread_local_swap_state():
+    """Thread-local coroutine swap state (cur/back/flag): TWO real OS threads each drive their OWN
+    stackful coroutine that yields (checkpoint_current) 2000x. Were cur/back/flag process-global the
+    threads' swapcontext state would stomp each other mid-flight (segfault / wrong totals); per-thread
+    `_Thread_local` keeps each thread's coroutine isolated. Exit 3 = both totals exact."""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "thread_coro_tls.zen")
+    assert r.returncode == 3, r.stderr
+
+
 def test_scope_generic_field_dispatch():
     """A1: trait dispatch through a nested-generic struct FIELD receiver across an inlined generic fn.
     `Scope<A>(alloc: a.addr())` monomorphizes to Scope<SyncArena>, and the field receiver `s.alloc`
