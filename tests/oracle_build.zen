@@ -22,10 +22,19 @@
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, is_empty } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts } = oracle_lib
+{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags } = oracle_lib
 
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: { path: str, want_exit: str, want_out: str, check_out: bool }
+// an EMIT case: `zenc emit <path>` must emit C containing every `present` string and none of `absent`.
+EmitCase*: { path: str, present: [str], absent: [str] }
+// a DOC case: `zenc doc <target>` must succeed (exit 0), its markdown containing every `present` string
+// and none of `absent` (target = a `std.x.y` module name OR a `file.zen` path, both relative to ROOT).
+DocCase*: { target: str, present: [str], absent: [str] }
+// a SHELL case: a self-contained `/bin/sh` pipeline that encodes a whole procedural test (project mode,
+// fmt idempotency, --help/--version, bad-file, cross-module sibling diagnostics, emit byte-equality). It
+// must exit 0 iff the test passes — every assertion is a `&&`-chained command / `test`/`grep -F` check.
+ShellCase*: { name: str, cmd: str }
 
 // helper: build the command  `./zenc build <path> -o /tmp/zob 2>/dev/null`
 build_cmd = (mp: MutPtr<Malloc>, path: str) str {
@@ -76,6 +85,87 @@ run_fixtures* = (name: str, cs: [FixtureCase]) i32 {
     fails := 0
     cs.loop((h, i, c) {
         run_fixture(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// helper: build a one-arg command  `./zenc <verb> <path> <redirect>`
+cmd_for = (mp: MutPtr<Malloc>, verb: str, path: str, redirect: str) str {
+    s := mp.new_in()
+    s = s.append_in(mp, "./zenc ")
+    s = s.append_in(mp, verb)
+    s = s.append_in(mp, " ")
+    s = s.append_in(mp, path)
+    s = s.append_in(mp, redirect)
+    mp.finish_in(s)
+}
+
+// check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
+all_present_absent = (txt: str, present: [str], absent: [str]) bool {
+    ok := true
+    present.loop((h, i, s) { txt.contains(s).match ({ true => {}, false => { ok = false } }) })
+    absent.loop((h, i, s) { txt.contains(s).match ({ true => { ok = false }, false => {} }) })
+    ok
+}
+
+// run ONE emit case: `zenc emit` must succeed and the C must satisfy present/absent.
+run_emit* = (ec: EmitCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    rc := shell(mp.cmd_for("emit", ec.path, " > /tmp/zoe_emit.c 2>/dev/null"))
+    (rc == 0).match ({
+        false => false,
+        true  => mp.contents_in("/tmp/zoe_emit.c").match ({
+            .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
+            .Err(e)  => false
+        })
+    })
+}
+
+run_emits* = (name: str, cs: [EmitCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_emit(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// run ONE doc case: `zenc doc <target>` must exit 0 and the markdown must satisfy present/absent.
+run_doc* = (dc: DocCase) bool {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    rc := shell(mp.cmd_for("doc", dc.target, " > /tmp/zoe_doc.txt 2>&1"))
+    (rc == 0).match ({
+        false => false,
+        true  => mp.contents_in("/tmp/zoe_doc.txt").match ({
+            .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
+            .Err(e)  => false
+        })
+    })
+}
+
+run_docs* = (name: str, cs: [DocCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        run_doc(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+    })
+    out("\n")
+    fails
+}
+
+// run ONE shell case: the pipeline must exit 0.
+run_shells* = (name: str, cs: [ShellCase]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    cs.loop((h, i, c) {
+        (shell(c.cmd) == 0).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
     })
     out("\n")
     fails
@@ -224,5 +314,269 @@ oracle_build_run* = () i32 {
         // @malloc is not an intrinsic: it is an undefined name.
         VerdictCase(src: "main = () i32 { p := @malloc(8)  0 }\n", should_pass: false, kind: "undefined-name"),
     ])
-    ex + so + ex2 + so2 + exm + vd
+    // ── (d) run/stdout fixtures ported from test_build.py inline-source programs (exit only) ──────
+    r1 := run_fixtures("build result-paths", [
+        FixtureCase(path: "tests/fixtures/zen/build_emits_binary.zen", want_exit: "12", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/run_struct_program.zen", want_exit: "12", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/diag_value_nested_span.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/type_import_actor_methods.zen", want_exit: "7", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/generic_replyref_send.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/generic_receiver_match_payload.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/generic_receiver_match_payload_nonfirst.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/core_slice_try_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/iter_try_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/vec_try_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/vec_and_string_push_coexist.zen", want_exit: "31", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/string_builder_chain.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/actor_try_constructors.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/actor_try_spawn.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/raw_memory_typed_buffer_of.zen", want_exit: "42", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/raw_memory_try_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/typed_local_i64.zen", want_exit: "4", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/typed_local_none_annot.zen", want_exit: "7", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/own_explicit.zen", want_exit: "7", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/rc_explicit.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/arc_explicit.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/own_rc_arc_try_constructors.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/map_try_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/allocator_try_acquire.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/arena_explicit_backing.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/map_and_string_free_coexist.zen", want_exit: "8", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/trace_explicit_allocator.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/trace_tracked_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/trace_root_collect_result.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/coroutine_try_spawn.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/scheduler_try_run.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/runtime_arena_explicit_backing.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/implicit_trait_bound_sugar.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/enum_match_block_run.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/cown_result_paths.zen", want_exit: "0", want_out: "", check_out: false),
+        FixtureCase(path: "tests/fixtures/zen/io_file_result_paths.zen", want_exit: "0", want_out: "", check_out: false),
+    ])
+    // ── (e) run/stdout fixtures with exact stdout ────────────────────────────────────────────────
+    r2 := run_fixtures("build result stdout", [
+        FixtureCase(path: "tests/fixtures/zen/bool_guard_wild_0.zen", want_exit: "0", want_out: "100\n50\n7\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/bool_guard_wild_1.zen", want_exit: "0", want_out: "100\n50\n7\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/bool_guard_wild_2.zen", want_exit: "0", want_out: "100\n50\n7\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/bool_guard_wild_3.zen", want_exit: "0", want_out: "100\n50\n7\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/drop_and_fmt_coimport.zen", want_exit: "0", want_out: "7\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/str_tokenizer.zen", want_exit: "0", want_out: "zen\n0\nhas\n0\n3\n3\nfrontends\n0\nand\n0\n-1\n-1\nregrets\n0\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/map_growth_second_value.zen", want_exit: "0", want_out: "9\n0\n80\nPARIS\nmiss\n2\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/map_clone_value.zen", want_exit: "0", want_out: "2\n3\n-1\n2\n99\n5\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/set_add_has_len.zen", want_exit: "0", want_out: "1\n4\n1\n0\n3\n0\n70\n2\n1\n0\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/set_union_intersect_diff.zen", want_exit: "0", want_out: "5\n1\n1\n2\n1\n0\n3\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/set_clone_isolation.zen", want_exit: "0", want_out: "4\n2\n0\n1\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/runtime_checkpoint_colorless_a.zen", want_exit: "0", want_out: "42\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/runtime_checkpoint_colorless_b.zen", want_exit: "0", want_out: "1\n2\n3\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/anon_struct_result_generic.zen", want_exit: "0", want_out: "3\n1\n", check_out: true),
+        FixtureCase(path: "tests/fixtures/zen/anon_struct_plain_nested.zen", want_exit: "0", want_out: "42\n1\n2\n3\n", check_out: true),
+    ])
+    // ── (f) more `zenc check` rejects (string/slice/own/rc/arc allocator-first; typed-local mismatch) ─
+    vd2 := run_verdicts("build check 2", [
+        VerdictCase(src: "{ new } = std.text.string\nmain = () i32 { s := new()  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "string = std.text.string\nmain = () i32 { s := string.init(16)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "string = std.text.string\nmain = () i32 { r := string.try_init(16)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.text.string\nmain = () i32 { a := default()  s := a.addr().new_in()  s.append(\"x\")  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.text.string\nmain = () i32 { a := default()  s := a.addr().new_in()  s.push('x')  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.text.string\nmain = () i32 { a := default()  s := a.addr().new_in()  done := s.finish()  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.text.string\nmain = () i32 { a := default()  s := a.addr().new_in()  s.free()  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { xs := slice.buf(2, [0])  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { r := slice.try_buf(2, [0])  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { xs := slice.dup([1, 2])  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { r := slice.try_dup([1, 2])  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { p := slice.node(1)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { r := slice.try_node(1)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { xs := slice.concat([1], [2])  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "slice = std.core.slice\nmain = () i32 { r := slice.try_concat([1], [2])  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ Resource, new } = std.mem.own\nmain = () i32 { o := new(Resource(id: 1, slot: 0))  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ Resource, try_new } = std.mem.own\nmain = () i32 { r := try_new(Resource(id: 1, slot: 0))  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ Resource, new_in } = std.mem.own\nmain = () i32 { a := default()  o := a.addr().new_in(Resource(id: 1, slot: 0))  o.release()  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ new } = std.mem.rc\nmain = () i32 { r := new(1)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ try_new } = std.mem.rc\nmain = () i32 { r := try_new(1)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.mem.rc\nmain = () i32 { a := default()  r := a.addr().new_in(1)  r.drop()  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ new } = std.mem.arc\nmain = () i32 { r := new(1)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ try_new } = std.mem.arc\nmain = () i32 { r := try_new(1)  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.mem.arc\nmain = () i32 { a := default()  r := a.addr().new_in(1)  r.drop()  0 }\n", should_pass: false, kind: ""),
+        VerdictCase(src: "main = () i32 { x: i32 := \"nope\"  0 }\n", should_pass: false, kind: "assign-fit"),
+    ])
+    // ── (g) POSITIONED diagnostics: kind + file:line:col + caret + message + hint ─────────────────
+    dg := run_diags("build diagnostics", [
+        DiagCase(src: "add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { add(1) }\n",
+            wants: [":2:17: error[arity]: wrong number of arguments", "  main = () i32 { add(1) }", "                  ^~~", "hint: check the callee signature and pass exactly the declared parameters"]),
+        DiagCase(src: "takes_u8 = (b: u8) i32 { 0 }\nbig = () i64 { 9999999999 }\nmain = () i32 { takes_u8(big()) }\n",
+            wants: [":3:26: error[arg-type]: argument type does not fit the parameter", "  main = () i32 { takes_u8(big()) }", "                           ^~~", "hint: check the argument type or add an explicit conversion at the call site"]),
+        DiagCase(src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { })\n",
+            wants: [":3:1: error[conformance]: impl does not satisfy the trait", "  Point.impl(Show, { })", "  ^~~~~", "hint: define every required trait method with the exact receiver, parameter, and return types"]),
+        DiagCase(src: "main = () i32 {\n    x := 5\n    y := (1 < 2)\n    x = y\n    x\n}\n",
+            wants: [":4:5: error[assign-fit]: assigned value does not fit the variable's type", "      x = y", "      ^", "hint: make the assigned value fit the target's type"]),
+        DiagCase(src: "main = () i32 {\n    s := [1, 2, 3]\n    b := (1 < 2)\n    s[0] = b\n    s[0]\n}\n",
+            wants: [":4:5: error[assign-fit]: assigned value does not fit the variable's type", "      s[0] = b", "      ^", "hint: make the assigned value fit the target's type"]),
+        DiagCase(src: "main = () i32 { 1 < 2 }\n",
+            wants: [":1:19: error[return-fit]: returned value does not fit the declared return type", "  main = () i32 { 1 < 2 }", "                    ^", "hint: make the returned value fit the function's declared return type"]),
+        DiagCase(src: "main = () i32 {\n    x: i32 := \"hi\"\n    0\n}\n",
+            wants: [":2:15: error[assign-fit]: assigned value does not fit the variable's type", "      x: i32 := \"hi\"", "                ^~~~", "hint: make the assigned value fit the target's type"]),
+        DiagCase(src: "f = () i32 { \"hi\" }\nmain = () i32 { 0 }\n",
+            wants: [":1:14: error[return-fit]: returned value does not fit the declared return type", "  f = () i32 { \"hi\" }", "               ^~~~", "hint: make the returned value fit the function's declared return type"]),
+        DiagCase(src: "P: { x: i32, y: i32 }\nf = (p: P) i32 {\n    p.nofield\n}\nmain = () i32 { 0 }\n",
+            wants: [":3:5: error[struct-field]: unknown struct field or invalid field access", "      p.nofield", "      ^", "hint: check the struct literal or field access against the declared fields"]),
+        DiagCase(src: "C: Red | Green | Blue\nf = (c: C) i32 {\n    c.match ({ .Red => 1, .Green => 2 })\n}\nmain = () i32 { 0 }\n",
+            wants: [":3:5: error[exhaustiveness]: match does not cover every variant", "      c.match ({ .Red => 1, .Green => 2 })", "      ^", "hint: add arms for every variant, or add an explicit `_` arm"]),
+        DiagCase(src: "C: Red | Green | Blue\nf = (c: C) i32 {\n    c.match ({ .Red => 1, .Red => 2, _ => 3 })\n}\nmain = () i32 { 0 }\n",
+            wants: [":3:5: error[dup-variant]: duplicate match arm variant", "      c.match ({ .Red => 1, .Red => 2, _ => 3 })", "      ^", "hint: remove the repeated match arm for this variant"]),
+        DiagCase(src: "main = () i32 {\n    x := = 5\n    0\n}\n",
+            wants: [":2:10: error[parse]: syntax error: unparseable top-level input", "      x := = 5", "           ^", "hint: check the syntax around this top-level declaration"]),
+        DiagCase(src: "main = () i32 { undefined_fn(1, 2) }\n",
+            wants: [":1:17: error[undefined-name]: undefined name", "  main = () i32 { undefined_fn(1, 2) }", "                  ^~~~~~~~~~~~", "hint: declare the name, import it, or qualify the intended module binding"]),
+        DiagCase(src: "{ println } = std.text.fmt\nmain = () i32 {\n    println(\"hi\")\n    oops()\n}\n",
+            wants: [":4:5: error[undefined-name]: undefined name", "      oops()", "      ^~~~", "hint: declare the name, import it, or qualify the intended module binding"]),
+        DiagCase(src: "wrap = (x: T) i32 { oops(x) }\nmain = () i32 { wrap(41) }\n",
+            wants: [":1:21: error[undefined-name]: undefined name", "  wrap = (x: T) i32 { oops(x) }", "                      ^~~~"]),
+        DiagCase(src: "apply = (f: (i32) i32, x: i32) i32 { f(x) }\nmain = () i32 {\n    apply((n) { bad(n) }, 41)\n}\n",
+            wants: [":3:17: error[undefined-name]: undefined name", "      apply((n) { bad(n) }, 41)", "                  ^~~"]),
+        DiagCase(src: "apply = (f: (i32) i32, x: i32) i32 { f(x) }\nmain = () i32 {\n    r := apply((n) { n + 1 }, 41)\n    nope(r)\n}\n",
+            wants: [":4:5: error[undefined-name]: undefined name", "      nope(r)", "      ^~~~", "hint: declare the name, import it, or qualify the intended module binding"]),
+        DiagCase(src: "good = () i32 { 1 }\n@@@ !!!\nmain = () i32 { good() + 6 }\n",
+            wants: ["syntax error"]),
+        DiagCase(src: "{ default } = std.mem.alloc\n{ Resource, new_in } = std.mem.own\nmain = () i32 {\n    alloc := default()\n    o := alloc.addr().new_in(Resource(id: 7, slot: 0))\n    o.release_in(alloc.addr())\n    o.get().id\n}\n",
+            wants: [":7:5: error[ownership]: use of an owner after release/drop", "      o.get().id", "      ^", "hint: after release/drop, bind a fresh owner instead of reusing the consumed local"]),
+        DiagCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.mem.rc\nmain = () i32 {\n    alloc := default()\n    r := alloc.addr().new_in(41)\n    r.drop_in(alloc.addr())\n    r.get()\n}\n",
+            wants: [":7:5: error[ownership]: use of an owner after release/drop", "      r.get()", "      ^"]),
+        DiagCase(src: "{ default } = std.mem.alloc\n{ new_in } = std.mem.arc\nmain = () i32 {\n    alloc := default()\n    a := alloc.addr().new_in(41)\n    a.drop_in(alloc.addr())\n    a.get()\n}\n",
+            wants: [":7:5: error[ownership]: use of an owner after release/drop", "      a.get()", "      ^"]),
+        DiagCase(src: "{ Scope, with_sync } = std.scope\n{ default } = std.mem.alloc\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> {\n    p := s.acquire(8)\n    p\n}\nmain = () i32 { h := default()  h.addr().with_sync(4096, leak)  0 }\n",
+            wants: [":5:5: error[scope-escape]: value from scope `s` escapes its scope", "      p", "      ^", "hint: do not return a pointer from `s.acquire(...)`"]),
+        DiagCase(src: "{ Scope, with_sync } = std.scope\n{ default } = std.mem.alloc\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> { s.acquire(8) }\nmain = () i32 { h := default()  h.addr().with_sync(4096, leak)  0 }\n",
+            wants: ["error[scope-escape]: value from scope `s` escapes its scope"]),
+    ])
+    // ── (h) `zenc emit` C-substring assertions (enum switch / bool ternary / no self-capture) ─────
+    em := run_emits("build emit", [
+        EmitCase(path: "tests/fixtures/zen/enum_emit.zen",
+            present: ["switch (_subj.tag)", "case R_Ok:"],
+            absent: []),
+        EmitCase(path: "tests/fixtures/zen/bool_emit.zen",
+            present: ["return (b ? 1 : 0);"],
+            absent: ["switch"]),
+        EmitCase(path: "tests/fixtures/zen/gen_template_local_no_capture.zen",
+            present: [],
+            absent: ["int32_t value = value"]),
+    ])
+    // ── (i) `zenc doc` public-surface + legacy-name assertions across the std modules + genc.zen ──
+    dc := run_docs("build doc", [
+        DocCase(target: "std.text.fmt",
+            present: ["# std.text.fmt", "Display*: {", "write_int_in*<A> = (a: MutPtr<A>, n: i64) i64", "write_float_in*<A> = (a: MutPtr<A>, x: f64) i64", "try_write_int_in*<A> = (a: MutPtr<A>, n: i64) Result<i64, IoError>", "try_write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError>", "print*<T> = (x: T) i64 { x.fmt_print() }", "println*<T> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
+            absent: ["print_owned", "print_int", "println_int"]),
+        DocCase(target: "std.text.string",
+            present: ["init*<A>", "new_in*<A>", "try_init*<A>", "try_new_in*<A>"],
+            absent: ["try_new*<A>", "new* = "]),
+        DocCase(target: "std.mem.own",
+            present: ["new_in*<A, T>", "try_new_in*<A, T>"],
+            absent: ["new*<T>", "try_new*<T>", "release = (o: Own<T>)", "own_new", "own_clone", "own_ptr", "own_release"]),
+        DocCase(target: "std.mem.rc",
+            present: ["new_in*<A, T>", "try_new_in*<A, T>"],
+            absent: ["new*<T>", "try_new*<T>", "drop = (r: Rc<T>)", "rc_new", "rc_get", "rc_clone", "rc_drop", "rc_count"]),
+        DocCase(target: "std.mem.arc",
+            present: ["new_in*<A, T>", "try_new_in*<A, T>"],
+            absent: ["new*<T>", "try_new*<T>", "drop = (r: Arc<T>)", "arc_new", "arc_get", "arc_clone", "arc_drop", "arc_count"]),
+        DocCase(target: "std.concurrent.actor",
+            present: ["ActorRef*<M>: {", "ReplyRef*<T>: {", "ActorEngine*<M>: {", "ActorCell*<M>: {", "cell*<A, M>", "spawn*<A, M, ActorT>", "try_spawn*<A, M, ActorT>", "try_cell*<A, M>"],
+            absent: ["reply*<", "try_reply*<", "Mailbox", "ActorSystem", "ActorState", "actor_ref", "actor_system", "run_actor", "make_reply"]),
+        DocCase(target: "std.core.slice",
+            present: ["buf_in*<A, T>", "try_buf_in*<A, T>", "buf*<A, T>", "try_buf*<A, T>", "dup*<A, T>", "node*<A, T>", "concat*<A, T>"],
+            absent: ["buf*<T>", "try_buf*<T>", "dup*<T>", "node*<T>", "concat*<T>", "nbuf", "try_nbuf"]),
+        DocCase(target: "std.text.bytes",
+            present: ["at* = (s: str, i: i32) u8", "is_digit*"],
+            absent: ["byte_at"]),
+        DocCase(target: "std.concurrent.cown",
+            present: ["buf*<A>", "try_buf*<A>", "file*<A> = (alloc: MutPtr<A>, path: str)", "file_in*<A>"],
+            absent: ["buf_alloc", "buf_free", "file_open", "file_wrap"]),
+        DocCase(target: "std.concurrent.runtime",
+            present: ["sync_in*<A> = (backing: MutPtr<A>, cap: i64) SyncArena", "async_in*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena", "sync*<A> = (backing: MutPtr<A>, cap: i64) SyncArena", "async*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena"],
+            absent: ["sync* = (cap: i64) SyncArena", "async* = (cap: i64) AsyncArena", "sync_arena", "async_arena"]),
+        DocCase(target: "std.concurrent.coroutine",
+            present: ["try_spawn_in*<A>", "try_spawn*<A>"],
+            absent: []),
+        DocCase(target: "std.concurrent.sched",
+            present: ["run_in*<A>", "try_run_in*<A>", "try_run*<A>"],
+            absent: []),
+        DocCase(target: "std.mem.alloc",
+            present: ["default* = () Heap"],
+            absent: ["system_allocator", "default_allocator"]),
+        DocCase(target: "std.mem.raw",
+            present: ["try_alloc* = (n: i64) Result<RawPtr<u8>, IoError>", "try_zeroed* = (n: i64) Result<RawPtr<u8>, IoError>", "of*<T>", "try_of*<T>"],
+            absent: ["buf_of", "new_i32", "new_u8"]),
+        DocCase(target: "std.mem.arena",
+            present: ["make_in*<A>", "try_make_in*<A>"],
+            absent: ["arena_new", "try_arena_new"]),
+        DocCase(target: "std.collections.vec",
+            present: ["of*<T, A>", "try_of*<T, A>"],
+            absent: ["vec_of", "try_vec_of", "vpush", "vgrow", "vfree", "vitems", "vlen"]),
+        DocCase(target: "std.collections.map",
+            present: ["of*<T, A>", "try_of*<T, A>"],
+            absent: ["map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"]),
+        DocCase(target: "std.collections.iter",
+            present: ["map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32]", "try_map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError>", "filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32]", "try_filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError>"],
+            absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]"]),
+        DocCase(target: "std.mem.trace",
+            present: ["Rc*<T>: {", "tracked_in*<A, T>", "tracked*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T>", "try_tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError>", "root_in*<A, T>", "root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void", "try_root_in*<A, T>", "try_root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Rc<Node>, child: Rc<Node>) void", "collect_in*<A>", "collect*<A> = (alloc: MutPtr<A>) void", "try_collect_in*<A>", "try_collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError>"],
+            absent: ["tracked*<T> = (x: T)", "collect* = () void", "hcount*", "list_push*", "trace_child*", "node_set_kid*", "cc_mark*", "blk_drop*", "trace_child", "node_set_kid", "hcount", "list_push", "cc_mark", "blk_drop"]),
+        DocCase(target: "std.text.str",
+            present: ["dup_bytes*<A> = (a: MutPtr<A>, s: str) [u8]", "try_dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>", "substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str", "try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>", "at* = (s: str, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: str) Result<i64, ParseError>", "what made try_parse_int refuse"],
+            absent: ["char_at", "str_parse_int"]),
+        DocCase(target: "std.text.num",
+            present: ["integer_in*<A> = (a: MutPtr<A>, n: i64) String", "integer*<A> = (a: MutPtr<A>, n: i64) String", "try_integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "try_integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "float_in*<A> = (a: MutPtr<A>, x: f64) String", "float*<A> = (a: MutPtr<A>, x: f64) String", "try_float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>", "try_float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>"],
+            absent: ["int_string", "float_string", "int_to_str", "float_to_str"]),
+        DocCase(target: "std.io.file",
+            present: ["out* = (s: str) i64", "out_bytes* = (bytes: [u8]) i64", "contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError>", "contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError>", "save* = (path: str, data: str, n: i64) Result<i64, IoError>", "shell* = (cmd: str) i32", "Reads a whole file into an allocator-owned NUL-terminated buffer."],
+            absent: ["contents* = (path: str) Result<str, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"]),
+        DocCase(target: "zen/compiler/genc.zen",
+            present: ["mangle_str_in*", "impl_cname_in*", "fnt_from_func_in*", "ty_cname_in*", "subst_ty_in*"],
+            absent: ["mangle_str*", "impl_cname*", "fnt_from_func*", "ty_cname*", "subst_ty*"]),
+    ])
+    // ── (j) procedural tests (project mode, fmt idempotency, help/version, bad-file, sibling, emit-eq) ─
+    sh := run_shells("build shell", [
+        ShellCase(name: "build_bad_file", cmd: "./zenc build /no/such/file.zen -o /tmp/zbf_x 2>/tmp/zbf.txt; test \"$?\" = 1 && grep -Fq \"cannot open\" /tmp/zbf.txt && test ! -e /tmp/zbf_x"),
+        ShellCase(name: "build_rejects_illtyped", cmd: "printf \"main = () i32 { 1 < 2 }\\n\" > /tmp/zit.zen && { ./zenc build /tmp/zit.zen -o /tmp/zit_bin 2>/dev/null; test \"$?\" != 0; } && test ! -e /tmp/zit_bin"),
+        ShellCase(name: "project_simple_app", cmd: "rm -rf /tmp/zsa && cp -r tests/fixtures/project/simple_app /tmp/zsa && ./zenc build /tmp/zsa 2>/tmp/zsa.txt && test -x /tmp/zsa/app && grep -Fq \"/tmp/zsa/app\" /tmp/zsa.txt && { /tmp/zsa/app; test \"$?\" = 7; }"),
+        ShellCase(name: "project_broken_manifest", cmd: "rm -rf /tmp/zbm && cp -r tests/fixtures/project/broken_manifest /tmp/zbm && { ./zenc build /tmp/zbm >/tmp/zbm.txt 2>&1; test \"$?\" != 0; } && grep -Fq \"invalid manifest\" /tmp/zbm.txt && ! grep -Fq \"cannot open input\" /tmp/zbm.txt"),
+        ShellCase(name: "project_manifest_fixture", cmd: "rm -rf /tmp/zop_md && cp -r tests/fixtures/project/manifest_demo /tmp/zop_md && ./zenc check /tmp/zop_md 2>/tmp/zop_c.txt && grep -Fq \"src/main.zen: ok\" /tmp/zop_c.txt && { o=$(./zenc run /tmp/zop_md); test \"$?\" = 42; } && test \"$o\" = \"fixture project\" && ./zenc build /tmp/zop_md >/dev/null 2>&1 && test -x /tmp/zop_md/fixture-bin && { b=$(/tmp/zop_md/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"fixture project\""),
+        ShellCase(name: "project_manifest_native", cmd: "rm -rf /tmp/zmn && cp -r tests/fixtures/project/manifest_native /tmp/zmn && sed -i \"s#@@NATIVE@@#/tmp/zmn/native.c#\" /tmp/zmn/zen.toml && ./zenc check /tmp/zmn 2>/tmp/zmn_c.txt && grep -Fq \"src/main.zen: ok\" /tmp/zmn_c.txt && { o=$(./zenc run /tmp/zmn); test \"$?\" = 42; } && test \"$o\" = \"project\" && ./zenc build /tmp/zmn >/dev/null 2>&1 && test -x /tmp/zmn/manifest-bin && { b=$(/tmp/zmn/manifest-bin); test \"$?\" = 42; } && test \"$b\" = \"project\""),
+        ShellCase(name: "project_build_zen", cmd: "rm -rf /tmp/zbz && cp -r tests/fixtures/project/build_zen_demo /tmp/zbz && ./zenc build /tmp/zbz >/dev/null 2>&1 && test -x /tmp/zbz/fixture-bin && { b=$(/tmp/zbz/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"built from build.zen\" && { o=$(./zenc run /tmp/zbz); test \"$?\" = 42; } && test \"$o\" = \"built from build.zen\""),
+        ShellCase(name: "project_link_directive", cmd: "rm -rf /tmp/zll && cp -r tests/fixtures/project/linklib_demo /tmp/zll && sed -i \"s#@@NATIVE@@#/tmp/zll/native.c#\" /tmp/zll/zen.toml && ./zenc build /tmp/zll >/dev/null 2>&1 && test -x /tmp/zll/linklib-bin && { b=$(/tmp/zll/linklib-bin); test \"$?\" = 51; } && test \"$b\" = \"link libm\" && { o=$(./zenc run /tmp/zll); test \"$?\" = 51; } && test \"$o\" = \"link libm\" && sed -i \"/^link = /d;s/linklib-bin/linklib-bin-nolink/\" /tmp/zll/zen.toml && { ./zenc build /tmp/zll >/dev/null 2>&1; test \"$?\" != 0; } && test ! -e /tmp/zll/linklib-bin-nolink"),
+        ShellCase(name: "help_version_zen_root", cmd: "{ ./zenc --help >/tmp/zh.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"usage:\" /tmp/zh.txt && grep -Fq \"zenc doc\" /tmp/zh.txt && { ./zenc --version >/tmp/zv.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"zenc\" /tmp/zv.txt && { printf \"test* = () i32 { 1 }\\n\" | ./zenc 2>/dev/null | grep -Fq zslice; } && cp ./zenc /tmp/zenc-moved && printf \"main = () i32 { 42 }\\n\" > /tmp/zrm.zen && { ZEN_ROOT=$(pwd) /tmp/zenc-moved run /tmp/zrm.zen; test \"$?\" = 42; }"),
+        ShellCase(name: "fmt_basic", cmd: "cp tests/fixtures/fmt/basic_unformatted.zen /tmp/zfmt.zen && { ./zenc fmt --check /tmp/zfmt.zen 2>/tmp/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" /tmp/zfmt_e.txt && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen tests/fixtures/fmt/basic_formatted.zen && ./zenc fmt --check /tmp/zfmt.zen && cp /tmp/zfmt.zen /tmp/zfmt_b.zen && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen /tmp/zfmt_b.zen"),
+        ShellCase(name: "fmt_block_comments", cmd: "cp tests/fixtures/fmt/block_comments_unformatted.zen /tmp/zfmt.zen && { ./zenc fmt --check /tmp/zfmt.zen 2>/tmp/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" /tmp/zfmt_e.txt && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen tests/fixtures/fmt/block_comments_formatted.zen && ./zenc fmt --check /tmp/zfmt.zen && cp /tmp/zfmt.zen /tmp/zfmt_b.zen && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen /tmp/zfmt_b.zen"),
+        ShellCase(name: "fmt_literals", cmd: "cp tests/fixtures/fmt/literals_unformatted.zen /tmp/zfmt.zen && { ./zenc fmt --check /tmp/zfmt.zen 2>/tmp/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" /tmp/zfmt_e.txt && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen tests/fixtures/fmt/literals_formatted.zen && ./zenc fmt --check /tmp/zfmt.zen && cp /tmp/zfmt.zen /tmp/zfmt_b.zen && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen /tmp/zfmt_b.zen"),
+        ShellCase(name: "sibling_source_location", cmd: "rm -rf /tmp/zsib && mkdir -p /tmp/zsib && printf \"bad* = () i32 { missing() }\\n\" > /tmp/zsib/bad.zen && printf \"{ bad } = bad\\nmain = () i32 { bad() }\\n\" > /tmp/zsib/main.zen && { ./zenc check /tmp/zsib/main.zen >/tmp/zsib_o.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"bad.zen:1:17: error[undefined-name]: undefined name\" /tmp/zsib_o.txt && grep -Fq \"bad* = () i32 { missing() }\" /tmp/zsib_o.txt"),
+        ShellCase(name: "implicit_trait_bound_emit_equal", cmd: "./zenc emit tests/fixtures/zen/implicit_trait_bound_sugar.zen >/tmp/zse_s.c 2>/dev/null && ./zenc emit tests/fixtures/zen/implicit_trait_bound_explicit.zen >/tmp/zse_e.c 2>/dev/null && cmp -s /tmp/zse_s.c /tmp/zse_e.c"),
+        ShellCase(name: "doc_local_file", cmd: "printf \"// Public counter type\\nCounter*: { n: i32 }\\n\\nhelper = () i32 { 1 }\\nvisible* = () i32 { 2 }\\n\" > /tmp/zdoc_local.zen && ./zenc doc /tmp/zdoc_local.zen >/tmp/zdoc_local_o.txt 2>&1 && grep -Fq \"Public counter type\" /tmp/zdoc_local_o.txt && grep -Fq \"Counter*: { n: i32 }\" /tmp/zdoc_local_o.txt && grep -Fq \"visible* = () i32 { 2 }\" /tmp/zdoc_local_o.txt && ! grep -Fq \"helper\" /tmp/zdoc_local_o.txt"),
+    ])
+    // ── (k) bootstrap-binary battery (ported from test_bootstrap.py + test_build_self.py): the committed
+    // `./zenc` IS the cc-built bootstrap binary, so drive it directly — emit-compile-run real programs,
+    // survive malformed input (no signal death), report missing files, and `--build-self` usage errors.
+    // (the self-host FIXPOINT itself is wired separately in oracle.zen via fixpoint_ok.)
+    bs := run_shells("bootstrap", [
+        ShellCase(name: "bootstrap_compiles_zen", cmd: "printf '%s' 'sq* = (n: i32) i32 { n * n }' | ./zenc >/tmp/zbc.c 2>/dev/null && grep -Fq 'int32_t sq(int32_t n)' /tmp/zbc.c && { echo '#include <stdint.h>'; cat /tmp/zbc.c; echo 'int main(void){ return sq(7) == 49 ? 0 : 1; }'; } > /tmp/zbc_full.c && cc -std=gnu11 -w /tmp/zbc_full.c -o /tmp/zbc_bin 2>/dev/null && /tmp/zbc_bin"),
+        ShellCase(name: "bootstrap_run_bool_true_first", cmd: "printf 'f* = (n: i32) i32 { (n < 5).match({ true => 1, false => 0 }) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return f(3)==1 && f(9)==0 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_bool_false_first", cmd: "printf 'g* = (n: i32) i32 { (n < 5).match({ false => 0, true => 1 }) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return g(3)==1 && g(9)==0 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_recursion_fib", cmd: "printf 'fib* = (n: i32) i32 { (n < 2).match({ true => n, false => fib(n-1)+fib(n-2) }) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return fib(10)==55 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_while_sum", cmd: "printf 'sum* = (n: i32) i32 {\\n s := 0\\n i := 1\\n @while(i <= n) {\\n  s = s + i\\n  i = i + 1\\n }\\n s\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return sum(5)==15 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_nested_while", cmd: "printf 'grid* = (n: i32) i32 {\\n c := 0\\n i := 0\\n @while(i < n) {\\n  j := 0\\n  @while(j < n) {\\n   c = c + 1\\n   j = j + 1\\n  }\\n  i = i + 1\\n }\\n c\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return grid(4)==16 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_enum_match", cmd: "printf 'Shape*: Circle(i32) | Square(i32)\\nmk* = (n: i32) Shape {\\n .Circle(n)\\n}\\narea* = (s: Shape) i32 {\\n s.match({ .Circle(r) => r*r*3, .Square(w) => w*w })\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return area(mk(2))==12 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_struct_field", cmd: "printf 'Pt*: { x: i32, y: i32 }\\nmk* = (a: i32, b: i32) Pt {\\n Pt(x: a, y: b)\\n}\\nnsq* = (p: Pt) i32 {\\n p.x*p.x + p.y*p.y\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return nsq(mk(3,4))==25 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_precedence", cmd: "printf 'e* = () i32 { 1 + 2 * 3 - 4 }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return e()==3 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_run_compare_and", cmd: "printf 'c* = (a: i32, b: i32) bool { (a < b) && (b < 10) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return c(3,7) && !c(3,12) ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+        ShellCase(name: "bootstrap_malformed_no_colon_param", cmd: "printf 'f* = (p i32) i32 { 1 }' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_colon_payload_enum", cmd: "printf 'E: A | Some: T' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_truncated_binop", cmd: "printf 'g* = () i32 { 6 *' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_unterminated_block", cmd: "printf 'h* = () i32 { 1' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_unterminated_import", cmd: "printf '{ a, b' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_unterminated_tparams", cmd: "printf 'f<T' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_empty", cmd: "printf '' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_lone_brace", cmd: "printf '{' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_malformed_lone_ident", cmd: "printf 'x' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
+        ShellCase(name: "bootstrap_missing_file", cmd: "./zenc /nonexistent/zzz.zen >/tmp/zmf.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' /tmp/zmf.txt"),
+        ShellCase(name: "build_self_usage_missing_args", cmd: "./zenc --build-self >/tmp/zbs.txt 2>&1; test \"$?\" = 2 && grep -Fq 'usage' /tmp/zbs.txt"),
+        ShellCase(name: "build_self_bad_srcroot", cmd: "./zenc --build-self /tmp/zbs_x.c /nonexistent/zzz >/tmp/zbs2.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' /tmp/zbs2.txt"),
+    ])
+    ex + so + ex2 + so2 + exm + vd + r1 + r2 + vd2 + dg + em + dc + sh + bs
 }

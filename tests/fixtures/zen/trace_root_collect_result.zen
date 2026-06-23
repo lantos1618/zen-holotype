@@ -1,0 +1,61 @@
+{ Allocator, Heap, default } = std.mem.alloc
+{ to_exit } = std.core.bool
+trace = std.mem.trace
+LimitAlloc: { heap: Heap, remaining: i32, released: i32 }
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {
+        (a.remaining <= 0).match({
+            true => null_ptr(),
+            false => {
+                a.remaining = a.remaining - 1
+                a.heap.addr().acquire(n)
+            }
+        })
+    }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+        (a.remaining <= 0).match({
+            true => null_ptr(),
+            false => {
+                a.remaining = a.remaining - 1
+                a.heap.addr().resize(p, n)
+            }
+        })
+    }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void {
+        a.released = a.released + 1
+        a.heap.addr().release(p)
+    }
+})
+root_fails = () bool {
+    heap := default()
+    node := trace.tracked_in(heap.addr(), trace.Node(has: 0, kid: null_ptr()))
+    lim := LimitAlloc(heap: default(), remaining: 0, released: 0)
+    r := trace.try_root_in(lim.addr(), node)
+    heap.addr().release(node.base)
+    r.match({ .Ok(v) => false, .Err(e) => true })
+}
+collect_succeeds = () bool {
+    c := LimitAlloc(heap: default(), remaining: 4, released: 0)
+    a := c.addr()
+    left := trace.tracked_in(a, trace.Node(has: 0, kid: null_ptr()))
+    right := trace.tracked_in(a, trace.Node(has: 0, kid: null_ptr()))
+    trace.set_kid(left, right)
+    trace.set_kid(right, left)
+    ok_roots := trace.try_root_in(a, left).match({ .Ok(v) => true, .Err(e) => false }) && trace.try_root_in(a, right).match({ .Ok(v) => true, .Err(e) => false })
+    ok_collect := trace.try_collect_in(a).match({ .Ok(v) => true, .Err(e) => false })
+    ok_roots && ok_collect && (c.released == 3)
+}
+collect_scratch_fails = () bool {
+    c := LimitAlloc(heap: default(), remaining: 2, released: 0)
+    a := c.addr()
+    left := trace.tracked_in(a, trace.Node(has: 0, kid: null_ptr()))
+    right := trace.tracked_in(a, trace.Node(has: 0, kid: null_ptr()))
+    trace.set_kid(left, right)
+    trace.set_kid(right, left)
+    trace.try_root_in(a, left)
+    trace.try_root_in(a, right)
+    failed := trace.try_collect_in(a).match({ .Ok(v) => false, .Err(e) => true })
+    trace.collect_in(c.heap.addr())
+    failed
+}
+main = () i32 { (root_fails() && collect_succeeds() && collect_scratch_fails()).to_exit() }

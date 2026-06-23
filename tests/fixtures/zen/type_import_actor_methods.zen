@@ -1,0 +1,21 @@
+alloc = std.mem.alloc
+{ Context, Receiver, ReplyRef, ActorCell } = std.concurrent.actor
+Msg*: Ping(ReplyRef<i32>)
+Room*: { n: i32 }
+Room.impl(Receiver<Msg>, {
+    receive = (room: MutPtr<Room>, ctx: Context<Msg>) void {
+        ctx.msg.match({ .Ping(reply_to) => reply_to.send(7) })
+    }
+})
+main = () i32 {
+    heap := alloc.default()
+    cell: ActorCell<Msg> := heap.addr().cell(4)
+    reply_to: ReplyRef<i32> := cell.reply(heap.addr())
+    ref: ActorRef<Msg> := cell.ref()
+    ref.send(.Ping(reply_to))
+    room := Room(n: 0)
+    cell.drain(room.addr())
+    out := reply_to.await(heap.addr())
+    cell.free(heap.addr())
+    out
+}

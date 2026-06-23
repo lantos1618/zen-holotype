@@ -1,0 +1,19 @@
+{ default } = std.mem.alloc
+{ to_exit } = std.core.bool
+{ eq } = std.text.str
+{ Context, Receiver, ReplyRef, ActorCell } = std.concurrent.actor
+Msg*: Ping(ReplyRef<str>)
+Room*: { n: i32 }
+Room.impl(Receiver<Msg>, {
+    receive = (room: MutPtr<Room>, ctx: Context<Msg>) void {
+        ctx.msg.match({ .Ping(reply_to) => reply_to.send("done") })
+    }
+})
+main = () i32 {
+    alloc := default()
+    cell: ActorCell<Msg> := alloc.addr().cell(4)
+    room := Room(n: 0)
+    out: str := cell.request(alloc.addr(), room.addr(), (reply_to) { .Ping(reply_to) })
+    cell.free(alloc.addr())
+    eq(out, "done").to_exit()
+}
