@@ -1,0 +1,36 @@
+{ Allocator, Heap, default } = std.mem.alloc
+{ Result, IoError } = std.core.result
+{ try_write_int_in, try_write_float_in } = std.text.fmt
+{ to_exit } = std.core.bool
+Limit: { heap: Heap, remaining: i32, released: i32 }
+Limit.impl(Allocator, {
+    acquire = (a: MutPtr<Limit>, n: i64) RawPtr<u8> {
+        (a.remaining <= 0).match({
+            true => null_ptr(),
+            false => {
+                a.remaining = a.remaining - 1
+                a.heap.addr().acquire(n)
+            }
+        })
+    }
+    resize = (a: MutPtr<Limit>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+        a.heap.addr().resize(p, n)
+    }
+    release = (a: MutPtr<Limit>, p: RawPtr<u8>) void {
+        a.released = a.released + 1
+        a.heap.addr().release(p)
+    }
+})
+main = () i32 {
+    ok_alloc := Limit(heap: default(), remaining: 1, released: 0)
+    wrote := ok_alloc.addr().try_write_int_in(42).match({
+        .Ok(n) => (n == 2) && (ok_alloc.released == 1),
+        .Err(e) => false
+    })
+    fail_alloc := Limit(heap: default(), remaining: 0, released: 0)
+    failed := fail_alloc.addr().try_write_float_in(1.25).match({
+        .Ok(n) => false,
+        .Err(e) => e.match({ .NotFound => true, _ => false })
+    })
+    (wrote && failed && (fail_alloc.released == 0)).to_exit()
+}
