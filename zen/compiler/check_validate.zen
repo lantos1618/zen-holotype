@@ -97,15 +97,72 @@ fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
         })
     })
 }
-// Numeric literals fit numeric slots only when in range.
-lit_fits = (e: Ptr<Expr>, t: Ty) bool {
+// Constant-fold a numeric literal expr: an `.Int`, or a +/-/* of folded literals — a negative literal
+// like `-1` lowers to the Bin `0 - 1`, so folding is what lets unsigned slots reject negatives.
+// ok=false when not a foldable integer constant (Byte/Cond/var/shift/…) → range checks stay lenient.
+LitVal*: { ok: bool, v: i64 }
+lit_binop = (op: str, l: i64, r: i64) LitVal {
+    eq(op, "+").match ({ true => LitVal( ok: true, v: l + r ), false =>
+    eq(op, "-").match ({ true => LitVal( ok: true, v: l - r ), false =>
+    eq(op, "*").match ({ true => LitVal( ok: true, v: l * r ), false =>
+    LitVal( ok: false, v: 0 ) }) }) })
+}
+lit_val = (e: Ptr<Expr>) LitVal {
     load(e).match ({
-        .Int(n) => t.match ({
-            .U8  => (n >= 0) && (n <= 255),
-            .I32 => (n >= 0 - 2147483648) && (n <= 2147483647),
-            _    => true
-        }),
-        _ => true
+        .Int(n) => LitVal( ok: true, v: n ),
+        .Bin(b) => {
+            l := b.lhs.lit_val()
+            r := b.rhs.lit_val()
+            (l.ok && r.ok).match ({
+                true  => lit_binop(b.op, l.v, r.v),
+                false => LitVal( ok: false, v: 0 )
+            })
+        },
+        _ => LitVal( ok: false, v: 0 )
+    })
+}
+// The narrow widths arrive as Named("i8")/Named("u32")/… (no Ty variant); range-check them by name.
+// u64 holds values an i64 can't, so only its lower bound (no negatives) is enforced here.
+named_int_range_ok = (nm: str, n: i64) bool {
+    eq(nm, "i8").match  ({ true => (n >= 0 - 128) && (n <= 127), false =>
+    eq(nm, "i16").match ({ true => (n >= 0 - 32768) && (n <= 32767), false =>
+    eq(nm, "u16").match ({ true => (n >= 0) && (n <= 65535), false =>
+    eq(nm, "u32").match ({ true => (n >= 0) && (n <= 4294967295), false =>
+    eq(nm, "u64").match ({ true => (n >= 0), false =>
+    true }) }) }) }) })
+}
+lit_range_ok = (t: Ty, n: i64) bool {
+    t.match ({
+        .U8        => (n >= 0) && (n <= 255),
+        .I32       => (n >= 0 - 2147483648) && (n <= 2147483647),
+        .I64       => true,
+        .Named(nm) => nm.named_int_range_ok(n),
+        _          => true
+    })
+}
+// Numeric literals fit numeric slots only when in range (constant-folded; lenient on non-constants).
+lit_fits = (e: Ptr<Expr>, t: Ty) bool {
+    lv := e.lit_val()
+    lv.ok.match ({
+        true  => t.lit_range_ok(lv.v),
+        false => true
+    })
+}
+// the narrow widths are Named, so ty_rank can't see them — recognize them as int slots here.
+is_int_width = (n: str) bool {
+    eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64")
+}
+is_int_slot = (t: Ty) bool {
+    t.match ({ .Named(n) => is_int_width(n), _ => t.ty_rank() >= 0 })
+}
+// Authoritative verdict for a numeric LITERAL flowing into an int slot: 0 = fits, 1 = overflow,
+// -1 = not a literal-into-int-slot (caller falls back to its structural fit logic). This MUST take
+// precedence over the unknown_ty leniency, else `x: i8 := 200` (i8 is an undeclared Named → "unknown")
+// would silently pass and truncate at cc.
+lit_slot_verdict = (e: Ptr<Expr>, t: Ty) i32 {
+    (e.is_lit_numeric() && t.is_int_slot()).match ({
+        true  => e.lit_fits(t).match ({ true => 0, false => 1 }),
+        false => 0 - 1
     })
 }
 // does a type MENTION an (unbound) generic type param? recurses Ptr/Slice/Generic-args. Concrete
@@ -131,10 +188,13 @@ arg_err_at = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
     (i < params.len).match ({
         true  => tps.ty_mentions_tparam(params[i].ty).match ({
             true  => 0,
-            false => (ar.addr().is_lit_numeric() && params[i].ty.ty_rank() >= 0 && ar.addr().lit_fits(params[i].ty)).match ({
-                true  => 0,
-                false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
-            })
+            false => {
+                lv := ar.addr().lit_slot_verdict(params[i].ty)
+                (lv >= 0).match ({
+                    true  => lv,
+                    false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
+                })
+            }
         }),
         false => 0
     })
@@ -281,13 +341,16 @@ call_errs = (env: Env, c: CallData) i32 {
 // indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
 fnt_arg_err_at = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
     (i < ptys.len).match ({
-        true  => env.unknown_ty(ptys[i]).match ({
-            true  => 0,
-            false => (ar.addr().is_lit_numeric() && ptys[i].ty_rank() >= 0 && ar.addr().lit_fits(ptys[i])).match ({
-                true  => 0,
-                false => env.fit_err(env.infer_expr(ar.addr()), ptys[i])
+        true  => {
+            lv := ar.addr().lit_slot_verdict(ptys[i])
+            (lv >= 0).match ({
+                true  => lv,
+                false => env.unknown_ty(ptys[i]).match ({
+                    true  => 0,
+                    false => env.fit_err(env.infer_expr(ar.addr()), ptys[i])
+                })
             })
-        }),
+        },
         false => 0
     })
 }
@@ -396,8 +459,9 @@ field_in = (fields: [Field], fname: str) Ty {
 }
 field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
     fty := fields.field_in(fi.name)
-    (fi.value.is_lit_numeric() && fty.ty_rank() >= 0).match ({       // polymorphic literal -> any numeric field
-        true  => 0,
+    lv := fi.value.lit_slot_verdict(fty)                            // a numeric literal must fit the field width
+    (lv >= 0).match ({
+        true  => lv,
         false => env.fit_err(env.infer_expr(fi.value), fty)
     })
 }
@@ -436,10 +500,13 @@ gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: F
     cty := (targs.len == tps.len).match ({ true => env.a.subst_ty_in(tps, targs, fty), false => fty })
     tps.ty_mentions_tparam(cty).match ({
         true  => 0,                                                  // still a tparam -> lenient
-        false => (fi.value.is_lit_numeric() && cty.ty_rank() >= 0).match ({  // polymorphic literal -> any numeric field
-            true  => 0,
-            false => env.fit_err(env.infer_expr(fi.value), cty)      // a concrete field -> check the fit
-        })
+        false => {
+            lv := fi.value.lit_slot_verdict(cty)                     // a numeric literal must fit the field width
+            (lv >= 0).match ({
+                true  => lv,
+                false => env.fit_err(env.infer_expr(fi.value), cty)  // a concrete field -> check the fit
+            })
+        }
     })
 }
 gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], inits: [FieldInit]) i32 {
@@ -804,29 +871,38 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
 // Return/assign/index-set checks only reject concrete mismatches.
 ret_err = (env: Env, r: Ptr<Expr>) i32 {
     rt := env.infer_expr(r)
-    lit_to_num := r.is_lit_numeric() && (env.exp.ty_rank() >= 0) && r.lit_fits(env.exp)
-    // a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
-    // treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
-    (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt() || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, env.exp).match ({ true => 0, false => 1 })
+    lv := r.lit_slot_verdict(env.exp)                        // a numeric literal return is decided by range
+    (lv >= 0).match ({
+        true  => lv,
+        // a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
+        // treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
+        false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
+            true  => 0,
+            false => fits(rt, env.exp).match ({ true => 0, false => 1 })
+        })
     })
 }
 assign_err = (env: Env, x: AssignData) i32 {
     vt := env.infer_expr(x.target)
     rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (vt.ty_rank() >= 0) && x.value.lit_fits(vt)
-    (env.unknown_ty(vt) || env.unknown_ty(rt) || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, vt).match ({ true => 0, false => 1 })
+    lv := x.value.lit_slot_verdict(vt)
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
+            true  => 0,
+            false => fits(rt, vt).match ({ true => 0, false => 1 })
+        })
     })
 }
 idxset_err = (env: Env, x: IndexSetData) i32 {
     rt := env.infer_expr(x.value)
-    lit_to_num := x.value.is_lit_numeric() && (x.elem.ty_rank() >= 0) && x.value.lit_fits(x.elem)
-    (env.unknown_ty(rt) || env.unknown_ty(x.elem) || lit_to_num).match ({
-        true  => 0,
-        false => fits(rt, x.elem).match ({ true => 0, false => 1 })
+    lv := x.value.lit_slot_verdict(x.elem)
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
+            true  => 0,
+            false => fits(rt, x.elem).match ({ true => 0, false => 1 })
+        })
     })
 }
 // Annotated lets must fit their declared type; unannotated lets are inferred only.
@@ -835,10 +911,13 @@ let_fit_err = (env: Env, l: LetData) i32 {
         true  => 0,
         false => {
             vt := env.infer_expr(l.value)
-            lit_to_num := l.value.is_lit_numeric() && (l.ty.ty_rank() >= 0) && l.value.lit_fits(l.ty)
-            (env.unknown_ty(vt) || env.unknown_ty(l.ty) || lit_to_num).match ({
-                true  => 0,
-                false => fits(vt, l.ty).match ({ true => 0, false => 1 })
+            lv := l.value.lit_slot_verdict(l.ty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
+                    true  => 0,
+                    false => fits(vt, l.ty).match ({ true => 0, false => 1 })
+                })
             })
         }
     })
