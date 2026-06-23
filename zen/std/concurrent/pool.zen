@@ -24,9 +24,23 @@
 // every driver: `pool_drain_inline` runs it single-threaded; the pool runs the SAME behavior across M
 // workers. spawn/send semantics are unchanged — only WHO drains (caller vs workers) differs.
 //
-// Internal pool/actor storage is malloc'd FFI/thread scratch (the same explicit-alloc justification as
-// std.thread's pthread_t cell and std.sync's mutex storage), not hidden heap.
+// ── ARC-BACKED ACTOR LIFETIME (goal item E, design §3.4) ─────────────────────────────────────────
+// The shared actor state (the PoolActor block) is allocated through `std.mem.arc` (`Arc<PoolActor>`):
+// its first 8 bytes are an ATOMIC refcount. A handle is the Arc base pointer; sharing the actor across
+// threads CLONEs the Arc (`atomic_add_i64 +1`), dropping a handle drops it (`atomic_add_i64 -1`), and
+// the LAST drop — and only the thread whose decrement returns 0 — frees the block (plus the mailbox it
+// owns + its mutex). This is what makes a cross-thread handle SAFE: a sender on worker A holding a ref
+// to an actor whose owner (worker B) finishes can never use-after-free, because the block only frees
+// once every handle (incl. the scheduler's "scheduled" ref) has dropped. Arc's atomic refcount —
+// dead code until threads existed — is now LOAD-BEARING under real contention.
+//
+// The pool's OWN infrastructure (the Pool block, run-queue ring, per-worker stats, pthread handle/arg
+// cells) is still malloc'd FFI/thread scratch — single-owner storage freed by the one owner in
+// pool_close after the workers join, the same explicit-alloc floor as std.thread/std.sync. Only the
+// cross-thread-shared ACTOR state needed refcounting; the single-owner infrastructure does not.
 { malloc, free } = std.mem.alloc
+{ Arc, new_in } = std.mem.arc
+{ Malloc } = std.mem.alloc
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
 { spawn, join, JoinHandle } = std.thread
 { is_null } = std.core.ptr
@@ -46,24 +60,44 @@ PoolActor: {
     sched: i64,                        // scheduled flag: 0 = idle, 1 = queued-or-running (under mbmu)
     behavior: (RawPtr<u8>, i64) void   // the actor's per-message reaction (non-capturing)
 }
-actor_view = (raw: RawPtr<u8>) MutPtr<PoolActor> { raw.slice(1)[0].addr() }
+// A handle is an `Arc<PoolActor>` base pointer: [ count:i64 | PoolActor ]. The PoolActor value lives 8
+// bytes past the base (past the refcount header), matching std.mem.arc's layout.
+actor_view = (raw: RawPtr<u8>) MutPtr<PoolActor> { raw.offset(8).slice(1)[0].addr() }
 
-// build a runnable actor: allocate its block + mailbox ring. NOT enqueued — the first `send` makes it
-// runnable (design: an actor is runnable iff it has a pending message). Returns the opaque handle.
+// build a runnable actor: Arc-allocate its block (refcount = 1, owned by the caller) + a mailbox ring.
+// NOT enqueued — the first `send` makes it runnable (design: an actor is runnable iff it has a pending
+// message). Returns the Arc base pointer as the opaque handle; the caller owns the initial reference.
 pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> {
-    blk := malloc(sizeof(PoolActor))
+    ma := Malloc(_: 0)
     mbuf := malloc(mbcap * 8)
-    av: [PoolActor] := blk.slice(1)
-    av[0] = PoolActor(user: user, mbuf: mbuf, head: 0, tail: 0, cap: mbcap, mbmu: new_mutex(), sched: 0, behavior: behavior)
-    blk
+    arc := new_in(ma.addr(), PoolActor(user: user, mbuf: mbuf, head: 0, tail: 0, cap: mbcap, mbmu: new_mutex(), sched: 0, behavior: behavior))
+    arc.base
 }
-// release an actor's mailbox + lock + block (after the pool has shut down; single owner).
-pool_actor_free* = (raw: RawPtr<u8>) void {
-    a := actor_view(raw)
-    free(a.mbuf)
-    a.mbmu.destroy()
-    free(raw)
+
+// clone a handle: bump the Arc refcount (atomic +1) and return the same base. Any party that shares the
+// actor across threads — a sender that wants to outlive the spawner, the run-queue's "scheduled" ref —
+// holds a clone, so the block cannot be freed while that party still references it.
+pool_actor_ref* = (raw: RawPtr<u8>) RawPtr<u8> { atomic_add_i64(raw, 1)  raw }
+
+// drop a handle: decrement the Arc refcount (atomic -1). The thread whose decrement returns 0 holds the
+// LAST reference and frees the block + the mailbox it owns + its mutex — exactly once, no UAF, no leak.
+pool_actor_unref* = (raw: RawPtr<u8>) void {
+    (atomic_add_i64(raw, 0 - 1) == 0).match ({
+        true => {
+            a := actor_view(raw)
+            free(a.mbuf)
+            a.mbmu.destroy()
+            free(raw)
+        },
+        false => {}
+    })
 }
+// the spawner releases its reference (the symmetric counterpart of pool_spawn). Same as pool_actor_unref;
+// the name is kept for the existing call sites that "free" the actor after the pool has shut down.
+pool_actor_free* = (raw: RawPtr<u8>) void { pool_actor_unref(raw) }
+
+// read an actor's current Arc refcount (for tests/assertions of the cross-thread lifetime).
+pool_actor_count* = (raw: RawPtr<u8>) i64 { load_i64(raw) }
 
 // ── Pool: M workers + ONE global run queue behind ONE mutex + condvar (Cut 1) ───────────────────
 Pool: {
@@ -123,7 +157,8 @@ pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
     a.mbmu.unlock()
     won.match ({
         true => {
-            p.mu.lock()
+            pool_actor_ref(actor)            // the run queue now OWNS a reference (the "scheduled" ref):
+            p.mu.lock()                      // the actor cannot be freed while it is queued or running.
             p.rq_push(actor)
             p.live = p.live + 1
             p.work_cv.signal()
@@ -181,7 +216,8 @@ run_quantum = (p: MutPtr<Pool>, actor: RawPtr<u8>) i64 {
             p.live = p.live - 1
             (p.live == 0).match ({ true => p.done_cv.broadcast(), false => {} })
             p.mu.unlock()
-        }
+            pool_actor_unref(actor)          // drop the run queue's "scheduled" ref (clone in pool_send);
+        }                                    // if this was the last handle, the actor frees here, safely.
     })
     processed
 }
