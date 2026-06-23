@@ -525,6 +525,8 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
 }
 // the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
 gen_base_of = (t: Ty) str { t.match ({ .Generic(g) => g.name, .Ptr(p) => load(p).gen_base_of(), _ => "" }) }
+// a primitive scalar has no fields, so `x.foo` on it is a hard error (C: "member in something not a struct").
+is_scalar_prim = (t: Ty) bool { t.match ({ .I32 => true, .I64 => true, .U8 => true, .F64 => true, .Bool => true, _ => false }) }
 // Field access checks known concrete struct receivers AND generic-struct instances (field names don't
 // depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be).
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
@@ -539,7 +541,7 @@ member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
                     base := rty.gen_base_of()
                     (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({
                         true  => env.decls.gen_struct_fields(base).has_field(field).match ({ true => 0, false => 1 }),
-                        false => 0                                       // unknown receiver (residue) -> lenient
+                        false => rty.is_scalar_prim().match ({ true => 1, false => 0 })   // scalars have no fields; other unknowns (residue) stay lenient
                     })
                 }
             })
@@ -668,7 +670,11 @@ same_eq_category = (a: Ty, b: Ty) bool {
         || (a.is_bool_ty() && b.is_bool_ty())
         || (a.is_str_t() && b.is_str_t())
         || (a.is_ptr_ty() && b.is_ptr_ty())
-        || a.ty_eq(b)
+}
+// a NOMINAL ==: only types genc can compare with C's `==` — an enum (tag compare) or a Named non-struct.
+// structs and slices CANNOT (`a == b` on two structs is a hard cc error), so they're excluded here.
+eq_nominal_ok = (env: Env, a: Ty, b: Ty) bool {
+    a.ty_eq(b) && a.match ({ .Named(n) => env.env_is_struct(n).match ({ true => false, false => true }), _ => false })
 }
 // Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).
 eq_mix_err = (env: Env, b: BinData) i32 {
@@ -678,7 +684,7 @@ eq_mix_err = (env: Env, b: BinData) i32 {
         true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).match ({ true => 0, false => 1 }),
         false => (env.unknown_ty(lt) || env.unknown_ty(rt)).match ({
             true  => 0,
-            false => lt.same_eq_category(rt).match ({ true => 0, false => 1 })
+            false => (lt.same_eq_category(rt) || env.eq_nominal_ok(lt, rt)).match ({ true => 0, false => 1 })
         })
     })
 }
