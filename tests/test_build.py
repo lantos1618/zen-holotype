@@ -553,6 +553,21 @@ def test_pool_with_pool_combinator():
     assert r.returncode == 9, r.stderr
 
 
+def test_pool_arc_contention():
+    """ACCEPTANCE PROOF (PARALLELISM goal item E — Arc safe under real contention). The pool's actor
+    state is Arc-backed (atomic refcount). 8 producer OS-threads each, per message, CLONE a shared
+    actor handle (atomic +1), send through it, then DROP the clone (atomic -1) — maximum concurrent
+    ref/unref churn — while 4 workers concurrently schedule/run/deschedule (each a clone/drop) the same
+    actors. The owner holds the spawn ref throughout; after producers join + quiescence EVERY actor's
+    refcount is exactly 1 (no lost decrement, no premature free), then the owner drops → freed exactly
+    once. A second scenario drops the owner ref mid-flight so a WORKER runs the last drop. 50 iterations;
+    exit 42 = all exact. (Validated additionally under -fsanitize=address: 50x UAF/double-free/leak
+    clean — see the agent report.)"""
+    zenc = _zenc()
+    r = _run_fixture(zenc, "pool_arc_contention.zen")
+    assert r.returncode == 42, r.stderr
+
+
 def test_scope_generic_field_dispatch():
     """A1: trait dispatch through a nested-generic struct FIELD receiver across an inlined generic fn.
     `Scope<A>(alloc: a.addr())` monomorphizes to Scope<SyncArena>, and the field receiver `s.alloc`
