@@ -22,7 +22,7 @@ ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 
-.PHONY: zenc regen clean
+.PHONY: zenc regen clean oracle
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 zenc:
@@ -36,3 +36,11 @@ regen: zenc
 
 clean:
 	rm -f $(ZENC)
+
+# The Zen-native correctness oracle (tests/oracle.zen) — the self-hosted replacement for the pytest
+# value/verdict harness. Build it with the freshly-built `zenc`, then run it from the repo ROOT (the
+# oracle drives `./zenc` + `tests/oracle_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
+# The oracle's exit code is the failing-case count, so `make oracle` fails iff any case fails.
+#   make -f bootstrap/Makefile oracle
+oracle: zenc
+	cd $(ROOT) && $(ZENC) build tests/oracle.zen -o /tmp/zo_oracle && /tmp/zo_oracle
