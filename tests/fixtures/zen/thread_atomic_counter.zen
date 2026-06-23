@@ -1,0 +1,56 @@
+// Parallelism floor (std.thread): spawn 4 REAL OS threads that each bump a SHARED counter 100000×
+// via atomic_add_i64 under genuine contention, join them — the total must be exactly 400000 (proves
+// the threads ran in parallel AND the atomic fetch-add survives contention, which was dead code until
+// threads existed). Plus a 5th thread that returns a value (42) through its arg pointer. Exit 42 only
+// when both hold; any lost increment or wrong return value → exit 1.
+{ spawn, join } = std.thread
+{ println } = std.text.fmt
+
+PER  := 100000
+NTHR := 4
+
+bump = (p: RawPtr<u8>, n: i64) void {
+    (n <= 0).match ({
+        true  => {},
+        false => { atomic_add_i64(p, 1)  bump(p, n - 1) }
+    })
+}
+
+// non-capturing thread body — all state travels through `arg` (the shared counter cell)
+worker = (arg: RawPtr<u8>) RawPtr<u8> {
+    bump(arg, PER)
+    null_ptr()
+}
+
+// a thread that returns a value: writes 42 through arg AND returns the pointer for `join` to read
+retworker = (arg: RawPtr<u8>) RawPtr<u8> {
+    store_i64(arg, 42)
+    arg
+}
+
+main = () i32 {
+    counter := malloc(8)
+    store_i64(counter, 0)
+    h0 := spawn(worker, counter)
+    h1 := spawn(worker, counter)
+    h2 := spawn(worker, counter)
+    h3 := spawn(worker, counter)
+    join(h0)
+    join(h1)
+    join(h2)
+    join(h3)
+    total := load_i64(counter)
+    println(total)
+
+    box := malloc(8)
+    rh  := spawn(retworker, box)
+    rp  := join(rh)
+    rv  := load_i64(rp)
+    println(rv)
+
+    expected := PER * NTHR
+    (total == expected).match ({
+        true  => (rv == 42).match ({ true => 42, false => 1 }),
+        false => 1
+    })
+}
