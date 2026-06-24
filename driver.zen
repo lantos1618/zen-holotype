@@ -22,47 +22,19 @@
 say = (s: str) i64 { out(s)  out("\n") }
 derr = (s: str) i64 { v := s.view()  write(2, v.ptr, v.len) }   // diagnostics go to stderr
 
-// the full type-check pipeline (ownership -> escape -> validate), short-circuiting on the first error
-// (mirrors the old C driver's type_check). raw = pre-resolve decls, decls = resolved.
+// the first FAILING diagnostic, else clean. `cd_or(a, b)` = a if a failed, else b — so this is a flat
+// precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
+// free, so running them all is harmless; the reported diagnostic is still the first failure in order.
+cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic { (a.code == 0).match ({ true => b, false => a }) }
 check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDiagnostic {
-    cd1 := mp.check_module_ownership_diagnostic_from_source(raw, flat)
-    (cd1.code == 0).match ({
-        true  => {
-            cd2 := mp.check_module_escape_diagnostic_from_source(raw, flat)
-            (cd2.code == 0).match ({
-                true  => {
-                    cdA := mp.check_module_addr_escape_diagnostic_from_source(raw, flat)   // `return local.addr()`
-                    (cdA.code == 0).match ({
-                    true  => {
-                    cdS := mp.check_module_send_rc_diagnostic_from_source(raw, flat)   // Rc not sendable across actors
-                    (cdS.code == 0).match ({
-                    true  => {
-                    cd3 := mp.check_module_bound_diagnostic_from_source(raw, flat)   // bounded generics `A: Trait`
-                    (cd3.code == 0).match ({
-                        true  => {
-                            cd4 := mp.check_module_unknown_type_diagnostic_from_source(decls, flat)   // undefined type names in annotations
-                            (cd4.code == 0).match ({
-                                true  => {
-                                    cd5 := mp.check_module_mustuse_diagnostic_from_source(raw, flat)   // discarded value-mold (Self,…)Self result
-                                    (cd5.code == 0).match ({ true => mp.check_module_diagnostic_from_source(decls, flat), false => cd5 })
-                                },
-                                false => cd4
-                            })
-                        },
-                        false => cd3
-                    })
-                    },
-                    false => cdS
-                    })
-                    },
-                    false => cdA
-                    })
-                },
-                false => cd2
-            })
-        },
-        false => cd1
-    })
+    mp.check_module_ownership_diagnostic_from_source(raw, flat)
+        .cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat))             // scope-derived value escapes
+        .cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat))        // return local.addr()
+        .cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat))            // Rc not sendable across actors
+        .cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))              // bounded generics `A: Trait`
+        .cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat))     // undefined type names
+        .cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat))            // discarded value-mold result
+        .cd_or(mp.check_module_diagnostic_from_source(decls, flat))                  // names / types / arity / …
 }
 // which (path, source) an error renders against: the main file if its span maps there, else the
 // imported module whose source the flat offset maps cleanly into (diag_user_span fails -> line 0).

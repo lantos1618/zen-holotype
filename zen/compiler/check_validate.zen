@@ -2747,6 +2747,14 @@ ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
         _ => false
     })
 }
+// SENDABILITY rule 3: a message may not carry a pointer into the sender's frame. `send(_, msg)` whose
+// message escapes a local (`.addr()` of a local, directly or forwarded) → the offset of the call, else 0.
+ae_send_pos = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c) => (eq(c.fn, "send") && (c.args.len >= 2) && a.ae_escapes(locals, c.args[1].addr())).match ({ true => c.pos.pos_or(1), false => 0 }),
+        _        => 0
+    })
+}
 ae_block_val_escapes = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, stmts: [Stmt]) bool {
     (stmts.len == 0).match ({
         true  => false,
@@ -2773,6 +2781,7 @@ ae_escapes = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
         true  => true,
         false => load(e).match ({
             .Call(c)       => (eq(c.fn, "slice") && (c.args.len > 0)).match ({ true => a.ae_escapes(locals, c.args[0].addr()), false => false }),
+            .MakeEnum(mk)  => a.ae_escapes(locals, mk.payload),
             .MakeStruct(s) => a.ae_inits_escape(locals, s.inits),
             .Match(m)      => a.ae_arms_escape(locals, m.arms),
             .Cond(d)       => a.ae_escapes(locals, d.t) || a.ae_escapes(locals, d.e),
@@ -2804,7 +2813,9 @@ ae_kv_stmt = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, st: Stmt) i32 {
         .Return(r)   => a.ae_escapes(locals, r).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
         .If(f)       => a.ae_kv_stmts(locals, f.then).kv_kor(a.ae_kv_stmts(locals, f.els)),
         .While(w)    => a.ae_kv_stmts(locals, w.body),
-        .ExprStmt(e) => a.ae_kv_expr_stmt(locals, e),
+        .Let(l)      => a.ae_send_pos(locals, l.value),
+        .Assign(x)   => a.ae_send_pos(locals, x.value),
+        .ExprStmt(e) => a.ae_kv_expr_stmt(locals, e).kv_kor(a.ae_send_pos(locals, e)),
         _            => 0
     })
 }
