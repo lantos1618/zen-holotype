@@ -1140,6 +1140,21 @@ recv_var_name = (c: CallData) str {
         true  => c.args[0].match ({ .Var(v) => v.name, _ => "" })
     })
 }
+// SENDABILITY — move-on-send. Passing an owned `Own<T>` into a `send(handle, msg)` transfers it to the
+// receiving actor, so the sender must not keep using it (otherwise both sides free it → race/double-free).
+// We mark the sent owner dead, reusing the use-after-free machinery. Catches the owner sent DIRECTLY or
+// wrapped one level in an enum message (`send(h, .Wrap(own))`). Value/str/Arc messages are untouched —
+// only `Own` is moved — so the ergonomic common case (value messages) sees zero new friction.
+send_own_var = (env: Env, e: Ptr<Expr>) str {
+    load(e).match ({
+        .Var(v)       => eq(env.infer_expr(e).owner_base(), "Own").match ({ true => v.name, false => "" }),
+        .MakeEnum(mk) => env.send_own_var(mk.payload),
+        _             => ""
+    })
+}
+send_consume = (env: Env, c: CallData) str {
+    (eq(c.fn, "send") && (c.args.len >= 2)).match ({ true => env.send_own_var(c.args[1].addr()), false => "" })
+}
 // the bare-Var name of arg `i` (else ""). We only track frees/escapes of SIMPLE LOCALS — a field free
 // like `a.release(m.keys)` (vec/map grow constantly do this) is deliberately NOT tracked, so the
 // stdlib does not over-reject. Field-level liveness is out of scope for v1.
@@ -1247,7 +1262,7 @@ own_stmt_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 
 consume_name = (env: Env, st: Stmt) str {
     st.match ({
         .ExprStmt(e) => load(e).match ({
-            .Call(c) => env.is_consume_method(c).match ({ true => c.recv_var_name(), false => "" }),
+            .Call(c) => env.is_consume_method(c).match ({ true => c.recv_var_name(), false => env.send_consume(c) }),
             _        => ""
         }),
         _ => ""
