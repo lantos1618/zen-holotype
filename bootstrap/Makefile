@@ -17,7 +17,7 @@ HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(HERE)..)
 
 CC      ?= cc
-CFLAGS  ?= -std=gnu11 -w
+CFLAGS  ?= -std=gnu11 -fwrapv -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c

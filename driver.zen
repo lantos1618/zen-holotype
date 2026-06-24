@@ -13,7 +13,7 @@
 { perr_get } = compiler.parse_type
 { lerr_get } = compiler.lex
 { resolve_module } = compiler.check
-{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source } = compiler.check_validate
+{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { genfmt_module_in } = compiler.genfmt
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
@@ -31,6 +31,9 @@ check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDi
             cd2 := mp.check_module_escape_diagnostic_from_source(raw, flat)
             (cd2.code == 0).match ({
                 true  => {
+                    cdA := mp.check_module_addr_escape_diagnostic_from_source(raw, flat)   // `return local.addr()`
+                    (cdA.code == 0).match ({
+                    true  => {
                     cd3 := mp.check_module_bound_diagnostic_from_source(raw, flat)   // bounded generics `A: Trait`
                     (cd3.code == 0).match ({
                         true  => {
@@ -44,6 +47,9 @@ check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDi
                             })
                         },
                         false => cd3
+                    })
+                    },
+                    false => cdA
                     })
                 },
                 false => cd2
@@ -140,7 +146,7 @@ write_runnable_c = (gen: String) bool {
 // cc -std=gnu11 -w -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
 // ccflags/links come from a project's zen.toml (extra .c files + `-l` libs); empty for single files.
 cc_command = (mp: MutPtr<Malloc>, root: str, out: str, ccflags: str, links: str) str {
-    mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ")
+    mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ")
         .gstr_append(mp, TMPC()).gstr_append(mp, " ")
         .gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ")
         .gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links)

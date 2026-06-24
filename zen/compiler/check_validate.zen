@@ -1085,6 +1085,18 @@ dead_has = (seen: Ptr<DeadList>, name: str) bool {
         .DeadCons(c) => eq(c.name, name).match ({ true => true, false => c.tail.dead_has(name) })
     })
 }
+// REVIVAL: rebuild the kill-set without `name`. Rebinding a freed/moved local to a fresh value clears
+// its dead state (so `p := malloc(); a.release(p); p = malloc(); use(p)` and the idiomatic
+// `p = a.resize(p, n)` are NOT use-after-free). Removes every occurrence (dups are harmless).
+dead_remove = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: str) Ptr<DeadList> {
+    seen.match ({
+        .DeadNil     => seen,
+        .DeadCons(c) => eq(c.name, name).match ({
+            true  => a.dead_remove(c.tail, name),
+            false => a.dead_cons(c.name, a.dead_remove(c.tail, name))
+        })
+    })
+}
 owner_base = (t: Ty) str {
     t.match ({
         .Generic(g) => g.name,
@@ -1128,6 +1140,66 @@ recv_var_name = (c: CallData) str {
         true  => c.args[0].match ({ .Var(v) => v.name, _ => "" })
     })
 }
+// the bare-Var name of arg `i` (else ""). We only track frees/escapes of SIMPLE LOCALS — a field free
+// like `a.release(m.keys)` (vec/map grow constantly do this) is deliberately NOT tracked, so the
+// stdlib does not over-reject. Field-level liveness is out of scope for v1.
+arg_var_name = (c: CallData, i: i32) str {
+    (i < c.args.len).match ({ true => c.args[i].match ({ .Var(v) => v.name, _ => "" }), false => "" })
+}
+ty_is_ptr_t = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+// ALLOCATOR-CENTRIC free detection. The free surface is the `Allocator` trait, generic over every
+// allocator (built-in Heap/Malloc and user-defined) because conformance fixes the method names:
+//   a.release(p)     — frees ptr arg `p`        (receiver `a` is a MutPtr<_>, NOT an Own/Rc/Arc)
+//   a.resize(p, n)   — frees the OLD ptr `p`    (returns a NEW pointer; old `p` dangles)
+//   free(p)          — raw FFI/bootstrap floor  (rare in user code)
+// The receiver being a pointer (`.Ptr`) — not an Own/Rc/Arc generic — disambiguates the allocator
+// `release` from the owner `o.release(a)` consume (handled by is_consume_method). Returns the freed
+// bare-local name, or "" when nothing simple is freed.
+alloc_free_call_name = (env: Env, c: CallData) str {
+    eq(c.fn, "free").match ({
+        true  => (c.args.len == 1).match ({ true => c.arg_var_name(0), false => "" }),
+        false => eq(c.fn, "release").match ({
+            true  => ((c.args.len == 2) && env.infer_expr(c.args[0].addr()).ty_is_ptr_t()).match ({ true => c.arg_var_name(1), false => "" }),
+            false => eq(c.fn, "resize").match ({
+                true  => ((c.args.len == 3) && env.infer_expr(c.args[0].addr()).ty_is_ptr_t()).match ({ true => c.arg_var_name(1), false => "" }),
+                false => ""
+            })
+        })
+    })
+}
+// the freed local for a whole statement: a bare free call, or a free that is the VALUE of a let/assign
+// (e.g. `p = a.resize(p, n)` frees the old `p`; the rebind then revives it in own_step).
+alloc_free_expr_name = (env: Env, e: Ptr<Expr>) str {
+    load(e).match ({ .Call(c) => env.alloc_free_call_name(c), _ => "" })
+}
+alloc_free_stmt_name = (env: Env, st: Stmt) str {
+    st.match ({
+        .ExprStmt(e) => env.alloc_free_expr_name(e),
+        .Let(l)      => env.alloc_free_expr_name(l.value),
+        .Assign(x)   => env.alloc_free_expr_name(x.value),
+        _            => ""
+    })
+}
+// the local (re)bound by a statement — clears its dead state (revival). A bare-Var assign target only;
+// a compound target like `arr[i]`/`m.f` is a write THROUGH the base, not a rebind of a local.
+// the bare-Var name of an assign/index target (else ""). Hoisted to its own fn: a nested match inside
+// an outer statement-match arm miscompiles, so the load+match lives here.
+target_var_name = (t: Ptr<Expr>) str { load(t).match ({ .Var(v) => v.name, _ => "" }) }
+rebind_stmt_name = (st: Stmt) str {
+    st.match ({
+        .Let(l)    => l.name,
+        .Assign(x) => target_var_name(x.target),
+        _          => ""
+    })
+}
+// count an assign TARGET as a use only when it is NOT a bare local (a bare `p = …` is a rebind/revival,
+// not a read of `p`; a compound `arr[i] = …` / `m.f = …` reads the base/index, so still check those).
+own_assign_target_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, t: Ptr<Expr>) i32 {
+    load(t).match ({ .Var(v) => 0, _ => a.own_expr_err(env, seen, t) })
+}
+kv_own_assign_target_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, t: Ptr<Expr>) i32 {
+    load(t).match ({ .Var(v) => 0, _ => a.kv_own_expr_kind(env, seen, t) })
+}
 own_args_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) { acc = acc + a.own_expr_err(env, seen, ar.addr()) })
@@ -1164,7 +1236,7 @@ own_expr_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) 
 own_stmt_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.own_expr_err(env, seen, l.value),
-        .Assign(x)   => a.own_expr_err(env, seen, x.target) + a.own_expr_err(env, seen, x.value),
+        .Assign(x)   => a.own_assign_target_err(env, seen, x.target) + a.own_expr_err(env, seen, x.value),
         .Return(r)   => a.own_expr_err(env, seen, r),
         .ExprStmt(e) => a.own_expr_err(env, seen, e),
         .If(f)       => a.own_expr_err(env, seen, f.c) + a.own_body_err(env, seen, f.then) + a.own_body_err(env, seen, f.els),
@@ -1182,9 +1254,18 @@ consume_name = (env: Env, st: Stmt) str {
     })
 }
 own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
-    nm := env.consume_name(st)
     out := seen
-    nm.is_empty().match ({ true => {}, false => { out = a.dead_cons(nm, seen) } })
+    // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
+    nm := env.consume_name(st)
+    nm.is_empty().match ({ true => {}, false => { out = a.dead_cons(nm, out) } })
+    // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead.
+    fn := env.alloc_free_stmt_name(st)
+    fn.is_empty().match ({ true => {}, false => { out = a.dead_cons(fn, out) } })
+    // 3. revival — a (re)bind of a local clears its dead state. Runs LAST so `p = a.resize(p, n)`
+    //    (free old p in step 2, then rebind p here) nets to ALIVE, while `q := a.resize(p, n)` leaves
+    //    p dead (q != p).
+    rb := rebind_stmt_name(st)
+    rb.is_empty().match ({ true => {}, false => { out = a.dead_remove(out, rb) } })
     out
 }
 own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
@@ -1615,7 +1696,7 @@ kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Exp
 kv_own_stmt_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.kv_own_expr_kind(env, seen, l.value),
-        .Assign(x)   => a.kv_own_expr_kind(env, seen, x.target).kv_kor(a.kv_own_expr_kind(env, seen, x.value)),
+        .Assign(x)   => a.kv_own_assign_target_kind(env, seen, x.target).kv_kor(a.kv_own_expr_kind(env, seen, x.value)),
         .Return(r)   => a.kv_own_expr_kind(env, seen, r),
         .ExprStmt(e) => a.kv_own_expr_kind(env, seen, e),
         .If(f)       => a.kv_own_expr_kind(env, seen, f.c).kv_kor(a.kv_own_body_kind(env, seen, f.then)).kv_kor(a.kv_own_body_kind(env, seen, f.els)),
@@ -2603,5 +2684,148 @@ check_module_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl],
                 hint: "do not return a pointer from `s.acquire(...)`; copy the value out, or allocate in an outer scope"
             )
         }
+    })
+}
+
+// ── ADDR-OF-LOCAL ESCAPE ──────────────────────────────────────────────────────────────────────────
+// Returning `x.addr()` where `x` is a stack local hands the caller a pointer into the dead frame. This
+// is a SEPARATE pass from the scope-escape above: it cannot reuse that walker, because a general
+// allocator's `a.acquire(n)` returns HEAP that outlives the call (returning it is fine) — only the
+// ADDRESS OF A LOCAL dangles. Conservative v1: taints `<local>.addr()` and forwards it through
+// `slice(...)`, struct literals, match/cond arms, and block values; flags it in return/trailing
+// position. NOT tracked (v1): aliasing through a `let`, heap-store aliasing, inter-procedural escape.
+ae_collect_arms = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
+    out := seen
+    arms.loop((h, i, ar) { out = a.ae_collect_expr(out, ar.body) })
+    out
+}
+ae_collect_expr = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .Match(m) => a.ae_collect_arms(seen, m.arms),
+        .Block(b) => a.ae_collect(seen, b.stmts),
+        .Loop(l)  => a.ae_collect(seen, l.body),
+        .Cond(d)  => a.ae_collect_expr(a.ae_collect_expr(seen, d.t), d.e),
+        _         => seen
+    })
+}
+ae_collect_stmt = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)      => a.dead_cons(l.name, seen),
+        .If(f)       => a.ae_collect(a.ae_collect(seen, f.then), f.els),
+        .While(w)    => a.ae_collect(seen, w.body),
+        .ExprStmt(e) => a.ae_collect_expr(seen, e),
+        _            => seen
+    })
+}
+ae_collect = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+    out := seen
+    body.loop((h, i, st) { out = a.ae_collect_stmt(out, st) })
+    out
+}
+// `<local>.addr()` — a UFCS `addr` call whose sole arg is a Var that is a collected stack local.
+ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c) => (eq(c.fn, "addr") && (c.args.len == 1)).match ({
+            true  => c.args[0].match ({ .Var(v) => locals.dead_has(v.name), _ => false }),
+            false => false
+        }),
+        _ => false
+    })
+}
+ae_block_val_escapes = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, stmts: [Stmt]) bool {
+    (stmts.len == 0).match ({
+        true  => false,
+        false => stmts[stmts.len - 1].match ({
+            .ExprStmt(e) => a.ae_escapes(locals, e),
+            .Return(r)   => a.ae_escapes(locals, r),
+            _            => false
+        })
+    })
+}
+ae_inits_escape = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) { f = a.ae_escapes(locals, fi.value).match ({ true => true, false => f }) })
+    f
+}
+ae_arms_escape = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) { f = a.ae_escapes(locals, ar.body).match ({ true => true, false => f }) })
+    f
+}
+// value position: IS a `<local>.addr()`, or forwards one through slice()/struct/match/cond/block.
+ae_escapes = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    locals.ae_is_addr_local(e).match ({
+        true  => true,
+        false => load(e).match ({
+            .Call(c)       => (eq(c.fn, "slice") && (c.args.len > 0)).match ({ true => a.ae_escapes(locals, c.args[0].addr()), false => false }),
+            .MakeStruct(s) => a.ae_inits_escape(locals, s.inits),
+            .Match(m)      => a.ae_arms_escape(locals, m.arms),
+            .Cond(d)       => a.ae_escapes(locals, d.t) || a.ae_escapes(locals, d.e),
+            .Block(b)      => a.ae_block_val_escapes(locals, b.stmts),
+            _              => false
+        })
+    })
+}
+// position walk (mirrors kv_escape_*): the source offset of the first escaping return/trailing, 0 = none.
+ae_kv_arm = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, body: Ptr<Expr>) i32 {
+    load(body).match ({ .Block(b) => a.ae_kv_stmts(locals, b.stmts), _ => 0 })
+}
+ae_kv_arms = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.ae_kv_arm(locals, ar.body)) })
+    acc
+}
+ae_kv_expr_stmt = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Match(m) => a.ae_kv_arms(locals, m.arms),
+        .Cond(d)  => a.ae_kv_expr_stmt(locals, d.t).kv_kor(a.ae_kv_expr_stmt(locals, d.e)),
+        .Block(b) => a.ae_kv_stmts(locals, b.stmts),
+        .Loop(l)  => a.ae_kv_stmts(locals, l.body),
+        _         => 0
+    })
+}
+ae_kv_stmt = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Return(r)   => a.ae_escapes(locals, r).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
+        .If(f)       => a.ae_kv_stmts(locals, f.then).kv_kor(a.ae_kv_stmts(locals, f.els)),
+        .While(w)    => a.ae_kv_stmts(locals, w.body),
+        .ExprStmt(e) => a.ae_kv_expr_stmt(locals, e),
+        _            => 0
+    })
+}
+ae_kv_stmts = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    body.loop((h, i, st) { acc = acc.kv_kor(a.ae_kv_stmt(locals, st)) })
+    acc
+}
+ae_kv_body = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := a.ae_kv_stmts(locals, body)
+    acc.kv_kor((body.len == 0).match ({ true => 0, false => body[body.len - 1].match ({ .ExprStmt(e) => a.ae_escapes(locals, e).match ({ true => load(e).expr_pos().pos_or(1), false => 0 }), _ => 0 }) }))
+}
+ae_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
+    locals := a.ae_collect(a.dead_nil(), f.body)
+    a.ae_kv_body(locals, f.body)
+}
+check_module_addr_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.ae_check_func(f), _ => 0 })) })
+    acc
+}
+check_module_addr_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    a.check_module_addr_escape_kind(decls).match ({ 0 => 0, _ => 1 })
+}
+check_module_addr_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    pos := a.check_module_addr_escape_kind(decls)
+    (pos == 0).match ({
+        true  => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KESCAPE(),
+            kind: "escape",
+            source_offset: pos,
+            span_width: src.diagnostic_span_width(pos),
+            count: 1,
+            message: "pointer to a local escapes the function (the local's frame is gone after return)",
+            hint: "return the value by copy, or allocate it through an allocator/owner that outlives the call"
+        )
     })
 }

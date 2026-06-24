@@ -97,12 +97,13 @@ def test_resolver_exposes_structured_import_edges():
     d = _program({
         "p.zen": (
             "{ Malloc } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ import_edges } = std.internal.resolve\n"
             "{ eq } = std.text.str\n"
             "{ to_exit } = std.core.bool\n"
             "arena = std.mem.arena\n"
             "main = () i32 {\n"
-            "    heap := default()\n"
+            "    heap := halloc.system()\n"
             "    a := arena.make_in(heap.addr(), 4096)\n"
             "    src := \"{ println } = std.text.fmt\\nactor = std.concurrent.actor\\nhelper = helper\\nmain = () i32 { 0 }\\n\"\n"
             "    edges := a.addr().import_edges(src)\n"
@@ -128,11 +129,12 @@ def test_resolver_import_edges_handles_many_edges_without_recursive_stack_growth
     d = _program({
         "p.zen": (
             "{ Malloc } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ import_edges } = std.internal.resolve\n"
             "{ eq } = std.text.str\n"
             "{ to_exit } = std.core.bool\n"
             "main = () i32 {\n"
-            "    a := default()\n"
+            "    a := halloc.system()\n"
             f"    src := \"{escaped}\"\n"
             "    edges := a.addr().import_edges(src)\n"
             "    last := edges.len - 1\n"
@@ -150,7 +152,8 @@ def test_resolver_import_edges_handles_many_edges_without_recursive_stack_growth
 def test_resolver_try_import_edges_reports_allocator_failure():
     d = _program({
         "p.zen": (
-            "{ Allocator, Heap, default } = std.mem.alloc\n"
+            "{ Allocator, Heap } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ Result, IoError } = std.core.result\n"
             "{ ImportEdge, try_import_edges } = std.internal.resolve\n"
             "{ eq } = std.text.str\n"
@@ -174,10 +177,10 @@ def test_resolver_try_import_edges_reports_allocator_failure():
             "}\n"
             "main = () i32 {\n"
             "    src := \"right = right\\n\"\n"
-            "    none := LimitAlloc(heap: default(), left: 0)\n"
-            "    only_slice := LimitAlloc(heap: default(), left: 1)\n"
-            "    no_alias := LimitAlloc(heap: default(), left: 2)\n"
-            "    enough := LimitAlloc(heap: default(), left: 3)\n"
+            "    none := LimitAlloc(heap: halloc.system(), left: 0)\n"
+            "    only_slice := LimitAlloc(heap: halloc.system(), left: 1)\n"
+            "    no_alias := LimitAlloc(heap: halloc.system(), left: 2)\n"
+            "    enough := LimitAlloc(heap: halloc.system(), left: 3)\n"
             "    r0: Result<[ImportEdge], IoError> := none.addr().try_import_edges(src)\n"
             "    r1: Result<[ImportEdge], IoError> := only_slice.addr().try_import_edges(src)\n"
             "    r2: Result<[ImportEdge], IoError> := no_alias.addr().try_import_edges(src)\n"
@@ -261,14 +264,15 @@ def test_final_dedup_handles_many_symbols_without_recursive_walk():
 def test_resolver_exposes_structured_provided_symbols():
     d = _program({
         "p.zen": (
-            "{ Malloc, default } = std.mem.alloc\n"
+            "{ Malloc } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ provided_symbols_in } = std.internal.resolve\n"
             "{ eq } = std.text.str\n"
             "{ to_exit } = std.core.bool\n"
             "arena = std.mem.arena\n"
             "main = () i32 {\n"
             "    scratch := Malloc(_: 0)\n"
-            "    heap := default()\n"
+            "    heap := halloc.system()\n"
             "    a := arena.make_in(heap.addr(), 4096)\n"
             "    src := \"{ helper } = dep\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n"
             "    symbols := scratch.addr().provided_symbols_in(a.addr(), src)\n"
@@ -289,7 +293,8 @@ def test_resolver_exposes_structured_provided_symbols():
 def test_resolver_symbol_key_has_result_allocator_path():
     d = _program({
         "p.zen": (
-            "{ Allocator, Heap, default } = std.mem.alloc\n"
+            "{ Allocator, Heap } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ to_exit } = std.core.bool\n"
             "{ ProvidedSymbol, try_symbol_key_in } = std.internal.resolve\n"
             "{ String } = std.text.string\n"
@@ -314,12 +319,12 @@ def test_resolver_symbol_key_has_result_allocator_path():
             "})\n"
             "main = () i32 {\n"
             "    sym := ProvidedSymbol(name: \"struct\", start: 0, next: 0, decl_start: 0, decl_next: 0, imported: false, foreign: false)\n"
-            "    ok_alloc := Limit(heap: default(), remaining: 1)\n"
+            "    ok_alloc := Limit(heap: halloc.system(), remaining: 1)\n"
             "    good := sym.try_symbol_key_in(ok_alloc.addr()).match({\n"
             "        .Ok(key) => eq(key.finish_in(ok_alloc.addr()), \"struct_zk\"),\n"
             "        .Err(e) => false\n"
             "    })\n"
-            "    fail_alloc := Limit(heap: default(), remaining: 0)\n"
+            "    fail_alloc := Limit(heap: halloc.system(), remaining: 0)\n"
             "    failed := sym.try_symbol_key_in(fail_alloc.addr()).match({\n"
             "        .Ok(key) => false,\n"
             "        .Err(e) => true\n"
@@ -339,7 +344,8 @@ def test_resolver_provided_symbols_handles_many_symbols_without_recursive_stack_
     escaped = src.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
     d = _program({
         "p.zen": (
-            "{ Malloc, default } = std.mem.alloc\n"
+            "{ Malloc } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ provided_symbols_in, module_graph_in, decl_names_in, all_decl_names_in } = std.internal.resolve\n"
             "{ finish_in } = std.text.string\n"
             "{ eq } = std.text.str\n"
@@ -347,7 +353,7 @@ def test_resolver_provided_symbols_handles_many_symbols_without_recursive_stack_
             "arena = std.mem.arena\n"
             "main = () i32 {\n"
             "    scratch := Malloc(_: 0)\n"
-            "    heap := default()\n"
+            "    heap := halloc.system()\n"
             "    a := arena.make_in(heap.addr(), 65536)\n"
             f"    src := \"{escaped}\"\n"
             "    symbols := scratch.addr().provided_symbols_in(a.addr(), src)\n"
@@ -373,14 +379,15 @@ def test_resolver_provided_symbols_handles_many_symbols_without_recursive_stack_
 def test_resolver_exposes_module_graph_imports_and_symbols():
     d = _program({
         "p.zen": (
-            "{ Malloc, default } = std.mem.alloc\n"
+            "{ Malloc } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ module_graph_in } = std.internal.resolve\n"
             "{ eq } = std.text.str\n"
             "{ to_exit } = std.core.bool\n"
             "arena = std.mem.arena\n"
             "main = () i32 {\n"
             "    scratch := Malloc(_: 0)\n"
-            "    heap := default()\n"
+            "    heap := halloc.system()\n"
             "    a := arena.make_in(heap.addr(), 4096)\n"
             "    src := \"{ helper, if } = dep\\nbytes = std.text.bytes\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n"
             "    g := scratch.addr().module_graph_in(a.addr(), src)\n"
@@ -554,11 +561,11 @@ def test_namespace_bound_std_modules_can_export_same_function_name():
         "p.zen": (
             "slice = std.core.slice\n"
             "text = std.text.str\n"
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "main = () i32 {\n"
-            "    heap := alloc.default()\n"
-            "    nums := slice.dup(heap.addr(), [10, 20])\n"
-            "    bytes := text.dup_bytes(heap.addr(), \"ab\")\n"
+            "    h := heap.system()\n"
+            "    nums := slice.dup(h.addr(), [10, 20])\n"
+            "    bytes := text.dup_bytes(h.addr(), \"ab\")\n"
             "    ok := (nums[0] == 10) && (nums[1] == 20) && (bytes[0] == 'a') && (bytes[1] == 'b')\n"
             "    ok.match({ true => 0, false => 1 })\n"
             "}\n"
@@ -573,11 +580,11 @@ def test_namespace_bound_std_slice_can_export_natural_buf_without_collision():
         "right.zen": "buf* = (n: i32) i32 { n + 5 }\n",
         "p.zen": (
             "slice = std.core.slice\n"
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "right = right\n"
             "main = () i32 {\n"
-            "    heap := alloc.default()\n"
-            "    xs := slice.buf(heap.addr(), 2, [0])\n"
+            "    h := heap.system()\n"
+            "    xs := slice.buf(h.addr(), 2, [0])\n"
             "    xs[0] = 30\n"
             "    xs[1] = 7\n"
             "    xs[0] + xs[1] + right.buf(0)\n"
@@ -626,9 +633,9 @@ def test_namespace_bound_std_ownership_modules_can_export_same_constructor_names
             "rc = std.mem.rc\n"
             "arc = std.mem.arc\n"
             "own = std.mem.own\n"
-            "{ default } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "main = () i32 {\n"
-            "    alloc := default()\n"
+            "    alloc := halloc.system()\n"
             "    ar := arena.make_in(alloc.addr(), 64)\n"
             "    r := rc.new_in(alloc.addr(), 11)\n"
             "    a := arc.new_in(alloc.addr(), 13)\n"
@@ -650,10 +657,10 @@ def test_namespace_bound_std_alloc_can_export_natural_default_without_collision(
     d = _program({
         "right.zen": "default* = (n: i32) i32 { n + 5 }\n",
         "p.zen": (
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "right = right\n"
             "main = () i32 {\n"
-            "    h := alloc.default()\n"
+            "    h := heap.system()\n"
             "    p := h.addr().acquire(8)\n"
             "    p.store_i64(30)\n"
             "    n := p.load_i64()\n"
@@ -670,14 +677,14 @@ def test_namespace_bound_std_num_can_export_natural_integer_float_without_collis
     d = _program({
         "right.zen": "integer* = (n: i32) i32 { n + 1 }\nfloat* = (n: i32) i32 { n + 2 }\n",
         "p.zen": (
-            "{ default } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ finish_in } = std.text.string\n"
             "num = std.text.num\n"
             "right = right\n"
             "{ eq } = std.text.str\n"
             "{ to_exit } = std.core.bool\n"
             "main = () i32 {\n"
-            "    heap := default()\n"
+            "    heap := halloc.system()\n"
             "    hp := heap.addr()\n"
             "    i := num.integer(hp, -12).finish_in(hp)\n"
             "    f := num.float(hp, 1.5).finish_in(hp)\n"
@@ -694,12 +701,12 @@ def test_std_num_supports_allocator_and_result_formatting():
     d = _program({
         "p.zen": (
             "{ integer_in, float_in, try_integer_in, try_float_in } = std.text.num\n"
-            "{ default } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "{ eq } = std.text.str\n"
             "{ finish_in } = std.text.string\n"
             "{ to_exit } = std.core.bool\n"
             "main = () i32 {\n"
-            "    a := default()\n"
+            "    a := halloc.system()\n"
             "    i := a.addr().integer_in(-12)\n"
             "    f := a.addr().float_in(1.5)\n"
             "    ok_fast := eq(a.addr().finish_in(i), \"-12\") && eq(a.addr().finish_in(f), \"1.5\")\n"
@@ -718,19 +725,19 @@ def test_zenc_emit_resolves_namespace_bound_calls_before_cgen():
     d = _program({
         "right.zen": "default* = (n: i32) i32 { n + 5 }\n",
         "p.zen": (
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "right = right\n"
             "main = () i32 {\n"
-            "    h := alloc.default()\n"
+            "    h := heap.system()\n"
             "    to_i32(30) + right.default(7)\n"
             "}\n"
         ),
     })
     r = subprocess.run([_zenc(), "emit", str(d / "p.zen")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "alloc__default()" in r.stdout
+    assert "heap__system()" in r.stdout
     assert "right__default(7)" in r.stdout
-    assert "default_zk(alloc)" not in r.stdout
+    assert "system_zk(heap)" not in r.stdout
     assert "default_zk(right" not in r.stdout
 
 
@@ -936,9 +943,9 @@ def test_namespace_bound_std_collections_can_export_natural_of_without_collision
             "vec = std.collections.vec\n"
             "maps = std.collections.map\n"
             "right = right\n"
-            "{ default } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "main = () i32 {\n"
-            "    alloc := default()\n"
+            "    alloc := halloc.system()\n"
             "    a := alloc.addr()\n"
             "    v := vec.of(a, [10, 20])\n"
             "    m := maps.of(a, \"x\", 1)\n"
@@ -957,11 +964,11 @@ def test_namespace_bound_generic_type_annotations_match_qualified_constructors()
     d = _program({
         "p.zen": (
             "vec = std.collections.vec\n"
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "sum = (v: vec.Vec<i32>) i32 { v.get(0) + v.get(1) }\n"
             "main = () i32 {\n"
-            "    heap := alloc.default()\n"
-            "    v := vec.of(heap.addr(), [19, 23])\n"
+            "    h := heap.system()\n"
+            "    v := vec.of(h.addr(), [19, 23])\n"
             "    v.sum()\n"
             "}\n"
         ),
@@ -974,12 +981,12 @@ def test_namespace_bound_std_runtime_can_export_natural_sync_async_without_colli
     d = _program({
         "right.zen": "sync* = (n: i32) i32 { n + 1 }\nasync* = (n: i32) i32 { n + 2 }\n",
         "p.zen": (
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "rt = std.concurrent.runtime\n"
             "right = right\n"
             "main = () i32 {\n"
-            "    heap := alloc.default()\n"
-            "    hp := heap.addr()\n"
+            "    h := heap.system()\n"
+            "    hp := h.addr()\n"
             "    s := rt.sync(hp, 128)\n"
             "    a := rt.async(hp, 128)\n"
             "    s.addr().checkpoint()\n"
@@ -999,7 +1006,7 @@ def test_namespace_bound_std_actor_cell_request_survives_export_name_collision()
     d = _program({
         "right.zen": "cell* = (n: i32) i32 { n + 35 }\n",
         "p.zen": (
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "actor = std.concurrent.actor\n"
             "right = right\n"
             "{ to_exit } = std.core.bool\n"
@@ -1011,11 +1018,11 @@ def test_namespace_bound_std_actor_cell_request_survives_export_name_collision()
             "    }\n"
             "})\n"
             "main = () i32 {\n"
-            "    heap := alloc.default()\n"
-            "    cell: actor.ActorCell<Msg> := actor.cell(heap.addr(), 4)\n"
+            "    h := heap.system()\n"
+            "    cell: actor.ActorCell<Msg> := actor.cell(h.addr(), 4)\n"
             "    room := Room(n: 0)\n"
-            "    out: i32 := cell.request(heap.addr(), room.addr(), (reply_to) { .Ping(reply_to) })\n"
-            "    cell.free(heap.addr())\n"
+            "    out: i32 := cell.request(h.addr(), room.addr(), (reply_to) { .Ping(reply_to) })\n"
+            "    cell.free(h.addr())\n"
             "    ((out + right.cell(35)) == 77).to_exit()\n"
             "}\n"
         ),
@@ -1034,7 +1041,7 @@ def test_std_string_and_actor_imports_coexist_without_new_in_collision():
         "p.zen": (
             "{ to_exit } = std.core.bool\n"
             "{ String, new_in } = std.text.string\n"
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "actor = std.concurrent.actor\n"
             "Colour*: { r: u8, g: u8, b: u8 }\n"
             "hex_digit = (n: u8) u8 { (n < 10).match({ true => '0' + n, false => ('a' + n) - 10 }) }\n"
@@ -1050,8 +1057,8 @@ def test_std_string_and_actor_imports_coexist_without_new_in_collision():
             "    }\n"
             "})\n"
             "main = () i32 {\n"
-            "    heap := alloc.default()\n"
-            "    a := heap.addr()\n"
+            "    h := heap.system()\n"
+            "    a := h.addr()\n"
             "    c := Colour(r: 255, g: 128, b: 0)\n"
             "    s := a.new_in().push_in(a, '#').push_byte(a, c.r).push_byte(a, c.g).push_byte(a, c.b)\n"
             "    hx := s.finish_in(a)\n"
@@ -1081,10 +1088,10 @@ def test_std_slice_and_text_imports_coexist_without_dup_in_collision():
     d = _program({
         "p.zen": (
             "{ println } = std.text.fmt\n"          # pulls in std.text.str
-            "alloc = std.mem.alloc\n"
+            "heap = std.mem.heap\n"
             "{ dup, node_in } = std.core.slice\n"
             "main = () i32 {\n"
-            "    m := alloc.default()\n"
+            "    m := heap.system()\n"
             "    xs: [i32] := m.addr().dup([10, 20, 30])\n"   # slice element-copy, not str byte-copy
             "    p := m.addr().node_in(777)\n"                # heap-alloc a node (the miscompile path)
             "    println(xs[2] + p.load())\n"                 # 30 + 777 = 807
@@ -1103,9 +1110,9 @@ def test_namespace_bound_std_cown_can_export_natural_buf_file_without_collision(
         "p.zen": (
             "cown = std.concurrent.cown\n"
             "right = right\n"
-            "{ default } = std.mem.alloc\n"
+            "halloc = std.mem.heap\n"
             "main = () i32 {\n"
-            "    alloc := default()\n"
+            "    alloc := halloc.system()\n"
             "    a := alloc.addr()\n"
             "    b := cown.buf(a, 8)\n"
             "    b.addr().set(0, 'Z')\n"
