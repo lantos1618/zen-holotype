@@ -2844,3 +2844,104 @@ check_module_addr_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [D
         )
     })
 }
+
+// ── SENDABILITY rule 2: an Rc<T> may not be sent across actors. ───────────────────────────────────
+// Rc's refcount is a plain (non-atomic) i64, so sharing one between actors on different threads races.
+// Flag `send(handle, msg)` whose message carries an Rc (sent directly, wrapped in an enum, or in a
+// struct field). Arc<T> (atomic) and value/Own messages are fine — only Rc is rejected, so ordinary
+// message sends keep zero friction.
+sd_inits_rc = (env: Env, inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) { f = env.sd_msg_rc(fi.value).match ({ true => true, false => f }) })
+    f
+}
+sd_msg_rc = (env: Env, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)        => eq(env.infer_expr(e).owner_base(), "Rc"),
+        .MakeEnum(mk)  => env.sd_msg_rc(mk.payload),
+        .MakeStruct(s) => env.sd_inits_rc(s.inits),
+        _              => false
+    })
+}
+// a `send(_, msg)` whose message carries an Rc → the source offset of the call, else 0. `&&` short-
+// circuits, so `c.args[1]` is only touched when the arity check passed.
+sd_call_pos = (env: Env, c: CallData) i32 {
+    (eq(c.fn, "send") && (c.args.len >= 2) && env.sd_msg_rc(c.args[1].addr())).match ({ true => c.pos.pos_or(1), false => 0 })
+}
+sd_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) { acc = acc.kv_kor(a.sd_expr(env, ar.addr())) })
+    acc
+}
+sd_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) { acc = acc.kv_kor(a.sd_expr(a.arm_env(env, subjty, ar), ar.body)) })
+    acc
+}
+sd_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) { acc = acc.kv_kor(a.sd_expr(env, fi.value)) })
+    acc
+}
+sd_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)       => env.sd_call_pos(c).kv_kor(a.sd_args(env, c.args)),
+        .Bin(b)        => a.sd_expr(env, b.lhs).kv_kor(a.sd_expr(env, b.rhs)),
+        .Index(ix)     => a.sd_expr(env, ix.seq).kv_kor(a.sd_expr(env, ix.idx)),
+        .Cond(d)       => a.sd_expr(env, d.c).kv_kor(a.sd_expr(env, d.t)).kv_kor(a.sd_expr(env, d.e)),
+        .Member(m)     => a.sd_expr(env, m.obj),
+        .Arrow(ar)     => a.sd_expr(env, ar.obj),
+        .Match(m)      => a.sd_expr(env, m.subj).kv_kor(a.sd_arms(env, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)  => a.sd_expr(env, mk.payload),
+        .MakeStruct(s) => a.sd_inits(env, s.inits),
+        .SliceLit(sd)  => a.sd_args(env, sd.items),
+        .Loop(l)       => a.sd_expr(env, l.seq).kv_kor(a.sd_body(env, l.body)),
+        .Block(b)      => a.sd_body(env, b.stmts),
+        _              => 0
+    })
+}
+sd_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.sd_expr(env, l.value),
+        .Assign(x)   => a.sd_expr(env, x.target).kv_kor(a.sd_expr(env, x.value)),
+        .Return(r)   => a.sd_expr(env, r),
+        .ExprStmt(e) => a.sd_expr(env, e),
+        .If(f)       => a.sd_expr(env, f.c).kv_kor(a.sd_body(env, f.then)).kv_kor(a.sd_body(env, f.els)),
+        .While(w)    => a.sd_expr(env, w.c).kv_kor(a.sd_body(env, w.body)),
+        .IndexSet(x) => a.sd_expr(env, x.seq).kv_kor(a.sd_expr(env, x.idx)).kv_kor(a.sd_expr(env, x.value))
+    })
+}
+sd_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e   := env
+    body.loop((h, i, st) { acc = acc.kv_kor(a.sd_stmt(e, st))  e = a.extend_env(e, st) })
+    acc
+}
+sd_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env( vars: a.params_env(f.params), decls: decls, didx: idx, exp: f.ret, a: a )
+    a.sd_body(env, f.body)
+}
+check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({ .DFunc(f) => a.sd_check_func(decls, idx, f), _ => 0 })) })
+    acc
+}
+check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    a.check_module_send_rc_kind(decls).match ({ 0 => 0, _ => 1 })
+}
+check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    pos := a.check_module_send_rc_kind(decls)
+    (pos == 0).match ({
+        true  => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KOWNERSHIP(),
+            kind: "sendable",
+            source_offset: pos,
+            span_width: src.diagnostic_span_width(pos),
+            count: 1,
+            message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
+            hint: "use Arc<T> for a value shared between actors, or send a value/owned copy"
+        )
+    })
+}
