@@ -486,7 +486,10 @@ fmt_lines = (mp: MutPtr<Malloc>, v: [u8], p0: i64, o0: String, depth0: i32, in_b
             true  => { o = o.gstr_push(mp, '\n') },
             false => {
                 indent := ((!in_block) && (v[s] == '}') && (depth > 0)).match ({ true => depth - 1, false => depth })
-                o = mp.bs_push_range(mp.fmt_indent(o, indent * 4), v, s, t).gstr_push(mp, '\n')
+                // HOIST: a `<call>.gstr_push` receiver is re-evaluated by gstr_reserve's inlining (the call
+                // runs twice → the second grow frees what the first returned → use-after-free). Bind first.
+                ol := mp.bs_push_range(mp.fmt_indent(o, indent * 4), v, s, t)
+                o = ol.gstr_push(mp, '\n')
                 fd := v.fmt_scan(s, t, depth, in_block, false, false, false)
                 depth = fd.depth
                 in_block = fd.in_block
