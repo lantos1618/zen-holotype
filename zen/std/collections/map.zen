@@ -63,6 +63,10 @@ Map*<T>: {
     // observe the tighter bound.
     keys = (m: Map<T>) [str] { slice(m.keys, m.len) }
     vals = (m: Map<T>) [T] { slice(m.vals, m.len) }
+    // CAP-sized views over the full backing buffers, for the one-past-len APPEND write (slot [len],
+    // which is < cap and so in-bounds here, but past the len-sized `keys()`/`vals()` views).
+    keys_all = (m: Map<T>) [str] { slice(m.keys, m.cap) }
+    vals_all = (m: Map<T>) [T] { slice(m.vals, m.cap) }
     // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
     index = (m: Map<T>) [i64] { slice(m.idx, m.cap * 2) }
     len = (m: Map<T>) i64 { m.len }
@@ -86,9 +90,9 @@ Map*<T>: {
     grow<A> = (m: Map<T>, a: MutPtr<A>) Map<T> {
         cap := (m.cap * 2) + 1
         next := Map<T>( keys: a.resize(m.keys, cap * sizeof(MKey)),
-                        vals: a.resize(m.vals, cap * sizeof(T)),
-                        idx:  a.resize(m.idx, cap * 2 * sizeof(MIdx)),
-                        len: m.len, cap: cap )
+        vals: a.resize(m.vals, cap * sizeof(T)),
+        idx:  a.resize(m.idx, cap * 2 * sizeof(MIdx)),
+        len: m.len, cap: cap )
         next.reindex()
     }
     try_grow<A> = (m: Map<T>, a: MutPtr<A>) Result<Map<T>, IoError> {
@@ -171,8 +175,8 @@ Map*<T>: {
         k := k
         v := v
         next := (m.len < m.cap).match ({ true => m, false => m.grow(a) })
-        keys := next.keys()
-        vals := next.vals()
+        keys := next.keys_all()
+        vals := next.vals_all()
         keys[next.len] = k
         vals[next.len] = v
         Map<T>( keys: next.keys, vals: next.vals, idx: next.idx, len: next.len + 1, cap: next.cap ).link(next.len)
@@ -182,8 +186,8 @@ Map*<T>: {
         v := v
         out: Result<Map<T>, IoError> := (m.len < m.cap).match ({
             true => {
-                keys := m.keys()
-                vals := m.vals()
+                keys := m.keys_all()
+                vals := m.vals_all()
                 keys[m.len] = k
                 vals[m.len] = v
                 ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: m.keys, vals: m.vals, idx: m.idx, len: m.len + 1, cap: m.cap ).link(m.len))
@@ -192,8 +196,8 @@ Map*<T>: {
             false => {
                 m.try_grow(a).match ({
                     .Ok(next) => {
-                        keys := next.keys()
-                        vals := next.vals()
+                        keys := next.keys_all()
+                        vals := next.vals_all()
                         keys[next.len] = k
                         vals[next.len] = v
                         ok: Result<Map<T>, IoError> := .Ok(Map<T>( keys: next.keys, vals: next.vals, idx: next.idx, len: next.len + 1, cap: next.cap ).link(next.len))
@@ -245,9 +249,9 @@ Map*<T>: {
     clone<A> = (m: Map<T>, a: MutPtr<A>) Map<T> {
         cap := m.cap
         next := Map<T>( keys: a.acquire(cap * sizeof(MKey)),
-                        vals: a.acquire(cap * sizeof(T)),
-                        idx:  a.acquire(cap * 2 * sizeof(MIdx)),
-                        len: m.len, cap: cap )
+        vals: a.acquire(cap * sizeof(T)),
+        idx:  a.acquire(cap * 2 * sizeof(MIdx)),
+        len: m.len, cap: cap )
         srcks := m.keys()
         srcvs := m.vals()
         dstks := next.keys()
@@ -303,7 +307,7 @@ mchain = (ks: [str], ix: [i64], cap: i64, e: i64, k: str) i64 {
 // on the empty map return absent immediately. Pair with `put`/`get`/`free` like `of`.
 empty*<T, A> = (a: MutPtr<A>) Map<T> {
     m := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)),
-                 idx: a.acquire(2 * sizeof(MIdx)), len: 0, cap: 1 )
+    idx: a.acquire(2 * sizeof(MIdx)), len: 0, cap: 1 )
     m.reindex()
 }
 
@@ -311,7 +315,7 @@ empty*<T, A> = (a: MutPtr<A>) Map<T> {
 // (Zen has no call-site type args). Starts at cap 1.
 of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Map<T> {
     m := Map<T>( keys: a.acquire(sizeof(MKey)), vals: a.acquire(sizeof(T)),
-                 idx: a.acquire(2 * sizeof(MIdx)), len: 1, cap: 1 )
+    idx: a.acquire(2 * sizeof(MIdx)), len: 1, cap: 1 )
     keys := m.keys()
     vals := m.vals()
     keys[0] = seed_key

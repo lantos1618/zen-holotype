@@ -4,7 +4,7 @@
 { Scope, with_sync } = std.scope
 { async_in, free_async } = std.concurrent.runtime
 { spawn_in, Coro } = std.concurrent.coroutine
-{ default } = std.mem.alloc
+halloc = std.mem.heap
 
 g_result := 0
 
@@ -19,7 +19,7 @@ run = (s: MutPtr<Scope<A>>) i32 {
 
 // async driver: run the SAME body under a Scope<AsyncArena>, inside a coroutine, to completion.
 awork = () void {
-    h := default()
+    h := halloc.gpa()
     a := h.addr().async_in(4096)
     s := Scope<AsyncArena>( alloc: a.addr(), budget: 0 - 1 )
     g_result = run(s.addr())
@@ -28,7 +28,7 @@ awork = () void {
 drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => {} }) }
 
 main = () i32 {
-    h := default()
+    h := halloc.gpa()
     sync_r := h.addr().with_sync(4096, run)   // sync path: same run, checkpoint no-ops
     c := h.addr().spawn_in(awork)             // async path: same run, checkpoint yields
     drive(c)

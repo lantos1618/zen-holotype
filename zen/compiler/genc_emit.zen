@@ -132,12 +132,29 @@ slice_count = (items: [Expr]) i32 {
     items.loop((h, i, it) { n = n + 1 })
     n
 }
+// Bounds-checked slice read: `zen__idx` (preamble) panics on a negative or >= len index and returns
+// the element byte-pointer, which `*(ELEM*)…` derefs back to an lvalue (so `seq[i]` keeps working as a
+// member base / address-of target). A plain function call — not a macro — so comma-bearing operands
+// (compound literals etc.) parse as real C, and seq/idx each evaluate exactly once.
 gen_index = (s: String, alloc: MutPtr<Malloc>, ix: IndexData) String {
-    s.gstr_append(alloc, "((").gstr_append(alloc, alloc.ty_cname_in(ix.elem)).gstr_append(alloc, "*)(").gen_expr(alloc, ix.seq).gstr_append(alloc, ").ptr)[").gen_expr(alloc, ix.idx).gstr_append(alloc, "]")
+    tn := alloc.ty_cname_in(ix.elem)
+    s.gstr_append(alloc, "(*(").gstr_append(alloc, tn).gstr_append(alloc, "*)zen__idx(").gen_expr(alloc, ix.seq).gstr_append(alloc, ", ").gen_expr(alloc, ix.idx).gstr_append(alloc, ", sizeof(").gstr_append(alloc, tn).gstr_append(alloc, ")))")
 }
 
+// `/` and `%` emit a statement-expression that binds both operands once, then dispatches on operand
+// type with `_Generic`: integer operands hit a checked helper that panics on divide-by-zero and on the
+// INT_MIN/-1 overflow; float operands keep native C semantics (x/0.0 == inf, never a SIGFPE). A
+// statement-expression (not a function-like macro) is used so operands that emit unparenthesized commas
+// — e.g. compound literals `(zslice){.ptr=…, .len=…}` — parse as real C instead of splitting macro args.
+// All other operators emit `(lhs op rhs)` unchanged.
 gen_bin = (s: String, alloc: MutPtr<Malloc>, b: BinData) String {
-    s.gstr_append(alloc, "(").gen_expr(alloc, b.lhs).gstr_append(alloc, " ").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_expr(alloc, b.rhs).gstr_append(alloc, ")")
+    eq(b.op, "/").match ({
+        true  => s.gstr_append(alloc, "({ __auto_type _zdl = (").gen_expr(alloc, b.lhs).gstr_append(alloc, "); __auto_type _zdr = (").gen_expr(alloc, b.rhs).gstr_append(alloc, "); _Generic(_zdl + _zdr, double:(double)(_zdl/_zdr), float:(float)(_zdl/_zdr), unsigned int: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), default: zen__divz((int64_t)_zdl, (int64_t)_zdr)); })"),
+        false => eq(b.op, "%").match ({
+            true  => s.gstr_append(alloc, "({ __auto_type _zml = (").gen_expr(alloc, b.lhs).gstr_append(alloc, "); __auto_type _zmr = (").gen_expr(alloc, b.rhs).gstr_append(alloc, "); _Generic(_zml + _zmr, double:(int64_t)0, float:(int64_t)0, unsigned int: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), default: zen__modz((int64_t)_zml, (int64_t)_zmr)); })"),
+            false => s.gstr_append(alloc, "(").gen_expr(alloc, b.lhs).gstr_append(alloc, " ").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_expr(alloc, b.rhs).gstr_append(alloc, ")")
+        })
+    })
 }
 
 // Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to literal 0.
@@ -151,14 +168,14 @@ EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI6
 // Zen keyword into C; struct names and already-substituted tparams (sizeof(T)→sizeof(Expr)) pass through.
 sizeof_cname = (n: str) str {
     eq(n, "i32").match ({ true => "int32_t", false =>
-    eq(n, "i64").match ({ true => "int64_t", false =>
-    eq(n, "u8").match ({ true => "uint8_t", false =>
-    eq(n, "f64").match ({ true => "double", false =>
-    eq(n, "bool").match ({ true => "bool", false =>
-    eq(n, "str").match ({ true => "const char*", false =>
-    eq(n, "Cstr").match ({ true => "const char*", false =>
-    eq(n, "text").match ({ true => "const char*", false =>
-    eq(n, "void").match ({ true => "void", false => n }) }) }) }) }) }) }) }) })
+        eq(n, "i64").match ({ true => "int64_t", false =>
+            eq(n, "u8").match ({ true => "uint8_t", false =>
+                eq(n, "f64").match ({ true => "double", false =>
+                    eq(n, "bool").match ({ true => "bool", false =>
+                        eq(n, "str").match ({ true => "const char*", false =>
+                            eq(n, "Cstr").match ({ true => "const char*", false =>
+                                eq(n, "text").match ({ true => "const char*", false =>
+                                    eq(n, "void").match ({ true => "void", false => n }) }) }) }) }) }) }) }) })
 }
 // `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
 gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
@@ -443,7 +460,7 @@ gen_stmt = (s: String, alloc: MutPtr<Malloc>, st: Stmt) String {
         .ExprStmt(e) => s.gen_expr_stmt(alloc, e),
         .If(f)     => s.gen_if(alloc, f),
         .While(w)  => s.gstr_append(alloc, "while (").gen_expr(alloc, w.c).gstr_append(alloc, ") ").gen_block(alloc, w.body),
-        .IndexSet(x) => s.gstr_append(alloc, "((").gstr_append(alloc, alloc.ty_cname_in(x.elem)).gstr_append(alloc, "*)(").gen_expr(alloc, x.seq).gstr_append(alloc, ").ptr)[").gen_expr(alloc, x.idx).gstr_append(alloc, "] = ").gen_expr(alloc, x.value).gstr_append(alloc, ";")
+        .IndexSet(x) => s.gstr_append(alloc, "(*(").gstr_append(alloc, alloc.ty_cname_in(x.elem)).gstr_append(alloc, "*)zen__idx(").gen_expr(alloc, x.seq).gstr_append(alloc, ", ").gen_expr(alloc, x.idx).gstr_append(alloc, ", sizeof(").gstr_append(alloc, alloc.ty_cname_in(x.elem)).gstr_append(alloc, "))) = ").gen_expr(alloc, x.value).gstr_append(alloc, ";")
     })
 }
 gen_stmt_effect = (s: String, alloc: MutPtr<Malloc>, st: Stmt) String {
@@ -762,13 +779,13 @@ gen_types_upto = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], cache: [Depth
 gen_funcs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     out := s
     decls.loop((h, i, d) { d.is_template().match ({
-        true => {},
-        false => d.match ({
-            .DFunc(f) => { out = out.gen_decl(alloc, d).gstr_append(alloc, " ") },
-            .DRaw(c)  => { out = out.gen_decl(alloc, d).gstr_append(alloc, " ") },
-            _
-        })
-    }) })
+            true => {},
+            false => d.match ({
+                .DFunc(f) => { out = out.gen_decl(alloc, d).gstr_append(alloc, " ") },
+                .DRaw(c)  => { out = out.gen_decl(alloc, d).gstr_append(alloc, " ") },
+                _
+            })
+        }) })
     out
 }
 
@@ -779,7 +796,9 @@ is_const_init = (e: Ptr<Expr>) bool {
         .Byte(b)   => true,
         .FloatLit(ft) => true,
         .StrLit(t) => true,
-        .Bin(b)    => b.lhs.is_const_init() && b.rhs.is_const_init(),
+        // `/` and `%` lower to a statement-expression (the div/mod guard), which is NOT a constant
+        // expression — a `static T g = ({…})` global init is invalid C. Force those to runtime init.
+        .Bin(b)    => (eq(b.op, "/") || eq(b.op, "%")).match ({ true => false, false => b.lhs.is_const_init() && b.rhs.is_const_init() }),
         .Call(c)   => eq(c.fn, "null_ptr"),
         _          => false
     })
@@ -801,12 +820,12 @@ gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
 gen_global_inits = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     out := s.gstr_append(alloc, "static void zen__init_globals(void) { ")
     decls.loop((h, i, d) { d.match ({
-        .DGlobal(g) => g.init.is_const_init().match ({
-            true  => {},
-            false => { out = out.gstr_append(alloc, g.name).gstr_append(alloc, " = ").gen_expr(alloc, g.init).gstr_append(alloc, "; ") }
-        }),
-        _
-    }) })
+            .DGlobal(g) => g.init.is_const_init().match ({
+                true  => {},
+                false => { out = out.gstr_append(alloc, g.name).gstr_append(alloc, " = ").gen_expr(alloc, g.init).gstr_append(alloc, "; ") }
+            }),
+            _
+        }) })
     out.gstr_append(alloc, "} ")
 }
 // Whole translation unit emission.
@@ -815,7 +834,7 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     // zslice is the EXACT leading HEAD; zfn (fn pointers, A2) and the malloc/memcpy prototypes follow so
     // heap-promoted slice literals (gen_slicelit) link in standalone programs that don't import std.mem
     // (types match std.mem/std.string foreign decls — compatible redecl).
-    s := a.gstr_string(4096).gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); ")
+    s := a.gstr_string(4096).gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); void abort(void); int64_t write(int32_t, uint8_t*, int64_t); static void zen__panic(const char* m){ int64_t n=0; while(m[n]){ n=n+1; } write(2,(uint8_t*)m,n); abort(); } static int64_t zen__divz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-9223372036854775807LL-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int64_t zen__modz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } if(b==-1){ return 0; } return a%b; } static uint64_t zen__udivz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } return a/b; } static uint64_t zen__umodz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } return a%b; } static uint8_t* zen__idx(zslice z, int64_t i, int64_t esz){ if(i<0 || i>=z.len){ zen__panic(\"zen: panic: slice index out of bounds\\n\"); } return (uint8_t*)z.ptr + i*esz; } ")
     decls.loop((h, i, d) { s = s.gen_fwd(a, decls, d) })
     s = s.gen_fnt_typedefs(a, decls)
     decls.loop((h, i, d) { s = s.gen_proto(a, d) })

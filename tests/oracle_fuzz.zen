@@ -11,7 +11,7 @@
 // SIGABRT) and WITHOUT hanging. The only failures here are real robustness bugs.
 //
 // ── HOW A CRASH IS DETECTED ─────────────────────────────────────────────────────────────────────
-// `std.io.file.shell` is libc system(): it returns the raw wait STATUS of `/bin/sh -c <cmd>`, not a
+// `std.io.file.shell` is libc gpa(): it returns the raw wait STATUS of `/bin/sh -c <cmd>`, not a
 // bare exit code. Each input is run under a `timeout 10` wrapper, so:
 //   * a clean exit (accept rc 0 / reject rc 1) -> status = rc << 8, (status & 0x7f) == 0, code < 124
 //   * a HANG (timeout fires)                  -> timeout exits 124  -> code == 124            => CRASH
@@ -169,19 +169,19 @@ fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
 // crash-class REGRESSIONS: one minimal representative per known malformed-input non-termination bug.
 fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
     seeds := [
-        "g := g",                                            // self-referential global init
-        "a := b\nb := a",                                    // mutually-referential globals
-        "A*: { b: B } B*: { a: A }",                         // struct A<->B by value
-        "f = () i32 {",                                      // unterminated block
-        "f = () i32 { 0 .match ({ 1 => 2",                   // unterminated match arms
-        "T*: { x: i32 } T.impl(Tr, { m = () void {",         // unterminated impl body
-        "f = () i32 { x := 5  x[0 ",                          // `[` never closed
-        "f = () i32 { s := [1,2]  s[0 = 3 }",                // idxset `[` scan past EOF
-        "Foo<",                                              // `<` with no closing `>`
-        "f<T> = (x: T) T { f(x) }",                          // self-recursive generic -> inliner
-        "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }",
-        "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }",
-        "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"
+    "g := g",                                            // self-referential global init
+    "a := b\nb := a",                                    // mutually-referential globals
+    "A*: { b: B } B*: { a: A }",                         // struct A<->B by value
+    "f = () i32 {",                                      // unterminated block
+    "f = () i32 { 0 .match ({ 1 => 2",                   // unterminated match arms
+    "T*: { x: i32 } T.impl(Tr, { m = () void {",         // unterminated impl body
+    "f = () i32 { x := 5  x[0 ",                          // `[` never closed
+    "f = () i32 { s := [1,2]  s[0 = 3 }",                // idxset `[` scan past EOF
+    "Foo<",                                              // `<` with no closing `>`
+    "f<T> = (x: T) T { f(x) }",                          // self-recursive generic -> inliner
+    "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }",
+    "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }",
+    "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"
     ]
     fails := 0
     seeds.loop((h, i, s) { fails = fails + mp.fz_run_one(s) })
@@ -196,11 +196,11 @@ oracle_fuzz_run* = () i32 {
     rp := r.addr()
     // a grammar-flavoured alphabet (mirrors _fuzz_campaign.ALPHA): keywords, punctuation, names.
     toks := [
-        "test*", "f*", "=", "(", ")", "i32", "i64", "bool", "str", "{", "}", "x", "y", "p",
-        ":=", ":", "5", "0", "1", ".match", "[", "]", "+", "-", "*", "/", "P", "C", "T",
-        "f", "<", ">", "2", "return", "_", "=>", ",", ".", ".Some", ".None", "|", "impl",
-        "Drop", "loop", "addr", "slice", "void", "Ptr", "MutPtr", "&&", "||", "==", "!=",
-        "g", "h", ".Ok", ".Err", "@while", "sizeof", "use*", "Box", "n:"
+    "test*", "f*", "=", "(", ")", "i32", "i64", "bool", "str", "{", "}", "x", "y", "p",
+    ":=", ":", "5", "0", "1", ".match", "[", "]", "+", "-", "*", "/", "P", "C", "T",
+    "f", "<", ">", "2", "return", "_", "=>", ",", ".", ".Some", ".None", "|", "impl",
+    "Drop", "loop", "addr", "slice", "void", "Ptr", "MutPtr", "&&", "||", "==", "!=",
+    "g", "h", ".Ok", ".Err", "@while", "sizeof", "use*", "Box", "n:"
     ]
     nt: i64 := toks.len
 

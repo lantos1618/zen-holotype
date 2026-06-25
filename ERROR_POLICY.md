@@ -16,6 +16,21 @@ Opt<T>: Some(T) | None
 The caller handles the value with `.match`. There are no exceptions and no
 unwinding. `panic` is reserved for invariants that cannot sensibly continue.
 
+## Runtime safety (trustworthy execution)
+
+A program that passes `zenc check` must not silently corrupt at runtime. The C backend emits guards so
+that undefined behaviour becomes a deterministic, message-bearing `panic` (write to stderr + `abort`),
+never a SIGFPE or a garbage read:
+
+| Operation | Policy | Mechanism |
+|-----------|--------|-----------|
+| integer `/` and `%` | **panic** on divide-by-zero and on the `INT_MIN / -1` overflow | `zen__divz`/`zen__modz` helpers (emitted preamble); integer operands only — `_Generic` keeps float `x/0.0 == inf` with native C semantics |
+| slice index `xs[i]` (read and write) | **panic** on `i < 0 || i >= len` | `zen__idx(z, i, esz)` helper bounds-checks against the slice's `.len` |
+| signed integer overflow (`+ - *`) | **documented: wraps** (two's complement), never UB | compiled with `-fwrapv`, so the compiler cannot miscompile on an assumed-no-overflow basis |
+
+Guards live in the emitted C preamble (`genc_emit.zen` `genModuleIn`) and so apply to every built
+program and to the compiler itself.
+
 ## Naming
 
 | Shape | Meaning |
