@@ -329,8 +329,10 @@ bs_skip_space = (v: [u8], i: i64, e: i64) i64 {
 bs_trim_end = (v: [u8], s: i64, e: i64) i64 {
     (e <= s).match ({ true => s, false => bs_is_space(v[e - 1]).match ({ true => v.bs_trim_end(s, e - 1), false => e }) })
 }
-bs_line_end = (v: [u8], p: i64, n: i64) i64 {
-    (p >= n).match ({ true => n, false => (v[p] == '\n').match ({ true => p, false => v.bs_line_end(p + 1, n) }) })
+bs_line_end = (v: [u8], p0: i64, n: i64) i64 {
+    p := p0
+    @while ((p < n) && (v[p] != '\n')) { p = p + 1 }   // iterative: a long line must not recurse per char
+    p
 }
 bs_eq_run = (v: [u8], at: i64, nv: [u8], i: i64) bool {
     (i >= nv.len).match ({ true => true, false => (v[at + i] == nv[i]).match ({ true => v.bs_eq_run(at, nv, i + 1), false => false }) })
@@ -446,52 +448,53 @@ FmtDepth*: { depth: i32, in_block: bool }
 fmt_lstrip = (v: [u8], p: i64, e: i64) i64 { (p >= e).match ({ true => e, false => bs_is_space(v[p]).match ({ true => v.fmt_lstrip(p + 1, e), false => p }) }) }
 fmt_next = (v: [u8], e: i64) i64 { (e >= v.len).match ({ true => v.len, false => ((v[e] == '\r') && (e + 1 < v.len) && (v[e + 1] == '\n')).match ({ true => e + 2, false => e + 1 }) }) }
 fmt_indent = (mp: MutPtr<Malloc>, o: String, n: i32) String { (n <= 0).match ({ true => o, false => mp.fmt_indent(o.gstr_push(mp, ' '), n - 1) }) }
-// scan v[i..e) updating brace depth + in_block-comment, skipping strings/chars/line-comments.
-fmt_scan = (v: [u8], i: i64, e: i64, depth: i32, in_block: bool, in_str: bool, in_char: bool, esc: bool) FmtDepth {
-    (i >= e).match ({
-        true  => FmtDepth(depth: depth, in_block: in_block),
-        false => {
-            c := v[i]
-            in_block.match ({
-                true  => ((c == '*') && (i + 1 < e) && (v[i + 1] == '/')).match ({ true => v.fmt_scan(i + 2, e, depth, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, true, false, false, false) }),
-                false => in_str.match ({
-                    true  => esc.match ({ true => v.fmt_scan(i + 1, e, depth, false, true, false, false), false => (c == '\\').match ({ true => v.fmt_scan(i + 1, e, depth, false, true, false, true), false => (c == '"').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, false, true, false, false) }) }) }),
-                    false => in_char.match ({
-                        true  => esc.match ({ true => v.fmt_scan(i + 1, e, depth, false, false, true, false), false => (c == '\\').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, true, true), false => (c == '\'').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, false, false, true, false) }) }) }),
-                        false => v.fmt_normal(i, e, depth, c)
+// scan v[i0..e) updating brace depth + in_block-comment, skipping strings/chars/line-comments.
+// ITERATIVE (was per-char recursion → stack overflow on long lines): one `@while` threading the
+// scanner state machine through mutable locals.
+fmt_scan = (v: [u8], i0: i64, e: i64, depth0: i32, in_block0: bool, in_str0: bool, in_char0: bool, esc0: bool) FmtDepth {
+    i := i0  depth := depth0  in_block := in_block0  in_str := in_str0  in_char := in_char0  esc := esc0
+    @while (i < e) {
+        c := v[i]
+        in_block.match ({
+            true  => ((c == '*') && (i + 1 < e) && (v[i + 1] == '/')).match ({ true => { in_block = false  i = i + 2 }, false => { i = i + 1 } }),
+            false => in_str.match ({
+                true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (c == '\\').match ({ true => { esc = true  i = i + 1 }, false => (c == '"').match ({ true => { in_str = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
+                false => in_char.match ({
+                    true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (c == '\\').match ({ true => { esc = true  i = i + 1 }, false => (c == '\'').match ({ true => { in_char = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
+                    false => ((c == '/') && (i + 1 < e) && (v[i + 1] == '/')).match ({
+                        true  => { i = e },   // line comment: rest of the line is ignored
+                        false => ((c == '/') && (i + 1 < e) && (v[i + 1] == '*')).match ({
+                            true  => { in_block = true  i = i + 2 },
+                            false => (c == '"').match ({ true => { in_str = true  i = i + 1 }, false => (c == '\'').match ({ true => { in_char = true  i = i + 1 }, false => (c == '{').match ({ true => { depth = depth + 1  i = i + 1 }, false => ((c == '}') && (depth > 0)).match ({ true => { depth = depth - 1  i = i + 1 }, false => { i = i + 1 } }) }) }) })
+                        })
                     })
                 })
             })
-        }
-    })
-}
-fmt_normal = (v: [u8], i: i64, e: i64, depth: i32, c: u8) FmtDepth {
-    ((c == '/') && (i + 1 < e) && (v[i + 1] == '/')).match ({
-        true  => FmtDepth(depth: depth, in_block: false),
-        false => ((c == '/') && (i + 1 < e) && (v[i + 1] == '*')).match ({
-            true  => v.fmt_scan(i + 2, e, depth, true, false, false, false),
-            false => (c == '"').match ({ true => v.fmt_scan(i + 1, e, depth, false, true, false, false), false => (c == '\'').match ({ true => v.fmt_scan(i + 1, e, depth, false, false, true, false), false => (c == '{').match ({ true => v.fmt_scan(i + 1, e, depth + 1, false, false, false, false), false => ((c == '}') && (depth > 0)).match ({ true => v.fmt_scan(i + 1, e, depth - 1, false, false, false, false), false => v.fmt_scan(i + 1, e, depth, false, false, false, false) }) }) }) })
         })
-    })
+    }
+    FmtDepth(depth: depth, in_block: in_block)
 }
-fmt_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, o: String, depth: i32, in_block: bool) String {
-    (p >= v.len).match ({
-        true  => o,
-        false => {
-            e := v.bs_line_end(p, v.len)
-            s := v.fmt_lstrip(p, e)
-            t := v.bs_trim_end(s, e)
-            (s == t).match ({
-                true  => mp.fmt_lines(v, v.fmt_next(e), o.gstr_push(mp, '\n'), depth, in_block),
-                false => {
-                    indent := ((!in_block) && (v[s] == '}') && (depth > 0)).match ({ true => depth - 1, false => depth })
-                    o3 := mp.bs_push_range(mp.fmt_indent(o, indent * 4), v, s, t).gstr_push(mp, '\n')
-                    fd := v.fmt_scan(s, t, depth, in_block, false, false, false)
-                    mp.fmt_lines(v, v.fmt_next(e), o3, fd.depth, fd.in_block)
-                }
-            })
-        }
-    })
+// ITERATIVE (was per-line recursion → stack overflow on big files): walk lines in one `@while`,
+// threading the output builder + brace depth + in-block-comment state through mutable locals.
+fmt_lines = (mp: MutPtr<Malloc>, v: [u8], p0: i64, o0: String, depth0: i32, in_block0: bool) String {
+    p := p0  o := o0  depth := depth0  in_block := in_block0
+    @while (p < v.len) {
+        e := v.bs_line_end(p, v.len)
+        s := v.fmt_lstrip(p, e)
+        t := v.bs_trim_end(s, e)
+        (s == t).match ({
+            true  => { o = o.gstr_push(mp, '\n') },
+            false => {
+                indent := ((!in_block) && (v[s] == '}') && (depth > 0)).match ({ true => depth - 1, false => depth })
+                o = mp.bs_push_range(mp.fmt_indent(o, indent * 4), v, s, t).gstr_push(mp, '\n')
+                fd := v.fmt_scan(s, t, depth, in_block, false, false, false)
+                depth = fd.depth
+                in_block = fd.in_block
+            }
+        })
+        p = v.fmt_next(e)
+    }
+    o
 }
 fmt_source = (mp: MutPtr<Malloc>, src: str) String { mp.fmt_lines(src.view(), 0, mp.gstr_string(1024), 0, false) }
 fmt_file = (mp: MutPtr<Malloc>, path: str, check: bool) i32 {
