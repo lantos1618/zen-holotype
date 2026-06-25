@@ -36,7 +36,18 @@ Each increment: `make oracle` green + fixpoint byte-exact + adversarial.
      broke it by introducing `MutPtr<ActorState<M>>` arrow access in push/pop.
    - **RETRY RULE:** keep the RawPtr-backed slice-view + value-load idiom (no generic `MutPtr<Struct<M>>`
      arrow → `.slice()`); OR first fix that codegen path in genc. Verify the `ActorCell` path explicitly
-     (not just `actor_demo`) at each step. (Also worth: a standalone genc fix for generic-arrow-slice.)
+     (not just `actor_demo`) at each step.
+   - **EXACT ROOT CAUSE (fully traced):** `inline_template` (check.zen:1677) inlines a generic fn body
+     substituting only VALUE params (`tf.params`→`cargs`) — it never computes the type-arg binding
+     (`M`→`i64`). So `xform_expr` (check.zen:1752) rebuilds `Index` passing `ix.elem` RAW, and `.Loop`
+     passes `l.elemTy` raw, `.SliceLit` passes `sd.elem` raw, and a `ms: [M] :=` let keeps `[M]`. genc
+     then emits `*(void*)zen__idx(ms,i,sizeof(void))` (M erased → void) = "invalid use of void expression".
+     The ACTOR path works only because its element type flows through a MONOMORPHIZED struct
+     (`ActorState_Msg`, a concrete `dstruct` from mono.zen) rather than a raw `[M]` local in an inlined body.
+     **THE FIX:** `inline_template` must compute the tparam→arg map (from the generic fn's `tparams` and the
+     concrete arg/receiver types) and thread it through `xform_*`, applying `subst_ty_in` to `ix.elem`,
+     `l.elemTy`, `sd.elem`, and `[M]` let-annotations. Real inliner change — do it fresh, oracle-gated,
+     with /tmp/m.zen (Box<M>.at) as the adversarial test. NOT attempted (deferred, not a tail-end rush).
 2. **Canonical verb set (ergonomics cleanup).** Remove the actor synonym sprawl (`post`≡`send`,
    `flush`≡`run`, `query`≡`request`, `perform`≡`ask`, `destroy`≡`free`) — keep ONE verb each. Update call
    sites. This is the "settle the verbs" the design calls for; do it now so later steps don't churn names.
