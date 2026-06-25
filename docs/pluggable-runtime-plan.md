@@ -26,9 +26,17 @@ Each increment: `make oracle` green + fixpoint byte-exact + adversarial.
      BROKE the `ActorCell.request` path (oracle: build-result-paths #5, modules-value #23 — `out` came back
      wrong). `actor_demo` uses `ActorHandle`; the failing cases use `ActorCell` — a DIFFERENT monomorphization
      path for the generic mailbox methods. Suspect: generic-method-on-`<M>` interacting with the OOB-guarded
-     `[M]` index or in-place field-mutation vs whole-struct-replace under that instantiation. RETRY: don't
-     generic-method `ActorState`; instead build `Ring<M>`/`Mailbox<M>` as a first-class type with a proper
-     `.impl(Mailbox<M>)` and verify the `ActorCell` path explicitly (not just `actor_demo`) at each step.
+     `[M]` index or in-place field-mutation vs whole-struct-replace under that instantiation.
+   - **ROOT CAUSE (diagnosed):** a generic-pointer-receiver arrow field-access feeding `.slice()` —
+     `b: MutPtr<Box<M>> { … b.buf.slice(b.cap) … }` — emits BAD C ("invalid use of void expression").
+     Confirmed with a minimal repro; it is NOT slice-element inference (direct `ms: [M] := buf.slice(n)`
+     in a flat scope works fine — prints 111/222). The OLD actor ring AVOIDS this: state lives behind a
+     `RawPtr`; methods take a **value** receiver, grab a `[ActorState<M>]` slice view, load `cur := state[0]`
+     (a VALUE), and slice `cur.buf` (DOT, not arrow), writing back `state[0] = ActorState(…)`. My refactor
+     broke it by introducing `MutPtr<ActorState<M>>` arrow access in push/pop.
+   - **RETRY RULE:** keep the RawPtr-backed slice-view + value-load idiom (no generic `MutPtr<Struct<M>>`
+     arrow → `.slice()`); OR first fix that codegen path in genc. Verify the `ActorCell` path explicitly
+     (not just `actor_demo`) at each step. (Also worth: a standalone genc fix for generic-arrow-slice.)
 2. **Canonical verb set (ergonomics cleanup).** Remove the actor synonym sprawl (`post`≡`send`,
    `flush`≡`run`, `query`≡`request`, `perform`≡`ask`, `destroy`≡`free`) — keep ONE verb each. Update call
    sites. This is the "settle the verbs" the design calls for; do it now so later steps don't churn names.
