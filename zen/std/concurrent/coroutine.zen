@@ -1,7 +1,7 @@
 // @self-hosted-only: stackful coroutines over glibc x86-64 ucontext.
 // Public code should checkpoint through Runtime.checkpoint; this module is substrate.
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 { is_null } = std.core.ptr
 
 getcontext  = (ctx: RawPtr<u8>) i32
@@ -57,13 +57,11 @@ spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
 spawn*<A> = (alloc: MutPtr<A>, work: () void) Coro {
     alloc.spawn_in(work)
 }
-coro_ok = (c: Coro) Result<Coro, IoError> { .Ok(c) }
-coro_err = (e: IoError) Result<Coro, IoError> { .Err(e) }
 spawn_cleanup<A> = (alloc: MutPtr<A>, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>, e: IoError) Result<Coro, IoError> {
     stack.is_null().match ({ false => alloc.release(stack), _ })
     ctx.is_null().match ({ false => alloc.release(ctx), _ })
     lnk.is_null().match ({ false => alloc.release(lnk), _ })
-    coro_err(e)
+    err(e)
 }
 finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawPtr<u8>, work: () void) Result<Coro, IoError> {
     getcontext(ctx)
@@ -71,7 +69,7 @@ finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawP
     makecontext(ctx, work, 0)
     slot: [CoroState] := state.slice(1)
     slot[0] = CoroState(ctx: ctx, link: lnk, stack: stack)
-    coro_ok(Coro(state: state))
+    ok(Coro(state: state))
 }
 try_spawn_with_link<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>) Result<Coro, IoError> {
     alloc.try_acquire(sizeof(CoroState)).match ({
@@ -94,7 +92,7 @@ try_spawn_with_stack<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>) R
 try_spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> {
     alloc.try_acquire(CORO_STACK).match ({
         .Ok(stack) => alloc.try_spawn_with_stack(work, stack),
-        .Err(e) => coro_err(e)
+        .Err(e) => err(e)
     })
 }
 try_spawn*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> {

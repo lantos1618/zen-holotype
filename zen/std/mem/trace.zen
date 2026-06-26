@@ -3,7 +3,7 @@
 // Trace exposes child Rc references; Drop finalizes payloads selected for reclaim.
 // The collector keeps a root registry plus a per-collection white-set scratch list.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 
 // Trial-deletion colors.
 BLACK := 0
@@ -12,10 +12,6 @@ WHITE := 2
 
 store_ptr = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }
 load_ptr  = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
-ptr_ok = (p: RawPtr<u8>) Result<RawPtr<u8>, IoError> { .Ok(p) }
-ptr_err = (e: IoError) Result<RawPtr<u8>, IoError> { .Err(e) }
-done_ok = () Result<i32, IoError> { .Ok(0) }
-done_err = (e: IoError) Result<i32, IoError> { .Err(e) }
 
 // Rc<T> block layout: [count:i64 | color:i64 | value:T].
 hcount     = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }
@@ -36,9 +32,9 @@ try_list_new_cap_in<A> = (alloc: MutPtr<A>, cap: i64) Result<RawPtr<u8>, IoError
         .Ok(l) => {
             store_i64(l.offset(0), 0)
             store_i64(l.offset(8), cap)
-            ptr_ok(l)
+            ok(l)
         },
-        .Err(e) => ptr_err(e)
+        .Err(e) => err(e)
     })
     out
 }
@@ -63,16 +59,16 @@ try_list_push_in<A> = (alloc: MutPtr<A>, l: RawPtr<u8>, p: RawPtr<u8>) Result<Ra
                     store_i64(g.offset(8), nc)
                     store_ptr(g.offset(16 + n * 8), p)
                     store_i64(g.offset(0), n + 1)
-                    ptr_ok(g)
+                    ok(g)
                 },
-                .Err(e) => ptr_err(e)
+                .Err(e) => err(e)
             })
             grown
         },
         false => {
             store_ptr(l.offset(16 + n * 8), p)
             store_i64(l.offset(0), n + 1)
-            ptr_ok(l)
+            ok(l)
         }
     })
     out
@@ -99,13 +95,13 @@ try_roots_list_in<A> = (alloc: MutPtr<A>) Result<RawPtr<u8>, IoError> {
             made: Result<RawPtr<u8>, IoError> := alloc.try_list_new_in().match({
                 .Ok(r) => {
                     roots = r
-                    ptr_ok(roots)
+                    ok(roots)
                 },
-                .Err(e) => ptr_err(e)
+                .Err(e) => err(e)
             })
             made
         },
-        false => ptr_ok(roots)
+        false => ok(roots)
     })
     out
 }
@@ -115,13 +111,13 @@ try_roots_add_in<A> = (alloc: MutPtr<A>, b: RawPtr<u8>) Result<i32, IoError> {
             pushed: Result<i32, IoError> := alloc.try_list_push_in(rs, b).match({
                 .Ok(next) => {
                     roots = next
-                    done_ok()
+                    ok(0)
                 },
-                .Err(e) => done_err(e)
+                .Err(e) => err(e)
             })
             pushed
         },
-        .Err(e) => done_err(e)
+        .Err(e) => err(e)
     })
     out
 }
@@ -276,7 +272,7 @@ collect_in*<A> = (alloc: MutPtr<A>) void {
 collect*<A> = (alloc: MutPtr<A>) void { alloc.collect_in() }
 try_collect_in*<A> = (alloc: MutPtr<A>) Result<i32, IoError> {
     out: Result<i32, IoError> := (roots == null_ptr()).match({
-        true => done_ok(),
+        true => ok(0),
         false => {
             rs := roots
             collected: Result<i32, IoError> := alloc.try_list_new_cap_in(tracked_blocks).match({
@@ -289,9 +285,9 @@ try_collect_in*<A> = (alloc: MutPtr<A>) Result<i32, IoError> {
                     alloc.release(white)
                     white = (null_ptr())
                     roots_clear_raw()
-                    done_ok()
+                    ok(0)
                 },
-                .Err(e) => done_err(e)
+                .Err(e) => err(e)
             })
             collected
         }

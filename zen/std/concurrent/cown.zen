@@ -4,7 +4,7 @@
 { Allocator, try_acquire } = std.mem.alloc
 { O_RDONLY } = std.io.file
 { open, close } = std.c.libc
-{ Result, IoError, ok_if } = std.core.result
+{ Result, IoError, ok_if, ok, err } = std.core.result
 
 Buf*: {
     p: RawPtr<u8>,
@@ -23,14 +23,12 @@ buf*<A> = (alloc: MutPtr<A>, n: i64) Buf {
     Buf(p: alloc.acquire(n), len: n)
 }
 
-buf_ok = (b: Buf) Result<Buf, IoError> { .Ok(b) }
-buf_err = (e: IoError) Result<Buf, IoError> { .Err(e) }
 try_buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError> {
     (n <= 0).match ({
-        true => buf_ok(Buf(p: null_ptr(), len: 0)),
+        true => ok(Buf(p: null_ptr(), len: 0)),
         false => alloc.try_acquire(n).match ({
-            .Ok(p)  => buf_ok(Buf(p: p, len: n)),
-            .Err(e) => buf_err(e)
+            .Ok(p)  => ok(Buf(p: p, len: n)),
+            .Err(e) => err(e)
         })
     })
 }
@@ -38,20 +36,18 @@ try_buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError> {
 // POSIX open returns a raw descriptor; File closes it through Drop.
 File*: { fd: i32 }
 
-file_ok = (o: Own<File>) Result<Own<File>, IoError> { .Ok(o) }
-file_err = (e: IoError) Result<Own<File>, IoError> { .Err(e) }
 file_in*<A> = (alloc: MutPtr<A>, path: str) Result<Own<File>, IoError> {
     path.open(O_RDONLY, 0).ok_if().match ({
         .Ok(fd)  => {
             alloc.try_new_in(File( fd: fd )).match ({
-                .Ok(o) => file_ok(o),
+                .Ok(o) => ok(o),
                 .Err(e) => {
                     fd.close()
-                    file_err(e)
+                    err(e)
                 }
             })
         },
-        .Err(e)  => file_err(e),
+        .Err(e)  => err(e),
     })
 }
 file*<A> = (alloc: MutPtr<A>, path: str) Result<Own<File>, IoError> { alloc.file_in(path) }
