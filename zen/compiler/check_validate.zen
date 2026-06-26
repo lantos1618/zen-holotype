@@ -1,6 +1,6 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -30,7 +30,7 @@ env_named_declared = (env: Env, n: str) bool {
 }
 // Uninferable types are skipped so validation does not false-reject imported/generic residue.
 is_uninferable = (t: Ty) bool {
-    t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(p) => load(p).is_void_ty(), _ => false })
+    t.match ({ .Void => true, .Slice(e) => load(e).is_void_ty(), .Ptr(pd) => load(pd.pointee).is_void_ty(), _ => false })
 }
 // Undeclared Named types are treated as uninferable template residue.
 named_declared = (decls: [Decl], n: str) bool {
@@ -58,7 +58,7 @@ unknown_ty = (env: Env, t: Ty) bool {
         true  => true,
         false => t.match ({
             .Named(n)   => env.env_named_declared(n).match ({ true => false, false => true }),
-            .Ptr(p)     => env.unknown_ty(load(p)),
+            .Ptr(pd)    => env.unknown_ty(load(pd.pointee)),
             .Slice(e)   => env.unknown_ty(load(e)),
             .Generic(g) => true,
             _           => false
@@ -183,7 +183,7 @@ tys_mention_tparam = (tps: [Param], ts: [Ty]) bool {
 ty_mentions_tparam = (tps: [Param], t: Ty) bool {
     t.match ({
         .Named(n)   => tps.names_has(n),
-        .Ptr(p)     => tps.ty_mentions_tparam(load(p)),
+        .Ptr(pd)    => tps.ty_mentions_tparam(load(pd.pointee)),
         .Slice(e)   => tps.ty_mentions_tparam(load(e)),
         .Generic(g) => tps.tys_mention_tparam(g.args),
         _           => false
@@ -565,7 +565,7 @@ makestruct_err = (env: Env, m: MakeStructData) i32 {
     })
 }
 // the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
-gen_base_of = (t: Ty) str { t.match ({ .Generic(g) => g.name, .Ptr(p) => load(p).gen_base_of(), _ => "" }) }
+gen_base_of = (t: Ty) str { t.match ({ .Generic(g) => g.name, .Ptr(pd) => load(pd.pointee).gen_base_of(), _ => "" }) }
 // a primitive scalar has no fields, so `x.foo` on it is a hard error (C: "member in something not a struct").
 is_scalar_prim = (t: Ty) bool { t.match ({ .I32 => true, .I64 => true, .U8 => true, .F64 => true, .Bool => true, _ => false }) }
 // Field access checks known concrete struct receivers AND generic-struct instances (field names don't
@@ -727,7 +727,7 @@ num_operand_err = (env: Env, b: BinData) i32 {
 }
 // the two sides of an ==/!= must share a comparable category: both numeric, both bool, both str-family,
 // both pointer, or the same nominal type. (unknown sides pass — no false-reject on template residue.)
-is_ptr_ty = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+is_ptr_ty = (t: Ty) bool { t.match ({ .Ptr(pd) => true, _ => false }) }
 same_eq_category = (a: Ty, b: Ty) bool {
     ((a.ty_rank() >= 0) && (b.ty_rank() >= 0))
     || (a.is_bool_ty() && b.is_bool_ty())
@@ -1017,7 +1017,7 @@ let_fit_err = (env: Env, l: LetData) i32 {
 ty_has_void_targ = (t: Ty) bool {
     t.match ({
         .Generic(g) => g.args.tys_mention_void(),
-        .Ptr(p)     => load(p).ty_has_void_targ(),
+        .Ptr(pd)    => load(pd.pointee).ty_has_void_targ(),
         .Slice(e)   => load(e).ty_has_void_targ(),
         _           => false
     })
@@ -1173,7 +1173,7 @@ send_consume = (env: Env, c: CallData) str {
 arg_var_name = (c: CallData, i: i32) str {
     (i < c.args.len).match ({ true => c.args[i].match ({ .Var(v) => v.name, _ => "" }), false => "" })
 }
-ty_is_ptr_t = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+ty_is_ptr_t = (t: Ty) bool { t.match ({ .Ptr(pd) => true, _ => false }) }
 // ALLOCATOR-CENTRIC free detection. The free surface is the `Allocator` trait, generic over every
 // allocator (built-in Heap/Malloc and user-defined) because conformance fixes the method names:
 //   a.release(p)     — frees ptr arg `p`        (receiver `a` is a MutPtr<_>, NOT an Own/Rc/Arc)
@@ -1343,7 +1343,7 @@ impl_ty = (tyname: str) Ty {
 subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: str) Ty {
     t.match ({
         .Named(n)  => eq(n, "Self").match ({ true => impl_ty(tyname), false => t }),
-        .Ptr(p)    => tptr(a.tnode(a.subst_self(load(p), tyname))),
+        .Ptr(pd)   => tptr_k(a.tnode(a.subst_self(load(pd.pointee), tyname)), pd.kind),
         .Slice(p)  => tslice(a.tnode(a.subst_self(load(p), tyname))),
         _          => t
     })
@@ -2108,7 +2108,7 @@ ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
         .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => 0, false => 1 }),
         .Generic(g) => env.env_named_declared(g.name).match ({ true => env.ut_unknown_tys(tparams, g.args), false => 1 }),
-        .Ptr(p)     => env.ut_unknown_ty(tparams, load(p)),
+        .Ptr(pd)    => env.ut_unknown_ty(tparams, load(pd.pointee)),
         .Slice(e)   => env.ut_unknown_ty(tparams, load(e)),
         _           => 0
     })
@@ -2451,7 +2451,7 @@ check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
 KESCAPE = () i32 { 16 }   // (own field code, NOT 4-bit packed: reported via its own diagnostic, never kv_at)
 
 is_scope_param_ty = (t: Ty) bool {
-    t.match ({ .Ptr(p) => load(p).match ({ .Generic(g) => eq(g.name, "Scope"), _ => false }), _ => false })
+    t.match ({ .Ptr(pd) => load(pd.pointee).match ({ .Generic(g) => eq(g.name, "Scope"), _ => false }), _ => false })
 }
 scope_params = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
     out := a.dead_nil()

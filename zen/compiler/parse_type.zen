@@ -4,7 +4,7 @@
 // (is_lbrace/is_comma/is_rparen/…/tok_eq) and the param buffer used by both expr and decl parsers.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Param, Ty, Field, StructDecl, param, pvariadic, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, payload_fname, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tslice } = compiler.genc
+{ Param, Ty, Field, StructDecl, param, pvariadic, field, sdef, dstruct, Decl, fntype, mangle_str_in, mangle_anon_in, payload_fname, tgeneric, ti32, ti64, tu8, tf64, tbool, tstr, tvoid, tcstr, ttext, tnamed, tptr, tptr_k, tslice, k_raw_ptr, k_ptr, k_mut_ptr } = compiler.genc
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.bytes
 { eq } = std.text.str
@@ -141,7 +141,7 @@ parse_ty* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
             false => src.is_lparen(tt.tok).match ({
                 true  => a.parse_fn_ty(src, tt.next),        // ( A, T ) R -> FnT (a closure/template param)
                 false => src.is_ptr_kw(tt.tok).match ({
-                    true  => a.parse_ptr_ty(src, tt.next),   // Ptr<inner> / RawPtr<inner> -> inner*
+                    true  => a.parse_ptr_ty(src, tt.tok, tt.next),   // Ptr<inner> / MutPtr<inner> / RawPtr<inner> -> inner* (kind from the keyword)
                     false => a.parse_leaf_ty(src, tt)        // a leaf type, maybe a generic instance N<…>
                 })
             })
@@ -316,18 +316,27 @@ parse_fn_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past
     TyEnd( ty: fntype(buf.take_tys(pe.count), a.tynode(rt.ty)), next: rt.next )
 }
 // `Ptr`, `MutPtr`, and `RawPtr` all lower to `T*` today, so all three parse through the same pointer
-// type node. Mutability/aliasing remains a checker-level policy, not a C type distinction.
+// type node. Mutability/aliasing remains a checker-level policy, not a C type distinction — but the
+// KIND is now recorded on the node so the formatter round-trips the spelling (Stage 1).
 is_ptr_kw = (src: str, t: Token) bool { src.tok_in(t, "Ptr|MutPtr|RawPtr") }
+// classify the pointer keyword token into its kind tag (default `Ptr`)
+ptr_kw_kind = (src: str, t: Token) i32 {
+    src.tok_in(t, "MutPtr").match ({
+        true  => k_mut_ptr(),
+        false => src.tok_in(t, "RawPtr").match ({ true => k_raw_ptr(), false => k_ptr() })
+    })
+}
 parse_slice_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '['
     inner := a.parse_ty(src, pos)                        // the element type
     rb    := src.scan(inner.next)                        // ']'
     TyEnd( ty: tslice(a.tynode(inner.ty)), next: rb.next )
 }
-parse_ptr_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {     // pos just past `Ptr`
+parse_ptr_ty = (a: MutPtr<Malloc>, src: str, kw: Token, pos: i32) TyEnd {     // kw = the Ptr/MutPtr/RawPtr keyword; pos just past it
+    kind  := src.ptr_kw_kind(kw)                         // which spelling fired
     lt    := src.scan(pos)                               // '<'
     inner := a.parse_ty(src, lt.next)                    // the pointee (recursive)
     gt    := src.scan(inner.next)                        // '>' (or a nested '>>')
-    TyEnd( ty: tptr(a.tynode(inner.ty)), next: src.gt_resume(gt) )
+    TyEnd( ty: tptr_k(a.tynode(inner.ty), kind), next: src.gt_resume(gt) )
 }
 
 // ── a typed parameter list `(name: Type, …)` into a heap [Param] ──────────────────

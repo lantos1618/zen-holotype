@@ -155,12 +155,12 @@ recv_name* = (t: Ty) str {
         .I32 => "i32", .I64 => "i64", .U8 => "u8", .F64 => "f64", .Bool => "bool", .Str => "str", .Cstr => "str", .Text => "str",
         .Named(n)   => n,
         .Generic(g) => g.mangled,
-        .Ptr(p)     => load(p).recv_name(),
+        .Ptr(pd)    => load(pd.pointee).recv_name(),
         _           => ""
     })
 }
-enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(p) => load(p).ty_name(), _ => "" }) }
-ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+enum_name* = (t: Ty) str { t.match ({ .Named(n) => n, .Generic(g) => g.mangled, .Ptr(pd) => load(pd.pointee).ty_name(), _ => "" }) }
+ty_is_ptr = (t: Ty) bool { t.match ({ .Ptr(pd) => true, _ => false }) }
 // is this generic the std `Vec<T>`? The flattened name is import-style dependent: a destructured
 // `{ Vec } = ...` yields bare "Vec", a namespace alias `vec = ...` yields "vec__Vec" (deeper paths
 // add more "__" segments). Match the bare name or any "…__Vec" suffix so both forms resolve.
@@ -330,7 +330,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         _              => tvoid()
     })
 }
-pointee_of = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => tvoid() }) }
+pointee_of = (t: Ty) Ty { t.match ({ .Ptr(pd) => load(pd.pointee), _ => tvoid() }) }
 // Generic calls infer type args from arguments, then use the expected return type
 // for params that only appear in the result.
 targ_of = (env: Env, params: [Param], args: [Expr], tp: str) Ty {
@@ -395,7 +395,7 @@ dispatch_name = (env: Env, c: CallData) str {
 dispatch_recv_name = (t: Ty) str {
     t.match ({
         .Generic(g) => g.name,
-        .Ptr(p)     => load(p).dispatch_recv_name(),
+        .Ptr(pd)    => load(pd.pointee).dispatch_recv_name(),
         _           => t.recv_name()
     })
 }
@@ -484,7 +484,7 @@ gen_struct_field = (a: MutPtr<Malloc>, decls: [Decl], gname: str, fname: str, ta
             _ => found }) })
     found
 }
-ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(p) => load(p), _ => t }) }
+ty_under_ptr = (t: Ty) Ty { t.match ({ .Ptr(pd) => load(pd.pointee), _ => t }) }
 slice_member = (a: MutPtr<Malloc>, field: str) Ty {
     eq(field, "len").match ({
         true  => ti64(),
@@ -1661,7 +1661,7 @@ unify_ty = (pty: Ty, aty: Ty, tp: str) Ty {
     pty.match ({
         .Named(n)   => eq(n, tp).match ({ true => aty, false => tvoid() }),
         .Generic(g) => aty.match ({ .Generic(ga) => g.args.unify_args(ga.args, tp), _ => tvoid() }),
-        .Ptr(p)     => aty.match ({ .Ptr(pa) => load(p).unify_ty(load(pa), tp), _ => tvoid() }),
+        .Ptr(pd)    => aty.match ({ .Ptr(pa) => load(pd.pointee).unify_ty(load(pa.pointee), tp), _ => tvoid() }),
         .Slice(e)   => aty.match ({ .Slice(ea) => load(e).unify_ty(load(ea), tp), _ => tvoid() }),
         _           => tvoid()
     })
@@ -2267,7 +2267,7 @@ rc_has = (buf: [GenericData], cnt: i32, m: str) bool {
     found
 }
 rc_ty_depth = (t: Ty) i32 {
-    t.match ({ .Generic(g) => 1 + g.args.rc_tys_depth(), .Ptr(p) => load(p).rc_ty_depth(), .Slice(e) => load(e).rc_ty_depth(), _ => 0 })
+    t.match ({ .Generic(g) => 1 + g.args.rc_tys_depth(), .Ptr(pd) => load(pd.pointee).rc_ty_depth(), .Slice(e) => load(e).rc_ty_depth(), _ => 0 })
 }
 rc_tys_depth = (ts: [Ty]) i32 {
     d := 0
@@ -2657,7 +2657,7 @@ ty_eq* = (g: Ty, w: Ty) bool {
         .Cstr     => w.match ({ .Cstr => true, .Str => true, _ => false }),
         .Text     => w.match ({ .Text => true, .Str => true, .Cstr => true, _ => false }),
         .Named(a) => w.match ({ .Named(b) => eq(a, b), .Generic(gb) => eq(a, gb.mangled), _ => false }),
-        .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa).ty_eq(load(pb)), _ => false }),
+        .Ptr(pa)  => w.match ({ .Ptr(pb) => load(pa.pointee).ty_eq(load(pb.pointee)), _ => false }),
         .Slice(pa) => w.match ({ .Slice(pb) => load(pa).ty_eq(load(pb)), _ => false }),
         .FnT(fa)  => false,
         .Generic(ga) => w.match ({ .Generic(gb) => eq(ga.mangled, gb.mangled), .Named(b) => eq(ga.mangled, b), _ => false })
@@ -2665,8 +2665,8 @@ ty_eq* = (g: Ty, w: Ty) bool {
 }
 // `RawPtr<u8>` is the raw-pointer floor: it fits any typed pointer slot (this is what `null_ptr()`
 // returns, so a null can initialize/assign any `Ptr<T>` field/param without a cast).
-is_raw_ptr_ty* = (t: Ty) bool { t.match ({ .Ptr(p) => load(p).match ({ .U8 => true, _ => false }), _ => false }) }
-is_ptr_ty_g* = (t: Ty) bool { t.match ({ .Ptr(p) => true, _ => false }) }
+is_raw_ptr_ty* = (t: Ty) bool { t.match ({ .Ptr(pd) => load(pd.pointee).match ({ .U8 => true, _ => false }), _ => false }) }
+is_ptr_ty_g* = (t: Ty) bool { t.match ({ .Ptr(pd) => true, _ => false }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
     numeric.match ({
