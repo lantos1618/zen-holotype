@@ -31,25 +31,24 @@
 { integer_in } = std.text.num
 { getpid } = std.c.libc
 
-// ── PER-RUN UNIQUE TEMP NAMESPACE + COMPILER-TEMP LOCK (concurrency safety) ───────────────────────
-// `make oracle` is run concurrently all the time (parallel agents). Two hazards make that flaky:
+// ── PER-RUN UNIQUE TEMP NAMESPACE (concurrency safety) ────────────────────────────────────────────
+// `make oracle` is run concurrently all the time (parallel agents). The hazard is shared `/tmp`
+// paths: if two runs touched the SAME fixed file, they would clobber each other mid-flight →
+// nondeterministic failures. Two layers of scratch state, both now PER-RUN/PER-PROCESS unique:
 //
-//   (1) TEST scratch files: if every run shared the SAME fixed `/tmp/zo_*` paths, two runs would
-//       clobber each other's case files mid-flight → nondeterministic failures at random positions.
-//       FIX: every oracle PROCESS derives a private scratch dir `/tmp/zo.<pid>/` (getpid is constant
-//       for the whole run) and threads it through every temp path — direct std.io writes via
-//       `zo_path`, shell pipelines via `zo_cmd` (which binds `$ZT` to the dir so a literal command
-//       body can interpolate it). Unique dirs => no clobber; `zo_cleanup` removes it at the end.
+//   (1) TEST scratch files: every oracle PROCESS derives a private scratch dir `/tmp/zo.<pid>/`
+//       (getpid is constant for the whole run) and threads it through every temp path — direct
+//       std.io writes via `zo_path`, shell pipelines via `zo_cmd` (which binds `$ZT` to the dir so a
+//       literal command body can interpolate it). Unique dirs => no clobber; `zo_cleanup` removes it.
 //
-//   (2) COMPILER scratch files: `zenc run`/`zenc build` write the intermediate C+binary to FIXED,
-//       machine-wide paths (driver.zen `/tmp/zenc_zd.c`, `/tmp/zenc_zd.bin`). Two concurrent `zenc`
-//       compiles overwrite each other's intermediate C → one process links/executes the OTHER's
-//       program (observed: a `main {11}` run returning 22). That lives in the compiler, so the
-//       test harness cannot rename those paths. FIX: serialize every zenc-invoking command behind a
-//       shared advisory lock (`flock` on `/tmp/zo_zenc.lock`), so no two `zenc` compiles overlap.
-//       The lock is uncontended for a solo run (negligible), and across concurrent runs it makes the
-//       compile steps mutually exclusive — correctness over raw parallelism, the right call for a
-//       correctness oracle. `zo_cmd` applies the lock to every command it wraps.
+//   (2) COMPILER scratch files: `zenc emit/check/build` write their intermediate C+binary to
+//       PID-NAMESPACED paths (driver.zen `/tmp/zenc_zd_<pid>.c`, `/tmp/zenc_zd_<pid>.bin`), and each
+//       `./zenc` the oracle spawns is a distinct process with a distinct pid — so two concurrent
+//       compiles can never share an intermediate file. (This used to require a global `flock` on
+//       `/tmp/zo_zenc.lock` serializing every zenc compile — back when the compiler used FIXED
+//       `/tmp/zenc_zd.*` paths. Now that those paths are pid-unique the lock is redundant; it was
+//       removed because it had been forcing N concurrent `make oracle` runs to execute strictly
+//       one-at-a-time. Per-run uniqueness gives the same correctness with full parallelism.)
 
 // the private scratch directory for this run, e.g. `/tmp/zo.12345` (no trailing slash).
 zo_dir* = (mp: MutPtr<Malloc>) str {
@@ -69,16 +68,16 @@ zo_path* = (mp: MutPtr<Malloc>, name: str) str {
 }
 
 // wrap a shell command body so it can use `$ZT` for the private scratch dir; the dir is (re)created
-// first so any command can write into it even before a std.io save runs. The body runs inside a
-// subshell holding a shared advisory lock (fd 9 on `/tmp/zo_zenc.lock`) so concurrent oracle runs
-// never overlap a `zenc` compile (which uses the compiler's fixed `/tmp/zenc_zd.*` scratch files).
+// first so any command can write into it even before a std.io save runs. No cross-run lock is needed:
+// the body's own scratch lives under `$ZT` (per-pid) and any `zenc` it spawns writes pid-namespaced
+// intermediates (`/tmp/zenc_zd_<pid>.*`), so concurrent oracle runs never collide — they run fully
+// in parallel.
 zo_cmd* = (mp: MutPtr<Malloc>, body: str) str {
     s := mp.new_in()
     s = s.append_in(mp, "ZT=")
     s = s.append_in(mp, mp.zo_dir())
-    s = s.append_in(mp, "; mkdir -p \"$ZT\"; ( flock 9; ")
+    s = s.append_in(mp, "; mkdir -p \"$ZT\"; ")
     s = s.append_in(mp, body)
-    s = s.append_in(mp, " ) 9>/tmp/zo_zenc.lock")
     mp.finish_in(s)
 }
 
