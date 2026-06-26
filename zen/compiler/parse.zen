@@ -330,7 +330,7 @@ fill_decls = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         })
     })
 }
-decl_is_impl = (src: str, pos: i32) bool {
+decl_is_impl* = (src: str, pos: i32) bool {
     nt  := src.scan(pos)
     dot := src.scan(nt.next)
     src.is_dot(dot.tok).match ({ true => src.tok_eq(src.scan(dot.next).tok, "impl"), false => false })
@@ -767,16 +767,19 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
 }
 
 // decl_span is std.internal.resolve's boundary oracle; it reuses the real decl parsers.
-DeclSpan*: { name: str, named: bool, eof: bool, start: i32, next: i32 }
+// `is_type` marks a struct/enum/trait declaration (a `Name: …` head, NOT a `name :=`/`name =` value).
+// std.internal.resolve uses it so a namespace alias canonicalizes TYPE names to their bare spelling
+// (one C identity, deduped) instead of alias-prefixing them — only value/fn decls get the `alias__` prefix.
+DeclSpan*: { name: str, named: bool, eof: bool, is_type: bool, start: i32, next: i32 }
 decl_span* = (a: MutPtr<Malloc>, src: str, pos: i32) DeclSpan {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => DeclSpan( name: "", named: false, eof: true, start: sc.tok.start, next: sc.next ),
+        .Eof => DeclSpan( name: "", named: false, eof: true, is_type: false, start: sc.tok.start, next: sc.next ),
         _    => src.decl_is_import(pos).match ({
-            true  => DeclSpan( name: "", named: false, eof: false, start: sc.tok.start, next: src.import_span_end(pos) ),
+            true  => DeclSpan( name: "", named: false, eof: false, is_type: false, start: sc.tok.start, next: src.import_span_end(pos) ),
             false => sc.tok.kind.match ({
                 .Ident => a.named_span(src, pos, sc.tok.start),
-                _      => DeclSpan( name: "", named: false, eof: false, start: sc.tok.start, next: sc.next ),
+                _      => DeclSpan( name: "", named: false, eof: false, is_type: false, start: sc.tok.start, next: sc.next ),
             })
         })
     })
@@ -784,14 +787,14 @@ decl_span* = (a: MutPtr<Malloc>, src: str, pos: i32) DeclSpan {
 named_span = (a: MutPtr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
     nm := a.lexeme(src, src.scan(pos).tok)
     src.decl_is_impl(pos).match ({
-        true  => DeclSpan( name: nm, named: false, eof: false, start: start, next: a.impl_span_end(src, pos) ),
+        true  => DeclSpan( name: nm, named: false, eof: false, is_type: false, start: start, next: a.impl_span_end(src, pos) ),
         false => src.decl_is_global(pos).match ({
-            true  => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_or(src, src.decl_marker(pos).next).next ),
+            true  => DeclSpan( name: nm, named: true, eof: false, is_type: false, start: start, next: a.parse_or(src, src.decl_marker(pos).next).next ),
             false => src.decl_is_struct(pos).match ({
-                true  => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_struct_at(src, pos).next ),
+                true  => DeclSpan( name: nm, named: true, eof: false, is_type: true, start: start, next: a.parse_struct_at(src, pos).next ),
                 false => src.decl_is_enum(pos).match ({
-                    true  => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_enum_at(src, pos).next ),
-                    false => DeclSpan( name: nm, named: true, eof: false, start: start, next: a.parse_decl_at(src, pos).next ),
+                    true  => DeclSpan( name: nm, named: true, eof: false, is_type: true, start: start, next: a.parse_enum_at(src, pos).next ),
+                    false => DeclSpan( name: nm, named: true, eof: false, is_type: false, start: start, next: a.parse_decl_at(src, pos).next ),
                 })
             })
         })
