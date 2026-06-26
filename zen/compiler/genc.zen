@@ -34,7 +34,7 @@ MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  
 ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
 MakeEnumData*: { ty: str, mty: str, variant: str, targs: [Ty], payload: Ptr<Expr> }  // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
 TagData*: { ty: str, mty: str, variant: str, targs: [Ty] }                     // (mty){ .tag=mty_V }  (no payload)
-ArmData*: { variant: str, bind: str, body: Ptr<Expr> }  // .Variant(bind) => body  (bind "" = none)
+ArmData*: { variant: str, bind: str, body: Ptr<Expr>, pos: i32 }  // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal
 MatchData*: { subj: Ptr<Expr>, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
 StrData*: { value: str, pos: i32 }                      // a C string literal "…" (escaped on emit); pos = byte offset (0 = synthesized)
 FieldInit*: { name: str, value: Ptr<Expr> }             // .name = value  (one struct-literal initializer)
@@ -92,20 +92,20 @@ PtrData*: { pointee: Ptr<Ty>, kind: i32 }   // a `Ptr`/`MutPtr`/`RawPtr` node: t
 Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)   // scalar/f64/struct/void/str, T*, [T], (A)R, or N<T>
 Param*: { name: str, ty: Ty, variadic: bool }   // variadic = a trailing `...T` param (ty is the collected `[T]`); false otherwise
 // a function is a name, typed parameters, a return type, and a sequence of statements
-Func*: { name: str, params: [Param], ret: Ty, tparams: [Param], body: [Stmt] }   // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic
+Func*: { name: str, params: [Param], ret: Ty, tparams: [Param], body: [Stmt], pos: i32 }   // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic; pos = name byte offset (0 = synthesized), used by the formatter to anchor leading comments
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
 Field*: { name: str, ty: Ty }
-StructDecl*: { name: str, fields: [Field] }             // typedef struct { fields } name;
+StructDecl*: { name: str, fields: [Field], pos: i32 }             // typedef struct { fields } name; pos = name byte offset (0 = synthesized), for the formatter's leading-comment anchor
 // a GENERIC struct declaration `Box<T>: { v: T }` — a template over type params `tparams` (["T"]).
 // It emits no C of its own; the monomorphize pass instantiates one concrete StructDecl per distinct
 // `Box<concrete>` used, substituting tparam→arg in the field types. genModule drops the DGenStruct.
-GenStructDecl*: { name: str, tparams: [Param], fields: [Field] }   // tparams = name-only Params (no sizeof(str))
+GenStructDecl*: { name: str, tparams: [Param], fields: [Field], pos: i32 }   // tparams = name-only Params (no sizeof(str)); pos = name byte offset (formatter leading-comment anchor)
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
 VariantDef*: { name: str, payload: Ty, dflt: Ptr<Expr> }   // dflt = constant for the zero-arg ctor (`Name = expr`); null_ptr() = no default. NOT named `default` — that's a C keyword and collides with the `default()` allocator ctor under keyword-mangling.
-EnumDecl*: { name: str, variants: [VariantDef] }
+EnumDecl*: { name: str, variants: [VariantDef], pos: i32 }   // pos = name byte offset (0 = synthesized), formatter leading-comment anchor
 // a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
 // The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
-GenEnumDecl*: { name: str, tparams: [Param], variants: [VariantDef] }
+GenEnumDecl*: { name: str, tparams: [Param], variants: [VariantDef], pos: i32 }   // pos = name byte offset (formatter leading-comment anchor)
 // records a `Type.impl(Trait, { … })` block: the type, the trait, and the method names THIS impl
 // actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
 // functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
@@ -127,7 +127,7 @@ ImportData*: { names: [Param], module: str, pos: i32 }   // module = the importe
 // `tl` = thread-local: emit `static _Thread_local` so each OS thread gets its own copy (coroutine
 // swap state, scheduler per-worker state). Source marks it by wrapping the init in `thread_local(x)`,
 // which the parser unwraps into the bare init + tl=true.
-GlobalData*: { name: str, ty: Ty, init: Ptr<Expr>, tl: bool, alias: bool }   // alias = a module-alias bind `name = mod` (single `=`, formatter prints `=` not `:=`)
+GlobalData*: { name: str, ty: Ty, init: Ptr<Expr>, tl: bool, alias: bool, pos: i32 }   // alias = a module-alias bind `name = mod` (single `=`, formatter prints `=` not `:=`); pos = name byte offset (0 = synthesized), formatter leading-comment anchor
 // DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
 // `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
 // no C of its own: compiler.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
@@ -245,7 +245,8 @@ is_trait* = (d: Decl) bool { d.match ({ .DStruct(sd) => sd.struct_is_trait(), _ 
 fntype* = (params: [Ty], ret: Ptr<Ty>) Ty { .FnT(FnTData( params: params, ret: ret )) }
 mktag* = (ty: str, v: str) Expr { .Tag(TagData( ty: ty, mty: ty, variant: v, targs: no_tys() )) }
 mktagg* = (ty: str, mty: str, targs: [Ty], v: str) Expr { .Tag(TagData( ty: ty, mty: mty, variant: v, targs: targs )) }
-arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData( variant: v, bind: bind, body: body ) }
+arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData( variant: v, bind: bind, body: body, pos: 0 ) }
+arm_at* = (v: str, bind: str, body: Ptr<Expr>, p: i32) ArmData { ArmData( variant: v, bind: bind, body: body, pos: p ) }   // source-backed (formatter anchors arm comments)
 ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData( subj: subj, ename: ename, arms: arms, ptr: false )) }
 ematchp* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData( subj: subj, ename: ename, arms: arms, ptr: true )) }
 strlit* = (v: str) Expr { .StrLit(StrData( value: v, pos: 0 )) }
@@ -396,15 +397,19 @@ tslice* = (e: Ptr<Ty>) Ty { .Slice(e) }
 param* = (nm: str, t: Ty) Param { Param( name: nm, ty: t, variadic: false ) }
 pvariadic* = (nm: str, t: Ty) Param { Param( name: nm, ty: t, variadic: true ) }   // a `...T` param: ty = the collected `[T]`
 field* = (nm: str, t: Ty) Field { Field( name: nm, ty: t ) }
-sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl( name: nm, fields: fs ) }
-gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl { GenStructDecl( name: nm, tparams: tps, fields: fs ) }
-genumdef* = (nm: str, tps: [Param], vs: [VariantDef]) GenEnumDecl { GenEnumDecl( name: nm, tparams: tps, variants: vs ) }
+sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl( name: nm, fields: fs, pos: 0 ) }
+sdef_at* = (nm: str, fs: [Field], p: i32) StructDecl { StructDecl( name: nm, fields: fs, pos: p ) }   // source-backed (formatter anchors a leading comment above the struct)
+gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl { GenStructDecl( name: nm, tparams: tps, fields: fs, pos: 0 ) }
+gsdef_at* = (nm: str, tps: [Param], fs: [Field], p: i32) GenStructDecl { GenStructDecl( name: nm, tparams: tps, fields: fs, pos: p ) }
+genumdef* = (nm: str, tps: [Param], vs: [VariantDef]) GenEnumDecl { GenEnumDecl( name: nm, tparams: tps, variants: vs, pos: 0 ) }
+genumdef_at* = (nm: str, tps: [Param], vs: [VariantDef], p: i32) GenEnumDecl { GenEnumDecl( name: nm, tparams: tps, variants: vs, pos: p ) }
 tvoid* = () Ty { .Void() }
 vdef* = (nm: str, p: Ty) VariantDef { VariantDef( name: nm, payload: p, dflt: null_ptr() ) }
 vdef_default* = (nm: str, p: Ty, e: Ptr<Expr>) VariantDef { VariantDef( name: nm, payload: p, dflt: e ) }
 expr_null* = () Ptr<Expr> { vdef("", tvoid()).dflt }       // a null Ptr<Expr> carrying the right static type
 is_expr_null* = (e: Ptr<Expr>) bool { e == null_ptr() }
-edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl( name: nm, variants: vs ) }
+edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl( name: nm, variants: vs, pos: 0 ) }
+edef_at* = (nm: str, vs: [VariantDef], p: i32) EnumDecl { EnumDecl( name: nm, variants: vs, pos: p ) }   // source-backed (formatter leading-comment anchor)
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
@@ -415,9 +420,12 @@ dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: 0 )) }
 dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: pos )) }
-dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: false )) }
-dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true, alias: false )) }
-dglobal_alias* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: true )) }   // module-alias `name = mod`
+dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: false, pos: 0 )) }
+dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true, alias: false, pos: 0 )) }
+dglobal_alias* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: true, pos: 0 )) }   // module-alias `name = mod`
+dglobal_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: false, pos: p )) }
+dglobal_tl_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true, alias: false, pos: p )) }
+dglobal_alias_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: true, pos: p )) }   // source-backed module-alias
 dtraitdef* = (trname: str, fn: Func) Decl { .DTraitDefault(TraitDefData( trname: trname, fn: fn )) }
 mono_tybuf_in = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
