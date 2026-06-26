@@ -3,7 +3,7 @@
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, register_anon } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, register_anon } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 
 PExpr*: { expr: Ptr<Expr>, next: i32 }
@@ -84,7 +84,19 @@ to_int = (src: str, t: Token) i64 {
     })
 }
 
-parse_atom* = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr { a.parse_postfix(src, a.parse_base(src, pos)) }
+parse_atom* = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
+    // DEPTH CAP (see parse_type.zen): every nested expression form — parens, prefix `-`/`!`, slice
+    // literals, `.match`/`.loop`, lambdas — funnels through parse_atom, so one guard here bounds them
+    // all. Past the cap, set the parse-error flag and return a placeholder WITHOUT recursing further;
+    // the enclosing frames simply unwind (each does O(1) work), so there is no hang.
+    pdepth_enter()
+    r := pdepth_over().match ({
+        true  => PExpr( expr: a.enode(lit(0)), next: pos ),
+        false => a.parse_postfix(src, a.parse_base(src, pos))
+    })
+    pdepth_exit()
+    r
+}
 parse_base = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
     sc.tok.kind.match ({
@@ -850,7 +862,9 @@ fill_pinit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) P
     after := src.scan(v.next)
     src.is_comma(after.tok).match ({
         true  => a.fill_pinits(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )
+        // A struct-construction `Name(f: v, …)` must close on ')'; a missing ')' is a parse error, not a
+        // silent terminator (mirrors fill_payload_args).
+        false => { src.is_rparen(after.tok).match ({ false => perr_set() })  PEnd( count: i + 1, next: after.next ) }
     })
 }
 // Argument and slice-literal buffers; slice literals need more room for data tables.
@@ -891,7 +905,9 @@ fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     after := src.scan(arg.next)
     src.is_comma(after.tok).match ({
         true  => a.fill_args(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )
+        // The arg list must close on ')'. Anything else (a missing ')', e.g. `id(1 }`) is a parse error —
+        // flag it instead of silently treating the stray token as a terminator and swallowing what follows.
+        false => { src.is_rparen(after.tok).match ({ false => perr_set() })  PEnd( count: i + 1, next: after.next ) }
     })
 }
 parse_paren = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
@@ -926,7 +942,8 @@ fill_sitem = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     after := src.scan(it.next)
     src.is_comma(after.tok).match ({
         true  => a.fill_sitems(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )
+        // A slice literal `[a, b, …]` must close on ']'; a missing ']' is a parse error, not a silent end.
+        false => { src.is_rbracket(after.tok).match ({ false => perr_set() })  PEnd( count: i + 1, next: after.next ) }
     })
 }
 parse_slicelit = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
