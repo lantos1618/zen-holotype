@@ -25,10 +25,10 @@ copy_span = (src: str, start: i32, dst: RawPtr<u8>, n: i32) void {
 }
 // C keywords are mangled at the lexeme choke point so defs/refs stay consistent.
 is_c_kw = (src: str, t: Token) bool {
-    src.tok_in(t, "double|short|long|int|char|float|unsigned|signed").match ({ true => { return true }, _ => {} })
-    src.tok_in(t, "union|struct|enum|typedef|static|extern|const|volatile").match ({ true => { return true }, _ => {} })
-    src.tok_in(t, "register|auto|inline|restrict|if|else|for|while").match ({ true => { return true }, _ => {} })
-    src.tok_in(t, "do|switch|case|default|goto|void|continue|break").match ({ true => { return true }, _ => {} })
+    src.tok_in(t, "double|short|long|int|char|float|unsigned|signed").match ({ true => { return true } })
+    src.tok_in(t, "union|struct|enum|typedef|static|extern|const|volatile").match ({ true => { return true } })
+    src.tok_in(t, "register|auto|inline|restrict|if|else|for|while").match ({ true => { return true } })
+    src.tok_in(t, "do|switch|case|default|goto|void|continue|break").match ({ true => { return true } })
     false
 }
 lexeme* = (a: MutPtr<Malloc>, src: str, t: Token) str {
@@ -112,11 +112,11 @@ parse_garbage = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
 }
 // Non-literal atoms: ctor, prefix op, slice literal, lambda, parenthesized expr.
 parse_other = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
-    src.is_lbrace(sc.tok).match ({ true => { return a.parse_postfix(src, src.looks_anon_struct(sc.next).match ({ true => a.parse_anon_struct_lit(src, sc.next), false => a.parse_arm_block(src, sc) })) }, _ => {} })
-    src.is_dot(sc.tok).match ({ true => { return a.parse_ctor(src, sc) }, _ => {} })
-    src.is_not(sc.tok).match ({ true => { return a.parse_not(src, sc) }, _ => {} })
-    src.is_minus(sc.tok).match ({ true => { return a.parse_neg(src, sc) }, _ => {} })
-    src.is_lbracket(sc.tok).match ({ true => { return a.parse_slicelit(src, sc) }, _ => {} })
+    src.is_lbrace(sc.tok).match ({ true => { return a.parse_postfix(src, src.looks_anon_struct(sc.next).match ({ true => a.parse_anon_struct_lit(src, sc.next), false => a.parse_arm_block(src, sc) })) } })
+    src.is_dot(sc.tok).match ({ true => { return a.parse_ctor(src, sc) } })
+    src.is_not(sc.tok).match ({ true => { return a.parse_not(src, sc) } })
+    src.is_minus(sc.tok).match ({ true => { return a.parse_neg(src, sc) } })
+    src.is_lbracket(sc.tok).match ({ true => { return a.parse_slicelit(src, sc) } })
     src.is_lparen(sc.tok).match ({ true => {}, _ => { return a.parse_garbage(src, sc) } })
     a.lam_open(src, sc).match ({
         true  => a.parse_lambda(src, sc),
@@ -217,13 +217,13 @@ parse_payload_args = (a: MutPtr<Malloc>, src: str, lp: Scan) PExpr {
     })
 }
 fill_payload_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     v     := a.parse_or(src, pos)
     buf[i] = finit(a.payload_fname(i), v.expr)
     after := src.scan(v.next)
     src.is_comma(after.tok).match ({
         true  => a.fill_payload_args(src, after.next, buf, i + 1),
-        false => { src.is_rparen(after.tok).match ({ true => {}, false => perr_set() })  PEnd( count: i + 1, next: after.next ) }   // past ')'
+        false => { src.is_rparen(after.tok).match ({ false => perr_set() })  PEnd( count: i + 1, next: after.next ) }   // past ')'
     })
 }
 // a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
@@ -432,7 +432,7 @@ arm_rhs = (a: MutPtr<Malloc>, src: str, pos: i32, bare_ok: bool) PExpr {
     src.is_fat_arrow(nx.tok).match ({
         true  => a.parse_arm_body(src, nx.next),
         false => {
-            bare_ok.match ({ true => {}, false => perr_set() })
+            bare_ok.match ({ false => perr_set() })
             PExpr( expr: a.enode(block(a.no_arm_stmts())), next: pos )
         }
     })
@@ -563,16 +563,16 @@ BindList*: { names: [str], count: i32, next: i32 }
 NameSlot: { s: str }
 bind_buf = (a: MutPtr<Malloc>) [str] { slice(a.acquire(64 * sizeof(NameSlot)), 64) }
 fill_binds = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [str], i: i32) BindList {
-    (i >= buf.len).match ({ true => { perr_set()  return BindList( names: buf, count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return BindList( names: buf, count: i, next: pos ) } })
     bt := src.scan(pos)
     // Each binder must be an identifier (or `_`); a literal like `.Some(123)` is garbage.
-    is_ident_tok(bt.tok).match ({ true => {}, false => perr_set() })
+    is_ident_tok(bt.tok).match ({ false => perr_set() })
     buf[i] = a.lexeme(src, bt.tok)
     nx := src.scan(bt.next)
     src.is_comma(nx.tok).match ({
         true  => a.fill_binds(src, nx.next, buf, i + 1),
         false => {
-            src.is_rparen(nx.tok).match ({ true => {}, false => perr_set() })
+            src.is_rparen(nx.tok).match ({ false => perr_set() })
             BindList( names: buf, count: i + 1, next: nx.next )
         }
     })
@@ -607,7 +607,7 @@ fill_arms = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
 // Variant or wildcard arm; the leading token tells them apart.
 fill_marm = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     // Guard fixed-size arm buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     src.is_dot(src.scan(pos).tok).match ({
         true  => a.fill_varm(src, pos, buf, i),
         false => a.fill_wild(src, pos, buf, i)
@@ -645,7 +645,7 @@ no_arm_stmts = (a: MutPtr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 // Wildcard arm or terminal bare `_`; non-wild labels here are parse errors.
 fill_wild = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     us := src.scan(pos)
-    src.is_wild_label(us.tok).match ({ true => {}, false => perr_set() })
+    src.is_wild_label(us.tok).match ({ false => perr_set() })
     rhs := a.arm_rhs(src, us.next, true)
     buf[i] = arm("_", "", rhs.expr)
     a.arm_tail(src, rhs.next, buf, i)
@@ -656,7 +656,7 @@ arm_tail = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd 
     src.is_comma(after.tok).match ({
         true  => a.fill_arms(src, after.next, buf, i + 1),
         false => {
-            src.is_rbrace(after.tok).match ({ true => {}, false => perr_set() })
+            src.is_rbrace(after.tok).match ({ false => perr_set() })
             PEnd( count: i + 1, next: after.next )
         }
     })
@@ -706,7 +706,7 @@ tyargs_end* = (src: str, pos: i32, depth: i32) i32 {
     // DEPTH CAP: bound recursion so pathologically-nested `Ptr<Ptr<…>>` annotations
     // become a clean parse error (-1) instead of a stack overflow. Real programs never
     // approach this nesting (the monomorphizer caps well-formed depth at 24).
-    (depth > 256).match ({ true => { return 0 - 1 }, false => {} })
+    (depth > 256).match ({ true => { return 0 - 1 } })
     sc := src.scan(pos)
     src.is_langle(sc.tok).match ({
         true  => src.tyargs_end(sc.next, depth + 1),
@@ -812,7 +812,7 @@ fill_ainits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) 
     })
 }
 fill_ainit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     nt    := src.scan(pos)                               // field name
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)                           // ':'
@@ -841,7 +841,7 @@ fill_pinits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) 
 }
 fill_pinit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     // Guard fixed-size field-init buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     nt    := src.scan(pos)
     nm    := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)
@@ -885,7 +885,7 @@ fill_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
 }
 fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size arg buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     arg   := a.parse_or(src, pos)
     buf[i] = load(arg.expr)
     after := src.scan(arg.next)
@@ -920,7 +920,7 @@ fill_sitems = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd 
 }
 fill_sitem = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size slice item buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     it    := a.parse_or(src, pos)
     buf[i] = load(it.expr)
     after := src.scan(it.next)
@@ -978,7 +978,7 @@ fill_lnames = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd
 }
 fill_lname = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     // Guard fixed-size lambda-param buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: pos ) } })
     nt    := src.scan(pos)
     buf[i] = param(a.lexeme(src, nt.tok), tvoid())
     sep0  := src.scan(nt.next)
