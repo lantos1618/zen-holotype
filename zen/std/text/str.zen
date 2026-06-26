@@ -5,6 +5,7 @@
 { Allocator, try_acquire } = std.mem.alloc
 { Result, Opt, IoError } = std.core.result
 { strlen, strcmp } = std.c.libc
+{ is_space } = std.text.bytes
 
 len* = (s: str) i64 { s.strlen() }
 is_empty* = (s: str) bool { s.strlen().match ({ 0 => true, _ => false }) }
@@ -173,18 +174,16 @@ at* = (s: str, i: i64) u8 {
 // `ltrim` alone can stay a zero-copy `str`: dropping a prefix only advances the start pointer, and the
 // original NUL still terminates the tail.
 
-is_ws = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r') }
-
 // first non-whitespace index, or `v.len` when `v` is empty / all whitespace.
 ws_start = (v: [u8]) i64 {
     lo: i64 := v.len
-    v.loop((h, i, b) { b.is_ws().match ({ true => {}, false => { lo = i  h.break } }) })
+    v.loop((h, i, b) { b.is_space().match ({ true => {}, false => { lo = i  h.break } }) })
     lo
 }
 // one past the last non-whitespace index, or 0 when `v` is empty / all whitespace.
 ws_end = (v: [u8]) i64 {
     hi: i64 := 0
-    v.loop((h, i, b) { b.is_ws().match ({ true => {}, false => { hi = i + 1 } }) })
+    v.loop((h, i, b) { b.is_space().match ({ true => {}, false => { hi = i + 1 } }) })
     hi
 }
 
@@ -287,7 +286,7 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
     nw: i64 := 0        // word count = whitespace(or start)->non-whitespace transitions
     inw := false        // currently inside a word?
     sv.loop((h, i, b) {
-        b.is_ws().match ({
+        b.is_space().match ({
             true  => { inw = false },
             false => inw.match ({ true => {}, false => { inw = true  nw = nw + 1 } })
         })
@@ -296,7 +295,7 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
     wi:    i64 := 0      // next word slot
     start: i64 := 0 - 1  // current word's start offset, -1 when between words
     sv.loop((h, i, b) {
-        b.is_ws().match ({
+        b.is_space().match ({
             true  => (start >= 0).match ({
                 true  => { out[wi] = a.substr_in(s, start, i - start)  wi = wi + 1  start = 0 - 1 },
                 false => {}
