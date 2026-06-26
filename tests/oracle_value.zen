@@ -42,6 +42,15 @@ oracle_value_run* = () i32 {
     VCase(src: "Opt<T>: Some(T) | None\none<T> = (x: T) Opt<T> { .None }\ntest* = () i32 { one(5).match({ .Some(x) => x, .None => 3 }) }", want: "3"),
     VCase(src: "Opt<T>: Some(T) | None\npick<T> = (x: T, b: i32) Opt<T> { (b == 1).match({ true => .Some(x), false => .None }) }\ntest* = () i32 { pick(9, 0).match({ .Some(x) => x, .None => 3 }) }", want: "3"),
     VCase(src: "Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 {\n  o := .Some(7)\n  unwrap(o, 0)\n}", want: "7"),
+    // Generic-enum constructor disambiguation: a bare `.Some(x)` under an annotated `Opt2<i32>` must
+    // resolve to the ANNOTATED enum, not the first in-scope enum sharing the variant name. The bug was
+    // a generic enum whose variant name COLLIDES with another in-scope enum (here `Opt`/`Plain`) — the
+    // expected-type-wins path only checked concrete `.DEnum`s, so it fell back to an ambient name scan
+    // and emitted the wrong C type (a `cc` "invalid initializer"). All four cases mix a collision.
+    VCase(src: "Opt2<T>: Some(T) | Nada\nOpt<T>: Some(T) | None\ntest* = () i32 {\n  a: Opt2<i32> := .Some(42)\n  a.match({ .Some(x) => x, .Nada => 0 })\n}", want: "42"),
+    VCase(src: "Opt2<T>: Some(T) | Nada\nPlain: Some(i32) | Other\ntest* = () i32 {\n  a: Opt2<i32> := .Some(7)\n  a.match({ .Some(x) => x, .Nada => 0 })\n}", want: "7"),
+    VCase(src: "Opt2<T>: Some(T) | Nada\nPlain: Some(i32) | Other\ntest* = () i32 {\n  p: Plain := .Some(9)\n  p.match({ .Some(x) => x, .Other => 0 })\n}", want: "9"),
+    VCase(src: "Uniq<T>: Only(T) | Empty\nOpt2<T>: Some(T) | Nada\ntest* = () i32 {\n  u: Uniq<i32> := .Only(5)\n  u.match({ .Only(x) => x, .Empty => 0 })\n}", want: "5"),
     // Inliner tparam-subst keystone (inline_template threads the tparam->arg map through xform_*):
     //   - `[M]` element type in an Index reached via a MutPtr<Box<M>> receiver (was `sizeof(void)`),
     //   - a `ms: [M] :=` let annotation in an inlined body,
