@@ -3,7 +3,7 @@
 
 { at, is_alpha, is_alnum } = std.text.bytes
 { Decl, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
-{ decl_span, parse_module } = compiler.parse
+{ decl_span, parse_module, decl_is_impl } = compiler.parse
 { check_linked, check_linked_kind } = compiler.check_validate
 // Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
 { Allocator, Malloc, try_acquire } = std.mem.alloc
@@ -1798,6 +1798,67 @@ dedup_symbols = (a: MutPtr<Malloc>, out: String, flat: str, symbols: [ProvidedSy
     cur.append_to_nul(a, flat, pos)
 }
 
+// ── impl-block dedup ─────────────────────────────────────────────────────────────────────────
+// A `T.impl(Trait, {…})` block carries no ProvidedSymbol (decl_span marks it unnamed), so the
+// per-name dedup above never touches it. Once TYPE names are canonicalized (value_decl_names_in keeps
+// them bare across import paths), the SAME module reached two ways — a namespace alias `x = M` plus a
+// by-name/other-alias load of M — emits its impls twice with the SAME canonical receiver, e.g. two
+// `Heap.impl(Allocator)` → duplicate `impl_Allocator_Heap_*` functions. A trait has at most one impl per
+// (canonical) type, so two blocks with the same `<receiver>.<trait>` key are redundant copies: keep the
+// first, drop the rest. Distinct impls (different receiver OR trait) get distinct keys and all survive.
+impl_lparen = (s: str, p: i32) i32 {
+    (s.at(p) == 0).match ({
+        true  => p,
+        false => (s.at(p) == '(').match ({ true => p + 1, false => s.impl_lparen(p + 1) })
+    })
+}
+impl_key_in = (a: MutPtr<Malloc>, s: str, p: i32) String {
+    re := s.res_ident_end(p)                 // receiver ident `Heap`
+    ts := s.lstrip(s.impl_lparen(re))        // first arg of `.impl(` — the trait
+    te := s.res_ident_end(ts)
+    a.gstr_string(40).rappend_span(a, s, p, re).gstr_append(a, ".").rappend_span(a, s, ts, te)
+}
+dedup_impls* = (a: MutPtr<Malloc>, flat: str) str {
+    a.dedup_impls_into(a.gstr_string(4096), flat, 0, a.gstr_string(128)).gstr_finish(a)
+}
+dedup_impls_into = (a: MutPtr<Malloc>, out: String, flat: str, p: i32, seen: String) String {
+    cur := out
+    pos := p
+    seen2 := seen
+    bs: [u8] := flat.view()
+    bs.loop((h, n, b) {
+        ii := to_i32(n)
+        (ii < pos).match ({
+            true => {},
+            false => {
+                sp := a.decl_span(flat, pos)
+                (sp.eof || (sp.next <= pos)).match ({
+                    true => { h.break },
+                    false => {
+                        cur = cur.rappend_span(a, flat, pos, sp.start)
+                        drop := flat.decl_is_impl(sp.start).match ({
+                            true => {
+                                key := a.impl_key_in(flat, sp.start)
+                                seen2.seen_name(key).match ({
+                                    true  => true,
+                                    false => { seen2 = a.madd_name(seen2, key)  false }
+                                })
+                            },
+                            false => false
+                        })
+                        drop.match ({
+                            true  => {},
+                            false => { cur = cur.rappend_span(a, flat, sp.start, sp.next) }
+                        })
+                        pos = sp.next
+                    }
+                })
+            }
+        })
+    })
+    cur.append_to_nul(a, flat, pos)
+}
+
 // Namespace binds load `c = std.io.c` / `m = sibling` under an alias prefix.
 // `c.libc()` rewrites to `c__libc()`, and the bound module's own declarations
 // are prefixed the same way, so two modules can export the same short name.
@@ -2161,7 +2222,7 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str
     nsl  := ns.c.out.len
     body := ns.c.out.strip_ns_into(a, mainsrc, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, ns.c.out.len == 0)
     cN   := a.load_import_graph_table(table, inpath, mainsrc, graph, true, Closure( seen: ns.c.seen, out: body, useen: ns.c.useen ))
-    flat := a.dedup_decls_mode(cN.out.gstr_finish(a), nsl, body.len, inpath.internal_source_path())
+    flat := a.dedup_impls(a.dedup_decls_mode(cN.out.gstr_finish(a), nsl, body.len, inpath.internal_source_path()))
     ResolvedProgram( table: table, flat: flat, body_start: nsl, body_end: body.len )
 }
 resolve_program* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) str {
