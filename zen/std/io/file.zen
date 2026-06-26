@@ -107,9 +107,12 @@ save* = (path: str, data: str, n: i64) Result<i64, IoError> {
     out: Result<i64, IoError> := (fd < 0).match ({
         true  => err(IoError.Denied),
         false => {
-            w := fd.write(data.view().ptr, n)
+            v := data.view()
+            // clamp the requested byte count to the buffer's real length — never read past `data`.
+            nn := (n < v.len).match ({ true => n, false => v.len })
+            w := fd.write(v.ptr, nn)
             fd.close()
-            (w == n).match ({
+            (w == nn).match ({
                 true  => ok(w),
                 false => err(IoError.Eof)
             })
