@@ -443,111 +443,69 @@ doc_cmd = (mp: MutPtr<Malloc>, root: str, modarg: str) i32 {
     eq(modarg, "").match ({ true => { derr("usage: zenc doc <std.mod|file.zen>\n")  2 }, false => contents_in(mp, mp.mod_path(root, modarg)).match ({ .Ok(src) => { out("# ")  out(modarg)  out("\n")  mp.doc_lines(src.view(), 0, mp.gstr_string(256))  0 }, .Err(e) => { derr("zenc: doc: cannot open module\n")  1 } }) })
 }
 
-// ── fmt: reindent by brace depth + trim whitespace (ported from driver.c fmt_source) ──────────────
-FmtDepth*: { depth: i32, in_block: bool }
-fmt_lstrip = (v: [u8], p: i64, e: i64) i64 { (p >= e).match ({ true => e, false => bs_is_space(v[p]).match ({ true => v.fmt_lstrip(p + 1, e), false => p }) }) }
-fmt_next = (v: [u8], e: i64) i64 { (e >= v.len).match ({ true => v.len, false => ((v[e] == '\r') && (e + 1 < v.len) && (v[e + 1] == '\n')).match ({ true => e + 2, false => e + 1 }) }) }
-fmt_indent = (mp: MutPtr<Malloc>, o: String, n: i32) String { (n <= 0).match ({ true => o, false => mp.fmt_indent(o.gstr_push(mp, ' '), n - 1) }) }
-// scan v[i0..e) updating brace depth + in_block-comment, skipping strings/chars/line-comments.
-// ITERATIVE (was per-char recursion → stack overflow on long lines): one `@while` threading the
-// scanner state machine through mutable locals.
-fmt_scan = (v: [u8], i0: i64, e: i64, depth0: i32, in_block0: bool, in_str0: bool, in_char0: bool, esc0: bool) FmtDepth {
-    i := i0  depth := depth0  in_block := in_block0  in_str := in_str0  in_char := in_char0  esc := esc0
-    @while (i < e) {
-        c := v[i]
-        in_block.match ({
-            true  => ((c == '*') && (i + 1 < e) && (v[i + 1] == '/')).match ({ true => { in_block = false  i = i + 2 }, false => { i = i + 1 } }),
-            false => in_str.match ({
-                true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (c == '\\').match ({ true => { esc = true  i = i + 1 }, false => (c == '"').match ({ true => { in_str = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
-                false => in_char.match ({
-                    true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (c == '\\').match ({ true => { esc = true  i = i + 1 }, false => (c == '\'').match ({ true => { in_char = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
-                    false => ((c == '/') && (i + 1 < e) && (v[i + 1] == '/')).match ({
-                        true  => { i = e },   // line comment: rest of the line is ignored
-                        false => ((c == '/') && (i + 1 < e) && (v[i + 1] == '*')).match ({
-                            true  => { in_block = true  i = i + 2 },
-                            false => (c == '"').match ({ true => { in_str = true  i = i + 1 }, false => (c == '\'').match ({ true => { in_char = true  i = i + 1 }, false => (c == '{').match ({ true => { depth = depth + 1  i = i + 1 }, false => ((c == '}') && (depth > 0)).match ({ true => { depth = depth - 1  i = i + 1 }, false => { i = i + 1 } }) }) }) })
-                        })
-                    })
-                })
-            })
-        })
-    }
-    FmtDepth(depth: depth, in_block: in_block)
+// ── THE formatter: the AST pretty-printer (compiler.genfmt) with source comments woven back in. ──────
+// (The old line-reindenter — fmt_source/fmt_lines/fmt_scan/fmt_indent — has been RETIRED: it only
+//  reindented + trimmed, never reflowed multi-arm matches, and overflowed the stack on big files. The
+//  AST pretty-printer below is now the single formatter behind `zenc fmt`.)
+// Parse the file FAITHFULLY (parse_module keeps MethodCall — UFCS preserved `s.len()`, not flat `len(s)`),
+// collect its comments into a positioned sidecar table, then pretty-print: 4-space indent, multi-arm
+// `.match` split one arm per line with `=>` aligned + trailing comma, multi-field struct literals one
+// field per line, short single-arm/single-expr bodies inline, and every comment kept in place. Comments
+// stay OUT of the AST, so the formatted source resolves to byte-identical C (formatting is a no-op on the
+// lowered tree). This is the engine behind BOTH `zenc fmt` (in-place / --check) and `fmt --stdout`.
+//
+// fmt parses the RAW (pre-flatten) source — module-alias lines and qualified types the post-flatten
+// pipeline never feeds parse_module. Qualified types `ns.Type` now parse; a residual construct the
+// faithful parser still can't represent plants a parse error, and a faithful printer must REFUSE a file
+// it cannot round-trip rather than silently rewrite it — so on any parse/lex error we fail cleanly.
+FmtResult*: { text: str, len: i64, ok: bool }    // ok=false => parse/lex error, text/len unused
+fmt_render = (mp: MutPtr<Malloc>, src: str) FmtResult {
+    decls := mp.parse_module(src)              // faithful AST (keeps MethodCall)
+    (perr_get() || lerr_get()).match ({
+        true  => FmtResult( text: "", len: 0, ok: false ),
+        false => {
+            exps := exports_get()              // the `*` export markers parse_module recorded
+            genfmt_set_comments(src, mp.collect_comments(src))   // weave source comments back in
+            o := mp.genfmt_module_in(decls, exps)
+            FmtResult( text: o.gstr_finish(mp), len: o.len, ok: true )
+        }
+    })
 }
-// ITERATIVE (was per-line recursion → stack overflow on big files): walk lines in one `@while`,
-// threading the output builder + brace depth + in-block-comment state through mutable locals.
-fmt_lines = (mp: MutPtr<Malloc>, v: [u8], p0: i64, o0: String, depth0: i32, in_block0: bool) String {
-    p := p0  o := o0  depth := depth0  in_block := in_block0
-    @while (p < v.len) {
-        e := v.bs_line_end(p, v.len)
-        s := v.fmt_lstrip(p, e)
-        t := v.bs_trim_end(s, e)
-        (s == t).match ({
-            true  => { o = o.gstr_push(mp, '\n') },
-            false => {
-                indent := ((!in_block) && (v[s] == '}') && (depth > 0)).match ({ true => depth - 1, false => depth })
-                // HOIST: a `<call>.gstr_push` receiver is re-evaluated by gstr_reserve's inlining (the call
-                // runs twice → the second grow frees what the first returned → use-after-free). Bind first.
-                ol := mp.bs_push_range(mp.fmt_indent(o, indent * 4), v, s, t)
-                o = ol.gstr_push(mp, '\n')
-                fd := v.fmt_scan(s, t, depth, in_block, false, false, false)
-                depth = fd.depth
-                in_block = fd.in_block
-            }
-        })
-        p = v.fmt_next(e)
-    }
-    o
-}
-fmt_source = (mp: MutPtr<Malloc>, src: str) String { mp.fmt_lines(src.view(), 0, mp.gstr_string(1024), 0, false) }
+fmt_parse_err = (mp: MutPtr<Malloc>) i32 { derr("zenc: fmt: cannot format (syntax error — a faithful formatter refuses a file it cannot represent)\n")  1 }
+// `zenc fmt [--check] <file>`: format IN PLACE (or, with --check, exit 1 when the file is not already
+// formatted, writing nothing). Idempotent — formatting an already-formatted file is a no-op.
 fmt_file = (mp: MutPtr<Malloc>, path: str, check: bool) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            o    := mp.fmt_source(src)
-            outs := o.gstr_finish(mp)
-            (eq(src, outs)).match ({
-                true  => 0,
-                false => check.match ({
-                    true  => { derr("zenc: ")  derr(path)  derr(": needs formatting\n")  1 },
-                    false => save(path, outs, o.len).match ({ .Ok(n) => 0, .Err(e) => 1 })
+            r := mp.fmt_render(src)
+            r.ok.match ({
+                false => mp.fmt_parse_err(),
+                true  => eq(src, r.text).match ({
+                    true  => 0,
+                    false => check.match ({
+                        true  => { derr("zenc: ")  derr(path)  derr(": needs formatting\n")  1 },
+                        false => save(path, r.text, r.len).match ({ .Ok(n) => 0, .Err(e) => 1 })
+                    })
                 })
             })
         },
         .Err(e) => { derr("zenc: fmt: cannot open input\n")  1 }
     })
 }
+// `zenc fmt --stdout <file>` (alias: --ast, kept for back-compat): write the formatted text to stdout.
+fmt_stdout = (mp: MutPtr<Malloc>, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => { r := mp.fmt_render(src)  r.ok.match ({ false => mp.fmt_parse_err(), true => { out(r.text)  0 } }) },
+        .Err(e)  => { derr("zenc: fmt: cannot open input\n")  1 }
+    })
+}
 fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
-    eq(a2, "--ast").match ({
-        true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt --ast <in.zen>\n")  2 }, false => mp.fmt_ast(a3) }),
+    (eq(a2, "--ast") || eq(a2, "--stdout")).match ({
+        true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt --stdout <in.zen>\n")  2 }, false => mp.fmt_stdout(a3) }),
         false => eq(a2, "--check").match ({
             true  => eq(a3, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a3, true) }),
             false => eq(a2, "").match ({ true => { derr("usage: zenc fmt [--check] <in.zen>\n")  2 }, false => mp.fmt_file(a2, false) })
         })
-    })
-}
-// `fmt --ast <file>`: parse the file FAITHFULLY (parse_module keeps MethodCall — UFCS preserved), then
-// pretty-print the AST back to canonical Zen text via compiler.genfmt. NO resolve/lowering, so a
-// `s.len()` round-trips as `s.len()` (not the flattened `len(s)`).
-// fmt --ast parses the RAW (pre-flatten) source. parse_module is otherwise only ever fed POST-flatten
-// source, so namespace constructs it never sees in normal use — module-alias lines (`v = std.x.y`),
-// qualified types (`v.Vec<T>`) — make it plant `__syntax_error` sentinels and mangle following decls.
-// Rather than emit that corruption, fail cleanly when the parse hit any error: a faithful printer must
-// refuse a file it cannot represent, not silently rewrite it.
-fmt_ast = (mp: MutPtr<Malloc>, path: str) i32 {
-    contents_in(mp, path).match ({
-        .Ok(src) => {
-            decls := mp.parse_module(src)          // faithful AST (keeps MethodCall)
-            (perr_get() || lerr_get()).match ({
-                true  => { derr("zenc: fmt --ast: cannot faithfully format (parse error: namespace aliases / qualified types are not supported by --ast)\n")  1 },
-                false => {
-                    exps := exports_get()          // the `*` export markers parse_module recorded
-                    genfmt_set_comments(src, mp.collect_comments(src))   // weave source comments back in
-                    out_bytes(mp.genfmt_module_in(decls, exps).bytes())
-                    0
-                }
-            })
-        },
-        .Err(e)  => { derr("zenc: fmt: cannot open input\n")  1 }
     })
 }
 

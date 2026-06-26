@@ -157,6 +157,22 @@ ff_int_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
     })
 }
 
+// render a char-literal byte `n` back as a `'x'` literal (a `.Byte` AST node ONLY ever comes from a
+// char literal, so this round-trips `'a'` → `'a'` instead of leaking the raw byte value `97`). Common
+// escapes are re-escaped; a printable ASCII byte prints bare; anything else falls back to the integer
+// (which still emits the identical value, so the lowered AST / C is unchanged either way).
+ff_char = (s: String, a: MutPtr<Malloc>, n: i32) String {
+    (n == 10).match ({ true => { return s.ff_append(a, "'\\n'") }, false => {} })
+    (n == 9).match  ({ true => { return s.ff_append(a, "'\\t'") }, false => {} })
+    (n == 13).match ({ true => { return s.ff_append(a, "'\\r'") }, false => {} })
+    (n == 0).match  ({ true => { return s.ff_append(a, "'\\0'") }, false => {} })
+    (n == 92).match ({ true => { return s.ff_append(a, "'\\\\'") }, false => {} })   // backslash
+    (n == 39).match ({ true => { return s.ff_append(a, "'\\''") }, false => {} })    // single quote
+    ((n >= 32) && (n <= 126)).match ({
+        true  => s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'"),
+        false => s.ff_int(a, n)
+    })
+}
 // n levels of 4-space indentation
 ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String {
     (n <= 0).match ({ true => s, false => s.ff_append(a, "    ").ff_indent(a, n - 1) })
@@ -236,7 +252,7 @@ ff_operand = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, parent: i32, right: bo
 ff_expr = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
     e.match ({
         .Int(n)        => s.ff_int(a, n),
-        .Byte(n)       => s.ff_int(a, n),                          // char-literal byte value (lexeme lost in the AST)
+        .Byte(n)       => s.ff_char(a, n),                          // a Byte is ALWAYS a char literal — re-render `'x'`
         .FloatLit(ft)  => s.ff_append(a, ft),
         .Var(v)        => s.ff_append(a, v.name),
         .StrLit(sl)    => s.ff_strlit(a, sl.value),
