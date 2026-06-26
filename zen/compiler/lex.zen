@@ -209,3 +209,72 @@ tokenize* = (a: MutPtr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }
 
 // walk the list: number of Cons nodes (the terminal Nil ends it)
 list_len* = (l: Ptr<TokList>) i32 { l.match ({ .Nil => 0, .Cons(c) => 1 + c.tail.list_len() }) }
+
+// ── comment sidecar: collect every `//` and `/* */` comment as a positioned span ──────────────────
+// The token scanner SKIPS comments (they carry no semantics), but the formatter must reproduce them.
+// So this is a SEPARATE pass over the raw source that records each comment as a span into it, plus
+// whether it is TRAILING — i.e. non-whitespace appears before it on the same line (`x := 1  // note`)
+// vs. a LEADING comment that owns its own line. Strings/chars are honored so a `//` inside `"…"`
+// or a `}` inside a comment never desyncs (mirrors the lexer's own string/char/escape handling).
+// The result is a flat, position-SORTED [Comment] the formatter consults by byte offset — comments
+// stay sidecar data, never entering the AST, so the lowered tree (and emitted C) is unchanged.
+Comment*: { start: i32, len: i32, trailing: bool }    // span [start, start+len); trailing = same-line code before it
+
+cmt_buf = (a: MutPtr<Malloc>, n: i32) [Comment] { slice(a.acquire(n * sizeof(Comment)), n) }
+// count comments first so the buffer is exact (no cap guesswork on a 100KB file).
+collect_comments* = (a: MutPtr<Malloc>, src: str) [Comment] {
+    n   := src.count_comments()
+    buf := a.cmt_buf(n + 1)                            // +1 keeps a 0-comment file from a 0-size acquire
+    src.fill_comments(buf, 0)
+    slice(buf.ptr, n)
+}
+// number of comments in the source — one iterative scan (no per-byte recursion: big files).
+count_comments* = (src: str) i32 {
+    i := 0  n := 0  in_str := false  in_char := false  esc := false
+    @while (at(src, i) != '\0') {
+        b := at(src, i)
+        in_str.match ({
+            true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (b == '\\').match ({ true => { esc = true  i = i + 1 }, false => (b == '"').match ({ true => { in_str = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
+            false => in_char.match ({
+                true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (b == '\\').match ({ true => { esc = true  i = i + 1 }, false => (b == '\'').match ({ true => { in_char = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
+                false => ((b == '/') && (at(src, i + 1) == '/')).match ({
+                    true  => { n = n + 1  i = src.skip_line(i + 2) },
+                    false => ((b == '/') && (at(src, i + 1) == '*')).match ({
+                        true  => { n = n + 1  i = src.skip_block_comment(i + 2) },
+                        false => (b == '"').match ({ true => { in_str = true  i = i + 1 }, false => (b == '\'').match ({ true => { in_char = true  i = i + 1 }, false => { i = i + 1 } }) })
+                    })
+                })
+            })
+        })
+    }
+    n
+}
+// is byte position `s` the start of a fresh line (only whitespace back to the previous '\n' / BOF)?
+line_is_blank_before = (src: str, s: i32) bool {
+    p := s - 1  blank := true
+    @while ((p >= 0) && (at(src, p) != '\n')) {
+        is_space(at(src, p)).match ({ true => {}, false => { blank = false } })
+        p = p - 1
+    }
+    blank
+}
+// record each comment span into `buf` (exactly count_comments() of them); same scanner as the count.
+fill_comments* = (src: str, buf: [Comment], k0: i32) void {
+    i := 0  k := k0  in_str := false  in_char := false  esc := false
+    @while (at(src, i) != '\0') {
+        b := at(src, i)
+        in_str.match ({
+            true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (b == '\\').match ({ true => { esc = true  i = i + 1 }, false => (b == '"').match ({ true => { in_str = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
+            false => in_char.match ({
+                true  => esc.match ({ true => { esc = false  i = i + 1 }, false => (b == '\\').match ({ true => { esc = true  i = i + 1 }, false => (b == '\'').match ({ true => { in_char = false  i = i + 1 }, false => { i = i + 1 } }) }) }),
+                false => ((b == '/') && (at(src, i + 1) == '/')).match ({
+                    true  => { e := src.skip_line(i + 2)  buf[k] = Comment( start: i, len: e - i, trailing: !src.line_is_blank_before(i) )  k = k + 1  i = e },
+                    false => ((b == '/') && (at(src, i + 1) == '*')).match ({
+                        true  => { e := src.skip_block_comment(i + 2)  buf[k] = Comment( start: i, len: e - i, trailing: !src.line_is_blank_before(i) )  k = k + 1  i = e },
+                        false => (b == '"').match ({ true => { in_str = true  i = i + 1 }, false => (b == '\'').match ({ true => { in_char = true  i = i + 1 }, false => { i = i + 1 } }) })
+                    })
+                })
+            })
+        })
+    }
+}

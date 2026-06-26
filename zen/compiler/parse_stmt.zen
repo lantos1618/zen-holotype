@@ -4,7 +4,7 @@
 // from compiler.parse_expr and the type/brace helpers from compiler.parse_type.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Stmt, slet, slett, sassign, sassign_at, sidxset, sidxset_at, swhile, sret, sexpr, vref, tvoid } = compiler.genc
+{ Stmt, slet, slett, slet_at, slett_at, sassign, sassign_at, sidxset, sidxset_at, swhile, sret, sexpr, vref, tvoid } = compiler.genc
 { Token, scan } = compiler.lex
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -169,7 +169,7 @@ parse_let_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     name := a.lexeme(src, nt.tok)
     at   := src.scan(nt.next)                // ':='
     v    := a.parse_or(src, at.next)        // value (full expression, incl. comparison)
-    a.scons(slet(name, v.expr), a.parse_stmts(src, v.next))   // … then the rest of the body
+    a.scons(slet_at(name, v.expr, nt.tok.start), a.parse_stmts(src, v.next))   // … then the rest of the body
 }
 // `name : Type := value` / `name : Type = value` — the type annotation is parsed (to skip it) and discarded.
 parse_typed_let_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
@@ -179,7 +179,7 @@ parse_typed_let_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     te    := a.parse_ty(src, colon.next)     // the (discarded) type annotation; te.next lands at ':='/'='
     op    := src.scan(te.next)
     v     := a.parse_or(src, op.next)        // value
-    a.scons(slett(name, te.ty, v.expr), a.parse_stmts(src, v.next))   // the annotation is now HONORED (checked + drives inference)
+    a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), a.parse_stmts(src, v.next))   // the annotation is now HONORED (checked + drives inference)
 }
 // the final expression of a body is its return; a non-final expression (something else
 // follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
@@ -273,7 +273,7 @@ block_typed_let = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     op    := src.scan(te.next)                       // ':=' / '='
     v     := a.parse_or(src, op.next)
     rest  := a.parse_block(src, v.next)
-    BlockEnd( list: a.scons(slett(name, te.ty, v.expr), rest.list), next: rest.next )
+    BlockEnd( list: a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), rest.list), next: rest.next )
 }
 block_idxset = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     nt   := src.scan(pos)                            // the array name
@@ -297,7 +297,7 @@ block_let = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     at   := src.scan(nt.next)                       // ':='
     v    := a.parse_or(src, at.next)
     rest := a.parse_block(src, v.next)
-    BlockEnd( list: a.scons(slet(name, v.expr), rest.list), next: rest.next )
+    BlockEnd( list: a.scons(slet_at(name, v.expr, nt.tok.start), rest.list), next: rest.next )
 }
 block_set = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     start := src.scan(pos).tok.start

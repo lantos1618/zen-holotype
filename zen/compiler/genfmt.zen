@@ -19,6 +19,119 @@
     IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData,
     ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData,
     impl_cname_in, is_expr_null, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Comment } = compiler.lex
+{ at } = std.text.bytes
+
+// ── comment sidecar state ──────────────────────────────────────────────────────
+// The formatter weaves SOURCE comments back into its AST walk. Comments live in a position-sorted
+// table (compiler.lex.collect_comments) keyed by byte offset; this module holds the source + table +
+// a cursor (the next un-emitted comment). As the walk reaches each statement / decl it FLUSHES every
+// leading comment whose start precedes that node, and after a statement it emits a same-line trailing
+// comment. Comments never enter the AST, so the lowered tree (and emitted C) is identical with or
+// without them — only the formatted text changes. State is module-level (mirrors parse's exports_buf).
+gf_no_cmts = () [Comment] { slice(null_ptr(), 0) }
+gf_empty_str = () str { "" }                              // a str-typed (not fixed-array) empty literal
+gf_src := gf_empty_str()
+gf_cmts := gf_no_cmts()
+gf_idx := 0
+genfmt_set_comments* = (src: str, cmts: [Comment]) void { gf_src = src  gf_cmts = cmts  gf_idx = 0 }
+
+// the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
+gf_line_of = (pos: i32) i32 {
+    i := 0  n := 0
+    @while (i < pos) { (at(gf_src, i) == '\n').match ({ true => { n = n + 1 }, false => {} })  i = i + 1 }
+    n
+}
+// append one comment's raw text, trimming trailing whitespace (a `//` span runs to but not past '\n';
+// trailing spaces before the newline are dropped so the formatted line has no dangling whitespace).
+gf_cmt_end = (c: Comment) i32 {
+    e := c.start + c.len
+    @while ((e > c.start) && ((at(gf_src, e - 1) == ' ') || (at(gf_src, e - 1) == '\t') || (at(gf_src, e - 1) == '\r'))) { e = e - 1 }
+    e
+}
+ff_cmt_text = (s: String, a: MutPtr<Malloc>, c: Comment) String {
+    out := s  i := c.start  e := gf_cmt_end(c)
+    @while (i < e) { out = out.ff_push(a, at(gf_src, i))  i = i + 1 }
+    out
+}
+// flush every LEADING (own-line) comment whose start is before `before` — each on its own indented line.
+// A `before` of 0 means "position unknown": flush nothing (the comment will land at the next known pos).
+ff_flush_leading = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String {
+    (before <= 0).match ({ true => { return s }, false => {} })
+    out := s
+    @while ((gf_idx < gf_cmts.len) && (gf_cmts[gf_idx].start < before) && (!gf_cmts[gf_idx].trailing)) {
+        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
+        gf_idx = gf_idx + 1
+    }
+    out
+}
+// if the NEXT pending comment is TRAILING (code precedes it on its source line), emit it inline after
+// the just-printed statement (two spaces then the text). Source order + the trailing flag make this
+// unambiguous and IDEMPOTENT: a trailing comment always immediately follows its own statement, and a
+// leading (own-line) comment of the next statement has trailing=false, so it is never grabbed here.
+// (A line check would not be idempotent — formatting moves a comment trailing a multi-line construct's
+// opening line to after its closing `})`, a different physical line, flipping it to own-line on re-fmt.)
+ff_trailing = (s: String, a: MutPtr<Malloc>, boundary: i32) String {
+    ((gf_idx < gf_cmts.len) && gf_cmts[gf_idx].trailing && gf_before(gf_cmts[gf_idx].start, boundary)).match ({
+        true  => { out := s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])  gf_idx = gf_idx + 1  out },
+        false => s
+    })
+}
+// is `start` before the next statement's position `boundary`? boundary 0 = "no next stmt" = unbounded
+// (the trailing comment is the last thing in the block, so it belongs to the statement just printed).
+gf_before = (start: i32, boundary: i32) bool { (boundary <= 0).match ({ true => true, false => start < boundary }) }
+// flush all comments still pending (end of module): each as its own line.
+ff_flush_rest = (s: String, a: MutPtr<Malloc>, ind: i32) String {
+    out := s
+    @while (gf_idx < gf_cmts.len) {
+        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
+        gf_idx = gf_idx + 1
+    }
+    out
+}
+
+// ── representative source position of an expr / statement (leftmost known byte offset; 0 = unknown) ──
+gf_expr_pos = (e: Expr) i32 {
+    e.match ({
+        .Var(v)         => v.pos,
+        .Bin(b)         => gf_bin_pos(b),
+        .Call(c)        => c.pos,
+        .MethodCall(mc) => gf_recv_pos(mc.recv, mc.pos),
+        .StrLit(sl)     => sl.pos,
+        .Member(m)      => gf_pos_of(m.obj),
+        .Arrow(ar)      => gf_pos_of(ar.obj),
+        .Match(m)       => gf_pos_of(m.subj),
+        .Index(ix)      => gf_pos_of(ix.seq),
+        _               => 0
+    })
+}
+gf_bin_pos = (b: BinData) i32 { lp := gf_pos_of(b.lhs)  (lp > 0).match ({ true => lp, false => b.pos }) }
+gf_recv_pos = (recv: Ptr<Expr>, fallback: i32) i32 { rp := gf_pos_of(recv)  (rp > 0).match ({ true => rp, false => fallback }) }
+gf_pos_of = (e: Ptr<Expr>) i32 { gf_expr_pos(load(e)) }
+gf_stmt_pos = (st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => (l.pos > 0).match ({ true => l.pos, false => gf_pos_of(l.value) }),
+        .Assign(asn) => asn.pos,
+        .Return(e)   => gf_pos_of(e),
+        .ExprStmt(e) => gf_pos_of(e),
+        .IndexSet(x) => x.pos,
+        _            => 0
+    })
+}
+// the first positioned offset INSIDE a function body (its first statement's pos) — a decl "floor" that
+// a leading comment above the function precedes. 0 when the body has no positioned statement.
+gf_body_pos = (body: [Stmt]) i32 { (body.len == 0).match ({ true => 0, false => gf_stmt_pos(body[0]) }) }
+// a top-level decl's representative source offset (0 = unknown → its leading comments defer forward).
+gf_decl_pos = (d: Decl) i32 {
+    d.match ({
+        .DFunc(f)        => gf_body_pos(f.body),
+        .DForeign(f)     => gf_body_pos(f.body),
+        .DTraitDefault(t) => gf_body_pos(t.fn.body),
+        .DGlobal(g)      => gf_pos_of(g.init),
+        .DImpl(im)       => im.pos,
+        _                => 0
+    })
+}
 
 // ── String builder shims (reuse the canonical genc String API) ───────────────
 ff_string = (a: MutPtr<Malloc>, cap: i64) String { String(ptr: a.acquire(cap), len: 0, cap: cap) }
@@ -302,8 +415,20 @@ ff_block = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
 }
 ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
     out := s
-    body.loop((h, i, st) { out = out.ff_indent(a, ind).ff_stmt_at(a, st, drop_ret && (i == body.len - 1), ind).ff_append(a, "\n") })
+    body.loop((h, i, st) {
+        nb := (i + 1 < body.len).match ({ true => gf_stmt_pos(body[i + 1]), false => 0 })   // next stmt's pos (0 = last)
+        out = out.ff_one_stmt(a, st, drop_ret && (i == body.len - 1), ind, nb)
+    })
     out
+}
+// one statement line: leading comments (before it) → the statement → its trailing comment → newline.
+// `nb` (next-stmt boundary) caps which trailing comment belongs to THIS statement (not the next one's).
+ff_one_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32, nb: i32) String {
+    sp    := gf_stmt_pos(st)
+    lead  := s.ff_flush_leading(a, sp, ind)
+    body  := lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
+    withc := body.ff_trailing(a, nb)
+    withc.ff_append(a, "\n")
 }
 ff_stmt_at = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) String {
     drop.match ({
@@ -524,12 +649,17 @@ genfmt_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
     out := s
     decls.loop((h, i, d) {
         d.match ({
-            .DFunc(f)  => a.ff_is_hoisted(decls, f.name).match ({ true => {}, false => { out = out.ff_decl(a, exp, decls, d).ff_append(a, "\n") } }),
-            .DImpl(im) => eq(im.ty, im.trname).match ({ true => {}, false => { out = out.ff_decl(a, exp, decls, d).ff_append(a, "\n") } }),
-            _          => { out = out.ff_decl(a, exp, decls, d).ff_append(a, "\n") }
+            .DFunc(f)  => a.ff_is_hoisted(decls, f.name).match ({ true => {}, false => { out = a.ff_top_decl(out, exp, decls, d) } }),
+            .DImpl(im) => eq(im.ty, im.trname).match ({ true => {}, false => { out = a.ff_top_decl(out, exp, decls, d) } }),
+            _          => { out = a.ff_top_decl(out, exp, decls, d) }
         })
     })
-    out
+    out.ff_flush_rest(a, 0)
+}
+// one top-level decl: its leading comments (at column 0), then the decl, then a newline.
+ff_top_decl = (a: MutPtr<Malloc>, s: String, exp: [Param], decls: [Decl], d: Decl) String {
+    lead := s.ff_flush_leading(a, gf_decl_pos(d), 0)
+    lead.ff_decl(a, exp, decls, d).ff_append(a, "\n")
 }
 // compatibility shim (default heap allocator, no export markers)
 genfmt_module* = (decls: [Decl]) String {
