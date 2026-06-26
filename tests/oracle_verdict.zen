@@ -47,7 +47,10 @@ oracle_verdict_run* = () i32 {
     VerdictCase(src: "foo* = () i32 { 1 }\nfoo* = () i32 { 2 }\ntest* = () i32 { foo() }", should_pass: false, kind: ""),
     VerdictCase(src: "a* = () i32 { 1 }\ndup* = () i32 { 2 }\ndup* = () i32 { 3 }\ntest* = () i32 { a() }", should_pass: false, kind: ""),
     VerdictCase(src: "R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 } })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }", should_pass: false, kind: ""),
-    VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }", should_pass: false, kind: ""),
+    // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
+    // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
+    VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }", should_pass: true, kind: ""),
+    // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
     VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }", should_pass: false, kind: ""),
     VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ true => 1 })\n}\ntest* = () i32 { f(true) }", should_pass: false, kind: ""),
     VerdictCase(src: "f* = (n: i32) i32 {\n n.match({ 0 => 9 })\n}\ntest* = () i32 { f(5) }", should_pass: false, kind: ""),
@@ -217,8 +220,11 @@ oracle_verdict_run* = () i32 {
     VerdictCase(src: "use* = (n: i32) i32 { n }\ntest* = () i32 { use(missing()) }", should_pass: false, kind: "undefined-name"),
     VerdictCase(src: "test* = () i32 { 1 + gone() }", should_pass: false, kind: "undefined-name"),
     VerdictCase(src: "f* = (b: bool) i32 { b.match({ true => { ghost()  1 }, false => 0 }) }\ntest* = () i32 { f(1 < 2) }", should_pass: false, kind: "undefined-name"),
-    VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }", should_pass: false, kind: "undefined-name"),
-    VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }", should_pass: false, kind: "undefined-name"),
+    // statement-position one-armed bool guard now ACCEPTS (was the position-less undefined-name sentinel).
+    VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }", should_pass: true, kind: ""),
+    // value-position one-armed bool match now rejects for the RIGHT reason: a positioned exhaustiveness
+    // error (NOT the old position-less undefined-name path).
+    VerdictCase(src: "f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }", should_pass: false, kind: "exhaustiveness"),
     VerdictCase(src: "f* = (n: i32) i32 {\n n.match({ 0 => 9 })\n}\ntest* = () i32 { f(5) }", should_pass: false, kind: "undefined-name"),
     VerdictCase(src: "f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }", should_pass: false, kind: "undefined-name"),
     VerdictCase(src: "f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }", should_pass: false, kind: "undefined-name"),

@@ -424,6 +424,11 @@ cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
         })
     })
 }
+// A one-armed bool `.match` (oa != 0) reaching the validator AS A Cond EXPRESSION is in VALUE position:
+// statement-position conds were already lowered to `if` statements (the empty branch a no-op). In value
+// position the missing branch has no value to produce → non-exhaustive. (Statement position never gets
+// here, so the flag alone decides.) The kind layer reports this as a positioned `exhaustiveness` error.
+cond_onearm_err = (d: CondData) i32 { (d.oa == 0).match ({ true => 0, false => 1 }) }
 cond_result_err = (env: Env, d: CondData) i32 {
     tt := env.infer_expr(d.t)
     et := env.infer_expr(d.e)
@@ -925,7 +930,7 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
-        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return() + env.cond_result_err(d),
+        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return() + env.cond_result_err(d) + d.cond_onearm_err(),
         .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
         .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
         .Match(m)       => {
@@ -1935,7 +1940,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
-        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos())),
+        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos())).kv_kor(d.cond_onearm_err().kv_one(KEXHAUST()).kv_at(load(d.c).expr_pos())),
         .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
         .Match(m)       => {

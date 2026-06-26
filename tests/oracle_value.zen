@@ -258,6 +258,17 @@ oracle_value_run* = () i32 {
     // BOUNDARY guard: outer match is the function's TAIL value (not stmt position) — must still work.
     VCase(src: "g = (n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 1 }, false => { return 2 } }) },\n    false => { return 3 }\n  })\n}\ntest* = () i32 { g(0, 2) * 100 + g(0, 9) * 10 + g(7, 0) }", want: "123"),
     // BOUNDARY guard: inner match is NOT the arm tail (a statement follows it) — already lowered, must work.
-    VCase(src: "h = (n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 1 }, false => { return 2 } })  k := 7  return k },\n    false => { return 3 }\n  })\n  return 9\n}\ntest* = () i32 { h(0, 2) * 100 + h(0, 9) * 10 + h(7, 0) }", want: "123")
+    VCase(src: "h = (n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 1 }, false => { return 2 } })  k := 7  return k },\n    false => { return 3 }\n  })\n  return 9\n}\ntest* = () i32 { h(0, 2) * 100 + h(0, 9) * 10 + h(7, 0) }", want: "123"),
+    // ONE-ARMED bool match in STATEMENT position: the missing arm defaults to `{}`. only-true arm runs the
+    // body when the cond holds and is a no-op otherwise; the assignment must take effect.
+    VCase(src: "test* = () i32 {\n  x := 5\n  (x > 3).match ({ true => { x = 99 } })\n  x\n}", want: "99"),
+    VCase(src: "test* = () i32 {\n  x := 5\n  (x > 9).match ({ true => { x = 99 } })\n  x\n}", want: "5"),
+    // only-FALSE arm: body runs when the cond is false, no-op when true.
+    VCase(src: "test* = () i32 {\n  x := 0\n  done := false\n  (done).match ({ false => { x = 1 } })\n  x\n}", want: "1"),
+    VCase(src: "test* = () i32 {\n  x := 0\n  done := true\n  (done).match ({ false => { x = 1 } })\n  x\n}", want: "0"),
+    // GUARD early-return with no trailing `_`: a one-armed bool match whose only arm `return`s.
+    VCase(src: "chk = (n: i32) i32 {\n  (n < 0).match ({ true => return 0 - 1 })\n  n\n}\ntest* = () i32 { chk(7) * 10 + (0 - chk(0 - 1)) }", want: "71"),
+    // one-armed match nested inside a `.loop` body (the running-max idiom).
+    VCase(src: "test* = () i32 {\n  max := 0\n  nums := [3, 7, 2, 9, 4]\n  nums.loop((h, i, v) { (v > max).match ({ true => { max = v } }) })\n  max\n}", want: "9")
     ])
 }
