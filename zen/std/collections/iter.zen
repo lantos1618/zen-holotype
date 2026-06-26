@@ -7,10 +7,8 @@
 // For other element types, use the generic `_into` forms with your own buffer.
 
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 
-i32s_ok = (xs: [i32]) Result<[i32], IoError> { .Ok(xs) }
-i32s_err = (e: IoError) Result<[i32], IoError> { .Err(e) }
 
 fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
     acc := init
@@ -48,14 +46,14 @@ map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] {
 
 try_map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> {
     (xs.len <= 0).match ({
-        true => i32s_ok(slice(null_ptr(), 0)),
+        true => ok(slice(null_ptr(), 0)),
         false => a.try_acquire(xs.len * 4).match ({
             .Ok(p) => {
                 out := p.slice(xs.len)
                 xs.loop((h, i, x) { out[i] = f(x) })
-                i32s_ok(out)
+                ok(out)
             },
-            .Err(e) => i32s_err(e)
+            .Err(e) => err(e)
         })
     })
 }
@@ -72,7 +70,7 @@ filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
 
 try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> {
     (xs.len <= 0).match ({
-        true => i32s_ok(slice(null_ptr(), 0)),
+        true => ok(slice(null_ptr(), 0)),
         false => a.try_acquire(xs.len * 4).match ({
             .Ok(p) => {
                 buf := p.slice(xs.len)
@@ -81,9 +79,9 @@ try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], Io
                     buf[n] = x
                     n = n + (keep(x)).match ({ true => 1, false => 0 })
                 })
-                i32s_ok(slice(buf[0].addr(), n))
+                ok(slice(buf[0].addr(), n))
             },
-            .Err(e) => i32s_err(e)
+            .Err(e) => err(e)
         })
     })
 }
