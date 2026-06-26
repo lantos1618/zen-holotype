@@ -24,7 +24,12 @@ CallData*: { fn: str, args: [Expr], pos: i32, raw: bool }  // fn(a, b, …) or @
 // formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
 // resolve/genc, so the C backend never sees it. pos = method-name byte offset (matches the old Call's pos).
 MethodCallData*: { recv: Ptr<Expr>, method: str, args: [Expr], pos: i32 }
-CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr> } // c ? t : e
+// oa = one-arm marker for a bool `.match` written with a single arm (the other arm is a synthesized
+// empty `{}` block): 0 = a real two-armed cond / if-expr, 1 = only `true =>` given (e is the synthetic
+// empty branch), 2 = only `false =>` given (t is the synthetic empty branch). In statement position the
+// cond lowers to an `if` and the empty branch is a no-op; in VALUE position oa != 0 is non-exhaustive
+// (the missing branch has no value) and the validator rejects it with a positioned exhaustiveness error.
+CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32 } // c ? t : e
 MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
 ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
 MakeEnumData*: { ty: str, mty: str, variant: str, targs: [Ty], payload: Ptr<Expr> }  // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
@@ -189,7 +194,8 @@ call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args, pos: 
 call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: false )) }
 raw_call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: true )) }
 emcall* = (recv: Ptr<Expr>, method: str, args: [Expr], p: i32) Expr { .MethodCall(MethodCallData( recv: recv, method: method, args: args, pos: p )) }
-cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData( c: c, t: t, e: e )) }
+cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData( c: c, t: t, e: e, oa: 0 )) }
+cond_oa* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32) Expr { .Cond(CondData( c: c, t: t, e: e, oa: oa )) }
 member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData( obj: o, field: f )) }
 arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData( obj: o, field: f )) }
 mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData( ty: ty, mty: ty, variant: v, targs: no_tys(), payload: p )) }

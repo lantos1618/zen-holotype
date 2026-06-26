@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -449,14 +449,33 @@ parse_bool_match = (a: MutPtr<Malloc>, src: str, subj: PExpr, open: Scan) PExpr 
     sep := src.scan(a0.next)
     src.is_comma(sep.tok).match ({
         true  => a.bool_second(src, subj, a0, sep.next),
-        false => a.reject_match(sep.next)
+        // No comma after the only arm: `(c).match ({ true => … })` is a ONE-ARMED bool match — the other
+        // arm defaults to an empty `{}`. Legal in statement position (lowers to `if`); rejected in value
+        // position by the validator (oa != 0 → positioned exhaustiveness). Anything else is a real error.
+        false => src.is_rbrace(sep.tok).match ({
+            true  => a.bool_one(src, subj, a0, sep.next),
+            false => a.reject_match(sep.next)
+        })
     })
 }
 bool_second = (a: MutPtr<Malloc>, src: str, subj: PExpr, a0: BoolArmEnd, pos: i32) PExpr {
     nx := src.scan(pos)
     src.is_rbrace(nx.tok).match ({
-        true  => a.reject_match(nx.next),
+        true  => a.bool_one(src, subj, a0, nx.next),    // trailing comma after the only arm — still one-armed
         false => a.bool_close(src, subj, a0, a.bool_arm(src, pos))
+    })
+}
+// Build the one-armed Cond, synthesizing an empty `{}` for the missing branch. The first arm of a bool
+// match is always labelled `true` or `false` (parse_match_arms dispatched on that), so oa records which
+// side is real: oa=1 → only `true` (e is empty), oa=2 → only `false` (t is empty).
+empty_arm = (a: MutPtr<Malloc>) Ptr<Expr> { a.enode(block(a.no_arm_stmts())) }
+bool_one = (a: MutPtr<Malloc>, src: str, subj: PExpr, a0: BoolArmEnd, next: i32) PExpr {
+    a0.ok.match ({
+        false => a.reject_match(next),
+        true  => src.tok_eq(a0.lab, "false").match ({
+            true  => PExpr( expr: a.enode(cond_oa(subj.expr, a.empty_arm(), a0.body, 2)), next: next ),
+            false => PExpr( expr: a.enode(cond_oa(subj.expr, a0.body, a.empty_arm(), 1)), next: next )
+        })
     })
 }
 bool_close = (a: MutPtr<Malloc>, src: str, subj: PExpr, a0: BoolArmEnd, a1: BoolArmEnd) PExpr {
