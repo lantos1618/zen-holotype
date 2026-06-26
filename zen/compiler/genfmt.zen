@@ -18,7 +18,7 @@
     BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData,
     IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData,
     ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData,
-    impl_cname_in, is_expr_null, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+    impl_cname_in, is_expr_null, tvoid, k_raw_ptr, k_mut_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Comment } = compiler.lex
 { at } = std.text.bytes
 
@@ -208,6 +208,13 @@ ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String {
 }
 
 // ── types ────────────────────────────────────────────────────────────────────
+// the source keyword for a pointer kind (preserves the spelling on round-trip)
+ptr_kw = (kind: i32) str {
+    (kind == k_raw_ptr()).match ({
+        true  => "RawPtr",
+        false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" })
+    })
+}
 ff_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
         .I32       => s.ff_append(a, "i32"),
@@ -220,7 +227,7 @@ ff_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
         .Cstr      => s.ff_append(a, "Cstr"),
         .Text      => s.ff_append(a, "Text"),
         .Named(nm) => s.ff_append(a, nm),
-        .Ptr(pd)   => s.ff_append(a, "Ptr<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
+        .Ptr(pd)   => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a, "<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
         .Slice(p)  => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
         .FnT(ft)   => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
         .Generic(g) => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">")
