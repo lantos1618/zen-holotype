@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, is_readonly_ptr_ty } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
@@ -303,6 +303,14 @@ check_call = (env: Env, c: CallData) i32 {
             })
         }) })
 }
+store_writes_readonly = (env: Env, c: CallData) bool {
+    (eq(c.fn, "store") && (c.args.len == 2)).match ({
+        true  => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(),
+        false => false
+    })
+}
+store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }
+store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }
 // A call checks arity, then arg types. For a LOCAL generic only tparam-typed slots defer to mono;
 // CONCRETE slots are still checked. An IMPORTED generic (a bodyless header) is skipped entirely — its
 // param types still carry unbound tparams that cross-module inference can't resolve at the call site,
@@ -926,7 +934,7 @@ lck_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.check_call(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
+        .Call(c)        => env.check_call(c) + env.store_mut_err(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
         .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
@@ -1462,6 +1470,7 @@ KUNKNOWNTYPE  = () i32 { 17 }   // a type annotation names a type that is not de
 KLAMBDAVALUE  = () i32 { 18 }   // a lambda used as a value the inliner can't splice (stored/returned)
 KMUSTUSE      = () i32 { 19 }   // a value-mold `(Self,…) Self` self-mutation whose result is discarded
 KNEEDANNOT    = () i32 { 20 }   // an unannotated let whose inferred type leaves a tparam uninferred (-> T=void)
+KPTRWRITE     = () i32 { 21 }   // a store() through a read-only `Ptr<T>` (use `MutPtr<T>` to write)
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1530,6 +1539,7 @@ diagnostic_kind_name = (code: i32) str {
         18 => "lambda-value",
         19 => "must-use",
         20 => "need-annotation",
+        21 => "ptr-write",
         _ => "type"
     })
 }
@@ -1555,6 +1565,7 @@ diagnostic_message = (code: i32) str {
         18 => "a lambda can only be used directly as a call argument",
         19 => "result of a self-mutating container method is discarded; the receiver is invalid after this call",
         20 => "cannot infer the type parameter of this binding",
+        21 => "cannot write through a read-only `Ptr<T>`",
         _ => "type error"
     })
 }
@@ -1580,6 +1591,7 @@ diagnostic_hint = (code: i32) str {
         18 => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
         19 => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
         20 => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
+        21 => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
         _ => ""
     })
 }
@@ -1936,7 +1948,7 @@ lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
+        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
