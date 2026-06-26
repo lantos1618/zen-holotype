@@ -1288,6 +1288,72 @@ consume_name = (env: Env, st: Stmt) str {
         _ => ""
     })
 }
+// BRANCH-AWARE dead-set helpers. A free performed inside a branch (if/while body, match arm) makes the
+// freed local CONDITIONALLY dead; the safe, simple rule is to treat it as dead AFTER the branch, so a
+// later UNCONDITIONAL free/use is flagged as a double-free / use-after-free. A branch that does NOT fall
+// through (its body ends in `return`) cannot reach the post-branch code, so its frees are EXCLUDED from
+// the post-branch set — this is what keeps the common error-path idiom legal:
+//   cond.match ({ err => { a.release(p)  return 1 }, ok => {} })   a.release(p)   // NOT a double-free
+// (the freeing arm returned, so the `release(p)` after only runs on the ok path, where p is still live).
+dead_union = (a: MutPtr<Malloc>, x: Ptr<DeadList>, y: Ptr<DeadList>) Ptr<DeadList> {
+    x.match ({
+        .DeadNil     => y,
+        .DeadCons(c) => a.dead_cons(c.name, a.dead_union(c.tail, y))
+    })
+}
+// does control flow off the END of this body reach the next statement? false only when it ends in return.
+body_falls_through = (body: [Stmt]) bool {
+    (body.len == 0).match ({
+        true  => true,
+        false => body[body.len - 1].match ({ .Return(r) => false, _ => true })
+    })
+}
+// a match-arm / Cond body is an Expr; it diverges only when it is a Block ending in `return`.
+expr_falls_through = (e: Ptr<Expr>) bool {
+    load(e).match ({ .Block(b) => body_falls_through(b.stmts), _ => true })
+}
+// net dead-set after a (possibly branching) statement body — threads own_step + env exactly like
+// own_body_err / kv_own_body_kind, but returns the final kill-set instead of an error count.
+own_dead_body = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+    e := env
+    d := seen
+    body.loop((h, i, st) { d = a.own_step(e, d, st)  e = a.extend_env(e, st) })
+    d
+}
+// union of the per-arm net dead-sets, over the arms that fall through (a returning arm contributes
+// nothing to the post-match set). Each arm is evaluated from the pre-match kill-set `seen`.
+own_dead_arms = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) Ptr<DeadList> {
+    out := seen
+    arms.loop((h, i, ar) {
+        expr_falls_through(ar.body).match ({
+            true  => { out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, ar.body), out) },
+            false => {}
+        })
+    })
+    out
+}
+// net dead-set after an expression in statement position (a statement-position match, a block, a ternary,
+// or a bare free/consume call as a match-arm body). Mirrors own_step's free/consume detection.
+own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .Block(b) => a.own_dead_body(env, seen, b.stmts),
+        .Match(m) => a.own_dead_arms(env, seen, env.infer_expr(m.subj), m.arms),
+        // a bool `.match` lowers to a Cond (ternary); apply the same fall-through exclusion as match arms
+        // so a branch that ends in `return` does not propagate its frees past the conditional.
+        .Cond(d)  => a.dead_union(
+            expr_falls_through(d.t).match ({ true => a.own_dead_expr(env, seen, d.t), false => seen }),
+            expr_falls_through(d.e).match ({ true => a.own_dead_expr(env, seen, d.e), false => seen })),
+        .Call(c)  => {
+            out := seen
+            fn := env.alloc_free_call_name(c)
+            fn.is_empty().match ({ false => { out = a.dead_cons(fn, out) } })
+            cn := env.is_consume_method(c).match ({ true => c.recv_var_name(), false => env.send_consume(c) })
+            cn.is_empty().match ({ false => { out = a.dead_cons(cn, out) } })
+            out
+        },
+        _ => seen
+    })
+}
 own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     out := seen
     // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
@@ -1296,6 +1362,17 @@ own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<Dead
     // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead.
     fn := env.alloc_free_stmt_name(st)
     fn.is_empty().match ({ false => { out = a.dead_cons(fn, out) } })
+    // 2b. branch-aware: descend into if/while bodies and statement-position matches/blocks so a free
+    //     inside a branch enters the kill-set (conditionally dead → dead after the branch). Only branches
+    //     that FALL THROUGH contribute; free-then-rebind within one branch nets to ALIVE via own_step.
+    out = st.match ({
+        .If(f)       => a.dead_union(
+                            body_falls_through(f.then).match ({ true => a.own_dead_body(env, out, f.then), false => out }),
+                            body_falls_through(f.els).match  ({ true => a.own_dead_body(env, out, f.els),  false => out })),
+        .While(w)    => body_falls_through(w.body).match ({ true => a.own_dead_body(env, out, w.body), false => out }),
+        .ExprStmt(e) => a.own_dead_expr(env, out, e),
+        _            => out
+    })
     // 3. revival — a (re)bind of a local clears its dead state. Runs LAST so `p = a.resize(p, n)`
     //    (free old p in step 2, then rebind p here) nets to ALIVE, while `q := a.resize(p, n)` leaves
     //    p dead (q != p).
