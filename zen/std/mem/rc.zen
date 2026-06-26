@@ -14,7 +14,7 @@
 // `new_in` / `drop_in` use the caller's allocator.
 // `try_new_in` returns Result so allocation failure can stay in the value flow.
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 
 Rc*<T>: {
     base: RawPtr<u8>                          // -> [ count:i64 | value:T ]
@@ -41,9 +41,6 @@ new_in*<A, T> = (a: MutPtr<A>, x: T) Rc<T> {
     s[0] = x
     r
 }
-rc_ok<T> = (r: Rc<T>) Result<Rc<T>, IoError> { .Ok(r) }
-rc_err<T> = (e: IoError) Result<Rc<T>, IoError> { .Err(e) }
-
 try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Rc<T>, IoError> {
     rx := x
     a.try_acquire(8 + sizeof(T)).match ({
@@ -52,12 +49,9 @@ try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Rc<T>, IoError> {
             r := Rc<T>( base: base )
             s := r.val()
             s[0] = rx
-            rc_ok(r)
+            ok(r)
         },
-        .Err(e) => {
-            err: Result<Rc<T>, IoError> := .Err(e)
-            err
-        }
+        .Err(e) => err(e)
     })
 }
 // `drop` only frees the [count|value] block; payload Drop is not run. Values that own
