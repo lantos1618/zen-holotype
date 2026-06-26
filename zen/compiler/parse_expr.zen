@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, mkstruct, finit, mkenum, mktag, arm, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, mkstruct, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -631,21 +631,21 @@ fill_varm = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
     vn  := a.lexeme(src, vt.tok)
     pk  := src.scan(vt.next)
     src.is_lparen(pk.tok).match ({
-        true  => a.fill_varm_bound(src, vn, pk.next, buf, i),
+        true  => a.fill_varm_bound(src, vn, pk.next, buf, i, dot.tok.start),
         false => {
             rhs := a.arm_rhs(src, vt.next, false)
-            buf[i] = arm(vn, "", rhs.expr)
+            buf[i] = arm_at(vn, "", rhs.expr, dot.tok.start)
             a.arm_tail(src, rhs.next, buf, i)
         }
     })
 }
 // `.Variant(binders…) => body`: a single binder keeps the existing form; multiple binders desugar.
-fill_varm_bound = (a: MutPtr<Malloc>, src: str, vn: str, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_varm_bound = (a: MutPtr<Malloc>, src: str, vn: str, pos: i32, buf: [ArmData], i: i32, dpos: i32) PEnd {
     bl  := a.arm_binds(src, pos)
     rhs := a.arm_rhs(src, bl.next, false)
     buf[i] = (bl.count == 1).match ({
-        true  => arm(vn, bl.names[0], rhs.expr),
-        false => arm(vn, "__zen_payload", a.destr_body(bl, rhs.expr))
+        true  => arm_at(vn, bl.names[0], rhs.expr, dpos),
+        false => arm_at(vn, "__zen_payload", a.destr_body(bl, rhs.expr), dpos)
     })
     a.arm_tail(src, rhs.next, buf, i)
 }
@@ -659,7 +659,7 @@ fill_wild = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
     us := src.scan(pos)
     src.is_wild_label(us.tok).match ({ false => perr_set() })
     rhs := a.arm_rhs(src, us.next, true)
-    buf[i] = arm("_", "", rhs.expr)
+    buf[i] = arm_at("_", "", rhs.expr, us.tok.start)
     a.arm_tail(src, rhs.next, buf, i)
 }
 // Comma continues arm list; rbrace closes it; anything else is a parse error.

@@ -146,19 +146,30 @@ gf_stmt_pos = (st: Stmt) i32 {
         _            => 0
     })
 }
-// the first positioned offset INSIDE a function body (its first statement's pos) — a decl "floor" that
-// a leading comment above the function precedes. 0 when the body has no positioned statement.
-gf_body_pos = (body: [Stmt]) i32 { (body.len == 0).match ({ true => 0, false => gf_stmt_pos(body[0]) }) }
-// a top-level decl's representative source offset (0 = unknown → its leading comments defer forward).
+// a top-level decl's representative source offset = its OWN start byte (the name/keyword position), so a
+// leading comment ABOVE the decl flushes at that decl and a comment INSIDE a body (e.g. before the first
+// statement) is NOT hoisted above the decl — the body's own ff_stmts drain emits it in place. Body-less
+// decls (enum/struct/global/foreign) now carry a real `pos`, so their leading comments no longer pile up
+// at the next positioned decl / EOF. 0 = genuinely unknown (synthesized / DRaw) → leading comments defer.
+// (Funcs/globals keep a body/init fallback for any synthesized node whose pos was never recorded.)
+// Every source-parsed decl carries its own name byte offset, so use it DIRECTLY (no body/init fallback):
+// a function whose name sits at offset 0 (the first decl in a file) legitimately reports 0, and 0 is the
+// "defer" sentinel — which is exactly right, since nothing precedes byte 0, and a comment INSIDE the body
+// drains in place via ff_stmts rather than being hoisted above the decl. Synthesized decls (DRaw, compiler
+// rewrites) have pos 0 and harmlessly defer.
 gf_decl_pos = (d: Decl) i32 {
     d.match ({
-        .DFunc(f)        => gf_body_pos(f.body),
-        .DForeign(f)     => gf_body_pos(f.body),
-        .DTraitDefault(t) => gf_body_pos(t.fn.body),
-        .DGlobal(g)      => gf_pos_of(g.init),
-        .DImpl(im)       => im.pos,
-        .DImport(im)     => im.pos,
-        _                => 0
+        .DFunc(f)         => f.pos,
+        .DForeign(f)      => f.pos,
+        .DTraitDefault(t) => t.fn.pos,
+        .DStruct(sd)      => sd.pos,
+        .DEnum(ed)        => ed.pos,
+        .DGenStruct(g)    => g.pos,
+        .DGenEnum(g)      => g.pos,
+        .DGlobal(g)       => g.pos,
+        .DImpl(im)        => im.pos,
+        .DImport(im)      => im.pos,
+        _                 => 0
     })
 }
 
@@ -423,12 +434,34 @@ ff_match = (s: String, a: MutPtr<Malloc>, m: MatchData, ind: i32) String {
     body := open.ff_arms(a, m.arms, maxw, ind + 1)
     body.ff_indent(a, ind).ff_append(a, "})")
 }
+// an arm's representative offset = its PATTERN byte offset (the `.Variant` / `_` token), recorded by the
+// parser — used to anchor a comment written ABOVE the arm and to bound an arm's trailing comment. The
+// pattern position is always present even when the arm body is a position-less literal (`.None => 0`),
+// which a body-derived offset would miss. 0 only for a synthesized arm (no source) → defers.
+gf_arm_pos = (ar: ArmData) i32 { ar.pos }
+// the first POSITIVE body offset among arms[from..] (0 = none) — a boundary that stops strictly before
+// the match's closing `})` (which carries no position here), so an arm's woven comment can never steal a
+// comment that sits after the whole `.match (...)` (e.g. the match statement's own trailing comment).
+gf_next_arm_pos = (arms: [ArmData], from: i32) i32 {
+    (from >= arms.len).match ({ true => { return 0 } })
+    p := gf_arm_pos(arms[from])
+    (p > 0).match ({ true => p, false => gf_next_arm_pos(arms, from + 1) })
+}
+// Comments are woven into the arm list the same way ff_stmts weaves them into a block: each arm flushes
+// the own-line comments written ABOVE it (bounded by its own offset), then — when a later positioned arm
+// gives a real upper bound — emits a same-line trailing comment. The next-arm bound is what keeps a
+// trailing comment from migrating out to after the enclosing decl's `})` (the reported relocation bug),
+// and makes re-formatting idempotent (a trailing comment always re-attaches to the same arm).
 ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) String {
     out := s
     arms.loop((h, i, ar) {
-        line := out.ff_indent(a, ind).ff_arm_pat(a, ar)
+        nb     := gf_next_arm_pos(arms, i + 1)
+        lead   := out.ff_flush_leading(a, gf_arm_pos(ar), ind)
+        line   := lead.ff_indent(a, ind).ff_arm_pat(a, ar)
         padded := line.ff_pad(a, maxw - arm_pat_len(ar))
-        out = padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",\n")
+        bodied := padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",")
+        withc  := (nb > 0).match ({ true => bodied.ff_trailing(a, nb), false => bodied })
+        out = withc.ff_append(a, "\n")
     })
     out
 }

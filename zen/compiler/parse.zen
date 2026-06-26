@@ -1,6 +1,6 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dimport_at, dgenstruct, dgenenum, dglobal, dglobal_tl, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, sdef_at, gsdef, gsdef_at, genumdef, genumdef_at, vdef, vdef_default, edef, edef_at, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dimport_at, dgenstruct, dgenenum, dglobal, dglobal_tl, dglobal_at, dglobal_tl_at, dglobal_alias_at, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
@@ -24,13 +24,13 @@ parse_decl_at = (a: MutPtr<Malloc>, src: str, pos: i32) DeclEnd {
     rt     := a.parse_ty(src, pe.next)
     params := buf.take_params(pe.count)
     src.is_lbrace(src.scan(rt.next).tok).match ({
-        true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next)),
-        false => DeclEnd( func: Func( name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body() ),
+        true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next), nt.tok.start),
+        false => DeclEnd( func: Func( name: name, params: params, ret: rt.ty, tparams: tp.names, body: a.no_body(), pos: nt.tok.start ),
         next: rt.next, foreign: true )
     })
 }
-parse_fn_body = (a: MutPtr<Malloc>, src: str, name: str, params: [Param], tparams: [Param], ret: Ty, bstart: i32) DeclEnd {
-    func := Func( name: name, params: params, ret: ret, tparams: tparams, body: a.build_body(src, bstart) )
+parse_fn_body = (a: MutPtr<Malloc>, src: str, name: str, params: [Param], tparams: [Param], ret: Ty, bstart: i32, dpos: i32) DeclEnd {
+    func := Func( name: name, params: params, ret: ret, tparams: tparams, body: a.build_body(src, bstart), pos: dpos )
     DeclEnd( func: func, next: src.skip_block(bstart), foreign: false )
 }
 parse_decl* = (a: MutPtr<Malloc>, src: str) Func { a.parse_decl_at(src, 0).func }
@@ -142,7 +142,7 @@ parse_struct_at = (a: MutPtr<Malloc>, src: str, pos: i32) StructEnd {
     buf    := a.field_buf()
     dbuf   := a.dfn_buf()
     fe     := a.fill_fields(src, bstart, buf, 0, dbuf, 0)
-    StructEnd( sd: sdef(name, buf.take_fields(fe.count)), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) )
+    StructEnd( sd: sdef_at(name, buf.take_fields(fe.count), nt.tok.start), tparams: tp.names, ntp: tp.count, next: fe.next, defaults: dbuf.take_dfns(fe.ndef) )
 }
 parse_struct* = (a: MutPtr<Malloc>, src: str) StructDecl { a.parse_struct_at(src, 0).sd }
 
@@ -223,7 +223,7 @@ parse_enum_at = (a: MutPtr<Malloc>, src: str, pos: i32) EnumEnd {
     cpos := src.skip_to_colon(nt.next)
     buf  := a.variant_buf()
     ve   := a.fill_variants(src, cpos, buf, 0)
-    EnumEnd( ed: edef(name, buf.take_variants(ve.count)), tparams: tp.names, ntp: tp.count, next: ve.next )
+    EnumEnd( ed: edef_at(name, buf.take_variants(ve.count), nt.tok.start), tparams: tp.names, ntp: tp.count, next: ve.next )
 }
 parse_enum* = (a: MutPtr<Malloc>, src: str) EnumDecl { a.parse_enum_at(src, 0).ed }
 
@@ -354,14 +354,14 @@ fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 // A module global whose init is `thread_local(x)` becomes a thread-local global with init `x`.
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
 // class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
-global_decl = (a: MutPtr<Malloc>, nm: str, init: Ptr<Expr>, alias: bool) Decl {
-    alias.match ({ true => { return dglobal_alias(nm, tvoid(), init) } })   // `name = mod` → keep the `=` form for round-trip
+global_decl = (a: MutPtr<Malloc>, nm: str, init: Ptr<Expr>, alias: bool, dpos: i32) Decl {
+    alias.match ({ true => { return dglobal_alias_at(nm, tvoid(), init, dpos) } })   // `name = mod` → keep the `=` form for round-trip
     load(init).match ({
         .Call(c) => (eq(c.fn, "thread_local") && (c.args.len == 1)).match ({
-            true  => dglobal_tl(nm, tvoid(), a.enode(c.args[0])),
-            false => dglobal(nm, tvoid(), init)
+            true  => dglobal_tl_at(nm, tvoid(), a.enode(c.args[0]), dpos),
+            false => dglobal_at(nm, tvoid(), init, dpos)
         }),
-        _ => dglobal(nm, tvoid(), init)
+        _ => dglobal_at(nm, tvoid(), init, dpos)
     })
 }
 fill_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
@@ -370,7 +370,7 @@ fill_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     mk := src.decl_marker(pos)
     alias := src.is_eq_tok(mk.tok)                        // single `=` (a module alias) vs `:=` (a value global)
     pe := a.parse_or(src, mk.next)
-    buf[i] = a.global_decl(nm, pe.expr, alias)
+    buf[i] = a.global_decl(nm, pe.expr, alias, nt.tok.start)
     a.fill_decls(src, pe.next, buf, i + 1)
 }
 // Impl methods become mangled functions plus one DImpl conformance record.
@@ -415,7 +415,7 @@ fill_impl_one = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbu
 fill_enum = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ee := a.parse_enum_at(src, pos)
     buf[i] = (ee.ntp > 0).match ({
-        true  => dgenenum(genumdef(ee.ed.name, ee.tparams, ee.ed.variants)),
+        true  => dgenenum(genumdef_at(ee.ed.name, ee.tparams, ee.ed.variants, ee.ed.pos)),
         false => denum(ee.ed)
     })
     a.fill_decls(src, ee.next, buf, i + 1)
@@ -468,8 +468,8 @@ fill_inherent_methods = (a: MutPtr<Malloc>, tyname: str, tparams: [Param], metho
 fill_inherent_struct = (a: MutPtr<Malloc>, se: StructEnd, buf: [Decl], i: i32) i32 {
     mbuf := a.param_buf()
     buf[i] = (se.ntp > 0).match ({
-        true  => dgenstruct(gsdef(se.sd.name, se.tparams, a.data_fields(se.sd.fields))),
-        false => dstruct(sdef(se.sd.name, a.data_fields(se.sd.fields)))
+        true  => dgenstruct(gsdef_at(se.sd.name, se.tparams, a.data_fields(se.sd.fields), se.sd.pos)),
+        false => dstruct(sdef_at(se.sd.name, a.data_fields(se.sd.fields), se.sd.pos))
     })
     next := a.fill_inherent_methods(se.sd.name, se.tparams, se.defaults, buf, i + 1, mbuf, 0)
     buf[next] = dimpl(se.sd.name, se.sd.name, mbuf.take_params(se.defaults.len))
@@ -482,7 +482,7 @@ fill_struct = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
         true  => a.fill_inherent_struct(se, buf, i),
         false => {
             buf[i] = (se.ntp > 0).match ({
-                true  => dgenstruct(gsdef(se.sd.name, se.tparams, se.sd.fields)),
+                true  => dgenstruct(gsdef_at(se.sd.name, se.tparams, se.sd.fields, se.sd.pos)),
                 false => dstruct(se.sd)
             })
             a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
@@ -680,13 +680,13 @@ augment_func = (a: MutPtr<Malloc>, types: [Param], traits: [Param], f: Func) Fun
     n1  := buf.collect_tv_params(types, n0, f.params)
     n2  := buf.collect_tv_ty(types, n1, f.ret)
     td  := a.desugar_trait_params(traits, buf, n2, f.params)
-    Func( name: f.name, params: td.params, ret: f.ret, tparams: buf.take_params(td.ntp), body: f.body )
+    Func( name: f.name, params: td.params, ret: f.ret, tparams: buf.take_params(td.ntp), body: f.body, pos: f.pos )
 }
 augment_dstruct = (a: MutPtr<Malloc>, types: [Param], sd: StructDecl) Decl {
     buf := a.param_buf()
     n   := buf.collect_tv_fields(types, 0, sd.fields)
     (n > 0).match ({
-        true  => dgenstruct(gsdef(sd.name, buf.take_params(n), sd.fields)),
+        true  => dgenstruct(gsdef_at(sd.name, buf.take_params(n), sd.fields, sd.pos)),
         false => dstruct(sd)
     })
 }
@@ -694,13 +694,13 @@ augment_dgenstruct = (a: MutPtr<Malloc>, types: [Param], g: GenStructDecl) Decl 
     buf := a.param_buf()
     n0  := buf.copy_tparams(g.tparams)
     n1  := buf.collect_tv_fields(types, n0, g.fields)
-    dgenstruct(gsdef(g.name, buf.take_params(n1), g.fields))
+    dgenstruct(gsdef_at(g.name, buf.take_params(n1), g.fields, g.pos))
 }
 augment_denum = (a: MutPtr<Malloc>, types: [Param], ed: EnumDecl) Decl {
     buf := a.param_buf()
     n   := buf.collect_tv_variants(types, 0, ed.variants)
     (n > 0).match ({
-        true  => dgenenum(genumdef(ed.name, buf.take_params(n), ed.variants)),
+        true  => dgenenum(genumdef_at(ed.name, buf.take_params(n), ed.variants, ed.pos)),
         false => denum(ed)
     })
 }
@@ -708,7 +708,7 @@ augment_dgenenum = (a: MutPtr<Malloc>, types: [Param], g: GenEnumDecl) Decl {
     buf := a.param_buf()
     n0  := buf.copy_tparams(g.tparams)
     n1  := buf.collect_tv_variants(types, n0, g.variants)
-    dgenenum(genumdef(g.name, buf.take_params(n1), g.variants))
+    dgenenum(genumdef_at(g.name, buf.take_params(n1), g.variants, g.pos))
 }
 rewrite_decl = (a: MutPtr<Malloc>, types: [Param], traits: [Param], d: Decl) Decl {
     d.match ({
