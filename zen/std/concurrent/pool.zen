@@ -44,6 +44,7 @@
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
 { spawn, join, JoinHandle } = std.thread
 { is_null } = std.core.ptr
+{ Ring } = std.concurrent.ring
 
 QUANTUM := 64   // max messages an actor runs per turn before yielding the worker (fairness)
 
@@ -63,6 +64,11 @@ PoolActor: {
 // A handle is an `Arc<PoolActor>` base pointer: [ count:i64 | PoolActor ]. The PoolActor value lives 8
 // bytes past the base (past the refcount header), matching std.mem.arc's layout.
 actor_view = (raw: RawPtr<u8>) MutPtr<PoolActor> { raw.offset(8).slice(1)[0].addr() }
+// the actor's mailbox as a Ring<i64> VALUE (the single shared ring, std.concurrent.ring): read the
+// {mbuf,head,tail,cap} fields out of the actor and operate on the value, writing head/tail back. The
+// ring methods slice the value's buf — no MutPtr arrow access is fed to .slice(). Messages ride as i64
+// (a pointer payload too); the value-load idiom keeps head/tail mutation exactly where the locks want it.
+actor_mb = (a: MutPtr<PoolActor>) Ring<i64> { Ring<i64>(buf: a.mbuf, head: a.head, tail: a.tail, cap: a.cap) }
 
 // build a runnable actor: Arc-allocate its block (refcount = 1, owned by the caller) + a mailbox ring.
 // NOT enqueued — the first `send` makes it runnable (design: an actor is runnable iff it has a pending
@@ -141,11 +147,11 @@ rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
 pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
     a := actor_view(actor)
     a.mbmu.lock()
-    sent := (a.tail - a.head >= a.cap).match ({
+    cur := actor_mb(a)
+    sent := cur.is_full().match ({
         true  => false,
         false => {
-            a.mbuf.offset((a.tail % a.cap) * 8).store_i64(msg)
-            a.tail = a.tail + 1
+            a.tail = cur.push(msg).tail
             true
         }
     })
@@ -176,11 +182,12 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
         true  => count,
         false => {
             a.mbmu.lock()
-            has := a.head < a.tail
+            cur := actor_mb(a)
+            has := cur.nonempty()
             msg := has.match ({
                 true  => {
-                    m := a.mbuf.offset((a.head % a.cap) * 8).load_i64()
-                    a.head = a.head + 1
+                    m := cur.peek()
+                    a.head = cur.advance().head
                     m
                 },
                 false => 0
@@ -383,10 +390,11 @@ pool_drain_inline* = (actor: RawPtr<u8>) i64 {
     drain_inline_loop(a, 0)
 }
 drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
-    (a.head < a.tail).match ({
+    cur := actor_mb(a)
+    cur.nonempty().match ({
         true => {
-            m := a.mbuf.offset((a.head % a.cap) * 8).load_i64()
-            a.head = a.head + 1
+            m := cur.peek()
+            a.head = cur.advance().head
             a.behavior(a.user, m)
             drain_inline_loop(a, count + 1)
         },
@@ -396,11 +404,11 @@ drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
 // post a message to an actor's mailbox with NO scheduling (for the inline sync driver / pre-loading).
 pool_post* = (actor: RawPtr<u8>, msg: i64) bool {
     a := actor_view(actor)
-    (a.tail - a.head >= a.cap).match ({
+    cur := actor_mb(a)
+    cur.is_full().match ({
         true  => false,
         false => {
-            a.mbuf.offset((a.tail % a.cap) * 8).store_i64(msg)
-            a.tail = a.tail + 1
+            a.tail = cur.push(msg).tail
             true
         }
     })

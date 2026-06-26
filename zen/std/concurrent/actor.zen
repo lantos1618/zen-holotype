@@ -8,81 +8,22 @@
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError } = std.core.result
 { runtime_checkpoint } = std.concurrent.runtime
+{ Ring } = std.concurrent.ring
 
-ACTOR_STATE_SIZE := 32  // RawPtr<u8> buf + head/tail/cap i64 slots.
-Mailbox: {
-    buf: RawPtr<u8>,
-    head: i64,
-    tail: i64,
-    cap: i64
-
-    send = (m: MutPtr<Mailbox>, v: i64) bool {
-        (m.tail - m.head >= m.cap).match ({
-            true => false,
-            _ => {
-                m.buf.offset((m.tail % m.cap) * 8).store_i64(v)
-                m.tail = m.tail + 1
-                true
-            }
-        })
-    }
-
-    recv = (m: MutPtr<Mailbox>) i64 {
-        v := m.buf.offset((m.head % m.cap) * 8).load_i64()
-        m.head = m.head + 1
-        v
-    }
-
-    pending = (m: Ptr<Mailbox>) i64 { m.tail - m.head }
-}
-
-mailbox_in<A> = (alloc: MutPtr<A>, cap: i64) Mailbox {
-    Mailbox(buf: alloc.acquire(cap * 8), head: 0, tail: 0, cap: cap)
-}
-mailbox<A> = (alloc: MutPtr<A>, cap: i64) Mailbox {
-    alloc.mailbox_in(cap)
-}
-
-try_mailbox_in<A> = (alloc: MutPtr<A>, cap: i64) Result<Mailbox, IoError> {
-    alloc.try_acquire(cap * 8).match ({
-        .Ok(p) => {
-            ok: Result<Mailbox, IoError> := .Ok(Mailbox(buf: p, head: 0, tail: 0, cap: cap))
-            ok
-        },
-        .Err(e) => {
-            err: Result<Mailbox, IoError> := .Err(e)
-            err
-        }
-    })
-}
-try_mailbox<A> = (alloc: MutPtr<A>, cap: i64) Result<Mailbox, IoError> {
-    alloc.try_mailbox_in(cap)
-}
-
-// release the ring's buffer; the mailbox is dead afterwards (cap 0 refuses every send).
-mailbox_free_in<A> = (alloc: MutPtr<A>, m: MutPtr<Mailbox>) void {
-    alloc.release(m.buf)
-    m.buf = null_ptr()
-    m.head = 0
-    m.tail = 0
-    m.cap = 0
-}
-mailbox_free<A> = (alloc: MutPtr<A>, m: MutPtr<Mailbox>) void {
-    alloc.mailbox_free_in(m)
-}
+ACTOR_STATE_SIZE := 32  // RawPtr<u8> buf + head/tail/cap i64 slots (one Ring<M>).
 
 Context*<M>: { msg: M }
 Receiver*<M>: {
     receive: (MutPtr<Self>, Context<M>) void
 }
 
-// Internal system state owns one allocator-backed state block plus one allocator-backed message buffer.
-// ActorRef shares the state; it never allocates or frees.
-ActorState<M>: { buf: RawPtr<u8>, head: i64, tail: i64, cap: i64 }
+// Internal system state owns one allocator-backed Ring<M> block plus one allocator-backed message
+// buffer. ActorRef shares the state; it never allocates or frees. The mailbox is a Ring<M> (the single
+// shared ring abstraction, std.concurrent.ring) held behind the RawPtr state slot.
 ActorSystem<M>: {
     state: RawPtr<u8>
 
-    state_slot = (sys: ActorSystem<M>) [ActorState<M>] { sys.state.slice(1) }
+    state_slot = (sys: ActorSystem<M>) [Ring<M>] { sys.state.slice(1) }
     ref = (sys: ActorSystem<M>) ActorRef<M> { ActorRef<M>(state: sys.state) }
     messages = (sys: ActorSystem<M>) [M] {
         state := sys.state_slot()
@@ -90,15 +31,13 @@ ActorSystem<M>: {
     }
     has_messages = (sys: ActorSystem<M>) bool {
         state := sys.state_slot()
-        state[0].head < state[0].tail
+        state[0].nonempty()
     }
     next_message = (sys: ActorSystem<M>) M {
         state := sys.state_slot()
         cur := state[0]
-        ms := sys.messages()
-        head := cur.head
-        message := ms[head % cur.cap]
-        state[0] = ActorState<M>(buf: cur.buf, head: head + 1, tail: cur.tail, cap: cur.cap)
+        message := cur.peek()
+        state[0] = cur.advance()
         message
     }
     run<ActorT> = (
@@ -125,22 +64,17 @@ ActorSystem<M>: {
 ActorRef*<M>: {
     state: RawPtr<u8>
 
-    ref_state = (ref: ActorRef<M>) [ActorState<M>] { ref.state.slice(1) }
+    ref_state = (ref: ActorRef<M>) [Ring<M>] { ref.state.slice(1) }
     send = (ref: ActorRef<M>, message: M) bool {
         state := ref.ref_state()
         cur := state[0]
-        tail := cur.tail
-        sent := false
-        (tail - cur.head >= cur.cap).match ({
-            false => {
-                ms: [M] := cur.buf.slice(cur.cap)
-                ms[tail % cur.cap] = message
-                state[0] = ActorState<M>(buf: cur.buf, head: cur.head, tail: tail + 1, cap: cur.cap)
-                sent = true
-            },
-            _
+        cur.is_full().match ({
+            true => false,
+            _ => {
+                state[0] = cur.push(message)
+                true
+            }
         })
-        sent
     }
 }
 ReplyRef*<T>: {
@@ -198,7 +132,7 @@ make_system<A, M> = (alloc: MutPtr<A>, cap: i64) ActorSystem<M> {
     state := alloc.acquire(ACTOR_STATE_SIZE)
     messages := alloc.acquire(cap * sizeof(M))
     slot := state.slice(1)
-    slot[0] = ActorState<M>(buf: messages, head: 0, tail: 0, cap: cap)
+    slot[0] = Ring<M>(buf: messages, head: 0, tail: 0, cap: cap)
     ActorSystem<M>(state: state)
 }
 try_make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoError> {
@@ -207,7 +141,7 @@ try_make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoEr
             alloc.try_acquire(cap * sizeof(M)).match ({
                 .Ok(messages) => {
                     slot := state.slice(1)
-                    slot[0] = ActorState<M>(buf: messages, head: 0, tail: 0, cap: cap)
+                    slot[0] = Ring<M>(buf: messages, head: 0, tail: 0, cap: cap)
                     ok: Result<ActorSystem<M>, IoError> := .Ok(ActorSystem<M>(state: state))
                     ok
                 },
@@ -313,33 +247,27 @@ ActorHandle*<M, ActorT>: {
         slot[0].addr()
     }
     send = (handle: ActorHandle<M, ActorT>, message: M) bool {
-        state: [ActorState<M>] := handle.inner_cell.inner.sys.state.slice(1)
+        state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
         cur := state[0]
-        tail := cur.tail
-        sent := false
-        (tail - cur.head >= cur.cap).match ({
-            false => {
-                ms: [M] := cur.buf.slice(cur.cap)
-                ms[tail % cur.cap] = message
-                state[0] = ActorState<M>(buf: cur.buf, head: cur.head, tail: tail + 1, cap: cur.cap)
-                sent = true
-            },
-            _
+        cur.is_full().match ({
+            true => false,
+            _ => {
+                state[0] = cur.push(message)
+                true
+            }
         })
-        sent
     }
     run = (handle: ActorHandle<M, ActorT>) void {
-        state: [ActorState<M>] := handle.inner_cell.inner.sys.state.slice(1)
+        state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
         actor_slot: [ActorT] := handle.state.slice(1)
         actor := actor_slot[0].addr()
         messages: [M] := state[0].buf.slice(state[0].cap)
         messages.loop((h, i, slot) {
             cur := state[0]
-            (cur.head < cur.tail).match({
+            cur.nonempty().match({
                 true => {
-                    ms: [M] := cur.buf.slice(cur.cap)
-                    message: M := ms[cur.head % cur.cap]
-                    state[0] = ActorState<M>(buf: cur.buf, head: cur.head + 1, tail: cur.tail, cap: cur.cap)
+                    message: M := cur.peek()
+                    state[0] = cur.advance()
                     actor.receive(Context<M>(msg: message))
                     runtime_checkpoint()
                 },
@@ -368,7 +296,7 @@ ActorHandle*<M, ActorT>: {
         reply_to.await(alloc)
     }
     free<A> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>) void {
-        state: [ActorState<M>] := handle.inner_cell.inner.sys.state.slice(1)
+        state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
         alloc.release(state[0].buf)
         alloc.release(handle.inner_cell.inner.sys.state)
         alloc.release(handle.state)
