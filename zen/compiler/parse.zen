@@ -1,6 +1,6 @@
 // Public parser entry and declaration parsers.
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
-{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dgenstruct, dgenenum, dglobal, dglobal_tl, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
+{ Expr, BinData, Func, Stmt, Param, Ty, Decl, Field, StructDecl, VariantDef, EnumDecl, GenStructDecl, GenEnumDecl, param, field, sdef, gsdef, genumdef, vdef, vdef_default, edef, dfunc, dstruct, denum, dimpl, dimpl_at, dforeign, dimport, dimport_at, dgenstruct, dgenenum, dglobal, dglobal_tl, dtraitdef, fnt_from_func_in, impl_cname_in, is_trait, lit, ti32, tnamed, tptr, ty_node_in, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get } = compiler.lex
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
@@ -253,6 +253,13 @@ is_walrus = (src: str, t: Token) bool {
     t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == ':') && (src.at(t.start + 1) == '='), _ => false })
 }
 decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).tok) }
+// a MODULE-ALIAS binding `name = std.mem.raw` / `name = sibling` — a `name = <ident…>` whose RHS is NOT a
+// function literal (`= (params)…`). The faithful parser would otherwise mis-read it as a function decl and
+// swallow the following decls. Routed to fill_global so the RHS parses as an ordinary (Member-chain) expr.
+decl_is_module_alias = (src: str, pos: i32) bool {
+    m := src.decl_marker(pos)
+    src.is_eq_tok(m.tok).match ({ true => is_ident_tok(src.scan(m.next).tok), false => false })
+}
 
 decl_buf = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
@@ -332,7 +339,7 @@ fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     a.note_export_if_starred(src, pos)
     src.decl_is_impl(pos).match ({
         true  => a.fill_impl(src, pos, buf, i),
-        false => src.decl_is_global(pos).match ({
+        false => (src.decl_is_global(pos) || src.decl_is_module_alias(pos)).match ({
             true  => a.fill_global(src, pos, buf, i),
             false => src.decl_is_struct(pos).match ({
                 true  => a.fill_struct(src, pos, buf, i),
@@ -347,7 +354,8 @@ fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 // A module global whose init is `thread_local(x)` becomes a thread-local global with init `x`.
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
 // class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
-global_decl = (a: MutPtr<Malloc>, nm: str, init: Ptr<Expr>) Decl {
+global_decl = (a: MutPtr<Malloc>, nm: str, init: Ptr<Expr>, alias: bool) Decl {
+    alias.match ({ true => { return dglobal_alias(nm, tvoid(), init) }, false => {} })   // `name = mod` → keep the `=` form for round-trip
     load(init).match ({
         .Call(c) => (eq(c.fn, "thread_local") && (c.args.len == 1)).match ({
             true  => dglobal_tl(nm, tvoid(), a.enode(c.args[0])),
@@ -360,8 +368,9 @@ fill_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     mk := src.decl_marker(pos)
+    alias := src.is_eq_tok(mk.tok)                        // single `=` (a module alias) vs `:=` (a value global)
     pe := a.parse_or(src, mk.next)
-    buf[i] = a.global_decl(nm, pe.expr)
+    buf[i] = a.global_decl(nm, pe.expr, alias)
     a.fill_decls(src, pe.next, buf, i + 1)
 }
 // Impl methods become mangled functions plus one DImpl conformance record.
@@ -486,7 +495,7 @@ fill_import = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     ie   := a.fill_import_names(src, src.scan(pos).next, nbuf, 0)
     eq   := src.scan(ie.next)
     pth  := a.read_import_path(src, eq.next)         // capture `std.text.fmt` text (kept for the formatter)
-    buf[i] = dimport(nbuf.take_params(ie.count), pth.text)
+    buf[i] = dimport_at(nbuf.take_params(ie.count), pth.text, src.scan(pos).tok.start)
     a.fill_decls(src, pth.next, buf, i + 1)
 }
 // Read the dotted module path `a.b.c` after an import `=`, returning its verbatim text + resume pos.
