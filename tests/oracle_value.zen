@@ -246,6 +246,18 @@ oracle_value_run* = () i32 {
     // fn) — a silent miscompile. The early-return lift turns it into `?:`; control stays in the block.
     VCase(src: "clamp<T> = (x: i32) i32 { (x > 100).match({ true => { return 100 }, false => {} })  x }\ntest* = () i32 { clamp(250) + clamp(50) }", want: "150"),
     VCase(src: "apply = (x: i32, f: (i32) i32) i32 { (x < 0).match({ true => { return 0 }, false => {} })  f(x) }\ntest* = () i32 { apply(-3, (n) { n * 2 }) + apply(5, (n) { n * 2 }) }", want: "10"),
-    VCase(src: "pick<T> = (x: i32) i32 { (x > 0).match({ true => { return 1 }, false => { return 2 } }) }\ntest* = () i32 { pick(5) * 10 + pick(-5) }", want: "12")
+    VCase(src: "pick<T> = (x: i32) i32 { (x > 0).match({ true => { return 1 }, false => { return 2 } }) }\ntest* = () i32 { pick(5) * 10 + pick(-5) }", want: "12"),
+    // Nested ARM-TAIL `return` under a NON-tail (statement-position) match. The outer match is followed
+    // by `return 90`, so it lowers to an `if`; the inner match sits in the outer arm's TAIL and its arm
+    // `return`s must stay real control flow — they were being flattened to a value `?:` and silently
+    // dropped (control fell through to `return 90`). Regression for the missed #306 case.
+    VCase(src: "f = (n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 10 }, false => { return 20 } }) },\n    false => { return 30 }\n  })\n  return 90\n}\ntest* = () i32 { f(0, 9) * 100 + f(0, 2) * 10 + f(5, 0) }", want: "2130"),
+    // Same shape but GENERIC → the body is INLINED into the caller; a dropped nested-arm `return` would
+    // become a real C `return` from the CALLER (or fall through). Must produce the same values inlined.
+    VCase(src: "classify<T> = (x: T, n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 10 }, false => { return 20 } }) },\n    false => { return 30 }\n  })\n  return 90\n}\ntest* = () i32 { classify(0, 0, 9) * 100 + classify(0, 0, 2) * 10 + classify(0, 5, 0) }", want: "2130"),
+    // BOUNDARY guard: outer match is the function's TAIL value (not stmt position) — must still work.
+    VCase(src: "g = (n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 1 }, false => { return 2 } }) },\n    false => { return 3 }\n  })\n}\ntest* = () i32 { g(0, 2) * 100 + g(0, 9) * 10 + g(7, 0) }", want: "123"),
+    // BOUNDARY guard: inner match is NOT the arm tail (a statement follows it) — already lowered, must work.
+    VCase(src: "h = (n: i32, m: i32) i32 {\n  (n == 0).match ({\n    true  => { (m < 5).match ({ true => { return 1 }, false => { return 2 } })  k := 7  return k },\n    false => { return 3 }\n  })\n  return 9\n}\ntest* = () i32 { h(0, 2) * 100 + h(0, 9) * 10 + h(7, 0) }", want: "123")
     ])
 }
