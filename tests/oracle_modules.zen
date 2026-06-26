@@ -344,6 +344,17 @@ oracle_modules_run* = () i32 {
     ModValCase(files: [
     ModFile(name: "p.zen", src: "slice = std.core.slice\ntext = std.text.str\nheap = std.mem.heap\nmain = () i32 {\n  h := heap.gpa()\n  nums := slice.dup(h.addr(), [10, 20])\n  bytes := text.dup_bytes(h.addr(), \"ab\")\n  ok := (nums[0] == 10) && (nums[1] == 20) && (bytes[0] == 'a') && (bytes[1] == 'b')\n  ok.match({ true => 0, false => 1 })\n}\n"),
     ], entry: "p.zen", want: 0),
+    // ── audit C2: a TYPE reached via a module ALIAS keeps ONE canonical C identity ────────────
+    // A qualified-alias type ref (`str.ParseError`) must mangle to the SAME C struct as the bare
+    // name `num` consumes (`{ ParseError } = std.text.str`), so a `Result<_, str.ParseError>` that
+    // mixes both import paths in one conditional unifies instead of "type mismatch in conditional".
+    ModValCase(files: [
+    ModFile(name: "p.zen", src: "{ Result } = std.core.result\nstr = std.text.str\nnum = std.text.num\npick = (s: str, b: bool) Result<i64, str.ParseError> {\n  b.match ({ true => str.try_parse_int(s), false => num.parse_i64_checked(s) })\n}\nmain = () i32 { pick(\"42\", true).match ({ .Ok(v) => to_i32(v), .Err(e) => 0 }) }\n"),
+    ], entry: "p.zen", want: 42),
+    // the acceptance combo: map alias alongside a type-bearing str alias compiles + runs.
+    ModValCase(files: [
+    ModFile(name: "p.zen", src: "{ Result } = std.core.result\nmaps = std.collections.map\nstr = std.text.str\nmain = () i32 { str.try_parse_int(\"9\").match ({ .Ok(v) => to_i32(v), .Err(e) => 0 }) }\n"),
+    ], entry: "p.zen", want: 9),
     // std.text.bytes.at vs a sibling `at`.
     ModValCase(files: [
     ModFile(name: "right.zen", src: "at* = (n: i32) i32 { n + 5 }\n"),
