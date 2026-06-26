@@ -36,6 +36,23 @@ lseek* = (fd: i32, off: i64, whence: i32) i64
 unlink* = (path: str) i32
 access* = (path: str, mode: i32) i32
 
+// directories & metadata (std.fs wraps these). `mkdir`/`rmdir`/`rename` return 0 on success, -1 on
+// error. `stat(path, buf)` fills a 144-byte `struct stat` cell (st_mode at +24, st_size at +48 on the
+// x86-64 Linux ABI) — we hand it a RawPtr<u8> at a zeroed cell and read the two fields back, exactly as
+// std.time does for `struct timespec`. glibc ≥ 2.33 exports `stat` directly (no `__xstat` shim needed).
+mkdir*  = (path: str, mode: i32) i32
+rmdir*  = (path: str) i32
+rename* = (from: str, to: str) i32
+stat*   = (path: str, buf: RawPtr<u8>) i32
+
+// directory iteration: opendir returns an opaque `DIR*` (NULL on failure), readdir returns the next
+// `struct dirent*` (NULL at end-of-stream) whose NUL-terminated name lives at +19, closedir frees the
+// stream. Both pointers are opaque to Zen — modeled as RawPtr<u8>, the C side owns the storage.
+opendir*   = (path: str) RawPtr<u8>
+readdir*   = (dir: RawPtr<u8>) RawPtr<u8>
+rewinddir* = (dir: RawPtr<u8>) void
+closedir*  = (dir: RawPtr<u8>) i32
+
 // ── process ──────────────────────────────────────────────────────────────────
 system* = (cmd: str) i32
 abort*  = () void
