@@ -44,6 +44,7 @@
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
 { spawn, join, JoinHandle } = std.thread
 { is_null } = std.core.ptr
+{ panic } = std.core.result
 { Ring } = std.concurrent.ring
 
 QUANTUM := 64   // max messages an actor runs per turn before yielding the worker (fairness)
@@ -129,7 +130,14 @@ pool_view* = (raw: RawPtr<u8>) MutPtr<Pool> { raw.slice(1)[0].addr() }
 pool_raw* = (p: MutPtr<Pool>) RawPtr<u8> { p.selfraw }
 
 // run-queue primitives — caller MUST hold `p.mu`.
+// The ring holds (rqtail - rqhead) live slots; it MUST NOT exceed rqcap or a push would overwrite a
+// still-queued actor (heap corruption / UAF). The pool is sized so rqcap >= the max # of concurrently
+// scheduled actors; if that invariant is ever violated we panic LOUDLY rather than silently corrupt.
 rq_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) void {
+    (p.rqtail - p.rqhead >= p.rqcap).match ({
+        true  => panic("pool: run-queue overflow (rqcap too small for scheduled actors)"),
+        false => {}
+    })
     p.rqbuf.offset((p.rqtail % p.rqcap) * 8).store_i64(actor)
     p.rqtail = p.rqtail + 1
 }
