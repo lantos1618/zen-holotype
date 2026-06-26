@@ -68,7 +68,6 @@ report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProg
         }
     })
 }
-
 // run/build temp.c swaps the emitted HEAD typedef for the zenrt.h include; the PROG variant also
 // suppresses zenrt's String (the program emits its own). --build-self uses the plain seed variant.
 // module-level str CONSTS don't emit as C globals in the seed, so these are zero-arg fns.
@@ -169,13 +168,10 @@ emit_file = (mp: MutPtr<Malloc>, root: str, a2: str, a3: str) i32 {
     force := flag2 || eq(a3, "--force") || eq(a3, "--no-check")
     force.match ({ true => mp.emit_raw(root, path), false => mp.emit_checked(root, path) })
 }
-// raw: resolve imports + emit, NO type-check (the --force escape hatch).
-emit_raw = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
-    contents_in(mp, path).match ({
-        .Ok(src) => { out_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(mp.flatten(root, path, src)))).bytes())  0 },
-        .Err(e)  => { derr("zenc: cannot read input\n")  1 }
-    })
-}
+// --force: resolve imports + emit, but STILL run the strict validator (audit C4) — a type error fails
+// the emit rather than producing C that silently miscompiles. `--force`/`--no-check` is retained for CLI
+// compatibility but no longer bypasses the checker; it now behaves exactly like the checked emit path.
+emit_raw = (mp: MutPtr<Malloc>, root: str, path: str) i32 { mp.emit_checked(root, path) }
 // checked: run the full report_check pipeline; emit only when clean, else exit 1 with the diagnostic.
 emit_checked = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
     contents_in(mp, path).match ({
@@ -418,16 +414,37 @@ bs_write = (out_path: str, gen: String) bool {
         false => { hv := BS_HEAD_REPL().view()  fd.write(hv.ptr, hv.len)  fd.write(gen.ptr.offset(hl), end - hl)  fd.close()  true }
     })
 }
+// emit the seed from the manifest concatenation `flat` (kept byte-exact), but ONLY after the compiler's
+// own source has passed its strict validator. The manifest flat itself is NOT directly checkable — it
+// deliberately omits the std modules whose symbols zenrt.c provides at the C level (`view`, `String`, …),
+// so as a raw concatenation it references hundreds of "undefined" runtime names. So validation runs on
+// the IMPORT-RESOLVED `driver.zen` entry (the same path `zenc check driver.zen` uses): that pulls in
+// those std modules so the names ARE declared, dedups, and runs the full checker over the real program.
+bs_emit_checked = (mp: MutPtr<Malloc>, root: str, out_path: str, flat: str, entry: str, esrc: str) i32 {
+    rp    := mp.resolve_prog(root, entry, esrc)
+    raw   := mp.parse_module(rp.flat)
+    decls := mp.resolve_module(raw)
+    (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
+        false => 1,                                                                  // type error in compiler source — fail, don't regenerate a miscompiled seed
+        true  => {
+            gen := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))
+            gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
+                true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
+                false => { derr("zenc: --build-self: emitted C did not start with the expected head\n")  1 }
+            })
+        }
+    })
+}
 build_self = (mp: MutPtr<Malloc>, root: str, out_path: str) i32 {
     mpath := mp.bs_join(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
-            mv   := man.view()
-            flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
-            gen  := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))
-            gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
-                true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
-                false => { derr("zenc: --build-self: emitted C did not start with the expected head\n")  1 }
+            mv    := man.view()
+            flat  := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
+            entry := mp.bs_join(root, "driver.zen")
+            contents_in(mp, entry).match ({
+                .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc),
+                .Err(e)   => { derr("zenc: --build-self: cannot open driver.zen for validation\n")  1 }
             })
         },
         .Err(e) => { derr("zenc: --build-self: cannot open bootstrap/sources.txt\n")  1 }
@@ -531,15 +548,17 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: str, a3: str) i32 {
 Spec*: { source: str, out: str, ccflags: str, links: str, ok: bool }
 join2 = (mp: MutPtr<Malloc>, a: str, b: str) str { mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp) }
 link_flag = (mp: MutPtr<Malloc>, lk: str) str { mp.gstr_string(8).gstr_append(mp, "-l").gstr_append(mp, lk).gstr_finish(mp) }
-// src[start .. start+n) as an owned str.
-substr = (mp: MutPtr<Malloc>, s: str, start: i32, n: i32) str {
+// src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
+// generic `substr` once the modules are flattened together — a plain `substr` would emit a second
+// C `substr` definition.)
+cstr_substr = (mp: MutPtr<Malloc>, s: str, start: i32, n: i32) str {
     v: [u8] := s.view()
     mp.bs_push_range(mp.gstr_string(n + 1), v, start, start + n).gstr_finish(mp)
 }
 // a zen.toml `key = "value"` -> the value (or "" if absent), via the Zen manifest parser.
 manifest_value = (mp: MutPtr<Malloc>, src: str, key: str) str {
     sp := manifest_value_span(src, to_i32(src.view().len), key, 0)
-    (sp.start < 0).match ({ true => "", false => mp.substr(src, sp.start, sp.len) })
+    (sp.start < 0).match ({ true => "", false => mp.cstr_substr(src, sp.start, sp.len) })
 }
 // read <dir>/zen.toml -> a project Spec (ok=false if absent or missing root/main).
 proj_spec = (mp: MutPtr<Malloc>, dir: str) Spec {
