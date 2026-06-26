@@ -1324,11 +1324,95 @@ block_of = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     stmts.loop((h, i, st) { buf[i] = (i == stmts.len - 1).match ({ true => ret_to_expr(st), false => st }) })
     a.cenode(block(buf))
 }
-// One value statement inlines directly; larger bodies become block expressions.
+// Does a statement (sequence) contain a `return`? Recurses ONLY through If branches — a discarded
+// match lowers to an If (lower_match_arms), so an arm `return` lives in an If body. (While/Loop bodies
+// are NOT followed: a return inside a real loop can't be lifted to a ?: and is left to the old path.)
+stmt_has_return = (st: Stmt) bool {
+    st.match ({
+        .Return(r) => true,
+        .If(f)     => f.then.body_has_return() || f.els.body_has_return(),
+        _          => false
+    })
+}
+body_has_return = (stmts: [Stmt]) bool {
+    found := false
+    stmts.loop((h, i, st) { found = st.stmt_has_return().match ({ true => true, false => found }) })
+    found
+}
+// A body needs the early-return lift when a `return` appears anywhere except as the clean TRAILING
+// top-level statement: a non-final top-level `return`, or any If whose branch contains a `return`.
+// When inlined, the body is spliced into a GCC statement-expression `({ … })`, so a real C `return`
+// would exit the CALLER's function — a silent miscompile. The lift below rewrites such returns into
+// `?:` so control never escapes the block.
+needs_early_lift = (stmts: [Stmt]) bool {
+    n     := stmts.len
+    found := false
+    stmts.loop((h, i, st) {
+        st.match ({
+            .Return(r) => { (i != n - 1).match ({ true => { found = true }, _ }) },
+            .If(f)     => { (f.then.body_has_return() || f.els.body_has_return()).match ({ true => { found = true }, _ }) },
+            _ => {}
+        })
+    })
+    found
+}
+// Concatenate two statement slices into a fresh buffer.
+cat_stmts = (a: MutPtr<Malloc>, xs: [Stmt], ys: [Stmt]) [Stmt] {
+    buf := a.sbuf(xs.len + ys.len)
+    xs.loop((h, i, s) { buf[i] = s })
+    ys.loop((h, i, s) { buf[xs.len + i] = s })
+    buf
+}
+// stmts[1..] in a fresh buffer.
+stmt_tail = (a: MutPtr<Malloc>, xs: [Stmt]) [Stmt] {
+    buf := a.sbuf(xs.len - 1)
+    xs.loop((h, i, s) { (i > 0).match ({ true => { buf[i - 1] = s }, _ }) })
+    buf
+}
+// `({ head; <value> })` — a head statement followed by the value expression.
+block_cons = (a: MutPtr<Malloc>, head: Stmt, value: Ptr<Expr>) Ptr<Expr> {
+    buf := a.sbuf(2)
+    buf[0] = head
+    buf[1] = sexpr(value)
+    a.cenode(block(buf))
+}
+// Lift early returns out of an inlined body: turn a statement sequence (in value position) into a
+// SINGLE expression. An If whose branches return becomes `cond ? thenVal : elseVal`, where each
+// branch's value is the branch body followed by the remaining statements (the continuation) — so a
+// `return` simply stops the sequence (its tail is dead) and never lowers to a C `return`. Only ONE
+// branch runs at a time, so duplicating the continuation into both arms is sound (no double effects).
+cps_value = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+    (stmts.len == 0).match ({
+        true  => a.cenode(block(no_stmts())),
+        false => {
+            head := stmts[0]
+            rest := a.stmt_tail(stmts)
+            head.match ({
+                .Return(r) => r,                                  // tail is dead
+                .If(f)     => (f.then.body_has_return() || f.els.body_has_return()).match ({
+                    true  => a.cenode(cond(f.c, a.cps_value(a.cat_stmts(f.then, rest)), a.cps_value(a.cat_stmts(f.els, rest)))),
+                    false => (rest.len == 0).match ({
+                        true  => a.cenode(block(stmts)),          // trailing for-effect If (void value)
+                        false => a.block_cons(head, a.cps_value(rest))
+                    })
+                }),
+                _          => (rest.len == 0).match ({
+                    true  => head.match ({ .ExprStmt(e) => e, _ => a.cenode(block(stmts)) }),
+                    false => a.block_cons(head, a.cps_value(rest))
+                })
+            })
+        }
+    })
+}
+// One value statement inlines directly; larger bodies become block expressions. A body with a
+// non-tail return is lifted into `?:` first (early-return → exits only the inlined block, not the caller).
 blockify = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
-    (stmts.len == 1).match ({
-        true  => stmts[0].match ({ .Return(e) => e, .ExprStmt(e) => e, _ => a.block_of(stmts) }),
-        false => a.block_of(stmts)
+    stmts.needs_early_lift().match ({
+        true  => a.cps_value(stmts),
+        false => (stmts.len == 1).match ({
+            true  => stmts[0].match ({ .Return(e) => e, .ExprStmt(e) => e, _ => a.block_of(stmts) }),
+            false => a.block_of(stmts)
+        })
     })
 }
 xform_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, args: [Expr], params: [Param], fargs: [Expr], env: Ptr<VList>) [Expr] {

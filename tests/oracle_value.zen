@@ -232,6 +232,12 @@ oracle_value_run* = () i32 {
     VCase(src: "clamp = (x: i64, lo: i64, hi: i64) i64 { (x < lo).match ({ true => lo, false => (x > hi).match ({ true => hi, false => x }) }) }\ntest* = () i64 { clamp(15, 0, 10) }", want: "10"),
     VCase(src: "sqrt_iter = (x: f64, g: f64, n: i64) f64 { (n == 0).match ({ true => g, false => { ng := (g + x / g) / 2.0  (ng == g).match ({ true => g, false => sqrt_iter(x, ng, n - 1) }) } }) }\ntest* = () i64 { to_i64(sqrt_iter(16.0, 16.0, 100)) }", want: "4"),
     VCase(src: "sqrt_iter = (x: f64, g: f64, n: i64) f64 { (n == 0).match ({ true => g, false => { ng := (g + x / g) / 2.0  (ng == g).match ({ true => g, false => sqrt_iter(x, ng, n - 1) }) } }) }\ntest* = () i64 { to_i64(sqrt_iter(2.0, 2.0, 100) * 1000000.0) }", want: "1414213"),
-    VCase(src: "test* = () i64 { x: i64 := 12345  x = (x ^ (x << 13)) & 4294967295  x = x ^ (x >> 17)  x = (x ^ (x << 5)) & 4294967295  x }", want: "3336926330")
+    VCase(src: "test* = () i64 { x: i64 := 12345  x = (x ^ (x << 13)) & 4294967295  x = x ^ (x >> 17)  x = (x ^ (x << 5)) & 4294967295  x }", want: "3336926330"),
+    // Non-tail `return` in an INLINED body (generic / FnT-param). The body is spliced into a GCC
+    // statement-expression at the call site, so an un-lifted `return` would exit the CALLER (the test
+    // fn) — a silent miscompile. The early-return lift turns it into `?:`; control stays in the block.
+    VCase(src: "clamp<T> = (x: i32) i32 { (x > 100).match({ true => { return 100 }, false => {} })  x }\ntest* = () i32 { clamp(250) + clamp(50) }", want: "150"),
+    VCase(src: "apply = (x: i32, f: (i32) i32) i32 { (x < 0).match({ true => { return 0 }, false => {} })  f(x) }\ntest* = () i32 { apply(-3, (n) { n * 2 }) + apply(5, (n) { n * 2 }) }", want: "10"),
+    VCase(src: "pick<T> = (x: i32) i32 { (x > 0).match({ true => { return 1 }, false => { return 2 } }) }\ntest* = () i32 { pick(5) * 10 + pick(-5) }", want: "12")
     ])
 }
