@@ -107,7 +107,7 @@ dnorm_col = (flat: str, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
 // the entry point main.c calls per candidate source: flat = import-flattened source the checker saw,
 // user = one real source file, offset = the error's flat byte offset, span_width = its width.
 diag_user_span* = (flat: str, user: str, offset: i32, span_width: i32) DiagSpan {
-    (offset <= 0).match ({ true => { return dspan_none() }, false => {} })
+    (offset <= 0).match ({ true => { return dspan_none() } })
     ls    := flat.dline_start(offset)
     llen  := flat.dline_len(ls, 0)
     rel   := offset - ls
@@ -116,7 +116,7 @@ diag_user_span* = (flat: str, user: str, offset: i32, span_width: i32) DiagSpan 
 
     // 1) exact line-text match
     exact := user.duser_line(flat, ls, llen)
-    (exact > 0).match ({ true => { return DiagSpan(line: exact, col: rel + 1, end_col: rel + span_width) }, false => {} })
+    (exact > 0).match ({ true => { return DiagSpan(line: exact, col: rel + 1, end_col: rel + span_width) } })
 
     // 2) alias `__`-removal inverse
     lead := flat.dlead_ws(ls, llen, 0)
@@ -125,14 +125,14 @@ diag_user_span* = (flat: str, user: str, offset: i32, span_width: i32) DiagSpan 
         true  => {
             rn   := j + 2 - lead
             al   := user.duser_line_alias(flat, ls, llen, lead, rn)
-            (al > 0).match ({ true => { return DiagSpan(line: al, col: rel.dremoved_col(lead, rn), end_col: erel.dremoved_col(lead, rn)) }, false => {} })
+            (al > 0).match ({ true => { return DiagSpan(line: al, col: rel.dremoved_col(lead, rn), end_col: erel.dremoved_col(lead, rn)) } })
         },
         false => {}
     })
 
     // 3) on-the-fly `__`==`.` normalized match
     nsl := user.duser_line_ns_at(0, flat, ls, llen, 1)
-    (nsl > 0).match ({ true => { return DiagSpan(line: nsl, col: flat.dnorm_col(ls, llen, rel, 0, 1), end_col: flat.dnorm_col(ls, llen, erel, 0, 1)) }, false => {} })
+    (nsl > 0).match ({ true => { return DiagSpan(line: nsl, col: flat.dnorm_col(ls, llen, rel, 0, 1), end_col: flat.dnorm_col(ls, llen, erel, 0, 1)) } })
 
     dspan_none()
 }
@@ -167,13 +167,13 @@ mf_close = (s: str, i: i32, e: i32) i32 {
 // parse one line [p,e) for `key = "value"` -> the value span, or mf_none
 mf_line = (s: str, p: i32, e: i32, key: str) MfSpan {
     i0 := s.mf_skip_ws(p, e)
-    ((i0 >= e) || (s.at(i0) == '#')).match ({ true => { return mf_none() }, false => {} })
+    ((i0 >= e) || (s.at(i0) == '#')).match ({ true => { return mf_none() } })
     ak := s.mf_key_at(i0, e, key, 0)
-    (ak < 0).match ({ true => { return mf_none() }, false => {} })
+    (ak < 0).match ({ true => { return mf_none() } })
     i1 := s.mf_skip_ws(ak, e)
-    ((i1 >= e) || (s.at(i1) != '=')).match ({ true => { return mf_none() }, false => {} })
+    ((i1 >= e) || (s.at(i1) != '=')).match ({ true => { return mf_none() } })
     i2 := s.mf_skip_ws(i1 + 1, e)
-    ((i2 >= e) || (s.at(i2) != '"')).match ({ true => { return mf_none() }, false => {} })
+    ((i2 >= e) || (s.at(i2) != '"')).match ({ true => { return mf_none() } })
     start := i2 + 1
     ce := s.mf_close(start, e)
     (ce < 0).match ({ true => mf_none(), false => MfSpan(start: start, len: ce - start) })
@@ -183,10 +183,10 @@ mf_line_end = (s: str, p: i32, len: i32) i32 {
 }
 // scan `src` (length `len`) for `key`'s value, starting at line `p`. The driver calls with p=0.
 manifest_value_span* = (src: str, len: i32, key: str, p: i32) MfSpan {
-    (p >= len).match ({ true => { return mf_none() }, false => {} })
+    (p >= len).match ({ true => { return mf_none() } })
     e := src.mf_line_end(p, len)
     r := src.mf_line(p, e, key)
-    (r.start >= 0).match ({ true => { return r }, false => {} })
+    (r.start >= 0).match ({ true => { return r } })
     np := ((e < len) && (src.at(e) == '\r') && (e + 1 < len) && (src.at(e + 1) == '\n')).match ({ true => e + 2, false => e + 1 })
     (e >= len).match ({ true => mf_none(), false => src.manifest_value_span(len, key, np) })
 }
@@ -229,19 +229,19 @@ render_diagnostic* = (a: MutPtr<Malloc>, in_path: str, user: str, line: i32, col
     cap := 1024 + in_path.view().len + kind.view().len + message.view().len + hint.view().len + user.view().len * 4
     s := a.gstr_string(cap)
     s = s.gstr_append(a, "zenc: ").gstr_append(a, in_path)
-    ((line > 0) && (col > 0)).match ({ true => { s = s.gstr_push(a, ':').dnum(a, line).gstr_push(a, ':').dnum(a, col) }, false => {} })
+    ((line > 0) && (col > 0)).match ({ true => { s = s.gstr_push(a, ':').dnum(a, line).gstr_push(a, ':').dnum(a, col) } })
     s = s.gstr_append(a, ": error[").gstr_append(a, kind).gstr_append(a, "]: ").gstr_append(a, message)
     (count > 1).match ({ true => {
             s = s.gstr_append(a, " (+").dnum(a, count - 1).gstr_append(a, " more error")
             // no method chained after a .match (parser limitation): push the closing chars inside the arms
             s = (count - 1 == 1).match ({ true => s.gstr_push(a, ')'), false => s.gstr_push(a, 's').gstr_push(a, ')') })
-        }, false => {} })
+        } })
     s = s.gstr_push(a, '\n')
     ((line > 0) && (col > 0)).match ({ true => {
             ls := user.dline_off(line, 0)
             width := (end_col >= col).match ({ true => end_col - col + 1, false => 1 })
             s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
             s = s.gstr_append(a, "  ").dput_blanks(a, user, ls, col, 0).dput_carets(a, width, 0).gstr_push(a, '\n')
-        }, false => {} })
+        } })
     (hint.at(0) == 0).match ({ true => s.gstr_finish(a), false => s.gstr_append(a, "hint: ").gstr_append(a, hint).gstr_push(a, '\n').gstr_finish(a) })
 }

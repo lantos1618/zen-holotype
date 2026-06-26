@@ -60,7 +60,7 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: str, pos: i32) TParamEnd {
 // at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
 record_tparam = (a: MutPtr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: sc.next ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: sc.next ) } })
     nm    := a.lexeme(src, sc.tok)
     colon := src.scan(sc.next)                           // peek: a `:` introduces a trait bound
     src.is_colon(colon.tok).match ({
@@ -114,7 +114,7 @@ fill_field_default = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i3
 }
 fill_field = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     // Guard both field and default-method buffers.
-    ((i >= buf.len) || (dn >= dbuf.len)).match ({ true => { perr_set()  return FieldsEnd( count: i, ndef: dn, next: pos ) }, false => {} })
+    ((i >= buf.len) || (dn >= dbuf.len)).match ({ true => { perr_set()  return FieldsEnd( count: i, ndef: dn, next: pos ) } })
     nt    := src.scan(pos)
     nm    := a.lexeme(src, nt.tok)
     mk    := src.decl_marker(pos)
@@ -154,7 +154,7 @@ has_data_field = (fields: [Field]) bool {
 }
 data_field_count = (fields: [Field]) i32 {
     n := 0
-    fields.loop((h, i, f) { f.field_is_method().match ({ true => {}, false => { n = n + 1 } }) })
+    fields.loop((h, i, f) { f.field_is_method().match ({ false => { n = n + 1 } }) })
     n
 }
 data_fields = (a: MutPtr<Malloc>, fields: [Field]) [Field] {
@@ -191,7 +191,7 @@ fill_variants = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i3
 }
 fill_variant = (a: MutPtr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32) PEnd {
     // Guard the variant buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: nt.next ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return PEnd( count: i, next: nt.next ) } })
     nm   := a.lexeme(src, nt.tok)
     pk   := src.scan(nt.next)
     vd   := a.variant_after(src, nm, nt, pk)
@@ -296,7 +296,7 @@ import_buf = (a: MutPtr<Malloc>) [Param] { slice(a.acquire(256 * sizeof(Param)),
 ImportEnd*: { count: i32, next: i32 }
 record_name = (a: MutPtr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportEnd {
     // Guard the import-name buffer.
-    (i >= buf.len).match ({ true => { perr_set()  return ImportEnd( count: i, next: sc.next ) }, false => {} })
+    (i >= buf.len).match ({ true => { perr_set()  return ImportEnd( count: i, next: sc.next ) } })
     buf[i] = param(a.lexeme(src, sc.tok), tvoid())
     a.fill_import_names(src, sc.next, buf, i + 1)
 }
@@ -316,7 +316,7 @@ fill_import_names = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32
 
 fill_decls = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     // Leave one slot for the syntax-error sentinel.
-    (i >= buf.len - 1).match ({ true => { perr_set()  buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  return i + 1 }, false => {} })
+    (i >= buf.len - 1).match ({ true => { perr_set()  buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))  return i + 1 } })
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,
@@ -355,7 +355,7 @@ fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
 // class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
 global_decl = (a: MutPtr<Malloc>, nm: str, init: Ptr<Expr>, alias: bool) Decl {
-    alias.match ({ true => { return dglobal_alias(nm, tvoid(), init) }, false => {} })   // `name = mod` → keep the `=` form for round-trip
+    alias.match ({ true => { return dglobal_alias(nm, tvoid(), init) } })   // `name = mod` → keep the `=` form for round-trip
     load(init).match ({
         .Call(c) => (eq(c.fn, "thread_local") && (c.args.len == 1)).match ({
             true  => dglobal_tl(nm, tvoid(), a.enode(c.args[0])),
@@ -405,7 +405,7 @@ fill_impl_methods = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32,
 }
 fill_impl_one = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
     // Impl methods fill both decl and method-name buffers.
-    ((i >= buf.len - 1) || (m >= mbuf.len)).match ({ true => { perr_set()  return ImplEnd( decls: i, methods: m, next: pos ) }, false => {} })
+    ((i >= buf.len - 1) || (m >= mbuf.len)).match ({ true => { perr_set()  return ImplEnd( decls: i, methods: m, next: pos ) } })
     de := a.parse_decl_at(src, pos)
     cn := a.impl_cname_in(trname, tyname, de.func.name)
     buf[i]  = dfunc(Func( name: cn, params: de.func.params, ret: de.func.ret, tparams: de.func.tparams, body: de.func.body ))

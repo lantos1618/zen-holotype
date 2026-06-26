@@ -1284,15 +1284,15 @@ own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<Dead
     out := seen
     // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
     nm := env.consume_name(st)
-    nm.is_empty().match ({ true => {}, false => { out = a.dead_cons(nm, out) } })
+    nm.is_empty().match ({ false => { out = a.dead_cons(nm, out) } })
     // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead.
     fn := env.alloc_free_stmt_name(st)
-    fn.is_empty().match ({ true => {}, false => { out = a.dead_cons(fn, out) } })
+    fn.is_empty().match ({ false => { out = a.dead_cons(fn, out) } })
     // 3. revival — a (re)bind of a local clears its dead state. Runs LAST so `p = a.resize(p, n)`
     //    (free old p in step 2, then rebind p here) nets to ALIVE, while `q := a.resize(p, n)` leaves
     //    p dead (q != p).
     rb := rebind_stmt_name(st)
-    rb.is_empty().match ({ true => {}, false => { out = a.dead_remove(out, rb) } })
+    rb.is_empty().match ({ false => { out = a.dead_remove(out, rb) } })
     out
 }
 own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
@@ -2455,7 +2455,7 @@ is_scope_param_ty = (t: Ty) bool {
 }
 scope_params = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
     out := a.dead_nil()
-    params.loop((h, i, p) { p.ty.is_scope_param_ty().match ({ true => { out = a.dead_cons(p.name, out) }, false => {} }) })
+    params.loop((h, i, p) { p.ty.is_scope_param_ty().match ({ true => { out = a.dead_cons(p.name, out) } }) })
     out
 }
 // the root Var name of a member/arrow chain (`s.alloc` -> "s"); "" if not rooted at a plain Var.
@@ -2560,7 +2560,7 @@ block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadL
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r)   => { f = a.expr_escapes(svars, d, r).match ({ true => true, false => f }) },
-            .ExprStmt(e) => (i == stmts.len - 1).match ({ true => { f = a.expr_escapes(svars, d, e).match ({ true => true, false => f }) }, false => {} }),
+            .ExprStmt(e) => (i == stmts.len - 1).match ({ true => { f = a.expr_escapes(svars, d, e).match ({ true => true, false => f }) } }),
             _            => {}
         })
         d = a.escape_step(svars, d, st)
@@ -2571,7 +2571,7 @@ block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadL
 escape_step = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     out := derived
     st.match ({
-        .Let(l) => svars.let_taints(derived, l.value).match ({ true => { out = a.dead_cons(l.name, derived) }, false => {} }),
+        .Let(l) => svars.let_taints(derived, l.value).match ({ true => { out = a.dead_cons(l.name, derived) } }),
         _       => {}
     })
     out
