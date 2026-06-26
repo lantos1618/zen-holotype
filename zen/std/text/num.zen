@@ -85,6 +85,53 @@ try_integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> {
 
 try_integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> { a.try_integer_in(n) }
 
+// ── unsigned (u64) integer formatting ────────────────────────────────────────
+//
+// integer_in above is i64-bound: a u64 magnitude above i64 max (e.g. 18446744073709551615)
+// would print as a negative. These mirror it with `n: u64`, so `/` and `%` lower to UNSIGNED
+// C ops and the full 0 .. 2^64-1 range renders correctly.
+num_uudigit_count = (n: u64) i64 {
+    (n < 10).match ({
+        true  => 1,
+        false => 1 + num_uudigit_count(n / 10)
+    })
+}
+
+num_uwrite_udigits = (p: RawPtr<u8>, at: i64, n: u64) i64 {
+    (n < 10).match ({
+        true => {
+            p.offset(at).store('0' + to_i64(n))
+            at + 1
+        },
+        false => {
+            next := num_uwrite_udigits(p, at, n / 10)
+            p.offset(next).store('0' + to_i64(n % 10))
+            next + 1
+        }
+    })
+}
+
+num_uinteger_from_ptr = (p: RawPtr<u8>, n: u64, cap: i64) String {
+    String( ptr: p, len: num_uwrite_udigits(p, 0, n), cap: cap )
+}
+
+uinteger_in*<A> = (a: MutPtr<A>, n: u64) String {
+    cap := num_uudigit_count(n) + 1
+    num_uinteger_from_ptr(a.acquire(cap), n, cap)
+}
+
+uinteger*<A> = (a: MutPtr<A>, n: u64) String { a.uinteger_in(n) }
+
+try_uinteger_in*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError> {
+    cap := num_uudigit_count(n) + 1
+    a.try_acquire(cap).match ({
+        .Ok(p)  => ok(num_uinteger_from_ptr(p, n, cap)),
+        .Err(e) => err(e)
+    })
+}
+
+try_uinteger*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError> { a.try_uinteger_in(n) }
+
 num_copy_text = (p: RawPtr<u8>, at: i64, s: str, i: i64) i64 {
     b := s.offset(i).load()
     (b == '\0').match ({
