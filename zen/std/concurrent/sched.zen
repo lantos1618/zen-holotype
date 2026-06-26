@@ -1,6 +1,6 @@
 // @self-hosted-only: cooperative round-robin scheduler over stackful coroutines.
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 { Coro } = std.concurrent.coroutine
 
 flag_slot = (flags: RawPtr<u8>, i: i64) RawPtr<u8> { flags.offset(i * 8) }
@@ -47,21 +47,19 @@ run*<A> = (alloc: MutPtr<A>, coros: [Coro]) void {
     alloc.run_in(coros)
 }
 
-run_ok = () Result<i32, IoError> { .Ok(0) }
-run_err = (e: IoError) Result<i32, IoError> { .Err(e) }
 
 try_run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError> {
     n := coros.len
     out: Result<i32, IoError> := (n <= 0).match({
-        true => run_ok(),
+        true => ok(0),
         false => alloc.try_acquire(n * 8).match({
             .Ok(flags) => {
                 flags.init_flags(0, n)
                 coros.drive(flags, n)
                 alloc.release(flags)
-                run_ok()
+                ok(0)
             },
-            .Err(e) => run_err(e)
+            .Err(e) => err(e)
         })
     })
     out
