@@ -1,7 +1,8 @@
 # Concurrency model — Pony semantics, Zig-pluggable mechanisms, statically-safe sends
 
 **Status:** canonical design. Supersedes the `checkpoint`/coroutine "colorless via `Runtime.suspend`"
-thesis in `scope-runtime-goal.md` (§"What dies", below).
+thesis in [`scope-runtime-goal.md`](scope-runtime-goal.md) (§"What dies", below).
+**Build plan:** the staged, oracle-gated execution of this spec is [`pluggable-runtime-plan.md`](pluggable-runtime-plan.md).
 **One line:** *fix the semantics (Pony: actors, `send`, run-to-completion, no color); make every
 mechanism a policy the user passes (Zig: mailbox / scheduler / allocator / collector); guarantee safe
 sends statically (the move/escape/UAF checker), not with a GC or a capability lattice.*

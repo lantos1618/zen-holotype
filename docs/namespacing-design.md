@@ -1,6 +1,9 @@
 # Resolver Namespacing — Design
 
-*Status: design only, read-only investigation. Author: design agent, 2026-06-22.*
+> **STATUS: implemented.** The resolver namespacing described here has since landed. This doc is kept
+> for design history / rationale.
+
+*Status (at time of writing): design only, read-only investigation. Author: design agent, 2026-06-22.*
 *Target file for the real doc: `docs/namespacing-design.md`.*
 
 ## Executive summary

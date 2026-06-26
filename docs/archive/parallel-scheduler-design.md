@@ -1,3 +1,9 @@
+> **ARCHIVED.** The working summary of this design now lives as
+> "[Future work: work-stealing scheduler](../pluggable-runtime-plan.md#future-work-work-stealing-scheduler-multi-threaded)"
+> in [`../pluggable-runtime-plan.md`](../pluggable-runtime-plan.md). Cut 1 of this scheduler has since
+> SHIPPED (`std.concurrent.pool`, PRs #289-293). This full design is retained for its detailed
+> current-state trace, race-hazard list, and open questions.
+
 # Parallelism Goal (D): a multi-threaded work-stealing scheduler for Zen actors + coroutines
 
 **Status:** design only (read-only task). No code changed.
