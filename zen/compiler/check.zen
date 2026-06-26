@@ -195,10 +195,21 @@ named_has = (decls: [Decl], ename: str, vn: str) bool {
     decls.loop((h, i, d) { found = d.match ({ .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.enum_has(vn), false => found }), _ => found }) })
     found
 }
-// Constructor enum: expected type wins, otherwise scan by variant name.
+// The base enum name an expected/annotated type names: a generic instance (`Opt2<i32>`) wants its
+// base `Opt2` (the GenEnumDecl key), not the mangled `Opt2_i32`; a plain enum its own name.
+exp_enum_base = (t: Ty) str { t.match ({ .Generic(g) => g.name, _ => t.enum_name() }) }
+// Constructor enum for a bare `.Foo` literal: the expected/annotated type WINS — try its concrete
+// enum, then its generic enum (so an annotated `Opt2<i32>` disambiguates `.Some` from a stdlib `Opt`
+// that shares the name) — only then fall back to scanning the ambient scope by variant name.
 ctor_enum_plain = (env: Env, vn: str) str {
-    en := env.exp.enum_name()
-    env.decls.named_has(en, vn).match ({ true => en, false => env.decls.enum_of_variant(vn) })
+    base := env.exp.exp_enum_base()
+    env.decls.named_has(base, vn).match ({
+        true  => base,
+        false => env.decls.find_genenum(base).gen_enum_has(vn).match ({
+            true  => base,
+            false => env.decls.enum_of_variant(vn)
+        })
+    })
 }
 
 // Infer expression types needed by resolve and validate.
