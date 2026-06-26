@@ -9,7 +9,7 @@
 { at } = std.text.bytes
 { eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ is_op, is_lparen, is_ident_tok, lexeme } = compiler.parse_expr
+{ is_op, is_lparen, is_ident_tok, is_dot, lexeme } = compiler.parse_expr
 
 // ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
 // The recursive-descent parsers have no error channel (every result is a plain value), so a parse
@@ -211,12 +211,61 @@ fill_anon_field = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) 
         })
     })
 }
-// a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name.
+// copy the raw source span `[start, endpos)` into a fresh NUL-terminated string. Used to materialize a
+// QUALIFIED type name (`io.Writer`) verbatim — the `.` and the segments are contiguous in source.
+lexeme_range = (a: MutPtr<Malloc>, src: str, start: i32, endpos: i32) str {
+    n := endpos - start
+    p := a.acquire(n + 1)
+    i := 0
+    @while (i < n) { store(offset(p, i), at(src, start + i))  i = i + 1 }
+    store(offset(p, n), 0)
+    cstr(p)
+}
+// Walk a `.ident.ident…` qualifier chain that follows the head name token, returning the scan of the
+// FINAL ident segment (`io.Vec` → the `Vec` token; its `.next` resumes after it). ITERATIVE so a deep
+// `a.b.c.d` qualifier never recurses per-segment.
+qual_end = (src: str, after_name: i32) Scan {
+    last := src.scan(after_name)                             // updated to each segment ident as we go
+    cur  := after_name
+    @while (src.is_dot(src.scan(cur).tok) && is_ident_tok(src.scan(src.scan(cur).next).tok)) {
+        last = src.scan(src.scan(cur).next)                  // the ident after this `.`
+        cur  = last.next
+    }
+    last
+}
+// is the head name followed by `.ident` (a qualified type like `io.Writer`)?
+is_qual_name = (src: str, after_name: i32) bool {
+    dot := src.scan(after_name)
+    src.is_dot(dot.tok).match ({ true => is_ident_tok(src.scan(dot.next).tok), false => false })
+}
+// a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name,
+// OR a QUALIFIED name `ns.Type` (with optional `<…>`) — the `ns.` prefix is kept verbatim in the Named
+// string so the formatter round-trips it and the resolver can namespace-resolve it.
 parse_leaf_ty = (a: MutPtr<Malloc>, src: str, tt: Scan) TyEnd {
-    nx := src.scan(tt.next)
+    src.is_qual_name(tt.next).match ({
+        true  => {
+            qe   := src.qual_end(tt.next)                    // qe.tok = the final qualifier segment ident
+            name := a.lexeme_range(src, tt.tok.start, qe.tok.start + qe.tok.len)   // [start .. end of last ident)
+            a.leaf_after_name(src, name, qe.next, src.scan(qe.next))
+        },
+        false => {
+            nx := src.scan(tt.next)
+            src.is_langle(nx.tok).match ({
+                true  => a.parse_generic_ty(src, tt, nx.next),
+                false => TyEnd( ty: a.ty_of(src, tt.tok), next: tt.next )
+            })
+        }
+    })
+}
+// resolve a leaf type given its (already materialized, possibly qualified) name and the resume position:
+// `<…>` after it → a generic instance, else a plain Named type.
+leaf_after_name = (a: MutPtr<Malloc>, src: str, name: str, after: i32, nx: Scan) TyEnd {
     src.is_langle(nx.tok).match ({
-        true  => a.parse_generic_ty(src, tt, nx.next),
-        false => TyEnd( ty: a.ty_of(src, tt.tok), next: tt.next )
+        true  => {
+            ta := a.parse_tyargs(src, nx.next)
+            TyEnd( ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)), next: ta.next )
+        },
+        false => TyEnd( ty: tnamed(name), next: after )
     })
 }
 TyArgs*: { args: [Ty], next: i32 }
