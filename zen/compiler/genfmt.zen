@@ -34,6 +34,11 @@ gf_empty_str = () str { "" }                              // a str-typed (not fi
 gf_src := gf_empty_str()
 gf_cmts := gf_no_cmts()
 gf_idx := 0
+// the source offset where the current top-level decl ENDS (= the next decl's position). Used as the
+// drain boundary for a body's LAST statement, so its interior comments drain up to the decl end but NEVER
+// past it into the following decl. Set per top-level decl in genfmt_module_in; 0 = the final decl.
+gf_block_end := 0
+genfmt_set_block_end* = (e: i32) void { gf_block_end = e }
 genfmt_set_comments* = (src: str, cmts: [Comment]) void { gf_src = src  gf_cmts = cmts  gf_idx = 0 }
 
 // the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
@@ -81,14 +86,22 @@ ff_trailing = (s: String, a: MutPtr<Malloc>, boundary: i32) String {
 // (the trailing comment is the last thing in the block, so it belongs to the statement just printed).
 gf_before = (start: i32, boundary: i32) bool { (boundary <= 0).match ({ true => true, false => start < boundary }) }
 // DRAIN the just-printed statement's trailing-comment region [stmt, boundary): the FIRST pending comment
-// prints inline iff it is trailing (shares the statement's source line); EVERY remaining comment before
-// the boundary prints on its own line at `ind`. Draining the whole region is what makes the formatter
-// IDEMPOTENT for multi-line statements: a comment interior to a multi-line `.match` that reflow moves to
-// after the statement still falls in the SAME [stmt, boundary) region on the next pass, so it drains
-// identically (rather than leaking onto the following statement and migrating each format).
-ff_drain = (s: String, a: MutPtr<Malloc>, boundary: i32, ind: i32) String {
-    out := s.ff_trailing(a, boundary)                                  // optional inline same-line comment
-    @while ((gf_idx < gf_cmts.len) && gf_before(gf_cmts[gf_idx].start, boundary)) {
+// prints inline iff it is trailing (shares the statement's source line); EVERY remaining comment STRICTLY
+// before the boundary prints on its own line at `ind`. Draining the whole region is what makes the
+// formatter IDEMPOTENT for multi-line statements: a comment interior to a multi-line `.match` that reflow
+// moves to after the statement still falls in the SAME [stmt, boundary) region on the next pass, so it
+// drains identically (rather than leaking onto the following statement and migrating each format).
+//   boundary 0 = "no next statement / unknown end": the inline same-line comment is still emitted, but the
+//   own-line drain is SUPPRESSED — own-line comments after the LAST statement belong to the NEXT decl (or
+//   are flushed as that decl's leading comments), NOT greedily consumed into this block (which, with an
+//   unbounded drain, would suck every following section comment in the whole file into the first function).
+ff_drain = (s: String, a: MutPtr<Malloc>, db: i32, ib: i32, ind: i32) String {
+    // ib <= 0 ⇒ this is the block's LAST statement: emit NO inline trailing comment here (a comment after
+    // the block's closing `}` is a DECL-level trailing, handled by ff_top_decl) — otherwise the unbounded
+    // ff_trailing would steal a much-later decl's comment. ib > 0 ⇒ a real next-stmt bound.
+    out := (ib > 0).match ({ true => s.ff_trailing(a, ib), false => s })
+    (db <= 0).match ({ true => { return out }, false => {} })    // no own-line drain without a real next-stmt boundary
+    @while ((gf_idx < gf_cmts.len) && (gf_cmts[gf_idx].start < db)) {
         out = out.ff_append(a, "\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx])
         gf_idx = gf_idx + 1
     }
@@ -115,6 +128,7 @@ gf_expr_pos = (e: Expr) i32 {
         .Member(m)      => gf_pos_of(m.obj),
         .Arrow(ar)      => gf_pos_of(ar.obj),
         .Match(m)       => gf_pos_of(m.subj),
+        .Cond(d)        => gf_pos_of(d.c),                 // a bool `.match` lowers to Cond — its subject is `c`
         .Index(ix)      => gf_pos_of(ix.seq),
         _               => 0
     })
@@ -446,19 +460,26 @@ ff_block = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
 }
 ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
     out := s
+    last := body.len - 1
     body.loop((h, i, st) {
-        nb := (i + 1 < body.len).match ({ true => gf_stmt_pos(body[i + 1]), false => 0 })   // next stmt's pos (0 = last)
-        out = out.ff_one_stmt(a, st, drop_ret && (i == body.len - 1), ind, nb)
+        // Both the OWN-LINE drain and the INLINE same-line comment are capped at the NEXT statement's pos,
+        // so neither pulls a following statement's comment back. The LAST statement uses 0 for BOTH — it
+        // emits no trailing comment itself; a comment trailing the block's closing `}` is a DECL-level
+        // trailing comment, emitted by ff_top_decl (bounded by the next decl), which keeps it from being
+        // stolen by a sibling one-liner and keeps re-formatting idempotent.
+        nb := (i < last).match ({ true => gf_stmt_pos(body[i + 1]), false => 0 })
+        out = out.ff_one_stmt(a, st, drop_ret && (i == last), ind, nb, nb)
     })
     out
 }
 // one statement line: leading comments (before it) → the statement → its trailing comment → newline.
-// `nb` (next-stmt boundary) caps which trailing comment belongs to THIS statement (not the next one's).
-ff_one_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32, nb: i32) String {
+// `db` (own-line drain boundary) caps which following comments this statement absorbs; `ib` (inline
+// boundary) caps the single same-line trailing comment.
+ff_one_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32, db: i32, ib: i32) String {
     sp    := gf_stmt_pos(st)
     lead  := s.ff_flush_leading(a, sp, ind)
     body  := lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
-    withc := body.ff_drain(a, nb, ind)
+    withc := body.ff_drain(a, db, ib, ind)
     withc.ff_append(a, "\n")
 }
 ff_stmt_at = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) String {
@@ -683,6 +704,7 @@ genfmt_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
     out := s
     decls.loop((h, i, d) {
         nb := gf_next_decl_pos(decls, i + 1)               // the next EMITTED decl's pos → trailing-comment boundary
+        genfmt_set_block_end(nb)                            // bound this decl's body last-stmt drain to the decl end
         d.match ({
             .DFunc(f)  => a.ff_is_hoisted(decls, f.name).match ({ true => {}, false => { out = a.ff_top_decl(out, exp, decls, d, nb) } }),
             .DImpl(im) => eq(im.ty, im.trname).match ({ true => {}, false => { out = a.ff_top_decl(out, exp, decls, d, nb) } }),
