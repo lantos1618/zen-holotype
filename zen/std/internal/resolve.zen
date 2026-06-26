@@ -7,7 +7,7 @@
 { check_linked, check_linked_kind } = compiler.check_validate
 // Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
 { Allocator, Malloc, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 { String } = std.text.string
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
@@ -520,20 +520,6 @@ ParsedProgram*: {
 ModuleCount: { seen: String, count: i32 }
 ModuleFill: { seen: String, next: i32 }
 
-edges_ok = (xs: [ImportEdge]) Result<[ImportEdge], IoError> { .Ok(xs) }
-edges_err = (e: IoError) Result<[ImportEdge], IoError> { .Err(e) }
-edge_ok = (e: ImportEdge) Result<ImportEdge, IoError> { .Ok(e) }
-edge_err = (e: IoError) Result<ImportEdge, IoError> { .Err(e) }
-edge_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-edge_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
-symbols_ok = (xs: [ProvidedSymbol]) Result<[ProvidedSymbol], IoError> { .Ok(xs) }
-symbols_err = (e: IoError) Result<[ProvidedSymbol], IoError> { .Err(e) }
-sym_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-sym_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
-sym_string_ok = (s: String) Result<String, IoError> { .Ok(s) }
-sym_string_err = (e: IoError) Result<String, IoError> { .Err(e) }
-i32_ok = (n: i32) Result<i32, IoError> { .Ok(n) }
-i32_err = (e: IoError) Result<i32, IoError> { .Err(e) }
 
 exit = (code: i32) i32
 eprint = (s: str) i64 { v := view(s)  write(2, v.ptr, v.len) }
@@ -629,8 +615,8 @@ edge_next = (src: str, p: i32) i32 {
 edge_buf<A> = (a: MutPtr<A>, n: i64) [ImportEdge] { slice(a.acquire(n * sizeof(ImportEdge)), n) }
 try_edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
-        .Ok(p)  => edges_ok(slice(p, n)),
-        .Err(e) => edges_err(e)
+        .Ok(p)  => ok(slice(p, n)),
+        .Err(e) => err(e)
     })
 }
 EDGE_MODULE_CAP := 128
@@ -731,9 +717,9 @@ try_import_id_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> {
                 })
             })
             buf.offset(out).store(0)
-            edge_str_ok(cstr(buf))
+            ok(cstr(buf))
         },
-        .Err(e) => edge_str_err(e)
+        .Err(e) => err(e)
     })
 }
 ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) str {
@@ -749,9 +735,9 @@ try_ns_qualifier_alloc<A> = (a: MutPtr<A>, s: str, p: i32) Result<str, IoError> 
             ls := s.lstrip(p)
             out := buf.copy_name_to(0, s, ls, EDGE_ALIAS_CAP)
             buf.offset(out).store(0)
-            edge_str_ok(cstr(buf))
+            ok(cstr(buf))
         },
-        .Err(e) => edge_str_err(e)
+        .Err(e) => err(e)
     })
 }
 edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) ImportEdge {
@@ -769,12 +755,12 @@ try_edge_from_line<A> = (a: MutPtr<A>, src: str, p: i32) Result<ImportEdge, IoEr
     a.try_import_id_alloc(src, p).match ({
         .Ok(mod) => ns.match ({
             true => a.try_ns_qualifier_alloc(src, p).match ({
-                .Ok(alias) => edge_ok(ImportEdge(module: mod, alias: alias, namespace: ns, start: p, next: src.edge_next(p))),
-                .Err(e)    => edge_err(e)
+                .Ok(alias) => ok(ImportEdge(module: mod, alias: alias, namespace: ns, start: p, next: src.edge_next(p))),
+                .Err(e)    => err(e)
             }),
-            false => edge_ok(ImportEdge(module: mod, alias: "", namespace: ns, start: p, next: src.edge_next(p)))
+            false => ok(ImportEdge(module: mod, alias: "", namespace: ns, start: p, next: src.edge_next(p)))
         }),
-        .Err(e) => edge_err(e)
+        .Err(e) => err(e)
     })
 }
 fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i: i32) [ImportEdge] {
@@ -831,7 +817,7 @@ try_fill_import_edges<A> = (a: MutPtr<A>, src: str, p: i32, out: [ImportEdge], i
             }
         })
     })
-    failed.match ({ true => edges_err(err), false => edges_ok(out) })
+    failed.match ({ true => err(err), false => ok(out) })
 }
 import_edges*<A> = (a: MutPtr<A>, src: str) [ImportEdge] {
     buf := a.edge_buf(src.import_edge_count())
@@ -840,7 +826,7 @@ import_edges*<A> = (a: MutPtr<A>, src: str) [ImportEdge] {
 try_import_edges*<A> = (a: MutPtr<A>, src: str) Result<[ImportEdge], IoError> {
     a.try_edge_buf(src.import_edge_count()).match ({
         .Ok(buf) => a.try_fill_import_edges(src, 0, buf, 0),
-        .Err(e)  => edges_err(e)
+        .Err(e)  => err(e)
     })
 }
 edge_id_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(24).gstr_append(a, e.module) }
@@ -1192,8 +1178,8 @@ provided_symbol_count* = (a: MutPtr<Malloc>, src: str) i32 { a.provided_symbol_c
 symbol_buf<A> = (a: MutPtr<A>, n: i64) [ProvidedSymbol] { slice(a.acquire(n * sizeof(ProvidedSymbol)), n) }
 try_symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
     a.try_acquire(n * sizeof(ProvidedSymbol)).match ({
-        .Ok(p)  => symbols_ok(slice(p, n)),
-        .Err(e) => symbols_err(e)
+        .Ok(p)  => ok(slice(p, n)),
+        .Err(e) => err(e)
     })
 }
 symbol_name_len = (src: str, p: i32, e: i32, escape: bool) i64 {
@@ -1230,8 +1216,8 @@ symbol_name_alloc<A> = (a: MutPtr<A>, src: str, p: i32, e: i32, escape: bool) st
 }
 try_symbol_name_alloc<A> = (a: MutPtr<A>, src: str, p: i32, e: i32, escape: bool) Result<str, IoError> {
     a.try_acquire(src.symbol_name_len(p, e, escape) + 1).match ({
-        .Ok(buf) => sym_str_ok(buf.finish_symbol_name(src, p, e, escape)),
-        .Err(e)  => sym_str_err(e)
+        .Ok(buf) => ok(buf.finish_symbol_name(src, p, e, escape)),
+        .Err(e)  => err(e)
     })
 }
 fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
@@ -1296,7 +1282,7 @@ try_fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [Provide
             }
         })
     })
-    failed.match ({ true => i32_err(err), false => i32_ok(idx) })
+    failed.match ({ true => err(err), false => ok(idx) })
 }
 fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSymbol], i: i32) i32 {
     pos := p
@@ -1397,7 +1383,7 @@ try_fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str
             }
         })
     })
-    failed.match ({ true => symbols_err(err), false => symbols_ok(out) })
+    failed.match ({ true => err(err), false => ok(out) })
 }
 provided_symbols_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str) [ProvidedSymbol] {
     buf := alloc.symbol_buf(a.provided_symbol_count(src))
@@ -1407,7 +1393,7 @@ provided_symbols_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str) [Provi
 try_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str) Result<[ProvidedSymbol], IoError> {
     alloc.try_symbol_buf(a.provided_symbol_count(src)).match ({
         .Ok(buf) => a.try_fill_provided_symbols_in(alloc, src, 0, buf, 0),
-        .Err(e)  => symbols_err(e)
+        .Err(e)  => err(e)
     })
 }
 provided_symbols* = (a: MutPtr<Malloc>, src: str) [ProvidedSymbol] {
@@ -1447,9 +1433,9 @@ try_symbol_key_in*<A> = (s: ProvidedSymbol, a: MutPtr<A>) Result<String, IoError
     a.try_acquire(n + 1).match ({
         .Ok(buf) => {
             buf.finish_symbol_name(s.name, 0, e, true)
-            sym_string_ok(String(ptr: buf, len: n, cap: n + 1))
+            ok(String(ptr: buf, len: n, cap: n + 1))
         },
-        .Err(err) => sym_string_err(err)
+        .Err(err) => err(err)
     })
 }
 has_symbol = (symbols: [ProvidedSymbol], name: str) bool {

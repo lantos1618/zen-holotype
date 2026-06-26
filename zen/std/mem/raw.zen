@@ -8,7 +8,7 @@
 //   store(p, 7)
 //   release(p)
 
-{ Result, IoError, ok_ptr } = std.core.result
+{ Result, IoError, ok_ptr, ok, err } = std.core.result
 { malloc, free } = std.mem.alloc
 { calloc, memcpy } = std.c.libc
 
@@ -34,9 +34,6 @@ release* = (p: RawPtr<u8>) void { free(p) }
 // read/write its element type; T is inferred from the seed.
 //   raw = std.mem.raw
 //   ns := raw.of(Node(v: 5), 8)     // [Node] with room for 8, ns[0] = the seed
-raw_slice_ok<T> = (xs: [T]) Result<[T], IoError> { .Ok(xs) }
-raw_slice_err<T> = (e: IoError) Result<[T], IoError> { .Err(e) }
-
 of*<T> = (seed: T, n: i64) [T] {
     b := slice(alloc(n * sizeof(T)), n)
     b[0] = seed
@@ -45,14 +42,14 @@ of*<T> = (seed: T, n: i64) [T] {
 
 try_of*<T> = (seed: T, n: i64) Result<[T], IoError> {
     (n <= 0).match ({
-        true => raw_slice_err(.NotFound),
+        true => err(IoError.NotFound),
         false => try_alloc(n * sizeof(T)).match ({
             .Ok(p) => {
                 b := slice(p, n)
                 b[0] = seed
-                raw_slice_ok(b)
+                ok(b)
             },
-            .Err(e) => raw_slice_err(e)
+            .Err(e) => err(e)
         })
     })
 }

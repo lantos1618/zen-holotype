@@ -4,7 +4,7 @@
 
 { Allocator, try_acquire } = std.mem.alloc
 { view } = std.text.str
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 { open, read, write, close, lseek, system } = std.c.libc
 
 STDOUT := 1
@@ -50,10 +50,6 @@ read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
 
 ENOMEM := 12
 
-read_file_err = (e: IoError) Result<str, IoError> { .Err(e) }
-read_file_ok = (buf: RawPtr<u8>) Result<str, IoError> { .Ok(cstr(buf)) }
-write_file_err = (e: IoError) Result<i64, IoError> { .Err(e) }
-write_file_ok = (n: i64) Result<i64, IoError> { .Ok(n) }
 
 read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<str, IoError> {
     got := fd.read_all(buf, 0, n)
@@ -61,11 +57,11 @@ read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<st
     out: Result<str, IoError> := (got == n).match ({
         true => {
             buf.offset(n).store(0)
-            read_file_ok(buf)
+            ok(cstr(buf))
         },
         false => {
             a.release(buf)
-            read_file_err(.Eof)
+            err(IoError.Eof)
         }
     })
     out
@@ -76,7 +72,7 @@ read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<str, IoError> {
         .Ok(buf) => a.read_file_finish(fd, buf, n),
         .Err(e) => {
             fd.close()
-            read_file_err(.Errno(ENOMEM))
+            err(IoError.Errno(ENOMEM))
         }
     })
 }
@@ -86,7 +82,7 @@ read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<str, IoError> {
     out: Result<str, IoError> := (n < 0).match ({
         true => {
             fd.close()
-            read_file_err(.Errno(0 - 1))
+            err(IoError.Errno(0 - 1))
         },
         false => a.read_file_alloc(fd, n)
     })
@@ -97,7 +93,7 @@ read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<str, IoError> {
 contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> {
     fd := path.open(O_RDONLY, 0)
     out: Result<str, IoError> := (fd < 0).match ({
-        true  => read_file_err(.NotFound),
+        true  => err(IoError.NotFound),
         false => a.read_file_open(fd)
     })
     out
@@ -109,13 +105,13 @@ contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> { a.contents_in(pa
 save* = (path: str, data: str, n: i64) Result<i64, IoError> {
     fd := path.open(O_WRTRUNC, MODE_644)
     out: Result<i64, IoError> := (fd < 0).match ({
-        true  => write_file_err(.Denied),
+        true  => err(IoError.Denied),
         false => {
             w := fd.write(data.view().ptr, n)
             fd.close()
             (w == n).match ({
-                true  => write_file_ok(w),
-                false => write_file_err(.Eof)
+                true  => ok(w),
+                false => err(IoError.Eof)
             })
         }
     })

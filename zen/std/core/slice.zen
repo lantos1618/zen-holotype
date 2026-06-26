@@ -3,12 +3,8 @@
 // Public constructors take an allocator first; `_in` aliases support UFCS on the allocator.
 
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 
-slice_ok<T> = (s: [T]) Result<[T], IoError> { .Ok(s) }
-slice_err<T> = (e: IoError) Result<[T], IoError> { .Err(e) }
-ptr_ok<T> = (p: Ptr<T>) Result<Ptr<T>, IoError> { .Ok(p) }
-ptr_err<T> = (e: IoError) Result<Ptr<T>, IoError> { .Err(e) }
 
 buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] {
     slice(a.acquire(n * sizeof(T)), n)
@@ -16,10 +12,10 @@ buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] {
 
 try_buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> {
     (n <= 0).match ({
-        true => slice_ok(slice(null_ptr(), 0)),
+        true => ok(slice(null_ptr(), 0)),
         false => a.try_acquire(n * sizeof(T)).match ({
-            .Ok(p)  => slice_ok(p.slice(n)),
-            .Err(e) => slice_err(e)
+            .Ok(p)  => ok(p.slice(n)),
+            .Err(e) => err(e)
         })
     })
 }
@@ -34,9 +30,9 @@ try_dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
     a.try_buf_in(xs.len, xs).match ({
         .Ok(buf) => {
             xs.loop((h, i, x) { buf[i] = x })
-            slice_ok(buf)
+            ok(buf)
         },
-        .Err(e) => slice_err(e)
+        .Err(e) => err(e)
     })
 }
 
@@ -57,9 +53,9 @@ try_node_in*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> {
         .Ok(buf) => {
             vals: [T] := buf
             p: Ptr<T> := vals[0].addr()
-            ptr_ok(p)
+            ok(p)
         },
-        .Err(e)  => ptr_err(e)
+        .Err(e)  => err(e)
     })
 }
 
@@ -75,9 +71,9 @@ try_concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> {
         .Ok(buf) => {
             xs.loop((h, i, x) { buf[i] = x })
             ys.loop((h, i, y) { buf[xs.len + i] = y })
-            slice_ok(buf)
+            ok(buf)
         },
-        .Err(e) => slice_err(e)
+        .Err(e) => err(e)
     })
 }
 
@@ -131,9 +127,9 @@ try_reverse_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
     a.try_buf_in(xs.len, xs).match ({
         .Ok(out) => {
             xs.loop((h, i, x) { out[xs.len - 1 - i] = x })
-            slice_ok(out)
+            ok(out)
         },
-        .Err(e) => slice_err(e)
+        .Err(e) => err(e)
     })
 }
 

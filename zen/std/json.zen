@@ -51,7 +51,7 @@
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
 
-{ Result, Opt } = std.core.result
+{ Result, Opt, err } = std.core.result
 { Malloc } = std.mem.alloc
 { String, new_in, push_in, append_in, finish_in } = std.text.string
 { view, substr_in, eq } = std.text.str
@@ -73,9 +73,7 @@ Step:    { v: Value, pos: i64 }
 StrStep: { s: str,   pos: i64 }
 
 step_ok  = (v: Value, pos: i64) Result<Step, JsonError> { .Ok(Step( v: v, pos: pos )) }
-j_err    = (e: JsonError) Result<Step, JsonError> { .Err(e) }
 sstep_ok = (s: str, pos: i64) Result<StrStep, JsonError> { .Ok(StrStep( s: s, pos: pos )) }
-sj_err   = (e: JsonError) Result<StrStep, JsonError> { .Err(e) }
 
 // ── module-local growable buffers (hand-rolled Vecs; see limit #2) ─────────────
 VBuf: { ptr: RawPtr<u8>, len: i64, cap: i64 }   // a growable [Value]
@@ -207,7 +205,7 @@ parse_string_raw = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<StrS
         })
     })
     (endpos < 0).match ({
-        true  => (errpos >= 0).match ({ true => sj_err(.BadString(errpos)), false => sj_err(.UnexpectedEof) }),
+        true  => (errpos >= 0).match ({ true => err(.BadString(errpos)), false => err(.UnexpectedEof) }),
         false => sstep_ok(sb.finish_in(a), endpos)
     })
 }
@@ -223,7 +221,7 @@ parse_lit = (sv: [u8], pos: i64, word: str, v: Value) Result<Step, JsonError> {
             false => { h.break }
         })
     })
-    ok.match ({ true => step_ok(v, pos + wv.len), false => j_err(.BadLiteral(pos)) })
+    ok.match ({ true => step_ok(v, pos + wv.len), false => err(.BadLiteral(pos)) })
 }
 
 parse_number = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, JsonError> {
@@ -236,12 +234,12 @@ parse_number = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, Js
     })
     n := endp - pos
     (n <= 0).match ({
-        true  => j_err(.BadNumber(pos)),
+        true  => err(.BadNumber(pos)),
         false => {
             txt := a.substr_in(src, pos, n)
             parse_f64(txt).match ({
                 .Ok(f)  => step_ok(.Num(f), endp),
-                .Err(_) => j_err(.BadNumber(pos))
+                .Err(_) => err(.BadNumber(pos))
             })
         }
     })
@@ -250,7 +248,7 @@ parse_number = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, Js
 parse_str_value = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, JsonError> {
     a.parse_string_raw(src, sv, pos).match ({
         .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
-        .Err(e) => j_err(e)
+        .Err(e) => err(e)
     })
 }
 
@@ -258,7 +256,7 @@ parse_str_value = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step,
 parse_array = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
     (p >= sv.len).match ({
-        true  => j_err(.UnexpectedEof),
+        true  => err(.UnexpectedEof),
         false => (sv[p] == ']').match ({
             true  => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1),
             false => a.arr_loop(src, sv, p, depth, a.vbuf_new())
@@ -268,16 +266,16 @@ parse_array = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Resu
 
 arr_loop = (a: MutPtr<Malloc>, src: str, sv: [u8], p: i64, depth: i64, vb: VBuf) Result<Step, JsonError> {
     a.parse_value(src, sv, p, depth + 1).match ({
-        .Err(e) => j_err(e),
+        .Err(e) => err(e),
         .Ok(st) => {
             vb2 := a.vbuf_push(vb, st.v)
             q := sv.skip_ws(st.pos)
             (q >= sv.len).match ({
-                true  => j_err(.UnexpectedEof),
+                true  => err(.UnexpectedEof),
                 false => sv[q].match ({
                     ',' => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2),
                     ']' => step_ok(.Arr(vb2.vbuf_slice()), q + 1),
-                    _   => j_err(.Unexpected(q))
+                    _   => err(.Unexpected(q))
                 })
             })
         }
@@ -287,7 +285,7 @@ arr_loop = (a: MutPtr<Malloc>, src: str, sv: [u8], p: i64, depth: i64, vb: VBuf)
 parse_object = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
     (p >= sv.len).match ({
-        true  => j_err(.UnexpectedEof),
+        true  => err(.UnexpectedEof),
         false => (sv[p] == '}').match ({
             true  => step_ok(.Obj(Object( entries: a.ebuf_new().ebuf_slice() )), p + 1),
             false => a.obj_loop(src, sv, p, depth, a.ebuf_new())
@@ -297,26 +295,26 @@ parse_object = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Res
 
 obj_loop = (a: MutPtr<Malloc>, src: str, sv: [u8], p: i64, depth: i64, eb: EBuf) Result<Step, JsonError> {
     (p >= sv.len).match ({
-        true  => j_err(.UnexpectedEof),
+        true  => err(.UnexpectedEof),
         false => (sv[p] == '"').match ({
-            false => j_err(.Unexpected(p)),
+            false => err(.Unexpected(p)),
             true  => a.parse_string_raw(src, sv, p).match ({
-                .Err(e)  => j_err(e),
+                .Err(e)  => err(e),
                 .Ok(ks)  => {
                     q := sv.skip_ws(ks.pos)
                     ((q >= sv.len) || (sv[q] != ':')).match ({
-                        true  => (q >= sv.len).match ({ true => j_err(.UnexpectedEof), false => j_err(.Unexpected(q)) }),
+                        true  => (q >= sv.len).match ({ true => err(.UnexpectedEof), false => err(.Unexpected(q)) }),
                         false => a.parse_value(src, sv, q + 1, depth + 1).match ({
-                            .Err(e)  => j_err(e),
+                            .Err(e)  => err(e),
                             .Ok(st)  => {
                                 eb2 := a.ebuf_push(eb, Entry( key: ks.s, val: st.v ))
                                 r := sv.skip_ws(st.pos)
                                 (r >= sv.len).match ({
-                                    true  => j_err(.UnexpectedEof),
+                                    true  => err(.UnexpectedEof),
                                     false => sv[r].match ({
                                         ',' => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2),
                                         '}' => step_ok(.Obj(Object( entries: eb2.ebuf_slice() )), r + 1),
-                                        _   => j_err(.Unexpected(r))
+                                        _   => err(.Unexpected(r))
                                     })
                                 })
                             }
@@ -331,11 +329,11 @@ obj_loop = (a: MutPtr<Malloc>, src: str, sv: [u8], p: i64, depth: i64, eb: EBuf)
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
 parse_value = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     (depth > MAX_DEPTH).match ({
-        true  => j_err(.TooDeep),
+        true  => err(.TooDeep),
         false => {
             p := sv.skip_ws(pos)
             (p >= sv.len).match ({
-                true  => j_err(.UnexpectedEof),
+                true  => err(.UnexpectedEof),
                 false => {
                     b := sv[p]
                     b.is_num_start().match ({
@@ -347,7 +345,7 @@ parse_value = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Resu
                             't' => parse_lit(sv, p, "true",  .Bool(true)),
                             'f' => parse_lit(sv, p, "false", .Bool(false)),
                             'n' => parse_lit(sv, p, "null",  .Null),
-                            _   => j_err(.Unexpected(p))
+                            _   => err(.Unexpected(p))
                         })
                     })
                 }
