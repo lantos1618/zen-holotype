@@ -11,7 +11,7 @@
 // `new_in` / `drop_in` use the caller's allocator.
 // `try_new_in` returns Result so allocation failure can stay in the value flow.
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 
 Arc*<T>: {
     base: RawPtr<u8>                          // -> [ count:i64 | value:T ]
@@ -36,9 +36,6 @@ new_in*<A, T> = (a: MutPtr<A>, x: T) Arc<T> {
     s[0] = x
     r
 }
-arc_ok<T> = (r: Arc<T>) Result<Arc<T>, IoError> { .Ok(r) }
-arc_err<T> = (e: IoError) Result<Arc<T>, IoError> { .Err(e) }
-
 try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError> {
     ax := x
     a.try_acquire(8 + sizeof(T)).match ({
@@ -47,11 +44,8 @@ try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError> {
             r := Arc<T>( base: base )
             s := r.val()
             s[0] = ax
-            arc_ok(r)
+            ok(r)
         },
-        .Err(e) => {
-            err: Result<Arc<T>, IoError> := .Err(e)
-            err
-        }
+        .Err(e) => err(e)
     })
 }
