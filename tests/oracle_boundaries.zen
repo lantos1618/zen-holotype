@@ -14,14 +14,14 @@
 //   8. test_fmt_try_numeric_writes_use_fallible_…       → "fmt try writes use fallible num helpers"
 //
 // HOW: enumerate the python file set (rglob *.zen under examples/tools/zen/std/zen/compiler) via
-// `find ... > /tmp/ob_files.txt`, then read+scan each file in Zen. The byte scanner mirrors the
+// `find ... > $ZT/ob_files.txt`, then read+scan each file in Zen. The byte scanner mirrors the
 // python regexes over `//`-comment-stripped text; the single-file region tests mirror python's
 // `_code(...).split(marker,1)[…]` substring slicing on comment-stripped source.
 { Malloc } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
 { eq, ne, view, is_empty, split_in, nbuf, find, contains, substr } = std.text.str
 { new_in, push_in, finish_in } = std.text.string
-{ run_suite } = oracle_lib
+{ run_suite, zo_path, zo_cmd } = oracle_lib
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SHARED byte-scan machinery: faithful port of python's `re` over `_code`-stripped source.
@@ -239,7 +239,7 @@ alloc_passes = (mp: MutPtr<Malloc>, path: str) bool {
 }
 
 alloc_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in("/tmp/ob_files.txt").match ({
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files := mp.split_in(listing, '\n')
             results: [bool] := mp.nbuf(true, files.len)
@@ -286,8 +286,8 @@ example_passes = (mp: MutPtr<Malloc>, path: str) bool {
 }
 
 example_suite = (mp: MutPtr<Malloc>) i32 {
-    shell("find examples -name '*.zen' 2>/dev/null | LC_ALL=C sort > /tmp/ob_examples.txt")
-    mp.contents_in("/tmp/ob_examples.txt").match ({
+    shell(mp.zo_cmd("find examples -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_examples.txt"))
+    mp.contents_in(mp.zo_path("ob_examples.txt")).match ({
         .Ok(listing) => {
             files := mp.split_in(listing, '\n')
             results: [bool] := mp.nbuf(true, files.len)
@@ -348,7 +348,7 @@ checkpoint_passes = (mp: MutPtr<Malloc>, path: str) bool {
 }
 
 checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in("/tmp/ob_files.txt").match ({
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files := mp.split_in(listing, '\n')
             results: [bool] := mp.nbuf(true, files.len)
@@ -385,7 +385,7 @@ atwhile_passes = (mp: MutPtr<Malloc>, path: str) bool {
 }
 
 atwhile_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in("/tmp/ob_files.txt").match ({
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files := mp.split_in(listing, '\n')
             results: [bool] := mp.nbuf(true, files.len)
@@ -486,7 +486,7 @@ oracle_boundaries_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     // enumerate exactly the python full file set: rglob *.zen under examples, tools, zen/std, zen/compiler.
-    shell("find examples tools zen/std zen/compiler -name '*.zen' 2>/dev/null | LC_ALL=C sort > /tmp/ob_files.txt")
+    shell(mp.zo_cmd("find examples tools zen/std zen/compiler -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_files.txt"))
     fails := 0
     fails = fails + mp.example_suite()
     fails = fails + mp.checkpoint_suite()
