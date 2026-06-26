@@ -25,8 +25,11 @@ SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 .PHONY: zenc regen clean oracle
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
+# Built to a per-builder pid temp then atomically `mv`d into place: two concurrent `make` runs (e.g.
+# parallel `make oracle`) each compile their own temp and never see a half-written `$(ZENC)`, since a
+# direct `cc -o $(ZENC)` truncates-then-writes and a racing `./zenc` exec could hit a partial binary.
 zenc:
-	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC)
+	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
 
 # Regenerate bootstrap/zenc.gen.c with the binary (no Python): `--build-self` reads
 # <srcroot>/bootstrap/sources.txt, strips imports, concatenates in graph/SCC-checked order, and emits
@@ -43,4 +46,4 @@ clean:
 # The oracle's exit code is the failing-case count, so `make oracle` fails iff any case fails.
 #   make -f bootstrap/Makefile oracle
 oracle: zenc
-	cd $(ROOT) && $(ZENC) build tests/oracle.zen -o /tmp/zo_oracle && /tmp/zo_oracle
+	cd $(ROOT) && ZO=/tmp/zo_oracle.$$$$ && $(ZENC) build tests/oracle.zen -o $$ZO && $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
