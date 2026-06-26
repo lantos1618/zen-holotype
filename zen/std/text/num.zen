@@ -1,12 +1,9 @@
 // Numeric text formatting helpers. All builders take the caller's allocator.
 
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 { Allocator, try_acquire } = std.mem.alloc
 { String } = std.text.string
 { ParseError, try_parse_int } = std.text.str
-
-num_ok = (s: String) Result<String, IoError> { .Ok(s) }
-num_err = (e: IoError) Result<String, IoError> { .Err(e) }
 
 num_udigit_count = (n: i64) i64 {
     (n < 10).match ({
@@ -81,8 +78,8 @@ integer*<A> = (a: MutPtr<A>, n: i64) String { a.integer_in(n) }
 try_integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> {
     cap := num_integer_len(n) + 1
     a.try_acquire(cap).match ({
-        .Ok(p)  => num_ok(num_integer_from_ptr(p, n, cap)),
-        .Err(e) => num_err(e)
+        .Ok(p)  => ok(num_integer_from_ptr(p, n, cap)),
+        .Err(e) => err(e)
     })
 }
 
@@ -199,8 +196,8 @@ float*<A> = (a: MutPtr<A>, x: f64) String { a.float_in(x) }
 try_float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> {
     cap := num_float_cap(x)
     a.try_acquire(cap).match ({
-        .Ok(p)  => num_ok(num_float_from_ptr(p, x, cap)),
-        .Err(e) => num_err(e)
+        .Ok(p)  => ok(num_float_from_ptr(p, x, cap)),
+        .Err(e) => err(e)
     })
 }
 
@@ -218,9 +215,6 @@ try_float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> { a.try_float_in(
 //   parse_i64_checked("123") => .Ok(123)   parse_i64_checked("12x") => .Err(.Trailing('x'))
 //   parse_i64_checked("")    => .Err(.NoDigits)
 parse_i64_checked* = (s: str) Result<i64, ParseError> { s.try_parse_int() }
-
-pf_ok  = (v: f64) Result<f64, ParseError> { .Ok(v) }
-pf_err = (e: ParseError) Result<f64, ParseError> { .Err(e) }
 
 // 10^e as f64, for any sign of e. Recursive — e is a (small) decimal exponent.
 pf_pow10 = (e: i64) f64 {
@@ -297,24 +291,22 @@ parse_f64* = (s: str) Result<f64, ParseError> {
     })
 
     out: Result<f64, ParseError> := (bad != 0).match ({
-        true  => pf_err(.Trailing(bad)),
+        true  => err(.Trailing(bad)),
         false => (ndig == 0).match ({
-            true  => pf_err(.NoDigits),
+            true  => err(.NoDigits),
             false => (seen_e && (edig == 0)).match ({
-                true  => pf_err(.NoDigits),
+                true  => err(.NoDigits),
                 false => {
                     exp := eneg.match ({ true => 0 - eval, false => eval })
                     val := mant * pf_pow10(exp)
-                    pf_ok(neg.match ({ true => 0.0 - val, false => val }))
+                    r: f64 := neg.match ({ true => 0.0 - val, false => val })
+                    ok(r)
                 }
             })
         })
     })
     out
 }
-
-pf_okI  = (v: i64) Result<i64, ParseError> { .Ok(v) }
-pf_errI = (e: ParseError) Result<i64, ParseError> { .Err(e) }
 
 // digit value of byte `b` in any base up to 36 ('0'-'9','a'-'z','A'-'Z'); -1 if not a digit.
 pf_digit_val = (b: u8) i64 {
@@ -354,10 +346,13 @@ parse_i64_radix* = (s: str, base: i64) Result<i64, ParseError> {
         })
     })
     out: Result<i64, ParseError> := (nd == 0).match ({
-        true  => pf_errI(.NoDigits),
+        true  => err(.NoDigits),
         false => (bad != 0).match ({
-            true  => pf_errI(.Trailing(bad)),
-            false => pf_okI(neg.match ({ true => 0 - acc, false => acc }))
+            true  => err(.Trailing(bad)),
+            false => {
+                v: i64 := neg.match ({ true => 0 - acc, false => acc })
+                ok(v)
+            }
         })
     })
     out
