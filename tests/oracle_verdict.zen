@@ -199,7 +199,7 @@ oracle_verdict_run* = () i32 {
     VerdictCase(src: "test* = () i32 { x := 3\n x.match ({ 0.25 => 1, _ => 9 }) }", should_pass: false, kind: ""),
     VerdictCase(src: "Box*: { op: (i32) i32 }\ntest* = () i32 {\n  k := 10\n  b := Box(op: (n) { n + k })\n  b.op(5)\n}", should_pass: false, kind: ""),
     ])
-    b := run_verdicts("verdict-kind (83)", [
+    b := run_verdicts("verdict-kind (89)", [
     VerdictCase(src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", should_pass: false, kind: "arity"),
     VerdictCase(src: "f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", should_pass: false, kind: "arity"),
     VerdictCase(src: "add* = (a: i32, b: i32) i32 { a + b }\ntest* = () i32 { add(1) }", should_pass: false, kind: "arity"),
@@ -286,6 +286,14 @@ oracle_verdict_run* = () i32 {
     VerdictCase(src: "test* = () f64 { 1.5 % 2.0 }", should_pass: false, kind: "operand-type"),
     VerdictCase(src: "test* = () i32 { x: u8 := 1.5\n to_i32(x) }", should_pass: false, kind: "assign-fit"),
     VerdictCase(src: "test* = () i32 { 1.5 }", should_pass: false, kind: "return-fit"),
+    // infinite-type: a struct/enum containing ITSELF by value has infinite size (the cc-error leak fix).
+    VerdictCase(src: "Node*: { next: Node, v: i32 }\ntest* = () i32 { 0 }", should_pass: false, kind: "infinite-type"),
+    VerdictCase(src: "E*: A(E) | B\ntest* = () i32 { 0 }", should_pass: false, kind: "infinite-type"),
+    VerdictCase(src: "A*: { b: B }\nB*: { a: A }\ntest* = () i32 { 0 }", should_pass: false, kind: "infinite-type"),
+    // INDIRECTION breaks the cycle — `Ptr<T>` / `[T]` are finite, so these are accepted.
+    VerdictCase(src: "Node*: { next: Ptr<Node>, v: i32 }\ntest* = () i32 { 0 }", should_pass: true, kind: ""),
+    VerdictCase(src: "E*: A(Ptr<E>) | B\ntest* = () i32 { 0 }", should_pass: true, kind: ""),
+    VerdictCase(src: "Tree*: { kids: [Tree], v: i32 }\ntest* = () i32 { 0 }", should_pass: true, kind: ""),
     ])
     a + b
 }
