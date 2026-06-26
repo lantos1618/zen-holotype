@@ -61,7 +61,7 @@ Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call
 | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 
 // statements: `int32_t name = expr;`  and  `return expr;`
-LetData*: { name: str, ty: Ty, value: Ptr<Expr> }   // ty = the declared annotation (`x: T := e`), tvoid when unannotated
+LetData*: { name: str, ty: Ty, value: Ptr<Expr>, pos: i32 }   // ty = the declared annotation (`x: T := e`), tvoid when unannotated; pos = bound-name byte offset (0 = synthesized)
 AssignData*: { target: Ptr<Expr>, value: Ptr<Expr>, pos: i32 }       // <lvalue> = expr; pos = lvalue byte offset (0 = synthesized)
 IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } else { els }
 WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
@@ -106,7 +106,7 @@ ImplData*: { ty: str, trname: str, methods: [Param], pos: i32 }
 // `[Param]` buffer needs no `sizeof(str)`). It carries no code (modules link separately, so
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
-ImportData*: { names: [Param], module: str }   // module = the imported module path text ("std.text.fmt"), kept for the formatter
+ImportData*: { names: [Param], module: str, pos: i32 }   // module = the imported module path text ("std.text.fmt"), kept for the formatter; pos = the `{` byte offset (0 = synthesized)
 // DGlobal is a module-level MUTABLE global `name := init` (Goal Z E1 — scheduler/runtime state).
 // It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
 // `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
@@ -114,7 +114,7 @@ ImportData*: { names: [Param], module: str }   // module = the imported module p
 // `tl` = thread-local: emit `static _Thread_local` so each OS thread gets its own copy (coroutine
 // swap state, scheduler per-worker state). Source marks it by wrapping the init in `thread_local(x)`,
 // which the parser unwraps into the bare init + tl=true.
-GlobalData*: { name: str, ty: Ty, init: Ptr<Expr>, tl: bool }
+GlobalData*: { name: str, ty: Ty, init: Ptr<Expr>, tl: bool, alias: bool }   // alias = a module-alias bind `name = mod` (single `=`, formatter prints `=` not `:=`)
 // DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
 // `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
 // no C of its own: compiler.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
@@ -239,8 +239,10 @@ strlit_at* = (v: str, p: i32) Expr { .StrLit(StrData( value: v, pos: p )) }   //
 tstr* = () Ty { .Str() }
 tcstr* = () Ty { .Cstr() }
 ttext* = () Ty { .Text() }
-slet*  = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: tvoid(), value: v )) }
-slett* = (nm: str, t: Ty, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: t, value: v )) }   // a TYPED let
+slet*  = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: tvoid(), value: v, pos: 0 )) }
+slett* = (nm: str, t: Ty, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: t, value: v, pos: 0 )) }   // a TYPED let
+slet_at*  = (nm: str, v: Ptr<Expr>, p: i32) Stmt { .Let(LetData( name: nm, ty: tvoid(), value: v, pos: p )) }   // source-backed let (formatter needs the name position)
+slett_at* = (nm: str, t: Ty, v: Ptr<Expr>, p: i32) Stmt { .Let(LetData( name: nm, ty: t, value: v, pos: p )) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }                  // a bare expression evaluated for effect
 sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt { .Assign(AssignData( target: tgt, value: v, pos: 0 )) }
@@ -389,13 +391,15 @@ dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
-dimport* = (names: [Param], module: str) Decl { .DImport(ImportData( names: names, module: module )) }
+dimport* = (names: [Param], module: str) Decl { .DImport(ImportData( names: names, module: module, pos: 0 )) }
+dimport_at* = (names: [Param], module: str, p: i32) Decl { .DImport(ImportData( names: names, module: module, pos: p )) }   // source-backed import (formatter anchors a file-header comment above it)
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
 dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: 0 )) }
 dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: pos )) }
-dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false )) }
-dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true )) }
+dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: false )) }
+dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true, alias: false )) }
+dglobal_alias* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: true )) }   // module-alias `name = mod`
 dtraitdef* = (trname: str, fn: Func) Decl { .DTraitDefault(TraitDefData( trname: trname, fn: fn )) }
 mono_tybuf_in = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
