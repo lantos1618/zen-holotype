@@ -1548,6 +1548,7 @@ KLAMBDAVALUE  = () i32 { 18 }   // a lambda used as a value the inliner can't sp
 KMUSTUSE      = () i32 { 19 }   // a value-mold `(Self,…) Self` self-mutation whose result is discarded
 KNEEDANNOT    = () i32 { 20 }   // an unannotated let whose inferred type leaves a tparam uninferred (-> T=void)
 KPTRWRITE     = () i32 { 21 }   // a store() through a read-only `Ptr<T>` (use `MutPtr<T>` to write)
+KINFINITETYPE = () i32 { 22 }   // a struct/enum that contains ITSELF by value (transitively) — infinite size
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1617,6 +1618,7 @@ diagnostic_kind_name = (code: i32) str {
         19 => "must-use",
         20 => "need-annotation",
         21 => "ptr-write",
+        22 => "infinite-type",
         _ => "type"
     })
 }
@@ -1643,6 +1645,7 @@ diagnostic_message = (code: i32) str {
         19 => "result of a self-mutating container method is discarded; the receiver is invalid after this call",
         20 => "cannot infer the type parameter of this binding",
         21 => "cannot write through a read-only `Ptr<T>`",
+        22 => "type contains itself by value, so it has infinite size",
         _ => "type error"
     })
 }
@@ -1669,6 +1672,7 @@ diagnostic_hint = (code: i32) str {
         19 => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
         20 => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
         21 => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
+        22 => "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value",
         _ => ""
     })
 }
@@ -2282,6 +2286,81 @@ check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 }
 check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_unknown_type_kind(decls)
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => src.check_diagnostic_from_source(packed, 1)
+    })
+}
+
+// ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
+// A by-value field/payload whose type is the enclosing type — directly (`Node: { next: Node }`,
+// `E: A(E) | B`) or through a chain of other by-value structs/enums (mutual recursion `A: { b: B }`,
+// `B: { a: A }`) — has infinite size; codegen emits a self-containing C struct and `cc` dies with the
+// confusing `field '…' has incomplete type`. INDIRECTION breaks the cycle: a `Ptr<T>` / `MutPtr<T>` /
+// `RawPtr<T>` (all `.Ptr`) or a `[T]` slice (`.Slice`) is a finite pointer, so the compiler's own
+// recursive AST (`Ptr<Expr>`, `Ptr<Ty>`) is correctly NOT flagged. A generic instance (`.Generic`) is
+// treated as cycle-breaking in the concrete pass (its monomorphized size is decided later); generic
+// SELF-instantiation (`Node<T>: { next: Node<T> }`) is caught by the dedicated generic pass below.
+// the by-value out-edge a member type contributes to the containment graph; "" = indirection/leaf.
+inf_edge_name = (t: Ty) str {
+    t.match ({ .Named(n) => n, _ => "" })   // Ptr/Slice/Generic/primitive/FnT all break the cycle
+}
+// does the member type `t` reach `target` by value? `depth` bounds the walk (= max distinct names) so a
+// cycle terminates instead of looping forever.
+inf_edge_reaches = (decls: [Decl], target: str, t: Ty, depth: i64) bool {
+    en := t.inf_edge_name()
+    en.is_empty().match ({
+        true  => false,
+        false => eq(en, target).match ({
+            true  => true,
+            false => (depth <= 0).match ({ true => false, false => decls.inf_named_reaches(target, en, depth - 1) })
+        })
+    })
+}
+inf_fields_reach = (decls: [Decl], target: str, fields: [Field], depth: i64) bool {
+    hit := false
+    fields.loop((h, i, fl) { hit = hit.match ({ true => true, false => decls.inf_edge_reaches(target, fl.ty, depth) }) })
+    hit
+}
+inf_variants_reach = (decls: [Decl], target: str, vs: [VariantDef], depth: i64) bool {
+    hit := false
+    vs.loop((h, i, v) { hit = hit.match ({ true => true, false => decls.inf_edge_reaches(target, v.payload, depth) }) })
+    hit
+}
+// expand the named type `cur` (a struct's fields or an enum's variant payloads) and recurse.
+inf_named_reaches = (decls: [Decl], target: str, cur: str, depth: i64) bool {
+    decls.is_struct(cur).match ({
+        true  => decls.inf_fields_reach(target, decls.struct_fields(cur), depth),
+        false => decls.inf_variants_reach(target, decls.enum_variants(cur), depth)
+    })
+}
+// generic decl: a DIRECT self-instantiation by value — a field/payload typed `Self` or `Self<…>`.
+inf_gen_self = (t: Ty, name: str) bool {
+    t.match ({ .Named(n) => eq(n, name), .Generic(g) => eq(g.name, name), _ => false })
+}
+inf_gen_fields = (fields: [Field], name: str) bool {
+    f := false
+    fields.loop((h, i, fl) { f = fl.ty.inf_gen_self(name).match ({ true => true, false => f }) })
+    f
+}
+inf_gen_variants = (vs: [VariantDef], name: str) bool {
+    f := false
+    vs.loop((h, i, v) { f = v.payload.inf_gen_self(name).match ({ true => true, false => f }) })
+    f
+}
+check_module_infinite_type_kind* = (decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) { acc = acc.kv_kor(d.match ({
+            .DStruct(sd)   => decls.inf_named_reaches(sd.name, sd.name, decls.len).match ({ true => KINFINITETYPE().kv_at(sd.pos), false => 0 }),
+            .DEnum(ed)     => decls.inf_named_reaches(ed.name, ed.name, decls.len).match ({ true => KINFINITETYPE().kv_at(ed.pos), false => 0 }),
+            .DGenStruct(g) => g.fields.inf_gen_fields(g.name).match ({ true => KINFINITETYPE().kv_at(g.pos), false => 0 }),
+            .DGenEnum(g)   => g.variants.inf_gen_variants(g.name).match ({ true => KINFINITETYPE().kv_at(g.pos), false => 0 }),
+            _              => 0
+        })) })
+    acc
+}
+check_module_infinite_type_diagnostic_from_source* = (decls: [Decl], src: str) CheckDiagnostic {
+    packed := decls.check_module_infinite_type_kind()
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => src.check_diagnostic_from_source(packed, 1)
