@@ -8,7 +8,7 @@
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc   // the seed's String API (string.zen isn't in the manifest)
 
 { contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
-{ open, read, write, close, system, unlink } = std.c.libc
+{ open, read, write, close, system, unlink, getpid } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { perr_get } = compiler.parse_type
 { lerr_get, collect_comments } = compiler.lex
@@ -74,8 +74,22 @@ report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProg
 // module-level str CONSTS don't emit as C globals in the seed, so these are zero-arg fns.
 HEAD      = () str { "typedef struct { void* ptr; int64_t len; } zslice; " }
 HEAD_REPL = () str { "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n" }
-TMPC   = () str { "/tmp/zenc_zd.c" }
-TMPBIN = () str { "/tmp/zenc_zd.bin" }
+// Intermediate /tmp files are namespaced by pid so two concurrent `zenc` invocations never clobber
+// each other's temp.c / temp.bin (a fixed path made one process compile/run the OTHER's program).
+// getpid() is constant for the life of a run, so each builder yields the SAME path on every call —
+// the write + the cc command (TMPC), and the build output + the run (TMPBIN), stay consistent.
+pid_digit = (d: i64) u8 { load(offset("0123456789", d)) }
+push_int = (s: String, mp: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({
+        true  => s.gstr_push(mp, pid_digit(n)),
+        false => { hs := s.push_int(mp, n / 10)  hs.gstr_push(mp, pid_digit(n % 10)) }   // hoist (gstr_reserve re-evals the receiver)
+    })
+}
+pid_path = (mp: MutPtr<Malloc>, pre: str, suf: str) str {
+    mp.gstr_string(64).gstr_append(mp, pre).push_int(mp, getpid()).gstr_append(mp, suf).gstr_finish(mp)
+}
+TMPC   = (mp: MutPtr<Malloc>) str { mp.pid_path("/tmp/zenc_zd_", ".c") }
+TMPBIN = (mp: MutPtr<Malloc>) str { mp.pid_path("/tmp/zenc_zd_", ".bin") }
 
 // ── path helpers ────────────────────────────────────────────────────────────────────────────────
 dirname = (mp: MutPtr<Malloc>, p: str) str {
@@ -113,9 +127,9 @@ decls_of = (mp: MutPtr<Malloc>, root: str, path: str, src: str) [Decl] {
 }
 
 // write the runnable temp.c: zenrt.h-include head, then the emitted body (after HEAD).
-write_runnable_c = (gen: String) bool {
+write_runnable_c = (tmpc: str, gen: String) bool {
     hl := HEAD().view().len
-    fd := TMPC().open(O_WRTRUNC, MODE_644)
+    fd := tmpc.open(O_WRTRUNC, MODE_644)
     (fd < 0).match ({
         true  => false,
         false => { hv := HEAD_REPL().view()  fd.write(hv.ptr, hv.len)  fd.write(gen.ptr.offset(hl), gen.len - hl)  fd.close()  true }
@@ -123,9 +137,9 @@ write_runnable_c = (gen: String) bool {
 }
 // cc -std=gnu11 -w -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
 // ccflags/links come from a project's zen.toml (extra .c files + `-l` libs); empty for single files.
-cc_command = (mp: MutPtr<Malloc>, root: str, out: str, ccflags: str, links: str) str {
+cc_command = (mp: MutPtr<Malloc>, root: str, tmpc: str, out: str, ccflags: str, links: str) str {
     mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ")
-    .gstr_append(mp, TMPC()).gstr_append(mp, " ")
+    .gstr_append(mp, tmpc).gstr_append(mp, " ")
     .gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ")
     .gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links)
     .gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp)
@@ -138,8 +152,9 @@ compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccfl
     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
         false => 1,
         true  => {
-            gen := mp.genModuleIn(decls)
-            write_runnable_c(gen).match ({ true => (mp.cc_command(root, out, ccflags, links).system() == 0).match ({ true => 0, false => 1 }), false => 1 })
+            gen  := mp.genModuleIn(decls)
+            tmpc := mp.TMPC()
+            write_runnable_c(tmpc, gen).match ({ true => (mp.cc_command(root, tmpc, out, ccflags, links).system() == 0).match ({ true => 0, false => 1 }), false => 1 })
         }
     })
 }
@@ -220,7 +235,10 @@ run_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
     spec.ok.match ({
         false => 1,
         true  => contents_in(mp, spec.source).match ({
-            .Ok(src) => (mp.compile_to(root, spec.source, src, TMPBIN(), spec.ccflags, spec.links) == 0).match ({ true => TMPBIN().system() / 256, false => 1 }),
+            .Ok(src) => {
+                bin := mp.TMPBIN()
+                (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links) == 0).match ({ true => bin.system() / 256, false => 1 })
+            },
             .Err(e)  => { derr("zenc: cannot open input: ")  derr(spec.source)  derr("\n")  1 }
         })
     })
@@ -569,8 +587,8 @@ resolve_spec = (mp: MutPtr<Malloc>, root: str, arg: str) Spec {
 
 // ── build.zen mode: the build IS a Zen program. Append a main that prints its Target's spec, compile
 // + run it (capturing stdout to a file), parse the 5 fields back. Wins over zen.toml. ─────────────
-BUILDBIN  = () str { "/tmp/zenbuild_spec.bin" }
-SPECFILE  = () str { "/tmp/zenbuild_spec.txt" }
+BUILDBIN  = (mp: MutPtr<Malloc>) str { mp.pid_path("/tmp/zenbuild_spec_", ".bin") }
+SPECFILE  = (mp: MutPtr<Malloc>) str { mp.pid_path("/tmp/zenbuild_spec_", ".txt") }
 BUILD_TAIL = () str { "\nmain = () i32 { build(Build(_: 0)).emit_spec()  0 }\n" }
 // the [start,end) of line `idx` (0-based) in v; field idx of the emitted spec.
 line_start = (v: [u8], idx: i32, p: i64) i64 { (idx <= 0).match ({ true => p, false => (p >= v.len).match ({ true => p, false => v.line_start(idx - 1, v.bs_line_end(p, v.len) + 1) }) }) }
@@ -604,14 +622,16 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: str, dir: str) Spec {
             entry := es.gstr_finish(mp)
             epath := mp.join2(dir, ".zenbuild_entry.zen")
             save(epath, entry, es.len).match ({ .Ok(n) => {}, .Err(e) => {} })
-            rc := mp.compile_to(root, epath, entry, BUILDBIN(), "", "")
+            bbin := mp.BUILDBIN()
+            rc   := mp.compile_to(root, epath, entry, bbin, "", "")
             unlink(epath)                                    // don't leave the entry in the project dir
             (rc == 0).match ({
                 false => { derr("zenc: build.zen: the build program did not compile\n")  Spec(source: "", out: "", ccflags: "", links: "", ok: false) },
                 true  => {
-                    mp.gstr_string(256).gstr_append(mp, BUILDBIN()).gstr_append(mp, " > ").gstr_append(mp, SPECFILE()).gstr_finish(mp).system()
-                    sp := contents_in(mp, SPECFILE()).match ({ .Ok(spec) => mp.parse_spec(dir, spec), .Err(e) => Spec(source: "", out: "", ccflags: "", links: "", ok: false) })
-                    unlink(BUILDBIN())  unlink(SPECFILE())
+                    spf := mp.SPECFILE()
+                    mp.gstr_string(256).gstr_append(mp, bbin).gstr_append(mp, " > ").gstr_append(mp, spf).gstr_finish(mp).system()
+                    sp := contents_in(mp, spf).match ({ .Ok(spec) => mp.parse_spec(dir, spec), .Err(e) => Spec(source: "", out: "", ccflags: "", links: "", ok: false) })
+                    unlink(bbin)  unlink(spf)
                     sp
                 }
             })
