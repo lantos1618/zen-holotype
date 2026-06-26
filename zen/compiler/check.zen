@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -2145,7 +2145,9 @@ dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
     mc.args.loop((h, i, ar) { buf[i + 1] = mc.args[i] })
     call_at(mc.method, buf, mc.pos)
 }
-dmc_expr = (a: MutPtr<Malloc>, ep: Ptr<Expr>) void {
+// `ep` is REWRITTEN in place (MethodCall -> Call lowering below), so it is a writable `MutPtr<Expr>`,
+// not a read-only `Ptr<Expr>` (Stage-2 mutability: a `store` through a `Ptr<T>` is rejected).
+dmc_expr = (a: MutPtr<Malloc>, ep: MutPtr<Expr>) void {
     ep.match ({
         .Bin(b)        => { a.dmc_expr(b.lhs)  a.dmc_expr(b.rhs) },
         .Call(c)       => a.dmc_args(c.args),
@@ -2667,6 +2669,10 @@ ty_eq* = (g: Ty, w: Ty) bool {
 // returns, so a null can initialize/assign any `Ptr<T>` field/param without a cast).
 is_raw_ptr_ty* = (t: Ty) bool { t.match ({ .Ptr(pd) => load(pd.pointee).match ({ .U8 => true, _ => false }), _ => false }) }
 is_ptr_ty_g* = (t: Ty) bool { t.match ({ .Ptr(pd) => true, _ => false }) }
+// Stage 2 mutability: which pointer KIND a value is (k_raw_ptr/k_ptr/k_mut_ptr), or -1 if not a pointer.
+ptr_kind_of* = (t: Ty) i32 { t.match ({ .Ptr(pd) => pd.kind, _ => -1 }) }
+// A write (store) through a read-only `Ptr<T>` (kind == k_ptr) is rejected; `MutPtr`/`RawPtr` permit it.
+is_readonly_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() }
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
     numeric.match ({
