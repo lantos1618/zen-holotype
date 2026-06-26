@@ -448,7 +448,7 @@ empty_closure = (a: MutPtr<Malloc>) Closure {
     Closure( seen: a.gstr_string(256), out: a.gstr_string(4096), useen: a.gstr_string(64) )
 }
 ImportEdge*: { module: str, alias: str, namespace: bool, start: i32, next: i32 }
-ProvidedSymbol*: { name: str, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
+ProvidedSymbol*: { name: str, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool, is_type: bool }
 ModuleGraph*: {
     imports: [ImportEdge],
     symbols: [ProvidedSymbol]
@@ -459,6 +459,12 @@ ModuleGraph*: {
 }
 decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
     a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, false)
+}
+// Like decl_names_in, but ALSO excludes TYPE (struct/enum) decls. A namespace alias prefixes only the
+// names this returns with `alias__`; TYPE names are deliberately left bare so the same type reached two
+// ways (`x = mod` vs `{ T } = mod`) keeps ONE canonical C identity (dedup_decls then collapses the copies).
+value_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+    a.value_symbol_names_into_in(a.gstr_string(256), g.symbols, 0)
 }
 all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
     a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, true)
@@ -1041,7 +1047,7 @@ load_ns_edge = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, src: st
     a.guard_module(progdir, inpath, modid, path)
     msrc    := a.read_module(inpath, path)
     graph   := a.module_graph(msrc)
-    names   := graph.decl_names_in(a)
+    names   := graph.value_decl_names_in(a)
     all     := graph.all_decl_names_in(a)
     c2      := a.load_ns_closure_graph(root, progdir, inpath, modid, alias, msrc, graph, st.c)
     q2      := a.madd_name(st.quals, alias)
@@ -1115,7 +1121,7 @@ load_ns_edge_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, src: s
     alias   := edge.edge_alias_in(a)
     entry   := table.module_id(modid)
     graph   := entry.graph
-    names   := graph.decl_names_in(a)
+    names   := graph.value_decl_names_in(a)
     all     := graph.all_decl_names_in(a)
     c2      := a.load_ns_closure_graph_table(table, inpath, modid, alias, entry.source, graph, st.c)
     q2      := a.madd_name(st.quals, alias)
@@ -1254,7 +1260,7 @@ fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSym
                 false => b.is_alpha().match ({
                     true => {
                         ie := src.res_ident_end(pos)
-                        out[idx] = ProvidedSymbol( name: alloc.symbol_name_alloc(src, pos, ie, true), start: pos, next: ie, decl_start: pos, decl_next: ie, imported: true, foreign: false )
+                        out[idx] = ProvidedSymbol( name: alloc.symbol_name_alloc(src, pos, ie, true), start: pos, next: ie, decl_start: pos, decl_next: ie, imported: true, foreign: false, is_type: false )
                         idx = idx + 1
                         pos = ie
                     },
@@ -1285,7 +1291,7 @@ try_fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [Provide
                                 ie := src.res_ident_end(pos)
                                 alloc.try_symbol_name_alloc(src, pos, ie, true).match ({
                                     .Ok(name) => {
-                                        out[idx] = ProvidedSymbol( name: name, start: pos, next: ie, decl_start: pos, decl_next: ie, imported: true, foreign: false )
+                                        out[idx] = ProvidedSymbol( name: name, start: pos, next: ie, decl_start: pos, decl_next: ie, imported: true, foreign: false, is_type: false )
                                         idx = idx + 1
                                         pos = ie
                                     },
@@ -1328,7 +1334,7 @@ fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str, p:
                                 sp.named.match ({
                                     true => {
                                         ie := src.res_ident_end(sp.start)
-                                        out[idx] = ProvidedSymbol( name: alloc.symbol_name_alloc(src, sp.start, ie, false), start: sp.start, next: ie, decl_start: sp.start, decl_next: sp.next, imported: false, foreign: src.is_foreign_span(sp.start, sp.next) )
+                                        out[idx] = ProvidedSymbol( name: alloc.symbol_name_alloc(src, sp.start, ie, false), start: sp.start, next: ie, decl_start: sp.start, decl_next: sp.next, imported: false, foreign: src.is_foreign_span(sp.start, sp.next), is_type: sp.is_type )
                                         idx = idx + 1
                                     },
                                     _
@@ -1382,7 +1388,7 @@ try_fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str
                                                 ie := src.res_ident_end(sp.start)
                                                 alloc.try_symbol_name_alloc(src, sp.start, ie, false).match ({
                                                     .Ok(name) => {
-                                                        out[idx] = ProvidedSymbol( name: name, start: sp.start, next: ie, decl_start: sp.start, decl_next: sp.next, imported: false, foreign: src.is_foreign_span(sp.start, sp.next) )
+                                                        out[idx] = ProvidedSymbol( name: name, start: sp.start, next: ie, decl_start: sp.start, decl_next: sp.next, imported: false, foreign: src.is_foreign_span(sp.start, sp.next), is_type: sp.is_type )
                                                         idx = idx + 1
                                                     },
                                                     .Err(e) => {
@@ -1499,6 +1505,20 @@ symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol
         (idx < i).match ({
             true => {},
             false => sym.symbol_allowed(include_imported, include_foreign).match ({
+                true  => { cur = a.madd_str_name(cur, sym.name) },
+                false => {}
+            })
+        })
+    })
+    cur
+}
+// Module-DEFINED value/fn decl names only: non-imported, non-foreign, and NOT a type (struct/enum).
+value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64) String {
+    cur := set
+    symbols.loop((h, idx, sym) {
+        (idx < i).match ({
+            true => {},
+            false => (sym.symbol_allowed(false, false) && (!sym.is_type)).match ({
                 true  => { cur = a.madd_str_name(cur, sym.name) },
                 false => {}
             })
@@ -1890,7 +1910,7 @@ rewrite_alias_names = (out: String, a: MutPtr<Malloc>, s: str, p: i32, names: St
 }
 
 alias_module_body = (a: MutPtr<Malloc>, src: str, graph: ModuleGraph, alias: String, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
-    names := graph.decl_names_in(a)
+    names := graph.value_decl_names_in(a)
     hs := a.gstr_string(4096).strip_ns_into(a, src, 0, quals, qnames, strip_qnames, strip_all_quals, true)
     body  := hs.gstr_finish(a)
     a.gstr_string(4096).rewrite_alias_names(a, body, 0, names, alias)
