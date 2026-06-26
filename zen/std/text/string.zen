@@ -19,7 +19,7 @@
 
 { len, view } = std.text.str
 { Allocator, try_acquire, try_resize } = std.mem.alloc
-{ Result, IoError } = std.core.result
+{ Result, IoError, ok, err } = std.core.result
 
 String*: {
     ptr: RawPtr<u8>,
@@ -88,29 +88,25 @@ free_in*<A> = (a: MutPtr<A>, s: String) void { a.release(s.ptr) }
 
 // ── fallible explicit allocator variants ────────────────────────────────────
 
-string_ok = (s: String) Result<String, IoError> { .Ok(s) }
-string_err = (e: IoError) Result<String, IoError> { .Err(e) }
-string_str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-string_str_err = (e: IoError) Result<str, IoError> { .Err(e) }
 
 try_init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
     a.try_acquire(cap).match ({
-        .Ok(p)  => string_ok(String( ptr: p, len: 0, cap: cap )),
-        .Err(e) => string_err(e)
+        .Ok(p)  => ok(String( ptr: p, len: 0, cap: cap )),
+        .Err(e) => err(e)
     })
 }
 try_new_in*<A> = (a: MutPtr<A>) Result<String, IoError> { a.try_init(16) }
 
 try_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) Result<String, IoError> {
     a.try_resize(s.ptr, ncap).match ({
-        .Ok(p)  => string_ok(String( ptr: p, len: s.len, cap: ncap )),
-        .Err(e) => string_err(e)
+        .Ok(p)  => ok(String( ptr: p, len: s.len, cap: ncap )),
+        .Err(e) => err(e)
     })
 }
 try_reserve<A> = (a: MutPtr<A>, s: String, need: i64) Result<String, IoError> {
     (s.len + need > s.cap).match ({
         true  => a.try_grow(s, (s.cap + need) * 2),
-        false => string_ok(s)
+        false => ok(s)
     })
 }
 try_push*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
@@ -118,9 +114,9 @@ try_push*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
     a.try_reserve(s, 1).match ({
         .Ok(r) => {
             r.ptr.offset(r.len).store(b)
-            string_ok(String( ptr: r.ptr, len: r.len + 1, cap: r.cap ))
+            ok(String( ptr: r.ptr, len: r.len + 1, cap: r.cap ))
         },
-        .Err(e) => string_err(e)
+        .Err(e) => err(e)
     })
 }
 try_append*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
@@ -129,14 +125,14 @@ try_append*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
     a.try_reserve(s, n).match ({
         .Ok(r) => {
             r.ptr.copy_str_bytes(r.len, t)
-            string_ok(String( ptr: r.ptr, len: r.len + n, cap: r.cap ))
+            ok(String( ptr: r.ptr, len: r.len + n, cap: r.cap ))
         },
-        .Err(e) => string_err(e)
+        .Err(e) => err(e)
     })
 }
 try_finish*<A> = (a: MutPtr<A>, s: String) Result<str, IoError> {
     a.try_push(s, 0).match ({
-        .Ok(done) => string_str_ok(cstr(done.ptr)),
-        .Err(e)   => string_str_err(e)
+        .Ok(done) => ok(cstr(done.ptr)),
+        .Err(e)   => err(e)
     })
 }
