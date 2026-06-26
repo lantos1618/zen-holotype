@@ -3,7 +3,7 @@
 // failure stays in the value flow.
 
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, Opt, IoError } = std.core.result
+{ Result, Opt, IoError, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
 { is_space } = std.text.bytes
 
@@ -22,11 +22,6 @@ copy_bytes = (src: [u8], out: [u8]) void {
     src.loop((h, i, b) { out[i] = b })
 }
 
-bytes_ok = (b: [u8]) Result<[u8], IoError> { .Ok(b) }
-bytes_err = (e: IoError) Result<[u8], IoError> { .Err(e) }
-str_ok = (s: str) Result<str, IoError> { .Ok(s) }
-str_err = (e: IoError) Result<str, IoError> { .Err(e) }
-
 dup_bytes_in*<A> = (a: MutPtr<A>, s: str) [u8] {
     src := s.view()
     out: [u8] := a.acquire(src.len.alloc_size()).slice(src.len)
@@ -40,9 +35,9 @@ try_dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
         .Ok(p) => {
             out: [u8] := p.slice(src.len)
             src.copy_bytes(out)
-            bytes_ok(out)
+            ok(out)
         },
-        .Err(e) => bytes_err(e)
+        .Err(e) => err(e)
     })
 }
 try_dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.try_dup_bytes_in(s) }
@@ -152,9 +147,9 @@ try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoErr
         .Ok(p) => {
             out: [u8] := p.slice(m + 1)
             sv.copy_substr(out, lo, m)
-            str_ok(cstr(out.ptr))
+            ok(cstr(out.ptr))
         },
-        .Err(e) => str_err(e)
+        .Err(e) => err(e)
     })
 }
 try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> { a.try_substr_in(s, start, n) }

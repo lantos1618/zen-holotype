@@ -1677,11 +1677,18 @@ is_inlining = (v: Ptr<VList>, name: str) bool {
 inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     tf   := idx.idx_func(decls, name)
     ienv := a.vcons(name, tnamed(""), env)
-    body := (tf.tparams.len > 0).match ({
-        true  => a.subst_body(tf.tparams, a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx), tf.body),
-        false => tf.body
+    // A function's body MUST produce its DECLARED return type, so that (targ-substituted) return is the
+    // authoritative expected type for the body's tail — NOT the call-site `exp`. This matters when an
+    // inlined fn is called WITHOUT expected context (e.g. `inner(..).match(..)`, the call as a match
+    // subject): a generic constructor in inner's tail still binds T/E from inner's own `R<str,IoError>`
+    // return. The call-site `exp` is used only to infer unconstrained tparams (infer_targs).
+    (tf.tparams.len > 0).match ({
+        true  => {
+            targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx)
+            a.blockify(a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, cargs, ienv, a.subst_ty_in(tf.tparams, targs, tf.ret)))
+        },
+        false => a.blockify(a.xform_body(decls, idx, tf.body, tf.params, cargs, ienv, tf.ret))
     })
-    a.blockify(a.xform_body(decls, idx, body, tf.params, cargs, ienv, exp))
 }
 maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     idx.idx_template_call(decls, c.fn).match ({

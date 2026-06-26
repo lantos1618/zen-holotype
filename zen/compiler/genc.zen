@@ -263,7 +263,10 @@ tgeneric* = (nm: str, args: [Ty], mangled: str) Ty { .Generic(GenericData( name:
 mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
         .I32 => s.gstr_append(a, "i32"), .I64 => s.gstr_append(a, "i64"), .U8 => s.gstr_append(a, "u8"), .F64 => s.gstr_append(a, "f64"),
-        .Bool => s.gstr_append(a, "bool"), .Str => s.gstr_append(a, "str"), .Cstr => s.gstr_append(a, "cstr"), .Text => s.gstr_append(a, "text"), .Void => s.gstr_append(a, "void"),
+        // str/cstr/text all lower to `const char*`, so they share ONE monomorphization name: a generic
+    // arg inferred as `text` (e.g. from a string literal) names the SAME C instance as one annotated
+    // `str`. This is what makes `okv("hi")` flowing into a `Result<str, _>` context name-match.
+    .Bool => s.gstr_append(a, "bool"), .Str => s.gstr_append(a, "str"), .Cstr => s.gstr_append(a, "str"), .Text => s.gstr_append(a, "str"), .Void => s.gstr_append(a, "void"),
         .Named(n)   => s.gstr_append(a, n),
         .Generic(g) => s.gstr_append(a, g.mangled),
         .Ptr(p)     => s.gstr_append(a, "ptr_").mangle_ty(a, load(p)),
@@ -274,7 +277,7 @@ mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
 
 mangle_ty_len = (t: Ty) i64 {
     t.match ({
-        .I32 => 3, .I64 => 3, .U8 => 2, .F64 => 3, .Bool => 4, .Str => 3, .Cstr => 4, .Text => 4, .Void => 4,
+        .I32 => 3, .I64 => 3, .U8 => 2, .F64 => 3, .Bool => 4, .Str => 3, .Cstr => 3, .Text => 3, .Void => 4,
         .Named(n)   => n.view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(p)     => 4 + load(p).mangle_ty_len(),
@@ -290,7 +293,7 @@ mangle_args_len = (args: [Ty]) i64 {
 mangle_write_ty = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
         .I32 => dst.write_str(at, "i32"), .I64 => dst.write_str(at, "i64"), .U8 => dst.write_str(at, "u8"), .F64 => dst.write_str(at, "f64"),
-        .Bool => dst.write_str(at, "bool"), .Str => dst.write_str(at, "str"), .Cstr => dst.write_str(at, "cstr"), .Text => dst.write_str(at, "text"), .Void => dst.write_str(at, "void"),
+        .Bool => dst.write_str(at, "bool"), .Str => dst.write_str(at, "str"), .Cstr => dst.write_str(at, "str"), .Text => dst.write_str(at, "str"), .Void => dst.write_str(at, "void"),
         .Named(n)   => dst.write_str(at, n),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(p)     => dst.mangle_write_ty(dst.write_str(at, "ptr_"), load(p)),
