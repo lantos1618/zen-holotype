@@ -964,13 +964,39 @@ one_stmt = (a: MutPtr<Malloc>, st: Stmt) [Stmt] {
     buf[0] = st
     buf
 }
-branch_stmts = (a: MutPtr<Malloc>, e: Ptr<Expr>) [Stmt] {
-    out := a.one_stmt(sexpr(e))
+branch_stmts = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
+    out := a.one_stmt(a.lower_stmt_expr(env, e))
     load(e).match ({
-        .Block(b) => { out = b.stmts },
+        .Block(b) => { out = a.relower_block_tail(env, b.stmts) },
         _
     })
     out
+}
+// Re-lower the TAIL statement of a discarded (statement-position) arm body. The arm body was resolved
+// as a VALUE (its `exp` kept so inner `return .Err(x)` infers the right enum), so a tail match/cond is
+// still a value Match/Cond node — in discarded position its arm `return`s would be flattened to value
+// exprs and silently dropped. Re-running the stmt lowering on the tail keeps those returns as real
+// control flow, and recurses through branch_stmts into arbitrarily-nested arm tails. Non-tail statements
+// keep their resolved form (already lowered with last=false); only their bindings thread into the env.
+relower_tail_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) Stmt {
+    st.match ({ .ExprStmt(e) => a.lower_stmt_expr(env, e), _ => st })
+}
+env_over = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt], upto: i64) Env {
+    out := env
+    stmts.loop((h, i, st) { out = (i < upto).match ({ true => a.extend_env(out, st), false => out }) })
+    out
+}
+relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
+    n := stmts.len
+    (n == 0).match ({
+        true  => stmts,
+        false => {
+            buf  := a.sbuf(n)
+            envT := a.env_over(env, stmts, n - 1)
+            stmts.loop((h, i, st) { buf[i] = (i == n - 1).match ({ true => a.relower_tail_stmt(envT, st), false => st }) })
+            buf
+        }
+    })
 }
 tag_const* = (a: MutPtr<Malloc>, ename: str, variant: str) str {
     s := a.gstr_string(64)
@@ -990,7 +1016,7 @@ subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: str, ptr: bool) Ptr
     a.cenode(member(u, variant))
 }
 arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
-    body := a.branch_stmts(ar.body)
+    body := a.branch_stmts(a.arm_env(env, t, ar), ar.body)
     out := body
     eq(ar.bind, "").match ({
         true  => {},
@@ -1016,7 +1042,7 @@ lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [S
         false => {
             ar := m.arms[i]
             eq(ar.variant, "_").match ({
-                true  => { out = a.branch_stmts(ar.body) },
+                true  => { out = a.branch_stmts(env, ar.body) },
                 false => {
                     cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(a.tag_const(m.ename, ar.variant)))))
                     out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
@@ -1034,13 +1060,13 @@ lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
     out
 }
 // Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
-lower_cond_stmt = (a: MutPtr<Malloc>, d: CondData) Stmt {
-    sif(d.c, a.branch_stmts(d.t), a.cond_else(d.e))
+lower_cond_stmt = (a: MutPtr<Malloc>, env: Env, d: CondData) Stmt {
+    sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
 }
-cond_else = (a: MutPtr<Malloc>, e: Ptr<Expr>) [Stmt] {
-    out := a.branch_stmts(e)
+cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
+    out := a.branch_stmts(env, e)
     load(e).match ({
-        .Cond(d) => { out = a.one_stmt(a.lower_cond_stmt(d)) },
+        .Cond(d) => { out = a.one_stmt(a.lower_cond_stmt(env, d)) },
         _
     })
     out
@@ -1053,7 +1079,7 @@ lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
             true => { out = a.lower_match_stmt(env, m) },
             _    => { out = sexpr(e) }
         }),
-        .Cond(d)  => { out = a.lower_cond_stmt(d) },
+        .Cond(d)  => { out = a.lower_cond_stmt(env, d) },
         _         => { out = sexpr(e) }
     })
     out
