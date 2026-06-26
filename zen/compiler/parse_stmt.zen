@@ -9,7 +9,7 @@
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
 { enode, lexeme, is_op, is_dot, is_field_colon, parse_atom, parse_or } = compiler.parse_expr
-{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set } = compiler.parse_type
+{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, pdepth_enter, pdepth_exit, pdepth_over } = compiler.parse_type
 
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -133,6 +133,19 @@ stmt_kind = (a: MutPtr<Malloc>, src: str, pos: i32) SKind {
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
 parse_stmts = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    // DEPTH CAP (see parse_type.zen): a function body's statement list recurses one frame per statement,
+    // so a flood of garbage tokens (e.g. the trailing `)`s of a pathologically-nested expression, each
+    // consumed as a one-token bad statement) would overflow the C stack. Past the cap, stop the list
+    // (perr already set) — the same effect as reaching the body's end.
+    pdepth_enter()
+    r := pdepth_over().match ({
+        true  => a.snil(),
+        false => a.parse_stmts_inner(src, pos)
+    })
+    pdepth_exit()
+    r
+}
+parse_stmts_inner = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     src.at_body_end(pos).match ({
         true  => a.snil(),                          // an empty body `{ }` (a void no-op) — no statements
         false => a.stmt_kind(src, pos).match ({
@@ -237,6 +250,19 @@ parse_while_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
 BlockEnd*: { list: Ptr<SList>, next: i32 }
 parse_block* = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
+    // DEPTH CAP (see parse_type.zen): loop/match-arm body nesting funnels through parse_block, so a guard
+    // here bounds deeply-nested `@while`s. Past the cap, stop descending (an empty block, perr set) — like
+    // the Eof case. The bail consumes no token, but the caller re-dispatches from a position that advances
+    // by a full cap's worth of nesting each outer pass, so the retry chain stays shallow and terminates.
+    pdepth_enter()
+    r := pdepth_over().match ({
+        true  => BlockEnd( list: a.snil(), next: pos ),
+        false => a.parse_block_inner(src, pos)
+    })
+    pdepth_exit()
+    r
+}
+parse_block_inner = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => { perr_set()  BlockEnd( list: a.snil(), next: sc.next ) },   // unterminated `{ …`: flag, don't recurse forever

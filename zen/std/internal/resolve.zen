@@ -55,9 +55,12 @@ is_compiler_marker_at = (s: str, p: i32) bool { s.resolve_span_eq(p, "= compiler
 
 is_marker_at = (s: str, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
 
+// A user-module alias `name = sibling` — `= <ident>` whose RHS is a bare module name. The RHS must NOT be
+// a qualified path (`= pkg.mod`, caught by `!= '.'`) NOR a call (`= compute()`); without the `!= '('` guard
+// a value-global `pi = compute()` is mis-read as importing a module `compute` (spurious "unknown module").
 is_user_marker_at = (s: str, p: i32) bool {
     (s.at(p) == '=') && (s.at(p + 1) == ' ') && s.at(p + 2).is_alpha()
-    && (s.at(s.res_ident_end(p + 2)) != '.')
+    && (s.at(s.res_ident_end(p + 2)) != '.') && (s.at(s.res_ident_end(p + 2)) != '(')
 }
 is_any_marker_at = (s: str, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 
@@ -523,6 +526,24 @@ ModuleFill: { seen: String, next: i32 }
 
 exit = (code: i32) i32
 eprint = (s: str) i64 { v := view(s)  write(2, v.ptr, v.len) }
+
+// ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
+// The namespace-closure loader (load_ns_closure_graph[_table] ↔ collect_ns_*) follows `m = pkg.mod`
+// alias edges with no seen-set, so a self-referential or cyclic alias (`a = a`, or a→b→a) recurses
+// forever and overflows the C stack (SIGSEGV). A nesting counter bounds it: real dependency chains
+// are a handful deep (the whole compiler is well under the cap), so this never fires on acyclic input
+// and leaves the flattened output byte-identical; a genuine cycle trips the cap and exits cleanly.
+ns_depth := 0
+NS_DEPTH_CAP := 256
+fail_import_cycle = (a: MutPtr<Malloc>, inpath: str, id: String) i32 {
+    msg0 := a.gstr_string(160).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: import cycle through namespace alias '")
+    msg1 := a.mappend_id_name(msg0, id)
+    tail := msg1.gstr_append(a, "' (a module cannot namespace-import itself, directly or transitively)")
+    line := tail.gstr_push(a, 10)
+    eprint(line.gstr_finish(a))
+    exit(1)
+    0
+}
 
 // Probe first so missing modules get a distinct error from unreadable modules.
 file_exists = (path: str) bool {
@@ -1895,15 +1916,21 @@ add_qual_names = (set: String, a: MutPtr<Malloc>, alias: String, names: String, 
 }
 
 load_ns_closure_graph = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, id: String, alias: String, src: str, graph: ModuleGraph, c: Closure) Closure {
+    (ns_depth > NS_DEPTH_CAP).match ({ true => { a.fail_import_cycle(inpath, id) } })   // cyclic alias — exit cleanly, never recurse to overflow
+    ns_depth = ns_depth + 1
     c2   := a.load_import_graph(root, progdir, inpath, src, graph, id.id_is_user(), c)
     ns   := a.collect_ns_graph(root, progdir, inpath, src, graph, a.ns_scan(c2))
     body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
+    ns_depth = ns_depth - 1
     Closure( seen: ns.c.seen, out: ns.c.out.rpush(a, 10).rappend_string(a, body), useen: ns.c.useen )
 }
 load_ns_closure_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: str, id: String, alias: String, src: str, graph: ModuleGraph, c: Closure) Closure {
+    (ns_depth > NS_DEPTH_CAP).match ({ true => { a.fail_import_cycle(inpath, id) } })   // cyclic alias — exit cleanly, never recurse to overflow
+    ns_depth = ns_depth + 1
     c2   := a.load_import_graph_table(table, inpath, src, graph, id.id_is_user(), c)
     ns   := a.collect_ns_graph_table(table, inpath, src, graph, a.ns_scan(c2))
     body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
+    ns_depth = ns_depth - 1
     Closure( seen: ns.c.seen, out: ns.c.out.rpush(a, 10).rappend_string(a, body), useen: ns.c.useen )
 }
 

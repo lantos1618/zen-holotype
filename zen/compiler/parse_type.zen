@@ -29,6 +29,22 @@ perr_reset* = () void { parse_failed = 0  parse_err_off = 0 }
 perr_get*   = () bool { parse_failed == 1 }
 perr_off_get* = () i32 { parse_err_off }
 
+// ── RECURSION-DEPTH CAP: bound recursive descent so pathological nesting becomes a clean parse
+// error instead of a C-stack overflow (SIGSEGV). The recursive-descent parsers funnel every nested
+// construct through a small set of entry points — parse_atom (parens/neg/not/slice/match/lambda),
+// parse_while (loop nesting), parse_ty (Ptr/slice/fn/anon type nesting) — each of which calls
+// pdepth_enter on entry, pdepth_exit before returning, and bails (with perr_set) once pdepth_over.
+// The cap (800) sits far below the measured overflow point of the tightest path (~1450 nested
+// `@while`s) yet orders of magnitude above any real program's nesting, so it never over-rejects.
+// Reset (with the parse-failure flags) at every parse_module entry. Mirrors `tyargs_end`'s 256 cap.
+parse_depth := 0
+PARSE_DEPTH_CAP := 800
+pdepth_enter* = () void { parse_depth = parse_depth + 1 }
+pdepth_exit*  = () void { parse_depth = parse_depth - 1 }
+// flag + report once we are nested too deep; the caller returns a placeholder instead of recursing.
+pdepth_over*  = () bool { (parse_depth > PARSE_DEPTH_CAP).match ({ true => { perr_set()  true }, false => false }) }
+pdepth_reset* = () void { parse_depth = 0 }
+
 // ── anonymous (structural) struct accumulator ─────────────────────────────────────
 // Anonymous struct TYPES `{ q: i32, r: i32 }` are desugared, at parse time, to a synthesized named
 // StructDecl (`__anon_q_r`, the structural name from mangle_anon_in) referenced as a `Named` type.
@@ -133,6 +149,15 @@ tynode = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
 is_lbracket* = (src: str, t: Token) bool { src.is_op(t, '[') }
 is_rbracket* = (src: str, t: Token) bool { src.is_op(t, ']') }
 parse_ty* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
+    pdepth_enter()
+    r := pdepth_over().match ({
+        true  => TyEnd( ty: tvoid(), next: pos ),         // nesting too deep — bail with a placeholder (perr already set)
+        false => a.parse_ty_inner(src, pos)
+    })
+    pdepth_exit()
+    r
+}
+parse_ty_inner = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)                                  // the head type token
     src.is_lbrace(tt.tok).match ({
         true  => a.parse_anon_ty(src, tt.next),          // { name: T, … } -> a structural anon struct
@@ -306,7 +331,9 @@ fill_ty = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     after := src.scan(te.next)                           // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_tys(src, after.next, buf, i + 1),
-        false => PEnd( count: i + 1, next: after.next )  // ')'
+        // A function-type param list `(A, B) R` must close on ')'; a missing ')' is a parse error, not a
+        // silent terminator (mirrors fill_payload_tys).
+        false => { src.is_rparen(after.tok).match ({ false => perr_set() })  PEnd( count: i + 1, next: after.next ) }
     })
 }
 parse_fn_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {   // pos just past '('
