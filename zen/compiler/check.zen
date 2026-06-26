@@ -673,7 +673,7 @@ resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Index(ix)    => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.keep_elem(ix.elem, ix.seq))),
         .Loop(l)      => a.resolve_loop(env, l),
         .SliceLit(sd) => a.resolve_slicelit(env, sd),
-        .Block(b)     => a.cenode(block(a.resolve_body(env, b.stmts))),
+        .Block(b)     => a.cenode(block(a.resolve_value_body(env, b.stmts))),
         _             => e
     })
 }
@@ -1123,7 +1123,12 @@ resolve_let = (a: MutPtr<Malloc>, env: Env, l: LetData) Stmt {
 // Any OTHER discarded expression clears exp — a stray exp would mis-unify a generic call's bare tparam.
 carries_return_e = (e: Ptr<Expr>) bool { load(e).match ({ .Cond(c) => true, .Match(m) => true, _ => false }) }
 disc_env = (env: Env, e: Ptr<Expr>) Env { e.carries_return_e().match ({ true => env, false => env.clr_exp() }) }
-resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
+// `vtail` = this body is a VALUE block (reached via resolve_expr `.Block`), so its TAIL expression is
+// the block's value and must NOT be discard-lowered even with no expected type. Without it, an inlined
+// fn whose value is a bare match/cond — wrapped in a block once a binding Let is prepended — spliced as
+// a match subject (resolved with cleared exp) would lower that tail match to a value-less `if`, leaving
+// the `({ … })` void (GCC: `_subj declared void`). Statement bodies pass vtail=false (unchanged).
+resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) Stmt {
     out := st
     st.match ({
         .Let(l)    => { out = a.resolve_let(env, l) },
@@ -1131,9 +1136,12 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool) Stmt {
         .Return(r) => { out = sret(a.resolve_expr(env, r)) },
         .ExprStmt(e) => {
             last.match ({
-                true  => env.exp.is_void_ty().match ({
-                    true  => { out = a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)) },
-                    false => { out = sexpr(a.resolve_expr(env, e)) }
+                true  => (env.exp.is_void_ty() == false).match ({
+                    true  => { out = sexpr(a.resolve_expr(env, e)) },
+                    false => vtail.match ({
+                        true  => { out = sexpr(a.resolve_expr(env.clr_exp(), e)) },
+                        false => { out = a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e)) }
+                    })
                 }),
                 false => { out = a.lower_stmt_expr(env, a.resolve_expr(env.disc_env(e), e)) }
             })
@@ -1190,32 +1198,36 @@ lower_or_return = (a: MutPtr<Malloc>, env: Env, st: Stmt) [Stmt] {
 }
 // Resolve a statement sequence while threading let bindings.
 noop2 = () void { }
-resolve_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) [Stmt] {
+resolve_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) [Stmt] { a.resolve_body_ex(env, body, false) }
+// resolve a VALUE-position block body: same as resolve_body but the trailing expression is kept as the
+// block's value (see resolve_stmt's `vtail`).
+resolve_value_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) [Stmt] { a.resolve_body_ex(env, body, true) }
+resolve_body_ex = (a: MutPtr<Malloc>, env: Env, body: [Stmt], vtail: bool) [Stmt] {
     buf := a.sbuf(body.body_out_len())
-    a.fill_stmts(env, body, buf, 0, 0)
+    a.fill_stmts(env, body, buf, 0, 0, vtail)
     buf
 }
-fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32) void {
-    (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i, o), false => noop2() })
+fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
+    (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i, o, vtail), false => noop2() })
 }
-fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32) void {
+fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
     st := body[i]
     st.let_is_or_return().match ({
-        true  => a.fill_or_return(env, body, buf, i, o),
+        true  => a.fill_or_return(env, body, buf, i, o, vtail),
         false => {
-            resolved := a.resolve_stmt(env, st, i == body.len - 1)
+            resolved := a.resolve_stmt(env, st, i == body.len - 1, vtail)
             buf[o]   = resolved
-            a.fill_stmts(a.extend_env(env, resolved), body, buf, i + 1, o + 1)
+            a.fill_stmts(a.extend_env(env, resolved), body, buf, i + 1, o + 1, vtail)
         }
     })
 }
-fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32) void {
+fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
     stmts      := a.lower_or_return(env, body[i])
     buf[o]     = stmts[0]
     buf[o + 1] = stmts[1]
     buf[o + 2] = stmts[2]
     env2       := a.extend_env(a.extend_env(a.extend_env(env, stmts[0]), stmts[1]), stmts[2])
-    a.fill_stmts(env2, body, buf, i + 1, o + 3)
+    a.fill_stmts(env2, body, buf, i + 1, o + 3, vtail)
 }
 extend_env* = (a: MutPtr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
@@ -1349,6 +1361,64 @@ idx_template_call = (idx: DeclIndex, decls: [Decl], name: str) bool { idx.idx_fu
 subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
     (idx < 0).match ({ true => e, false => args[idx].addr() })
+}
+// THE keystone: `subst_var` splices the SAME arg AST node into every param use, so a param used N
+// times re-evaluates the arg N times (double-effect / double-alloc / UAF) and a param used 0 times
+// DROPS the arg entirely (a generic-instance literal then never monomorphizes). The fix binds each
+// non-trivial arg to ONE generated local BEFORE splicing the body, then substitutes that local's Var
+// for every param use — so the arg evaluates exactly once and always survives as a real statement.
+// Pure leaves (Var/Int/literal) are left alone: a Var receiver MUST stay concrete for UFCS/trait
+// dispatch (binding it erased the receiver type — a prior attempt regressed 37 cases), and leaves
+// have no effect to duplicate. We bind effectful/instance-bearing args: calls and struct/enum makes.
+ArgBind*: { fargs: [Expr], binds: [Stmt], env: Ptr<VList> }
+arg_needs_bind = (e: Expr) bool {
+    e.match ({
+        .Call(c)        => true,
+        .MakeStruct(sd) => true,
+        .MakeEnum(mk)   => true,
+        _               => false
+    })
+}
+// Fresh C name for an arg-binding local: distinct "__zen_arg" prefix (never collides with body
+// "__zen_local"s), inline_marks keep it distinct across nested inline depths, the index keeps each
+// arg distinct within one inline.
+arg_local_name = (a: MutPtr<Malloc>, name: str, env: Ptr<VList>, idx: i64) str {
+    s := a.gstr_string(128)
+    s = s.gstr_append(a, "__zen_arg")
+    s = a.inline_marks(s, env)
+    s = a.local_marks(s, idx)
+    s = s.gstr_append(a, "_")
+    s = s.gstr_append(a, name)
+    s.gstr_finish(a)
+}
+// Bind every non-trivial arg to a generated local; return the rewritten fargs (the param-use
+// substitution targets), the binding Let statements to prepend to the body, and the env extended with
+// each temp's CONCRETE light type. The env type is the arg's own light_ty — NOT the param's declared
+// type: a UFCS/trait receiver passed by value (`a.addr()`) carries the concrete impl type that
+// in-body dispatch (`a.try_acquire(..)`) depends on; the param's declared type is the trait interface,
+// which would mis-dispatch (a prior attempt regressed 37 cases this way). Using light_ty makes the
+// binding type-TRANSPARENT — the body sees exactly the type splicing the arg would have produced. The
+// temp Let carries a void type → genc emits `__auto_type`, the exact concrete C type.
+bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>) ArgBind {
+    nf := a.cebuf(cargs.len)
+    nb := 0
+    cargs.loop((h, i, ce) { (i < params.len && ce.arg_needs_bind()).match ({ true => { nb = nb + 1 }, _ }) })
+    bb := a.sbuf(nb)
+    e2 := env
+    j  := 0
+    cargs.loop((h, i, ce) {
+        (i < params.len && ce.arg_needs_bind()).match ({
+            true  => {
+                nm := a.arg_local_name(params[i].name, env, i)
+                bb[j] = slett(nm, tvoid(), cargs[i].addr())
+                e2 = a.vcons(nm, cargs[i].addr().light_ty(a, env, decls, idx), e2)
+                nf[i] = vref(nm)
+                j = j + 1
+            },
+            false => { nf[i] = ce }
+        })
+    })
+    ArgBind( fargs: nf, binds: bb, env: e2 )
 }
 // the C name a substituted arg carries: a Var holds the (renamed) local it stands for, so an
 // indirect call `f()` through a renamed local let recovers `f`'s renamed C name. Falls back to the
@@ -1492,7 +1562,10 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
 }
 inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
-        .Lambda(lm) => a.blockify(a.xform_body(decls, idx, lm.body, lm.params, cargs, env, tvoid())),
+        .Lambda(lm) => {
+            ab := a.bind_args(decls, idx, lm.params, cargs, env)
+            a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, lm.body, lm.params, ab.fargs, ab.env, tvoid())))
+        },
         .Var(v)     => a.var_call(v, cargs),
         _           => a.cenode(lamx)
     })
@@ -1806,9 +1879,13 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
     (tf.tparams.len > 0).match ({
         true  => {
             targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx)
-            a.blockify(a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, cargs, ienv, a.subst_ty_in(tf.tparams, targs, tf.ret)))
+            ab    := a.bind_args(decls, idx, tf.params, cargs, ienv)
+            a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, a.subst_ty_in(tf.tparams, targs, tf.ret))))
         },
-        false => a.blockify(a.xform_body(decls, idx, tf.body, tf.params, cargs, ienv, tf.ret))
+        false => {
+            ab := a.bind_args(decls, idx, tf.params, cargs, ienv)
+            a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, tf.body, tf.params, ab.fargs, ab.env, tf.ret)))
+        }
     })
 }
 maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
