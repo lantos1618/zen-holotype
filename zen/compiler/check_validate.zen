@@ -100,43 +100,50 @@ fit_err = (env: Env, argty: Ty, pty: Ty) i32 {
 // Constant-fold a numeric literal expr: an `.Int`, or a +/-/* of folded literals — a negative literal
 // like `-1` lowers to the Bin `0 - 1`, so folding is what lets unsigned slots reject negatives.
 // ok=false when not a foldable integer constant (Byte/Cond/var/shift/…) → range checks stay lenient.
-LitVal*: { ok: bool, v: i64 }
+//
+// `v` is the i64 BIT PATTERN of the literal. A u64 magnitude above i64-max (e.g. u64 MAX) overflows
+// `v` to a negative i64, so `v < 0` alone cannot tell a written magnitude from a real negative. `neg`
+// records the SEMANTIC sign: a bare `.Int` is a non-negative written magnitude (neg=false) even when
+// `v` wrapped negative; only a subtraction/negation that yields a negative result sets neg=true. That
+// lets `x: u64 := 18446744073709551615` fit while `x: u64 := -1` (i.e. `0 - 1`) is still rejected.
+LitVal*: { ok: bool, v: i64, neg: bool }
 lit_binop = (op: str, l: i64, r: i64) LitVal {
-    eq(op, "+").match ({ true => LitVal( ok: true, v: l + r ), false =>
-        eq(op, "-").match ({ true => LitVal( ok: true, v: l - r ), false =>
-            eq(op, "*").match ({ true => LitVal( ok: true, v: l * r ), false =>
-                LitVal( ok: false, v: 0 ) }) }) })
+    eq(op, "+").match ({ true => LitVal( ok: true, v: l + r, neg: (l + r) < 0 ), false =>
+        eq(op, "-").match ({ true => LitVal( ok: true, v: l - r, neg: (l - r) < 0 ), false =>
+            eq(op, "*").match ({ true => LitVal( ok: true, v: l * r, neg: (l * r) < 0 ), false =>
+                LitVal( ok: false, v: 0, neg: false ) }) }) })
 }
 lit_val = (e: Ptr<Expr>) LitVal {
     load(e).match ({
-        .Int(n) => LitVal( ok: true, v: n ),
+        .Int(n) => LitVal( ok: true, v: n, neg: false ),
         .Bin(b) => {
             l := b.lhs.lit_val()
             r := b.rhs.lit_val()
             (l.ok && r.ok).match ({
                 true  => lit_binop(b.op, l.v, r.v),
-                false => LitVal( ok: false, v: 0 )
+                false => LitVal( ok: false, v: 0, neg: false )
             })
         },
-        _ => LitVal( ok: false, v: 0 )
+        _ => LitVal( ok: false, v: 0, neg: false )
     })
 }
 // The narrow widths arrive as Named("i8")/Named("u32")/… (no Ty variant); range-check them by name.
-// u64 holds values an i64 can't, so only its lower bound (no negatives) is enforced here.
-named_int_range_ok = (nm: str, n: i64) bool {
+// u64 holds values an i64 can't represent as a positive `n`, so its upper bound cannot be checked in
+// i64; any non-negative literal fits (every i64 bit pattern is a valid u64). `neg` rejects `-1` etc.
+named_int_range_ok = (nm: str, n: i64, neg: bool) bool {
     eq(nm, "i8").match  ({ true => (n >= 0 - 128) && (n <= 127), false =>
         eq(nm, "i16").match ({ true => (n >= 0 - 32768) && (n <= 32767), false =>
             eq(nm, "u16").match ({ true => (n >= 0) && (n <= 65535), false =>
                 eq(nm, "u32").match ({ true => (n >= 0) && (n <= 4294967295), false =>
-                    eq(nm, "u64").match ({ true => (n >= 0), false =>
+                    eq(nm, "u64").match ({ true => !neg, false =>
                         true }) }) }) }) })
 }
-lit_range_ok = (t: Ty, n: i64) bool {
+lit_range_ok = (t: Ty, n: i64, neg: bool) bool {
     t.match ({
         .U8        => (n >= 0) && (n <= 255),
         .I32       => (n >= 0 - 2147483648) && (n <= 2147483647),
         .I64       => true,
-        .Named(nm) => nm.named_int_range_ok(n),
+        .Named(nm) => nm.named_int_range_ok(n, neg),
         _          => true
     })
 }
@@ -144,7 +151,7 @@ lit_range_ok = (t: Ty, n: i64) bool {
 lit_fits = (e: Ptr<Expr>, t: Ty) bool {
     lv := e.lit_val()
     lv.ok.match ({
-        true  => t.lit_range_ok(lv.v),
+        true  => t.lit_range_ok(lv.v, lv.neg),
         false => true
     })
 }
