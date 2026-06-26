@@ -1,0 +1,45 @@
+// std.concurrent.ring — ONE generic single-producer/single-consumer ring buffer over a RawPtr<u8>
+// slot buffer. This is the single shared shape `{ buf, head, tail, cap }` that the actor mailbox,
+// the actor run-queue read path, and the pool's i64 mailbox all open-coded before (the `tail - head
+// >= cap` full-check / `buf[tail % cap]` write / `buf[head % cap]` modulo read).
+//
+// THE IDIOM (proven-safe, value-load): callers keep the ring state behind a RawPtr (or as fields of a
+// larger struct), load a Ring<M> VALUE, call a method, and write the advanced indices back. Every
+// method slices the ring VALUE's `buf` as `[M]` (DOT access on the value), so codegen sees a concrete
+// `sizeof(M)` — it never takes a `MutPtr<Struct<M>>` arrow access and feeds it into `.slice()`.
+//
+// Methods are pure on the indices: `push`/`advance` RETURN a new ring with tail/head moved; the caller
+// stores back `state[0] = ring.push(v)` (typed slice) or `a.tail = ring.push(v).tail` (struct field).
+// The buffer write/read is the side effect; index motion is functional. This keeps the abstraction
+// usable both behind a `[Ring<M>]` slot and embedded as plain fields under a mutex.
+Ring*<M>: {
+    buf: RawPtr<u8>,
+    head: i64,
+    tail: i64,
+    cap: i64
+
+    // the ring cannot accept another element (producer is a full lap ahead of the consumer).
+    is_full = (r: Ring<M>) bool { r.tail - r.head >= r.cap }
+    // queued-but-unconsumed element count.
+    pending = (r: Ring<M>) i64 { r.tail - r.head }
+    // there is at least one element to consume.
+    nonempty = (r: Ring<M>) bool { r.head < r.tail }
+    // write `v` at the producer slot, return the ring with tail advanced (caller checks is_full first).
+    push = (r: Ring<M>, v: M) Ring<M> {
+        slots: [M] := r.buf.slice(r.cap)
+        slots[r.tail % r.cap] = v
+        Ring<M>(buf: r.buf, head: r.head, tail: r.tail + 1, cap: r.cap)
+    }
+    // the consumer-slot value (caller checks nonempty first); does NOT advance.
+    peek = (r: Ring<M>) M {
+        slots: [M] := r.buf.slice(r.cap)
+        slots[r.head % r.cap]
+    }
+    // the ring with the head advanced by one (consumed the peeked element).
+    advance = (r: Ring<M>) Ring<M> {
+        Ring<M>(buf: r.buf, head: r.head + 1, tail: r.tail, cap: r.cap)
+    }
+}
+
+// build an empty ring over an already-allocated slot buffer.
+ring*<M> = (buf: RawPtr<u8>, cap: i64) Ring<M> { Ring<M>(buf: buf, head: 0, tail: 0, cap: cap) }
