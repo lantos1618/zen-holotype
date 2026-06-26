@@ -34,6 +34,14 @@ oracle_value_run* = () i32 {
     VCase(src: "Opt<T>: Some(T) | None\none<T> = (x: T) Opt<T> { .None }\ntest* = () i32 { one(5).match({ .Some(x) => x, .None => 3 }) }", want: "3"),
     VCase(src: "Opt<T>: Some(T) | None\npick<T> = (x: T, b: i32) Opt<T> { (b == 1).match({ true => .Some(x), false => .None }) }\ntest* = () i32 { pick(9, 0).match({ .Some(x) => x, .None => 3 }) }", want: "3"),
     VCase(src: "Opt<T>: Some(T) | None\nunwrap<T> = (o: Opt<T>, d: T) T { o.match({ .Some(x) => x, .None => d }) }\ntest* = () i32 {\n  o := .Some(7)\n  unwrap(o, 0)\n}", want: "7"),
+    // Inliner tparam-subst keystone (inline_template threads the tparam->arg map through xform_*):
+    //   - `[M]` element type in an Index reached via a MutPtr<Box<M>> receiver (was `sizeof(void)`),
+    //   - a `ms: [M] :=` let annotation in an inlined body,
+    //   - two-param `ok<T,E>` where E is inferred from the RETURN type (must be Result_i32_IoError,
+    //     not Result_i32_void). These are silent-miscompile guards for that fix.
+    VCase(src: "Box<M>: { buf: [M]  n: i32  at = (b: MutPtr<Box<M>>, i: i32) M { b.buf[i] } }\ntest* = () i32 { data := [111, 222, 333]  b := Box<i32>(buf: data, n: 3)  p := b.addr()  p.at(0) + p.at(1) }", want: "333"),
+    VCase(src: "Box<M>: { buf: [M]  n: i32  sum = (b: Box<M>) M { ms: [M] := b.buf  ms[0] + ms[1] } }\ntest* = () i32 { data := [10, 20, 30]  b := Box<i32>(buf: data, n: 3)  b.sum() }", want: "30"),
+    VCase(src: "Result<T, E>: Ok(T) | Err(E)\nIoError: NotFound\nok2<T, E> = (x: T) Result<T, E> { .Ok(x) }\ngetit = () Result<i32, IoError> { ok2(42) }\ntest* = () i32 { getit().match({ .Ok(v) => v, .Err(e) => 0 - 1 }) }", want: "42"),
     VCase(src: "first<T> = (xs: [T]) T { xs[0] }\ntest* = () i32 { first([7, 8]) }", want: "7"),
     VCase(src: "pick2<T> = (xs: [T], a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }", want: "9"),
     VCase(src: "test* = () i64 {\n  xs := [10, 20, 30]\n  xs.len()\n}", want: "3"),
