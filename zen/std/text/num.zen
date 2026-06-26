@@ -183,7 +183,13 @@ num_write_fparts = (p: RawPtr<u8>, at: i64, ip: i64, scaled: i64) i64 {
     })
 }
 
-num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
+// Largest magnitude whose integer part still fits in i64 (i64 max ~9.22e18). Above this
+// `to_i64(x)` would overflow, so the fixed-decimal path is replaced by scientific notation.
+F64_DIGIT_MAX := 9000000000000000000.0
+
+// Fixed-decimal write: integer part + up to 6 fraction digits. Valid only for magnitudes
+// whose integer part fits in i64 (the sci path below feeds it a mantissa in [1, 10)).
+num_write_fabs_normal = (p: RawPtr<u8>, at: i64, x: f64) i64 {
     ip     := to_i64(x)
     scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
     (scaled >= 1000000).match ({
@@ -192,16 +198,53 @@ num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
     })
 }
 
-F64_DIGIT_MAX := 9000000000000000000.0
+// Decimal exponent E of a large positive x: the count of /10 steps until x < 10, so x/10^E
+// lands in [1, 10). Recursive (E is small: <= 308 for any finite f64).
+num_sci_exp = (x: f64, e: i64) i64 {
+    (x < 10.0).match ({
+        true  => e,
+        false => num_sci_exp(x / 10.0, e + 1)
+    })
+}
+
+num_scale_down = (x: f64, n: i64) f64 {
+    (n == 0).match ({ true => x, false => num_scale_down(x / 10.0, n - 1) })
+}
+
+// Scientific notation "m.mmmmmme+EE" for a large finite positive x (one whose integer part
+// would overflow i64). The mantissa m = x / 10^E is in [1, 10), so it formats via the normal
+// fixed-decimal path. PRECISION: mantissa carries the usual ~15-significant-digit f64 error.
+num_write_sci = (p: RawPtr<u8>, at: i64, x: f64) i64 {
+    e    := num_sci_exp(x, 0)
+    mant := num_scale_down(x, e)
+    mend := num_write_fabs_normal(p, at, mant)
+    p.offset(mend).store('e')
+    p.offset(mend + 1).store('+')
+    num_write_udigits(p, mend + 2, e)
+}
+
+// x is the non-negative magnitude. Above i64's integer range use scientific notation so a
+// finite-but-huge value (e.g. 6.022e23) renders its digits instead of overflowing to "inf".
+num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
+    (x > F64_DIGIT_MAX).match ({
+        true  => num_write_sci(p, at, x),
+        false => num_write_fabs_normal(p, at, x)
+    })
+}
+
+// "nan"/"inf"/"-inf" for the IEEE specials, "" for any finite value (incl. large ones, which
+// the formatter renders in scientific notation). A TRUE infinity is detected arithmetically:
+// for finite x, x - x == 0; for +/-inf, inf - inf == nan != 0. Magnitude alone is NOT used —
+// that mislabels large finite numbers as infinity.
 f64_special* = (x: f64) str {
     (x != x).match ({
         true => "nan",
-        false => (x > F64_DIGIT_MAX).match ({
-            true => "inf",
-            false => (x < 0.0 - F64_DIGIT_MAX).match ({
+        false => ((x - x) != 0.0).match ({
+            true => (x < 0.0).match ({
                 true  => "-inf",
-                false => ""
-            })
+                false => "inf"
+            }),
+            false => ""
         })
     })
 }
