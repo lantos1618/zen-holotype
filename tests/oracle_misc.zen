@@ -11,7 +11,7 @@
 //
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
 // already defines `read_file*`), oracle_lib, or the other category files.
-{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite } = oracle_lib
+{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd } = oracle_lib
 { Malloc } = std.mem.alloc
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
@@ -102,10 +102,10 @@ NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_ra
 oracle_misc_num_parse = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    save("/tmp/zo_misc_np.zen", NP_PROG, len(NP_PROG))
-    save("/tmp/zo_misc_np.out", "", 0)
-    shell("./zenc run /tmp/zo_misc_np.zen > /tmp/zo_misc_np.out 2>/dev/null")
-    txt := mp.om_read_file("/tmp/zo_misc_np.out")
+    save(mp.zo_path("zo_misc_np.zen"), NP_PROG, len(NP_PROG))
+    save(mp.zo_path("zo_misc_np.out"), "", 0)
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_np.zen > $ZT/zo_misc_np.out 2>/dev/null"))
+    txt := mp.om_read_file(mp.zo_path("zo_misc_np.out"))
     run_suite("num_parse (run)", [
     // value path: numbers parse correctly
     txt.contains("f_pi|=Ok3.14\n"),
@@ -182,9 +182,9 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
 }
 
 om_acid_ok = (mp: MutPtr<Malloc>, path: str) bool {
-    save("/tmp/zo_misc_acid.c", "", 0)
-    rc := shell(mp.om_cat3("./zenc emit ", path, " > /tmp/zo_misc_acid.c 2>/dev/null"))
-    txt := mp.om_read_file("/tmp/zo_misc_acid.c")
+    save(mp.zo_path("zo_misc_acid.c"), "", 0)
+    rc := shell(mp.zo_cmd(mp.om_cat3("./zenc emit ", path, " > $ZT/zo_misc_acid.c 2>/dev/null")))
+    txt := mp.om_read_file(mp.zo_path("zo_misc_acid.c"))
     src := mp.om_read_file(path)
     (rc == 0).match ({
         true  => txt.starts_with(HEAD).match ({
@@ -356,52 +356,56 @@ oracle_misc_differential = () i32 {
 // ════════════════════════════════════════════════════════════════════════════════
 // fmt --ast a source string, returning the formatted output.
 om_do_fmt = (mp: MutPtr<Malloc>, src: str) str {
-    save("/tmp/zo_misc_fa.zen", src, len(src))
-    save("/tmp/zo_misc_fa.out", "", 0)
-    shell("./zenc fmt --ast /tmp/zo_misc_fa.zen > /tmp/zo_misc_fa.out 2>/dev/null")
-    mp.om_read_file("/tmp/zo_misc_fa.out")
+    save(mp.zo_path("zo_misc_fa.zen"), src, len(src))
+    save(mp.zo_path("zo_misc_fa.out"), "", 0)
+    shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_fa.zen > $ZT/zo_misc_fa.out 2>/dev/null"))
+    mp.om_read_file(mp.zo_path("zo_misc_fa.out"))
 }
 // emit a source string, returning the emitted C.
 om_do_emit = (mp: MutPtr<Malloc>, src: str) str {
-    save("/tmp/zo_misc_em.zen", src, len(src))
-    save("/tmp/zo_misc_em.c", "", 0)
-    shell("./zenc emit /tmp/zo_misc_em.zen > /tmp/zo_misc_em.c 2>/dev/null")
-    mp.om_read_file("/tmp/zo_misc_em.c")
+    save(mp.zo_path("zo_misc_em.zen"), src, len(src))
+    save(mp.zo_path("zo_misc_em.c"), "", 0)
+    shell(mp.zo_cmd("./zenc emit $ZT/zo_misc_em.zen > $ZT/zo_misc_em.c 2>/dev/null"))
+    mp.om_read_file(mp.zo_path("zo_misc_em.c"))
 }
 // `zenc run` a source string, returning the program's exit code (a value-returning main's value).
 // `shell` is libc gpa(): it returns the wait status with the exit code in the high byte, so
 // `/ 256` recovers the code a normally-terminating program returned.
 om_run_rc = (src: str) i32 {
-    save("/tmp/zo_misc_run.zen", src, len(src))
-    shell("./zenc run /tmp/zo_misc_run.zen > /dev/null 2>&1") / 256
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_misc_run.zen"), src, len(src))
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_run.zen > /dev/null 2>&1")) / 256
 }
 // fmt --ast a source, then run the FORMATTED output; returns its exit code.
 om_fmt_then_run = (mp: MutPtr<Malloc>, src: str) i32 {
-    save("/tmp/zo_misc_ftr.zen", src, len(src))
-    shell("./zenc fmt --ast /tmp/zo_misc_ftr.zen > /tmp/zo_misc_ftr_f.zen 2>/dev/null")
-    shell("./zenc run /tmp/zo_misc_ftr_f.zen > /dev/null 2>&1") / 256
+    save(mp.zo_path("zo_misc_ftr.zen"), src, len(src))
+    shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_ftr.zen > $ZT/zo_misc_ftr_f.zen 2>/dev/null"))
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")) / 256
 }
 // fmt(fmt src) == fmt(src) on a source string.
 om_fmt_idem = (src: str) bool {
-    save("/tmp/zo_misc_id.zen", src, len(src))
-    shell("./zenc fmt --ast /tmp/zo_misc_id.zen > /tmp/zo_misc_id1.zen 2>/dev/null")
-    shell("./zenc fmt --ast /tmp/zo_misc_id1.zen > /tmp/zo_misc_id2.zen 2>/dev/null")
-    shell("cmp -s /tmp/zo_misc_id1.zen /tmp/zo_misc_id2.zen") == 0
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_misc_id.zen"), src, len(src))
+    shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null"))
+    shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null"))
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")) == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
 om_corpus_idem = (mp: MutPtr<Malloc>, rel: str) bool {
-    shell(mp.om_cat3("./zenc fmt --ast ", rel, " > /tmp/zo_misc_c1.zen 2>/dev/null"))
-    shell("./zenc fmt --ast /tmp/zo_misc_c1.zen > /tmp/zo_misc_c2.zen 2>/dev/null")
-    shell("cmp -s /tmp/zo_misc_c1.zen /tmp/zo_misc_c2.zen") == 0
+    shell(mp.zo_cmd(mp.om_cat3("./zenc fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null")))
+    shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null"))
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")) == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
 om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: str) bool {
-    shell(mp.om_cat3("./zenc fmt --ast ", rel, " > /tmp/zo_misc_cf.zen 2>/dev/null"))
-    shell(mp.om_cat3("cp ", rel, " /tmp/zo_misc_co.zen"))
-    shell("ZEN_ROOT=. ./zenc emit --force /tmp/zo_misc_co.zen > /tmp/zo_misc_eo.c 2>/dev/null")
-    shell("ZEN_ROOT=. ./zenc emit --force /tmp/zo_misc_cf.zen > /tmp/zo_misc_ef.c 2>/dev/null")
-    shell("cmp -s /tmp/zo_misc_eo.c /tmp/zo_misc_ef.c") == 0
+    shell(mp.zo_cmd(mp.om_cat3("./zenc fmt --ast ", rel, " > $ZT/zo_misc_cf.zen 2>/dev/null")))
+    shell(mp.zo_cmd(mp.om_cat3("cp ", rel, " $ZT/zo_misc_co.zen")))
+    shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null"))
+    shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null"))
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")) == 0
 }
 
 oracle_misc_faithful = () i32 {

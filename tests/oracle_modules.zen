@@ -32,6 +32,7 @@
 { eq, len, contains, is_empty, view } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
 { integer_in } = std.text.num
+{ zo_path, zo_cmd } = oracle_lib
 
 // one source file of a project: `name` is the basename (e.g. "p.zen"), `src` its full text.
 ModFile*: { name: str, src: str }
@@ -48,7 +49,8 @@ ModDocCase*: { module: str, present: [str] }
 // the combined stdout+stderr must contain every `present` substring.
 ModStdinCase*: { src: str, should_succeed: bool, present: [str] }
 
-DIR := "/tmp/zo_mods/"
+// this run's private project dir (trailing slash), unique per process so concurrent runs never clash.
+mod_dir = (mp: MutPtr<Malloc>) str { mp.zo_path("zo_mods/") }
 
 // concat two / three strings through an allocator-owned String (no fixed-buffer assumptions).
 join2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
@@ -106,11 +108,11 @@ gen_repeat = (mp: MutPtr<Malloc>, chunk: str, n: i32) str {
     mp.finish_in(s)
 }
 
-// fresh temp project dir, then every file written into it (paths are DIR + basename).
+// fresh temp project dir, then every file written into it (paths are mod_dir + basename).
 write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
-    shell("rm -rf /tmp/zo_mods && mkdir -p /tmp/zo_mods")
+    shell(mp.zo_cmd("rm -rf $ZT/zo_mods && mkdir -p $ZT/zo_mods"))
     files.loop((h, i, f) {
-        p := mp.join2(DIR, f.name)
+        p := mp.join2(mp.mod_dir(), f.name)
         save(p, f.src, len(f.src))
     })
 }
@@ -120,9 +122,9 @@ run_mod_value* = (mc: ModValCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     mp.write_files(mc.files)
-    entry := mp.join2(DIR, mc.entry)
-    cmd := mp.join3("./zenc run ", entry, " > /tmp/zo_mods_out.txt 2>&1")
-    rc := shell(cmd)
+    entry := mp.join2(mp.mod_dir(), mc.entry)
+    cmd := mp.join3("./zenc run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
+    rc := shell(mp.zo_cmd(cmd))
     // `shell` returns the raw waitpid status; for a normal exit the program's exit code is the high
     // byte (WEXITSTATUS), i.e. status / 256. A build/loader failure surfaces as rc != 0.
     (rc / 256) == mc.want
@@ -134,16 +136,16 @@ run_mod_verdict* = (mc: ModVerdictCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     mp.write_files(mc.files)
-    entry := mp.join2(DIR, mc.entry)
-    cmd := mp.join3("./zenc check ", entry, " > /tmp/zo_mods_chk.txt 2>&1")
-    rc := shell(cmd)
+    entry := mp.join2(mp.mod_dir(), mc.entry)
+    cmd := mp.join3("./zenc check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
+    rc := shell(mp.zo_cmd(cmd))
     mc.should_pass.match ({
         true  => rc == 0,
         false => (rc == 0).match ({
             true  => false,
             false => is_empty(mc.needle).match ({
                 true  => true,
-                false => mp.contents_in("/tmp/zo_mods_chk.txt").match ({
+                false => mp.contents_in(mp.zo_path("zo_mods_chk.txt")).match ({
                     .Ok(txt) => txt.contains(mc.needle),
                     .Err(e)  => false
                 })
@@ -158,12 +160,12 @@ run_mod_emit* = (mc: ModEmitCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     mp.write_files(mc.files)
-    entry := mp.join2(DIR, mc.entry)
-    cmd := mp.join3("./zenc emit ", entry, " > /tmp/zo_mods_emit.txt 2>&1")
-    rc := shell(cmd)
+    entry := mp.join2(mp.mod_dir(), mc.entry)
+    cmd := mp.join3("./zenc emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
+    rc := shell(mp.zo_cmd(cmd))
     (rc == 0).match ({
         false => false,
-        true  => mp.contents_in("/tmp/zo_mods_emit.txt").match ({
+        true  => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
             .Err(e) => false,
             .Ok(txt) => {
                 bad := 0
@@ -179,11 +181,11 @@ run_mod_emit* = (mc: ModEmitCase) bool {
 run_mod_doc* = (mc: ModDocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    cmd := mp.join3("./zenc doc ", mc.module, " > /tmp/zo_mods_doc.txt 2>&1")
-    rc := shell(cmd)
+    cmd := mp.join3("./zenc doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
+    rc := shell(mp.zo_cmd(cmd))
     (rc == 0).match ({
         false => false,
-        true  => mp.contents_in("/tmp/zo_mods_doc.txt").match ({
+        true  => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
             .Err(e) => false,
             .Ok(txt) => {
                 bad := 0
@@ -199,12 +201,12 @@ run_mod_doc* = (mc: ModDocCase) bool {
 run_mod_stdin* = (mc: ModStdinCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    save("/tmp/zo_mods_stdin.zen", mc.src, len(mc.src))
-    rc := shell("./zenc < /tmp/zo_mods_stdin.zen > /tmp/zo_mods_stdin_out.txt 2>&1")
+    save(mp.zo_path("zo_mods_stdin.zen"), mc.src, len(mc.src))
+    rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1"))
     ok_rc := mc.should_succeed.match ({ true => rc == 0, false => rc != 0 })
     ok_rc.match ({
         false => false,
-        true  => mp.contents_in("/tmp/zo_mods_stdin_out.txt").match ({
+        true  => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
             .Err(e) => false,
             .Ok(txt) => {
                 bad := 0

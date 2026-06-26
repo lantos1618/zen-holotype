@@ -5,7 +5,7 @@
 //
 // ── THE CUSTOM RUNNER (why it differs from oracle_lib.run_value) ──────────────────────────────────
 // run_value compiles a tiny `test*` snippet through tests/oracle_runner.c and compares a printed int.
-// A BUILD fixture is a whole `main = () i32 { … }` program: we `zenc build <path> -o /tmp/zob`, run the
+// A BUILD fixture is a whole `main = () i32 { … }` program: we `zenc build <path> -o $ZT/zob`, run the
 // binary, and assert its EXIT CODE and (optionally) its STDOUT. The exit code is captured by embedding
 // `test "$?" -eq <want_exit>` in the shell command — `std.io.file.shell` returns the system(3) wait
 // status (exit<<8), not the raw code, so we let the shell do the comparison and check rc==0 instead.
@@ -22,7 +22,7 @@
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, is_empty } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags } = oracle_lib
+{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd } = oracle_lib
 
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: { path: str, want_exit: str, want_out: str, check_out: bool }
@@ -36,20 +36,20 @@ DocCase*: { target: str, present: [str], absent: [str] }
 // must exit 0 iff the test passes — every assertion is a `&&`-chained command / `test`/`grep -F` check.
 ShellCase*: { name: str, cmd: str }
 
-// helper: build the command  `./zenc build <path> -o /tmp/zob 2>/dev/null`
+// helper: build the command body  `./zenc build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
 build_cmd = (mp: MutPtr<Malloc>, path: str) str {
     s := mp.new_in()
     s = s.append_in(mp, "./zenc build ")
     s = s.append_in(mp, path)
-    s = s.append_in(mp, " -o /tmp/zob 2>/dev/null")
+    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null")
     mp.finish_in(s)
 }
 
-// helper: build the command  `/tmp/zob > /tmp/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
-// (returns rc 0 iff the program's exit code equals want_exit; stdout is left in /tmp/zob_out.txt).
+// helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
+// (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
 run_cmd = (mp: MutPtr<Malloc>, want_exit: str) str {
     s := mp.new_in()
-    s = s.append_in(mp, "/tmp/zob > /tmp/zob_out.txt 2>/dev/null; test \"$?\" -eq ")
+    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ")
     s = s.append_in(mp, want_exit)
     mp.finish_in(s)
 }
@@ -58,17 +58,17 @@ run_cmd = (mp: MutPtr<Malloc>, want_exit: str) str {
 run_fixture* = (fc: FixtureCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    save("/tmp/zob_out.txt", "", 0)
-    bc := shell(mp.build_cmd(fc.path))
+    save(mp.zo_path("zob_out.txt"), "", 0)
+    bc := shell(mp.zo_cmd(mp.build_cmd(fc.path)))
     (bc == 0).match ({
         false => false,                                   // `zenc build` must succeed
         true  => {
-            rc := shell(mp.run_cmd(fc.want_exit))
+            rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit)))
             (rc == 0).match ({                            // exit code mismatch => fail
                 false => false,
                 true  => fc.check_out.match ({
                     false => true,                        // exit-only fixture: matched
-                    true  => mp.contents_in("/tmp/zob_out.txt").match ({
+                    true  => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
                         .Ok(got) => eq(got, fc.want_out),
                         .Err(e)  => false
                     })
@@ -113,10 +113,10 @@ all_present_absent = (txt: str, present: [str], absent: [str]) bool {
 run_emit* = (ec: EmitCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    rc := shell(mp.cmd_for("emit", ec.path, " > /tmp/zoe_emit.c 2>/dev/null"))
+    rc := shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null")))
     (rc == 0).match ({
         false => false,
-        true  => mp.contents_in("/tmp/zoe_emit.c").match ({
+        true  => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
             .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
             .Err(e)  => false
         })
@@ -138,10 +138,10 @@ run_emits* = (name: str, cs: [EmitCase]) i32 {
 run_doc* = (dc: DocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    rc := shell(mp.cmd_for("doc", dc.target, " > /tmp/zoe_doc.txt 2>&1"))
+    rc := shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1")))
     (rc == 0).match ({
         false => false,
-        true  => mp.contents_in("/tmp/zoe_doc.txt").match ({
+        true  => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
             .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
             .Err(e)  => false
         })
@@ -159,13 +159,16 @@ run_docs* = (name: str, cs: [DocCase]) i32 {
     fails
 }
 
-// run ONE shell case: the pipeline must exit 0.
+// run ONE shell case: the pipeline must exit 0. Each `cmd` body uses `$ZT` for its scratch paths;
+// zo_cmd binds `$ZT` to this run's private dir so concurrent oracle runs never share scratch files.
 run_shells* = (name: str, cs: [ShellCase]) i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
     out(name)
     out("\n")
     fails := 0
     cs.loop((h, i, c) {
-        (shell(c.cmd) == 0).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+        (shell(mp.zo_cmd(c.cmd)) == 0).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
     })
     out("\n")
     fails
@@ -350,8 +353,8 @@ oracle_build_run* = () i32 {
     FixtureCase(path: "tests/fixtures/zen/runtime_arena_explicit_backing.zen", want_exit: "0", want_out: "", check_out: false),
     FixtureCase(path: "tests/fixtures/zen/implicit_trait_bound_sugar.zen", want_exit: "0", want_out: "", check_out: false),
     FixtureCase(path: "tests/fixtures/zen/enum_match_block_run.zen", want_exit: "0", want_out: "", check_out: false),
-    FixtureCase(path: "tests/fixtures/zen/cown_result_paths.zen", want_exit: "0", want_out: "", check_out: false),
-    FixtureCase(path: "tests/fixtures/zen/io_file_result_paths.zen", want_exit: "0", want_out: "", check_out: false),
+    // cown_result_paths + io_file_result_paths use scratch FILE paths (`@@T@@/...`) — they are driven
+    // as shell cases below so each run substitutes its own private `$ZT` dir and seeds the inputs.
     ])
     // ── (e) run/stdout fixtures with exact stdout ────────────────────────────────────────────────
     r2 := run_fixtures("build result stdout", [
@@ -534,37 +537,43 @@ oracle_build_run* = () i32 {
     ])
     // ── (j) procedural tests (project mode, fmt idempotency, help/version, bad-file, sibling, emit-eq) ─
     sh := run_shells("build shell", [
-    ShellCase(name: "build_bad_file", cmd: "./zenc build /no/such/file.zen -o /tmp/zbf_x 2>/tmp/zbf.txt; test \"$?\" = 1 && grep -Fq \"cannot open\" /tmp/zbf.txt && test ! -e /tmp/zbf_x"),
-    ShellCase(name: "build_rejects_illtyped", cmd: "printf \"main = () i32 { 1 < 2 }\\n\" > /tmp/zit.zen && { ./zenc build /tmp/zit.zen -o /tmp/zit_bin 2>/dev/null; test \"$?\" != 0; } && test ! -e /tmp/zit_bin"),
-    ShellCase(name: "project_simple_app", cmd: "rm -rf /tmp/zsa && cp -r tests/fixtures/project/simple_app /tmp/zsa && ./zenc build /tmp/zsa 2>/tmp/zsa.txt && test -x /tmp/zsa/app && grep -Fq \"/tmp/zsa/app\" /tmp/zsa.txt && { /tmp/zsa/app; test \"$?\" = 7; }"),
-    ShellCase(name: "project_broken_manifest", cmd: "rm -rf /tmp/zbm && cp -r tests/fixtures/project/broken_manifest /tmp/zbm && { ./zenc build /tmp/zbm >/tmp/zbm.txt 2>&1; test \"$?\" != 0; } && grep -Fq \"invalid manifest\" /tmp/zbm.txt && ! grep -Fq \"cannot open input\" /tmp/zbm.txt"),
-    ShellCase(name: "project_manifest_fixture", cmd: "rm -rf /tmp/zop_md && cp -r tests/fixtures/project/manifest_demo /tmp/zop_md && ./zenc check /tmp/zop_md 2>/tmp/zop_c.txt && grep -Fq \"src/main.zen: ok\" /tmp/zop_c.txt && { o=$(./zenc run /tmp/zop_md); test \"$?\" = 42; } && test \"$o\" = \"fixture project\" && ./zenc build /tmp/zop_md >/dev/null 2>&1 && test -x /tmp/zop_md/fixture-bin && { b=$(/tmp/zop_md/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"fixture project\""),
-    ShellCase(name: "project_manifest_native", cmd: "rm -rf /tmp/zmn && cp -r tests/fixtures/project/manifest_native /tmp/zmn && sed -i \"s#@@NATIVE@@#/tmp/zmn/native.c#\" /tmp/zmn/zen.toml && ./zenc check /tmp/zmn 2>/tmp/zmn_c.txt && grep -Fq \"src/main.zen: ok\" /tmp/zmn_c.txt && { o=$(./zenc run /tmp/zmn); test \"$?\" = 42; } && test \"$o\" = \"project\" && ./zenc build /tmp/zmn >/dev/null 2>&1 && test -x /tmp/zmn/manifest-bin && { b=$(/tmp/zmn/manifest-bin); test \"$?\" = 42; } && test \"$b\" = \"project\""),
-    ShellCase(name: "project_build_zen", cmd: "rm -rf /tmp/zbz && cp -r tests/fixtures/project/build_zen_demo /tmp/zbz && ./zenc build /tmp/zbz >/dev/null 2>&1 && test -x /tmp/zbz/fixture-bin && { b=$(/tmp/zbz/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"built from build.zen\" && { o=$(./zenc run /tmp/zbz); test \"$?\" = 42; } && test \"$o\" = \"built from build.zen\""),
-    ShellCase(name: "project_link_directive", cmd: "rm -rf /tmp/zll && cp -r tests/fixtures/project/linklib_demo /tmp/zll && sed -i \"s#@@NATIVE@@#/tmp/zll/native.c#\" /tmp/zll/zen.toml && ./zenc build /tmp/zll >/dev/null 2>&1 && test -x /tmp/zll/linklib-bin && { b=$(/tmp/zll/linklib-bin); test \"$?\" = 51; } && test \"$b\" = \"link libm\" && { o=$(./zenc run /tmp/zll); test \"$?\" = 51; } && test \"$o\" = \"link libm\" && sed -i \"/^link = /d;s/linklib-bin/linklib-bin-nolink/\" /tmp/zll/zen.toml && { ./zenc build /tmp/zll >/dev/null 2>&1; test \"$?\" != 0; } && test ! -e /tmp/zll/linklib-bin-nolink"),
-    ShellCase(name: "help_version_zen_root", cmd: "{ ./zenc --help >/tmp/zh.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"usage:\" /tmp/zh.txt && grep -Fq \"zenc doc\" /tmp/zh.txt && { ./zenc --version >/tmp/zv.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"zenc\" /tmp/zv.txt && { printf \"test* = () i32 { 1 }\\n\" | ./zenc 2>/dev/null | grep -Fq zslice; } && cp ./zenc /tmp/zenc-moved && printf \"main = () i32 { 42 }\\n\" > /tmp/zrm.zen && { ZEN_ROOT=$(pwd) /tmp/zenc-moved run /tmp/zrm.zen; test \"$?\" = 42; }"),
-    ShellCase(name: "fmt_basic", cmd: "cp tests/fixtures/fmt/basic_unformatted.zen /tmp/zfmt.zen && { ./zenc fmt --check /tmp/zfmt.zen 2>/tmp/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" /tmp/zfmt_e.txt && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen tests/fixtures/fmt/basic_formatted.zen && ./zenc fmt --check /tmp/zfmt.zen && cp /tmp/zfmt.zen /tmp/zfmt_b.zen && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen /tmp/zfmt_b.zen"),
-    ShellCase(name: "fmt_block_comments", cmd: "cp tests/fixtures/fmt/block_comments_unformatted.zen /tmp/zfmt.zen && { ./zenc fmt --check /tmp/zfmt.zen 2>/tmp/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" /tmp/zfmt_e.txt && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen tests/fixtures/fmt/block_comments_formatted.zen && ./zenc fmt --check /tmp/zfmt.zen && cp /tmp/zfmt.zen /tmp/zfmt_b.zen && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen /tmp/zfmt_b.zen"),
-    ShellCase(name: "fmt_literals", cmd: "cp tests/fixtures/fmt/literals_unformatted.zen /tmp/zfmt.zen && { ./zenc fmt --check /tmp/zfmt.zen 2>/tmp/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" /tmp/zfmt_e.txt && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen tests/fixtures/fmt/literals_formatted.zen && ./zenc fmt --check /tmp/zfmt.zen && cp /tmp/zfmt.zen /tmp/zfmt_b.zen && ./zenc fmt /tmp/zfmt.zen >/dev/null && cmp -s /tmp/zfmt.zen /tmp/zfmt_b.zen"),
-    ShellCase(name: "sibling_source_location", cmd: "rm -rf /tmp/zsib && mkdir -p /tmp/zsib && printf \"bad* = () i32 { missing() }\\n\" > /tmp/zsib/bad.zen && printf \"{ bad } = bad\\nmain = () i32 { bad() }\\n\" > /tmp/zsib/main.zen && { ./zenc check /tmp/zsib/main.zen >/tmp/zsib_o.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"bad.zen:1:17: error[undefined-name]: undefined name\" /tmp/zsib_o.txt && grep -Fq \"bad* = () i32 { missing() }\" /tmp/zsib_o.txt"),
-    ShellCase(name: "implicit_trait_bound_emit_equal", cmd: "./zenc emit tests/fixtures/zen/implicit_trait_bound_sugar.zen >/tmp/zse_s.c 2>/dev/null && ./zenc emit tests/fixtures/zen/implicit_trait_bound_explicit.zen >/tmp/zse_e.c 2>/dev/null && cmp -s /tmp/zse_s.c /tmp/zse_e.c"),
-    ShellCase(name: "doc_local_file", cmd: "printf \"// Public counter type\\nCounter*: { n: i32 }\\n\\nhelper = () i32 { 1 }\\nvisible* = () i32 { 2 }\\n\" > /tmp/zdoc_local.zen && ./zenc doc /tmp/zdoc_local.zen >/tmp/zdoc_local_o.txt 2>&1 && grep -Fq \"Public counter type\" /tmp/zdoc_local_o.txt && grep -Fq \"Counter*: { n: i32 }\" /tmp/zdoc_local_o.txt && grep -Fq \"visible* = () i32 { 2 }\" /tmp/zdoc_local_o.txt && ! grep -Fq \"helper\" /tmp/zdoc_local_o.txt"),
+    ShellCase(name: "build_bad_file", cmd: "./zenc build /no/such/file.zen -o $ZT/zbf_x 2>$ZT/zbf.txt; test \"$?\" = 1 && grep -Fq \"cannot open\" $ZT/zbf.txt && test ! -e $ZT/zbf_x"),
+    ShellCase(name: "build_rejects_illtyped", cmd: "printf \"main = () i32 { 1 < 2 }\\n\" > $ZT/zit.zen && { ./zenc build $ZT/zit.zen -o $ZT/zit_bin 2>/dev/null; test \"$?\" != 0; } && test ! -e $ZT/zit_bin"),
+    ShellCase(name: "project_simple_app", cmd: "rm -rf $ZT/zsa && cp -r tests/fixtures/project/simple_app $ZT/zsa && ./zenc build $ZT/zsa 2>$ZT/zsa.txt && test -x $ZT/zsa/app && grep -Fq \"$ZT/zsa/app\" $ZT/zsa.txt && { $ZT/zsa/app; test \"$?\" = 7; }"),
+    ShellCase(name: "project_broken_manifest", cmd: "rm -rf $ZT/zbm && cp -r tests/fixtures/project/broken_manifest $ZT/zbm && { ./zenc build $ZT/zbm >$ZT/zbm.txt 2>&1; test \"$?\" != 0; } && grep -Fq \"invalid manifest\" $ZT/zbm.txt && ! grep -Fq \"cannot open input\" $ZT/zbm.txt"),
+    ShellCase(name: "project_manifest_fixture", cmd: "rm -rf $ZT/zop_md && cp -r tests/fixtures/project/manifest_demo $ZT/zop_md && ./zenc check $ZT/zop_md 2>$ZT/zop_c.txt && grep -Fq \"src/main.zen: ok\" $ZT/zop_c.txt && { o=$(./zenc run $ZT/zop_md); test \"$?\" = 42; } && test \"$o\" = \"fixture project\" && ./zenc build $ZT/zop_md >/dev/null 2>&1 && test -x $ZT/zop_md/fixture-bin && { b=$($ZT/zop_md/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"fixture project\""),
+    ShellCase(name: "project_manifest_native", cmd: "rm -rf $ZT/zmn && cp -r tests/fixtures/project/manifest_native $ZT/zmn && sed -i \"s#@@NATIVE@@#$ZT/zmn/native.c#\" $ZT/zmn/zen.toml && ./zenc check $ZT/zmn 2>$ZT/zmn_c.txt && grep -Fq \"src/main.zen: ok\" $ZT/zmn_c.txt && { o=$(./zenc run $ZT/zmn); test \"$?\" = 42; } && test \"$o\" = \"project\" && ./zenc build $ZT/zmn >/dev/null 2>&1 && test -x $ZT/zmn/manifest-bin && { b=$($ZT/zmn/manifest-bin); test \"$?\" = 42; } && test \"$b\" = \"project\""),
+    ShellCase(name: "project_build_zen", cmd: "rm -rf $ZT/zbz && cp -r tests/fixtures/project/build_zen_demo $ZT/zbz && ./zenc build $ZT/zbz >/dev/null 2>&1 && test -x $ZT/zbz/fixture-bin && { b=$($ZT/zbz/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"built from build.zen\" && { o=$(./zenc run $ZT/zbz); test \"$?\" = 42; } && test \"$o\" = \"built from build.zen\""),
+    ShellCase(name: "project_link_directive", cmd: "rm -rf $ZT/zll && cp -r tests/fixtures/project/linklib_demo $ZT/zll && sed -i \"s#@@NATIVE@@#$ZT/zll/native.c#\" $ZT/zll/zen.toml && ./zenc build $ZT/zll >/dev/null 2>&1 && test -x $ZT/zll/linklib-bin && { b=$($ZT/zll/linklib-bin); test \"$?\" = 51; } && test \"$b\" = \"link libm\" && { o=$(./zenc run $ZT/zll); test \"$?\" = 51; } && test \"$o\" = \"link libm\" && sed -i \"/^link = /d;s/linklib-bin/linklib-bin-nolink/\" $ZT/zll/zen.toml && { ./zenc build $ZT/zll >/dev/null 2>&1; test \"$?\" != 0; } && test ! -e $ZT/zll/linklib-bin-nolink"),
+    ShellCase(name: "help_version_zen_root", cmd: "{ ./zenc --help >$ZT/zh.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"usage:\" $ZT/zh.txt && grep -Fq \"zenc doc\" $ZT/zh.txt && { ./zenc --version >$ZT/zv.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"zenc\" $ZT/zv.txt && { printf \"test* = () i32 { 1 }\\n\" | ./zenc 2>/dev/null | grep -Fq zslice; } && cp ./zenc $ZT/zenc-moved && printf \"main = () i32 { 42 }\\n\" > $ZT/zrm.zen && { ZEN_ROOT=$(pwd) $ZT/zenc-moved run $ZT/zrm.zen; test \"$?\" = 42; }"),
+    ShellCase(name: "fmt_basic", cmd: "cp tests/fixtures/fmt/basic_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/basic_formatted.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen"),
+    ShellCase(name: "fmt_block_comments", cmd: "cp tests/fixtures/fmt/block_comments_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/block_comments_formatted.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen"),
+    ShellCase(name: "fmt_literals", cmd: "cp tests/fixtures/fmt/literals_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/literals_formatted.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen"),
+    ShellCase(name: "sibling_source_location", cmd: "rm -rf $ZT/zsib && mkdir -p $ZT/zsib && printf \"bad* = () i32 { missing() }\\n\" > $ZT/zsib/bad.zen && printf \"{ bad } = bad\\nmain = () i32 { bad() }\\n\" > $ZT/zsib/main.zen && { ./zenc check $ZT/zsib/main.zen >$ZT/zsib_o.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"bad.zen:1:17: error[undefined-name]: undefined name\" $ZT/zsib_o.txt && grep -Fq \"bad* = () i32 { missing() }\" $ZT/zsib_o.txt"),
+    ShellCase(name: "implicit_trait_bound_emit_equal", cmd: "./zenc emit tests/fixtures/zen/implicit_trait_bound_sugar.zen >$ZT/zse_s.c 2>/dev/null && ./zenc emit tests/fixtures/zen/implicit_trait_bound_explicit.zen >$ZT/zse_e.c 2>/dev/null && cmp -s $ZT/zse_s.c $ZT/zse_e.c"),
+    ShellCase(name: "doc_local_file", cmd: "printf \"// Public counter type\\nCounter*: { n: i32 }\\n\\nhelper = () i32 { 1 }\\nvisible* = () i32 { 2 }\\n\" > $ZT/zdoc_local.zen && ./zenc doc $ZT/zdoc_local.zen >$ZT/zdoc_local_o.txt 2>&1 && grep -Fq \"Public counter type\" $ZT/zdoc_local_o.txt && grep -Fq \"Counter*: { n: i32 }\" $ZT/zdoc_local_o.txt && grep -Fq \"visible* = () i32 { 2 }\" $ZT/zdoc_local_o.txt && ! grep -Fq \"helper\" $ZT/zdoc_local_o.txt"),
+    // io_file_result_paths: substitute this run's private scratch dir for the `@@T@@` placeholder, then
+    // build+run; missing/denied/out paths now live under $ZT so concurrent runs never share scratch.
+    ShellCase(name: "io_file_result_paths", cmd: "cp tests/fixtures/zen/io_file_result_paths.zen $ZT/iofile.zen && sed -i \"s#@@T@@#$ZT#g\" $ZT/iofile.zen && ./zenc build $ZT/iofile.zen -o $ZT/iofile_bin 2>/dev/null && { $ZT/iofile_bin; test \"$?\" = 0; }"),
+    // cown_result_paths: same substitution, and SEED the input file first so `cown.file_in` opens it
+    // successfully and the allocator-wrap failure (LimitAlloc) is what yields the asserted .NotFound.
+    ShellCase(name: "cown_result_paths", cmd: "cp tests/fixtures/zen/cown_result_paths.zen $ZT/cown.zen && sed -i \"s#@@T@@#$ZT#g\" $ZT/cown.zen && printf \"\" > $ZT/zo_cown_input.txt && ./zenc build $ZT/cown.zen -o $ZT/cown_bin 2>/dev/null && { $ZT/cown_bin; test \"$?\" = 0; }"),
     ])
     // ── (k) bootstrap-binary battery (ported from test_bootstrap.py + test_build_self.py): the committed
     // `./zenc` IS the cc-built bootstrap binary, so drive it directly — emit-compile-run real programs,
     // survive malformed input (no signal death), report missing files, and `--build-self` usage errors.
     // (the self-host FIXPOINT itself is wired separately in oracle.zen via fixpoint_ok.)
     bs := run_shells("bootstrap", [
-    ShellCase(name: "bootstrap_compiles_zen", cmd: "printf '%s' 'sq* = (n: i32) i32 { n * n }' | ./zenc >/tmp/zbc.c 2>/dev/null && grep -Fq 'int32_t sq(int32_t n)' /tmp/zbc.c && { echo '#include <stdint.h>'; cat /tmp/zbc.c; echo 'int main(void){ return sq(7) == 49 ? 0 : 1; }'; } > /tmp/zbc_full.c && cc -std=gnu11 -w /tmp/zbc_full.c -o /tmp/zbc_bin 2>/dev/null && /tmp/zbc_bin"),
-    ShellCase(name: "bootstrap_run_bool_true_first", cmd: "printf 'f* = (n: i32) i32 { (n < 5).match({ true => 1, false => 0 }) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return f(3)==1 && f(9)==0 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_bool_false_first", cmd: "printf 'g* = (n: i32) i32 { (n < 5).match({ false => 0, true => 1 }) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return g(3)==1 && g(9)==0 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_recursion_fib", cmd: "printf 'fib* = (n: i32) i32 { (n < 2).match({ true => n, false => fib(n-1)+fib(n-2) }) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return fib(10)==55 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_while_sum", cmd: "printf 'sum* = (n: i32) i32 {\\n s := 0\\n i := 1\\n @while(i <= n) {\\n  s = s + i\\n  i = i + 1\\n }\\n s\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return sum(5)==15 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_nested_while", cmd: "printf 'grid* = (n: i32) i32 {\\n c := 0\\n i := 0\\n @while(i < n) {\\n  j := 0\\n  @while(j < n) {\\n   c = c + 1\\n   j = j + 1\\n  }\\n  i = i + 1\\n }\\n c\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return grid(4)==16 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_enum_match", cmd: "printf 'Shape*: Circle(i32) | Square(i32)\\nmk* = (n: i32) Shape {\\n .Circle(n)\\n}\\narea* = (s: Shape) i32 {\\n s.match({ .Circle(r) => r*r*3, .Square(w) => w*w })\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return area(mk(2))==12 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_struct_field", cmd: "printf 'Pt*: { x: i32, y: i32 }\\nmk* = (a: i32, b: i32) Pt {\\n Pt(x: a, y: b)\\n}\\nnsq* = (p: Pt) i32 {\\n p.x*p.x + p.y*p.y\\n}' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return nsq(mk(3,4))==25 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_precedence", cmd: "printf 'e* = () i32 { 1 + 2 * 3 - 4 }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return e()==3 ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
-    ShellCase(name: "bootstrap_run_compare_and", cmd: "printf 'c* = (a: i32, b: i32) bool { (a < b) && (b < 10) }' | ./zenc >/tmp/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat /tmp/zbp.c; echo 'int main(void){ return c(3,7) && !c(3,12) ? 0 : 1; }'; } > /tmp/zbp_full.c && cc -std=gnu11 -w /tmp/zbp_full.c -o /tmp/zbp_bin 2>/dev/null && /tmp/zbp_bin"),
+    ShellCase(name: "bootstrap_compiles_zen", cmd: "printf '%s' 'sq* = (n: i32) i32 { n * n }' | ./zenc >$ZT/zbc.c 2>/dev/null && grep -Fq 'int32_t sq(int32_t n)' $ZT/zbc.c && { echo '#include <stdint.h>'; cat $ZT/zbc.c; echo 'int main(void){ return sq(7) == 49 ? 0 : 1; }'; } > $ZT/zbc_full.c && cc -std=gnu11 -w $ZT/zbc_full.c -o $ZT/zbc_bin 2>/dev/null && $ZT/zbc_bin"),
+    ShellCase(name: "bootstrap_run_bool_true_first", cmd: "printf 'f* = (n: i32) i32 { (n < 5).match({ true => 1, false => 0 }) }' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return f(3)==1 && f(9)==0 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_bool_false_first", cmd: "printf 'g* = (n: i32) i32 { (n < 5).match({ false => 0, true => 1 }) }' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return g(3)==1 && g(9)==0 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_recursion_fib", cmd: "printf 'fib* = (n: i32) i32 { (n < 2).match({ true => n, false => fib(n-1)+fib(n-2) }) }' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return fib(10)==55 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_while_sum", cmd: "printf 'sum* = (n: i32) i32 {\\n s := 0\\n i := 1\\n @while(i <= n) {\\n  s = s + i\\n  i = i + 1\\n }\\n s\\n}' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return sum(5)==15 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_nested_while", cmd: "printf 'grid* = (n: i32) i32 {\\n c := 0\\n i := 0\\n @while(i < n) {\\n  j := 0\\n  @while(j < n) {\\n   c = c + 1\\n   j = j + 1\\n  }\\n  i = i + 1\\n }\\n c\\n}' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return grid(4)==16 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_enum_match", cmd: "printf 'Shape*: Circle(i32) | Square(i32)\\nmk* = (n: i32) Shape {\\n .Circle(n)\\n}\\narea* = (s: Shape) i32 {\\n s.match({ .Circle(r) => r*r*3, .Square(w) => w*w })\\n}' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return area(mk(2))==12 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_struct_field", cmd: "printf 'Pt*: { x: i32, y: i32 }\\nmk* = (a: i32, b: i32) Pt {\\n Pt(x: a, y: b)\\n}\\nnsq* = (p: Pt) i32 {\\n p.x*p.x + p.y*p.y\\n}' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return nsq(mk(3,4))==25 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_precedence", cmd: "printf 'e* = () i32 { 1 + 2 * 3 - 4 }' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return e()==3 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
+    ShellCase(name: "bootstrap_run_compare_and", cmd: "printf 'c* = (a: i32, b: i32) bool { (a < b) && (b < 10) }' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return c(3,7) && !c(3,12) ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin"),
     ShellCase(name: "bootstrap_malformed_no_colon_param", cmd: "printf 'f* = (p i32) i32 { 1 }' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
     ShellCase(name: "bootstrap_malformed_colon_payload_enum", cmd: "printf 'E: A | Some: T' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
     ShellCase(name: "bootstrap_malformed_truncated_binop", cmd: "printf 'g* = () i32 { 6 *' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
@@ -574,9 +583,9 @@ oracle_build_run* = () i32 {
     ShellCase(name: "bootstrap_malformed_empty", cmd: "printf '' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
     ShellCase(name: "bootstrap_malformed_lone_brace", cmd: "printf '{' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
     ShellCase(name: "bootstrap_malformed_lone_ident", cmd: "printf 'x' | timeout 15 ./zenc >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128"),
-    ShellCase(name: "bootstrap_missing_file", cmd: "./zenc /nonexistent/zzz.zen >/tmp/zmf.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' /tmp/zmf.txt"),
-    ShellCase(name: "build_self_usage_missing_args", cmd: "./zenc --build-self >/tmp/zbs.txt 2>&1; test \"$?\" = 2 && grep -Fq 'usage' /tmp/zbs.txt"),
-    ShellCase(name: "build_self_bad_srcroot", cmd: "./zenc --build-self /tmp/zbs_x.c /nonexistent/zzz >/tmp/zbs2.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' /tmp/zbs2.txt"),
+    ShellCase(name: "bootstrap_missing_file", cmd: "./zenc /nonexistent/zzz.zen >$ZT/zmf.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' $ZT/zmf.txt"),
+    ShellCase(name: "build_self_usage_missing_args", cmd: "./zenc --build-self >$ZT/zbs.txt 2>&1; test \"$?\" = 2 && grep -Fq 'usage' $ZT/zbs.txt"),
+    ShellCase(name: "build_self_bad_srcroot", cmd: "./zenc --build-self $ZT/zbs_x.c /nonexistent/zzz >$ZT/zbs2.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' $ZT/zbs2.txt"),
     ])
     ex + so + ex2 + so2 + exm + vd + r1 + r2 + vd2 + dg + em + dc + sh + bs
 }

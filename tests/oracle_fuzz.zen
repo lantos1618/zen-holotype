@@ -21,7 +21,7 @@
 // crash/hang from any clean reject. (Verified adversarially: segv->139, hang->124, reject->1.)
 //
 // Helpers are `fz_`-prefixed so they never collide on the flat-import flatten with std/oracle_lib/etc.
-{ run_suite } = oracle_lib
+{ run_suite, zo_path, zo_cmd } = oracle_lib
 { Malloc } = std.mem.alloc
 { out, save, shell } = std.io.file
 { len } = std.text.str
@@ -31,8 +31,8 @@
 // fixed, reproducible seed (NO Date.now — the sequence is identical on every run).
 FZ_SEED := 20260623
 // the two crash-resistance probes, each `timeout`-wrapped at a fixed path (no per-call concat needed).
-FZ_CHECK := "timeout 60 ./zenc check /tmp/zo_fuzz.zen > /dev/null 2>&1"
-FZ_EMIT  := "timeout 60 ./zenc emit  /tmp/zo_fuzz.zen > /dev/null 2>&1"
+FZ_CHECK := "timeout 60 ./zenc check $ZT/zo_fuzz.zen > /dev/null 2>&1"
+FZ_EMIT  := "timeout 60 ./zenc emit  $ZT/zo_fuzz.zen > /dev/null 2>&1"
 // a real (well-formed) program; the truncation generator feeds prefixes of it (off-by-token garbage).
 FZ_FULL  := "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
 
@@ -125,9 +125,9 @@ fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) str {
 
 // ── run one input through both probes; print '.'/crash report, return the crash count (0..2) ──────
 fz_run_one = (mp: MutPtr<Malloc>, src: str) i32 {
-    save("/tmp/zo_fuzz.zen", src, len(src))
-    cc := shell(FZ_CHECK)
-    ec := shell(FZ_EMIT)
+    save(mp.zo_path("zo_fuzz.zen"), src, len(src))
+    cc := shell(mp.zo_cmd(FZ_CHECK))
+    ec := shell(mp.zo_cmd(FZ_EMIT))
     crashes := 0
     fz_crash(cc).match ({ true => { crashes = crashes + 1 }, false => {} })
     fz_crash(ec).match ({ true => { crashes = crashes + 1 }, false => {} })
