@@ -57,9 +57,21 @@ unknown_ty = (env: Env, t: Ty) bool {
         .Named(n)   => env.env_named_declared(n).match ({ true => false, false => true }),
         .Ptr(pd)    => env.unknown_ty(load(pd.pointee)),
         .Slice(e)   => env.unknown_ty(load(e)),
-        .Generic(g) => true,
+        // A generic instance is unknown ONLY while a type-arg is still unresolved (an unbound
+        // tparam / void residue): its concrete decl appears only after that arg is pinned. Once
+        // EVERY arg is concrete (`Box<i32>`), the instance is fully known and its mangled name
+        // (`Box_i32`) is authoritative — so a real arg mismatch (`Box<i32>` vs `Box<u8>`) is a Zen
+        // fit error here instead of leaking a `Box_u8` unknown-type to cc.
+        .Generic(g) => env.gen_args_unknown(g.args),
         _           => false,
     }) })
+}
+gen_args_unknown = (env: Env, args: [Ty]) bool {
+    f := false
+    args.loop((h, i, t) {
+        f = env.unknown_ty(t).match ({ true => true, false => f })
+    })
+    f
 }
 // FnT-vs-FnT signature compatibility: same arity, each param type and the return type equal —
 // EXCEPT a position whose type is unknown (an unbound tparam like `S`, generic residue) stays lenient,
