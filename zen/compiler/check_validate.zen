@@ -1667,15 +1667,15 @@ expr_pos = (e: Expr) i32 {
     e.match ({
         .Var(v)         => v.pos,
         .Call(c)        => c.pos,
-        .Member(m)      => load(m.obj).expr_pos(),
-        .Arrow(ar)      => load(ar.obj).expr_pos(),
+        .Member(m)      => load(m.obj).expr_pos().pos_or(m.pos),
+        .Arrow(ar)      => load(ar.obj).expr_pos().pos_or(ar.pos),
         .Index(ix)      => load(ix.seq).expr_pos(),
         .Bin(b)         => b.pos.pos_or(load(b.lhs).expr_pos()),
         .Cond(d)        => load(d.c).expr_pos(),
         .Match(m)       => load(m.subj).expr_pos(),
         .MakeEnum(mk)   => load(mk.payload).expr_pos(),
         .StrLit(s)      => s.pos,
-        .MakeStruct(sd) => (sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() }),
+        .MakeStruct(sd) => sd.pos.pos_or((sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() })),
         .SliceLit(sd)   => (sd.items.len == 0).match ({ true => 0, false => sd.items[0].expr_pos() }),
         .Block(b)       => (b.stmts.len == 0).match ({ true => 0, false => b.stmts[0].stmt_pos() }),
         .Loop(l)        => load(l.seq).expr_pos(),
@@ -1848,9 +1848,9 @@ kv_check_inits_kind = (env: Env, inits: [FieldInit]) i32 {
 }
 // struct-literal init: caret on the first init value's source position when it's positioned
 // (a Var/Call/StrLit survives resolve; bare numeric literals carry none — best-effort, else file-only).
-kv_makestruct_kind = (env: Env, m: MakeStructData) i32 { env.makestruct_err(m).kv_one(KSTRUCTFIELD()).kv_at((m.inits.len == 0).match ({ true => 0, false => load(m.inits[0].value).expr_pos() })) }
+kv_makestruct_kind = (env: Env, m: MakeStructData) i32 { env.makestruct_err(m).kv_one(KSTRUCTFIELD()).kv_at(m.pos.pos_or((m.inits.len == 0).match ({ true => 0, false => load(m.inits[0].value).expr_pos() }))) }
 // member access caret on the receiver object (a Var/Call survives resolve).
-kv_member_kind = (env: Env, obj: Ptr<Expr>, field: str) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()).kv_at(load(obj).expr_pos()) }
+kv_member_kind = (env: Env, obj: Ptr<Expr>, field: str, pos: i32) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()).kv_at(pos.pos_or(load(obj).expr_pos())) }
 // a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
 // matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
 kv_match_kind = (env: Env, m: MatchData) i32 {
@@ -1859,7 +1859,170 @@ kv_match_kind = (env: Env, m: MatchData) i32 {
     base.kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
 }
 kv_index_kind = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
-kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()) }
+kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()).kv_at(b.pos.pos_or(load(b.lhs).expr_pos())) }
+// ── enriched diagnostic text: name the offending field / operator + the operand types ────────────
+// Built lazily by the driver only AFTER a check error is located, so this never affects the compile of
+// an accepted program. `denrich_module` walks the resolved decls to the node at the error's byte offset
+// (the SAME offset the kind pass reported) and returns a precise message; "" means the offset names no
+// enrichable node, so the driver keeps the generic message. The env is threaded exactly as the validator
+// threads it (params + lets + arms), so receiver and operand types infer the same way.
+zty* = (a: MutPtr<Malloc>, t: Ty) str {
+    t.match ({
+        .I32        => "i32",
+        .I64        => "i64",
+        .U8         => "u8",
+        .F64        => "f64",
+        .Bool       => "bool",
+        .Str        => "str",
+        .Cstr       => "cstr",
+        .Text       => "text",
+        .Void       => "(unknown)",
+        .Named(n)   => n,
+        .Generic(g) => g.name,
+        .FnT(ft)    => "fn",
+        .Slice(e)   => a.gstr_string(24).gstr_append(a, "[").gstr_append(a, a.zty(load(e))).gstr_append(a, "]").gstr_finish(a),
+        .Ptr(pd)    => a.gstr_string(24).gstr_append(a, "Ptr<").gstr_append(a, a.zty(load(pd.pointee))).gstr_append(a, ">").gstr_finish(a),
+    })
+}
+desc_or* = (x: str, y: str) str { is_empty(x).match ({ true => y, false => x }) }
+denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) str {
+    s := a.gstr_string(64)
+    fields.loop((h, i, f) {
+        s = (i == 0).match ({ true => s.gstr_append(a, f.name), false => s.gstr_append(a, ", ").gstr_append(a, f.name) })
+    })
+    s.gstr_finish(a)
+}
+denrich_member_noty = (a: MutPtr<Malloc>, field: str, objty: Ty) str {
+    a.gstr_string(64).gstr_append(a, "type `").gstr_append(a, a.zty(objty)).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "`").gstr_finish(a)
+}
+denrich_member_msg = (env: Env, field: str, objty: Ty) str {
+    a := env.a
+    objty.match ({
+        .Named(n) => env.env_is_struct(n).match ({
+            true  => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a),
+            false => a.denrich_member_noty(field, objty),
+        }),
+        _ => a.denrich_member_noty(field, objty),
+    })
+}
+denrich_operand_msg = (env: Env, b: BinData) str {
+    a := env.a
+    lt := env.infer_expr(b.lhs)
+    rt := env.infer_expr(b.rhs)
+    a.gstr_string(96).gstr_append(a, "operator `").gstr_append(a, b.op).gstr_append(a, "` cannot be applied to `").gstr_append(a, a.zty(lt)).gstr_append(a, "` and `").gstr_append(a, a.zty(rt)).gstr_append(a, "`").gstr_finish(a)
+}
+// first init field whose name is not a declared field (the unknown field a struct-literal error names)
+denrich_bad_init = (fields: [Field], inits: [FieldInit]) str {
+    bad := ""
+    inits.loop((h, i, fi) {
+        bad = is_empty(bad).match ({ true => fields.field_has(fi.name).match ({ true => "", false => fi.name }), false => bad })
+    })
+    bad
+}
+field_has = (fields: [Field], name: str) bool {
+    found := false
+    fields.loop((h, i, f) {
+        found = found || eq(f.name, name)
+    })
+    found
+}
+denrich_makestruct_msg = (env: Env, sd: MakeStructData) str {
+    a := env.a
+    env.env_is_struct(sd.ty).match ({
+        true => {
+            fields := env.env_struct_fields(sd.ty)
+            bad := fields.denrich_bad_init(sd.inits)
+            is_empty(bad).match ({ true => "", false => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, sd.ty).gstr_append(a, "` has no field `").gstr_append(a, bad).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(fields)).gstr_append(a, ")").gstr_finish(a) })
+        },
+        false => "",
+    })
+}
+denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) str {
+    load(e).match ({
+        .Bin(b)         => (code == KOPERAND() && b.pos.pos_or(load(b.lhs).expr_pos()) == off).match ({ true => env.denrich_operand_msg(b), false => desc_or(a.denrich_expr(env, b.lhs, off, code), a.denrich_expr(env, b.rhs, off, code)) }),
+        .Member(m)      => (code == KSTRUCTFIELD() && m.pos.pos_or(load(m.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(m.field, env.infer_expr(m.obj)), false => a.denrich_expr(env, m.obj, off, code) }),
+        .Arrow(ar)      => (code == KSTRUCTFIELD() && ar.pos.pos_or(load(ar.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(ar.field, env.infer_expr(ar.obj)), false => a.denrich_expr(env, ar.obj, off, code) }),
+        .MakeStruct(sd) => (code == KSTRUCTFIELD() && sd.pos.pos_or((sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() })) == off).match ({ true => env.denrich_makestruct_msg(sd), false => a.denrich_inits(env, sd.inits, off, code) }),
+        .Call(c)        => a.denrich_args(env, c.args, off, code),
+        .SliceLit(sd)   => a.denrich_args(env, sd.items, off, code),
+        .Index(ix)      => desc_or(a.denrich_expr(env, ix.seq, off, code), a.denrich_expr(env, ix.idx, off, code)),
+        .Cond(d)        => desc_or(a.denrich_expr(env, d.c, off, code), desc_or(a.denrich_expr(env, d.t, off, code), a.denrich_expr(env, d.e, off, code))),
+        .MakeEnum(mk)   => a.denrich_expr(env, mk.payload, off, code),
+        .Match(m)       => {
+            subjty := env.infer_expr(m.subj)
+            desc_or(a.denrich_expr(env, m.subj, off, code), a.denrich_arms(env, subjty, m.arms, off, code))
+        },
+        .Block(b)       => a.denrich_body(env, b.stmts, off, code),
+        .Loop(l)        => desc_or(a.denrich_expr(env, l.seq, off, code), a.denrich_body(a.loop_env(env, l), l.body, off, code)),
+        _               => "",
+    })
+}
+denrich_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], off: i32, code: i32) str {
+    res := ""
+    args.loop((h, i, ar) {
+        res = desc_or(res, a.denrich_expr(env, ar.addr(), off, code))
+    })
+    res
+}
+denrich_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], off: i32, code: i32) str {
+    res := ""
+    inits.loop((h, i, fi) {
+        res = desc_or(res, a.denrich_expr(env, fi.value, off, code))
+    })
+    res
+}
+denrich_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], off: i32, code: i32) str {
+    res := ""
+    arms.loop((h, i, ar) {
+        res = desc_or(res, a.denrich_expr(a.arm_env(env, subjty, ar), ar.body, off, code))
+    })
+    res
+}
+denrich_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, off: i32, code: i32) str {
+    st.match ({
+        .Let(l)      => a.denrich_expr(env, l.value, off, code),
+        .Assign(x)   => desc_or(a.denrich_expr(env, x.target, off, code), a.denrich_expr(env, x.value, off, code)),
+        .Return(r)   => a.denrich_expr(env, r, off, code),
+        .ExprStmt(e) => a.denrich_expr(env, e, off, code),
+        .If(f)       => desc_or(a.denrich_expr(env, f.c, off, code), desc_or(a.denrich_body(env, f.then, off, code), a.denrich_body(env, f.els, off, code))),
+        .While(w)    => desc_or(a.denrich_expr(env, w.c, off, code), a.denrich_body(env, w.body, off, code)),
+        .IndexSet(x) => desc_or(a.denrich_expr(env, x.seq, off, code), desc_or(a.denrich_expr(env, x.idx, off, code), a.denrich_expr(env, x.value, off, code))),
+    })
+}
+denrich_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], off: i32, code: i32) str {
+    res := ""
+    e := env
+    body.loop((h, i, st) {
+        res = desc_or(res, a.denrich_stmt(e, st, off, code))
+        e = a.extend_env(e, st)
+    })
+    res
+}
+denrich_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, off: i32, code: i32) str {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    a.denrich_body(env, f.body, off, code)
+}
+// the driver's entry: an enriched message for a struct-field/operand-type error at `off`, else "".
+denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
+    (off <= 0 || (code != KSTRUCTFIELD() && code != KOPERAND())).match ({ true => {
+        return ""
+    } })
+    idx := a.build_decl_index(decls)
+    res := ""
+    decls.loop((h, i, d) {
+        res = desc_or(res, d.match ({
+            .DFunc(f) => a.denrich_func(decls, idx, f, off, code),
+            _         => "",
+        }))
+    })
+    res
+}
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
@@ -1964,8 +2127,8 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
         .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos())).kv_kor(d.cond_onearm_err().kv_one(KEXHAUST()).kv_at(load(d.c).expr_pos())),
-        .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field)),
-        .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field)),
+        .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field, m.pos)),
+        .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field, ar.pos)),
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
             env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
