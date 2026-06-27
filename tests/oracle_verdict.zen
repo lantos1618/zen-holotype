@@ -44,6 +44,16 @@ oracle_verdict_run* = () i32 {
     VerdictCase(src: "f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags, 1)  store_i64(flags, 2) }, false => {} }) }\ntest* = () i32 { 0 }", should_pass: true, kind: ""),
     VerdictCase(src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", should_pass: false, kind: ""),
     VerdictCase(src: "f* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { store_i64(flags)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }", should_pass: false, kind: ""),
+    // Stage 3 nullability: deref of a nullable `RawPtr<T>` (T != u8) without a null-check is REJECTED.
+    VerdictCase(src: "test* = () i32 { x := 7\n p: RawPtr<i32> := x.addr()\n load(p) }", should_pass: false, kind: ""),
+    // store / offset through a nullable `RawPtr<T>` are likewise rejected.
+    VerdictCase(src: "test* = () i32 { x := 7\n p: RawPtr<i32> := x.addr()\n store(p, 3)\n 0 }", should_pass: false, kind: ""),
+    // `assert_nonnull` proves non-null (yields `MutPtr<T>`), so the subsequent load is accepted.
+    VerdictCase(src: "test* = () i32 { x := 7\n p: RawPtr<i32> := x.addr()\n q := assert_nonnull(p)\n load(q) }", should_pass: true, kind: ""),
+    // the `RawPtr<u8>` byte-buffer floor is EXEMPT — it derefs freely.
+    VerdictCase(src: "test* = () i32 { x: u8 := 9\n p: RawPtr<u8> := x.addr()\n to_i32(load(p)) }", should_pass: true, kind: ""),
+    // a non-null `Ptr<T>` / `MutPtr<T>` deref is unaffected by the nullability rule.
+    VerdictCase(src: "test* = () i32 { x := 5\n p: Ptr<i32> := x.addr()\n load(p) }", should_pass: true, kind: ""),
     VerdictCase(src: "foo* = () i32 { 1 }\nfoo* = () i32 { 2 }\ntest* = () i32 { foo() }", should_pass: false, kind: ""),
     VerdictCase(src: "a* = () i32 { 1 }\ndup* = () i32 { 2 }\ndup* = () i32 { 3 }\ntest* = () i32 { a() }", should_pass: false, kind: ""),
     VerdictCase(src: "R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 } })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }", should_pass: false, kind: ""),

@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -448,7 +448,12 @@ infer_call = (env: Env, c: CallData) Ty {
                                                             true  => tcstr(),
                                                             false => eq(c.fn, "addr").match ({
                                                                 true  => tptr(env.a.tnode(env.arg0_ty(c))),
-                                                                false => env.gen_call_ret(c)
+                                                                // Stage 3: `assert_nonnull(p)` PANICs if p is null and yields a non-null `MutPtr<T>`
+                                                                // (the null-checked narrowing of a nullable `RawPtr<T>`).
+                                                                false => eq(c.fn, "assert_nonnull").match ({
+                                                                    true  => tptr_k(env.a.tnode(env.arg0_ty(c).pointee_of()), k_mut_ptr()),
+                                                                    false => env.gen_call_ret(c)
+                                                                })
                                                             })
                                                         })
                                                     }) }) }) }) })
@@ -2673,6 +2678,16 @@ is_ptr_ty_g* = (t: Ty) bool { t.match ({ .Ptr(pd) => true, _ => false }) }
 ptr_kind_of* = (t: Ty) i32 { t.match ({ .Ptr(pd) => pd.kind, _ => -1 }) }
 // A write (store) through a read-only `Ptr<T>` (kind == k_ptr) is rejected; `MutPtr`/`RawPtr` permit it.
 is_readonly_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() }
+// Stage 3 nullability: a `RawPtr<T>` (kind == k_raw_ptr) is NULLABLE and must be proven non-null
+// (via `assert_nonnull`, which yields a `MutPtr<T>`) before a deref. EXCEPTION: the `RawPtr<u8>`
+// byte-buffer floor — the trusted allocator/FFI primitive — derefs freely (so it is NOT nullable here).
+// `Ptr<T>` / `MutPtr<T>` are non-null, so they are never nullable.
+is_nullable_ptr_ty* = (t: Ty) bool {
+    (t.ptr_kind_of() == k_raw_ptr()).match ({
+        true  => t.is_raw_ptr_ty().match ({ true => false, false => true }),
+        false => false
+    })
+}
 fits* = (g: Ty, w: Ty) bool {
     numeric := (g.ty_rank() >= 0) && (w.ty_rank() >= 0)
     numeric.match ({

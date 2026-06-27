@@ -162,7 +162,7 @@ gen_arg_at = (s: String, alloc: MutPtr<Malloc>, c: CallData, i: i32) String {
     (i < c.args.len).match ({ true => s.gen_expr(alloc, c.args[i].addr()), false => s.gstr_append(alloc, "0") })
 }
 
-EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | AtomicLoadI64 | AtomicStoreI64 | AtomicCasI64 | AtomicFence | Addr | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64 | Sizeof
+EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | AtomicLoadI64 | AtomicStoreI64 | AtomicCasI64 | AtomicFence | Addr | AssertNonnull | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64 | Sizeof
 
 // map a sizeof type-arg name to its C type name. Primitives (i64→int64_t, bool→…) must NOT leak the
 // Zen keyword into C; struct names and already-substituted tparams (sizeof(T)→sizeof(Expr)) pass through.
@@ -205,6 +205,7 @@ call_kind = (name: str) EmitCallKind {
     eq(name, "atomic_cas_i64").match ({ true => { kind = EmitCallKind.AtomicCasI64() }, _ })
     eq(name, "atomic_fence").match ({ true => { kind = EmitCallKind.AtomicFence() }, _ })
     eq(name, "addr").match ({ true => { kind = EmitCallKind.Addr() }, _ })
+    eq(name, "assert_nonnull").match ({ true => { kind = EmitCallKind.AssertNonnull() }, _ })
     eq(name, "cstr").match ({ true => { kind = EmitCallKind.CStr() }, _ })
     eq(name, "slice").match ({ true => { kind = EmitCallKind.Slice() }, _ })
     eq(name, "null_ptr").match ({ true => { kind = EmitCallKind.NullPtr() }, _ })
@@ -257,6 +258,8 @@ gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
         .AtomicCasI64 => s.gstr_append(alloc, "__atomic_compare_exchange_n((int64_t*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "), &(int64_t){ ").gen_arg_at(alloc, c, 1).gstr_append(alloc, " }, (").gen_arg_at(alloc, c, 2).gstr_append(alloc, "), 0, 5, 5)"),
         .AtomicFence => s.gstr_append(alloc, "__atomic_thread_fence(5)"),
         .Addr => s.gen_addr(alloc, c),
+        // Stage 3 null guard: panics if the RawPtr is null, else yields it unchanged (preserving its T*).
+        .AssertNonnull => s.gstr_append(alloc, "({ __typeof__(").gen_arg_at(alloc, c, 0).gstr_append(alloc, ") _znn = (").gen_arg_at(alloc, c, 0).gstr_append(alloc, "); if(!_znn){ zen__panic(\"zen: panic: null pointer deref\\n\"); } _znn; })"),
         .CStr => s.gstr_append(alloc, "((const char*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
         .Slice => s.gstr_append(alloc, "(zslice){ .ptr = (void*)(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "), .len = (").gen_arg_at(alloc, c, 1).gstr_append(alloc, ") }"),
         .NullPtr => s.gstr_append(alloc, "0"),
