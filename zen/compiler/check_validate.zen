@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, is_readonly_ptr_ty } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, is_readonly_ptr_ty, is_nullable_ptr_ty } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
@@ -235,6 +235,7 @@ is_intrinsic = (fn: str) bool {
     eq(fn, "load").match   ({ true => true, false =>
         eq(fn, "store").match  ({ true => true, false =>
             eq(fn, "addr").match   ({ true => true, false =>
+                eq(fn, "assert_nonnull").match ({ true => true, false =>   // Stage 3: panic-on-null guard, RawPtr<T> -> MutPtr<T>
                 eq(fn, "offset").match ({ true => true, false =>
                     eq(fn, "cstr").match   ({ true => true, false =>
                         eq(fn, "slice").match  ({ true => true, false =>
@@ -253,7 +254,7 @@ is_intrinsic = (fn: str) bool {
                                                                             eq(fn, "to_i32").match ({ true => true, false =>             // explicit narrowing/widening casts (also accept f64 — C truncation)
                                                                                 eq(fn, "to_i64").match ({ true => true, false =>
                                                                                     eq(fn, "to_u8").match  ({ true => true, false =>
-                                                                                        eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })   // explicit int -> f64 cast
+                                                                                        eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })   // explicit int -> f64 cast
 }
 // Intrinsic arity must be checked before emission.
 intrinsic_arity = (fn: str) i32 {
@@ -311,6 +312,18 @@ store_writes_readonly = (env: Env, c: CallData) bool {
 }
 store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }
 store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }
+// Stage 3 nullability: a `load`/`store`/`offset` whose pointer operand is a nullable `RawPtr<T>`
+// (T != u8) that has NOT been proven non-null is rejected. The proof is carried by the TYPE: a
+// `q := assert_nonnull(p)` yields `q: MutPtr<T>`, so `load(q)` sees a non-nullable kind and passes.
+// `RawPtr<u8>` (the byte-buffer floor) and `Ptr`/`MutPtr` are never nullable, so they are exempt.
+derefs_nullable = (env: Env, c: CallData) bool {
+    ((eq(c.fn, "load") || eq(c.fn, "store") || eq(c.fn, "offset")) && (c.args.len >= 1)).match ({
+        true  => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(),
+        false => false
+    })
+}
+null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({ true => 1, false => 0 }) }
+null_deref_kind = (env: Env, c: CallData) i32 { kv_at(env.derefs_nullable(c).match ({ true => KNULLDEREF(), false => 0 }), c.pos) }
 // A call checks arity, then arg types. For a LOCAL generic only tparam-typed slots defer to mono;
 // CONCRETE slots are still checked. An IMPORTED generic (a bodyless header) is skipped entirely — its
 // param types still carry unbound tparams that cross-module inference can't resolve at the call site,
@@ -934,7 +947,7 @@ lck_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 }
 check_expr = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.check_call(c) + env.store_mut_err(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
+        .Call(c)        => env.check_call(c) + env.store_mut_err(c) + env.null_deref_err(c) + eq(c.fn, "sizeof").match ({ true => 0, false => env.check_args(c.args) }),
         .SliceLit(sd)   => env.slicelit_err(sd.items),
         .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
         .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
@@ -1549,6 +1562,7 @@ KMUSTUSE      = () i32 { 19 }   // a value-mold `(Self,…) Self` self-mutation 
 KNEEDANNOT    = () i32 { 20 }   // an unannotated let whose inferred type leaves a tparam uninferred (-> T=void)
 KPTRWRITE     = () i32 { 21 }   // a store() through a read-only `Ptr<T>` (use `MutPtr<T>` to write)
 KINFINITETYPE = () i32 { 22 }   // a struct/enum that contains ITSELF by value (transitively) — infinite size
+KNULLDEREF    = () i32 { 23 }   // a load/store/offset through a nullable `RawPtr<T>` (T != u8) not proven non-null
 
 SourceSpan*: { start: i32, width: i32 }
 Diagnostic*: { code: i32, kind: str, span: SourceSpan, count: i32, message: str, hint: str }
@@ -1619,6 +1633,7 @@ diagnostic_kind_name = (code: i32) str {
         20 => "need-annotation",
         21 => "ptr-write",
         22 => "infinite-type",
+        23 => "null-deref",
         _ => "type"
     })
 }
@@ -1646,6 +1661,7 @@ diagnostic_message = (code: i32) str {
         20 => "cannot infer the type parameter of this binding",
         21 => "cannot write through a read-only `Ptr<T>`",
         22 => "type contains itself by value, so it has infinite size",
+        23 => "`RawPtr<T>` may be null; deref requires a null-check first",
         _ => "type error"
     })
 }
@@ -1673,6 +1689,7 @@ diagnostic_hint = (code: i32) str {
         20 => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
         21 => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
         22 => "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value",
+        23 => "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
         _ => ""
     })
 }
@@ -2029,7 +2046,7 @@ lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 // mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
+        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(env.null_deref_kind(c)).kv_kor(eq(c.fn, "sizeof").match ({ true => 0, false => env.kv_check_args_kind(c.args) })),
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
