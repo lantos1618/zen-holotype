@@ -143,6 +143,81 @@ Printer*: {
 // raw byte writer) — a same-named free function in another module would shadow this
 // one's Printer return type at the call site.
 put* = (t: str) Printer { Printer(n: t.write_text()) }
+// ── {}-template interpolation: format / formatln ─────────────────────────────
+//
+// The streaming Printer mixes types but reads as a chain; the first thing most
+// newcomers reach for is a printf-style ONE-CALL template — `"name={} n={}"` with
+// the values supplied positionally. Zen has no heterogeneous varargs (`...T` is
+// single-type), so the values are carried as a SLICE of pre-wrapped `Arg`s the
+// caller builds explicitly:
+//
+//   format("name={} n={}", [arg_str(name), arg_int(n)])   // name=Zen n=42
+//   formatln("{} + {} = {}", [arg_int(a), arg_int(b), arg_int(a + b)])
+//
+// Each `{}` consumes the next `Arg` in order and writes it with the matching typed
+// writer (the SAME ones backing the Printer ops) — straight to stdout, no buffer,
+// no allocation beyond what an `arg_owned(String)` already owns. `{{` and `}}` are
+// literal braces. A missing arg (`{}` past the end of the slice) writes nothing; a
+// surplus arg is ignored. `format` returns the byte count; `formatln` adds a newline.
+//
+// `format` is NON-GENERIC (concrete `[Arg]` + `str`), so it resolves cleanly across
+// modules — it sidesteps the generic+struct-param dispatch gap noted below.
+Arg*: Int(i64) | Flt(f64) | Str(str) | Bool(bool) | Owned(String)
+// Arg constructors — named `arg_*` (not `i`/`s`/`f`) so they never clash on the flat
+// import namespace with an importer's own top-level `i`/`s`/`f` or the Printer methods.
+arg_int* = (n: i64) Arg { .Int(n) }
+arg_flt* = (x: f64) Arg { .Flt(x) }
+arg_str* = (s: str) Arg { .Str(s) }
+arg_bool* = (x: bool) Arg { .Bool(x) }
+arg_owned* = (g: String) Arg { .Owned(g) }
+// write one Arg with the writer matching its kind; returns the bytes written.
+write_arg = (a: Arg) i64 {
+    a.match ({
+        .Int(n)   => write_int(n),
+        .Flt(x)   => write_float(x),
+        .Str(s)   => s.write_text(),
+        .Bool(x)  => x.match ({ true => "true".write_text(), false => "false".write_text() }),
+        .Owned(g) => write_string(g),
+    })
+}
+// write the template sub-run sv[lo..hi) verbatim (a borrowed view, no copy).
+write_run = (sv: [u8], lo: i64, hi: i64) i64 { out_bytes(slice(sv.ptr.offset(lo), hi - lo)) }
+// write the i-th arg, or nothing when the template has more `{}` than the slice has args.
+write_arg_at = (args: [Arg], i: i64) i64 { (i < args.len).match ({ true => write_arg(args[i]), false => 0 }) }
+// splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
+format* = (template: str, args: [Arg]) i64 {
+    sv := template.view()
+    n: i64 := 0    // bytes written so far
+    ai: i64 := 0    // next arg slot
+    start: i64 := 0    // start of the pending literal run
+    skip: i64 := 0
+    sv.loop((h, i, b) {
+        (i < skip).match ({ true => { }, false => {
+            pair := i + 1 < sv.len    // resume index (skips the 2nd byte of a `{}`/`{{`/`}}` pair)
+            ph := b == '{' && pair && sv[i + 1] == '}'
+            esc := pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')
+            (ph || esc).match ({ true => {
+                (i > start).match ({ true => {
+                    n = n + sv.write_run(start, i)
+                } })    // flush the literal run before the brace
+                ph.match ({ true => {
+                    n = n + args.write_arg_at(ai)
+                    ai = ai + 1
+                }, false => {
+                    n = n + sv.write_run(i, i + 1)
+                } })    // a `{{`/`}}` escape → one literal brace
+                skip = i + 2
+                start = i + 2
+            }, false => { } })
+        } })
+    })
+    (sv.len > start).match ({ true => {
+        n = n + sv.write_run(start, sv.len)
+    } })    // flush the trailing literal run
+    n
+}
+// `format` plus a trailing newline — the println-shaped one-call interpolator.
+formatln* = (template: str, args: [Arg]) i64 { format(template, args) + newline() }
 // LIMITATION — why typed ops (.i/.f/.s) and not one generic `.v(x)` or printf:
 //
 //   1. A single generic `v<T>(p: Printer, x: T) Printer` would read cleanest —
