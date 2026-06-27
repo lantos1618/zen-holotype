@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, is_readonly_ptr_ty, is_nullable_ptr_ty } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
@@ -508,7 +508,35 @@ gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], in
     })
     acc
 }
-makestruct_err = (env: Env, m: MakeStructData) i32 { (m.targs.len > 0).match ({ true => env.decls.cv_is_gen_struct(m.ty).match ({ true => env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, env.decls.gen_struct_fields(m.ty), m.inits), false => 0 }), false => env.env_is_struct(m.ty).match ({ true => env.struct_init_errs(env.env_struct_fields(m.ty), m.inits), false => 0 }) }) }    // a generic literal: check concrete fields
+inits_has = (inits: [FieldInit], name: str) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = eq(fi.name, name).match ({ true => true, false => f })
+    })
+    f
+}    // is this field named in the literal?
+// A NON-NULL pointer field (`Ptr<T>`/`MutPtr<T>`) left out of the literal would be default-zeroed to a
+// null that the type promises can never happen → a deref segfault the checker currently misses. Require it.
+field_missing_nonnull_ptr = (fields: [Field], inits: [FieldInit]) i32 {
+    acc := 0
+    fields.loop((h, i, fl) {
+        acc = acc + (fl.ty.is_nonnull_ptr_ty() && (inits.inits_has(fl.name) == false)).match ({ true => 1, false => 0 })
+    })
+    acc
+}
+// A repeated initializer for the same field (`Box(v: 5, v: 9)`) is almost certainly a mistake.
+dup_init_errs = (inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        earlier := false
+        inits.loop((h2, j, fj) {
+            earlier = (j < i && eq(fj.name, fi.name)).match ({ true => true, false => earlier })
+        })
+        acc = acc + earlier.match ({ true => 1, false => 0 })
+    })
+    acc
+}
+makestruct_err = (env: Env, m: MakeStructData) i32 { (m.targs.len > 0).match ({ true => env.decls.cv_is_gen_struct(m.ty).match ({ true => { gf := env.decls.gen_struct_fields(m.ty)  env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs() }, false => 0 }), false => env.env_is_struct(m.ty).match ({ true => { sf := env.env_struct_fields(m.ty)  env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs() }, false => 0 }) }) }    // a generic literal: check concrete fields
 gen_base_of = (t: Ty) str {
     t.match ({
         .Generic(g) => g.name,    // unknown gen-struct (template residue) -> lenient
@@ -734,7 +762,7 @@ index_err = (env: Env, ix: IndexData) i32 { (env.non_slice(ix.seq) || env.non_nu
 check_block_stmt = (env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l) + env.let_needannot_err(l),
-        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
+        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x) + env.assign_ptr_write_err(x),
         .Return(r)   => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
         .If(f)       => env.check_expr(f.c),
@@ -928,6 +956,16 @@ assign_err = (env: Env, x: AssignData) i32 {
     lv := x.value.lit_slot_verdict(vt)
     (lv >= 0).match ({ true => lv, false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({ true => 0, false => fits(rt, vt).match ({ true => 0, false => 1 }) }) })
 }
+// Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
+// non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
+// (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched.
+assign_ptr_write_err = (env: Env, x: AssignData) i32 {
+    load(x.target).match ({
+        .Member(m) => env.infer_expr(m.obj).is_readonly_ptr_ty().match ({ true => 1, false => 0 }),
+        .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty().match ({ true => 1, false => 0 }),
+        _          => 0,
+    })
+}
 idxset_err = (env: Env, x: IndexSetData) i32 {
     rt := env.infer_expr(x.value)
     lv := x.value.lit_slot_verdict(x.elem)
@@ -966,7 +1004,7 @@ let_needannot_err = (env: Env, l: LetData) i32 { l.ty.ty_has_void_targ().match (
 check_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l) + env.let_needannot_err(l),
-        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x),
+        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x) + env.assign_ptr_write_err(x),
         .Return(r)   => env.check_expr(r) + env.ret_err(r),
         .ExprStmt(e) => env.check_expr(e),
         .If(f)       => env.check_expr(f.c) + a.check_body(env, f.then) + a.check_body(env, f.els),
@@ -1926,7 +1964,7 @@ pos_or = (p: i32, fallback: i32) i32 { (p <= 0).match ({ true => fallback, false
 kv_ret_kind = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos()) }
 kv_let_fit_kind = (env: Env, l: LetData) i32 { env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos()) }
 kv_let_needannot_kind = (env: Env, l: LetData) i32 { env.let_needannot_err(l).kv_one(KNEEDANNOT()).kv_at(load(l.value).expr_pos()) }
-kv_assign_kind = (env: Env, x: AssignData) i32 { env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())) }
+kv_assign_kind = (env: Env, x: AssignData) i32 { ap := x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())  env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(ap).kv_kor(env.assign_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ap)) }
 kv_idxset_kind = (env: Env, x: IndexSetData) i32 { env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())) }
 // mirrors check_stmt: the statement's sub-expressions, then its own fit check.
 kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {

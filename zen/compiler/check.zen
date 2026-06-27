@@ -3217,6 +3217,9 @@ ptr_kind_of* = (t: Ty) i32 {
 }
 // A write (store) through a read-only `Ptr<T>` (kind == k_ptr) is rejected; `MutPtr`/`RawPtr` permit it.
 is_readonly_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() }
+// A NON-NULL pointer: `Ptr<T>` (k_ptr) or `MutPtr<T>` (k_mut_ptr). These can never be null, so a slot
+// of this kind cannot be left default-zeroed and cannot be filled by a nullable `RawPtr<T>`.
+is_nonnull_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_ptr() || t.ptr_kind_of() == k_mut_ptr()) }
 // Stage 3 nullability: a `RawPtr<T>` (kind == k_raw_ptr) is NULLABLE and must be proven non-null
 // (via `assert_nonnull`, which yields a `MutPtr<T>`) before a deref. EXCEPTION: the `RawPtr<u8>`
 // byte-buffer floor — the trusted allocator/FFI primitive — derefs freely (so it is NOT nullable here).
@@ -3224,7 +3227,7 @@ is_readonly_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() }
 is_nullable_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_raw_ptr()).match ({ true => t.is_raw_ptr_ty().match ({ true => false, false => true }), false => false }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
-    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => (g.is_raw_ptr_ty() && w.is_ptr_ty_g()).match ({ true => true, false => g.ty_eq(w) }) })
+    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.ty_eq(w) }) }) })
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }
