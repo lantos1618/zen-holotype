@@ -1,27 +1,22 @@
 // std.text.str — borrowed `str` helpers plus allocator-owned byte copies.
 // Allocating helpers take the caller allocator explicitly; `try_*` returns Result so allocation
 // failure stays in the value flow.
-
 { Allocator, try_acquire } = std.mem.alloc
 { Result, Opt, IoError, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
 { is_space } = std.text.bytes
-
 len* = (s: str) i64 { s.strlen() }
-is_empty* = (s: str) bool { s.strlen().match ({ 0 => true, _ => false }) }
-eq* = (a: str, b: str) bool { a.strcmp(b).match ({ 0 => true, _ => false }) }
+is_empty* = (s: str) bool { (s.strlen() == 0).match ({ true => true, false => false }) }
+eq* = (a: str, b: str) bool { (a.strcmp(b) == 0).match ({ true => true, false => false }) }
 ne* = (a: str, b: str) bool { a.eq(b).match ({ true => false, false => true }) }
-
 // ── bytes: borrow or own ────────────────────────────────────────────────────
-
 view* = (s: str) [u8] { s.slice(s.strlen()) }
-
 alloc_size = (n: i64) i64 { (n == 0).match ({ true => 1, false => n }) }
-
 copy_bytes = (src: [u8], out: [u8]) void {
-    src.loop((h, i, b) { out[i] = b })
+    src.loop((h, i, b) {
+        out[i] = b
+    })
 }
-
 dup_bytes_in*<A> = (a: MutPtr<A>, s: str) [u8] {
     src := s.view()
     out: [u8] := a.acquire(src.len.alloc_size()).slice(src.len)
@@ -32,103 +27,77 @@ dup_bytes*<A> = (a: MutPtr<A>, s: str) [u8] { a.dup_bytes_in(s) }
 try_dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
     src := s.view()
     a.try_acquire(src.len.alloc_size()).match ({
-        .Ok(p) => {
+        .Ok(p)  => {
             out: [u8] := p.slice(src.len)
             src.copy_bytes(out)
             ok(out)
         },
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
 }
 try_dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.try_dup_bytes_in(s) }
-
 // ── search ──────────────────────────────────────────────────────────────────
-
 // do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
 has_at = (sv: [u8], pv: [u8], at: i64) bool {
     ok := true
     pv.loop((h, i, b) {
-        ok.match ({
-            true => (sv[at + i] == b).match ({
-                true  => {},
-                false => {
-                    ok = false
-                    h.break
-                }
-            }),
-            false => { h.break }
-        })
+        ok.match ({ true => (sv[at + i] == b).match ({ true => { }, false => {
+            ok = false
+            h.break
+        } }), false => {
+            h.break
+        } })
     })
     ok
 }
-
 // byte index of the first occurrence of `needle` in `s`, -1 if absent.
 // the empty needle matches at 0 (the strstr convention).
 find* = (s: str, needle: str) i64 {
     sv := s.view()
     pv := needle.view()
-    (pv.len == 0).match ({
-        true  => 0,
-        false => {
-            found: i64 := -1
-            sv.loop((h, i, b) {
-                (i + pv.len > sv.len).match ({
-                    true  => { h.break },
-                    false => sv.has_at(pv, i).match ({
-                        true => {
-                            found = i
-                            h.break
-                        },
-                        _ => {}
-                    })
-                })
-            })
-            found
-        }
-    })
+    (pv.len == 0).match ({ true => 0, false => {
+        found: i64 := 0 - 1
+        sv.loop((h, i, b) {
+            (i + pv.len > sv.len).match ({ true => {
+                h.break
+            }, false => sv.has_at(pv, i).match ({ true => {
+                found = i
+                h.break
+            }, false => { } }) })
+        })
+        found
+    } })
 }
-
 // does `s` contain `needle`? (the empty needle is contained in everything)
 contains* = (s: str, needle: str) bool { s.find(needle) >= 0 }
-
 // NOTE: `find` IS the index-of operation (first byte index, -1 if absent) — there is no separate
 // `index_of` here on purpose: it would duplicate `find` AND collide on the flattened namespace with
 // std.core.slice's `index_of<T>`. Reach for `find` (raw -1 sentinel) or `find_opt` (Opt<i64>).
-
 // does `s` begin with `prefix`? (every str starts with the empty prefix)
 starts_with* = (s: str, prefix: str) bool {
     sv := s.view()
     pv := prefix.view()
     pv.len <= sv.len && sv.has_at(pv, 0)
 }
-
 // does `s` end with `suffix`? (every str ends with the empty suffix)
 ends_with* = (s: str, suffix: str) bool {
     sv := s.view()
     fv := suffix.view()
     fv.len <= sv.len && sv.has_at(fv, sv.len - fv.len)
 }
-
 // ── slicing & indexing ──────────────────────────────────────────────────────
-
 // pin `x` into [lo, hi] — the substr clamp
-pin = (x: i64, lo: i64, hi: i64) i64 {
-    (x < lo).match ({
-        true  => lo,
-        false => (x > hi).match ({ true => hi, false => x }),
-    })
-}
-
+pin = (x: i64, lo: i64, hi: i64) i64 { (x < lo).match ({ true => lo, false => (x > hi).match ({ true => hi, false => x }) }) }
 copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out.loop((h, i, b) {
-        (i < m).match ({
-            true  => { out[i] = sv[lo + i] },
-            false => { h.break }
-        })
+        (i < m).match ({ true => {
+            out[i] = sv[lo + i]
+        }, false => {
+            h.break
+        } })
     })
     out[m] = 0
 }
-
 // Out-of-range is clamped: a.substr("hi", 1, 99) == "i"; a.substr("hi", 5, 2) == "".
 substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str {
     sv := s.view()
@@ -144,22 +113,20 @@ try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoErr
     lo := start.pin(0, sv.len)
     m := n.pin(0, sv.len - lo)
     a.try_acquire(m + 1).match ({
-        .Ok(p) => {
+        .Ok(p)  => {
             out: [u8] := p.slice(m + 1)
             sv.copy_substr(out, lo, m)
             ok(cstr(out.ptr))
         },
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
 }
 try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> { a.try_substr_in(s, start, n) }
-
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
 at* = (s: str, i: i64) u8 {
     sv := s.view()
     (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
 }
-
 // ── trimming: leading/trailing ASCII whitespace (' ', '\t', '\n', '\r') ───────
 //
 // `str` is NUL-terminated, so a *both-ends* trimmed `str` can't be a zero-copy view — the trailing
@@ -168,20 +135,27 @@ at* = (s: str, i: i64) u8 {
 //   • `trim_in` / `rtrim_in` → an allocator-owned NUL-terminated `str` copy (reuses `substr_in`).
 // `ltrim` alone can stay a zero-copy `str`: dropping a prefix only advances the start pointer, and the
 // original NUL still terminates the tail.
-
 // first non-whitespace index, or `v.len` when `v` is empty / all whitespace.
 ws_start = (v: [u8]) i64 {
     lo: i64 := v.len
-    v.loop((h, i, b) { b.is_space().match ({ false => { lo = i  h.break } }) })
+    v.loop((h, i, b) {
+        b.is_space().match ({ false => {
+            lo = i
+            h.break
+        } })
+    })
     lo
 }
 // one past the last non-whitespace index, or 0 when `v` is empty / all whitespace.
 ws_end = (v: [u8]) i64 {
     hi: i64 := 0
-    v.loop((h, i, b) { b.is_space().match ({ false => { hi = i + 1 } }) })
+    v.loop((h, i, b) {
+        b.is_space().match ({ false => {
+            hi = i + 1
+        } })
+    })
     hi
 }
-
 // zero-copy `[u8]` sub-views (no allocation) — both ends / leading / trailing.
 trim_view* = (s: str) [u8] {
     v: [u8] := s.view()
@@ -198,13 +172,11 @@ rtrim_view* = (s: str) [u8] {
     v: [u8] := s.view()
     slice(v.ptr, v.ws_end())
 }
-
 // leading-only trim AS A STR — zero-copy: the original NUL terminator still ends the result.
 ltrim* = (s: str) str {
     v: [u8] := s.view()
     cstr(v.ptr.offset(v.ws_start()))
 }
-
 // allocator-owned NUL-terminated trimmed copies (both ends / trailing).
 trim_in*<A> = (a: MutPtr<A>, s: str) str {
     v: [u8] := s.view()
@@ -218,90 +190,83 @@ rtrim_in*<A> = (a: MutPtr<A>, s: str) str {
     a.substr_in(s, 0, v.ws_end())
 }
 rtrim*<A> = (a: MutPtr<A>, s: str) str { a.rtrim_in(s) }
-
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): like `ltrim`, dropping a prefix only
 // advances the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
 // it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
-trim_prefix* = (s: str, prefix: str) str {
-    s.starts_with(prefix).match ({
-        true  => cstr(s.view().ptr.offset(prefix.len())),
-        false => s
-    })
-}
+trim_prefix* = (s: str, prefix: str) str { s.starts_with(prefix).match ({ true => cstr(s.view().ptr.offset(prefix.len())), false => s }) }
 // strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
 // own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
 // trim_suffix("file.zen", ".zen") == "file".
 trim_suffix_in*<A> = (a: MutPtr<A>, s: str, suffix: str) str {
     n := s.len()
-    s.ends_with(suffix).match ({
-        true  => a.substr_in(s, 0, n - suffix.len()),
-        false => a.substr_in(s, 0, n)
-    })
+    s.ends_with(suffix).match ({ true => a.substr_in(s, 0, n - suffix.len()), false => a.substr_in(s, 0, n) })
 }
 trim_suffix*<A> = (a: MutPtr<A>, s: str, suffix: str) str { a.trim_suffix_in(s, suffix) }
-
 // ── splitting: fields and words ───────────────────────────────────────────────
 //
 // A returned `[str]` holds NUL-terminated COPIES of each field, not zero-copy sub-views: `str` is
 // NUL-terminated, so a field can't both share `s`'s buffer AND end at a separator. The slice backbone
 // and every field are acquired from the caller's allocator (reusing `substr_in` for each copy).
-
 // an allocator-owned `[T]` of `n` slots, uninitialised. `seed` is unread — it only pins T (sizeof(T)
 // is rewritten per concrete element type at monomorphization). `n == 0` yields an empty slice.
 nbuf*<T, A> = (a: MutPtr<A>, seed: T, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
-
 // split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
 // kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
 split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
     sv := s.view()
     nf: i64 := 1
-    sv.loop((h, i, b) { (b == sep).match ({ true => { nf = nf + 1 } }) })
-    out: [str] := a.nbuf("", nf)
-    fi:    i64 := 0     // next field slot
-    start: i64 := 0     // current field's start offset
     sv.loop((h, i, b) {
-        (b == sep).match ({
-            true => {
-                out[fi] = a.substr_in(s, start, i - start)
-                fi    = fi + 1
-                start = i + 1
-            },
-            _ => {}
-        })
+        (b == sep).match ({ true => {
+            nf = nf + 1
+        } })
+    })
+    out: [str] := a.nbuf("", nf)
+    fi: i64 := 0    // next field slot
+    start: i64 := 0
+    sv.loop((h, i, b) {
+        (b == sep).match ({ true => {
+            out[fi] = a.substr_in(s, start, i - start)    // current field's start offset
+            fi = fi + 1
+            start = i + 1
+        }, false => { } })
     })
     out[fi] = a.substr_in(s, start, sv.len - start)
     out
 }
 split*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] { a.split_in(s, sep) }
-
 // split `s` on RUNS of ASCII whitespace, dropping empty fields: "  the  cat sat " -> ["the","cat","sat"];
 // "" / all-whitespace -> [] (an empty slice).
 words_in*<A> = (a: MutPtr<A>, s: str) [str] {
     sv := s.view()
-    nw: i64 := 0        // word count = whitespace(or start)->non-whitespace transitions
-    inw := false        // currently inside a word?
+    nw: i64 := 0    // word count = whitespace(or start)->non-whitespace transitions
+    inw := false
     sv.loop((h, i, b) {
-        b.is_space().match ({
-            true  => { inw = false },
-            false => inw.match ({ false => { inw = true  nw = nw + 1 } })
-        })
+        b.is_space().match ({ true => {
+            inw = false
+        }, false => inw.match ({ false => {
+            inw = true    // currently inside a word?
+            nw = nw + 1
+        } }) })
     })
     out: [str] := a.nbuf("", nw)
-    wi:    i64 := 0      // next word slot
-    start: i64 := 0 - 1  // current word's start offset, -1 when between words
+    wi: i64 := 0    // next word slot
+    start: i64 := 0 - 1
     sv.loop((h, i, b) {
-        b.is_space().match ({
-            true  => (start >= 0).match ({
-                true => { out[wi] = a.substr_in(s, start, i - start)  wi = wi + 1  start = 0 - 1 }
-            }),
-            false => (start < 0).match ({ true => { start = i } })
-        })
+        b.is_space().match ({ true => (start >= 0).match ({ true => {
+            out[wi] = a.substr_in(s, start, i - start)    // current word's start offset, -1 when between words
+            wi = wi + 1
+            start = 0 - 1
+        } }), false => (start < 0).match ({ true => {
+            start = i
+        } }) })
     })
-    (start >= 0).match ({ true => { out[wi] = a.substr_in(s, start, sv.len - start)  wi = wi + 1 } })
+    (start >= 0).match ({ true => {
+        out[wi] = a.substr_in(s, start, sv.len - start)
+        wi = wi + 1
+    } })
     out
 }
 words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
-
 // ── building new strings: join / replace / case / repeat / pad ─────────────────
 //
 // Each op below ALLOCATES a fresh NUL-terminated `str` from the caller's allocator (a `MutPtr<A>`),
@@ -311,24 +276,25 @@ words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
 // FLAT-NAMESPACE NOTE: `join`, `replace`, `repeat`, `to_lower`, `to_upper`, `pad_left`, `pad_right` are
 // common names. They are unique across std today (grepped) — the only near-miss is std.core.slice's
 // `index_of<T>`, which is why no `index_of` is defined here (use `find`). Keep new globals distinct.
-
 // copy `t`'s bytes into `out` starting at `at`; return the offset just past them.
 copy_at = (out: [u8], at: i64, t: str) i64 {
     tv := t.view()
-    tv.loop((h, i, b) { out[at + i] = b })
+    tv.loop((h, i, b) {
+        out[at + i] = b
+    })
     at + tv.len
 }
-
 // the 'A'..'Z' / 'a'..'z' case shift; non-letters pass through. ASCII-ONLY (bytes 0x80+ untouched).
 to_ascii_lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + ('a' - 'A'), false => b }) }
 to_ascii_upper = (b: u8) u8 { (b >= 'a' && b <= 'z').match ({ true => b - ('a' - 'A'), false => b }) }
-
 // ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
 to_lower_in*<A> = (a: MutPtr<A>, s: str) str {
     sv := s.view()
     out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
-    sv.loop((h, i, b) { out[i] = b.to_ascii_lower() })
+    sv.loop((h, i, b) {
+        out[i] = b.to_ascii_lower()
+    })
     out[sv.len] = 0
     cstr(out.ptr)
 }
@@ -336,12 +302,13 @@ to_lower*<A> = (a: MutPtr<A>, s: str) str { a.to_lower_in(s) }
 to_upper_in*<A> = (a: MutPtr<A>, s: str) str {
     sv := s.view()
     out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
-    sv.loop((h, i, b) { out[i] = b.to_ascii_upper() })
+    sv.loop((h, i, b) {
+        out[i] = b.to_ascii_upper()
+    })
     out[sv.len] = 0
     cstr(out.ptr)
 }
 to_upper*<A> = (a: MutPtr<A>, s: str) str { a.to_upper_in(s) }
-
 // `s` concatenated `n` times. `n <= 0` yields ""; an empty `s` also yields "". repeat("ab", 3) == "ababab".
 repeat_in*<A> = (a: MutPtr<A>, s: str, n: i64) str {
     sv := s.view()
@@ -349,111 +316,112 @@ repeat_in*<A> = (a: MutPtr<A>, s: str, n: i64) str {
     total := sv.len * cnt
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     out.loop((h, i, b) {
-        (i < total).match ({
-            true  => { out[i] = sv[i % sv.len] },   // sv.len > 0 whenever total > 0, so `%` is safe
-            false => { out[i] = 0  h.break }
-        })
+        (i < total).match ({ true => {
+            out[i] = sv[i % sv.len]
+        }, false => {
+            out[i] = 0    // sv.len > 0 whenever total > 0, so `%` is safe
+            h.break
+        } })
     })
     cstr(out.ptr)
 }
 repeat*<A> = (a: MutPtr<A>, s: str, n: i64) str { a.repeat_in(s, n) }
-
 // join a slice of `str`s with `sep` between each: join(["a","b","c"], ",") == "a,b,c".
 // An empty slice yields "", a one-element slice yields that element (no separator).
 join_in*<A> = (a: MutPtr<A>, parts: [str], sep: str) str {
     np := parts.len
     total: i64 := 0
-    parts.loop((h, i, p) { total = total + p.len() })
+    parts.loop((h, i, p) {
+        total = total + p.len()
+    })
     seps := (np > 0).match ({ true => np - 1, false => 0 })
     total = total + sep.len() * seps
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     pos: i64 := 0
     parts.loop((h, i, p) {
-        (i > 0).match ({ true => { pos = out.copy_at(pos, sep) } })
+        (i > 0).match ({ true => {
+            pos = out.copy_at(pos, sep)
+        } })
         pos = out.copy_at(pos, p)
     })
     out[total] = 0
     cstr(out.ptr)
 }
 join*<A> = (a: MutPtr<A>, parts: [str], sep: str) str { a.join_in(parts, sep) }
-
 // count NON-overlapping occurrences of `fv` (len >= 1) in `sv`. `nextpos` skips past a match's bytes so
 // "aaaa" has 2 occurrences of "aa", not 3.
 count_occ = (sv: [u8], fv: [u8]) i64 {
-    cnt:     i64 := 0
+    cnt: i64 := 0
     nextpos: i64 := 0
     sv.loop((h, i, b) {
-        ((i >= nextpos) && (i + fv.len <= sv.len) && sv.has_at(fv, i)).match ({
-            true => { cnt = cnt + 1  nextpos = i + fv.len },
-            _    => {}
-        })
+        (i >= nextpos && i + fv.len <= sv.len && sv.has_at(fv, i)).match ({ true => {
+            cnt = cnt + 1
+            nextpos = i + fv.len
+        }, false => { } })
     })
     cnt
 }
-
 // replace ALL non-overlapping occurrences of `from` with `to` (not just the first). An empty `from`
 // matches nothing and returns a copy of `s` unchanged (the strstr convention would loop forever).
 // replace("hello", "l", "L") == "heLLo"; replace("a.b.c", ".", "/") == "a/b/c".
 replace_in*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str {
     sv := s.view()
     fv := from.view()
-    (fv.len == 0).match ({
-        true  => a.substr_in(s, 0, sv.len),         // empty pattern: unchanged copy (no infinite loop)
-        false => {
-            cnt   := sv.count_occ(fv)
-            total := sv.len + cnt * (to.len() - fv.len)
-            out: [u8] := a.acquire(total + 1).slice(total + 1)
-            pos:  i64 := 0
-            skip: i64 := 0                           // bytes of an in-progress match to NOT copy verbatim
-            sv.loop((h, i, b) {
-                (i < skip).match ({
-                    true  => {},
-                    false => ((i + fv.len <= sv.len) && sv.has_at(fv, i)).match ({
-                        true  => { pos = out.copy_at(pos, to)  skip = i + fv.len },
-                        false => { out[pos] = b  pos = pos + 1 }
-                    })
-                })
-            })
-            out[total] = 0
-            cstr(out.ptr)
-        }
-    })
+    (fv.len == 0).match ({ true => a.substr_in(s, 0, sv.len), false => {
+        cnt := sv.count_occ(fv)    // empty pattern: unchanged copy (no infinite loop)
+        total := sv.len + cnt * (to.len() - fv.len)
+        out: [u8] := a.acquire(total + 1).slice(total + 1)
+        pos: i64 := 0
+        skip: i64 := 0
+        sv.loop((h, i, b) {
+            (i < skip).match ({ true => { }, false => (i + fv.len <= sv.len && sv.has_at(fv, i)).match ({ true => {
+                pos = out.copy_at(pos, to)    // bytes of an in-progress match to NOT copy verbatim
+                skip = i + fv.len
+            }, false => {
+                out[pos] = b
+                pos = pos + 1
+            } }) })
+        })
+        out[total] = 0
+        cstr(out.ptr)
+    } })
 }
 replace*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str { a.replace_in(s, from, to) }
-
 // pad `s` to at least `width` bytes by prepending / appending `fill`; a longer `s` is copied unchanged.
 // pad_left("7", 3, '0') == "007"; pad_right("hi", 4, ' ') == "hi  ".
 pad_left_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
-    sv  := s.view()
+    sv := s.view()
     pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
     total := pad + sv.len
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     out.loop((h, i, b) {
-        (i < total).match ({
-            true  => { out[i] = (i < pad).match ({ true => fill, false => sv[i - pad] }) },
-            false => { out[i] = 0  h.break }
-        })
+        (i < total).match ({ true => {
+            out[i] = (i < pad).match ({ true => fill, false => sv[i - pad] })
+        }, false => {
+            out[i] = 0
+            h.break
+        } })
     })
     cstr(out.ptr)
 }
 pad_left*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str { a.pad_left_in(s, width, fill) }
 pad_right_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
-    sv  := s.view()
+    sv := s.view()
     pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
     total := sv.len + pad
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     out.loop((h, i, b) {
-        (i < total).match ({
-            true  => { out[i] = (i < sv.len).match ({ true => sv[i], false => fill }) },
-            false => { out[i] = 0  h.break }
-        })
+        (i < total).match ({ true => {
+            out[i] = (i < sv.len).match ({ true => sv[i], false => fill })
+        }, false => {
+            out[i] = 0
+            h.break
+        } })
     })
     cstr(out.ptr)
 }
 pad_right*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str { a.pad_right_in(s, width, fill) }
-
 // ── numbers ─────────────────────────────────────────────────────────────────
-
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of
 // digits. Parsing stops at the first non-digit and never errors: no leading digits
 // (empty str, garbage, a bare '-') parse as 0 — parse_int("42") == 42,
@@ -464,38 +432,30 @@ parse_int* = (s: str) i64 {
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
     sv.loop((h, i, b) {
-        (i < start).match ({
-            true  => {},
-            false => (b >= '0' && b <= '9').match ({
-                true  => { acc = acc * 10 + (b - '0') },
-                false => { h.break }
-            })
-        })
+        (i < start).match ({ true => { }, false => (b >= '0' && b <= '9').match ({ true => {
+            acc = acc * 10 + (b - '0')
+        }, false => {
+            h.break
+        } }) })
     })
     neg.match ({ true => 0 - acc, false => acc })
 }
-
 // ── the VALUE-shaped variants: a miss/garbage must be `.match`ed, not guessed at ─────────────
-
 // find, as a value: `.Some(index)` or `.None`. find's raw -1 sentinel compounds badly when
 // unchecked — a.substr(s, find(s, n), k) silently clamps the -1 to index 0 via pin.
 some_at = (i: i64) Opt<i64> { .Some(i) }
-no_hit  = () Opt<i64> { .None }
+no_hit = () Opt<i64> { .None }
 find_opt* = (s: str, needle: str) Opt<i64> {
     i := s.find(needle)
     (i >= 0).match ({ true => some_at(i), false => no_hit() })
 }
-
 // what made try_parse_int refuse: nothing to parse, a non-digit in the tail (the byte carried),
 // or a magnitude past i64. parse_int (above) keeps its documented never-errors behavior.
 ParseError*: NoDigits | Trailing(u8) | Overflow
-
 I64_MAX_DIV10 := 922337203685477580    // i64 max / 10: the pre-multiply overflow bound
-
 e_nodigits = () ParseError { .NoDigits }
 e_trailing = (b: u8) ParseError { .Trailing(b) }
 e_overflow = () ParseError { .Overflow }
-
 // parse_int, honestly: "zen" and "12ab" are errors, not 0 and 12. An optional leading '-', then
 // digits to the very end; the magnitude must fit i64 (|INT64_MIN| itself counts as overflow).
 try_parse_int* = (s: str) Result<i64, ParseError> {
@@ -503,36 +463,27 @@ try_parse_int* = (s: str) Result<i64, ParseError> {
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
-    nd:  i64 := 0                       // digits consumed
-    bad: u8  := 0                       // the first non-digit byte hit (0 = none)
+    nd: i64 := 0    // digits consumed
+    bad: u8 := 0    // the first non-digit byte hit (0 = none)
     over := false
     sv.loop((h, i, b) {
-        (i < start).match ({
-            true  => {},
-            false => (b >= '0' && b <= '9').match ({
-                true  => {
-                    d := b - '0'
-                    ((acc > I64_MAX_DIV10) || ((acc == I64_MAX_DIV10) && (d > 7))).match ({
-                        true  => { over = true  h.break },
-                        false => { acc = acc * 10 + d  nd = nd + 1 }
-                    })
-                },
-                false => { bad = b  h.break }
-            })
-        })
+        (i < start).match ({ true => { }, false => (b >= '0' && b <= '9').match ({ true => {
+            d := b - '0'
+            (acc > I64_MAX_DIV10 || acc == I64_MAX_DIV10 && d > 7).match ({ true => {
+                over = true
+                h.break
+            }, false => {
+                acc = acc * 10 + d
+                nd = nd + 1
+            } })
+        }, false => {
+            bad = b
+            h.break
+        } }) })
     })
-    out: Result<i64, ParseError> := over.match ({
-        true => err(e_overflow()),
-        false => (nd == 0).match ({
-            true => err(e_nodigits()),
-            false => (bad != 0).match ({
-                true  => err(e_trailing(bad)),
-                false => {
-                    v: i64 := neg.match ({ true => 0 - acc, false => acc })
-                    ok(v)
-                }
-            })
-        })
-    })
+    out: Result<i64, ParseError> := over.match ({ true => err(e_overflow()), false => (nd == 0).match ({ true => err(e_nodigits()), false => (bad != 0).match ({ true => err(e_trailing(bad)), false => {
+        v: i64 := neg.match ({ true => 0 - acc, false => acc })
+        ok(v)
+    } }) }) })
     out
 }

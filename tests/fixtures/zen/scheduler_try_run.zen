@@ -6,17 +6,18 @@ halloc = std.mem.heap
 { try_run } = std.concurrent.sched
 ran := 0
 work = () void { ran = ran + 1 }
-Counting: { left: i32, acquired: i32, released: i32 }
+Counting: {
+    left: i32,
+    acquired: i32,
+    released: i32,
+}
 Counting.impl(Allocator, {
     acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
-        (a.left <= 0).match({
-            true => null_ptr(),
-            false => {
-                a.left = a.left - 1
-                a.acquired = a.acquired + 1
-                malloc(n)
-            }
-        })
+        (a.left <= 0).match ({ true => null_ptr(), false => {
+            a.left = a.left - 1
+            a.acquired = a.acquired + 1
+            malloc(n)
+        } })
     }
     resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
     release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
@@ -28,21 +29,32 @@ success = () bool {
     heap := halloc.gpa()
     h := heap.addr()
     co := h.spawn(work)
-    c := Counting(left: 1, acquired: 0, released: 0)
+    c := Counting(
+        left: 1,
+        acquired: 0,
+        released: 0,
+    )
     r: Result<i32, IoError> := c.addr().try_run([co])
     h.destroy(co)
-    r.match({
-        .Ok(n) => (ran == 1) && (c.acquired == 1) && (c.released == 1),
-        .Err(e) => false
+    r.match ({
+        .Ok(n)  => ran == 1 && c.acquired == 1 && c.released == 1,
+        .Err(e) => false,
     })
 }
 fail_flags = () bool {
-    c := Counting(left: 0, acquired: 0, released: 0)
+    c := Counting(
+        left: 0,
+        acquired: 0,
+        released: 0,
+    )
     bogus := Coro(state: null_ptr())
     r: Result<i32, IoError> := c.addr().try_run([bogus])
-    r.match({
-        .Err(e) => e.match({ .NotFound => (c.acquired == 0) && (c.released == 0), _ => false }),
-        .Ok(n) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => c.acquired == 0 && c.released == 0,
+            _         => false,
+        }),
+        .Ok(n)  => false,
     })
 }
 main = () i32 { (success() && fail_flags()).to_exit() }

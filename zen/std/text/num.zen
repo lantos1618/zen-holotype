@@ -1,322 +1,198 @@
 // Numeric text formatting helpers. All builders take the caller's allocator.
-
 { Result, IoError, ok, err } = std.core.result
 { Allocator, try_acquire } = std.mem.alloc
 { String } = std.text.string
 { ParseError, try_parse_int } = std.text.str
-
-num_udigit_count = (n: i64) i64 {
-    (n < 10).match ({
-        true  => 1,
-        false => 1 + num_udigit_count(n / 10)
-    })
-}
-
-num_ndigit_count = (n: i64) i64 {
-    (n > 0 - 10).match ({
-        true  => 1,
-        false => 1 + num_ndigit_count(n / 10)
-    })
-}
-
-num_integer_len = (n: i64) i64 {
-    (n < 0).match ({
-        true  => 1 + num_ndigit_count(n),
-        false => num_udigit_count(n)
-    })
-}
-
+num_udigit_count = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + num_udigit_count(n / 10) }) }
+num_ndigit_count = (n: i64) i64 { (n > 0 - 10).match ({ true => 1, false => 1 + num_ndigit_count(n / 10) }) }
+num_integer_len = (n: i64) i64 { (n < 0).match ({ true => 1 + num_ndigit_count(n), false => num_udigit_count(n) }) }
 num_write_udigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
-    (n < 10).match ({
-        true => {
-            p.offset(at).store('0' + n)
-            at + 1
-        },
-        false => {
-            next := num_write_udigits(p, at, n / 10)
-            p.offset(next).store('0' + (n % 10))
-            next + 1
-        }
-    })
+    (n < 10).match ({ true => {
+        p.offset(at).store('0' + n)
+        at + 1
+    }, false => {
+        next := num_write_udigits(p, at, n / 10)
+        p.offset(next).store('0' + n % 10)
+        next + 1
+    } })
 }
-
 num_write_ndigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
-    (n > 0 - 10).match ({
-        true => {
-            p.offset(at).store('0' + (0 - n))
-            at + 1
-        },
-        false => {
-            next := num_write_ndigits(p, at, n / 10)
-            p.offset(next).store('0' + (0 - (n % 10)))
-            next + 1
-        }
-    })
+    (n > 0 - 10).match ({ true => {
+        p.offset(at).store('0' + (0 - n))
+        at + 1
+    }, false => {
+        next := num_write_ndigits(p, at, n / 10)
+        p.offset(next).store('0' + (0 - n % 10))
+        next + 1
+    } })
 }
-
 num_write_integer = (p: RawPtr<u8>, n: i64) i64 {
-    (n < 0).match ({
-        true => {
-            p.store('-')
-            num_write_ndigits(p, 1, n)
-        },
-        false => num_write_udigits(p, 0, n)
-    })
+    (n < 0).match ({ true => {
+        p.store('-')
+        num_write_ndigits(p, 1, n)
+    }, false => num_write_udigits(p, 0, n) })
 }
-
 num_integer_from_ptr = (p: RawPtr<u8>, n: i64, cap: i64) String {
-    String( ptr: p, len: num_write_integer(p, n), cap: cap )
+    String(
+        ptr: p,
+        len: num_write_integer(p, n),
+        cap: cap,
+    )
 }
-
 integer_in*<A> = (a: MutPtr<A>, n: i64) String {
     cap := num_integer_len(n) + 1
     num_integer_from_ptr(a.acquire(cap), n, cap)
 }
-
 integer*<A> = (a: MutPtr<A>, n: i64) String { a.integer_in(n) }
-
 try_integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> {
     cap := num_integer_len(n) + 1
     a.try_acquire(cap).match ({
         .Ok(p)  => ok(num_integer_from_ptr(p, n, cap)),
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
 }
-
 try_integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> { a.try_integer_in(n) }
-
 // ── unsigned (u64) integer formatting ────────────────────────────────────────
 //
 // integer_in above is i64-bound: a u64 magnitude above i64 max (e.g. 18446744073709551615)
 // would print as a negative. These mirror it with `n: u64`, so `/` and `%` lower to UNSIGNED
 // C ops and the full 0 .. 2^64-1 range renders correctly.
-num_uudigit_count = (n: u64) i64 {
-    (n < 10).match ({
-        true  => 1,
-        false => 1 + num_uudigit_count(n / 10)
-    })
-}
-
+num_uudigit_count = (n: u64) i64 { (n < 10).match ({ true => 1, false => 1 + num_uudigit_count(n / 10) }) }
 num_uwrite_udigits = (p: RawPtr<u8>, at: i64, n: u64) i64 {
-    (n < 10).match ({
-        true => {
-            p.offset(at).store('0' + to_i64(n))
-            at + 1
-        },
-        false => {
-            next := num_uwrite_udigits(p, at, n / 10)
-            p.offset(next).store('0' + to_i64(n % 10))
-            next + 1
-        }
-    })
+    (n < 10).match ({ true => {
+        p.offset(at).store('0' + to_i64(n))
+        at + 1
+    }, false => {
+        next := num_uwrite_udigits(p, at, n / 10)
+        p.offset(next).store('0' + to_i64(n % 10))
+        next + 1
+    } })
 }
-
 num_uinteger_from_ptr = (p: RawPtr<u8>, n: u64, cap: i64) String {
-    String( ptr: p, len: num_uwrite_udigits(p, 0, n), cap: cap )
+    String(
+        ptr: p,
+        len: num_uwrite_udigits(p, 0, n),
+        cap: cap,
+    )
 }
-
 uinteger_in*<A> = (a: MutPtr<A>, n: u64) String {
     cap := num_uudigit_count(n) + 1
     num_uinteger_from_ptr(a.acquire(cap), n, cap)
 }
-
 uinteger*<A> = (a: MutPtr<A>, n: u64) String { a.uinteger_in(n) }
-
 try_uinteger_in*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError> {
     cap := num_uudigit_count(n) + 1
     a.try_acquire(cap).match ({
         .Ok(p)  => ok(num_uinteger_from_ptr(p, n, cap)),
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
 }
-
 try_uinteger*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError> { a.try_uinteger_in(n) }
-
 num_copy_text = (p: RawPtr<u8>, at: i64, s: str, i: i64) i64 {
     b := s.offset(i).load()
-    (b == '\0').match ({
-        true => at,
-        false => {
-            p.offset(at).store(b)
-            num_copy_text(p, at + 1, s, i + 1)
-        }
-    })
+    (b == '\0').match ({ true => at, false => {
+        p.offset(at).store(b)
+        num_copy_text(p, at + 1, s, i + 1)
+    } })
 }
-
-num_text_len_at = (s: str, i: i64) i64 {
-    (s.offset(i).load() == '\0').match ({
-        true  => i,
-        false => num_text_len_at(s, i + 1)
-    })
-}
+num_text_len_at = (s: str, i: i64) i64 { (s.offset(i).load() == '\0').match ({ true => i, false => num_text_len_at(s, i + 1) }) }
 num_text_len = (s: str) i64 { num_text_len_at(s, 0) }
-
 num_write_fpad = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
-    (w == 1).match ({
-        true => {
-            p.offset(at).store('0' + (n % 10))
-            at + 1
-        },
-        false => {
-            next := num_write_fpad(p, at, n / 10, w - 1)
-            p.offset(next).store('0' + (n % 10))
-            next + 1
-        }
-    })
+    (w == 1).match ({ true => {
+        p.offset(at).store('0' + n % 10)
+        at + 1
+    }, false => {
+        next := num_write_fpad(p, at, n / 10, w - 1)
+        p.offset(next).store('0' + n % 10)
+        next + 1
+    } })
 }
-
-num_write_frac_digits = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
-    ((n % 10 == 0) && (w > 1)).match ({
-        true  => num_write_frac_digits(p, at, n / 10, w - 1),
-        false => num_write_fpad(p, at, n, w)
-    })
-}
-
+num_write_frac_digits = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 { (n % 10 == 0 && w > 1).match ({ true => num_write_frac_digits(p, at, n / 10, w - 1), false => num_write_fpad(p, at, n, w) }) }
 num_write_fparts = (p: RawPtr<u8>, at: i64, ip: i64, scaled: i64) i64 {
     whole := num_write_udigits(p, at, ip)
-    (scaled == 0).match ({
-        true => whole,
-        false => {
-            p.offset(whole).store('.')
-            num_write_frac_digits(p, whole + 1, scaled, 6)
-        }
-    })
+    (scaled == 0).match ({ true => whole, false => {
+        p.offset(whole).store('.')
+        num_write_frac_digits(p, whole + 1, scaled, 6)
+    } })
 }
-
 // Largest magnitude whose integer part still fits in i64 (i64 max ~9.22e18). Above this
 // `to_i64(x)` would overflow, so the fixed-decimal path is replaced by scientific notation.
 F64_DIGIT_MAX := 9000000000000000000.0
-
 // Fixed-decimal write: integer part + up to 6 fraction digits. Valid only for magnitudes
 // whose integer part fits in i64 (the sci path below feeds it a mantissa in [1, 10)).
 num_write_fabs_normal = (p: RawPtr<u8>, at: i64, x: f64) i64 {
-    ip     := to_i64(x)
+    ip := to_i64(x)
     scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
-    (scaled >= 1000000).match ({
-        true  => num_write_fparts(p, at, ip + 1, 0),
-        false => num_write_fparts(p, at, ip, scaled)
-    })
+    (scaled >= 1000000).match ({ true => num_write_fparts(p, at, ip + 1, 0), false => num_write_fparts(p, at, ip, scaled) })
 }
-
 // Decimal exponent E of a large positive x: the count of /10 steps until x < 10, so x/10^E
 // lands in [1, 10). Recursive (E is small: <= 308 for any finite f64).
-num_sci_exp = (x: f64, e: i64) i64 {
-    (x < 10.0).match ({
-        true  => e,
-        false => num_sci_exp(x / 10.0, e + 1)
-    })
-}
-
-num_scale_down = (x: f64, n: i64) f64 {
-    (n == 0).match ({ true => x, false => num_scale_down(x / 10.0, n - 1) })
-}
-
+num_sci_exp = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => num_sci_exp(x / 10.0, e + 1) }) }
+num_scale_down = (x: f64, n: i64) f64 { (n == 0).match ({ true => x, false => num_scale_down(x / 10.0, n - 1) }) }
 // Scientific notation "m.mmmmmme+EE" for a large finite positive x (one whose integer part
 // would overflow i64). The mantissa m = x / 10^E is in [1, 10), so it formats via the normal
 // fixed-decimal path. PRECISION: mantissa carries the usual ~15-significant-digit f64 error.
 num_write_sci = (p: RawPtr<u8>, at: i64, x: f64) i64 {
-    e    := num_sci_exp(x, 0)
+    e := num_sci_exp(x, 0)
     mant := num_scale_down(x, e)
     mend := num_write_fabs_normal(p, at, mant)
     p.offset(mend).store('e')
     p.offset(mend + 1).store('+')
     num_write_udigits(p, mend + 2, e)
 }
-
 // x is the non-negative magnitude. Above i64's integer range use scientific notation so a
 // finite-but-huge value (e.g. 6.022e23) renders its digits instead of overflowing to "inf".
-num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
-    (x > F64_DIGIT_MAX).match ({
-        true  => num_write_sci(p, at, x),
-        false => num_write_fabs_normal(p, at, x)
-    })
-}
-
+num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 { (x > F64_DIGIT_MAX).match ({ true => num_write_sci(p, at, x), false => num_write_fabs_normal(p, at, x) }) }
 // "nan"/"inf"/"-inf" for the IEEE specials, "" for any finite value (incl. large ones, which
 // the formatter renders in scientific notation). A TRUE infinity is detected arithmetically:
 // for finite x, x - x == 0; for +/-inf, inf - inf == nan != 0. Magnitude alone is NOT used —
 // that mislabels large finite numbers as infinity.
-f64_special* = (x: f64) str {
-    (x != x).match ({
-        true => "nan",
-        false => ((x - x) != 0.0).match ({
-            true => (x < 0.0).match ({
-                true  => "-inf",
-                false => "inf"
-            }),
-            false => ""
-        })
-    })
-}
-
+f64_special* = (x: f64) str { (x != x).match ({ true => "nan", false => (x - x != 0.0).match ({ true => (x < 0.0).match ({ true => "-inf", false => "inf" }), false => "" }) }) }
 num_is_special_text = (s: str) bool { s.offset(0).load() != '\0' }
 num_float_cap = (x: f64) i64 {
     sp := x.f64_special()
-    sp.num_is_special_text().match ({
-        true  => num_text_len(sp) + 1,
-        false => 80
-    })
+    sp.num_is_special_text().match ({ true => num_text_len(sp) + 1, false => 80 })
 }
-
 num_write_float = (p: RawPtr<u8>, x: f64) i64 {
     sp := x.f64_special()
-    sp.num_is_special_text().match ({
-        true => num_copy_text(p, 0, sp, 0),
-        false => (x < 0.0).match ({
-            true => {
-                p.store('-')
-                num_write_fabs_digits(p, 1, 0.0 - x)
-            },
-            false => num_write_fabs_digits(p, 0, x)
-        })
-    })
+    sp.num_is_special_text().match ({ true => num_copy_text(p, 0, sp, 0), false => (x < 0.0).match ({ true => {
+        p.store('-')
+        num_write_fabs_digits(p, 1, 0.0 - x)
+    }, false => num_write_fabs_digits(p, 0, x) }) })
 }
-
 num_float_from_ptr = (p: RawPtr<u8>, x: f64, cap: i64) String {
-    String( ptr: p, len: num_write_float(p, x), cap: cap )
+    String(
+        ptr: p,
+        len: num_write_float(p, x),
+        cap: cap,
+    )
 }
-
 float_in*<A> = (a: MutPtr<A>, x: f64) String {
     cap := num_float_cap(x)
     num_float_from_ptr(a.acquire(cap), x, cap)
 }
-
 float*<A> = (a: MutPtr<A>, x: f64) String { a.float_in(x) }
-
 try_float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> {
     cap := num_float_cap(x)
     a.try_acquire(cap).match ({
         .Ok(p)  => ok(num_float_from_ptr(p, x, cap)),
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
 }
-
 try_float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError> { a.try_float_in(x) }
-
 // ── parsing: text → number, as values ────────────────────────────────────────
 //
 // The format side above turns numbers into text; these turn text back into numbers.
 // All reuse std.text.str's `ParseError`: NoDigits | Trailing(u8) | Overflow. A bad
 // parse is a value to `.match`, never a silent 0 (that is `parse_int`'s documented job).
-
 // parse_int with errors surfaced: empty/garbage/overflow become Err instead of 0.
 // A thin honest alias over std.text.str.try_parse_int — optional leading '-', then
 // decimal digits to the very end, magnitude must fit i64.
 //   parse_i64_checked("123") => .Ok(123)   parse_i64_checked("12x") => .Err(.Trailing('x'))
 //   parse_i64_checked("")    => .Err(.NoDigits)
 parse_i64_checked* = (s: str) Result<i64, ParseError> { s.try_parse_int() }
-
 // 10^e as f64, for any sign of e. Recursive — e is a (small) decimal exponent.
-pf_pow10 = (e: i64) f64 {
-    (e == 0).match ({
-        true  => 1.0,
-        false => (e < 0).match ({
-            true  => pf_pow10(e + 1) / 10.0,
-            false => pf_pow10(e - 1) * 10.0
-        })
-    })
-}
-
+pf_pow10 = (e: i64) f64 { (e == 0).match ({ true => 1.0, false => (e < 0).match ({ true => pf_pow10(e + 1) / 10.0, false => pf_pow10(e - 1) * 10.0 }) }) }
 // Parse a decimal float: an optional sign, an integer part, an optional '.' fraction,
 // and an optional 'e'/'E' exponent (itself optionally signed). e.g. "3.14", "-2.5",
 // "1e3", "6.022e23", ".5", "42".
@@ -332,86 +208,58 @@ parse_f64* = (s: str) Result<f64, ParseError> {
     neg := sv.len > 0 && sv[0] == '-'
     pos := sv.len > 0 && sv[0] == '+'
     start: i64 := (neg || pos).match ({ true => 1, false => 0 })
-
-    mant:    f64 := 0.0
+    mant: f64 := 0.0
     fracdiv: f64 := 1.0
-    seen_dot   := false
-    seen_e     := false
+    seen_dot := false
+    seen_e := false
     eseen_sign := false
-    eneg       := false
+    eneg := false
     eval: i64 := 0
-    ndig: i64 := 0       // mantissa digits (integer + fraction)
-    edig: i64 := 0       // exponent digits
-    bad:  u8  := 0       // first offending byte (0 = none)
-
+    ndig: i64 := 0    // mantissa digits (integer + fraction)
+    edig: i64 := 0    // exponent digits
+    bad: u8 := 0
     sv.loop((h, i, b) {
-        (i < start).match ({
-            true  => {},
-            false => seen_e.match ({
-                true => ((edig == 0) && (eseen_sign == false) && ((b == '-') || (b == '+'))).match ({
-                    true  => { eseen_sign = true  eneg = b == '-' },
-                    false => (b >= '0' && b <= '9').match ({
-                        true  => { eval = eval * 10 + (b - '0')  edig = edig + 1 },
-                        false => { bad = b  h.break }
-                    })
-                }),
-                false => (b >= '0' && b <= '9').match ({
-                    true  => {
-                        dd: i64 := b - '0'
-                        d := to_f64(dd)
-                        seen_dot.match ({
-                            true  => { fracdiv = fracdiv * 10.0  mant = mant + d / fracdiv },
-                            false => { mant = mant * 10.0 + d }
-                        })
-                        ndig = ndig + 1
-                    },
-                    false => (b == '.').match ({
-                        true  => seen_dot.match ({
-                            true  => { bad = b  h.break },
-                            false => { seen_dot = true }
-                        }),
-                        false => ((b == 'e' || b == 'E') && ndig > 0).match ({
-                            true  => { seen_e = true },
-                            false => { bad = b  h.break }
-                        })
-                    })
-                })
-            })
-        })
+        (i < start).match ({ true => { }, false => seen_e.match ({ true => (edig == 0 && eseen_sign == false && (b == '-' || b == '+')).match ({ true => {
+            eseen_sign = true    // first offending byte (0 = none)
+            eneg = b == '-'
+        }, false => (b >= '0' && b <= '9').match ({ true => {
+            eval = eval * 10 + (b - '0')
+            edig = edig + 1
+        }, false => {
+            bad = b
+            h.break
+        } }) }), false => (b >= '0' && b <= '9').match ({ true => {
+            dd: i64 := b - '0'
+            d := to_f64(dd)
+            seen_dot.match ({ true => {
+                fracdiv = fracdiv * 10.0
+                mant = mant + d / fracdiv
+            }, false => {
+                mant = mant * 10.0 + d
+            } })
+            ndig = ndig + 1
+        }, false => (b == '.').match ({ true => seen_dot.match ({ true => {
+            bad = b
+            h.break
+        }, false => {
+            seen_dot = true
+        } }), false => ((b == 'e' || b == 'E') && ndig > 0).match ({ true => {
+            seen_e = true
+        }, false => {
+            bad = b
+            h.break
+        } }) }) }) }) })
     })
-
-    out: Result<f64, ParseError> := (bad != 0).match ({
-        true  => err(.Trailing(bad)),
-        false => (ndig == 0).match ({
-            true  => err(.NoDigits),
-            false => (seen_e && (edig == 0)).match ({
-                true  => err(.NoDigits),
-                false => {
-                    exp := eneg.match ({ true => 0 - eval, false => eval })
-                    val := mant * pf_pow10(exp)
-                    r: f64 := neg.match ({ true => 0.0 - val, false => val })
-                    ok(r)
-                }
-            })
-        })
-    })
+    out: Result<f64, ParseError> := (bad != 0).match ({ true => err(.Trailing(bad)), false => (ndig == 0).match ({ true => err(.NoDigits), false => (seen_e && edig == 0).match ({ true => err(.NoDigits), false => {
+        exp := eneg.match ({ true => 0 - eval, false => eval })
+        val := mant * pf_pow10(exp)
+        r: f64 := neg.match ({ true => 0.0 - val, false => val })
+        ok(r)
+    } }) }) })
     out
 }
-
 // digit value of byte `b` in any base up to 36 ('0'-'9','a'-'z','A'-'Z'); -1 if not a digit.
-pf_digit_val = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => b - '0',
-        false => (b >= 'a' && b <= 'z').match ({
-            true  => b - 'a' + 10,
-            false => (b >= 'A' && b <= 'Z').match ({
-                true  => b - 'A' + 10,
-                false => 0 - 1
-            })
-        })
-    })
-}
-
+pf_digit_val = (b: u8) i64 { (b >= '0' && b <= '9').match ({ true => b - '0', false => (b >= 'a' && b <= 'z').match ({ true => b - 'a' + 10, false => (b >= 'A' && b <= 'Z').match ({ true => b - 'A' + 10, false => 0 - 1 }) }) }) }
 // Parse an integer in an arbitrary base (2..=36): optional '-', then digits valid for
 // `base` to the end. e.g. parse_i64_radix("ff", 16) => .Ok(255), ("1010", 2) => .Ok(10).
 // ERRORS: nothing to parse => .NoDigits; a digit out of range (or stray byte) => .Trailing.
@@ -421,29 +269,23 @@ parse_i64_radix* = (s: str, base: i64) Result<i64, ParseError> {
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
-    nd:  i64 := 0
-    bad: u8  := 0
+    nd: i64 := 0
+    bad: u8 := 0
     sv.loop((h, i, b) {
-        (i < start).match ({
-            true  => {},
-            false => {
-                dv := pf_digit_val(b)
-                ((dv >= 0) && (dv < base)).match ({
-                    true  => { acc = acc * base + dv  nd = nd + 1 },
-                    false => { bad = b  h.break }
-                })
-            }
-        })
+        (i < start).match ({ true => { }, false => {
+            dv := pf_digit_val(b)
+            (dv >= 0 && dv < base).match ({ true => {
+                acc = acc * base + dv
+                nd = nd + 1
+            }, false => {
+                bad = b
+                h.break
+            } })
+        } })
     })
-    out: Result<i64, ParseError> := (nd == 0).match ({
-        true  => err(.NoDigits),
-        false => (bad != 0).match ({
-            true  => err(.Trailing(bad)),
-            false => {
-                v: i64 := neg.match ({ true => 0 - acc, false => acc })
-                ok(v)
-            }
-        })
-    })
+    out: Result<i64, ParseError> := (nd == 0).match ({ true => err(.NoDigits), false => (bad != 0).match ({ true => err(.Trailing(bad)), false => {
+        v: i64 := neg.match ({ true => 0 - acc, false => acc })
+        ok(v)
+    } }) })
     out
 }

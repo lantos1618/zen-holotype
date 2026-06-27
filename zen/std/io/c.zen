@@ -3,69 +3,30 @@
 // `libc(alloc)` returns bodyless foreign declarations for the libc surface the stdlib
 // needs. The resolver can also namespace-bind this module (`c = std.io.c`) so
 // user code may call `c.malloc` while the backend still emits normal C prototypes.
-
 { dupx, node } = std.core.slice
 { Decl, Func, Param, Stmt, Ty, dforeign, tptr, param, ti32, ti64, tu8, tstr, tvoid } = compiler.genc
-
 // A foreign function has no type params and no Zen body.
 c_empty_params = () [Param] { slice(null_ptr(), 0) }
-c_empty_body   = () [Stmt]  { slice(null_ptr(), 0) }
-
+c_empty_body = () [Stmt] { slice(null_ptr(), 0) }
 // Box Ty values before storing them behind Ptr<Ty> fields in the returned AST.
 c_tynode<A> = (alloc: MutPtr<A>, t: Ty) Ptr<Ty> { alloc.node(t) }
 ptr_u8_ty<A> = (alloc: MutPtr<A>) Ty { tptr(alloc.c_tynode(tu8())) }
-
 foreign_decl<A> = (alloc: MutPtr<A>, name: str, ps: [Param], ret: Ty) Decl {
     dforeign(Func(
-    name: name,
-    params: alloc.dupx(ps),
-    ret: ret,
-    tparams: c_empty_params(),
-    body: c_empty_body()
+        name: name,
+        params: alloc.dupx(ps),
+        ret: ret,
+        tparams: c_empty_params(),
+        body: c_empty_body(),
     ))
 }
-
-binding0<A> = (alloc: MutPtr<A>, name: str, ret: Ty) Decl {
-    alloc.foreign_decl(name, c_empty_params(), ret)
-}
-
-binding1<A> = (alloc: MutPtr<A>, name: str, p0: Param, ret: Ty) Decl {
-    alloc.foreign_decl(name, [p0], ret)
-}
-
-binding2<A> = (alloc: MutPtr<A>, name: str, p0: Param, p1: Param, ret: Ty) Decl {
-    alloc.foreign_decl(name, [p0, p1], ret)
-}
-
-binding3<A> = (alloc: MutPtr<A>, name: str, p0: Param, p1: Param, p2: Param, ret: Ty) Decl {
-    alloc.foreign_decl(name, [p0, p1, p2], ret)
-}
-
+binding0<A> = (alloc: MutPtr<A>, name: str, ret: Ty) Decl { alloc.foreign_decl(name, c_empty_params(), ret) }
+binding1<A> = (alloc: MutPtr<A>, name: str, p0: Param, ret: Ty) Decl { alloc.foreign_decl(name, [p0], ret) }
+binding2<A> = (alloc: MutPtr<A>, name: str, p0: Param, p1: Param, ret: Ty) Decl { alloc.foreign_decl(name, [p0, p1], ret) }
+binding3<A> = (alloc: MutPtr<A>, name: str, p0: Param, p1: Param, p2: Param, ret: Ty) Decl { alloc.foreign_decl(name, [p0, p1, p2], ret) }
 p_i32 = (name: str) Param { param(name, ti32()) }
 p_i64 = (name: str) Param { param(name, ti64()) }
 p_str = (name: str) Param { param(name, tstr()) }
 p_ptr<A> = (alloc: MutPtr<A>, name: str) Param { param(name, alloc.ptr_u8_ty()) }
-
 // Canonical libc surface used by std memory, strings, I/O, and process code.
-libc*<A> = (alloc: MutPtr<A>) [Decl] {
-    alloc.dupx([
-    alloc.binding1("malloc", p_i64("n"), alloc.ptr_u8_ty()),
-    alloc.binding2("calloc", p_i64("n"), p_i64("size"), alloc.ptr_u8_ty()),
-    alloc.binding2("realloc", alloc.p_ptr("p"), p_i64("n"), alloc.ptr_u8_ty()),
-    alloc.binding1("free", alloc.p_ptr("p"), tvoid()),
-
-    alloc.binding3("memcpy", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()),
-    alloc.binding3("memmove", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()),
-    alloc.binding3("memset", alloc.p_ptr("p"), p_i32("v"), p_i64("n"), alloc.ptr_u8_ty()),
-
-    alloc.binding1("strlen", p_str("s"), ti64()),
-    alloc.binding2("strcmp", p_str("a"), p_str("b"), ti32()),
-
-    alloc.binding1("putchar", p_i32("c"), ti32()),
-    alloc.binding0("getchar", ti32()),
-    alloc.binding1("puts", p_str("s"), ti32()),
-
-    alloc.binding0("abort", tvoid()),
-    alloc.binding1("exit", p_i32("code"), tvoid())
-    ])
-}
+libc*<A> = (alloc: MutPtr<A>) [Decl] { alloc.dupx([alloc.binding1("malloc", p_i64("n"), alloc.ptr_u8_ty()), alloc.binding2("calloc", p_i64("n"), p_i64("size"), alloc.ptr_u8_ty()), alloc.binding2("realloc", alloc.p_ptr("p"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding1("free", alloc.p_ptr("p"), tvoid()), alloc.binding3("memcpy", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding3("memmove", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding3("memset", alloc.p_ptr("p"), p_i32("v"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding1("strlen", p_str("s"), ti64()), alloc.binding2("strcmp", p_str("a"), p_str("b"), ti32()), alloc.binding1("putchar", p_i32("c"), ti32()), alloc.binding0("getchar", ti32()), alloc.binding1("puts", p_str("s"), ti32()), alloc.binding0("abort", tvoid()), alloc.binding1("exit", p_i32("code"), tvoid())]) }

@@ -5,17 +5,18 @@ halloc = std.mem.heap
 { Coro, try_spawn, destroy } = std.concurrent.coroutine
 ran := 0
 work = () void { ran = ran + 1 }
-Counting: { left: i32, acquired: i32, released: i32 }
+Counting: {
+    left: i32,
+    acquired: i32,
+    released: i32,
+}
 Counting.impl(Allocator, {
     acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
-        (a.left <= 0).match({
-            true => null_ptr(),
-            false => {
-                a.left = a.left - 1
-                a.acquired = a.acquired + 1
-                malloc(n)
-            }
-        })
+        (a.left <= 0).match ({ true => null_ptr(), false => {
+            a.left = a.left - 1
+            a.acquired = a.acquired + 1
+            malloc(n)
+        } })
     }
     resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
     release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
@@ -27,29 +28,43 @@ success = () bool {
     heap := halloc.gpa()
     a := heap.addr()
     r: Result<Coro, IoError> := a.try_spawn(work)
-    r.match({
+    r.match ({
         .Ok(co) => {
             co.resume()
             a.destroy(co)
             ran == 1
         },
-        .Err(e) => false
+        .Err(e) => false,
     })
 }
 fail_first = () bool {
-    c := Counting(left: 0, acquired: 0, released: 0)
+    c := Counting(
+        left: 0,
+        acquired: 0,
+        released: 0,
+    )
     r: Result<Coro, IoError> := c.addr().try_spawn(work)
-    r.match({
-        .Err(e) => e.match({ .NotFound => (c.acquired == 0) && (c.released == 0), _ => false }),
-        .Ok(co) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => c.acquired == 0 && c.released == 0,
+            _         => false,
+        }),
+        .Ok(co) => false,
     })
 }
 fail_state = () bool {
-    c := Counting(left: 3, acquired: 0, released: 0)
+    c := Counting(
+        left: 3,
+        acquired: 0,
+        released: 0,
+    )
     r: Result<Coro, IoError> := c.addr().try_spawn(work)
-    r.match({
-        .Err(e) => e.match({ .NotFound => (c.acquired == 3) && (c.released == 3), _ => false }),
-        .Ok(co) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => c.acquired == 3 && c.released == 3,
+            _         => false,
+        }),
+        .Ok(co) => false,
     })
 }
 main = () i32 { (success() && fail_first() && fail_state()).to_exit() }

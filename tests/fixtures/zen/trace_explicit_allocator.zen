@@ -2,31 +2,43 @@
 halloc = std.mem.heap
 { to_exit } = std.core.bool
 trace = std.mem.trace
-Counting: { heap: Heap, acquired: i32, released: i32 }
+Counting: {
+    heap: Heap,
+    acquired: i32,
+    released: i32,
+}
 Counting.impl(Allocator, {
     acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
         a.acquired = a.acquired + 1
         a.heap.addr().acquire(n)
     }
-    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-        a.heap.addr().resize(p, n)
-    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.heap.addr().resize(p, n) }
     release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
         a.released = a.released + 1
         a.heap.addr().release(p)
     }
 })
 main = () i32 {
-    c := Counting(heap: halloc.gpa(), acquired: 0, released: 0)
+    c := Counting(
+        heap: halloc.gpa(),
+        acquired: 0,
+        released: 0,
+    )
     a := c.addr()
-    left := trace.tracked_in(a, trace.Node(has: 0, kid: null_ptr()))
-    right := trace.tracked_in(a, trace.Node(has: 0, kid: null_ptr()))
+    left := trace.tracked_in(a, trace.Node(
+        has: 0,
+        kid: null_ptr(),
+    ))
+    right := trace.tracked_in(a, trace.Node(
+        has: 0,
+        kid: null_ptr(),
+    ))
     trace.set_kid(left, right)
     trace.set_kid(right, left)
     trace.root_in(a, left)
     trace.root_in(a, right)
     allocated := c.acquired == 3
     trace.collect_in(a)
-    reclaimed := (c.acquired == 4) && (c.released == 3)
+    reclaimed := c.acquired == 4 && c.released == 3
     (allocated && reclaimed).to_exit()
 }

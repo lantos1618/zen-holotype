@@ -6,33 +6,29 @@
 { spawn, join } = std.thread
 { spawn_in, checkpoint_current, Coro } = std.concurrent.coroutine
 halloc = std.mem.heap
-
 ITERS := 2000
-
 sumA := 0
 sumB := 0
-
 // recursive yielder: increment the per-thread sum, yield, repeat n times.
 stepA = (n: i32) void {
-    (n <= 0).match ({
-        true  => {},
-        false => { sumA = sumA + 1  checkpoint_current()  stepA(n - 1) }
-    })
+    (n <= 0).match ({ true => { }, false => {
+        sumA = sumA + 1
+        checkpoint_current()
+        stepA(n - 1)
+    } })
 }
 stepB = (n: i32) void {
-    (n <= 0).match ({
-        true  => {},
-        false => { sumB = sumB + 1  checkpoint_current()  stepB(n - 1) }
-    })
+    (n <= 0).match ({ true => { }, false => {
+        sumB = sumB + 1
+        checkpoint_current()
+        stepB(n - 1)
+    } })
 }
-
 // non-capturing coroutine bodies
 workA = () void { stepA(ITERS) }
 workB = () void { stepB(ITERS) }
-
 // drive a coroutine to completion: resume() returns 1 while it has yielded, 0 when finished.
-drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => {} }) }
-
+drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => { } }) }
 // non-capturing thread bodies: each builds its OWN coroutine and runs it to completion.
 threadA = (arg: RawPtr<u8>) RawPtr<u8> {
     h := halloc.gpa()
@@ -46,7 +42,6 @@ threadB = (arg: RawPtr<u8>) RawPtr<u8> {
     drive(c)
     null_ptr()
 }
-
 main = () i32 {
     ha := spawn(threadA, null_ptr())
     hb := spawn(threadB, null_ptr())

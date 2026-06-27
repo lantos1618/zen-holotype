@@ -30,7 +30,6 @@
 { new_in, append_in, finish_in } = std.text.string
 { integer_in } = std.text.num
 { getpid } = std.c.libc
-
 // ── PER-RUN UNIQUE TEMP NAMESPACE (concurrency safety) ────────────────────────────────────────────
 // `make oracle` is run concurrently all the time (parallel agents). The hazard is shared `/tmp`
 // paths: if two runs touched the SAME fixed file, they would clobber each other mid-flight →
@@ -49,7 +48,6 @@
 //       `/tmp/zenc_zd.*` paths. Now that those paths are pid-unique the lock is redundant; it was
 //       removed because it had been forcing N concurrent `make oracle` runs to execute strictly
 //       one-at-a-time. Per-run uniqueness gives the same correctness with full parallelism.)
-
 // the private scratch directory for this run, e.g. `/tmp/zo.12345` (no trailing slash).
 zo_dir* = (mp: MutPtr<Malloc>) str {
     b := mp.new_in()
@@ -57,7 +55,6 @@ zo_dir* = (mp: MutPtr<Malloc>) str {
     b = b.append_in(mp, mp.finish_in(mp.integer_in(getpid().to_i64())))
     mp.finish_in(b)
 }
-
 // build `<zo_dir>/<name>` — a scratch path private to this oracle run (for std.io save/contents_in).
 zo_path* = (mp: MutPtr<Malloc>, name: str) str {
     b := mp.new_in()
@@ -66,7 +63,6 @@ zo_path* = (mp: MutPtr<Malloc>, name: str) str {
     b = b.append_in(mp, name)
     mp.finish_in(b)
 }
-
 // wrap a shell command body so it can use `$ZT` for the private scratch dir; the dir is (re)created
 // first so any command can write into it even before a std.io save runs. No cross-run lock is needed:
 // the body's own scratch lives under `$ZT` (per-pid) and any `zenc` it spawns writes pid-namespaced
@@ -80,14 +76,12 @@ zo_cmd* = (mp: MutPtr<Malloc>, body: str) str {
     s = s.append_in(mp, body)
     mp.finish_in(s)
 }
-
 // create the private scratch dir (idempotent); call once at oracle startup before any std.io save.
 zo_ensure* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     shell(mp.zo_cmd("true"))
 }
-
 // remove the private scratch dir; call once at oracle teardown.
 zo_cleanup* = () i32 {
     m := Malloc(_: 0)
@@ -97,18 +91,26 @@ zo_cleanup* = () i32 {
     s = s.append_in(mp, mp.zo_dir())
     shell(mp.finish_in(s))
 }
-
 // a VALUE case: `src` defines `test* = () iNN { … }`; the emitted program must compute (print) `want`.
-VCase*: { src: str, want: str }
+VCase*: {
+    src: str,
+    want: str,
+}
 // a VERDICT case: `zenc check src` must accept (should_pass=true) or reject (false). When rejecting
 // and `kind` is non-empty, the diagnostic must contain `error[<kind>]` (e.g. kind: "arity").
-VerdictCase*: { src: str, should_pass: bool, kind: str }
+VerdictCase*: {
+    src: str,
+    should_pass: bool,
+    kind: str,
+}
 // a DIAGNOSTIC case: `zenc check src` must REJECT (exit nonzero), and its full diagnostic text (stderr,
 // captured) must CONTAIN every string in `wants` — the precise positioned-diagnostic assertion (kind +
 // `line:col` + the source line + the `^~~` caret + the human message + hint). Substring containment is
 // adversarially sufficient: corrupt any expected piece (a wrong col, a missing caret) and the case fails.
-DiagCase*: { src: str, wants: [str] }
-
+DiagCase*: {
+    src: str,
+    wants: [str],
+}
 // build the diagnostic needle `error[<kind>]` for a kind label.
 kind_needle = (mp: MutPtr<Malloc>, kind: str) str {
     s := mp.new_in()
@@ -117,7 +119,6 @@ kind_needle = (mp: MutPtr<Malloc>, kind: str) str {
     s = s.append_in(mp, "]")
     mp.finish_in(s)
 }
-
 // VALUE: emit C for the case, compile it with tests/oracle_runner.c, run it, compare the printed int
 // to `want`. /tmp/zo_out.txt is cleared first so a stale value can't masquerade as a pass when emit
 // or cc fails (the `&&` chain then never runs the program).
@@ -129,10 +130,9 @@ run_value* = (vc: VCase) bool {
     shell(mp.zo_cmd("./zenc emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/oracle_runner.c -o $ZT/zo_prog 2>/dev/null && $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
     mp.contents_in(mp.zo_path("zo_out.txt")).match ({
         .Ok(got) => eq(got, vc.want),
-        .Err(e)  => false
+        .Err(e)  => false,
     })
 }
-
 // VERDICT: `zenc check` exits 0 on accept, non-zero on reject (it prints exactly one diagnostic, so
 // `contains("error[<kind>]")` is equivalent to matching the first-error kind).
 run_verdict* = (vc: VerdictCase) bool {
@@ -140,21 +140,11 @@ run_verdict* = (vc: VerdictCase) bool {
     mp := m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
     rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1"))
-    vc.should_pass.match ({
-        true  => rc == 0,
-        false => (rc == 0).match ({
-            true  => false,
-            false => is_empty(vc.kind).match ({
-                true  => true,
-                false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
-                    .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-                    .Err(e)  => false
-                })
-            })
-        })
-    })
+    vc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(vc.kind).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
+        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
+        .Err(e)  => false,
+    }) }) }) })
 }
-
 // DIAGNOSTIC: `zenc check` must reject (exit nonzero); capture the FULL diagnostic (stdout+stderr) and
 // require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
 run_diag* = (dc: DiagCase) bool {
@@ -162,21 +152,19 @@ run_diag* = (dc: DiagCase) bool {
     mp := m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
     rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1"))
-    (rc == 0).match ({
-        true  => false,                                   // must REJECT
-        false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
-            .Ok(txt) => {
-                all := true
-                dc.wants.loop((h, i, wnt) {
-                    txt.contains(wnt).match ({ false => { all = false } })
-                })
-                all
-            },
-            .Err(e) => false
-        })
-    })
+    (rc == 0).match ({ true => false, false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
+        .Ok(txt) => {
+            all := true
+            dc.wants.loop((h, i, wnt) {
+                txt.contains(wnt).match ({ false => {
+                    all = false
+                } })
+            })    // must REJECT
+            all
+        },
+        .Err(e)  => false,
+    }) })
 }
-
 // the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
 // temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
 fixpoint_ok* = () bool {
@@ -186,7 +174,6 @@ fixpoint_ok* = () bool {
     same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c"))
     same == 0
 }
-
 // REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. Use when a caller
 // already has a `[bool]` of outcomes (e.g. the fixpoint suite, or a custom category mix).
 run_suite* = (name: str, results: [bool]) i32 {
@@ -194,43 +181,52 @@ run_suite* = (name: str, results: [bool]) i32 {
     out("\n")
     fails := 0
     results.loop((h, i, ok) {
-        ok.match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+        ok.match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
     })
     out("\n")
     fails
 }
-
 // batch VALUE runner + reporter: run every case, print '.'/'F', return the failing count.
 run_values* = (name: str, cs: [VCase]) i32 {
     out(name)
     out("\n")
     fails := 0
     cs.loop((h, i, c) {
-        run_value(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+        run_value(c).match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
     })
     out("\n")
     fails
 }
-
 // batch VERDICT runner + reporter: run every case, print '.'/'F', return the failing count.
 run_verdicts* = (name: str, cs: [VerdictCase]) i32 {
     out(name)
     out("\n")
     fails := 0
     cs.loop((h, i, c) {
-        run_verdict(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+        run_verdict(c).match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
     })
     out("\n")
     fails
 }
-
 // batch DIAGNOSTIC runner + reporter: run every case, print '.'/'F', return the failing count.
 run_diags* = (name: str, cs: [DiagCase]) i32 {
     out(name)
     out("\n")
     fails := 0
     cs.loop((h, i, c) {
-        run_diag(c).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+        run_diag(c).match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
     })
     out("\n")
     fails

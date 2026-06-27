@@ -1,127 +1,86 @@
 // @self-hosted-only
 // File and process I/O for the Zen-side build driver.
 // Uses POSIX descriptors directly so the compiler std closure stays small.
-
 { Allocator, try_acquire } = std.mem.alloc
 { view } = std.text.str
 { Result, IoError, ok, err } = std.core.result
 { open, read, write, close, lseek, system } = std.c.libc
-
 STDOUT := 1
-
 // Writes a str to stdout without the trailing NUL and returns the byte count.
 out* = (s: str) i64 {
     v := s.view()
     STDOUT.write(v.ptr, v.len)
 }
-
 // Writes length-tracked bytes to stdout without requiring a trailing NUL.
-out_bytes* = (bytes: [u8]) i64 {
-    STDOUT.write(bytes.ptr, bytes.len)
-}
-
+out_bytes* = (bytes: [u8]) i64 { STDOUT.write(bytes.ptr, bytes.len) }
 // Linux x86-64 POSIX constants used by contents/save.
 O_RDONLY := 0
 O_WRTRUNC := 577
 MODE_644 := 420
 SEEK_SET := 0
 SEEK_END := 2
-
 // Returns file size and rewinds the descriptor to the start.
 file_size = (fd: i32) i64 {
     n := fd.lseek(0, SEEK_END)
     fd.lseek(0, SEEK_SET)
     n
 }
-
 // Reads [off, n), handling short reads.
 read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
-    (off >= n).match ({
-        true  => n,
-        false => {
-            r := fd.read(buf.offset(off), n - off)
-            (r <= 0).match ({
-                true  => off,
-                false => fd.read_all(buf, off + r, n)
-            })
-        }
-    })
+    (off >= n).match ({ true => n, false => {
+        r := fd.read(buf.offset(off), n - off)
+        (r <= 0).match ({ true => off, false => fd.read_all(buf, off + r, n) })
+    } })
 }
-
 ENOMEM := 12
-
-
 read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<str, IoError> {
     got := fd.read_all(buf, 0, n)
     fd.close()
-    out: Result<str, IoError> := (got == n).match ({
-        true => {
-            buf.offset(n).store(0)
-            ok(cstr(buf))
-        },
-        false => {
-            a.release(buf)
-            err(IoError.Eof)
-        }
-    })
+    out: Result<str, IoError> := (got == n).match ({ true => {
+        buf.offset(n).store(0)
+        ok(cstr(buf))
+    }, false => {
+        a.release(buf)
+        err(IoError.Eof)
+    } })
     out
 }
-
 read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<str, IoError> {
     a.try_acquire(n + 1).match ({
         .Ok(buf) => a.read_file_finish(fd, buf, n),
-        .Err(e) => {
+        .Err(e)  => {
             fd.close()
             err(IoError.Errno(ENOMEM))
-        }
+        },
     })
 }
-
 read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<str, IoError> {
     n := fd.file_size()
-    out: Result<str, IoError> := (n < 0).match ({
-        true => {
-            fd.close()
-            err(IoError.Errno(0 - 1))
-        },
-        false => a.read_file_alloc(fd, n)
-    })
+    out: Result<str, IoError> := (n < 0).match ({ true => {
+        fd.close()
+        err(IoError.Errno(0 - 1))
+    }, false => a.read_file_alloc(fd, n) })
     out
 }
-
 // Reads a whole file into an allocator-owned NUL-terminated buffer.
 contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> {
     fd := path.open(O_RDONLY, 0)
-    out: Result<str, IoError> := (fd < 0).match ({
-        true  => err(IoError.NotFound),
-        false => a.read_file_open(fd)
-    })
+    out: Result<str, IoError> := (fd < 0).match ({ true => err(IoError.NotFound), false => a.read_file_open(fd) })
     out
 }
-
 contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> { a.contents_in(path) }
-
 // Writes a str's bytes to a file, creating/truncating it.
 save* = (path: str, data: str, n: i64) Result<i64, IoError> {
     fd := path.open(O_WRTRUNC, MODE_644)
-    out: Result<i64, IoError> := (fd < 0).match ({
-        true  => err(IoError.Denied),
-        false => {
-            v := data.view()
-            // clamp the requested byte count to the buffer's real length — never read past `data`.
-            nn := (n < v.len).match ({ true => n, false => v.len })
-            w := fd.write(v.ptr, nn)
-            fd.close()
-            (w == nn).match ({
-                true  => ok(w),
-                false => err(IoError.Eof)
-            })
-        }
-    })
+    out: Result<i64, IoError> := (fd < 0).match ({ true => err(IoError.Denied), false => {
+        v := data.view()
+        // clamp the requested byte count to the buffer's real length — never read past `data`.
+        nn := (n < v.len).match ({ true => n, false => v.len })
+        w := fd.write(v.ptr, nn)
+        fd.close()
+        (w == nn).match ({ true => ok(w), false => err(IoError.Eof) })
+    } })
     out
 }
-
 // Runs a shell command and returns its exit status.
-shell* = (cmd: str) i32 {
-    cmd.system()
-}
+shell* = (cmd: str) i32 { cmd.system() }

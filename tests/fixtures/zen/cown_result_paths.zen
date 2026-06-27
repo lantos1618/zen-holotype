@@ -4,42 +4,48 @@ halloc = std.mem.heap
 { Result, IoError } = std.core.result
 { to_exit } = std.core.bool
 cown = std.concurrent.cown
-LimitAlloc: { _: i32 }
+LimitAlloc: {
+    _: i32,
+}
 LimitAlloc.impl(Allocator, {
     acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
     resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
-    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void {}
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { }
 })
 success_buf = () bool {
     heap := halloc.gpa()
     a := heap.addr()
     r: Result<cown.Buf, IoError> := cown.try_buf(a, 4)
-    r.match({
-        .Ok(b) => {
+    r.match ({
+        .Ok(b)  => {
             b.addr().set(0, 'A')
-            ok := (b.len == 4) && (b.addr().get(0) == 'A')
+            ok := b.len == 4 && b.addr().get(0) == 'A'
             b.addr().free(a)
             ok
         },
-        .Err(e) => false
+        .Err(e) => false,
     })
 }
 fail_buf = () bool {
     lim := LimitAlloc(_: 0)
     r: Result<cown.Buf, IoError> := cown.try_buf(lim.addr(), 4)
-    r.match({
-        .Err(e) => e.match({ .NotFound => true, _ => false }),
-        .Ok(b) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => true,
+            _         => false,
+        }),
+        .Ok(b)  => false,
     })
 }
 fail_file_wrap = () bool {
     lim := LimitAlloc(_: 0)
     r: Result<Own<cown.File>, IoError> := cown.file_in(lim.addr(), "@@T@@/zo_cown_input.txt")
-    r.match({
-        .Err(e) => e.match({ .NotFound => true, _ => false }),
-        .Ok(f) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => true,
+            _         => false,
+        }),
+        .Ok(f)  => false,
     })
 }
-main = () i32 {
-    (success_buf() && fail_buf() && fail_file_wrap()).to_exit()
-}
+main = () i32 { (success_buf() && fail_buf() && fail_file_wrap()).to_exit() }

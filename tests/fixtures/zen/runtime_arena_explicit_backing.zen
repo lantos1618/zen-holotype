@@ -2,26 +2,32 @@
 halloc = std.mem.heap
 { to_exit } = std.core.bool
 rt = std.concurrent.runtime
-Counting: { heap: Heap, acquired: i32, released: i32 }
+Counting: {
+    heap: Heap,
+    acquired: i32,
+    released: i32,
+}
 Counting.impl(Allocator, {
     acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
         a.acquired = a.acquired + 1
         a.heap.addr().acquire(n)
     }
-    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-        a.heap.addr().resize(p, n)
-    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.heap.addr().resize(p, n) }
     release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
         a.released = a.released + 1
         a.heap.addr().release(p)
     }
 })
 main = () i32 {
-    backing := Counting(heap: halloc.gpa(), acquired: 0, released: 0)
+    backing := Counting(
+        heap: halloc.gpa(),
+        acquired: 0,
+        released: 0,
+    )
     a := backing.addr()
     s := rt.sync_in(a, 1024)
     y := rt.async_in(a, 1024)
     s.addr().free_in(a)
     y.addr().free_in(a)
-    ((backing.acquired == 2) && (backing.released == 2)).to_exit()
+    (backing.acquired == 2 && backing.released == 2).to_exit()
 }

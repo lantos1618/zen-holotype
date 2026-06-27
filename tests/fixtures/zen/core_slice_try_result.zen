@@ -3,16 +3,15 @@ halloc = std.mem.heap
 { Result, IoError } = std.core.result
 { to_exit } = std.core.bool
 { try_dup_in, try_concat_in, try_node_in } = std.core.slice
-LimitAlloc: { left: i32 }
+LimitAlloc: {
+    left: i32,
+}
 LimitAlloc.impl(Allocator, {
     acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {
-        (a.left > 0).match ({
-            true => {
-                a.left = a.left - 1
-                malloc(n)
-            },
-            false => null_ptr()
-        })
+        (a.left > 0).match ({ true => {
+            a.left = a.left - 1
+            malloc(n)
+        }, false => null_ptr() })
     }
     resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
     release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { free(p) }
@@ -21,31 +20,32 @@ success = () bool {
     heap := halloc.gpa()
     a := heap.addr()
     r0: Result<[i32], IoError> := a.try_dup_in([1, 2])
-    r0.match({
+    r0.match ({
         .Ok(xs) => {
             r1: Result<[i32], IoError> := a.try_concat_in(xs, [3, 4])
-            r1.match({
+            r1.match ({
                 .Ok(ys) => {
                     rp: Result<Ptr<i32>, IoError> := a.try_node_in(5)
-                    rp.match({
-                        .Ok(p) => (ys[0] == 1) && (ys[3] == 4) && (load(p) == 5),
-                        .Err(e) => false
+                    rp.match ({
+                        .Ok(p)  => ys[0] == 1 && ys[3] == 4 && load(p) == 5,
+                        .Err(e) => false,
                     })
                 },
-                .Err(e) => false
+                .Err(e) => false,
             })
         },
-        .Err(e) => false
+        .Err(e) => false,
     })
 }
 failure = () bool {
     lim := LimitAlloc(left: 0)
     r: Result<[i32], IoError> := lim.addr().try_dup_in([1])
-    r.match({
-        .Err(e) => e.match({ .NotFound => true, _ => false }),
-        .Ok(xs) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => true,
+            _         => false,
+        }),
+        .Ok(xs) => false,
     })
 }
-main = () i32 {
-    (success() && failure()).to_exit()
-}
+main = () i32 { (success() && failure()).to_exit() }

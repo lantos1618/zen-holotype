@@ -4,21 +4,17 @@
 // The collector keeps a root registry plus a per-collection white-set scratch list.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-
 // Trial-deletion colors.
 BLACK := 0
-GRAY  := 1
+GRAY := 1
 WHITE := 2
-
 store_ptr = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }
-load_ptr  = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
-
+load_ptr = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
 // Rc<T> block layout: [count:i64 | color:i64 | value:T].
-hcount     = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }
+hcount = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }
 hset_count = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(0), v) }
-hcolor     = (b: RawPtr<u8>) i64 { load_i64(b.offset(8)) }
+hcolor = (b: RawPtr<u8>) i64 { load_i64(b.offset(8)) }
 hset_color = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(8), v) }
-
 // Growable raw list of block pointers: [len:i64 | cap:i64 | slots...].
 list_new_cap_in<A> = (alloc: MutPtr<A>, cap: i64) RawPtr<u8> {
     l := alloc.acquire(16 + cap * 8)
@@ -28,13 +24,13 @@ list_new_cap_in<A> = (alloc: MutPtr<A>, cap: i64) RawPtr<u8> {
 }
 list_new_in<A> = (alloc: MutPtr<A>) RawPtr<u8> { alloc.list_new_cap_in(8) }
 try_list_new_cap_in<A> = (alloc: MutPtr<A>, cap: i64) Result<RawPtr<u8>, IoError> {
-    out: Result<RawPtr<u8>, IoError> := alloc.try_acquire(16 + cap * 8).match({
-        .Ok(l) => {
+    out: Result<RawPtr<u8>, IoError> := alloc.try_acquire(16 + cap * 8).match ({
+        .Ok(l)  => {
             store_i64(l.offset(0), 0)
             store_i64(l.offset(8), cap)
             ok(l)
         },
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
     out
 }
@@ -44,103 +40,108 @@ list_cap = (l: RawPtr<u8>) i64 { load_i64(l.offset(8)) }
 list_get = (l: RawPtr<u8>, i: i64) RawPtr<u8> { load_ptr(l.offset(16 + i * 8)) }
 list_push_in<A> = (alloc: MutPtr<A>, l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
     n := list_len(l)
-    r := (n == load_i64(l.offset(8))).match({ true => { nc := load_i64(l.offset(8)) * 2  g := alloc.resize(l, 16 + nc * 8)  store_i64(g.offset(8), nc)  g }, false => l })
+    r := (n == load_i64(l.offset(8))).match ({ true => {
+        nc := load_i64(l.offset(8)) * 2
+        g := alloc.resize(l, 16 + nc * 8)
+        store_i64(g.offset(8), nc)
+        g
+    }, false => l })
     store_ptr(r.offset(16 + n * 8), p)
     store_i64(r.offset(0), n + 1)
     r
 }
 try_list_push_in<A> = (alloc: MutPtr<A>, l: RawPtr<u8>, p: RawPtr<u8>) Result<RawPtr<u8>, IoError> {
     n := list_len(l)
-    out: Result<RawPtr<u8>, IoError> := (n == list_cap(l)).match({
-        true => {
-            nc := list_cap(l) * 2
-            grown: Result<RawPtr<u8>, IoError> := alloc.try_resize(l, 16 + nc * 8).match({
-                .Ok(g) => {
-                    store_i64(g.offset(8), nc)
-                    store_ptr(g.offset(16 + n * 8), p)
-                    store_i64(g.offset(0), n + 1)
-                    ok(g)
-                },
-                .Err(e) => err(e)
-            })
-            grown
-        },
-        false => {
-            store_ptr(l.offset(16 + n * 8), p)
-            store_i64(l.offset(0), n + 1)
-            ok(l)
-        }
-    })
+    out: Result<RawPtr<u8>, IoError> := (n == list_cap(l)).match ({ true => {
+        nc := list_cap(l) * 2
+        grown: Result<RawPtr<u8>, IoError> := alloc.try_resize(l, 16 + nc * 8).match ({
+            .Ok(g)  => {
+                store_i64(g.offset(8), nc)
+                store_ptr(g.offset(16 + n * 8), p)
+                store_i64(g.offset(0), n + 1)
+                ok(g)
+            },
+            .Err(e) => err(e),
+        })
+        grown
+    }, false => {
+        store_ptr(l.offset(16 + n * 8), p)
+        store_i64(l.offset(0), n + 1)
+        ok(l)
+    } })
     out
 }
 list_push_static = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
     n := l.list_len()
-    (n < l.list_cap()).match({
-        true => {
-            store_ptr(l.offset(16 + n * 8), p)
-            store_i64(l.offset(0), n + 1)
-            l
-        },
-        false => l
-    })
+    (n < l.list_cap()).match ({ true => {
+        store_ptr(l.offset(16 + n * 8), p)
+        store_i64(l.offset(0), n + 1)
+        l
+    }, false => l })
 }
-
 // Candidate cycle roots. A real Rc would register on decrement-not-to-zero.
-roots := (null_ptr())
-roots_list_in<A> = (alloc: MutPtr<A>) RawPtr<u8> { (roots == null_ptr()).match({ true => { roots = alloc.list_new_in()  roots }, false => roots }) }
+roots := null_ptr()
+roots_list_in<A> = (alloc: MutPtr<A>) RawPtr<u8> {
+    (roots == null_ptr()).match ({ true => {
+        roots = alloc.list_new_in()
+        roots
+    }, false => roots })
+}
 roots_add_in<A> = (alloc: MutPtr<A>, b: RawPtr<u8>) void { roots = alloc.list_push_in(alloc.roots_list_in(), b) }
 try_roots_list_in<A> = (alloc: MutPtr<A>) Result<RawPtr<u8>, IoError> {
-    out: Result<RawPtr<u8>, IoError> := (roots == null_ptr()).match({
-        true => {
-            made: Result<RawPtr<u8>, IoError> := alloc.try_list_new_in().match({
-                .Ok(r) => {
-                    roots = r
-                    ok(roots)
-                },
-                .Err(e) => err(e)
-            })
-            made
-        },
-        false => ok(roots)
-    })
+    out: Result<RawPtr<u8>, IoError> := (roots == null_ptr()).match ({ true => {
+        made: Result<RawPtr<u8>, IoError> := alloc.try_list_new_in().match ({
+            .Ok(r)  => {
+                roots = r
+                ok(roots)
+            },
+            .Err(e) => err(e),
+        })
+        made
+    }, false => ok(roots) })
     out
 }
 try_roots_add_in<A> = (alloc: MutPtr<A>, b: RawPtr<u8>) Result<i32, IoError> {
-    out: Result<i32, IoError> := alloc.try_roots_list_in().match({
+    out: Result<i32, IoError> := alloc.try_roots_list_in().match ({
         .Ok(rs) => {
-            pushed: Result<i32, IoError> := alloc.try_list_push_in(rs, b).match({
+            pushed: Result<i32, IoError> := alloc.try_list_push_in(rs, b).match ({
                 .Ok(next) => {
                     roots = next
                     ok(0)
                 },
-                .Err(e) => err(e)
+                .Err(e)   => err(e),
             })
             pushed
         },
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
     out
 }
-roots_clear_raw = () void { (roots == null_ptr()).match({ true => {}, false => { store_i64(roots.offset(0), 0) } }) }
+roots_clear_raw = () void {
+    (roots == null_ptr()).match ({ true => { }, false => {
+        store_i64(roots.offset(0), 0)
+    } })
+}
 roots_clear = () void { roots_clear_raw() }
-
 // Block pointers found to be cycle-only garbage during a collection.
-white := (null_ptr())
+white := null_ptr()
 tracked_blocks := 0
-
-Tracer*: { op: i32 }
-Trace*:  { trace: (Ptr<Self>, MutPtr<Tracer>) void }
-Drop*:   { drop: (MutPtr<Self>) void }
-
+Tracer*: {
+    op: i32,
+}
+Trace*: {
+    trace: (Ptr<Self>, MutPtr<Tracer>) void,
+}
+Drop*: {
+    drop: (MutPtr<Self>) void,
+}
 // Sub-passes carried by Tracer.op.
-OP_MARK       := 0
-OP_SCAN       := 1
+OP_MARK := 0
+OP_SCAN := 1
 OP_SCAN_BLACK := 2
-OP_GATHER     := 3
-
+OP_GATHER := 3
 Rc*<T>: {
-    base: RawPtr<u8>
-
+    base: RawPtr<u8>,
     val = (r: Rc<T>) [T] { slice(r.base.offset(16), 1) }
     get = (r: Rc<T>) T { r.val()[0] }
     inc = (r: Rc<T>) void { store_i64(r.base.offset(0), load_i64(r.base.offset(0)) + 1) }
@@ -150,28 +151,28 @@ tracked_in*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T> {
     tracked_blocks = tracked_blocks + 1
     store_i64(base.offset(0), 0)
     store_i64(base.offset(8), 0)
-    r := Rc<T>( base: base )
+    r := Rc<T>(base: base)
     s := r.val()
     s[0] = x
     r
 }
 try_tracked_in*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError> {
     tx := x
-    alloc.try_acquire(16 + sizeof(T)).match({
+    alloc.try_acquire(16 + sizeof(T)).match ({
         .Ok(base) => {
             tracked_blocks = tracked_blocks + 1
             store_i64(base.offset(0), 0)
             store_i64(base.offset(8), 0)
-            r := Rc<T>( base: base )
+            r := Rc<T>(base: base)
             s := r.val()
             s[0] = tx
             ok: Result<Rc<T>, IoError> := .Ok(r)
             ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<Rc<T>, IoError> := .Err(e)
             err
-        }
+        },
     })
 }
 tracked*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T> { alloc.tracked_in(x) }
@@ -180,74 +181,98 @@ root_in*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void { alloc.roots_add_in(r.base) 
 root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void { alloc.root_in(r) }
 try_root_in*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError> { alloc.try_roots_add_in(r.base) }
 try_root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError> { alloc.try_root_in(r) }
-
 // Generic shims re-dispatch Trace/Drop after Rc<T> is monomorphized.
-do_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void { s := r.val()  s[0].addr().trace(t) }
-do_drop<T>  = (r: Rc<T>) void { s := r.val()  s[0].addr().drop() }
+do_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void {
+    s := r.val()
+    s[0].addr().trace(t)
+}
+do_drop<T> = (r: Rc<T>) void {
+    s := r.val()
+    s[0].addr().drop()
+}
 child*<T> = (child: Rc<T>, t: MutPtr<Tracer>) void { visit_child(child.base, t) }
-
 // Collector passes operate on erased blocks; payload work goes through blk_trace/blk_drop.
 visit_child = (cb: RawPtr<u8>, t: MutPtr<Tracer>) void {
-    (t.op == OP_MARK).match({ true => { hset_count(cb, hcount(cb) - 1)  cc_mark(cb) }, false =>
-        (t.op == OP_SCAN).match({ true => { cc_scan(cb) }, false =>
-            (t.op == OP_SCAN_BLACK).match({ true => { hset_count(cb, hcount(cb) + 1)  cc_scan_black(cb) }, false =>
-                { cc_gather(cb) } }) }) })
+    (t.op == OP_MARK).match ({ true => {
+        hset_count(cb, hcount(cb) - 1)
+        cc_mark(cb)
+    }, false => (t.op == OP_SCAN).match ({ true => {
+        cc_scan(cb)
+    }, false => (t.op == OP_SCAN_BLACK).match ({ true => {
+        hset_count(cb, hcount(cb) + 1)
+        cc_scan_black(cb)
+    }, false => {
+        cc_gather(cb)
+    } }) }) })
 }
-
 cc_mark = (b: RawPtr<u8>) void {
-    (hcolor(b) == GRAY).match({ true => {}, false => {
-            hset_color(b, GRAY)
-            mt := Tracer( op: 0 )
-            blk_trace(b, mt.addr())
-        } })
+    (hcolor(b) == GRAY).match ({ true => { }, false => {
+        hset_color(b, GRAY)
+        mt := Tracer(op: 0)
+        blk_trace(b, mt.addr())
+    } })
 }
 cc_scan = (b: RawPtr<u8>) void {
-    (hcolor(b) == GRAY).match({ true => {
-            (hcount(b) > 0).match({ true => { cc_scan_black(b) }, false => {
-                    hset_color(b, WHITE)
-                    st := Tracer( op: 1 )
-                    blk_trace(b, st.addr())
-                } })
-        }, false => {} })
+    (hcolor(b) == GRAY).match ({ true => {
+        (hcount(b) > 0).match ({ true => {
+            cc_scan_black(b)
+        }, false => {
+            hset_color(b, WHITE)
+            st := Tracer(op: 1)
+            blk_trace(b, st.addr())
+        } })
+    }, false => { } })
 }
 cc_scan_black = (b: RawPtr<u8>) void {
     hset_color(b, BLACK)
-    bt := Tracer( op: 2 )
+    bt := Tracer(op: 2)
     blk_trace(b, bt.addr())
 }
 cc_gather = (b: RawPtr<u8>) void {
-    (hcolor(b) == WHITE).match({ true => {
-            hset_color(b, BLACK)
-            white = white.list_push_static(b)
-            gt := Tracer( op: 3 )
-            blk_trace(b, gt.addr())
-        }, false => {} })
+    (hcolor(b) == WHITE).match ({ true => {
+        hset_color(b, BLACK)
+        white = white.list_push_static(b)
+        gt := Tracer(op: 3)
+        blk_trace(b, gt.addr())
+    }, false => { } })
 }
-
 // Concrete payload used by tests until erased Trace/Drop bridges are generated per payload type.
-Node*: { has: i32, kid: RawPtr<u8> }
-Node.impl(Drop, { drop = (s: MutPtr<Node>) void { } })
-Node.impl(Trace, { trace = (s: Ptr<Node>, t: MutPtr<Tracer>) void {
-        (s.has == 0).match({ true => {}, false => { visit_child(s.kid, t) } })
-    } })
-
-blk_trace = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Rc<Node>( base: b ), t) }
-blk_drop  = (b: RawPtr<u8>) void { do_drop(Rc<Node>( base: b )) }
-
+Node*: {
+    has: i32,
+    kid: RawPtr<u8>,
+}
+Node.impl(Drop, {
+    drop = (s: MutPtr<Node>) void { }
+})
+Node.impl(Trace, {
+    trace = (s: Ptr<Node>, t: MutPtr<Tracer>) void {
+        (s.has == 0).match ({ true => { }, false => {
+            visit_child(s.kid, t)
+        } })
+    }
+})
+blk_trace = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Rc<Node>(base: b), t) }
+blk_drop = (b: RawPtr<u8>) void { do_drop(Rc<Node>(base: b)) }
 set_kid* = (parent: Rc<Node>, child: Rc<Node>) void {
     p := parent.val()
-    p[0] = Node( has: 1, kid: child.base )
+    p[0] = Node(
+        has: 1,
+        kid: child.base,
+    )
     child.inc()
 }
-
 drive_roots = (rs: RawPtr<u8>, op: i32, i: i64) void {
-    (i < rs.list_len()).match({ true => {
-            b := rs.list_get(i)
-            (op == OP_MARK).match({ true => { cc_mark(b) }, false =>
-                (op == OP_SCAN).match({ true => { cc_scan(b) }, false =>
-                    { cc_gather(b) } }) })
-            drive_roots(rs, op, i + 1)
-        }, false => {} })
+    (i < rs.list_len()).match ({ true => {
+        b := rs.list_get(i)
+        (op == OP_MARK).match ({ true => {
+            cc_mark(b)
+        }, false => (op == OP_SCAN).match ({ true => {
+            cc_scan(b)
+        }, false => {
+            cc_gather(b)
+        } }) })
+        drive_roots(rs, op, i + 1)
+    }, false => { } })
 }
 free_white_in<A> = (alloc: MutPtr<A>) void {
     blocks: [RawPtr<u8>] := white.offset(16).slice(white.list_len())
@@ -266,32 +291,29 @@ collect_in*<A> = (alloc: MutPtr<A>) void {
     drive_roots(rs, 2, 0)
     alloc.free_white_in()
     alloc.release(white)
-    white = (null_ptr())
+    white = null_ptr()
     roots_clear_raw()
 }
 collect*<A> = (alloc: MutPtr<A>) void { alloc.collect_in() }
 try_collect_in*<A> = (alloc: MutPtr<A>) Result<i32, IoError> {
-    out: Result<i32, IoError> := (roots == null_ptr()).match({
-        true => ok(0),
-        false => {
-            rs := roots
-            collected: Result<i32, IoError> := alloc.try_list_new_cap_in(tracked_blocks).match({
-                .Ok(w) => {
-                    white = w
-                    drive_roots(rs, 0, 0)
-                    drive_roots(rs, 1, 0)
-                    drive_roots(rs, 2, 0)
-                    alloc.free_white_in()
-                    alloc.release(white)
-                    white = (null_ptr())
-                    roots_clear_raw()
-                    ok(0)
-                },
-                .Err(e) => err(e)
-            })
-            collected
-        }
-    })
+    out: Result<i32, IoError> := (roots == null_ptr()).match ({ true => ok(0), false => {
+        rs := roots
+        collected: Result<i32, IoError> := alloc.try_list_new_cap_in(tracked_blocks).match ({
+            .Ok(w)  => {
+                white = w
+                drive_roots(rs, 0, 0)
+                drive_roots(rs, 1, 0)
+                drive_roots(rs, 2, 0)
+                alloc.free_white_in()
+                alloc.release(white)
+                white = null_ptr()
+                roots_clear_raw()
+                ok(0)
+            },
+            .Err(e) => err(e),
+        })
+        collected
+    } })
     out
 }
 try_collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError> { alloc.try_collect_in() }

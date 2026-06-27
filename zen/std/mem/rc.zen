@@ -15,28 +15,27 @@
 // `try_new_in` returns Result so allocation failure can stay in the value flow.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-
 Rc*<T>: {
-    base: RawPtr<u8>                          // -> [ count:i64 | value:T ]
-    // the value slot as a 1-element [T] (T from the receiver) — typed access to the bytes after the count.
+    base: RawPtr<u8>,
     val = (r: Rc<T>) [T] { slice(r.base.offset(8), 1) }
-    get = (r: Rc<T>) T  { r.val()[0] }         // borrow the shared value
+    get = (r: Rc<T>) T { r.val()[0] }
     count = (r: Rc<T>) i64 { load_i64(r.base) }
     clone = (r: Rc<T>) Rc<T> {
         store_i64(r.base, load_i64(r.base) + 1)
-        Rc<T>( base: r.base )
+        Rc<T>(base: r.base)
     }
     drop_in<A> = (r: Rc<T>, a: MutPtr<A>) void {
-        n := load_i64(r.base) - 1
+        n := load_i64(r.base) - 1    // -> [ count:i64 | value:T ]
+        // the value slot as a 1-element [T] (T from the receiver) — typed access to the bytes after the count.
+        // borrow the shared value
         store_i64(r.base, n)
-        (n == 0).match({ true => a.release(r.base), false => {} })
+        (n == 0).match ({ true => a.release(r.base), false => { } })
     }
 }
-
 new_in*<A, T> = (a: MutPtr<A>, x: T) Rc<T> {
     base := a.acquire(8 + sizeof(T))
     store_i64(base, 1)
-    r := Rc<T>( base: base )
+    r := Rc<T>(base: base)
     s := r.val()
     s[0] = x
     r
@@ -46,12 +45,12 @@ try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Rc<T>, IoError> {
     a.try_acquire(8 + sizeof(T)).match ({
         .Ok(base) => {
             store_i64(base, 1)
-            r := Rc<T>( base: base )
+            r := Rc<T>(base: base)
             s := r.val()
             s[0] = rx
             ok(r)
         },
-        .Err(e) => err(e)
+        .Err(e)   => err(e),
     })
 }
 // `drop` only frees the [count|value] block; payload Drop is not run. Values that own

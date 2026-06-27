@@ -10,18 +10,12 @@
 // / single-expr bodies stay inline.
 //
 // Same fluent UFCS String-builder walk as genjs, allocator explicit: `s.ff_append(a, x).ff_expr(a, e)`.
-
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
-    BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData,
-    IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData,
-    ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData,
-    impl_cname_in, is_expr_null, tvoid, k_raw_ptr, k_mut_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, is_expr_null, tvoid, k_raw_ptr, k_mut_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Comment } = compiler.lex
 { at } = std.text.bytes
-
 // ── comment sidecar state ──────────────────────────────────────────────────────
 // The formatter weaves SOURCE comments back into its AST walk. Comments live in a position-sorted
 // table (compiler.lex.collect_comments) keyed by byte offset; this module holds the source + table +
@@ -30,7 +24,7 @@
 // comment. Comments never enter the AST, so the lowered tree (and emitted C) is identical with or
 // without them — only the formatted text changes. State is module-level (mirrors parse's exports_buf).
 gf_no_cmts = () [Comment] { slice(null_ptr(), 0) }
-gf_empty_str = () str { "" }                              // a str-typed (not fixed-array) empty literal
+gf_empty_str = () str { "" }    // a str-typed (not fixed-array) empty literal
 gf_src := gf_empty_str()
 gf_cmts := gf_no_cmts()
 gf_idx := 0
@@ -39,32 +33,50 @@ gf_idx := 0
 // past it into the following decl. Set per top-level decl in genfmt_module_in; 0 = the final decl.
 gf_block_end := 0
 genfmt_set_block_end* = (e: i32) void { gf_block_end = e }
-genfmt_set_comments* = (src: str, cmts: [Comment]) void { gf_src = src  gf_cmts = cmts  gf_idx = 0 }
-
+genfmt_set_comments* = (src: str, cmts: [Comment]) void {
+    gf_src = src
+    gf_cmts = cmts
+    gf_idx = 0
+}
 // the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
 gf_line_of = (pos: i32) i32 {
-    i := 0  n := 0
-    @while (i < pos) { (at(gf_src, i) == '\n').match ({ true => { n = n + 1 } })  i = i + 1 }
+    i := 0
+    n := 0
+    @while (i < pos) {
+        (at(gf_src, i) == '\n').match ({ true => {
+            n = n + 1
+        } })
+        i = i + 1
+    }
     n
 }
 // append one comment's raw text, trimming trailing whitespace (a `//` span runs to but not past '\n';
 // trailing spaces before the newline are dropped so the formatted line has no dangling whitespace).
 gf_cmt_end = (c: Comment) i32 {
     e := c.start + c.len
-    @while ((e > c.start) && ((at(gf_src, e - 1) == ' ') || (at(gf_src, e - 1) == '\t') || (at(gf_src, e - 1) == '\r'))) { e = e - 1 }
+    @while (e > c.start && (at(gf_src, e - 1) == ' ' || at(gf_src, e - 1) == '\t' || at(gf_src, e - 1) == '\r')) {
+        e = e - 1
+    }
     e
 }
 ff_cmt_text = (s: String, a: MutPtr<Malloc>, c: Comment) String {
-    out := s  i := c.start  e := gf_cmt_end(c)
-    @while (i < e) { out = out.ff_push(a, at(gf_src, i))  i = i + 1 }
+    out := s
+    i := c.start
+    e := gf_cmt_end(c)
+    @while (i < e) {
+        out = out.ff_push(a, at(gf_src, i))
+        i = i + 1
+    }
     out
 }
 // flush every LEADING (own-line) comment whose start is before `before` — each on its own indented line.
 // A `before` of 0 means "position unknown": flush nothing (the comment will land at the next known pos).
 ff_flush_leading = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String {
-    (before <= 0).match ({ true => { return s } })
+    (before <= 0).match ({ true => {
+        return s
+    } })
     out := s
-    @while ((gf_idx < gf_cmts.len) && (gf_cmts[gf_idx].start < before) && (!gf_cmts[gf_idx].trailing)) {
+    @while (gf_idx < gf_cmts.len && gf_cmts[gf_idx].start < before && gf_cmts[gf_idx].trailing.match ({ true => false, false => true })) {
         out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
         gf_idx = gf_idx + 1
     }
@@ -77,10 +89,11 @@ ff_flush_leading = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String 
 // (A line check would not be idempotent — formatting moves a comment trailing a multi-line construct's
 // opening line to after its closing `})`, a different physical line, flipping it to own-line on re-fmt.)
 ff_trailing = (s: String, a: MutPtr<Malloc>, boundary: i32) String {
-    ((gf_idx < gf_cmts.len) && gf_cmts[gf_idx].trailing && gf_before(gf_cmts[gf_idx].start, boundary)).match ({
-        true  => { out := s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])  gf_idx = gf_idx + 1  out },
-        false => s
-    })
+    (gf_idx < gf_cmts.len && gf_cmts[gf_idx].trailing && gf_before(gf_cmts[gf_idx].start, boundary)).match ({ true => {
+        out := s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
+        gf_idx = gf_idx + 1
+        out
+    }, false => s })
 }
 // is `start` before the next statement's position `boundary`? boundary 0 = "no next stmt" = unbounded
 // (the trailing comment is the last thing in the block, so it belongs to the statement just printed).
@@ -100,9 +113,11 @@ ff_drain = (s: String, a: MutPtr<Malloc>, db: i32, ib: i32, ind: i32) String {
     // the block's closing `}` is a DECL-level trailing, handled by ff_top_decl) — otherwise the unbounded
     // ff_trailing would steal a much-later decl's comment. ib > 0 ⇒ a real next-stmt bound.
     out := (ib > 0).match ({ true => s.ff_trailing(a, ib), false => s })
-    (db <= 0).match ({ true => { return out } })    // no own-line drain without a real next-stmt boundary
-    @while ((gf_idx < gf_cmts.len) && (gf_cmts[gf_idx].start < db)) {
-        out = out.ff_append(a, "\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx])
+    (db <= 0).match ({ true => {
+        return out
+    } })
+    @while (gf_idx < gf_cmts.len && gf_cmts[gf_idx].start < db) {
+        out = out.ff_append(a, "\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx])    // no own-line drain without a real next-stmt boundary
         gf_idx = gf_idx + 1
     }
     out
@@ -116,7 +131,6 @@ ff_flush_rest = (s: String, a: MutPtr<Malloc>, ind: i32) String {
     }
     out
 }
-
 // ── representative source position of an expr / statement (leftmost known byte offset; 0 = unknown) ──
 gf_expr_pos = (e: Expr) i32 {
     e.match ({
@@ -128,13 +142,19 @@ gf_expr_pos = (e: Expr) i32 {
         .Member(m)      => gf_pos_of(m.obj),
         .Arrow(ar)      => gf_pos_of(ar.obj),
         .Match(m)       => gf_pos_of(m.subj),
-        .Cond(d)        => gf_pos_of(d.c),                 // a bool `.match` lowers to Cond — its subject is `c`
+        .Cond(d)        => gf_pos_of(d.c),    // a bool `.match` lowers to Cond — its subject is `c`
         .Index(ix)      => gf_pos_of(ix.seq),
-        _               => 0
+        _               => 0,
     })
 }
-gf_bin_pos = (b: BinData) i32 { lp := gf_pos_of(b.lhs)  (lp > 0).match ({ true => lp, false => b.pos }) }
-gf_recv_pos = (recv: Ptr<Expr>, fallback: i32) i32 { rp := gf_pos_of(recv)  (rp > 0).match ({ true => rp, false => fallback }) }
+gf_bin_pos = (b: BinData) i32 {
+    lp := gf_pos_of(b.lhs)
+    (lp > 0).match ({ true => lp, false => b.pos })
+}
+gf_recv_pos = (recv: Ptr<Expr>, fallback: i32) i32 {
+    rp := gf_pos_of(recv)
+    (rp > 0).match ({ true => rp, false => fallback })
+}
 gf_pos_of = (e: Ptr<Expr>) i32 { gf_expr_pos(load(e)) }
 gf_stmt_pos = (st: Stmt) i32 {
     st.match ({
@@ -143,7 +163,7 @@ gf_stmt_pos = (st: Stmt) i32 {
         .Return(e)   => gf_pos_of(e),
         .ExprStmt(e) => gf_pos_of(e),
         .IndexSet(x) => x.pos,
-        _            => 0
+        _            => 0,
     })
 }
 // a top-level decl's representative source offset = its OWN start byte (the name/keyword position), so a
@@ -169,79 +189,81 @@ gf_decl_pos = (d: Decl) i32 {
         .DGlobal(g)       => g.pos,
         .DImpl(im)        => im.pos,
         .DImport(im)      => im.pos,
-        _                 => 0
+        _                 => 0,
     })
 }
-
 // ── String builder shims (reuse the canonical genc String API) ───────────────
-ff_string = (a: MutPtr<Malloc>, cap: i64) String { String(ptr: a.acquire(cap), len: 0, cap: cap) }
+ff_string = (a: MutPtr<Malloc>, cap: i64) String {
+    String(
+        ptr: a.acquire(cap),
+        len: 0,
+        cap: cap,
+    )
+}
 ff_append = (s: String, a: MutPtr<Malloc>, t: str) String { s.gstr_append(a, t) }
-ff_push   = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
-
+ff_push = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
 // integer rendering, byte-only (mirrors genc_emit so this self-hosts)
 ffbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
 ffdigit = (d: i64) u8 { ffbyte("0123456789", d) }
 ff_int_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n > 0 - 10).match ({
-        true  => s.ff_push(a, ffdigit(0 - n)),
-        false => { hs := s.ff_int_neg(a, n / 10)  hs.ff_push(a, ffdigit(0 - (n % 10))) }
-    })
+    (n > 0 - 10).match ({ true => s.ff_push(a, ffdigit(0 - n)), false => {
+        hs := s.ff_int_neg(a, n / 10)
+        hs.ff_push(a, ffdigit(0 - n % 10))
+    } })
 }
-ff_int = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 0).match ({ true => s.ff_append(a, "-").ff_int_neg(a, n), false => s.ff_int_nat(a, n) })
-}
+ff_int = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({ true => s.ff_append(a, "-").ff_int_neg(a, n), false => s.ff_int_nat(a, n) }) }
 ff_int_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.ff_push(a, ffdigit(n)),
-        false => { hs := s.ff_int(a, n / 10)  hs.ff_push(a, ffdigit(n % 10)) }
-    })
+    (n < 10).match ({ true => s.ff_push(a, ffdigit(n)), false => {
+        hs := s.ff_int(a, n / 10)
+        hs.ff_push(a, ffdigit(n % 10))
+    } })
 }
-
 // render a char-literal byte `n` back as a `'x'` literal (a `.Byte` AST node ONLY ever comes from a
 // char literal, so this round-trips `'a'` → `'a'` instead of leaking the raw byte value `97`). Common
 // escapes are re-escaped; a printable ASCII byte prints bare; anything else falls back to the integer
 // (which still emits the identical value, so the lowered AST / C is unchanged either way).
 ff_char = (s: String, a: MutPtr<Malloc>, n: i32) String {
-    (n == 10).match ({ true => { return s.ff_append(a, "'\\n'") } })
-    (n == 9).match  ({ true => { return s.ff_append(a, "'\\t'") } })
-    (n == 13).match ({ true => { return s.ff_append(a, "'\\r'") } })
-    (n == 0).match  ({ true => { return s.ff_append(a, "'\\0'") } })
-    (n == 92).match ({ true => { return s.ff_append(a, "'\\\\'") } })   // backslash
-    (n == 39).match ({ true => { return s.ff_append(a, "'\\''") } })    // single quote
-    ((n >= 32) && (n <= 126)).match ({
-        true  => s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'"),
-        false => s.ff_int(a, n)
-    })
+    (n == 10).match ({ true => {
+        return s.ff_append(a, "'\\n'")
+    } })
+    (n == 9).match ({ true => {
+        return s.ff_append(a, "'\\t'")
+    } })
+    (n == 13).match ({ true => {
+        return s.ff_append(a, "'\\r'")
+    } })
+    (n == 0).match ({ true => {
+        return s.ff_append(a, "'\\0'")
+    } })
+    (n == 92).match ({ true => {
+        return s.ff_append(a, "'\\\\'")
+    } })    // backslash
+    (n == 39).match ({ true => {
+        return s.ff_append(a, "'\\''")
+    } })    // single quote
+    (n >= 32 && n <= 126).match ({ true => s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'"), false => s.ff_int(a, n) })
 }
 // n levels of 4-space indentation
-ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String {
-    (n <= 0).match ({ true => s, false => s.ff_append(a, "    ").ff_indent(a, n - 1) })
-}
-
+ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({ true => s, false => s.ff_append(a, "    ").ff_indent(a, n - 1) }) }
 // ── types ────────────────────────────────────────────────────────────────────
 // the source keyword for a pointer kind (preserves the spelling on round-trip)
-ptr_kw = (kind: i32) str {
-    (kind == k_raw_ptr()).match ({
-        true  => "RawPtr",
-        false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" })
-    })
-}
+ptr_kw = (kind: i32) str { (kind == k_raw_ptr()).match ({ true => "RawPtr", false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" }) }) }
 ff_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
-        .I32       => s.ff_append(a, "i32"),
-        .I64       => s.ff_append(a, "i64"),
-        .U8        => s.ff_append(a, "u8"),
-        .F64       => s.ff_append(a, "f64"),
-        .Bool      => s.ff_append(a, "bool"),
-        .Void      => s.ff_append(a, "void"),
-        .Str       => s.ff_append(a, "str"),
-        .Cstr      => s.ff_append(a, "Cstr"),
-        .Text      => s.ff_append(a, "Text"),
-        .Named(nm) => s.ff_append(a, nm),
-        .Ptr(pd)   => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a, "<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
-        .Slice(p)  => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
-        .FnT(ft)   => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
-        .Generic(g) => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">")
+        .I32        => s.ff_append(a, "i32"),
+        .I64        => s.ff_append(a, "i64"),
+        .U8         => s.ff_append(a, "u8"),
+        .F64        => s.ff_append(a, "f64"),
+        .Bool       => s.ff_append(a, "bool"),
+        .Void       => s.ff_append(a, "void"),
+        .Str        => s.ff_append(a, "str"),
+        .Cstr       => s.ff_append(a, "Cstr"),
+        .Text       => s.ff_append(a, "Text"),
+        .Named(nm)  => s.ff_append(a, nm),
+        .Ptr(pd)    => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a, "<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
+        .Slice(p)   => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
+        .FnT(ft)    => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
+        .Generic(g) => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">"),
     })
 }
 ff_tys = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
@@ -252,34 +274,29 @@ ff_tys = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
     })
     out
 }
-
 // ── precedence (mirrors the parser chain: || < && < cmp < | < ^ < & < shift < +- < */%  < postfix) ──
 // Parens are RE-INSERTED by precedence so the formatted output reparses to the SAME AST:
 //  • a Bin used as a postfix RECEIVER (`(n > 0).match(…)`, `(a + b).field`) must be wrapped — else
 //    `.match`/`.field` would bind to the right operand;
 //  • a Bin operand of a tighter-or-equal (on the right, for left-assoc) Bin must be wrapped.
-ff_is_cmp_op   = (op: str) bool { eq(op, "==") || eq(op, "!=") || eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
+ff_is_cmp_op = (op: str) bool { eq(op, "==") || eq(op, "!=") || eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
 ff_is_shift_op = (op: str) bool { eq(op, "<<") || eq(op, ">>") }
-ff_is_add_op   = (op: str) bool { eq(op, "+") || eq(op, "-") }
-ff_op_prec = (op: str) i32 {
-    eq(op, "||").match ({ true => 1, false =>
-        eq(op, "&&").match ({ true => 2, false =>
-            ff_is_cmp_op(op).match ({ true => 3, false =>
-                eq(op, "|").match ({ true => 4, false =>
-                    eq(op, "^").match ({ true => 5, false =>
-                        eq(op, "&").match ({ true => 6, false =>
-                            ff_is_shift_op(op).match ({ true => 7, false =>
-                                ff_is_add_op(op).match ({ true => 8, false => 9 }) }) }) }) }) }) }) })
-}
-ff_expr_prec = (e: Expr) i32 { e.match ({ .Bin(b) => ff_op_prec(b.op), _ => 100 }) }
-ff_is_bin = (e: Expr) bool { e.match ({ .Bin(b) => true, _ => false }) }
-// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin
-ff_recv = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
-    ff_is_bin(load(e)).match ({
-        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
-        false => s.ff_expr(a, e, ind)
+ff_is_add_op = (op: str) bool { eq(op, "+") || eq(op, "-") }
+ff_op_prec = (op: str) i32 { eq(op, "||").match ({ true => 1, false => eq(op, "&&").match ({ true => 2, false => ff_is_cmp_op(op).match ({ true => 3, false => eq(op, "|").match ({ true => 4, false => eq(op, "^").match ({ true => 5, false => eq(op, "&").match ({ true => 6, false => ff_is_shift_op(op).match ({ true => 7, false => ff_is_add_op(op).match ({ true => 8, false => 9 }) }) }) }) }) }) }) }) }
+ff_expr_prec = (e: Expr) i32 {
+    e.match ({
+        .Bin(b) => ff_op_prec(b.op),
+        _       => 100,
     })
 }
+ff_is_bin = (e: Expr) bool {
+    e.match ({
+        .Bin(b) => true,
+        _       => false,
+    })
+}
+// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin
+ff_recv = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String { ff_is_bin(load(e)).match ({ true => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"), false => s.ff_expr(a, e, ind) }) }
 ff_bin = (s: String, a: MutPtr<Malloc>, b: BinData, ind: i32) String {
     p := ff_op_prec(b.op)
     l := s.ff_operand(a, b.lhs, p, false, ind)
@@ -287,40 +304,35 @@ ff_bin = (s: String, a: MutPtr<Malloc>, b: BinData, ind: i32) String {
     m.ff_operand(a, b.rhs, p, true, ind)
 }
 ff_operand = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, parent: i32, right: bool, ind: i32) String {
-    cp    := ff_expr_prec(load(e))
+    cp := ff_expr_prec(load(e))
     needp := right.match ({ true => cp <= parent, false => cp < parent })
-    needp.match ({
-        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
-        false => s.ff_expr(a, e, ind)
-    })
+    needp.match ({ true => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"), false => s.ff_expr(a, e, ind) })
 }
-
 // ── expressions ────────────────────────────────────────────────────────────────
 ff_expr = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
     e.match ({
-        .Int(n)        => s.ff_int(a, n),
-        .Byte(n)       => s.ff_char(a, n),                          // a Byte is ALWAYS a char literal — re-render `'x'`
-        .FloatLit(ft)  => s.ff_append(a, ft),
-        .Var(v)        => s.ff_append(a, v.name),
-        .StrLit(sl)    => s.ff_strlit(a, sl.value),
-        .Bin(b)        => s.ff_bin(a, b, ind),
+        .Int(n)         => s.ff_int(a, n),
+        .Byte(n)        => s.ff_char(a, n),    // a Byte is ALWAYS a char literal — re-render `'x'`
+        .FloatLit(ft)   => s.ff_append(a, ft),
+        .Var(v)         => s.ff_append(a, v.name),
+        .StrLit(sl)     => s.ff_strlit(a, sl.value),
+        .Bin(b)         => s.ff_bin(a, b, ind),
         .MethodCall(mc) => s.ff_recv(a, mc.recv, ind).ff_append(a, ".").ff_append(a, mc.method).ff_append(a, "(").ff_args(a, mc.args, ind).ff_append(a, ")"),
-        .Call(c)       => s.ff_call(a, c, ind),
-        .Cond(d)       => s.ff_cond(a, d, ind),
-        .Member(m)     => s.ff_recv(a, m.obj, ind).ff_append(a, ".").ff_append(a, m.field),
-        .Arrow(ar)     => s.ff_recv(a, ar.obj, ind).ff_append(a, ".").ff_append(a, ar.field),
-        .MakeEnum(m)   => s.ff_mkenum(a, m, ind),
-        .MakeStruct(m) => s.ff_mkstruct(a, m, ind),
-        .Tag(t)        => s.ff_tag(a, t),
-        .Match(m)      => s.ff_match(a, m, ind),
-        .SliceLit(sd)  => s.ff_append(a, "[").ff_args(a, sd.items, ind).ff_append(a, "]"),
-        .Index(ix)     => s.ff_recv(a, ix.seq, ind).ff_append(a, "[").ff_expr(a, ix.idx, ind).ff_append(a, "]"),
-        .Loop(l)       => s.ff_loop(a, l, ind),
-        .Lambda(lm)    => s.ff_lambda(a, lm, ind),
-        .Block(b)      => s.ff_block(a, b.stmts, ind, false)
+        .Call(c)        => s.ff_call(a, c, ind),
+        .Cond(d)        => s.ff_cond(a, d, ind),
+        .Member(m)      => s.ff_recv(a, m.obj, ind).ff_append(a, ".").ff_append(a, m.field),
+        .Arrow(ar)      => s.ff_recv(a, ar.obj, ind).ff_append(a, ".").ff_append(a, ar.field),
+        .MakeEnum(m)    => s.ff_mkenum(a, m, ind),
+        .MakeStruct(m)  => s.ff_mkstruct(a, m, ind),
+        .Tag(t)         => s.ff_tag(a, t),
+        .Match(m)       => s.ff_match(a, m, ind),
+        .SliceLit(sd)   => s.ff_append(a, "[").ff_args(a, sd.items, ind).ff_append(a, "]"),
+        .Index(ix)      => s.ff_recv(a, ix.seq, ind).ff_append(a, "[").ff_expr(a, ix.idx, ind).ff_append(a, "]"),
+        .Loop(l)        => s.ff_loop(a, l, ind),
+        .Lambda(lm)     => s.ff_lambda(a, lm, ind),
+        .Block(b)       => s.ff_block(a, b.stmts, ind, false),
     })
 }
-
 ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
     out := s
     args.loop((h, i, ar) {
@@ -329,51 +341,30 @@ ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
     })
     out
 }
-
 ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
     head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
     head.ff_append(a, c.fn).ff_append(a, "(").ff_args(a, c.args, ind).ff_append(a, ")")
 }
-
 // bool .match lowers to a Cond in the AST — print it back as `c.match ({ true => t, false => e })`.
-ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
-    d.oa.match ({
-        // one-armed bool match: print only the arm the user wrote (the other branch is a synthetic `{}`).
-        1 => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"),
-        2 => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"),
-        _ => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })")
-    })
-}
-
+ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String { (d.oa == 1).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"), false => (d.oa == 2).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"), false => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })") }) }) }
+// one-armed bool match: print only the arm the user wrote (the other branch is a synthetic `{}`).
 // a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
 // the parser records the args in `targs`, and dropping them would lose the type info monomorphization
 // needs (the literal becomes `Rc(…)` → T uninferable → wrong/void element type).
-ff_tyname = (s: String, a: MutPtr<Malloc>, name: str, targs: [Ty]) String {
-    (targs.len > 0).match ({
-        true  => s.ff_append(a, name).ff_append(a, "<").ff_tys(a, targs).ff_append(a, ">"),
-        false => s.ff_append(a, name)
-    })
-}
-
+ff_tyname = (s: String, a: MutPtr<Malloc>, name: str, targs: [Ty]) String { (targs.len > 0).match ({ true => s.ff_append(a, name).ff_append(a, "<").ff_tys(a, targs).ff_append(a, ">"), false => s.ff_append(a, name) }) }
 // `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
 ff_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData, ind: i32) String {
     head := is_empty(m.ty).match ({ true => s.ff_append(a, "."), false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, ".") })
     head.ff_append(a, m.variant).ff_append(a, "(").ff_expr(a, m.payload, ind).ff_append(a, ")")
 }
-ff_tag = (s: String, a: MutPtr<Malloc>, t: TagData) String {
-    is_empty(t.ty).match ({ true => s.ff_append(a, ".").ff_append(a, t.variant), false => s.ff_tyname(a, t.ty, t.targs).ff_append(a, ".").ff_append(a, t.variant) })
-}
-
+ff_tag = (s: String, a: MutPtr<Malloc>, t: TagData) String { is_empty(t.ty).match ({ true => s.ff_append(a, ".").ff_append(a, t.variant), false => s.ff_tyname(a, t.ty, t.targs).ff_append(a, ".").ff_append(a, t.variant) }) }
 // struct literal `Ty(f: v, …)` — split one field per line when there is more than one field.
 ff_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData, ind: i32) String {
-    (m.inits.len > 1).match ({
-        true  => {
-            open := s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(\n")
-            body := open.ff_struct_fields(a, m.inits, ind + 1)
-            body.ff_indent(a, ind).ff_append(a, ")")
-        },
-        false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(").ff_struct_inline(a, m.inits, ind).ff_append(a, ")")
-    })
+    (m.inits.len > 1).match ({ true => {
+        open := s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(\n")
+        body := open.ff_struct_fields(a, m.inits, ind + 1)
+        body.ff_indent(a, ind).ff_append(a, ")")
+    }, false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(").ff_struct_inline(a, m.inits, ind).ff_append(a, ")") })
 }
 ff_struct_inline = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
     out := s
@@ -390,44 +381,24 @@ ff_struct_fields = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) 
     })
     out
 }
-
 // foreach: `seq.loop((h, i, x) { body })`
 ff_loop = (s: String, a: MutPtr<Malloc>, l: LoopData, ind: i32) String {
     head := s.ff_recv(a, l.seq, ind).ff_append(a, ".loop((").ff_append(a, l.h).ff_append(a, ", ").ff_append(a, l.idx).ff_append(a, ", ").ff_append(a, l.elem).ff_append(a, ") ")
     head.ff_block(a, l.body, ind, false).ff_append(a, ")")
 }
-
-ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
-    s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ").ff_block(a, lm.body, ind, true)
-}
-
+ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String { s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ").ff_block(a, lm.body, ind, true) }
 // ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
-arm_pat_len = (ar: ArmData) i32 {
-    eq(ar.variant, "_").match ({
-        true  => 1,
-        false => is_empty(ar.bind).match ({
-            true  => 1 + to_i32(view(ar.variant).len),
-            false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len)
-        })
-    })
-}
+arm_pat_len = (ar: ArmData) i32 { eq(ar.variant, "_").match ({ true => 1, false => is_empty(ar.bind).match ({ true => 1 + to_i32(view(ar.variant).len), false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len) }) }) }
 arms_max_pat = (arms: [ArmData]) i32 {
     m := 0
-    arms.loop((h, i, ar) { w := arm_pat_len(ar)  m = (w > m).match ({ true => w, false => m }) })
+    arms.loop((h, i, ar) {
+        w := arm_pat_len(ar)
+        m = (w > m).match ({ true => w, false => m })
+    })
     m
 }
-ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
-    eq(ar.variant, "_").match ({
-        true  => s.ff_append(a, "_"),
-        false => is_empty(ar.bind).match ({
-            true  => s.ff_append(a, ".").ff_append(a, ar.variant),
-            false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")")
-        })
-    })
-}
-ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String {
-    (n <= 0).match ({ true => s, false => s.ff_append(a, " ").ff_pad(a, n - 1) })
-}
+ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String { eq(ar.variant, "_").match ({ true => s.ff_append(a, "_"), false => is_empty(ar.bind).match ({ true => s.ff_append(a, ".").ff_append(a, ar.variant), false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")") }) }) }
+ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({ true => s, false => s.ff_append(a, " ").ff_pad(a, n - 1) }) }
 ff_match = (s: String, a: MutPtr<Malloc>, m: MatchData, ind: i32) String {
     maxw := arms_max_pat(m.arms)
     open := s.ff_recv(a, m.subj, ind).ff_append(a, ".match ({\n")
@@ -443,7 +414,9 @@ gf_arm_pos = (ar: ArmData) i32 { ar.pos }
 // the match's closing `})` (which carries no position here), so an arm's woven comment can never steal a
 // comment that sits after the whole `.match (...)` (e.g. the match statement's own trailing comment).
 gf_next_arm_pos = (arms: [ArmData], from: i32) i32 {
-    (from >= arms.len).match ({ true => { return 0 } })
+    (from >= arms.len).match ({ true => {
+        return 0
+    } })
     p := gf_arm_pos(arms[from])
     (p > 0).match ({ true => p, false => gf_next_arm_pos(arms, from + 1) })
 }
@@ -455,37 +428,20 @@ gf_next_arm_pos = (arms: [ArmData], from: i32) i32 {
 ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) String {
     out := s
     arms.loop((h, i, ar) {
-        nb     := gf_next_arm_pos(arms, i + 1)
-        lead   := out.ff_flush_leading(a, gf_arm_pos(ar), ind)
-        line   := lead.ff_indent(a, ind).ff_arm_pat(a, ar)
+        nb := gf_next_arm_pos(arms, i + 1)
+        lead := out.ff_flush_leading(a, gf_arm_pos(ar), ind)
+        line := lead.ff_indent(a, ind).ff_arm_pat(a, ar)
         padded := line.ff_pad(a, maxw - arm_pat_len(ar))
         bodied := padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",")
-        withc  := (nb > 0).match ({ true => bodied.ff_trailing(a, nb), false => bodied })
+        withc := (nb > 0).match ({ true => bodied.ff_trailing(a, nb), false => bodied })
         out = withc.ff_append(a, "\n")
     })
     out
 }
-
 // ── string literal escaping (mirrors genjs) ────────────────────────────────────
-ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
-    (b == '"').match ({
-        true  => s.ff_append(a, "\\\""),
-        false => (b == '\\').match ({
-            true  => s.ff_append(a, "\\\\"),
-            false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => s.ff_push(a, b) })
-        })
-    })
-}
-ff_strlit = (s: String, a: MutPtr<Malloc>, v: str) String {
-    s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"")
-}
-ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String {
-    (ffbyte(v, i) == 0).match ({
-        true  => s,
-        false => s.ff_escape_byte(a, ffbyte(v, i)).ff_escape_from(a, v, i + 1)
-    })
-}
-
+ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.ff_append(a, "\\\""), false => (b == '\\').match ({ true => s.ff_append(a, "\\\\"), false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => s.ff_push(a, b) }) }) }) }
+ff_strlit = (s: String, a: MutPtr<Malloc>, v: str) String { s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"") }
+ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String { (ffbyte(v, i) == 0).match ({ true => s, false => s.ff_escape_byte(a, ffbyte(v, i)).ff_escape_from(a, v, i + 1) }) }
 // ── statements ─────────────────────────────────────────────────────────────────
 // Two block flavors, matching the parser's TWO body parsers:
 //  • VALUE block (drop_ret = true): a function/lambda body — the parser's `parse_stmts` turns the
@@ -493,15 +449,48 @@ ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String {
 //    (`{ s.len() }`, not `{ return s.len() }`). A non-last Return is a genuine early return → keeps `return`.
 //  • STATEMENT block (drop_ret = false): a match-arm / loop / if / while block — the parser's `parse_block`
 //    has NO trailing-return rule, so a Return there is ALWAYS an explicit early return → ALWAYS keep `return`.
+// is there a '\n' anywhere in the built String? (used to keep an inline body inline only when its single
+// statement formats to ONE line — a multi-arm match / multi-field struct splits and forces multi-line.)
+ff_scan_nl = (p: RawPtr<u8>, i: i64, n: i64) bool { (i >= n).match ({ true => false, false => (load(offset(p, i)) == '\n').match ({ true => true, false => ff_scan_nl(p, i + 1, n) }) }) }
+ff_str_has_nl = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
+// does the single statement format to ONE physical line? Formats into a THROWAWAY String. ff_stmt_at can
+// reach ff_arms (a Match weaves comments and ADVANCES gf_idx), so the comment cursor is SNAPSHOT and
+// RESTORED — making this trial render side-effect-free (otherwise a single-statement body that holds a
+// match would have its arm comments consumed by the trial and then DROPPED by the real render).
+ff_one_line = (a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) bool {
+    save := gf_idx
+    r := ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).match ({ true => false, false => true })
+    gf_idx = save
+    r
+}
+// Inlining a single-statement body skips ff_stmts, so it is SAFE exactly when ff_stmts would weave no
+// comment into this body. For one statement (the last), ff_stmts drains nothing (db = ib = 0) and only
+// ff_flush_leading(sp) can emit anything — and that emits a comment ONLY when the FIRST pending comment is
+// an own-line (non-trailing) comment with start < sp (it returns immediately for sp <= 0 and STOPS at the
+// first trailing comment). Mirroring that test EXACTLY makes the inline and multi-line paths handle
+// comments identically, so the choice is idempotent even as struct-interior comments migrate across passes.
+ff_no_lead_cmt = (sp: i32) bool {
+    (sp <= 0).match ({ true => {
+        return true
+    } })
+    (gf_idx >= gf_cmts.len).match ({ true => {
+        return true
+    } })
+    (gf_cmts[gf_idx].start >= sp).match ({ true => {
+        return true
+    } })
+    gf_cmts[gf_idx].trailing
+}
+// A VALUE block (drop_ret = a function / lambda / method body) whose body is ONE single-line statement
+// stays inline — `{ s.len() }` — matching the codebase's one-liner style and keeping `zenc doc`'s first
+// line intact. STATEMENT blocks (match arms / loop / if / while, drop_ret = false) ALWAYS expand, as the
+// fixtures require. Inlining is suppressed when a leading comment sits inside the body (it would be dropped).
 ff_block = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
-    (body.len == 0).match ({
-        true  => s.ff_append(a, "{ }"),
-        false => {
-            open := s.ff_append(a, "{\n")
-            inner := open.ff_stmts(a, body, ind + 1, drop_ret)
-            inner.ff_indent(a, ind).ff_append(a, "}")
-        }
-    })
+    (body.len == 0).match ({ true => s.ff_append(a, "{ }"), false => (drop_ret && body.len == 1 && ff_no_lead_cmt(gf_stmt_pos(body[0])) && a.ff_one_line(body[0], drop_ret, ind)).match ({ true => s.ff_append(a, "{ ").ff_stmt_at(a, body[0], drop_ret, ind).ff_append(a, " }"), false => {
+        open := s.ff_append(a, "{\n")
+        inner := open.ff_stmts(a, body, ind + 1, drop_ret)
+        inner.ff_indent(a, ind).ff_append(a, "}")
+    } }) })
 }
 ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
     out := s
@@ -513,7 +502,7 @@ ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
         // trailing comment, emitted by ff_top_decl (bounded by the next decl), which keeps it from being
         // stolen by a sibling one-liner and keeps re-formatting idempotent.
         nb := (i < last).match ({ true => gf_stmt_pos(body[i + 1]), false => 0 })
-        out = out.ff_one_stmt(a, st, drop_ret && (i == last), ind, nb, nb)
+        out = out.ff_one_stmt(a, st, drop_ret && i == last, ind, nb, nb)
     })
     out
 }
@@ -521,17 +510,17 @@ ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
 // `db` (own-line drain boundary) caps which following comments this statement absorbs; `ib` (inline
 // boundary) caps the single same-line trailing comment.
 ff_one_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32, db: i32, ib: i32) String {
-    sp    := gf_stmt_pos(st)
-    lead  := s.ff_flush_leading(a, sp, ind)
-    body  := lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
+    sp := gf_stmt_pos(st)
+    lead := s.ff_flush_leading(a, sp, ind)
+    body := lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
     withc := body.ff_drain(a, db, ib, ind)
     withc.ff_append(a, "\n")
 }
 ff_stmt_at = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) String {
-    drop.match ({
-        true  => st.match ({ .Return(e) => s.ff_expr(a, e, ind), _ => s.ff_stmt(a, st, ind) }),
-        false => s.ff_stmt(a, st, ind)
-    })
+    drop.match ({ true => st.match ({
+        .Return(e) => s.ff_expr(a, e, ind),
+        _          => s.ff_stmt(a, st, ind),
+    }), false => s.ff_stmt(a, st, ind) })
 }
 ff_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) String {
     st.match ({
@@ -541,26 +530,30 @@ ff_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) String {
         .ExprStmt(e) => s.ff_expr(a, e, ind),
         .If(f)       => s.ff_append(a, "if (").ff_expr(a, f.c, ind).ff_append(a, ") ").ff_block(a, f.then, ind, false).ff_append(a, " else ").ff_block(a, f.els, ind, false),
         .While(w)    => s.ff_append(a, "@while (").ff_expr(a, w.c, ind).ff_append(a, ") ").ff_block(a, w.body, ind, false),
-        .IndexSet(x) => s.ff_recv(a, x.seq, ind).ff_append(a, "[").ff_expr(a, x.idx, ind).ff_append(a, "] = ").ff_expr(a, x.value, ind)
+        .IndexSet(x) => s.ff_recv(a, x.seq, ind).ff_append(a, "[").ff_expr(a, x.idx, ind).ff_append(a, "] = ").ff_expr(a, x.value, ind),
     })
 }
 // `name := value` (inferred) or `name: T := value` (annotated)
 ff_let = (s: String, a: MutPtr<Malloc>, l: LetData, ind: i32) String {
-    head := l.ty.match ({ .Void => s.ff_append(a, l.name), _ => s.ff_append(a, l.name).ff_append(a, ": ").ff_ty(a, l.ty) })
+    head := l.ty.match ({
+        .Void => s.ff_append(a, l.name),
+        _     => s.ff_append(a, l.name).ff_append(a, ": ").ff_ty(a, l.ty),
+    })
     head.ff_append(a, " := ").ff_expr(a, l.value, ind)
 }
-
 // ── declarations ────────────────────────────────────────────────────────────────
 // a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
-ff_slice_elem = (t: Ty) Ty { t.match ({ .Slice(p) => load(p), _ => t }) }
+ff_slice_elem = (t: Ty) Ty {
+    t.match ({
+        .Slice(p) => load(p),
+        _         => t,
+    })
+}
 ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
-        out = p.variadic.match ({
-            true  => out.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
-            false => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty)
-        })
+        out = p.variadic.match ({ true => out.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)), false => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty) })
     })
     out
 }
@@ -577,37 +570,35 @@ ff_lparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
 }
 // generic type params `<A, B>` (with optional bound `<A: Bound>`)
 ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
-    (ps.len == 0).match ({
-        true  => s,
-        false => {
-            open := s.ff_append(a, "<")
-            body := open
-            ps.loop((h, i, p) {
-                body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
-                body = p.ty.match ({ .Void => body.ff_append(a, p.name), _ => body.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty) })
+    (ps.len == 0).match ({ true => s, false => {
+        open := s.ff_append(a, "<")
+        body := open
+        ps.loop((h, i, p) {
+            body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+            body = p.ty.match ({
+                .Void => body.ff_append(a, p.name),
+                _     => body.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
             })
-            body.ff_append(a, ">")
-        }
-    })
+        })
+        body.ff_append(a, ">")
+    } })
 }
 // the `*` export marker: appended right after a top-level decl name when it was starred in the source.
 ff_exported = (exp: [Param], name: str) bool {
     found := false
-    exp.loop((h, i, p) { found = (found || eq(p.name, name)) })
+    exp.loop((h, i, p) {
+        found = found || eq(p.name, name)
+    })
     found
 }
-ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: str) String {
-    exp.ff_exported(name).match ({ true => s.ff_append(a, name).ff_append(a, "*"), false => s.ff_append(a, name) })
-}
+ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: str) String { exp.ff_exported(name).match ({ true => s.ff_append(a, name).ff_append(a, "*"), false => s.ff_append(a, name) }) }
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
 ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
     sig := s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
     sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
 }
-ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
-    s.ff_name(a, exp, f.name).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
-}
+ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String { s.ff_name(a, exp, f.name).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret) }
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
 // The parser HOISTS a struct's inherent methods (and a trait impl's methods) into separate mangled
 // DFuncs (`impl_<Tr>_<Ty>_<m>`) plus a DImpl marker carrying the ORIGINAL method names. To round-trip,
@@ -615,38 +606,70 @@ ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
 // inside `Ty.impl(Tr, { … })`, and the hoisted DFuncs / inherent DImpl markers are SKIPPED at top level.
 ff_no_params = () [Param] { slice(null_ptr(), 0) }
 ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: str) Func {
-    res := Func( name: "", params: ff_no_params(), ret: tvoid(), tparams: ff_no_params(), body: slice(null_ptr(), 0) )
-    decls.loop((h, i, d) { d.match ({ .DFunc(f) => eq(f.name, name).match ({ true => { res = f }, _ => {} }), _ => {} }) })
+    res := Func(
+        name: "",
+        params: ff_no_params(),
+        ret: tvoid(),
+        tparams: ff_no_params(),
+        body: slice(null_ptr(), 0),
+    )
+    decls.loop((h, i, d) {
+        d.match ({
+            .DFunc(f) => eq(f.name, name).match ({ true => {
+                res = f
+            }, false => { } }),
+            _         => { },
+        })
+    })
     res
 }
 // the type's own tparams (so a method's print drops them, keeping only the method's OWN tparams)
 ff_type_tparams = (decls: [Decl], tyname: str) [Param] {
     res := ff_no_params()
-    decls.loop((h, i, d) { d.match ({
-            .DGenStruct(g) => eq(g.name, tyname).match ({ true => { res = g.tparams } }),
-            .DGenEnum(g)   => eq(g.name, tyname).match ({ true => { res = g.tparams } }),
-            _              => {}
-        }) })
+    decls.loop((h, i, d) {
+        d.match ({
+            .DGenStruct(g) => eq(g.name, tyname).match ({ true => {
+                res = g.tparams
+            } }),
+            .DGenEnum(g)   => eq(g.name, tyname).match ({ true => {
+                res = g.tparams
+            } }),
+            _              => { },
+        })
+    })
     res
 }
 ff_tparams_has = (ps: [Param], name: str) bool {
     found := false
-    ps.loop((h, i, p) { found = (found || eq(p.name, name)) })
+    ps.loop((h, i, p) {
+        found = found || eq(p.name, name)
+    })
     found
 }
 ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
     buf := slice(a.acquire((full.len + 1) * sizeof(Param)), full.len + 1)
     n := 0
-    full.loop((h, i, p) { drop.ff_tparams_has(p.name).match ({ false => { buf[n] = p  n = n + 1 } }) })
+    full.loop((h, i, p) {
+        drop.ff_tparams_has(p.name).match ({ false => {
+            buf[n] = p
+            n = n + 1
+        } })
+    })
     slice(buf.ptr, n)
 }
 // is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
 ff_is_hoisted = (a: MutPtr<Malloc>, decls: [Decl], fname: str) bool {
     found := false
-    decls.loop((h, i, d) { d.match ({
-            .DImpl(im) => im.methods.loop((h2, k, mp) { eq(a.impl_cname_in(im.trname, im.ty, mp.name), fname).match ({ true => { found = true } }) }),
-            _          => {}
-        }) })
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => im.methods.loop((h2, k, mp) {
+                eq(a.impl_cname_in(im.trname, im.ty, mp.name), fname).match ({ true => {
+                    found = true
+                } })
+            }),
+            _          => { },
+        })
+    })
     found
 }
 // print an impl's methods (each demangled to its original name; the type's tparams dropped from the
@@ -654,7 +677,7 @@ ff_is_hoisted = (a: MutPtr<Malloc>, decls: [Decl], fname: str) bool {
 ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) String {
     out := s
     im.methods.loop((h, k, mp) {
-        f   := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
+        f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
         own := a.ff_minus_tparams(f.tparams, ctp)
         sig := out.ff_indent(a, ind).ff_append(a, mp.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
         out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
@@ -664,37 +687,45 @@ ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [P
 // the inherent methods of `tyname` (the DImpl where ty == trname == tyname), printed at `ind`
 ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: str, ctp: [Param], ind: i32) String {
     out := s
-    decls.loop((h, i, d) { d.match ({
-            .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, tyname)).match ({ true => { out = out.ff_methods(a, decls, im, ctp, ind) } }),
-            _          => {}
-        }) })
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, tyname)).match ({ true => {
+                out = out.ff_methods(a, decls, im, ctp, ind)
+            } }),
+            _          => { },
+        })
+    })
     out
 }
 ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: StructDecl) String {
     open := s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
     body := open
-    sd.fields.loop((h, i, fl) { body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n") })
+    sd.fields.loop((h, i, fl) {
+        body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n")
+    })
     body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
 }
 ff_genstruct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenStructDecl) String {
     open := s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
     body := open
-    g.fields.loop((h, i, fl) { body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n") })
+    g.fields.loop((h, i, fl) {
+        body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n")
+    })
     body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).ff_append(a, "}")
 }
 ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
     ctp := decls.ff_type_tparams(im.ty)
-    (im.methods.len == 0).match ({
-        true  => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", { })"),
-        false => {
-            open := s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", {\n")
-            open.ff_methods(a, decls, im, ctp, 1).ff_append(a, "})")
-        }
-    })
+    (im.methods.len == 0).match ({ true => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", { })"), false => {
+        open := s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", {\n")
+        open.ff_methods(a, decls, im, ctp, 1).ff_append(a, "})")
+    } })
 }
 // one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
 ff_variant = (s: String, a: MutPtr<Malloc>, vd: VariantDef) String {
-    base := vd.payload.match ({ .Void => s.ff_append(a, vd.name), _ => s.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")") })
+    base := vd.payload.match ({
+        .Void => s.ff_append(a, vd.name),
+        _     => s.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")"),
+    })
     vd.dflt.is_expr_null().match ({ true => base, false => base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0) })
 }
 ff_variants = (s: String, a: MutPtr<Malloc>, vs: [VariantDef]) String {
@@ -705,31 +736,21 @@ ff_variants = (s: String, a: MutPtr<Malloc>, vs: [VariantDef]) String {
     })
     body
 }
-ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], ed: EnumDecl) String {
-    s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, ed.variants)
-}
-ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], g: GenEnumDecl) String {
-    s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, g.variants)
-}
+ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], ed: EnumDecl) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, ed.variants) }
+ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], g: GenEnumDecl) String { s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, g.variants) }
 ff_decl = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
     d.match ({
-        .DFunc(f)      => s.ff_func(a, exp, f),
-        .DStruct(sd)   => s.ff_struct(a, exp, decls, sd),
-        .DEnum(ed)     => s.ff_enum(a, exp, ed),
-        .DGenStruct(g) => s.ff_genstruct(a, exp, decls, g),
-        .DGenEnum(g)   => s.ff_genenum(a, exp, g),
-        .DForeign(f)   => s.ff_foreign(a, exp, f),
-        .DImpl(im)     => s.ff_trait_impl(a, decls, im),
-        .DGlobal(g)    => g.tl.match ({
-            true  => s.ff_name(a, exp, g.name).ff_append(a, " := thread_local(").ff_expr(a, g.init, 0).ff_append(a, ")"),
-            false => g.alias.match ({
-                true  => s.ff_name(a, exp, g.name).ff_append(a, " = ").ff_expr(a, g.init, 0),     // module alias keeps `=`
-                false => s.ff_name(a, exp, g.name).ff_append(a, " := ").ff_expr(a, g.init, 0)
-            })
-        }),
-        .DImport(im)   => s.ff_import(a, im),
+        .DFunc(f)          => s.ff_func(a, exp, f),
+        .DStruct(sd)       => s.ff_struct(a, exp, decls, sd),
+        .DEnum(ed)         => s.ff_enum(a, exp, ed),
+        .DGenStruct(g)     => s.ff_genstruct(a, exp, decls, g),
+        .DGenEnum(g)       => s.ff_genenum(a, exp, g),
+        .DForeign(f)       => s.ff_foreign(a, exp, f),
+        .DImpl(im)         => s.ff_trait_impl(a, decls, im),
+        .DGlobal(g)        => g.tl.match ({ true => s.ff_name(a, exp, g.name).ff_append(a, " := thread_local(").ff_expr(a, g.init, 0).ff_append(a, ")"), false => g.alias.match ({ true => s.ff_name(a, exp, g.name).ff_append(a, " = ").ff_expr(a, g.init, 0), false => s.ff_name(a, exp, g.name).ff_append(a, " := ").ff_expr(a, g.init, 0) }) }),    // module alias keeps `=`
+        .DImport(im)       => s.ff_import(a, im),
         .DTraitDefault(td) => s.ff_func(a, exp, td.fn),
-        .DRaw(c)       => s.ff_append(a, c)
+        .DRaw(c)           => s.ff_append(a, c),
     })
 }
 ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
@@ -741,19 +762,24 @@ ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
     })
     body.ff_append(a, " } = ").ff_append(a, im.module)
 }
-
 // ── module: each decl on its own line; hoisted methods + inherent-impl markers are skipped (their
 // bodies print inside the owning struct / trait impl instead). ───────────────────────────────────
 genfmt_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
     s := a.ff_string(8192)
     out := s
     decls.loop((h, i, d) {
-        nb := gf_next_decl_pos(decls, i + 1)               // the next EMITTED decl's pos → trailing-comment boundary
-        genfmt_set_block_end(nb)                            // bound this decl's body last-stmt drain to the decl end
+        nb := gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
+        genfmt_set_block_end(nb)    // bound this decl's body last-stmt drain to the decl end
         d.match ({
-            .DFunc(f)  => a.ff_is_hoisted(decls, f.name).match ({ false => { out = a.ff_top_decl(out, exp, decls, d, nb) } }),
-            .DImpl(im) => eq(im.ty, im.trname).match ({ false => { out = a.ff_top_decl(out, exp, decls, d, nb) } }),
-            _          => { out = a.ff_top_decl(out, exp, decls, d, nb) }
+            .DFunc(f)  => a.ff_is_hoisted(decls, f.name).match ({ false => {
+                out = a.ff_top_decl(out, exp, decls, d, nb)
+            } }),
+            .DImpl(im) => eq(im.ty, im.trname).match ({ false => {
+                out = a.ff_top_decl(out, exp, decls, d, nb)
+            } }),
+            _          => {
+                out = a.ff_top_decl(out, exp, decls, d, nb)
+            },
         })
     })
     out.ff_flush_rest(a, 0)
@@ -762,7 +788,9 @@ genfmt_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
 // e.g. inherent-impl markers, so the boundary is a real source offset). 0 = none left. Used only to cap
 // which trailing comment belongs to the decl just printed — a slightly loose bound is harmless.
 gf_next_decl_pos = (decls: [Decl], i: i32) i32 {
-    (i >= decls.len).match ({ true => { return 0 } })
+    (i >= decls.len).match ({ true => {
+        return 0
+    } })
     p := gf_decl_pos(decls[i])
     (p > 0).match ({ true => p, false => gf_next_decl_pos(decls, i + 1) })
 }
@@ -770,9 +798,9 @@ gf_next_decl_pos = (decls: [Decl], i: i32) i32 {
 ff_top_decl = (a: MutPtr<Malloc>, s: String, exp: [Param], decls: [Decl], d: Decl, nb: i32) String {
     lead := s.ff_flush_leading(a, gf_decl_pos(d), 0)
     body := lead.ff_decl(a, exp, decls, d)
-    withc := body.ff_trailing(a, nb)                  // a decl gets only an inline same-line comment; own-line
-    withc.ff_append(a, "\n")                          // comments between decls are LEADING for the next decl
-}
+    withc := body.ff_trailing(a, nb)    // a decl gets only an inline same-line comment; own-line
+    withc.ff_append(a, "\n")
+}    // comments between decls are LEADING for the next decl
 // compatibility shim (default heap allocator, no export markers)
 genfmt_module* = (decls: [Decl]) String {
     a := Malloc(_: 0)

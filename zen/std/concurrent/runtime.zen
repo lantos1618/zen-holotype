@@ -3,68 +3,50 @@
 { Allocator, Heap } = std.mem.alloc
 { Arena, make_in } = std.mem.arena
 { checkpoint_current } = std.concurrent.coroutine
-
 CancelReason*: Deadline | Parent | User
 Signal*: Go | Stop(CancelReason)
-
 // helper to yield a Go signal inside multi-statement bodies (dodges leading-dot statement glue)
 sig_go* = () Signal { .Go }
-
 Runtime*: {
-    checkpoint: (MutPtr<Self>) Signal
+    checkpoint: (MutPtr<Self>) Signal,
 }
-
 SyncArena*: {
-    mem: Arena
-
-    free_in<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
-        runtime.mem.addr().free_in(backing)
-    }
-
+    mem: Arena,
+    free_in<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void { runtime.mem.addr().free_in(backing) }
     free<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void { runtime.free_in(backing) }
 }
 AsyncArena*: {
-    mem: Arena
-
-    free_in<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void {
-        runtime.mem.addr().free_in(backing)
-    }
-
+    mem: Arena,
+    free_in<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void { runtime.mem.addr().free_in(backing) }
     free<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void { runtime.free_in(backing) }
 }
-
 SyncArena.impl(Runtime, {
     checkpoint = (s: MutPtr<SyncArena>) Signal { .Go }
 })
-
 Heap.impl(Runtime, {
     checkpoint = (s: MutPtr<Heap>) Signal { .Go }
 })
-
 AsyncArena.impl(Runtime, {
-    checkpoint = (s: MutPtr<AsyncArena>) Signal { checkpoint_current()  sig_go() }
+    checkpoint = (s: MutPtr<AsyncArena>) Signal {
+        checkpoint_current()
+        sig_go()
+    }
 })
-
 runtime_checkpoint = () void { checkpoint_current() }
-
 SyncArena.impl(Allocator, {
     acquire = (s: MutPtr<SyncArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
-    resize  = (s: MutPtr<SyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
+    resize = (s: MutPtr<SyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
     release = (s: MutPtr<SyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
 })
-
 AsyncArena.impl(Allocator, {
     acquire = (s: MutPtr<AsyncArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
-    resize  = (s: MutPtr<AsyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
+    resize = (s: MutPtr<AsyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
     release = (s: MutPtr<AsyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
 })
-
 sync_in*<A> = (backing: MutPtr<A>, cap: i64) SyncArena { SyncArena(mem: backing.make_in(cap)) }
 async_in*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena { AsyncArena(mem: backing.make_in(cap)) }
-
 // exported top-level free wrappers (the in-body .free methods aren't visible cross-module)
 free_sync*<A> = (s: MutPtr<SyncArena>, backing: MutPtr<A>) void { s.free(backing) }
 free_async*<A> = (s: MutPtr<AsyncArena>, backing: MutPtr<A>) void { s.free(backing) }
-
 sync*<A> = (backing: MutPtr<A>, cap: i64) SyncArena { backing.sync_in(cap) }
 async*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena { backing.async_in(cap) }

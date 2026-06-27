@@ -8,109 +8,258 @@
 //
 // The emitters are written in fluent UFCS style while threading the owning allocator
 // explicitly: `s.gstr_append(a, x).gen_expr(a, e)` keeps String growth visible.
-
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
 { Malloc, malloc, realloc } = std.mem.alloc
-
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
 // which needs only a forward decl, so the recursion closes.
-VarData*: { name: str, pos: i32 }                      // pos = byte offset of the name in the source (0 = synthesized)
-BinData*: { op: str, lhs: Ptr<Expr>, rhs: Ptr<Expr>, pos: i32 }   // lhs op rhs; pos = operator byte offset when source-backed
-CallData*: { fn: str, args: [Expr], pos: i32, raw: bool }  // fn(a, b, …) or @fn(a, b, …); pos = fn byte offset (0 = synthesized)
+VarData*: {
+    name: str,
+    pos: i32,
+}    // pos = byte offset of the name in the source (0 = synthesized)
+BinData*: {
+    op: str,
+    lhs: Ptr<Expr>,
+    rhs: Ptr<Expr>,
+    pos: i32,
+}    // lhs op rhs; pos = operator byte offset when source-backed
+CallData*: {
+    fn: str,
+    args: [Expr],
+    pos: i32,
+    raw: bool,
+}    // fn(a, b, …) or @fn(a, b, …); pos = fn byte offset (0 = synthesized)
 // a FAITHFUL method call `recv.method(args)` — preserves the UFCS surface syntax that the parser would
 // otherwise FLATTEN into a `Call(fn: method, args: [recv] ++ args)`. parse_module keeps MethodCall (so the
 // formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
 // resolve/genc, so the C backend never sees it. pos = method-name byte offset (matches the old Call's pos).
-MethodCallData*: { recv: Ptr<Expr>, method: str, args: [Expr], pos: i32 }
+MethodCallData*: {
+    recv: Ptr<Expr>,
+    method: str,
+    args: [Expr],
+    pos: i32,
+}
 // oa = one-arm marker for a bool `.match` written with a single arm (the other arm is a synthesized
 // empty `{}` block): 0 = a real two-armed cond / if-expr, 1 = only `true =>` given (e is the synthetic
 // empty branch), 2 = only `false =>` given (t is the synthetic empty branch). In statement position the
 // cond lowers to an `if` and the empty branch is a no-op; in VALUE position oa != 0 is non-exhaustive
 // (the missing branch has no value) and the validator rejects it with a positioned exhaustiveness error.
-CondData*: { c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32 } // c ? t : e
-MemberData*: { obj: Ptr<Expr>, field: str }             // obj.field   (value)  /  obj->field (pointer)
-ArrowData*: { obj: Ptr<Expr>, field: str }              // obj->field
-MakeEnumData*: { ty: str, mty: str, variant: str, targs: [Ty], payload: Ptr<Expr> }  // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
-TagData*: { ty: str, mty: str, variant: str, targs: [Ty] }                     // (mty){ .tag=mty_V }  (no payload)
-ArmData*: { variant: str, bind: str, body: Ptr<Expr>, pos: i32 }  // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal
-MatchData*: { subj: Ptr<Expr>, ename: str, arms: [ArmData], ptr: bool }  // subj a variable; ptr -> use ->; last arm = default
-StrData*: { value: str, pos: i32 }                      // a C string literal "…" (escaped on emit); pos = byte offset (0 = synthesized)
-FieldInit*: { name: str, value: Ptr<Expr> }             // .name = value  (one struct-literal initializer)
+CondData*: {
+    c: Ptr<Expr>,
+    t: Ptr<Expr>,
+    e: Ptr<Expr>,
+    oa: i32,
+}    // c ? t : e
+MemberData*: {
+    obj: Ptr<Expr>,
+    field: str,
+}    // obj.field   (value)  /  obj->field (pointer)
+ArrowData*: {
+    obj: Ptr<Expr>,
+    field: str,
+}    // obj->field
+MakeEnumData*: {
+    ty: str,
+    mty: str,
+    variant: str,
+    targs: [Ty],
+    payload: Ptr<Expr>,
+}    // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
+TagData*: {
+    ty: str,
+    mty: str,
+    variant: str,
+    targs: [Ty],
+}    // (mty){ .tag=mty_V }  (no payload)
+ArmData*: {
+    variant: str,
+    bind: str,
+    body: Ptr<Expr>,
+    pos: i32,
+}    // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal
+MatchData*: {
+    subj: Ptr<Expr>,
+    ename: str,
+    arms: [ArmData],
+    ptr: bool,
+}    // subj a variable; ptr -> use ->; last arm = default
+StrData*: {
+    value: str,
+    pos: i32,
+}    // a C string literal "…" (escaped on emit); pos = byte offset (0 = synthesized)
+FieldInit*: {
+    name: str,
+    value: Ptr<Expr>,
+}    // .name = value  (one struct-literal initializer)
 // `ty` is the base type name, `mty` the C name to emit (= ty for a plain struct, or the monomorphized
 // name `Box_i32` for a generic literal), and `targs` the type args of a generic literal (empty otherwise
 // — they let the monomorphize pass discover `Box<i32>` from a literal that has no typed signature).
-MakeStructData*: { ty: str, mty: str, targs: [Ty], inits: [FieldInit] }   // (mty){ .a = …, .b = … }
+MakeStructData*: {
+    ty: str,
+    mty: str,
+    targs: [Ty],
+    inits: [FieldInit],
+}    // (mty){ .a = …, .b = … }
 // a slice [T] is a fat pointer { void* ptr; int64_t len; } (the `zslice` typedef). The element
 // type T is recovered at the literal (array type) and at indexing (the cast) — carried in the AST.
-SliceData*: { elem: Ty, items: [Expr] }                 // [a, b, c]  ->  (zslice){ .ptr = (T[]){…}, .len = N }
-IndexData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty }  // seq[idx]  ->  ((T*)(seq).ptr)[idx]
+SliceData*: {
+    elem: Ty,
+    items: [Expr],
+}    // [a, b, c]  ->  (zslice){ .ptr = (T[]){…}, .len = N }
+IndexData*: {
+    seq: Ptr<Expr>,
+    idx: Ptr<Expr>,
+    elem: Ty,
+}    // seq[idx]  ->  ((T*)(seq).ptr)[idx]
 // a foreach loop `xs.loop((h, i, x) { body })` — i is the index, x the element. Lowers to a C
 // for-loop (the body runs for effect, capturing outer locals), as a void statement-expression.
-LoopData*: { seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt], h: str }   // h = the handler name; `h.break`/`h.continue` in the body are the loop controls
+LoopData*: {
+    seq: Ptr<Expr>,
+    idx: str,
+    elem: str,
+    elemTy: Ty,
+    body: [Stmt],
+    h: str,
+}    // h = the handler name; `h.break`/`h.continue` in the body are the loop controls
 // a lambda value `(a, x) { body }` — params are NAMES only (their types come from the FnT it is
 // passed to, so the Param tys are Void placeholders). Lambda values are only ever arguments to a
 // template's FnT parameter, and are inlined at the call site so their bodies read captured locals.
-LambdaData*: { params: [Param], body: [Stmt] }
+LambdaData*: {
+    params: [Param],
+    body: [Stmt],
+}
 // a statement-expression `({ s1; s2; … sN; })` — its value is the last statement's. Produced by
 // inlining a (multi-statement) template body at a call site; the trailing return becomes a bare expr.
-BlockData*: { stmts: [Stmt] }
+BlockData*: {
+    stmts: [Stmt],
+}
 // `Byte` is an integer literal that came from a CHAR literal `'a'` — emitted exactly like Int
 // (its byte value), but typed `u8` by the checker (a char is a byte, so `is_op(t, '+')` passing
 // it to a u8 param doesn't read as an i32->u8 narrowing).
 // `FloatLit` is a FLOAT literal carried as its SOURCE TEXT, verbatim (the compiler is written in
 // Zen, which had no floats — so it never holds a float VALUE; the text "1.5" IS a C double
 // literal and a JS number as-is). Typed f64 by the checker.
-Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call(CallData) | MethodCall(MethodCallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData)
-| MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
-
+Expr*: Int(i64) | Byte(i32) | FloatLit(str) | Var(VarData) | Bin(BinData) | Call(CallData) | MethodCall(MethodCallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData) | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
 // statements: `int32_t name = expr;`  and  `return expr;`
-LetData*: { name: str, ty: Ty, value: Ptr<Expr>, pos: i32 }   // ty = the declared annotation (`x: T := e`), tvoid when unannotated; pos = bound-name byte offset (0 = synthesized)
-AssignData*: { target: Ptr<Expr>, value: Ptr<Expr>, pos: i32 }       // <lvalue> = expr; pos = lvalue byte offset (0 = synthesized)
-IfData*: { c: Ptr<Expr>, then: [Stmt], els: [Stmt] }      // if (c) { then } else { els }
-WhileData*: { c: Ptr<Expr>, body: [Stmt] }               // while (c) { body }   (Stmt is recursive)
-IndexSetData*: { seq: Ptr<Expr>, idx: Ptr<Expr>, elem: Ty, value: Ptr<Expr>, pos: i32 }  // seq[idx] = value; pos = seq byte offset
+LetData*: {
+    name: str,
+    ty: Ty,
+    value: Ptr<Expr>,
+    pos: i32,
+}    // ty = the declared annotation (`x: T := e`), tvoid when unannotated; pos = bound-name byte offset (0 = synthesized)
+AssignData*: {
+    target: Ptr<Expr>,
+    value: Ptr<Expr>,
+    pos: i32,
+}    // <lvalue> = expr; pos = lvalue byte offset (0 = synthesized)
+IfData*: {
+    c: Ptr<Expr>,
+    then: [Stmt],
+    els: [Stmt],
+}    // if (c) { then } else { els }
+WhileData*: {
+    c: Ptr<Expr>,
+    body: [Stmt],
+}    // while (c) { body }   (Stmt is recursive)
+IndexSetData*: {
+    seq: Ptr<Expr>,
+    idx: Ptr<Expr>,
+    elem: Ty,
+    value: Ptr<Expr>,
+    pos: i32,
+}    // seq[idx] = value; pos = seq byte offset
 Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData) | IndexSet(IndexSetData) | ExprStmt(Ptr<Expr>)
 // types + typed parameters
 // a function type `(A, T) R` — ONLY a parameter type. A function that takes one is an inline
 // template (spliced per call site), never a C function pointer, so FnT has no standalone C type.
-FnTData*: { params: [Ty], ret: Ptr<Ty> }
+FnTData*: {
+    params: [Ty],
+    ret: Ptr<Ty>,
+}
 // a GENERIC INSTANCE type `Box<i32>` — a named type applied to concrete type args. `name` is the
 // generic's base ("Box"), `args` the concrete type arguments (for field substitution), and `mangled`
 // the monomorphized C name ("Box_i32"), precomputed by the parser so gen_ty emits it with no runtime
 // string-building. The monomorphize pass turns each instance into a concrete StructDecl named `mangled`.
-GenericData*: { name: str, args: [Ty], mangled: str }
+GenericData*: {
+    name: str,
+    args: [Ty],
+    mangled: str,
+}
 // pointer KIND tag (safety-goal-D). All three spellings still lower to `T*` and mangle to `ptr_`;
 // the kind is CARRIED through the AST (preserved by the formatter) but is NOT yet read by codegen or
 // the type-checker — ty_eq/unify/fits stay kind-blind. 0=RawPtr (nullable FFI floor), 1=Ptr (read-only
 // borrow), 2=MutPtr (writable borrow). Mirrors the `() i32` constant style used for the K* diag codes.
 k_raw_ptr* = () i32 { 0 }
-k_ptr*     = () i32 { 1 }
+k_ptr* = () i32 { 1 }
 k_mut_ptr* = () i32 { 2 }
-PtrData*: { pointee: Ptr<Ty>, kind: i32 }   // a `Ptr`/`MutPtr`/`RawPtr` node: the pointee + which kind was spelled
-Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)   // scalar/f64/struct/void/str, T*, [T], (A)R, or N<T>
-Param*: { name: str, ty: Ty, variadic: bool }   // variadic = a trailing `...T` param (ty is the collected `[T]`); false otherwise
+PtrData*: {
+    pointee: Ptr<Ty>,
+    kind: i32,
+}    // a `Ptr`/`MutPtr`/`RawPtr` node: the pointee + which kind was spelled
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)    // scalar/f64/struct/void/str, T*, [T], (A)R, or N<T>
+Param*: {
+    name: str,
+    ty: Ty,
+    variadic: bool,
+}    // variadic = a trailing `...T` param (ty is the collected `[T]`); false otherwise
 // a function is a name, typed parameters, a return type, and a sequence of statements
-Func*: { name: str, params: [Param], ret: Ty, tparams: [Param], body: [Stmt], pos: i32 }   // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic; pos = name byte offset (0 = synthesized), used by the formatter to anchor leading comments
+Func*: {
+    name: str,
+    params: [Param],
+    ret: Ty,
+    tparams: [Param],
+    body: [Stmt],
+    pos: i32,
+}    // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic; pos = name byte offset (0 = synthesized), used by the formatter to anchor leading comments
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
-Field*: { name: str, ty: Ty }
-StructDecl*: { name: str, fields: [Field], pos: i32 }             // typedef struct { fields } name; pos = name byte offset (0 = synthesized), for the formatter's leading-comment anchor
+Field*: {
+    name: str,
+    ty: Ty,
+}
+StructDecl*: {
+    name: str,
+    fields: [Field],
+    pos: i32,
+}    // typedef struct { fields } name; pos = name byte offset (0 = synthesized), for the formatter's leading-comment anchor
 // a GENERIC struct declaration `Box<T>: { v: T }` — a template over type params `tparams` (["T"]).
 // It emits no C of its own; the monomorphize pass instantiates one concrete StructDecl per distinct
 // `Box<concrete>` used, substituting tparam→arg in the field types. genModule drops the DGenStruct.
-GenStructDecl*: { name: str, tparams: [Param], fields: [Field], pos: i32 }   // tparams = name-only Params (no sizeof(str)); pos = name byte offset (formatter leading-comment anchor)
+GenStructDecl*: {
+    name: str,
+    tparams: [Param],
+    fields: [Field],
+    pos: i32,
+}    // tparams = name-only Params (no sizeof(str)); pos = name byte offset (formatter leading-comment anchor)
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
-VariantDef*: { name: str, payload: Ty, dflt: Ptr<Expr> }   // dflt = constant for the zero-arg ctor (`Name = expr`); null_ptr() = no default. NOT named `default` — that's a C keyword and collides with the `default()` allocator ctor under keyword-mangling.
-EnumDecl*: { name: str, variants: [VariantDef], pos: i32 }   // pos = name byte offset (0 = synthesized), formatter leading-comment anchor
+VariantDef*: {
+    name: str,
+    payload: Ty,
+    dflt: Ptr<Expr>,
+}    // dflt = constant for the zero-arg ctor (`Name = expr`); null_ptr() = no default. NOT named `default` — that's a C keyword and collides with the `default()` allocator ctor under keyword-mangling.
+EnumDecl*: {
+    name: str,
+    variants: [VariantDef],
+    pos: i32,
+}    // pos = name byte offset (0 = synthesized), formatter leading-comment anchor
 // a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
 // The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
-GenEnumDecl*: { name: str, tparams: [Param], variants: [VariantDef], pos: i32 }   // pos = name byte offset (formatter leading-comment anchor)
+GenEnumDecl*: {
+    name: str,
+    tparams: [Param],
+    variants: [VariantDef],
+    pos: i32,
+}    // pos = name byte offset (formatter leading-comment anchor)
 // records a `Type.impl(Trait, { … })` block: the type, the trait, and the method names THIS impl
 // actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
 // functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
 // verify conformance (every method the Trait declares is one this impl provides). genModule skips it.
-ImplData*: { ty: str, trname: str, methods: [Param], pos: i32 }
+ImplData*: {
+    ty: str,
+    trname: str,
+    methods: [Param],
+    pos: i32,
+}
 // DForeign is a function DECLARATION with no body — a foreign binding like `malloc = (n: i64) …`.
 // It's emitted as a C prototype `ret name(params);` (the definition comes from libc / another TU),
 // so genModule emits its signature but no body, and the checker knows its full signature.
@@ -119,7 +268,11 @@ ImplData*: { ty: str, trname: str, methods: [Param], pos: i32 }
 // `[Param]` buffer needs no `sizeof(str)`). It carries no code (modules link separately, so
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
-ImportData*: { names: [Param], module: str, pos: i32 }   // module = the imported module path text ("std.text.fmt"), kept for the formatter; pos = the `{` byte offset (0 = synthesized)
+ImportData*: {
+    names: [Param],
+    module: str,
+    pos: i32,
+}    // module = the imported module path text ("std.text.fmt"), kept for the formatter; pos = the `{` byte offset (0 = synthesized)
 // DGlobal is a module-level MUTABLE global `name := init` (Goal Z E1 — scheduler/runtime state).
 // It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
 // `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
@@ -127,109 +280,265 @@ ImportData*: { names: [Param], module: str, pos: i32 }   // module = the importe
 // `tl` = thread-local: emit `static _Thread_local` so each OS thread gets its own copy (coroutine
 // swap state, scheduler per-worker state). Source marks it by wrapping the init in `thread_local(x)`,
 // which the parser unwraps into the bare init + tl=true.
-GlobalData*: { name: str, ty: Ty, init: Ptr<Expr>, tl: bool, alias: bool, pos: i32 }   // alias = a module-alias bind `name = mod` (single `=`, formatter prints `=` not `:=`); pos = name byte offset (0 = synthesized), formatter leading-comment anchor
+GlobalData*: {
+    name: str,
+    ty: Ty,
+    init: Ptr<Expr>,
+    tl: bool,
+    alias: bool,
+    pos: i32,
+}    // alias = a module-alias bind `name = mod` (single `=`, formatter prints `=` not `:=`); pos = name byte offset (0 = synthesized), formatter leading-comment anchor
 // DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
 // `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
 // no C of its own: compiler.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
 // instantiates `impl_<Trait>_<Type>_<m>` from this body with `Self` → the concrete type, as an ordinary
 // DFunc. The checker treats a method with a default as satisfied even when an impl doesn't provide it.
-TraitDefData*: { trname: str, fn: Func }
-Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)   // DRaw = verbatim C escape
-
+TraitDefData*: {
+    trname: str,
+    fn: Func,
+}
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(str) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)    // DRaw = verbatim C escape
 // Compiler-owned allocations flow through these shims so stripped bootstrap drivers that do not
 // flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
-acquire = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> {
-    (n <= 0).match ({ true => null_ptr(), false => malloc(n) })
-}
-resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-    realloc(p, n)
-}
-
-write_str = (dst: RawPtr<u8>, at: i64, t: str) i64 {
-    dst.write_str_at(at, t, 0)
-}
+acquire = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).match ({ true => null_ptr(), false => malloc(n) }) }
+resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+write_str = (dst: RawPtr<u8>, at: i64, t: str) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: str, i: i64) i64 {
     b := load(offset(t, i))
-    (b == 0).match ({
-        true  => at + i,
-        false => {
-            dst.offset(at + i).store(b)
-            dst.write_str_at(at, t, i + 1)
-        }
-    })
+    (b == 0).match ({ true => at + i, false => {
+        dst.offset(at + i).store(b)
+        dst.write_str_at(at, t, i + 1)
+    } })
 }
 finish_buf = (dst: RawPtr<u8>, n: i64) str {
     dst.offset(n).store(0)
     cstr(dst)
 }
-
 // ── THE canonical String builder: allocator-explicit + generic over the allocator type, so a caller
 // passes whatever allocator it has (heap/arena/test). One implementation for the whole compiler — the
 // per-module emit_*/check_*/m* builders are thin aliases onto these. Safe to inline now that the
 // inliner namespaces inlined locals by their inline-marker chain (see check.inline_marks).
-gstr_string*<A> = (a: MutPtr<A>, cap: i64) String { String(ptr: a.acquire(cap), len: 0, cap: cap) }
+gstr_string*<A> = (a: MutPtr<A>, cap: i64) String {
+    String(
+        ptr: a.acquire(cap),
+        len: 0,
+        cap: cap,
+    )
+}
 gstr_grow*<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
-    String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
+    String(
+        ptr: a.resize(s.ptr, ncap),
+        len: s.len,
+        cap: ncap,
+    )
 }
 gstr_reserve*<A> = (a: MutPtr<A>, s: String, need: i64) String {
     out := s
-    (s.len + need > s.cap).match ({ true => { out = a.gstr_grow(s, (s.cap + need) * 2) }, _ })
+    (s.len + need > s.cap).match ({ true => {
+        out = a.gstr_grow(s, (s.cap + need) * 2)
+    }, false => { } })
     out
 }
 gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
     r := a.gstr_reserve(s, 1)
     r.ptr.offset(r.len).store(b)
-    String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
+    String(
+        ptr: r.ptr,
+        len: r.len + 1,
+        cap: r.cap,
+    )
 }
 gstr_append*<A> = (s: String, a: MutPtr<A>, t: str) String {
     cur := s
     bs: [u8] := t.view()
-    bs.loop((h, i, b) { cur = cur.gstr_push(a, b) })
+    bs.loop((h, i, b) {
+        cur = cur.gstr_push(a, b)
+    })
     cur
 }
 gstr_finish*<A> = (s: String, a: MutPtr<A>) Cstr { cstr(s.gstr_push(a, 0).ptr) }
-
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
 lit* = (n: i64) Expr { .Int(n) }
-byte_lit* = (n: i32) Expr { .Byte(n) }   // a char literal's byte value (typed u8 by the checker)
-flit* = (t: str) Expr { .FloatLit(t) }   // a float literal — its lexeme text, emitted verbatim (typed f64)
-vref* = (nm: str) Expr { .Var(VarData( name: nm, pos: 0 )) }
-vref_at* = (nm: str, p: i32) Expr { .Var(VarData( name: nm, pos: p )) }
-bin_at* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr { .Bin(BinData( op: op, lhs: l, rhs: r, pos: p )) }
+byte_lit* = (n: i32) Expr { .Byte(n) }    // a char literal's byte value (typed u8 by the checker)
+flit* = (t: str) Expr { .FloatLit(t) }    // a float literal — its lexeme text, emitted verbatim (typed f64)
+vref* = (nm: str) Expr {
+    .Var(VarData(
+        name: nm,
+        pos: 0,
+    ))
+}
+vref_at* = (nm: str, p: i32) Expr {
+    .Var(VarData(
+        name: nm,
+        pos: p,
+    ))
+}
+bin_at* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr {
+    .Bin(BinData(
+        op: op,
+        lhs: l,
+        rhs: r,
+        pos: p,
+    ))
+}
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
-call* = (fn: str, args: [Expr]) Expr { .Call(CallData( fn: fn, args: args, pos: 0, raw: false )) }
-call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: false )) }
-raw_call_at* = (fn: str, args: [Expr], p: i32) Expr { .Call(CallData( fn: fn, args: args, pos: p, raw: true )) }
-emcall* = (recv: Ptr<Expr>, method: str, args: [Expr], p: i32) Expr { .MethodCall(MethodCallData( recv: recv, method: method, args: args, pos: p )) }
-cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr { .Cond(CondData( c: c, t: t, e: e, oa: 0 )) }
-cond_oa* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32) Expr { .Cond(CondData( c: c, t: t, e: e, oa: oa )) }
-member* = (o: Ptr<Expr>, f: str) Expr { .Member(MemberData( obj: o, field: f )) }
-arrow* = (o: Ptr<Expr>, f: str) Expr { .Arrow(ArrowData( obj: o, field: f )) }
-mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData( ty: ty, mty: ty, variant: v, targs: no_tys(), payload: p )) }
-mkenumg* = (ty: str, mty: str, targs: [Ty], v: str, p: Ptr<Expr>) Expr { .MakeEnum(MakeEnumData( ty: ty, mty: mty, variant: v, targs: targs, payload: p )) }
-finit* = (nm: str, v: Ptr<Expr>) FieldInit { FieldInit( name: nm, value: v ) }
-mkstruct* = (ty: str, inits: [FieldInit]) Expr { .MakeStruct(MakeStructData( ty: ty, mty: ty, targs: no_tys(), inits: inits )) }
-mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr { .MakeStruct(MakeStructData( ty: ty, mty: mty, targs: targs, inits: inits )) }
-no_tys* = () [Ty] { slice(null_ptr(), 0) }                  // an empty [Ty] (non-generic literal's targs)
-slit* = (elem: Ty, items: [Expr]) Expr { .SliceLit(SliceData( elem: elem, items: items )) }
-eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr { .Index(IndexData( seq: seq, idx: i, elem: elem )) }
-eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt], h: str) Expr { .Loop(LoopData( seq: seq, idx: idx, elem: elem, elemTy: elemTy, body: body, h: h )) }
-lam* = (params: [Param], body: [Stmt]) Expr { .Lambda(LambdaData( params: params, body: body )) }
-block* = (stmts: [Stmt]) Expr { .Block(BlockData( stmts: stmts )) }
+call* = (fn: str, args: [Expr]) Expr {
+    .Call(CallData(
+        fn: fn,
+        args: args,
+        pos: 0,
+        raw: false,
+    ))
+}
+call_at* = (fn: str, args: [Expr], p: i32) Expr {
+    .Call(CallData(
+        fn: fn,
+        args: args,
+        pos: p,
+        raw: false,
+    ))
+}
+raw_call_at* = (fn: str, args: [Expr], p: i32) Expr {
+    .Call(CallData(
+        fn: fn,
+        args: args,
+        pos: p,
+        raw: true,
+    ))
+}
+emcall* = (recv: Ptr<Expr>, method: str, args: [Expr], p: i32) Expr {
+    .MethodCall(MethodCallData(
+        recv: recv,
+        method: method,
+        args: args,
+        pos: p,
+    ))
+}
+cond* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>) Expr {
+    .Cond(CondData(
+        c: c,
+        t: t,
+        e: e,
+        oa: 0,
+    ))
+}
+cond_oa* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32) Expr {
+    .Cond(CondData(
+        c: c,
+        t: t,
+        e: e,
+        oa: oa,
+    ))
+}
+member* = (o: Ptr<Expr>, f: str) Expr {
+    .Member(MemberData(
+        obj: o,
+        field: f,
+    ))
+}
+arrow* = (o: Ptr<Expr>, f: str) Expr {
+    .Arrow(ArrowData(
+        obj: o,
+        field: f,
+    ))
+}
+mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr {
+    .MakeEnum(MakeEnumData(
+        ty: ty,
+        mty: ty,
+        variant: v,
+        targs: no_tys(),
+        payload: p,
+    ))
+}
+mkenumg* = (ty: str, mty: str, targs: [Ty], v: str, p: Ptr<Expr>) Expr {
+    .MakeEnum(MakeEnumData(
+        ty: ty,
+        mty: mty,
+        variant: v,
+        targs: targs,
+        payload: p,
+    ))
+}
+finit* = (nm: str, v: Ptr<Expr>) FieldInit {
+    FieldInit(
+        name: nm,
+        value: v,
+    )
+}
+mkstruct* = (ty: str, inits: [FieldInit]) Expr {
+    .MakeStruct(MakeStructData(
+        ty: ty,
+        mty: ty,
+        targs: no_tys(),
+        inits: inits,
+    ))
+}
+mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr {
+    .MakeStruct(MakeStructData(
+        ty: ty,
+        mty: mty,
+        targs: targs,
+        inits: inits,
+    ))
+}
+no_tys* = () [Ty] { slice(null_ptr(), 0) }    // an empty [Ty] (non-generic literal's targs)
+slit* = (elem: Ty, items: [Expr]) Expr {
+    .SliceLit(SliceData(
+        elem: elem,
+        items: items,
+    ))
+}
+eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr {
+    .Index(IndexData(
+        seq: seq,
+        idx: i,
+        elem: elem,
+    ))
+}
+eloop* = (seq: Ptr<Expr>, idx: str, elem: str, elemTy: Ty, body: [Stmt], h: str) Expr {
+    .Loop(LoopData(
+        seq: seq,
+        idx: idx,
+        elem: elem,
+        elemTy: elemTy,
+        body: body,
+        h: h,
+    ))
+}
+lam* = (params: [Param], body: [Stmt]) Expr {
+    .Lambda(LambdaData(
+        params: params,
+        body: body,
+    ))
+}
+block* = (stmts: [Stmt]) Expr { .Block(BlockData(stmts: stmts)) }
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
 // (compiler.check splices it), never emitted as a C function — so genModule skips it.
-is_fnt* = (t: Ty) bool { t.match ({ .FnT(f) => true, _ => false }) }
+is_fnt* = (t: Ty) bool {
+    t.match ({
+        .FnT(f) => true,
+        _       => false,
+    })
+}
 has_fnt_param* = (ps: [Param]) bool {
     found := false
-    ps.loop((h, i, p) { found = p.ty.is_fnt().match ({ true => true, false => found }) })
+    ps.loop((h, i, p) {
+        found = p.ty.is_fnt().match ({ true => true, false => found })
+    })
     found
 }
 // a TEMPLATE: a fn inlined/monomorphized per call site — has an FnT param (a lambda to splice) or type
 // params (to substitute). It must have a BODY to inline; a BODYLESS fn (an extern like makecontext, with
 // an FnT param for a real C function-pointer arg) is a normal callable, NOT a template to inline away.
-is_generic_fn* = (f: Func) bool { (f.params.has_fnt_param() || (f.tparams.len > 0)) && (f.body.len > 0) }
-is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.is_generic_fn(), _ => false }) }
+is_generic_fn* = (f: Func) bool { (f.params.has_fnt_param() || f.tparams.len > 0) && f.body.len > 0 }
+is_template* = (d: Decl) bool {
+    d.match ({
+        .DFunc(f) => f.is_generic_fn(),
+        _         => false,
+    })
+}
 // a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no
 // runtime representation in the monomorphic/inline model — the impl methods are plain functions —
 // so genModule skips it, exactly like a template function. NOTE: a data struct holding a function-
@@ -238,82 +547,242 @@ is_template* = (d: Decl) bool { d.match ({ .DFunc(f) => f.is_generic_fn(), _ => 
 // impl'd, never constructed — via `struct_is_trait_emit`.
 struct_is_trait = (sd: StructDecl) bool {
     found := false
-    sd.fields.loop((h, i, f) { found = f.ty.is_fnt().match ({ true => true, false => found }) })
+    sd.fields.loop((h, i, f) {
+        found = f.ty.is_fnt().match ({ true => true, false => found })
+    })
     found
 }
-is_trait* = (d: Decl) bool { d.match ({ .DStruct(sd) => sd.struct_is_trait(), _ => false }) }
-fntype* = (params: [Ty], ret: Ptr<Ty>) Ty { .FnT(FnTData( params: params, ret: ret )) }
-mktag* = (ty: str, v: str) Expr { .Tag(TagData( ty: ty, mty: ty, variant: v, targs: no_tys() )) }
-mktagg* = (ty: str, mty: str, targs: [Ty], v: str) Expr { .Tag(TagData( ty: ty, mty: mty, variant: v, targs: targs )) }
-arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData { ArmData( variant: v, bind: bind, body: body, pos: 0 ) }
-arm_at* = (v: str, bind: str, body: Ptr<Expr>, p: i32) ArmData { ArmData( variant: v, bind: bind, body: body, pos: p ) }   // source-backed (formatter anchors arm comments)
-ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData( subj: subj, ename: ename, arms: arms, ptr: false )) }
-ematchp* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr { .Match(MatchData( subj: subj, ename: ename, arms: arms, ptr: true )) }
-strlit* = (v: str) Expr { .StrLit(StrData( value: v, pos: 0 )) }
-strlit_at* = (v: str, p: i32) Expr { .StrLit(StrData( value: v, pos: p )) }   // a source-backed string literal
-tstr* = () Ty { .Str() }
-tcstr* = () Ty { .Cstr() }
-ttext* = () Ty { .Text() }
-slet*  = (nm: str, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: tvoid(), value: v, pos: 0 )) }
-slett* = (nm: str, t: Ty, v: Ptr<Expr>) Stmt { .Let(LetData( name: nm, ty: t, value: v, pos: 0 )) }   // a TYPED let
-slet_at*  = (nm: str, v: Ptr<Expr>, p: i32) Stmt { .Let(LetData( name: nm, ty: tvoid(), value: v, pos: p )) }   // source-backed let (formatter needs the name position)
-slett_at* = (nm: str, t: Ty, v: Ptr<Expr>, p: i32) Stmt { .Let(LetData( name: nm, ty: t, value: v, pos: p )) }
+is_trait* = (d: Decl) bool {
+    d.match ({
+        .DStruct(sd) => sd.struct_is_trait(),
+        _            => false,
+    })
+}
+fntype* = (params: [Ty], ret: Ptr<Ty>) Ty {
+    .FnT(FnTData(
+        params: params,
+        ret: ret,
+    ))
+}
+mktag* = (ty: str, v: str) Expr {
+    .Tag(TagData(
+        ty: ty,
+        mty: ty,
+        variant: v,
+        targs: no_tys(),
+    ))
+}
+mktagg* = (ty: str, mty: str, targs: [Ty], v: str) Expr {
+    .Tag(TagData(
+        ty: ty,
+        mty: mty,
+        variant: v,
+        targs: targs,
+    ))
+}
+arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData {
+    ArmData(
+        variant: v,
+        bind: bind,
+        body: body,
+        pos: 0,
+    )
+}
+arm_at* = (v: str, bind: str, body: Ptr<Expr>, p: i32) ArmData {
+    ArmData(
+        variant: v,
+        bind: bind,
+        body: body,
+        pos: p,
+    )
+}    // source-backed (formatter anchors arm comments)
+ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr {
+    .Match(MatchData(
+        subj: subj,
+        ename: ename,
+        arms: arms,
+        ptr: false,
+    ))
+}
+ematchp* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr {
+    .Match(MatchData(
+        subj: subj,
+        ename: ename,
+        arms: arms,
+        ptr: true,
+    ))
+}
+strlit* = (v: str) Expr {
+    .StrLit(StrData(
+        value: v,
+        pos: 0,
+    ))
+}
+strlit_at* = (v: str, p: i32) Expr {
+    .StrLit(StrData(
+        value: v,
+        pos: p,
+    ))
+}    // a source-backed string literal
+tstr* = () Ty { .Str }
+tcstr* = () Ty { .Cstr }
+ttext* = () Ty { .Text }
+slet* = (nm: str, v: Ptr<Expr>) Stmt {
+    .Let(LetData(
+        name: nm,
+        ty: tvoid(),
+        value: v,
+        pos: 0,
+    ))
+}
+slett* = (nm: str, t: Ty, v: Ptr<Expr>) Stmt {
+    .Let(LetData(
+        name: nm,
+        ty: t,
+        value: v,
+        pos: 0,
+    ))
+}    // a TYPED let
+slet_at* = (nm: str, v: Ptr<Expr>, p: i32) Stmt {
+    .Let(LetData(
+        name: nm,
+        ty: tvoid(),
+        value: v,
+        pos: p,
+    ))
+}    // source-backed let (formatter needs the name position)
+slett_at* = (nm: str, t: Ty, v: Ptr<Expr>, p: i32) Stmt {
+    .Let(LetData(
+        name: nm,
+        ty: t,
+        value: v,
+        pos: p,
+    ))
+}
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
-sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }                  // a bare expression evaluated for effect
-sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt { .Assign(AssignData( target: tgt, value: v, pos: 0 )) }
-sassign_at* = (tgt: Ptr<Expr>, v: Ptr<Expr>, p: i32) Stmt { .Assign(AssignData( target: tgt, value: v, pos: p )) }
-sidxset* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>) Stmt { .IndexSet(IndexSetData( seq: seq, idx: i, elem: elem, value: v, pos: 0 )) }
-sidxset_at* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>, p: i32) Stmt { .IndexSet(IndexSetData( seq: seq, idx: i, elem: elem, value: v, pos: p )) }
-sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt { .If(IfData( c: c, then: t, els: e )) }
-swhile* = (c: Ptr<Expr>, b: [Stmt]) Stmt { .While(WhileData( c: c, body: b )) }
-ti32* = () Ty { .I32() }
-ti64* = () Ty { .I64() }
-tu8* = () Ty { .U8() }
-tf64* = () Ty { .F64() }
-tbool* = () Ty { .Bool() }
+sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }    // a bare expression evaluated for effect
+sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt {
+    .Assign(AssignData(
+        target: tgt,
+        value: v,
+        pos: 0,
+    ))
+}
+sassign_at* = (tgt: Ptr<Expr>, v: Ptr<Expr>, p: i32) Stmt {
+    .Assign(AssignData(
+        target: tgt,
+        value: v,
+        pos: p,
+    ))
+}
+sidxset* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>) Stmt {
+    .IndexSet(IndexSetData(
+        seq: seq,
+        idx: i,
+        elem: elem,
+        value: v,
+        pos: 0,
+    ))
+}
+sidxset_at* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>, p: i32) Stmt {
+    .IndexSet(IndexSetData(
+        seq: seq,
+        idx: i,
+        elem: elem,
+        value: v,
+        pos: p,
+    ))
+}
+sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt {
+    .If(IfData(
+        c: c,
+        then: t,
+        els: e,
+    ))
+}
+swhile* = (c: Ptr<Expr>, b: [Stmt]) Stmt {
+    .While(WhileData(
+        c: c,
+        body: b,
+    ))
+}
+ti32* = () Ty { .I32 }
+ti64* = () Ty { .I64 }
+tu8* = () Ty { .U8 }
+tf64* = () Ty { .F64 }
+tbool* = () Ty { .Bool }
 tnamed* = (n: str) Ty { .Named(n) }
-tgeneric* = (nm: str, args: [Ty], mangled: str) Ty { .Generic(GenericData( name: nm, args: args, mangled: mangled )) }
+tgeneric* = (nm: str, args: [Ty], mangled: str) Ty {
+    .Generic(GenericData(
+        name: nm,
+        args: args,
+        mangled: mangled,
+    ))
+}
 // the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` -> `Vec_ptr_u8`.
 // A C identifier fragment per arg (prims by name, a nested generic by its own mangled name).
 mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
-        .I32 => s.gstr_append(a, "i32"), .I64 => s.gstr_append(a, "i64"), .U8 => s.gstr_append(a, "u8"), .F64 => s.gstr_append(a, "f64"),
+        .I32        => s.gstr_append(a, "i32"),
+        .I64        => s.gstr_append(a, "i64"),
+        .U8         => s.gstr_append(a, "u8"),
+        .F64        => s.gstr_append(a, "f64"),
         // str/cstr/text all lower to `const char*`, so they share ONE monomorphization name: a generic
-    // arg inferred as `text` (e.g. from a string literal) names the SAME C instance as one annotated
-    // `str`. This is what makes `okv("hi")` flowing into a `Result<str, _>` context name-match.
-    .Bool => s.gstr_append(a, "bool"), .Str => s.gstr_append(a, "str"), .Cstr => s.gstr_append(a, "str"), .Text => s.gstr_append(a, "str"), .Void => s.gstr_append(a, "void"),
+        // arg inferred as `text` (e.g. from a string literal) names the SAME C instance as one annotated
+        // `str`. This is what makes `okv("hi")` flowing into a `Result<str, _>` context name-match.
+        .Bool       => s.gstr_append(a, "bool"),
+        .Str        => s.gstr_append(a, "str"),
+        .Cstr       => s.gstr_append(a, "str"),
+        .Text       => s.gstr_append(a, "str"),
+        .Void       => s.gstr_append(a, "void"),
         .Named(n)   => s.gstr_append(a, n),
         .Generic(g) => s.gstr_append(a, g.mangled),
         .Ptr(pd)    => s.gstr_append(a, "ptr_").mangle_ty(a, load(pd.pointee)),
         .Slice(e)   => s.gstr_append(a, "slice_").mangle_ty(a, load(e)),
-        .FnT(ft)    => s.gstr_append(a, "fn")
+        .FnT(ft)    => s.gstr_append(a, "fn"),
     })
 }
-
 mangle_ty_len = (t: Ty) i64 {
     t.match ({
-        .I32 => 3, .I64 => 3, .U8 => 2, .F64 => 3, .Bool => 4, .Str => 3, .Cstr => 3, .Text => 3, .Void => 4,
+        .I32        => 3,
+        .I64        => 3,
+        .U8         => 2,
+        .F64        => 3,
+        .Bool       => 4,
+        .Str        => 3,
+        .Cstr       => 3,
+        .Text       => 3,
+        .Void       => 4,
         .Named(n)   => n.view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(pd)    => 4 + load(pd.pointee).mangle_ty_len(),
         .Slice(e)   => 6 + load(e).mangle_ty_len(),
-        .FnT(ft)    => 2
+        .FnT(ft)    => 2,
     })
 }
 mangle_args_len = (args: [Ty]) i64 {
     n := 0
-    args.loop((h, i, t) { n = n + 1 + t.mangle_ty_len() })
+    args.loop((h, i, t) {
+        n = n + 1 + t.mangle_ty_len()
+    })
     n
 }
 mangle_write_ty = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
-        .I32 => dst.write_str(at, "i32"), .I64 => dst.write_str(at, "i64"), .U8 => dst.write_str(at, "u8"), .F64 => dst.write_str(at, "f64"),
-        .Bool => dst.write_str(at, "bool"), .Str => dst.write_str(at, "str"), .Cstr => dst.write_str(at, "str"), .Text => dst.write_str(at, "str"), .Void => dst.write_str(at, "void"),
+        .I32        => dst.write_str(at, "i32"),
+        .I64        => dst.write_str(at, "i64"),
+        .U8         => dst.write_str(at, "u8"),
+        .F64        => dst.write_str(at, "f64"),
+        .Bool       => dst.write_str(at, "bool"),
+        .Str        => dst.write_str(at, "str"),
+        .Cstr       => dst.write_str(at, "str"),
+        .Text       => dst.write_str(at, "str"),
+        .Void       => dst.write_str(at, "void"),
         .Named(n)   => dst.write_str(at, n),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(pd)    => dst.mangle_write_ty(dst.write_str(at, "ptr_"), load(pd.pointee)),
         .Slice(e)   => dst.mangle_write_ty(dst.write_str(at, "slice_"), load(e)),
-        .FnT(ft)    => dst.write_str(at, "fn")
+        .FnT(ft)    => dst.write_str(at, "fn"),
     })
 }
 mangle_write_args = (dst: RawPtr<u8>, at: i64, args: [Ty]) i64 {
@@ -329,13 +798,24 @@ mangle_write_args = (dst: RawPtr<u8>, at: i64, args: [Ty]) i64 {
 // `__fnt_AppState_i32_r_AppState`. The matching `typedef Ret (*name)(Args);` is emitted by genc_emit.
 fnt_cname* = (a: MutPtr<Malloc>, ft: FnTData) str {
     s := a.gstr_string(48).gstr_append(a, "__fnt")
-    ft.params.loop((h, i, p) { s = s.gstr_append(a, "_").mangle_ty(a, p) })
+    ft.params.loop((h, i, p) {
+        s = s.gstr_append(a, "_").mangle_ty(a, p)
+    })
     s.gstr_append(a, "_r_").mangle_ty(a, load(ft.ret)).gstr_finish(a)
 }
 mangle_str_in* = (a: MutPtr<Malloc>, base: str, args: [Ty]) str {
-    n   := base.view().len + args.mangle_args_len()
+    n := base.view().len + args.mangle_args_len()
     buf: RawPtr<u8> := a.acquire(n + 1)
     end := buf.mangle_write_args(buf.write_str(0, base), args)
+    buf.finish_buf(end)
+}
+// `ns.Type` — a dotted qualified name. The FAITHFUL parser (fmt) keeps a namespace-qualified struct
+// literal's `ns.` prefix (`trace.Node(has: 0)`) so the formatter round-trips it verbatim; the flatten
+// pipeline resolves `ns.Type` to `Type` BEFORE parsing, so only fmt reaches the dotted form.
+dotted_name_in* = (a: MutPtr<Malloc>, ns: str, name: str) str {
+    n := ns.view().len + 1 + name.view().len
+    buf: RawPtr<u8> := a.acquire(n + 1)
+    end := buf.write_str(buf.write_str(buf.write_str(0, ns), "."), name)
     buf.finish_buf(end)
 }
 // ── anonymous (structural) struct naming ──────────────────────────────────────────
@@ -347,7 +827,9 @@ mangle_str_in* = (a: MutPtr<Malloc>, base: str, args: [Ty]) str {
 // position) is hoisted into the module decl list by the parser.
 anon_fields_len = (fields: [Field]) i64 {
     n := 0
-    fields.loop((h, i, f) { n = n + 1 + f.name.view().len })   // 1 for the '_' separator
+    fields.loop((h, i, f) {
+        n = n + 1 + f.name.view().len
+    })    // 1 for the '_' separator
     n
 }
 anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: [Field]) i64 {
@@ -359,7 +841,7 @@ anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: [Field]) i64 {
     out
 }
 mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) str {
-    n   := 6 + fields.anon_fields_len()                        // "__anon" = 6 bytes
+    n := 6 + fields.anon_fields_len()    // "__anon" = 6 bytes
     buf: RawPtr<u8> := a.acquire(n + 1)
     end := buf.anon_write_fields(buf.write_str(0, "__anon"), fields)
     buf.finish_buf(end)
@@ -369,10 +851,14 @@ mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) str {
 // `.B(a, b)` constructor, so their anon-struct names mangle identically.
 pf_digit = (d: i32) u8 { load(offset("0123456789", d)) }
 pf_write = (dst: RawPtr<u8>, at: i64, v: i32) i64 {
-    (v < 10).match ({
-        true  => { dst.offset(at).store(pf_digit(v))  at + 1 },
-        false => { np := dst.pf_write(at, v / 10)  dst.offset(np).store(pf_digit(v % 10))  np + 1 }
-    })
+    (v < 10).match ({ true => {
+        dst.offset(at).store(pf_digit(v))
+        at + 1
+    }, false => {
+        np := dst.pf_write(at, v / 10)
+        dst.offset(np).store(pf_digit(v % 10))
+        np + 1
+    } })
 }
 payload_fname* = (a: MutPtr<Malloc>, idx: i32) str {
     buf: RawPtr<u8> := a.acquire(24)
@@ -382,51 +868,227 @@ payload_fname* = (a: MutPtr<Malloc>, idx: i32) str {
 // types implementing the same trait method emit DISTINCT C functions. UFCS dispatch routes `x.m()` to
 // the impl for x's type (compiler.check dispatch_name).
 impl_cname_in* = (a: MutPtr<Malloc>, trname: str, ty: str, method: str) str {
-    n   := 5 + trname.view().len + 1 + ty.view().len + 1 + method.view().len
+    n := 5 + trname.view().len + 1 + ty.view().len + 1 + method.view().len
     buf: RawPtr<u8> := a.acquire(n + 1)
-    p1  := buf.write_str(0, "impl_")
-    p2  := buf.write_str(p1, trname)
-    p3  := buf.write_str(p2, "_")
-    p4  := buf.write_str(p3, ty)
-    p5  := buf.write_str(p4, "_")
+    p1 := buf.write_str(0, "impl_")
+    p2 := buf.write_str(p1, trname)
+    p3 := buf.write_str(p2, "_")
+    p4 := buf.write_str(p3, ty)
+    p5 := buf.write_str(p4, "_")
     buf.finish_buf(buf.write_str(p5, method))
 }
-tptr* = (t: Ptr<Ty>) Ty { .Ptr(PtrData( pointee: t, kind: k_mut_ptr() )) }
-tptr_k* = (t: Ptr<Ty>, k: i32) Ty { .Ptr(PtrData( pointee: t, kind: k )) }
+tptr* = (t: Ptr<Ty>) Ty {
+    .Ptr(PtrData(
+        pointee: t,
+        kind: k_mut_ptr(),
+    ))
+}
+tptr_k* = (t: Ptr<Ty>, k: i32) Ty {
+    .Ptr(PtrData(
+        pointee: t,
+        kind: k,
+    ))
+}
 tslice* = (e: Ptr<Ty>) Ty { .Slice(e) }
-param* = (nm: str, t: Ty) Param { Param( name: nm, ty: t, variadic: false ) }
-pvariadic* = (nm: str, t: Ty) Param { Param( name: nm, ty: t, variadic: true ) }   // a `...T` param: ty = the collected `[T]`
-field* = (nm: str, t: Ty) Field { Field( name: nm, ty: t ) }
-sdef* = (nm: str, fs: [Field]) StructDecl { StructDecl( name: nm, fields: fs, pos: 0 ) }
-sdef_at* = (nm: str, fs: [Field], p: i32) StructDecl { StructDecl( name: nm, fields: fs, pos: p ) }   // source-backed (formatter anchors a leading comment above the struct)
-gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl { GenStructDecl( name: nm, tparams: tps, fields: fs, pos: 0 ) }
-gsdef_at* = (nm: str, tps: [Param], fs: [Field], p: i32) GenStructDecl { GenStructDecl( name: nm, tparams: tps, fields: fs, pos: p ) }
-genumdef* = (nm: str, tps: [Param], vs: [VariantDef]) GenEnumDecl { GenEnumDecl( name: nm, tparams: tps, variants: vs, pos: 0 ) }
-genumdef_at* = (nm: str, tps: [Param], vs: [VariantDef], p: i32) GenEnumDecl { GenEnumDecl( name: nm, tparams: tps, variants: vs, pos: p ) }
-tvoid* = () Ty { .Void() }
-vdef* = (nm: str, p: Ty) VariantDef { VariantDef( name: nm, payload: p, dflt: null_ptr() ) }
-vdef_default* = (nm: str, p: Ty, e: Ptr<Expr>) VariantDef { VariantDef( name: nm, payload: p, dflt: e ) }
-expr_null* = () Ptr<Expr> { vdef("", tvoid()).dflt }       // a null Ptr<Expr> carrying the right static type
+param* = (nm: str, t: Ty) Param {
+    Param(
+        name: nm,
+        ty: t,
+        variadic: false,
+    )
+}
+pvariadic* = (nm: str, t: Ty) Param {
+    Param(
+        name: nm,
+        ty: t,
+        variadic: true,
+    )
+}    // a `...T` param: ty = the collected `[T]`
+field* = (nm: str, t: Ty) Field {
+    Field(
+        name: nm,
+        ty: t,
+    )
+}
+sdef* = (nm: str, fs: [Field]) StructDecl {
+    StructDecl(
+        name: nm,
+        fields: fs,
+        pos: 0,
+    )
+}
+sdef_at* = (nm: str, fs: [Field], p: i32) StructDecl {
+    StructDecl(
+        name: nm,
+        fields: fs,
+        pos: p,
+    )
+}    // source-backed (formatter anchors a leading comment above the struct)
+gsdef* = (nm: str, tps: [Param], fs: [Field]) GenStructDecl {
+    GenStructDecl(
+        name: nm,
+        tparams: tps,
+        fields: fs,
+        pos: 0,
+    )
+}
+gsdef_at* = (nm: str, tps: [Param], fs: [Field], p: i32) GenStructDecl {
+    GenStructDecl(
+        name: nm,
+        tparams: tps,
+        fields: fs,
+        pos: p,
+    )
+}
+genumdef* = (nm: str, tps: [Param], vs: [VariantDef]) GenEnumDecl {
+    GenEnumDecl(
+        name: nm,
+        tparams: tps,
+        variants: vs,
+        pos: 0,
+    )
+}
+genumdef_at* = (nm: str, tps: [Param], vs: [VariantDef], p: i32) GenEnumDecl {
+    GenEnumDecl(
+        name: nm,
+        tparams: tps,
+        variants: vs,
+        pos: p,
+    )
+}
+tvoid* = () Ty { .Void }
+vdef* = (nm: str, p: Ty) VariantDef {
+    VariantDef(
+        name: nm,
+        payload: p,
+        dflt: null_ptr(),
+    )
+}
+vdef_default* = (nm: str, p: Ty, e: Ptr<Expr>) VariantDef {
+    VariantDef(
+        name: nm,
+        payload: p,
+        dflt: e,
+    )
+}
+expr_null* = () Ptr<Expr> { vdef("", tvoid()).dflt }    // a null Ptr<Expr> carrying the right static type
 is_expr_null* = (e: Ptr<Expr>) bool { e == null_ptr() }
-edef* = (nm: str, vs: [VariantDef]) EnumDecl { EnumDecl( name: nm, variants: vs, pos: 0 ) }
-edef_at* = (nm: str, vs: [VariantDef], p: i32) EnumDecl { EnumDecl( name: nm, variants: vs, pos: p ) }   // source-backed (formatter leading-comment anchor)
+edef* = (nm: str, vs: [VariantDef]) EnumDecl {
+    EnumDecl(
+        name: nm,
+        variants: vs,
+        pos: 0,
+    )
+}
+edef_at* = (nm: str, vs: [VariantDef], p: i32) EnumDecl {
+    EnumDecl(
+        name: nm,
+        variants: vs,
+        pos: p,
+    )
+}    // source-backed (formatter leading-comment anchor)
 dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
-dimport* = (names: [Param], module: str) Decl { .DImport(ImportData( names: names, module: module, pos: 0 )) }
-dimport_at* = (names: [Param], module: str, p: i32) Decl { .DImport(ImportData( names: names, module: module, pos: p )) }   // source-backed import (formatter anchors a file-header comment above it)
+dimport* = (names: [Param], module: str) Decl {
+    .DImport(ImportData(
+        names: names,
+        module: module,
+        pos: 0,
+    ))
+}
+dimport_at* = (names: [Param], module: str, p: i32) Decl {
+    .DImport(ImportData(
+        names: names,
+        module: module,
+        pos: p,
+    ))
+}    // source-backed import (formatter anchors a file-header comment above it)
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
-dimpl* = (ty: str, trname: str, methods: [Param]) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: 0 )) }
-dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl { .DImpl(ImplData( ty: ty, trname: trname, methods: methods, pos: pos )) }
-dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: false, pos: 0 )) }
-dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true, alias: false, pos: 0 )) }
-dglobal_alias* = (name: str, ty: Ty, init: Ptr<Expr>) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: true, pos: 0 )) }   // module-alias `name = mod`
-dglobal_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: false, pos: p )) }
-dglobal_tl_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: true, alias: false, pos: p )) }
-dglobal_alias_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl { .DGlobal(GlobalData( name: name, ty: ty, init: init, tl: false, alias: true, pos: p )) }   // source-backed module-alias
-dtraitdef* = (trname: str, fn: Func) Decl { .DTraitDefault(TraitDefData( trname: trname, fn: fn )) }
+dimpl* = (ty: str, trname: str, methods: [Param]) Decl {
+    .DImpl(ImplData(
+        ty: ty,
+        trname: trname,
+        methods: methods,
+        pos: 0,
+    ))
+}
+dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl {
+    .DImpl(ImplData(
+        ty: ty,
+        trname: trname,
+        methods: methods,
+        pos: pos,
+    ))
+}
+dglobal* = (name: str, ty: Ty, init: Ptr<Expr>) Decl {
+    .DGlobal(GlobalData(
+        name: name,
+        ty: ty,
+        init: init,
+        tl: false,
+        alias: false,
+        pos: 0,
+    ))
+}
+dglobal_tl* = (name: str, ty: Ty, init: Ptr<Expr>) Decl {
+    .DGlobal(GlobalData(
+        name: name,
+        ty: ty,
+        init: init,
+        tl: true,
+        alias: false,
+        pos: 0,
+    ))
+}
+dglobal_alias* = (name: str, ty: Ty, init: Ptr<Expr>) Decl {
+    .DGlobal(GlobalData(
+        name: name,
+        ty: ty,
+        init: init,
+        tl: false,
+        alias: true,
+        pos: 0,
+    ))
+}    // module-alias `name = mod`
+dglobal_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
+    .DGlobal(GlobalData(
+        name: name,
+        ty: ty,
+        init: init,
+        tl: false,
+        alias: false,
+        pos: p,
+    ))
+}
+dglobal_tl_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
+    .DGlobal(GlobalData(
+        name: name,
+        ty: ty,
+        init: init,
+        tl: true,
+        alias: false,
+        pos: p,
+    ))
+}
+dglobal_alias_at* = (name: str, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
+    .DGlobal(GlobalData(
+        name: name,
+        ty: ty,
+        init: init,
+        tl: false,
+        alias: true,
+        pos: p,
+    ))
+}    // source-backed module-alias
+dtraitdef* = (trname: str, fn: Func) Decl {
+    .DTraitDefault(TraitDefData(
+        trname: trname,
+        fn: fn,
+    ))
+}
 mono_tybuf_in = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.mono_tybuf_in(1)
@@ -437,86 +1099,121 @@ mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
 fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     buf := a.mono_tybuf_in(ps.len)
-    ps.loop((h, i, p) { buf[i] = p.ty })
+    ps.loop((h, i, p) {
+        buf[i] = p.ty
+    })
     buf
 }
 ty_node_in* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
 fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty { fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret)) }
-draw* = (c: str) Decl { .DRaw(c) }                      // emit verbatim C: an attribute,
+draw* = (c: str) Decl { .DRaw(c) }    // emit verbatim C: an attribute,
 // pragma, intrinsic decl, anything
-
-
 // map a narrow int/float type name to its C type; any other name passes through unchanged.
 // the checker accepts i8/i16/u16/u32/u64/f32 but they reach genc as Named(name), so without
 // this they'd leak the Zen name (`u32`, `f32`, …) straight to cc as an unknown C type.
-width_cname* = (n: str) str {
-    eq(n, "i8").match ({ true => "int8_t", false =>
-        eq(n, "i16").match ({ true => "int16_t", false =>
-            eq(n, "u16").match ({ true => "uint16_t", false =>
-                eq(n, "u32").match ({ true => "uint32_t", false =>
-                    eq(n, "u64").match ({ true => "uint64_t", false =>
-                        eq(n, "f32").match ({ true => "float", false => n })})})})})})
-}
+width_cname* = (n: str) str { eq(n, "i8").match ({ true => "int8_t", false => eq(n, "i16").match ({ true => "int16_t", false => eq(n, "u16").match ({ true => "uint16_t", false => eq(n, "u32").match ({ true => "uint32_t", false => eq(n, "u64").match ({ true => "uint64_t", false => eq(n, "f32").match ({ true => "float", false => n }) }) }) }) }) }) }
 // append a C type — recurses for pointers (`T*`), so it can't be a plain str-returning fn
 gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
     out := s
     t.match ({
-        .I32 => { out = out.gstr_append(a, "int32_t") },
-        .I64 => { out = out.gstr_append(a, "int64_t") },
-        .U8 => { out = out.gstr_append(a, "uint8_t") },
-        .F64 => { out = out.gstr_append(a, "double") },
-        .Bool => { out = out.gstr_append(a, "bool") },
-        .Void => { out = out.gstr_append(a, "void") },
-        .Str => { out = out.gstr_append(a, "const char*") },
-        .Cstr => { out = out.gstr_append(a, "const char*") },
-        .Text => { out = out.gstr_append(a, "const char*") },
-        .Named(n) => { out = out.gstr_append(a, width_cname(n)) },
-        .Ptr(pd) => {
+        .I32        => {
+            out = out.gstr_append(a, "int32_t")
+        },
+        .I64        => {
+            out = out.gstr_append(a, "int64_t")
+        },
+        .U8         => {
+            out = out.gstr_append(a, "uint8_t")
+        },
+        .F64        => {
+            out = out.gstr_append(a, "double")
+        },
+        .Bool       => {
+            out = out.gstr_append(a, "bool")
+        },
+        .Void       => {
+            out = out.gstr_append(a, "void")
+        },
+        .Str        => {
+            out = out.gstr_append(a, "const char*")
+        },
+        .Cstr       => {
+            out = out.gstr_append(a, "const char*")
+        },
+        .Text       => {
+            out = out.gstr_append(a, "const char*")
+        },
+        .Named(n)   => {
+            out = out.gstr_append(a, width_cname(n))
+        },
+        .Ptr(pd)    => {
             inner := out.gen_ty(a, pd.pointee)
             out = inner.gstr_append(a, "*")
         },
-        .Slice(e) => { out = out.gstr_append(a, "zslice") },                // [T] is the fat-pointer struct (T recovered at use)
-        .FnT(ft)  => { out = out.gstr_append(a, "zfn") },                   // a first-class function value: the generic fn-pointer typedef
-        .Generic(g) => { out = out.gstr_append(a, g.mangled) }              // a generic instance → its monomorphized C name
-    })
+        .Slice(e)   => {
+            out = out.gstr_append(a, "zslice")
+        },    // [T] is the fat-pointer struct (T recovered at use)
+        .FnT(ft)    => {
+            out = out.gstr_append(a, "zfn")
+        },    // a first-class function value: the generic fn-pointer typedef
+        .Generic(g) => {
+            out = out.gstr_append(a, g.mangled)
+        },
+    })    // a generic instance → its monomorphized C name
     out
 }
 // the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 cname_len = (t: Ty) i64 {
     t.match ({
-        .I32 => 7, .I64 => 7, .U8 => 7, .F64 => 6, .Bool => 4, .Void => 4, .Str => 11, .Cstr => 11, .Text => 11,
+        .I32        => 7,
+        .I64        => 7,
+        .U8         => 7,
+        .F64        => 6,
+        .Bool       => 4,
+        .Void       => 4,
+        .Str        => 11,
+        .Cstr       => 11,
+        .Text       => 11,
         .Named(n)   => width_cname(n).view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(pd)    => load(pd.pointee).cname_len() + 1,
         .Slice(e)   => 6,
-        .FnT(ft)    => 3
+        .FnT(ft)    => 3,
     })
 }
 cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
-        .I32 => dst.write_str(at, "int32_t"), .I64 => dst.write_str(at, "int64_t"), .U8 => dst.write_str(at, "uint8_t"), .F64 => dst.write_str(at, "double"),
-        .Bool => dst.write_str(at, "bool"), .Void => dst.write_str(at, "void"), .Str => dst.write_str(at, "const char*"), .Cstr => dst.write_str(at, "const char*"), .Text => dst.write_str(at, "const char*"),
+        .I32        => dst.write_str(at, "int32_t"),
+        .I64        => dst.write_str(at, "int64_t"),
+        .U8         => dst.write_str(at, "uint8_t"),
+        .F64        => dst.write_str(at, "double"),
+        .Bool       => dst.write_str(at, "bool"),
+        .Void       => dst.write_str(at, "void"),
+        .Str        => dst.write_str(at, "const char*"),
+        .Cstr       => dst.write_str(at, "const char*"),
+        .Text       => dst.write_str(at, "const char*"),
         .Named(n)   => dst.write_str(at, width_cname(n)),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(pd)    => dst.write_str(dst.cname_write(at, load(pd.pointee)), "*"),
         .Slice(e)   => dst.write_str(at, "zslice"),
-        .FnT(ft)    => dst.write_str(at, "zfn")
+        .FnT(ft)    => dst.write_str(at, "zfn"),
     })
 }
 ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) str {
-    n   := t.cname_len()
+    n := t.cname_len()
     buf: RawPtr<u8> := a.acquire(n + 1)
     buf.finish_buf(buf.cname_write(0, t))
 }
-
 // ── type substitution (tparam→arg): shared by compiler.check (subst_ty_in/find_genenum) and the
 //    monomorphize pass (compiler.mono). A tiny stack of [Ty] buffer helpers + the recursive
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
 // substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
 tparam_arg = (tparams: [Param], args: [Ty], n: str, dflt: Ty) Ty {
     found := dflt
-    tparams.loop((h, i, tp) { found = eq(tp.name, n).match ({ true => args[i], false => found }) })
+    tparams.loop((h, i, tp) {
+        found = eq(tp.name, n).match ({ true => args[i], false => found })
+    })
     found
 }
 subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
@@ -524,15 +1221,17 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
         .Named(n)   => tparams.tparam_arg(args, n, t),
         .Ptr(pd)    => tptr_k(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
         .Slice(e)   => tslice(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(e)))),
-        .Generic(g) => a.subst_generic_in(tparams, args, g),   // a nested generic field: substitute its args, re-mangle
-        .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),       // a function-VALUE field `(S, i32) S`: substitute inside the signature
-        _           => t
+        .Generic(g) => a.subst_generic_in(tparams, args, g),    // a nested generic field: substitute its args, re-mangle
+        .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),    // a function-VALUE field `(S, i32) S`: substitute inside the signature
+        _           => t,
     })
 }
 // substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
 subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty {
     ptys := a.mono_tybuf_in(ft.params.len)
-    ft.params.loop((h, i, p) { ptys[i] = a.subst_ty_in(tparams, args, p) })
+    ft.params.loop((h, i, p) {
+        ptys[i] = a.subst_ty_in(tparams, args, p)
+    })
     fntype(ptys, a.mono_tynode_in(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
@@ -540,11 +1239,22 @@ subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericD
     // `tys` (not `buf`): mangle_str_in inlines a local `buf: RawPtr<u8>`, and the inliner
     // substitutes args by name — a caller arg also named `buf` would be captured by that local.
     tys := a.mono_tybuf_in(g.args.len)
-    g.args.loop((h, i, gt) { tys[i] = a.subst_ty_in(tparams, args, gt) })
+    g.args.loop((h, i, gt) {
+        tys[i] = a.subst_ty_in(tparams, args, gt)
+    })
     tgeneric(g.name, tys, a.mangle_str_in(g.name, tys))
 }
 find_genenum* = (decls: [Decl], name: str) GenEnumDecl {
-    found := GenEnumDecl( name: "", tparams: slice(null_ptr(), 0), variants: slice(null_ptr(), 0) )
-    decls.loop((h, i, d) { found = d.match ({ .DGenEnum(g) => eq(g.name, name).match ({ true => g, false => found }), _ => found }) })
+    found := GenEnumDecl(
+        name: "",
+        tparams: slice(null_ptr(), 0),
+        variants: slice(null_ptr(), 0),
+    )
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DGenEnum(g) => eq(g.name, name).match ({ true => g, false => found }),
+            _            => found,
+        })
+    })
     found
 }

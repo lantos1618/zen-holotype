@@ -2,33 +2,42 @@
 // accumulator. Run across 4 workers. Assert (a) total is exact (no lost/dup work) AND (b) >= 2 workers
 // processed messages (work demonstrably fanned across cores).
 { pool_open, pool_spawn, pool_send, pool_quiesce_stop, pool_close, pool_actor_free, workers_busy, Pool } = std.concurrent.pool
-
-NACT    := 8
-PERMSG  := 5000
+NACT := 8
+PERMSG := 5000
 WORKERS := 4
-
 acc := malloc(8)
 actors := malloc(NACT * 8)
-
 spin = (n: i64, s: i64) i64 { (n <= 0).match ({ true => s, false => spin(n - 1, s + n) }) }
 behave = (user: RawPtr<u8>, msg: i64) void {
     junk := spin(150, 0)
-    (junk >= 0).match ({ true => { atomic_add_i64(user, msg) }, false => {} })
+    (junk >= 0).match ({ true => {
+        atomic_add_i64(user, msg)
+    }, false => { } })
 }
-
 send_n = (p: MutPtr<Pool>, a: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({ true => { p.pool_send(a, 1)  send_n(p, a, i + 1, n) }, false => {} })
+    (i < n).match ({ true => {
+        p.pool_send(a, 1)
+        send_n(p, a, i + 1, n)
+    }, false => { } })
 }
 spawn_all = (i: i64) void {
-    (i < NACT).match ({ true => { actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))  spawn_all(i + 1) }, false => {} })
+    (i < NACT).match ({ true => {
+        actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))
+        spawn_all(i + 1)
+    }, false => { } })
 }
 blast = (p: MutPtr<Pool>, i: i64) void {
-    (i < NACT).match ({ true => { send_n(p, actors.offset(i * 8).load_i64().offset(0), 0, PERMSG)  blast(p, i + 1) }, false => {} })
+    (i < NACT).match ({ true => {
+        send_n(p, actors.offset(i * 8).load_i64().offset(0), 0, PERMSG)
+        blast(p, i + 1)
+    }, false => { } })
 }
 free_all = (i: i64) void {
-    (i < NACT).match ({ true => { pool_actor_free(actors.offset(i * 8).load_i64().offset(0))  free_all(i + 1) }, false => {} })
+    (i < NACT).match ({ true => {
+        pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
+        free_all(i + 1)
+    }, false => { } })
 }
-
 main = () i32 {
     store_i64(acc, 0)
     spawn_all(0)
@@ -42,8 +51,5 @@ main = () i32 {
     free(actors)
     free(acc)
     expected := NACT * PERMSG
-    (total == expected).match ({
-        true  => (busy >= 2).match ({ true => 7, false => 3 }),
-        false => 1
-    })
+    (total == expected).match ({ true => (busy >= 2).match ({ true => 7, false => 3 }), false => 1 })
 }

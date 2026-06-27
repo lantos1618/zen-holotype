@@ -50,120 +50,130 @@
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
-
 { Result, Opt, err } = std.core.result
 { Malloc } = std.mem.alloc
 { String, new_in, push_in, append_in, finish_in } = std.text.string
 { view, substr_in, eq } = std.text.str
 { parse_f64, float_in } = std.text.num
-
 // ── the value type ───────────────────────────────────────────────────────────
-Entry*:  { key: str, val: Value }
-Object*: { entries: [Entry] }
-Value*:  Null | Bool(bool) | Num(f64) | Str(str) | Arr([Value]) | Obj(Object)
-
+Entry*: {
+    key: str,
+    val: Value,
+}
+Object*: {
+    entries: [Entry],
+}
+Value*: Null | Bool(bool) | Num(f64) | Str(str) | Arr([Value]) | Obj(Object)
 // A parse error, carrying the byte offset where it was detected (UnexpectedEof carries none).
 JsonError*: Unexpected(i64) | BadString(i64) | BadNumber(i64) | BadLiteral(i64) | TrailingGarbage(i64) | UnexpectedEof | TooDeep
-
 // nesting cap so a pathological "[[[[…" can't blow the native stack.
 MAX_DEPTH := 256
-
 // ── internal step values (a parsed node + the offset just past it) ────────────
-Step:    { v: Value, pos: i64 }
-StrStep: { s: str,   pos: i64 }
-
-step_ok  = (v: Value, pos: i64) Result<Step, JsonError> { .Ok(Step( v: v, pos: pos )) }
-sstep_ok = (s: str, pos: i64) Result<StrStep, JsonError> { .Ok(StrStep( s: s, pos: pos )) }
-
+Step: {
+    v: Value,
+    pos: i64,
+}
+StrStep: {
+    s: str,
+    pos: i64,
+}
+step_ok = (v: Value, pos: i64) Result<Step, JsonError> {
+    .Ok(Step(
+        v: v,
+        pos: pos,
+    ))
+}
+sstep_ok = (s: str, pos: i64) Result<StrStep, JsonError> {
+    .Ok(StrStep(
+        s: s,
+        pos: pos,
+    ))
+}
 // ── module-local growable buffers (hand-rolled Vecs; see limit #2) ─────────────
-VBuf: { ptr: RawPtr<u8>, len: i64, cap: i64 }   // a growable [Value]
-EBuf: { ptr: RawPtr<u8>, len: i64, cap: i64 }   // a growable [Entry]
-
-vbuf_new  = (a: MutPtr<Malloc>) VBuf { VBuf( ptr: a.acquire(sizeof(Value)), len: 0, cap: 1 ) }
+VBuf: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+}    // a growable [Value]
+EBuf: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+}    // a growable [Entry]
+vbuf_new = (a: MutPtr<Malloc>) VBuf {
+    VBuf(
+        ptr: a.acquire(sizeof(Value)),
+        len: 0,
+        cap: 1,
+    )
+}
 vbuf_push = (a: MutPtr<Malloc>, vb: VBuf, x: Value) VBuf {
     x := x
-    r := (vb.len < vb.cap).match ({
-        true  => vb,
-        false => VBuf( ptr: a.resize(vb.ptr, ((vb.cap * 2) + 1) * sizeof(Value)), len: vb.len, cap: (vb.cap * 2) + 1 )
-    })
+    r := (vb.len < vb.cap).match ({ true => vb, false => VBuf(
+        ptr: a.resize(vb.ptr, (vb.cap * 2 + 1) * sizeof(Value)),
+        len: vb.len,
+        cap: vb.cap * 2 + 1,
+    ) })
     s: [Value] := slice(r.ptr, r.cap)
     s[r.len] = x
-    VBuf( ptr: r.ptr, len: r.len + 1, cap: r.cap )
+    VBuf(
+        ptr: r.ptr,
+        len: r.len + 1,
+        cap: r.cap,
+    )
 }
 vbuf_slice = (vb: VBuf) [Value] { slice(vb.ptr, vb.len) }
-
-ebuf_new  = (a: MutPtr<Malloc>) EBuf { EBuf( ptr: a.acquire(sizeof(Entry)), len: 0, cap: 1 ) }
+ebuf_new = (a: MutPtr<Malloc>) EBuf {
+    EBuf(
+        ptr: a.acquire(sizeof(Entry)),
+        len: 0,
+        cap: 1,
+    )
+}
 ebuf_push = (a: MutPtr<Malloc>, eb: EBuf, e: Entry) EBuf {
     e := e
-    r := (eb.len < eb.cap).match ({
-        true  => eb,
-        false => EBuf( ptr: a.resize(eb.ptr, ((eb.cap * 2) + 1) * sizeof(Entry)), len: eb.len, cap: (eb.cap * 2) + 1 )
-    })
+    r := (eb.len < eb.cap).match ({ true => eb, false => EBuf(
+        ptr: a.resize(eb.ptr, (eb.cap * 2 + 1) * sizeof(Entry)),
+        len: eb.len,
+        cap: eb.cap * 2 + 1,
+    ) })
     s: [Entry] := slice(r.ptr, r.cap)
     s[r.len] = e
-    EBuf( ptr: r.ptr, len: r.len + 1, cap: r.cap )
+    EBuf(
+        ptr: r.ptr,
+        len: r.len + 1,
+        cap: r.cap,
+    )
 }
 ebuf_slice = (eb: EBuf) [Entry] { slice(eb.ptr, eb.len) }
-
 // ── byte classes ──────────────────────────────────────────────────────────────
-json_ws      = (b: u8) bool { (b == ' ') || (b == '\t') || (b == '\n') || (b == '\r') }
-is_num_start = (b: u8) bool { (b == '-') || (b >= '0' && b <= '9') }
-is_num_byte  = (b: u8) bool {
-    (b >= '0' && b <= '9') || (b == '-') || (b == '+') || (b == '.') || (b == 'e') || (b == 'E')
-}
-
+json_ws = (b: u8) bool { b == ' ' || b == '\t' || b == '\n' || b == '\r' }
+is_num_start = (b: u8) bool { b == '-' || b >= '0' && b <= '9' }
+is_num_byte = (b: u8) bool { b >= '0' && b <= '9' || b == '-' || b == '+' || b == '.' || b == 'e' || b == 'E' }
 // first index >= pos that is not JSON whitespace (or sv.len when the tail is all whitespace).
 skip_ws = (sv: [u8], pos: i64) i64 {
     p: i64 := pos
     sv.loop((h, i, b) {
-        (i < p).match ({
-            true  => {},
-            false => b.json_ws().match ({ true => { p = i + 1 }, false => { h.break } })
-        })
+        (i < p).match ({ true => { }, false => b.json_ws().match ({ true => {
+            p = i + 1
+        }, false => {
+            h.break
+        } }) })
     })
     p
 }
-
 // ── string decoding (allocator-owned, escapes resolved) ───────────────────────
-hex_val = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => (b - '0').to_i64(),
-        false => (b >= 'a' && b <= 'f').match ({
-            true  => (b - 'a').to_i64() + 10,
-            false => (b >= 'A' && b <= 'F').match ({
-                true  => (b - 'A').to_i64() + 10,
-                false => 0 - 1
-            })
-        })
-    })
-}
-
+hex_val = (b: u8) i64 { (b >= '0' && b <= '9').match ({ true => (b - '0').to_i64(), false => (b >= 'a' && b <= 'f').match ({ true => (b - 'a').to_i64() + 10, false => (b >= 'A' && b <= 'F').match ({ true => (b - 'A').to_i64() + 10, false => 0 - 1 }) }) }) }
 // the code point of the 4 hex digits at sv[at..at+4], or -1 if any byte is not hex.
 hex4 = (sv: [u8], at: i64) i64 {
     d0 := hex_val(sv[at])
     d1 := hex_val(sv[at + 1])
     d2 := hex_val(sv[at + 2])
     d3 := hex_val(sv[at + 3])
-    ((d0 < 0) || (d1 < 0) || (d2 < 0) || (d3 < 0)).match ({
-        true  => 0 - 1,
-        false => d0 * 4096 + d1 * 256 + d2 * 16 + d3
-    })
+    (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).match ({ true => 0 - 1, false => d0 * 4096 + d1 * 256 + d2 * 16 + d3 })
 }
-
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
-push_utf8 = (a: MutPtr<Malloc>, sb: String, cp: i64) String {
-    (cp < 0x80).match ({
-        true  => sb.push_in(a, cp.to_u8()),
-        false => (cp < 0x800).match ({
-            true  => sb.push_in(a, (0xC0 | (cp >> 6)).to_u8())
-            .push_in(a, (0x80 | (cp & 0x3F)).to_u8()),
-            false => sb.push_in(a, (0xE0 | (cp >> 12)).to_u8())
-            .push_in(a, (0x80 | ((cp >> 6) & 0x3F)).to_u8())
-            .push_in(a, (0x80 | (cp & 0x3F)).to_u8())
-        })
-    })
-}
-
+push_utf8 = (a: MutPtr<Malloc>, sb: String, cp: i64) String { (cp < 128).match ({ true => sb.push_in(a, cp.to_u8()), false => (cp < 2048).match ({ true => sb.push_in(a, (192 | cp >> 6).to_u8()).push_in(a, (128 | cp & 63).to_u8()), false => sb.push_in(a, (224 | cp >> 12).to_u8()).push_in(a, (128 | cp >> 6 & 63).to_u8()).push_in(a, (128 | cp & 63).to_u8()) }) }) }
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded str + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
 parse_string_raw = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<StrStep, JsonError> {
@@ -172,188 +182,145 @@ parse_string_raw = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<StrS
     errpos: i64 := 0 - 1
     resume: i64 := pos + 1
     sv.loop((h, i, b) {
-        (i < resume).match ({
-            true  => {},
-            false => b.match ({
-                '"'  => { endpos = i + 1  h.break },
-                '\\' => (i + 1 >= sv.len).match ({
-                    true  => { errpos = i  h.break },
-                    false => sv[i + 1].match ({
-                        '"'  => { sb = sb.push_in(a, '"')   resume = i + 2 },
-                        '\\' => { sb = sb.push_in(a, '\\')  resume = i + 2 },
-                        '/'  => { sb = sb.push_in(a, '/')   resume = i + 2 },
-                        'n'  => { sb = sb.push_in(a, '\n')  resume = i + 2 },
-                        't'  => { sb = sb.push_in(a, '\t')  resume = i + 2 },
-                        'r'  => { sb = sb.push_in(a, '\r')  resume = i + 2 },
-                        'b'  => { sb = sb.push_in(a, (0x08).to_u8())  resume = i + 2 },
-                        'f'  => { sb = sb.push_in(a, (0x0C).to_u8())  resume = i + 2 },
-                        'u'  => (i + 5 >= sv.len).match ({
-                            true  => { errpos = i  h.break },
-                            false => {
-                                cp := hex4(sv, i + 2)
-                                (cp < 0).match ({
-                                    true  => { errpos = i  h.break },
-                                    false => { sb = a.push_utf8(sb, cp)  resume = i + 6 }
-                                })
-                            }
-                        }),
-                        _    => { errpos = i  h.break }
-                    })
-                }),
-                _    => { sb = sb.push_in(a, b)  resume = i + 1 }
-            })
-        })
+        (i < resume).match ({ true => { }, false => (b == '"').match ({ true => {
+            endpos = i + 1
+            h.break
+        }, false => (b == '\\').match ({ true => (i + 1 >= sv.len).match ({ true => {
+            errpos = i
+            h.break
+        }, false => (sv[i + 1] == '"').match ({ true => {
+            sb = sb.push_in(a, '"')
+            resume = i + 2
+        }, false => (sv[i + 1] == '\\').match ({ true => {
+            sb = sb.push_in(a, '\\')
+            resume = i + 2
+        }, false => (sv[i + 1] == '/').match ({ true => {
+            sb = sb.push_in(a, '/')
+            resume = i + 2
+        }, false => (sv[i + 1] == 'n').match ({ true => {
+            sb = sb.push_in(a, '\n')
+            resume = i + 2
+        }, false => (sv[i + 1] == 't').match ({ true => {
+            sb = sb.push_in(a, '\t')
+            resume = i + 2
+        }, false => (sv[i + 1] == 'r').match ({ true => {
+            sb = sb.push_in(a, '\r')
+            resume = i + 2
+        }, false => (sv[i + 1] == 'b').match ({ true => {
+            sb = sb.push_in(a, 8.to_u8())
+            resume = i + 2
+        }, false => (sv[i + 1] == 'f').match ({ true => {
+            sb = sb.push_in(a, 12.to_u8())
+            resume = i + 2
+        }, false => (sv[i + 1] == 'u').match ({ true => (i + 5 >= sv.len).match ({ true => {
+            errpos = i
+            h.break
+        }, false => {
+            cp := hex4(sv, i + 2)
+            (cp < 0).match ({ true => {
+                errpos = i
+                h.break
+            }, false => {
+                sb = a.push_utf8(sb, cp)
+                resume = i + 6
+            } })
+        } }), false => {
+            errpos = i
+            h.break
+        } }) }) }) }) }) }) }) }) }) }), false => {
+            sb = sb.push_in(a, b)
+            resume = i + 1
+        } }) }) })
     })
-    (endpos < 0).match ({
-        true  => (errpos >= 0).match ({ true => err(.BadString(errpos)), false => err(.UnexpectedEof) }),
-        false => sstep_ok(sb.finish_in(a), endpos)
-    })
+    (endpos < 0).match ({ true => (errpos >= 0).match ({ true => err(.BadString(errpos)), false => err(.UnexpectedEof) }), false => sstep_ok(sb.finish_in(a), endpos) })
 }
-
 // ── scalar parsers ─────────────────────────────────────────────────────────────
 // match sv[pos..] against `word`; on success produce `v` at pos+len, else BadLiteral.
 parse_lit = (sv: [u8], pos: i64, word: str, v: Value) Result<Step, JsonError> {
     wv := word.view()
     ok: bool := pos + wv.len <= sv.len
     wv.loop((h, i, b) {
-        ok.match ({
-            true  => (sv[pos + i] == b).match ({ false => { ok = false  h.break } }),
-            false => { h.break }
-        })
+        ok.match ({ true => (sv[pos + i] == b).match ({ false => {
+            ok = false
+            h.break
+        } }), false => {
+            h.break
+        } })
     })
     ok.match ({ true => step_ok(v, pos + wv.len), false => err(.BadLiteral(pos)) })
 }
-
 parse_number = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, JsonError> {
     endp: i64 := pos
     sv.loop((h, i, b) {
-        (i < pos).match ({
-            true  => {},
-            false => b.is_num_byte().match ({ true => { endp = i + 1 }, false => { h.break } })
-        })
+        (i < pos).match ({ true => { }, false => b.is_num_byte().match ({ true => {
+            endp = i + 1
+        }, false => {
+            h.break
+        } }) })
     })
     n := endp - pos
-    (n <= 0).match ({
-        true  => err(.BadNumber(pos)),
-        false => {
-            txt := a.substr_in(src, pos, n)
-            parse_f64(txt).match ({
-                .Ok(f)  => step_ok(.Num(f), endp),
-                .Err(_) => err(.BadNumber(pos))
-            })
-        }
-    })
+    (n <= 0).match ({ true => err(.BadNumber(pos)), false => {
+        txt := a.substr_in(src, pos, n)
+        parse_f64(txt).match ({
+            .Ok(f)  => step_ok(.Num(f), endp),
+            .Err(_) => err(.BadNumber(pos)),
+        })
+    } })
 }
-
 parse_str_value = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, JsonError> {
     a.parse_string_raw(src, sv, pos).match ({
         .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
-        .Err(e) => err(e)
+        .Err(e) => err(e),
     })
 }
-
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
 parse_array = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
-    (p >= sv.len).match ({
-        true  => err(.UnexpectedEof),
-        false => (sv[p] == ']').match ({
-            true  => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1),
-            false => a.arr_loop(src, sv, p, depth, a.vbuf_new())
-        })
-    })
+    (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == ']').match ({ true => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1), false => a.arr_loop(src, sv, p, depth, a.vbuf_new()) }) })
 }
-
 arr_loop = (a: MutPtr<Malloc>, src: str, sv: [u8], p: i64, depth: i64, vb: VBuf) Result<Step, JsonError> {
     a.parse_value(src, sv, p, depth + 1).match ({
         .Err(e) => err(e),
         .Ok(st) => {
             vb2 := a.vbuf_push(vb, st.v)
             q := sv.skip_ws(st.pos)
-            (q >= sv.len).match ({
-                true  => err(.UnexpectedEof),
-                false => sv[q].match ({
-                    ',' => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2),
-                    ']' => step_ok(.Arr(vb2.vbuf_slice()), q + 1),
-                    _   => err(.Unexpected(q))
-                })
-            })
-        }
+            (q >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[q] == ',').match ({ true => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2), false => (sv[q] == ']').match ({ true => step_ok(.Arr(vb2.vbuf_slice()), q + 1), false => err(.Unexpected(q)) }) }) })
+        },
     })
 }
-
 parse_object = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
-    (p >= sv.len).match ({
-        true  => err(.UnexpectedEof),
-        false => (sv[p] == '}').match ({
-            true  => step_ok(.Obj(Object( entries: a.ebuf_new().ebuf_slice() )), p + 1),
-            false => a.obj_loop(src, sv, p, depth, a.ebuf_new())
-        })
-    })
+    (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == '}').match ({ true => step_ok(.Obj(Object(entries: a.ebuf_new().ebuf_slice())), p + 1), false => a.obj_loop(src, sv, p, depth, a.ebuf_new()) }) })
 }
-
 obj_loop = (a: MutPtr<Malloc>, src: str, sv: [u8], p: i64, depth: i64, eb: EBuf) Result<Step, JsonError> {
-    (p >= sv.len).match ({
-        true  => err(.UnexpectedEof),
-        false => (sv[p] == '"').match ({
-            false => err(.Unexpected(p)),
-            true  => a.parse_string_raw(src, sv, p).match ({
-                .Err(e)  => err(e),
-                .Ok(ks)  => {
-                    q := sv.skip_ws(ks.pos)
-                    ((q >= sv.len) || (sv[q] != ':')).match ({
-                        true  => (q >= sv.len).match ({ true => err(.UnexpectedEof), false => err(.Unexpected(q)) }),
-                        false => a.parse_value(src, sv, q + 1, depth + 1).match ({
-                            .Err(e)  => err(e),
-                            .Ok(st)  => {
-                                eb2 := a.ebuf_push(eb, Entry( key: ks.s, val: st.v ))
-                                r := sv.skip_ws(st.pos)
-                                (r >= sv.len).match ({
-                                    true  => err(.UnexpectedEof),
-                                    false => sv[r].match ({
-                                        ',' => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2),
-                                        '}' => step_ok(.Obj(Object( entries: eb2.ebuf_slice() )), r + 1),
-                                        _   => err(.Unexpected(r))
-                                    })
-                                })
-                            }
-                        })
-                    })
-                }
-            })
-        })
-    })
+    (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == '"').match ({ true => a.parse_string_raw(src, sv, p).match ({
+        .Err(e) => err(e),
+        .Ok(ks) => {
+            q := sv.skip_ws(ks.pos)
+            (q >= sv.len || sv[q] != ':').match ({ true => (q >= sv.len).match ({ true => err(.UnexpectedEof), false => err(.Unexpected(q)) }), false => a.parse_value(src, sv, q + 1, depth + 1).match ({
+                .Err(e) => err(e),
+                .Ok(st) => {
+                    eb2 := a.ebuf_push(eb, Entry(
+                        key: ks.s,
+                        val: st.v,
+                    ))
+                    r := sv.skip_ws(st.pos)
+                    (r >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[r] == ',').match ({ true => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2), false => (sv[r] == '}').match ({ true => step_ok(.Obj(Object(entries: eb2.ebuf_slice())), r + 1), false => err(.Unexpected(r)) }) }) })
+                },
+            }) })
+        },
+    }), false => err(.Unexpected(p)) }) })
 }
-
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
 parse_value = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
-    (depth > MAX_DEPTH).match ({
-        true  => err(.TooDeep),
-        false => {
-            p := sv.skip_ws(pos)
-            (p >= sv.len).match ({
-                true  => err(.UnexpectedEof),
-                false => {
-                    b := sv[p]
-                    b.is_num_start().match ({
-                        true  => a.parse_number(src, sv, p),
-                        false => b.match ({
-                            '{' => a.parse_object(src, sv, p, depth),
-                            '[' => a.parse_array(src, sv, p, depth),
-                            '"' => a.parse_str_value(src, sv, p),
-                            't' => parse_lit(sv, p, "true",  .Bool(true)),
-                            'f' => parse_lit(sv, p, "false", .Bool(false)),
-                            'n' => parse_lit(sv, p, "null",  .Null),
-                            _   => err(.Unexpected(p))
-                        })
-                    })
-                }
-            })
-        }
-    })
+    (depth > MAX_DEPTH).match ({ true => err(.TooDeep), false => {
+        p := sv.skip_ws(pos)
+        (p >= sv.len).match ({ true => err(.UnexpectedEof), false => {
+            b := sv[p]
+            b.is_num_start().match ({ true => a.parse_number(src, sv, p), false => (b == '{').match ({ true => a.parse_object(src, sv, p, depth), false => (b == '[').match ({ true => a.parse_array(src, sv, p, depth), false => (b == '"').match ({ true => a.parse_str_value(src, sv, p), false => (b == 't').match ({ true => parse_lit(sv, p, "true", .Bool(true)), false => (b == 'f').match ({ true => parse_lit(sv, p, "false", .Bool(false)), false => (b == 'n').match ({ true => parse_lit(sv, p, "null", .Null), false => err(.Unexpected(p)) }) }) }) }) }) }) })
+        } })
+    } })
 }
-
 // ── public parse ───────────────────────────────────────────────────────────────
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
@@ -366,67 +333,50 @@ parse* = (a: MutPtr<Malloc>, s: str) Result<Value, JsonError> {
         },
         .Ok(st) => {
             p := sv.skip_ws(st.pos)
-            r: Result<Value, JsonError> := (p < sv.len).match ({
-                true  => .Err(.TrailingGarbage(p)),
-                false => .Ok(st.v)
-            })
+            r: Result<Value, JsonError> := (p < sv.len).match ({ true => .Err(.TrailingGarbage(p)), false => .Ok(st.v) })
             r
-        }
+        },
     })
     out
 }
-
 // ── serialization ──────────────────────────────────────────────────────────────
-hex_digit = (n: i64) u8 {
-    (n < 10).match ({ true => ('0'.to_i64() + n).to_u8(), false => ('a'.to_i64() + n - 10).to_u8() })
-}
-
+hex_digit = (n: i64) u8 { (n < 10).match ({ true => ('0'.to_i64() + n).to_u8(), false => ('a'.to_i64() + n - 10).to_u8() }) }
 write_u_esc = (a: MutPtr<Malloc>, sb: String, b: u8) String {
     bi := b.to_i64()
-    sb.push_in(a, '\\').push_in(a, 'u').push_in(a, '0').push_in(a, '0')
-    .push_in(a, hex_digit((bi >> 4) & 0xF))
-    .push_in(a, hex_digit(bi & 0xF))
+    sb.push_in(a, '\\').push_in(a, 'u').push_in(a, '0').push_in(a, '0').push_in(a, hex_digit(bi >> 4 & 15)).push_in(a, hex_digit(bi & 15))
 }
-
-write_esc_byte = (a: MutPtr<Malloc>, sb: String, b: u8) String {
-    b.match ({
-        '"'  => sb.push_in(a, '\\').push_in(a, '"'),
-        '\\' => sb.push_in(a, '\\').push_in(a, '\\'),
-        '\n' => sb.push_in(a, '\\').push_in(a, 'n'),
-        '\t' => sb.push_in(a, '\\').push_in(a, 't'),
-        '\r' => sb.push_in(a, '\\').push_in(a, 'r'),
-        _    => (b < 0x20).match ({ true => a.write_u_esc(sb, b), false => sb.push_in(a, b) })
-    })
-}
-
+write_esc_byte = (a: MutPtr<Malloc>, sb: String, b: u8) String { (b == '"').match ({ true => sb.push_in(a, '\\').push_in(a, '"'), false => (b == '\\').match ({ true => sb.push_in(a, '\\').push_in(a, '\\'), false => (b == '\n').match ({ true => sb.push_in(a, '\\').push_in(a, 'n'), false => (b == '\t').match ({ true => sb.push_in(a, '\\').push_in(a, 't'), false => (b == '\r').match ({ true => sb.push_in(a, '\\').push_in(a, 'r'), false => (b < 32).match ({ true => a.write_u_esc(sb, b), false => sb.push_in(a, b) }) }) }) }) }) }) }
 write_str_lit = (a: MutPtr<Malloc>, sb: String, s: str) String {
     out: String := sb.push_in(a, '"')
     sv := s.view()
-    sv.loop((h, i, b) { out = a.write_esc_byte(out, b) })
+    sv.loop((h, i, b) {
+        out = a.write_esc_byte(out, b)
+    })
     out.push_in(a, '"')
 }
-
 write_arr = (a: MutPtr<Malloc>, sb: String, xs: [Value]) String {
     out: String := sb.push_in(a, '[')
     xs.loop((h, i, x) {
-        (i > 0).match ({ true => { out = out.push_in(a, ',') } })
+        (i > 0).match ({ true => {
+            out = out.push_in(a, ',')
+        } })
         out = a.write_value(out, x)
     })
     out.push_in(a, ']')
 }
-
 write_obj = (a: MutPtr<Malloc>, sb: String, o: Object) String {
     out: String := sb.push_in(a, '{')
     es := o.entries
     es.loop((h, i, e) {
-        (i > 0).match ({ true => { out = out.push_in(a, ',') } })
+        (i > 0).match ({ true => {
+            out = out.push_in(a, ',')
+        } })
         out = a.write_str_lit(out, e.key)
         out = out.push_in(a, ':')
         out = a.write_value(out, e.val)
     })
     out.push_in(a, '}')
 }
-
 write_value = (a: MutPtr<Malloc>, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null"),
@@ -434,102 +384,134 @@ write_value = (a: MutPtr<Malloc>, sb: String, v: Value) String {
         .Num(n)  => sb.append_in(a, a.float_in(n).finish_in(a)),
         .Str(s)  => a.write_str_lit(sb, s),
         .Arr(xs) => a.write_arr(sb, xs),
-        .Obj(o)  => a.write_obj(sb, o)
+        .Obj(o)  => a.write_obj(sb, o),
     })
 }
-
 // Serialize a Value to compact JSON text (Malloc-owned, NUL-terminated str).
 stringify* = (a: MutPtr<Malloc>, v: Value) str {
     sb: String := a.new_in()
     sb = a.write_value(sb, v)
     sb.finish_in(a)
 }
-
 // ── accessors ──────────────────────────────────────────────────────────────────
 // index of `key` in the object's entry list, or -1 (O(n) linear scan).
 obj_find* = (o: Object, key: str) i64 {
     found: i64 := 0 - 1
     o.entries.loop((h, i, e) {
-        (found < 0).match ({
-            true  => eq(e.key, key).match ({ true => { found = i  h.break } }),
-            false => { h.break }
-        })
+        (found < 0).match ({ true => eq(e.key, key).match ({ true => {
+            found = i
+            h.break
+        } }), false => {
+            h.break
+        } })
     })
     found
 }
-
 // Object member lookup: .Some(value) if `key` is present, else .None.
 obj_get* = (o: Object, key: str) Opt<Value> {
     i := o.obj_find(key)
     out: Opt<Value> := (i < 0).match ({ true => .None, false => .Some(o.entries[i].val) })
     out
 }
-
 // Member lookup on a Value: .Some(value) if it is an Obj containing `key`, else .None.
 get* = (obj: Value, key: str) Opt<Value> {
-    out: Opt<Value> := obj.match ({ .Obj(o) => o.obj_get(key), _ => .None })
+    out: Opt<Value> := obj.match ({
+        .Obj(o) => o.obj_get(key),
+        _       => .None,
+    })
     out
 }
-
 as_obj* = (v: Value) Opt<Object> {
-    out: Opt<Object> := v.match ({ .Obj(o) => .Some(o), _ => .None })
+    out: Opt<Object> := v.match ({
+        .Obj(o) => .Some(o),
+        _       => .None,
+    })
     out
 }
 as_num* = (v: Value) Opt<f64> {
-    out: Opt<f64> := v.match ({ .Num(n) => .Some(n), _ => .None })
+    out: Opt<f64> := v.match ({
+        .Num(n) => .Some(n),
+        _       => .None,
+    })
     out
 }
 as_str* = (v: Value) Opt<str> {
-    out: Opt<str> := v.match ({ .Str(s) => .Some(s), _ => .None })
+    out: Opt<str> := v.match ({
+        .Str(s) => .Some(s),
+        _       => .None,
+    })
     out
 }
 as_bool* = (v: Value) Opt<bool> {
-    out: Opt<bool> := v.match ({ .Bool(b) => .Some(b), _ => .None })
+    out: Opt<bool> := v.match ({
+        .Bool(b) => .Some(b),
+        _        => .None,
+    })
     out
 }
 as_arr* = (v: Value) Opt<[Value]> {
-    out: Opt<[Value]> := v.match ({ .Arr(xs) => .Some(xs), _ => .None })
+    out: Opt<[Value]> := v.match ({
+        .Arr(xs) => .Some(xs),
+        _        => .None,
+    })
     out
 }
-
 // ── structural equality (handy for round-trip checks) ───────────────────────────
 arr_eq = (xs: [Value], ys: [Value]) bool {
-    (xs.len != ys.len).match ({
-        true  => false,
-        false => {
-            ok: bool := true
-            xs.loop((h, i, x) { equals(x, ys[i]).match ({ false => { ok = false  h.break } }) })
-            ok
-        }
-    })
+    (xs.len != ys.len).match ({ true => false, false => {
+        ok: bool := true
+        xs.loop((h, i, x) {
+            equals(x, ys[i]).match ({ false => {
+                ok = false
+                h.break
+            } })
+        })
+        ok
+    } })
 }
-
 obj_eq = (a: Object, b: Object) bool {
-    (a.entries.len != b.entries.len).match ({
-        true  => false,
-        false => {
-            ok: bool := true
-            a.entries.loop((h, i, e) {
-                j := b.obj_find(e.key)
-                (j < 0).match ({
-                    true  => { ok = false  h.break },
-                    false => equals(e.val, b.entries[j].val).match ({ false => { ok = false  h.break } })
-                })
-            })
-            ok
-        }
-    })
+    (a.entries.len != b.entries.len).match ({ true => false, false => {
+        ok: bool := true
+        a.entries.loop((h, i, e) {
+            j := b.obj_find(e.key)
+            (j < 0).match ({ true => {
+                ok = false
+                h.break
+            }, false => equals(e.val, b.entries[j].val).match ({ false => {
+                ok = false
+                h.break
+            } }) })
+        })
+        ok
+    } })
 }
-
 // Deep structural equality. Numbers compare by f64 ==, strings byte-wise, objects key-by-key
 // regardless of key order.
 equals* = (x: Value, y: Value) bool {
     x.match ({
-        .Null    => y.match ({ .Null => true, _ => false }),
-        .Bool(a) => y.match ({ .Bool(b) => a == b, _ => false }),
-        .Num(a)  => y.match ({ .Num(b) => a == b, _ => false }),
-        .Str(a)  => y.match ({ .Str(b) => eq(a, b), _ => false }),
-        .Arr(a)  => y.match ({ .Arr(b) => arr_eq(a, b), _ => false }),
-        .Obj(a)  => y.match ({ .Obj(b) => obj_eq(a, b), _ => false })
+        .Null    => y.match ({
+            .Null => true,
+            _     => false,
+        }),
+        .Bool(a) => y.match ({
+            .Bool(b) => a == b,
+            _        => false,
+        }),
+        .Num(a)  => y.match ({
+            .Num(b) => a == b,
+            _       => false,
+        }),
+        .Str(a)  => y.match ({
+            .Str(b) => eq(a, b),
+            _       => false,
+        }),
+        .Arr(a)  => y.match ({
+            .Arr(b) => arr_eq(a, b),
+            _       => false,
+        }),
+        .Obj(a)  => y.match ({
+            .Obj(b) => obj_eq(a, b),
+            _       => false,
+        }),
     })
 }

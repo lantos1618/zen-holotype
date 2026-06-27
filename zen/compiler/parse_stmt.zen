@@ -10,17 +10,23 @@
 { Malloc } = std.mem.alloc
 { enode, lexeme, is_op, is_dot, is_field_colon, parse_atom, parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, pdepth_enter, pdepth_exit, pdepth_over } = compiler.parse_type
-
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
 // dangles the moment the Func is returned (genc would then walk freed memory).
 SList*: SNil | SCons(SCell)
-SCell*: { head: Stmt, tail: Ptr<SList> }
-
+SCell*: {
+    head: Stmt,
+    tail: Ptr<SList>,
+}
 // ctor fns — a leading-dot enum can't infer its type passed straight into a generic call
-snil_val  = () SList { .SNil() }
-scons_val = (h: Stmt, t: Ptr<SList>) SList { .SCons(SCell( head: h, tail: t )) }
+snil_val = () SList { .SNil }
+scons_val = (h: Stmt, t: Ptr<SList>) SList {
+    .SCons(SCell(
+        head: h,
+        tail: t,
+    ))
+}
 slbuf = (a: MutPtr<Malloc>) [SList] { slice(a.acquire(sizeof(SList)), 1) }
 slnode = (a: MutPtr<Malloc>, v: SList) Ptr<SList> {
     buf := a.slbuf()
@@ -29,14 +35,19 @@ slnode = (a: MutPtr<Malloc>, v: SList) Ptr<SList> {
 }
 snil = (a: MutPtr<Malloc>) Ptr<SList> { a.slnode(snil_val()) }
 scons = (a: MutPtr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
-
 // is there a `name :=` at `pos`? (an Ident, then the two-byte ':=' symbol)
 is_assign = (src: str, t: Token) bool {
-    t.kind.match ({ .Sym => (t.len == 2) && (src.at(t.start) == ':') && (src.at(t.start + 1) == '='), _ => false })
+    t.kind.match ({
+        .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
+        _    => false,
+    })
 }
 is_let_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
-    sc.tok.kind.match ({ .Ident => src.is_assign(src.scan(sc.next).tok), _ => false })
+    sc.tok.kind.match ({
+        .Ident => src.is_assign(src.scan(sc.next).tok),
+        _      => false,
+    })
 }
 // a TYPED let `name : Type :=` / `name : Type =` — an Ident, a single ':', a type, then ':='/'='. Lets a
 // user write `x: i32 := 5` / `x: i32 = 5`; the annotation is parsed (to find the '=') then DISCARDED (the
@@ -46,90 +57,71 @@ is_typed_let_here = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
     sc.tok.kind.match ({
         .Ident => {
             colon := src.scan(sc.next)
-            src.is_field_colon(colon.tok).match ({
-                true  => {
-                    te := a.parse_ty(src, colon.next)        // consume the type; te.next lands at ':=' or '='
-                    op := src.scan(te.next)
-                    src.is_assign(op.tok) || src.is_eq(op.tok)
-                },
-                false => false
-            })
+            src.is_field_colon(colon.tok).match ({ true => {
+                te := a.parse_ty(src, colon.next)    // consume the type; te.next lands at ':=' or '='
+                op := src.scan(te.next)
+                src.is_assign(op.tok) || src.is_eq(op.tok)
+            }, false => false })
         },
-        _ => false
+        _      => false,
     })
 }
 // is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
-is_eq = (src: str, t: Token) bool { t.kind.match ({ .Sym => (t.len == 1) && (src.at(t.start) == '='), _ => false }) }
+is_eq = (src: str, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 1 && src.at(t.start) == '=',
+        _    => false,
+    })
+}
 // Skip a place-expression suffix: a chain of `.field` and `[index]` postfixes after the head ident, so
 // `s.buf[i]`, `a[i].x`, `s.inner.p[i]` are all recognized as store targets. parse_atom re-parses the
 // same chain for the real LHS, and gen_expr lowers an Index target to the same valid C lvalue a read
 // produces (`((elem*)(seq).ptr)[idx]`), so sassign stores through it directly.
 skip_place = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
-    src.is_dot(sc.tok).match ({
-        true  => src.skip_place(src.scan(sc.next).next),         // `.field` -> skip the dot and the field name
-        false => src.is_lbracket(sc.tok).match ({
-            true  => src.skip_place(src.skip_brackets(sc.next)), // `[ … ]` -> skip past the matching ']'
-            false => pos
-        })
-    })
-}
+    src.is_dot(sc.tok).match ({ true => src.skip_place(src.scan(sc.next).next), false => src.is_lbracket(sc.tok).match ({ true => src.skip_place(src.skip_brackets(sc.next)), false => pos }) })
+}    // `.field` -> skip the dot and the field name
 is_set_here = (src: str, pos: i32) bool {
-    sc := src.scan(pos)
-    sc.tok.kind.match ({ .Ident => src.is_eq(src.scan(src.skip_place(sc.next)).tok), _ => false })   // ident (.field | [i])* '='
-}
-// is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
-skip_brackets = (src: str, pos: i32) i32 {              // pos just past '['; returns pos past ']'
-    sc := src.scan(pos)
+    sc := src.scan(pos)    // `[ … ]` -> skip past the matching ']'
     sc.tok.kind.match ({
-        .Eof => { perr_set()  sc.next },                  // unterminated '[': flag, stop at EOF, don't recurse forever
-        _    => src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) })
+        .Ident => src.is_eq(src.scan(src.skip_place(sc.next)).tok),
+        _      => false,
+    })
+}    // ident (.field | [i])* '='
+// is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
+skip_brackets = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)    // pos just past '['; returns pos past ']'
+    sc.tok.kind.match ({
+        .Eof => {
+            perr_set()
+            sc.next
+        },    // unterminated '[': flag, stop at EOF, don't recurse forever
+        _    => src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) }),
     })
 }
 is_idxset_here = (src: str, pos: i32) bool {
     nt := src.scan(pos)
     nt.tok.kind.match ({
-        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
-            true  => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
-            false => false
-        }),
-        _ => false
+        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({ true => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok), false => false }),
+        _      => false,
     })
 }
-
 // is there a `return` keyword at `pos`? (the Ident "return", NOT followed by ':=' or '=' — those
 // make `return` an ordinary variable name being bound/assigned, not the early-return keyword).
-is_return_kw = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "return"), _ => false }) }
-is_return_here = (src: str, pos: i32) bool {
-    sc := src.scan(pos)
-    src.is_return_kw(sc.tok).match ({
-        true  => src.is_assign(src.scan(sc.next).tok).match ({ true => false, false => !src.is_eq(src.scan(sc.next).tok) }),
-        false => false
+is_return_kw = (src: str, t: Token) bool {
+    t.kind.match ({
+        .Ident => src.tok_eq(t, "return"),
+        _      => false,
     })
 }
-
+is_return_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_return_kw(sc.tok).match ({ true => src.is_assign(src.scan(sc.next).tok).match ({ true => false, false => src.is_eq(src.scan(sc.next).tok).match ({ true => false, false => true }) }), false => false })
+}
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
 SKind*: SLet | SLetT | SIdx | SSet | SWhile | SRet | SExpr
-stmt_kind = (a: MutPtr<Malloc>, src: str, pos: i32) SKind {
-    a.is_typed_let_here(src, pos).match ({
-        true  => .SLetT(),
-        false => src.is_let_here(pos).match ({
-            true  => .SLet(),
-            false => src.is_idxset_here(pos).match ({
-                true  => .SIdx(),
-                false => src.is_set_here(pos).match ({
-                    true  => .SSet(),
-                    false => src.is_while_here(pos).match ({
-                        true  => .SWhile(),
-                        false => src.is_return_here(pos).match ({ true => .SRet(), false => .SExpr() })
-                    })
-                })
-            })
-        })
-    })
-}
-
+stmt_kind = (a: MutPtr<Malloc>, src: str, pos: i32) SKind { a.is_typed_let_here(src, pos).match ({ true => .SLetT, false => src.is_let_here(pos).match ({ true => .SLet, false => src.is_idxset_here(pos).match ({ true => .SIdx, false => src.is_set_here(pos).match ({ true => .SSet, false => src.is_while_here(pos).match ({ true => .SWhile, false => src.is_return_here(pos).match ({ true => .SRet, false => .SExpr }) }) }) }) }) }) }
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
 parse_stmts = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
@@ -138,226 +130,263 @@ parse_stmts = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     // consumed as a one-token bad statement) would overflow the C stack. Past the cap, stop the list
     // (perr already set) — the same effect as reaching the body's end.
     pdepth_enter()
-    r := pdepth_over().match ({
-        true  => a.snil(),
-        false => a.parse_stmts_inner(src, pos)
-    })
+    r := pdepth_over().match ({ true => a.snil(), false => a.parse_stmts_inner(src, pos) })
     pdepth_exit()
     r
 }
 parse_stmts_inner = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    src.at_body_end(pos).match ({
-        true  => a.snil(),                          // an empty body `{ }` (a void no-op) — no statements
-        false => a.stmt_kind(src, pos).match ({
-            .SLet   => a.parse_let_stmt(src, pos),
-            .SLetT  => a.parse_typed_let_stmt(src, pos),
-            .SIdx   => a.parse_idxset_stmt(src, pos),
-            .SSet   => a.parse_set_stmt(src, pos),
-            .SWhile => a.parse_while_stmt(src, pos),
-            .SRet   => a.parse_return_stmt(src, pos),
-            .SExpr  => a.parse_ret_stmt(src, pos)
-        })
-    })
+    src.at_body_end(pos).match ({ true => a.snil(), false => a.stmt_kind(src, pos).match ({
+        .SLet   => a.parse_let_stmt(src, pos),    // an empty body `{ }` (a void no-op) — no statements
+        .SLetT  => a.parse_typed_let_stmt(src, pos),
+        .SIdx   => a.parse_idxset_stmt(src, pos),
+        .SSet   => a.parse_set_stmt(src, pos),
+        .SWhile => a.parse_while_stmt(src, pos),
+        .SRet   => a.parse_return_stmt(src, pos),
+        .SExpr  => a.parse_ret_stmt(src, pos),
+    }) })
 }
 // `name[i] = value` — an index assignment. The element type is left void; compiler.check fills it.
 parse_idxset_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    nt   := src.scan(pos)                    // the array name
+    nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
-    lb   := src.scan(nt.next)                // '['
-    ie   := a.parse_or(src, lb.next)         // the index
-    rb   := src.scan(ie.next)                // ']'
-    eq   := src.scan(rb.next)                // '='
-    v    := a.parse_or(src, eq.next)         // the value
+    lb := src.scan(nt.next)    // '['
+    ie := a.parse_or(src, lb.next)    // the index
+    rb := src.scan(ie.next)    // ']'
+    eq := src.scan(rb.next)    // '='
+    v := a.parse_or(src, eq.next)    // the value
     a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), a.parse_stmts(src, v.next))
 }
 parse_set_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     start := src.scan(pos).tok.start
-    lhs  := a.parse_atom(src, pos)           // the lvalue target: a Var `x` or a Member chain `p.x.y`
-    eq   := src.scan(lhs.next)               // '='
-    v    := a.parse_or(src, eq.next)        // value
+    lhs := a.parse_atom(src, pos)    // the lvalue target: a Var `x` or a Member chain `p.x.y`
+    eq := src.scan(lhs.next)    // '='
+    v := a.parse_or(src, eq.next)    // value
     a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts(src, v.next))
 }
 parse_let_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    nt   := src.scan(pos)                    // the bound name
+    nt := src.scan(pos)    // the bound name
     name := a.lexeme(src, nt.tok)
-    at   := src.scan(nt.next)                // ':='
-    v    := a.parse_or(src, at.next)        // value (full expression, incl. comparison)
-    a.scons(slet_at(name, v.expr, nt.tok.start), a.parse_stmts(src, v.next))   // … then the rest of the body
-}
+    at := src.scan(nt.next)    // ':='
+    v := a.parse_or(src, at.next)    // value (full expression, incl. comparison)
+    a.scons(slet_at(name, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
+}    // … then the rest of the body
 // `name : Type := value` / `name : Type = value` — the type annotation is parsed (to skip it) and discarded.
 parse_typed_let_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    nt    := src.scan(pos)
-    name  := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)               // ':'
-    te    := a.parse_ty(src, colon.next)     // the (discarded) type annotation; te.next lands at ':='/'='
-    op    := src.scan(te.next)
-    v     := a.parse_or(src, op.next)        // value
-    a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), a.parse_stmts(src, v.next))   // the annotation is now HONORED (checked + drives inference)
-}
+    nt := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)    // ':'
+    te := a.parse_ty(src, colon.next)    // the (discarded) type annotation; te.next lands at ':='/'='
+    op := src.scan(te.next)
+    v := a.parse_or(src, op.next)    // value
+    a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
+}    // the annotation is now HONORED (checked + drives inference)
 // the final expression of a body is its return; a non-final expression (something else
 // follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
 at_body_end = (src: str, pos: i32) bool {
     sc := src.scan(pos)
-    sc.tok.kind.match ({ .Eof => true, _ => src.is_rbrace(sc.tok) })
+    sc.tok.kind.match ({
+        .Eof => true,
+        _    => src.is_rbrace(sc.tok),
+    })
 }
 parse_ret_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     r := a.parse_or(src, pos)
-    src.at_body_end(r.next).match ({
-        true  => a.scons(sret(r.expr), a.snil()),                      // final expression -> return
-        false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next))    // a bare expr statement
-    })
-}
-// an EARLY `return <expr>` statement: the `return` keyword, then a value, then the rest of the body.
-// Produces the same Return Stmt as a trailing expression, but here it can sit mid-body (e.g. inside
-// a guard's match arm) — genc emits `return expr;`, which actually leaves the enclosing function.
+    src.at_body_end(r.next).match ({ true => a.scons(sret(r.expr), a.snil()), false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next)) })
+}    // final expression -> return
 parse_return_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
-    kw := src.scan(pos)                                                 // the 'return' keyword
-    r  := a.parse_or(src, kw.next)                                      // the returned value
+    kw := src.scan(pos)    // a bare expr statement
+    // an EARLY `return <expr>` statement: the `return` keyword, then a value, then the rest of the body.
+    // Produces the same Return Stmt as a trailing expression, but here it can sit mid-body (e.g. inside
+    // a guard's match arm) — genc emits `return expr;`, which actually leaves the enclosing function.
+    // the 'return' keyword
+    r := a.parse_or(src, kw.next)    // the returned value
     a.scons(sret(r.expr), a.parse_stmts(src, r.next))
 }
-
 // ── @while loops ─────────────────────────────────────────────────────────────────
 // `@while(cond) { stmts }` — a `@` Sym, the `while` Ident, a parenthesized condition,
 // then a brace block of statements (let / assign / nested-while; NO trailing return — a
 // loop body produces no value, unlike a function body). Lowers to genc's While. The block
 // reuses the SList cons-list (materialized into a heap [Stmt]), terminated by `}` rather
 // than by a final expression.
-is_at         = (src: str, t: Token) bool { src.is_op(t, '@') }
-is_while_kw   = (src: str, t: Token) bool { t.kind.match ({ .Ident => src.tok_eq(t, "while"), _ => false }) }
+is_at = (src: str, t: Token) bool { src.is_op(t, '@') }
+is_while_kw = (src: str, t: Token) bool {
+    t.kind.match ({
+        .Ident => src.tok_eq(t, "while"),
+        _      => false,
+    })
+}
 is_while_here = (src: str, pos: i32) bool {
     sc := src.scan(pos)
     src.is_at(sc.tok).match ({ true => src.is_while_kw(src.scan(sc.next).tok), false => false })
 }
-
 // a parsed `@while`: the While statement + where it ends (just past the closing `}`)
-WhileEnd*: { stmt: Stmt, next: i32 }
-parse_while = (a: MutPtr<Malloc>, src: str, pos: i32) WhileEnd {
-    at     := src.scan(pos)                        // '@'
-    wk     := src.scan(at.next)                    // 'while'
-    lp     := src.skip_to_lparen(wk.next)          // pos just past '('
-    c      := a.parse_or(src, lp)                  // condition (stops at ')')
-    rp     := src.scan(c.next)                      // ')'
-    bstart := src.skip_to_brace(rp.next)           // pos just past '{'
-    blk    := a.parse_block(src, bstart)           // statements until '}'
-    WhileEnd( stmt: swhile(c.expr, a.materialize(blk.list)), next: blk.next )
+WhileEnd*: {
+    stmt: Stmt,
+    next: i32,
 }
+parse_while = (a: MutPtr<Malloc>, src: str, pos: i32) WhileEnd {
+    at := src.scan(pos)    // '@'
+    wk := src.scan(at.next)    // 'while'
+    lp := src.skip_to_lparen(wk.next)    // pos just past '('
+    c := a.parse_or(src, lp)    // condition (stops at ')')
+    rp := src.scan(c.next)    // ')'
+    bstart := src.skip_to_brace(rp.next)    // pos just past '{'
+    blk := a.parse_block(src, bstart)
+    WhileEnd(
+        stmt: swhile(c.expr, a.materialize(blk.list)),
+        next: blk.next,
+    )
+}    // statements until '}'
 // the top-level statement form: a While, then the rest of the function body
 parse_while_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     w := a.parse_while(src, pos)
     a.scons(w.stmt, a.parse_stmts(src, w.next))
 }
-
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
-BlockEnd*: { list: Ptr<SList>, next: i32 }
+BlockEnd*: {
+    list: Ptr<SList>,
+    next: i32,
+}
 parse_block* = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     // DEPTH CAP (see parse_type.zen): loop/match-arm body nesting funnels through parse_block, so a guard
     // here bounds deeply-nested `@while`s. Past the cap, stop descending (an empty block, perr set) — like
     // the Eof case. The bail consumes no token, but the caller re-dispatches from a position that advances
     // by a full cap's worth of nesting each outer pass, so the retry chain stays shallow and terminates.
     pdepth_enter()
-    r := pdepth_over().match ({
-        true  => BlockEnd( list: a.snil(), next: pos ),
-        false => a.parse_block_inner(src, pos)
-    })
+    r := pdepth_over().match ({ true => BlockEnd(
+        list: a.snil(),
+        next: pos,
+    ), false => a.parse_block_inner(src, pos) })
     pdepth_exit()
     r
 }
 parse_block_inner = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Eof => { perr_set()  BlockEnd( list: a.snil(), next: sc.next ) },   // unterminated `{ …`: flag, don't recurse forever
-        _    => src.is_rbrace(sc.tok).match ({
-            true  => BlockEnd( list: a.snil(), next: sc.next ),   // '}' — block done
-            false => a.block_stmt(src, pos)
-        })
+        .Eof => {
+            perr_set()
+            BlockEnd(
+                list: a.snil(),
+                next: sc.next,
+            )
+        },    // unterminated `{ …`: flag, don't recurse forever
+        _    => src.is_rbrace(sc.tok).match ({ true => BlockEnd(
+            list: a.snil(),
+            next: sc.next,
+        ), false => a.block_stmt(src, pos) }),
     })
-}
+}    // '}' — block done
 // same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare
 // statement. An explicit `return <expr>` (SRet) IS allowed inside a block (a guard arm's body).
 block_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     a.stmt_kind(src, pos).match ({
         .SLet   => a.block_let(src, pos),
         .SLetT  => a.block_typed_let(src, pos),
-        .SIdx   => a.block_idxset(src, pos),         // buf[i] = v  inside a loop/if body
+        .SIdx   => a.block_idxset(src, pos),    // buf[i] = v  inside a loop/if body
         .SSet   => a.block_set(src, pos),
         .SWhile => a.block_while(src, pos),
-        .SRet   => a.block_return(src, pos),         // an early `return <expr>` inside a block
-        .SExpr  => a.block_expr(src, pos)            // a bare expression statement (e.g. putchar(b))
+        .SRet   => a.block_return(src, pos),    // an early `return <expr>` inside a block
+        .SExpr  => a.block_expr(src, pos),
     })
-}
+}    // a bare expression statement (e.g. putchar(b))
 block_return = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
-    kw   := src.scan(pos)                            // 'return'
-    r    := a.parse_or(src, kw.next)                 // the returned value
+    kw := src.scan(pos)    // 'return'
+    r := a.parse_or(src, kw.next)    // the returned value
     rest := a.parse_block(src, r.next)
-    BlockEnd( list: a.scons(sret(r.expr), rest.list), next: rest.next )
+    BlockEnd(
+        list: a.scons(sret(r.expr), rest.list),
+        next: rest.next,
+    )
 }
 block_typed_let = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
-    nt    := src.scan(pos)
-    name  := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)                       // ':'
-    te    := a.parse_ty(src, colon.next)             // (discarded) type annotation
-    op    := src.scan(te.next)                       // ':=' / '='
-    v     := a.parse_or(src, op.next)
-    rest  := a.parse_block(src, v.next)
-    BlockEnd( list: a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), rest.list), next: rest.next )
+    nt := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    colon := src.scan(nt.next)    // ':'
+    te := a.parse_ty(src, colon.next)    // (discarded) type annotation
+    op := src.scan(te.next)    // ':=' / '='
+    v := a.parse_or(src, op.next)
+    rest := a.parse_block(src, v.next)
+    BlockEnd(
+        list: a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), rest.list),
+        next: rest.next,
+    )
 }
 block_idxset = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
-    nt   := src.scan(pos)                            // the array name
+    nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
-    lb   := src.scan(nt.next)                        // '['
-    ie   := a.parse_or(src, lb.next)                 // index
-    rb   := src.scan(ie.next)                        // ']'
-    eq   := src.scan(rb.next)                        // '='
-    v    := a.parse_or(src, eq.next)                 // value
+    lb := src.scan(nt.next)    // '['
+    ie := a.parse_or(src, lb.next)    // index
+    rb := src.scan(ie.next)    // ']'
+    eq := src.scan(rb.next)    // '='
+    v := a.parse_or(src, eq.next)    // value
     rest := a.parse_block(src, v.next)
-    BlockEnd( list: a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), rest.list), next: rest.next )
+    BlockEnd(
+        list: a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), rest.list),
+        next: rest.next,
+    )
 }
 block_expr = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
-    e    := a.parse_or(src, pos)                     // a bare expression, evaluated for effect
+    e := a.parse_or(src, pos)    // a bare expression, evaluated for effect
     rest := a.parse_block(src, e.next)
-    BlockEnd( list: a.scons(sexpr(e.expr), rest.list), next: rest.next )
+    BlockEnd(
+        list: a.scons(sexpr(e.expr), rest.list),
+        next: rest.next,
+    )
 }
 block_let = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
-    nt   := src.scan(pos)
+    nt := src.scan(pos)
     name := a.lexeme(src, nt.tok)
-    at   := src.scan(nt.next)                       // ':='
-    v    := a.parse_or(src, at.next)
+    at := src.scan(nt.next)    // ':='
+    v := a.parse_or(src, at.next)
     rest := a.parse_block(src, v.next)
-    BlockEnd( list: a.scons(slet_at(name, v.expr, nt.tok.start), rest.list), next: rest.next )
+    BlockEnd(
+        list: a.scons(slet_at(name, v.expr, nt.tok.start), rest.list),
+        next: rest.next,
+    )
 }
 block_set = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     start := src.scan(pos).tok.start
-    lhs  := a.parse_atom(src, pos)                   // the lvalue target (Var or Member chain)
-    eq   := src.scan(lhs.next)                       // '='
-    v    := a.parse_or(src, eq.next)
+    lhs := a.parse_atom(src, pos)    // the lvalue target (Var or Member chain)
+    eq := src.scan(lhs.next)    // '='
+    v := a.parse_or(src, eq.next)
     rest := a.parse_block(src, v.next)
-    BlockEnd( list: a.scons(sassign_at(lhs.expr, v.expr, start), rest.list), next: rest.next )
+    BlockEnd(
+        list: a.scons(sassign_at(lhs.expr, v.expr, start), rest.list),
+        next: rest.next,
+    )
 }
 block_while = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
-    w    := a.parse_while(src, pos)
+    w := a.parse_while(src, pos)
     rest := a.parse_block(src, w.next)
-    BlockEnd( list: a.scons(w.stmt, rest.list), next: rest.next )
+    BlockEnd(
+        list: a.scons(w.stmt, rest.list),
+        next: rest.next,
+    )
 }
-
 // count the statements, then fill a heap [Stmt] from the list (return the next index)
-scount = (l: Ptr<SList>) i32 { l.match ({ .SNil => 0, .SCons(c) => 1 + c.tail.scount() }) }
-sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 { l.match ({ .SNil => i, .SCons(c) => buf.sfill_cons(c, i) }) }
+scount = (l: Ptr<SList>) i32 {
+    l.match ({
+        .SNil     => 0,
+        .SCons(c) => 1 + c.tail.scount(),
+    })
+}
+sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 {
+    l.match ({
+        .SNil     => i,
+        .SCons(c) => buf.sfill_cons(c, i),
+    })
+}
 sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
     buf[i] = c.head
     buf.sfill(c.tail, i + 1)
 }
-
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
 stmt_buf = (a: MutPtr<Malloc>, n: i64) [Stmt] { slice(a.acquire(n * sizeof(Stmt)), n) }
-
 // materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
 materialize* = (a: MutPtr<Malloc>, stmts: Ptr<SList>) [Stmt] {
     body := a.stmt_buf(stmts.scount())
     body.sfill(stmts, 0)
     body
 }
-
 // parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
-build_body* = (a: MutPtr<Malloc>, src: str, pos: i32) [Stmt] {
-    a.materialize(a.parse_stmts(src, pos))
-}
+build_body* = (a: MutPtr<Malloc>, src: str, pos: i32) [Stmt] { a.materialize(a.parse_stmts(src, pos)) }

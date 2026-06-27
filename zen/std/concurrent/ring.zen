@@ -16,30 +16,51 @@ Ring*<M>: {
     buf: RawPtr<u8>,
     head: i64,
     tail: i64,
-    cap: i64
-
-    // the ring cannot accept another element (producer is a full lap ahead of the consumer).
-    is_full = (r: Ring<M>) bool { r.tail - r.head >= r.cap }
-    // queued-but-unconsumed element count.
-    pending = (r: Ring<M>) i64 { r.tail - r.head }
-    // there is at least one element to consume.
-    nonempty = (r: Ring<M>) bool { r.head < r.tail }
-    // write `v` at the producer slot, return the ring with tail advanced (caller checks is_full first).
+    cap: i64,
+    is_full = (r: Ring<M>) bool {
+        // the ring cannot accept another element (producer is a full lap ahead of the consumer).
+        r.tail - r.head >= r.cap
+    }
+    pending = (r: Ring<M>) i64 {
+        // queued-but-unconsumed element count.
+        r.tail - r.head
+    }
+    nonempty = (r: Ring<M>) bool {
+        // there is at least one element to consume.
+        r.head < r.tail
+    }
     push = (r: Ring<M>, v: M) Ring<M> {
+        // write `v` at the producer slot, return the ring with tail advanced (caller checks is_full first).
         slots: [M] := r.buf.slice(r.cap)
         slots[r.tail % r.cap] = v
-        Ring<M>(buf: r.buf, head: r.head, tail: r.tail + 1, cap: r.cap)
+        Ring<M>(
+            buf: r.buf,
+            head: r.head,
+            tail: r.tail + 1,
+            cap: r.cap,
+        )
     }
-    // the consumer-slot value (caller checks nonempty first); does NOT advance.
     peek = (r: Ring<M>) M {
+        // the consumer-slot value (caller checks nonempty first); does NOT advance.
         slots: [M] := r.buf.slice(r.cap)
         slots[r.head % r.cap]
     }
-    // the ring with the head advanced by one (consumed the peeked element).
     advance = (r: Ring<M>) Ring<M> {
-        Ring<M>(buf: r.buf, head: r.head + 1, tail: r.tail, cap: r.cap)
+        Ring<M>(
+            buf: r.buf,
+            head: r.head + 1,
+            tail: r.tail,
+            cap: r.cap,
+        )
     }
 }
-
+// the ring with the head advanced by one (consumed the peeked element).
 // build an empty ring over an already-allocated slot buffer.
-ring*<M> = (buf: RawPtr<u8>, cap: i64) Ring<M> { Ring<M>(buf: buf, head: 0, tail: 0, cap: cap) }
+ring*<M> = (buf: RawPtr<u8>, cap: i64) Ring<M> {
+    Ring<M>(
+        buf: buf,
+        head: 0,
+        tail: 0,
+        cap: cap,
+    )
+}
