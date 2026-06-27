@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (186)", [VerdictCase(
+    a := run_verdicts("verdict (194)", [VerdictCase(
         src: "test* = () i32 { a: u8 := 300  to_i32(a) }",
         should_pass: false,
         kind: "",
@@ -770,6 +770,49 @@ oracle_verdict_run* = () i32 {
     ), VerdictCase(
         src: "Box*: { op: (i32) i32 }\ntest* = () i32 {\n  k := 10\n  b := Box(op: (n) { n + k })\n  b.op(5)\n}",
         should_pass: false,
+        kind: "",
+    ), VerdictCase(
+        // soundness hole 4: a generic call's CONCRETE result type (Box<i32> from mk(255)) must be
+        // fit-checked against the annotation Box<u8> — a real mismatch, not an unknown leaked to cc.
+        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ntest* = () i32 { bu: Box<u8> := mk(255)  0 }",
+        should_pass: false,
+        kind: "assign-fit",
+    ), VerdictCase(
+        // hole 4 still-accept: the inferred instance IS correct (Box<i32>), so it type-checks.
+        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\nunbox<T> = (b: Box<T>) T { b.v }\ntest* = () i32 { bi: Box<i32> := mk(7)  unbox(bi) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // hole 4 return position: returning Box<i32> from a Box<u8> function is a return-fit error.
+        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ngetu8* = () Box<u8> { mk(7) }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        // soundness hole 5: i32 + i64 is i64 (the WIDER operand), so it cannot fit an i32 slot —
+        // no silent truncation, and no order-dependence (`a + b` and `b + a` both reject).
+        src: "f* = () i32 { a: i32 := 0  b: i64 := 4294967297  a + b }\ntest* = () i32 { f() }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        // hole 5 still-accept: legitimate i64 math and same-width i32 math are unchanged.
+        src: "f* = () i64 { a: i64 := 3  b: i64 := 4294967297  a + b }\ng* = () i32 { a: i32 := 5  b: i32 := 7  a + b }\ntest* = () i32 { g() }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // hole 5 still-accept: a numeric LITERAL operand adapts, so `c + 1` (u8 + int-lit) stays u8.
+        src: "f* = (c: u8) u8 { c + 1 }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // soundness hole 6: a UFCS trait method on a receiver that does NOT impl the trait (Box has
+        // no Area impl) is a trait-bound error, not a bare `area` symbol leaked to the linker.
+        src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nBox*: { w: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { b := Box(w: 3)  b.addr().area() }",
+        should_pass: false,
+        kind: "trait-bound",
+    ), VerdictCase(
+        // hole 6 still-accept: valid UFCS trait dispatch (Circle DOES impl Area) resolves and runs.
+        src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { c := Circle(r: 4)  c.addr().area() }",
+        should_pass: true,
         kind: "",
     )])
     // Stage 3 nullability: deref of a nullable `RawPtr<T>` (T != u8) without a null-check is REJECTED.
