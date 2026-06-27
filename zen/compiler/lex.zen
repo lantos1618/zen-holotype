@@ -57,6 +57,15 @@ hex_end = (src: str, pos: i32) i32 { is_hex(at(src, pos)).match ({ true => src.h
 // a number span from its first digit: `0x…` runs over hex digits, otherwise decimal digits.
 is_hex_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'x' || at(src, pos + 1) == 'X') }
 num_end = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.hex_end(pos + 2), false => src.int_end(pos + 1) }) }
+// scientific exponent: `[eE][+-]?[0-9]+` right after the mantissa. Returns the end past the
+// exponent when one is present, else `pos` unchanged — so `1e` (no digit) / `1einstein` /
+// `x.e` are NOT mis-consumed; the exponent only fuses when a digit actually follows.
+exp_end = (src: str, pos: i32) i32 {
+    (at(src, pos) == 'e' || at(src, pos) == 'E').match ({ true => {
+        p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({ true => pos + 2, false => pos + 1 })
+        is_digit(at(src, p2)).match ({ true => src.int_end(p2), false => pos })
+    }, false => pos })
+}
 str_end = (src: str, pos: i32) i32 {
     b := at(src, pos)    // pos just past the opening quote
     (b == '\0').match ({ true => pos, false => (b == '"').match ({ true => pos + 1, false => (b == '\\').match ({ true => src.str_end(pos + 2), false => src.str_end(pos + 1) }) }) })
@@ -100,11 +109,16 @@ num_tok = (src: str, pos: i32) Scan {
     // << (shift)
     // >> (shift)
     // ── one token ──────────────────────────────────────────────────────────────────
-    // a number token. A decimal digit run whose very next bytes are `.` THEN a digit continues as a
-    // FLOAT literal — `digits '.' digits`, nothing more (NO exponent form: write 0.001, not 1e-3; NO
-    // hex floats). The dot must be followed by a digit, so `1.match` / `xs[0].addr()` still scan as
-    // an Int and a `.` postfix — only `1.5` fuses into one Float token.
-    (src.is_hex_prefix(pos).match ({ true => false, false => true }) && at(src, e) == '.' && is_digit(at(src, e + 1))).match ({ true => mk(.Float, pos, src.int_end(e + 1)), false => mk(.Int, pos, e) })
+    // a number token. A decimal digit run becomes a FLOAT when it grows a fractional part
+    // (`digits '.' digits`) and/or a scientific exponent (`[eE][+-]?digits`): `3.14`, `1e10`,
+    // `1.5e-3`, `6.022e23`, `1.0E5`. The dot must be followed by a digit, so `1.match` /
+    // `xs[0].addr()` still scan as an Int + a `.` postfix; the exponent only fuses when a digit
+    // follows `e`, so `x.e` / a var `e1` are untouched. Hex (`0x…`) never floats.
+    hex := src.is_hex_prefix(pos)
+    has_frac := hex.match ({ true => false, false => at(src, e) == '.' && is_digit(at(src, e + 1)) })
+    me := has_frac.match ({ true => src.int_end(e + 1), false => e })
+    end := hex.match ({ true => me, false => src.exp_end(me) })
+    (has_frac || end > me).match ({ true => mk(.Float, pos, end), false => mk(.Int, pos, e) })
 }
 scan_one = (src: str, pos: i32, b: u8) Scan { is_alpha(b).match ({ true => mk(.Ident, pos, src.ident_end(pos + 1)), false => is_digit(b).match ({ true => src.num_tok(pos), false => (b == '"').match ({ true => mk(.Str, pos, src.str_end(pos + 1)), false => (b == '\'').match ({ true => mk(.Char, pos, src.char_end(pos + 1)), false => mk(.Sym, pos, src.sym_end(pos)) }) }) }) }) }
 scan* = (src: str, pos0: i32) Scan {
