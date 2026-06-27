@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, arrow, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -729,7 +729,7 @@ infer_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, written: 
 }
 genlit_g = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
     nt := a.infer_struct_targs(env, env.decls.gstruct_of(sd.ty), sd.targs, inits)
-    a.cenode(mkstructg(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits))
+    a.cenode(mkstructg_at(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits, sd.pos))
 }
 // the expected type's args, when it names generic struct `base` — the authoritative source for a bare
 // literal's type args under a `st: Store<AppState> := …` annotation (or any expected-type position).
@@ -756,9 +756,9 @@ bare_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, inits: [Fi
 // A bare literal of a plain (non-generic) struct is unchanged.
 resolve_genlit_bare = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
     gsd := env.decls.gstruct_of(sd.ty)
-    is_empty(gsd.name).match ({ true => a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, inits)), false => {
+    is_empty(gsd.name).match ({ true => a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, inits, sd.pos)), false => {
         nt := a.bare_struct_targs(env, gsd, inits)
-        a.cenode(mkstructg(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits))
+        a.cenode(mkstructg_at(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits, sd.pos))
     } })
 }
 resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
@@ -789,7 +789,7 @@ resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> { a.ce
 // Field access auto-derefs pointer receivers.
 resolve_member = (a: MutPtr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
     obj := a.resolve_expr(env.clr_exp(), mm.obj)
-    env.infer_expr(mm.obj).ty_is_ptr().match ({ true => a.cenode(arrow(obj, mm.field)), false => a.cenode(member(obj, mm.field)) })
+    env.infer_expr(mm.obj).ty_is_ptr().match ({ true => a.cenode(arrow_at(obj, mm.field, mm.pos)), false => a.cenode(member_at(obj, mm.field, mm.pos)) })
 }
 // Resolve foreach body with index and element bindings.
 resolve_loop = (a: MutPtr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
@@ -2032,9 +2032,9 @@ subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] 
 }
 subst_genlit_g = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
     nt := a.subst_targs(tparams, targs, m.targs)
-    mkstructg(m.ty, a.mangle_str_in(m.ty, nt), nt, a.subst_inits(tparams, targs, m.inits))
+    mkstructg_at(m.ty, a.mangle_str_in(m.ty, nt), nt, a.subst_inits(tparams, targs, m.inits), m.pos)
 }
-subst_genlit = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr { (m.targs.len > 0).match ({ true => a.subst_genlit_g(tparams, targs, m), false => mkstruct(m.ty, a.subst_inits(tparams, targs, m.inits)) }) }
+subst_genlit = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], m: MakeStructData) Expr { (m.targs.len > 0).match ({ true => a.subst_genlit_g(tparams, targs, m), false => mkstruct_at(m.ty, a.subst_inits(tparams, targs, m.inits), m.pos) }) }
 subst_inits = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) {
@@ -2082,8 +2082,8 @@ subst_expr = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Pt
         .Var(v)        => a.subst_tparam_var(tparams, targs, v, e),
         .Bin(b)        => a.cenode(bin_at(b.op, a.subst_expr(tparams, targs, b.lhs), a.subst_expr(tparams, targs, b.rhs), b.pos)),
         .Cond(d)       => a.cenode(cond_oa(a.subst_expr(tparams, targs, d.c), a.subst_expr(tparams, targs, d.t), a.subst_expr(tparams, targs, d.e), d.oa)),
-        .Member(m)     => a.cenode(member(a.subst_expr(tparams, targs, m.obj), m.field)),
-        .Arrow(ar)     => a.cenode(arrow(a.subst_expr(tparams, targs, ar.obj), ar.field)),
+        .Member(m)     => a.cenode(member_at(a.subst_expr(tparams, targs, m.obj), m.field, m.pos)),
+        .Arrow(ar)     => a.cenode(arrow_at(a.subst_expr(tparams, targs, ar.obj), ar.field, ar.pos)),
         .Call(c)       => a.recall(c, c.fn, a.subst_exprs(tparams, targs, c.args)),
         .MakeEnum(mk)  => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(tparams, targs, mk.payload)),
         .Tag(t)        => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant),
@@ -2200,16 +2200,16 @@ xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>
             out = a.cenode(cond_oa(a.xform_expr(decls, idx, d.c, params, fargs, env), a.xform_expr_exp(decls, idx, d.t, params, fargs, env, exp), a.xform_expr_exp(decls, idx, d.e, params, fargs, env, exp), d.oa))
         },
         .Member(m)      => {
-            out = a.cenode(member(a.xform_expr(decls, idx, m.obj, params, fargs, env), m.field))
+            out = a.cenode(member_at(a.xform_expr(decls, idx, m.obj, params, fargs, env), m.field, m.pos))
         },
         .Arrow(ar)      => {
-            out = a.cenode(arrow(a.xform_expr(decls, idx, ar.obj, params, fargs, env), ar.field))
+            out = a.cenode(arrow_at(a.xform_expr(decls, idx, ar.obj, params, fargs, env), ar.field, ar.pos))
         },
         .MakeEnum(mk)   => {
             out = a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, idx, mk.payload, params, fargs, env)))
         },
         .MakeStruct(sd) => {
-            out = a.cenode(mkstructg(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, idx, sd.inits, params, fargs, env)))
+            out = a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, idx, sd.inits, params, fargs, env), sd.pos))
         },
         .Match(m)       => {
             out = a.xform_match(decls, idx, m, params, fargs, env, exp)
@@ -3014,11 +3014,11 @@ lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
 }
 lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
-        .MakeStruct(s) => a.cenode(mkstructg(s.ty, s.mty, s.targs, a.lift_rw_inits(decls, idx, gcp, gen, s.ty, s.targs, s.inits))),
+        .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.lift_rw_inits(decls, idx, gcp, gen, s.ty, s.targs, s.inits), s.pos)),
         .Bin(b)        => a.cenode(bin_at(b.op, a.lift_rw_expr(decls, idx, gcp, gen, b.lhs), a.lift_rw_expr(decls, idx, gcp, gen, b.rhs), b.pos)),
         .Cond(d)       => a.cenode(cond_oa(a.lift_rw_expr(decls, idx, gcp, gen, d.c), a.lift_rw_expr(decls, idx, gcp, gen, d.t), a.lift_rw_expr(decls, idx, gcp, gen, d.e), d.oa)),
-        .Member(m)     => a.cenode(member(a.lift_rw_expr(decls, idx, gcp, gen, m.obj), m.field)),
-        .Arrow(ar)     => a.cenode(arrow(a.lift_rw_expr(decls, idx, gcp, gen, ar.obj), ar.field)),
+        .Member(m)     => a.cenode(member_at(a.lift_rw_expr(decls, idx, gcp, gen, m.obj), m.field, m.pos)),
+        .Arrow(ar)     => a.cenode(arrow_at(a.lift_rw_expr(decls, idx, gcp, gen, ar.obj), ar.field, ar.pos)),
         .Call(c)       => a.recall(c, c.fn, a.lift_rw_args(decls, idx, gcp, gen, c.args)),
         .MakeEnum(mk)  => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.lift_rw_expr(decls, idx, gcp, gen, mk.payload))),
         .Match(m)      => m.ptr.match ({ true => a.cenode(ematchp(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))), false => a.cenode(ematch(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))) }),

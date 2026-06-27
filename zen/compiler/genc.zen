@@ -54,11 +54,13 @@ CondData*: {
 MemberData*: {
     obj: Ptr<Expr>,
     field: str,
-}    // obj.field   (value)  /  obj->field (pointer)
+    pos: i32,
+}    // obj.field   (value)  /  obj->field (pointer); pos = field-name byte offset (0 = synthesized)
 ArrowData*: {
     obj: Ptr<Expr>,
     field: str,
-}    // obj->field
+    pos: i32,
+}    // obj->field; pos = field-name byte offset (0 = synthesized)
 MakeEnumData*: {
     ty: str,
     mty: str,
@@ -100,7 +102,8 @@ MakeStructData*: {
     mty: str,
     targs: [Ty],
     inits: [FieldInit],
-}    // (mty){ .a = …, .b = … }
+    pos: i32,
+}    // (mty){ .a = …, .b = … }; pos = type-name byte offset (0 = synthesized)
 // a slice [T] is a fat pointer { void* ptr; int64_t len; } (the `zslice` typedef). The element
 // type T is recovered at the literal (array type) and at indexing (the cast) — carried in the AST.
 SliceData*: {
@@ -435,12 +438,28 @@ member* = (o: Ptr<Expr>, f: str) Expr {
     .Member(MemberData(
         obj: o,
         field: f,
+        pos: 0,
+    ))
+}
+member_at* = (o: Ptr<Expr>, f: str, p: i32) Expr {
+    .Member(MemberData(
+        obj: o,
+        field: f,
+        pos: p,
     ))
 }
 arrow* = (o: Ptr<Expr>, f: str) Expr {
     .Arrow(ArrowData(
         obj: o,
         field: f,
+        pos: 0,
+    ))
+}
+arrow_at* = (o: Ptr<Expr>, f: str, p: i32) Expr {
+    .Arrow(ArrowData(
+        obj: o,
+        field: f,
+        pos: p,
     ))
 }
 mkenum* = (ty: str, v: str, p: Ptr<Expr>) Expr {
@@ -473,6 +492,16 @@ mkstruct* = (ty: str, inits: [FieldInit]) Expr {
         mty: ty,
         targs: no_tys(),
         inits: inits,
+        pos: 0,
+    ))
+}
+mkstruct_at* = (ty: str, inits: [FieldInit], p: i32) Expr {
+    .MakeStruct(MakeStructData(
+        ty: ty,
+        mty: ty,
+        targs: no_tys(),
+        inits: inits,
+        pos: p,
     ))
 }
 mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr {
@@ -481,6 +510,16 @@ mkstructg* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit]) Expr {
         mty: mty,
         targs: targs,
         inits: inits,
+        pos: 0,
+    ))
+}
+mkstructg_at* = (ty: str, mty: str, targs: [Ty], inits: [FieldInit], p: i32) Expr {
+    .MakeStruct(MakeStructData(
+        ty: ty,
+        mty: mty,
+        targs: targs,
+        inits: inits,
+        pos: p,
     ))
 }
 no_tys* = () [Ty] { slice(null_ptr(), 0) }    // an empty [Ty] (non-generic literal's targs)

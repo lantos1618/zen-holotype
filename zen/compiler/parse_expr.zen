@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, mkstruct, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -372,7 +372,7 @@ parse_field = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
 parse_field_plain = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, fld: Scan) PExpr {
     nx := src.scan(fld.next)
     (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => a.parse_method(src, base, name, nx, fld.tok.start), false => a.parse_postfix(src, PExpr(
-        expr: a.enode(member(base.expr, name)),
+        expr: a.enode(member_at(base.expr, name, fld.tok.start)),
         next: fld.next,
     )) })
 }
@@ -772,7 +772,7 @@ parse_ident = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
-    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next), false => PExpr(
+    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => PExpr(
         expr: a.enode(vref_at(name, sc.tok.start)),
         next: sc.next,
     ) }), false => PExpr(
@@ -801,7 +801,7 @@ tyargs_end* = (src: str, pos: i32, depth: i32) i32 {
 }
 is_tyarg_tok = (src: str, t: Token) bool { is_ident_tok(t) || src.is_comma(t) || src.is_lbracket(t) || src.is_rbracket(t) || src.is_lparen(t) || src.is_rparen(t) }    // fn-type args `() R` — a `(A,B) R` element inside `Name<…>`
 // Generic struct construction is `Name<...>(f: v)`.
-parse_generic_struct_lit = (a: MutPtr<Malloc>, src: str, name: str, pos: i32) PExpr {
+parse_generic_struct_lit = (a: MutPtr<Malloc>, src: str, name: str, pos: i32, tnpos: i32) PExpr {
     ta := a.parse_tyargs(src, pos)    // pos just past '<'
     open := src.scan(ta.next)
     buf := a.finit_buf()
@@ -809,7 +809,7 @@ parse_generic_struct_lit = (a: MutPtr<Malloc>, src: str, name: str, pos: i32) PE
     mty := a.mangle_str_in(name, ta.args)
     inits := buf.take_inits(fe.count)
     PExpr(
-        expr: a.enode(mkstructg(name, mty, ta.args, inits)),
+        expr: a.enode(mkstructg_at(name, mty, ta.args, inits, tnpos)),
         next: fe.next,
     )
 }
@@ -912,11 +912,11 @@ fill_ainit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) P
 // Paren struct construction: `Name(field: value, ...)`.
 finit_buf = (a: MutPtr<Malloc>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }
 take_inits = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }
-parse_paren_struct_lit = (a: MutPtr<Malloc>, src: str, name: str, open: Scan) PExpr {
+parse_paren_struct_lit = (a: MutPtr<Malloc>, src: str, name: str, open: Scan, tnpos: i32) PExpr {
     buf := a.finit_buf()
     fe := a.fill_pinits(src, open.next, buf, 0)
     PExpr(
-        expr: a.enode(mkstruct(name, buf.take_inits(fe.count))),
+        expr: a.enode(mkstruct_at(name, buf.take_inits(fe.count), tnpos)),
         next: fe.next,
     )
 }
