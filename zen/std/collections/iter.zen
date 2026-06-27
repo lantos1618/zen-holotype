@@ -5,87 +5,79 @@
 // the receiver-style `map`, `filter` aliases).
 // `try_*` variants keep allocator failure in the value flow.
 // For other element types, use the generic `_into` forms with your own buffer.
-
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-
-
 fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
     acc := init
-    xs.loop((h, i, x) { acc = f(acc, x) })
+    xs.loop((h, i, x) {
+        acc = f(acc, x)
+    })
     acc
 }
-
 each*<T> = (xs: [T], f: (T) void) void {
-    xs.loop((h, i, x) { f(x) })
+    xs.loop((h, i, x) {
+        f(x)
+    })
 }
-
 // map/filter into a caller-provided output slice. The caller owns `out`, so
 // these allocate nothing; they just transform.
 // `out` must be at least as long as `xs` (map) or hold the kept elements (filter).
-
 map_into*<T, U> = (xs: [T], out: [U], f: (T) U) void {
-    xs.loop((h, i, x) { out[i] = f(x) })
+    xs.loop((h, i, x) {
+        out[i] = f(x)
+    })
 }
-
 // Keep the elements that satisfy `keep`, packed into `out`; returns how many.
 filter_into*<T> = (xs: [T], out: [T], keep: (T) bool) i64 {
     n := 0
     xs.loop((h, i, x) {
         out[n] = x
-        n = n + (keep(x)).match ({ true => 1, false => 0 })
+        n = n + keep(x).match ({ true => 1, false => 0 })
     })
     n
 }
-
 map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] {
     out := slice(a.acquire(xs.len * 4), xs.len)
-    xs.loop((h, i, x) { out[i] = f(x) })
+    xs.loop((h, i, x) {
+        out[i] = f(x)
+    })
     out
 }
-
 try_map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> {
-    (xs.len <= 0).match ({
-        true => ok(slice(null_ptr(), 0)),
-        false => a.try_acquire(xs.len * 4).match ({
-            .Ok(p) => {
-                out := p.slice(xs.len)
-                xs.loop((h, i, x) { out[i] = f(x) })
-                ok(out)
-            },
-            .Err(e) => err(e)
-        })
-    })
+    (xs.len <= 0).match ({ true => ok(slice(null_ptr(), 0)), false => a.try_acquire(xs.len * 4).match ({
+        .Ok(p)  => {
+            out := p.slice(xs.len)
+            xs.loop((h, i, x) {
+                out[i] = f(x)
+            })
+            ok(out)
+        },
+        .Err(e) => err(e),
+    }) })
 }
-
 filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
     buf := slice(a.acquire(xs.len * 4), xs.len)
     n := 0
     xs.loop((h, i, x) {
         buf[n] = x
-        n = n + (keep(x)).match ({ true => 1, false => 0 })
+        n = n + keep(x).match ({ true => 1, false => 0 })
     })
     slice(buf[0].addr(), n)
 }
-
 try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> {
-    (xs.len <= 0).match ({
-        true => ok(slice(null_ptr(), 0)),
-        false => a.try_acquire(xs.len * 4).match ({
-            .Ok(p) => {
-                buf := p.slice(xs.len)
-                n := 0
-                xs.loop((h, i, x) {
-                    buf[n] = x
-                    n = n + (keep(x)).match ({ true => 1, false => 0 })
-                })
-                ok(slice(buf[0].addr(), n))
-            },
-            .Err(e) => err(e)
-        })
-    })
+    (xs.len <= 0).match ({ true => ok(slice(null_ptr(), 0)), false => a.try_acquire(xs.len * 4).match ({
+        .Ok(p)  => {
+            buf := p.slice(xs.len)
+            n := 0
+            xs.loop((h, i, x) {
+                buf[n] = x
+                n = n + keep(x).match ({ true => 1, false => 0 })
+            })
+            ok(slice(buf[0].addr(), n))
+        },
+        .Err(e) => err(e),
+    }) })
 }
-
 // In-place insertion sort of a mutable `[T]`, ordered by the comparator `less(a, b)` (true when
 // `a` must come before `b`). Allocates nothing — it permutes `xs` directly. Stable. O(n^2), which is
 // fine for the small slices these collections produce; callers wanting more can sort into a Vec.
@@ -93,31 +85,25 @@ try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], Io
 // sorts descending. The comparator `less` is invoked DIRECTLY in the loop body (never forwarded to a
 // helper) so an inline lambda splices in, exactly as it does for `fold`/`each`.
 sort*<T> = (xs: [T], less: (T, T) bool) void {
-    // Outer pass: insert each xs[i] into the already-sorted prefix [0, i).
     xs.loop((ho, i, _) {
-        // Inner pass: sink element at j = i - k leftward while it precedes its neighbour. The break
-        // closes the inner loop only (its own handler `hi`), leaving the outer pass running.
         xs.loop((hi, k, _) {
+            // Outer pass: insert each xs[i] into the already-sorted prefix [0, i).
+            // Inner pass: sink element at j = i - k leftward while it precedes its neighbour. The break
+            // closes the inner loop only (its own handler `hi`), leaving the outer pass running.
             j := i - k
-            (j <= 0).match ({
-                true  => { hi.break },
-                false => less(xs[j], xs[j - 1]).match ({
-                    true => {
-                        tmp := xs[j]
-                        xs[j] = xs[j - 1]
-                        xs[j - 1] = tmp
-                    },
-                    false => { hi.break }
-                })
-            })
+            (j <= 0).match ({ true => {
+                hi.break
+            }, false => less(xs[j], xs[j - 1]).match ({ true => {
+                tmp := xs[j]
+                xs[j] = xs[j - 1]
+                xs[j - 1] = tmp
+            }, false => {
+                hi.break
+            } }) })
         })
     })
 }
-
 map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] { a.map_in(xs, f) }
-
 try_map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> { a.try_map_in(xs, f) }
-
 filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] { a.filter_in(xs, keep) }
-
 try_filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> { a.try_filter_in(xs, keep) }

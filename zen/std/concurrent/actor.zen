@@ -9,20 +9,18 @@
 { Result, IoError } = std.core.result
 { runtime_checkpoint } = std.concurrent.runtime
 { Ring } = std.concurrent.ring
-
-ACTOR_STATE_SIZE := 32  // RawPtr<u8> buf + head/tail/cap i64 slots (one Ring<M>).
-
-Context*<M>: { msg: M }
-Receiver*<M>: {
-    receive: (MutPtr<Self>, Context<M>) void
+ACTOR_STATE_SIZE := 32    // RawPtr<u8> buf + head/tail/cap i64 slots (one Ring<M>).
+Context*<M>: {
+    msg: M,
 }
-
+Receiver*<M>: {
+    receive: (MutPtr<Self>, Context<M>) void,
+}
 // Internal system state owns one allocator-backed Ring<M> block plus one allocator-backed message
 // buffer. ActorRef shares the state; it never allocates or frees. The mailbox is a Ring<M> (the single
 // shared ring abstraction, std.concurrent.ring) held behind the RawPtr state slot.
 ActorSystem<M>: {
-    state: RawPtr<u8>
-
+    state: RawPtr<u8>,
     state_slot = (sys: ActorSystem<M>) [Ring<M>] { sys.state.slice(1) }
     ref = (sys: ActorSystem<M>) ActorRef<M> { ActorRef<M>(state: sys.state) }
     messages = (sys: ActorSystem<M>) [M] {
@@ -40,19 +38,15 @@ ActorSystem<M>: {
         state[0] = cur.advance()
         message
     }
-    run<ActorT> = (
-    sys: ActorSystem<M>,
-    actor: MutPtr<ActorT>
-    ) void {
+    run<ActorT> = (sys: ActorSystem<M>, actor: MutPtr<ActorT>) void {
         sys.messages().loop((h, i, slot) {
-            sys.has_messages().match({
-                true => {
-                    message: M := sys.next_message()
-                    actor.receive(Context<M>(msg: message))
-                    runtime_checkpoint()
-                },
-                false => { h.break }
-            })
+            sys.has_messages().match ({ true => {
+                message: M := sys.next_message()
+                actor.receive(Context<M>(msg: message))
+                runtime_checkpoint()
+            }, false => {
+                h.break
+            } })
         })
     }
     free<A> = (sys: ActorSystem<M>, alloc: MutPtr<A>) void {
@@ -62,25 +56,20 @@ ActorSystem<M>: {
     }
 }
 ActorRef*<M>: {
-    state: RawPtr<u8>
-
+    state: RawPtr<u8>,
     ref_state = (ref: ActorRef<M>) [Ring<M>] { ref.state.slice(1) }
     send = (ref: ActorRef<M>, message: M) bool {
         state := ref.ref_state()
         cur := state[0]
-        cur.is_full().match ({
-            true => false,
-            _ => {
-                state[0] = cur.push(message)
-                true
-            }
-        })
+        cur.is_full().match ({ true => false, false => {
+            state[0] = cur.push(message)
+            true
+        } })
     }
 }
 ReplyRef*<T>: {
     value: RawPtr<u8>,
-    ready: RawPtr<u8>
-
+    ready: RawPtr<u8>,
     values = (reply: ReplyRef<T>) [T] { reply.value.slice(1) }
     send = (reply: ReplyRef<T>, value: T) bool {
         vals: [T] := reply.value.slice(1)
@@ -97,14 +86,15 @@ ReplyRef*<T>: {
         value
     }
 }
-
 context*<M> = (msg: M) Context<M> { Context<M>(msg: msg) }
-
 reply<A, T> = (alloc: MutPtr<A>) ReplyRef<T> {
     value := alloc.acquire(sizeof(T))
     ready := alloc.acquire(8)
     ready.store_i64(0)
-    ReplyRef<T>(value: value, ready: ready)
+    ReplyRef<T>(
+        value: value,
+        ready: ready,
+    )
 }
 try_reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
     alloc.try_acquire(sizeof(T)).match ({
@@ -112,27 +102,35 @@ try_reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
             alloc.try_acquire(8).match ({
                 .Ok(ready) => {
                     ready.store_i64(0)
-                    ok: Result<ReplyRef<T>, IoError> := .Ok(ReplyRef<T>(value: value, ready: ready))
+                    ok: Result<ReplyRef<T>, IoError> := .Ok(ReplyRef<T>(
+                        value: value,
+                        ready: ready,
+                    ))
                     ok
                 },
-                .Err(e) => {
+                .Err(e)    => {
                     alloc.release(value)
                     err: Result<ReplyRef<T>, IoError> := .Err(e)
                     err
-                }
+                },
             })
         },
-        .Err(e) => {
+        .Err(e)    => {
             err: Result<ReplyRef<T>, IoError> := .Err(e)
             err
-        }
+        },
     })
 }
 make_system<A, M> = (alloc: MutPtr<A>, cap: i64) ActorSystem<M> {
     state := alloc.acquire(ACTOR_STATE_SIZE)
     messages := alloc.acquire(cap * sizeof(M))
     slot := state.slice(1)
-    slot[0] = Ring<M>(buf: messages, head: 0, tail: 0, cap: cap)
+    slot[0] = Ring<M>(
+        buf: messages,
+        head: 0,
+        tail: 0,
+        cap: cap,
+    )
     ActorSystem<M>(state: state)
 }
 try_make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoError> {
@@ -141,38 +139,34 @@ try_make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoEr
             alloc.try_acquire(cap * sizeof(M)).match ({
                 .Ok(messages) => {
                     slot := state.slice(1)
-                    slot[0] = Ring<M>(buf: messages, head: 0, tail: 0, cap: cap)
+                    slot[0] = Ring<M>(
+                        buf: messages,
+                        head: 0,
+                        tail: 0,
+                        cap: cap,
+                    )
                     ok: Result<ActorSystem<M>, IoError> := .Ok(ActorSystem<M>(state: state))
                     ok
                 },
-                .Err(e) => {
+                .Err(e)       => {
                     alloc.release(state)
                     err: Result<ActorSystem<M>, IoError> := .Err(e)
                     err
-                }
+                },
             })
         },
-        .Err(e) => {
+        .Err(e)    => {
             err: Result<ActorSystem<M>, IoError> := .Err(e)
             err
-        }
+        },
     })
 }
-
 ActorEngine*<M>: {
-    sys: ActorSystem<M>
-
-    ref = (engine: ActorEngine<M>) ActorRef<M> {
-        engine.sys.ref()
-    }
-    drain<ActorT> = (engine: ActorEngine<M>, actor: MutPtr<ActorT>) void {
-        engine.sys.run(actor)
-    }
-    free<A> = (engine: ActorEngine<M>, alloc: MutPtr<A>) void {
-        engine.sys.free(alloc)
-    }
+    sys: ActorSystem<M>,
+    ref = (engine: ActorEngine<M>) ActorRef<M> { engine.sys.ref() }
+    drain<ActorT> = (engine: ActorEngine<M>, actor: MutPtr<ActorT>) void { engine.sys.run(actor) }
+    free<A> = (engine: ActorEngine<M>, alloc: MutPtr<A>) void { engine.sys.free(alloc) }
 }
-
 engine*<A, M> = (alloc: MutPtr<A>, cap: i64) ActorEngine<M> {
     sys: ActorSystem<M> := alloc.make_system(cap)
     ActorEngine<M>(sys: sys)
@@ -180,68 +174,42 @@ engine*<A, M> = (alloc: MutPtr<A>, cap: i64) ActorEngine<M> {
 try_engine*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorEngine<M>, IoError> {
     sys: Result<ActorSystem<M>, IoError> := alloc.try_make_system(cap)
     sys.match ({
-        .Ok(s) => {
+        .Ok(s)  => {
             ok: Result<ActorEngine<M>, IoError> := .Ok(ActorEngine<M>(sys: s))
             ok
         },
         .Err(e) => {
             err: Result<ActorEngine<M>, IoError> := .Err(e)
             err
-        }
+        },
     })
 }
-
 ActorCell*<M>: {
     inner: ActorEngine<M>,
-
-    ref = (cell: ActorCell<M>) ActorRef<M> {
-        cell.inner.ref()
-    }
-    send = (cell: ActorCell<M>, message: M) bool {
-        cell.ref().send(message)
-    }
-    reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) ReplyRef<T> {
-        alloc.reply()
-    }
-    try_reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
-        alloc.try_reply()
-    }
-    drain<ActorT> = (cell: ActorCell<M>, actor: MutPtr<ActorT>) void {
-        cell.inner.drain(actor)
-    }
+    ref = (cell: ActorCell<M>) ActorRef<M> { cell.inner.ref() }
+    send = (cell: ActorCell<M>, message: M) bool { cell.ref().send(message) }
+    reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) ReplyRef<T> { alloc.reply() }
+    try_reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> { alloc.try_reply() }
+    drain<ActorT> = (cell: ActorCell<M>, actor: MutPtr<ActorT>) void { cell.inner.drain(actor) }
     await_reply<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, reply_to: ReplyRef<T>) T {
         cell.drain(actor)
         reply_to.await(alloc)
     }
-    ask<A, ActorT, T> = (
-    cell: ActorCell<M>,
-    alloc: MutPtr<A>,
-    actor: MutPtr<ActorT>,
-    issue: (ReplyRef<T>) void
-    ) T {
+    ask<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, issue: (ReplyRef<T>) void) T {
         reply_to: ReplyRef<T> := cell.reply(alloc)
         issue(reply_to)
         cell.await_reply(alloc, actor, reply_to)
     }
-    request<A, ActorT, T> = (
-    cell: ActorCell<M>,
-    alloc: MutPtr<A>,
-    actor: MutPtr<ActorT>,
-    make: (ReplyRef<T>) M
-    ) T {
+    request<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, make: (ReplyRef<T>) M) T {
         reply_to: ReplyRef<T> := cell.reply(alloc)
         cell.send(make(reply_to))
         cell.await_reply(alloc, actor, reply_to)
     }
-    free<A> = (cell: ActorCell<M>, alloc: MutPtr<A>) void {
-        cell.inner.free(alloc)
-    }
+    free<A> = (cell: ActorCell<M>, alloc: MutPtr<A>) void { cell.inner.free(alloc) }
 }
-
 ActorHandle*<M, ActorT>: {
     inner_cell: ActorCell<M>,
-    state: RawPtr<u8>
-
+    state: RawPtr<u8>,
     actor = (handle: ActorHandle<M, ActorT>) MutPtr<ActorT> {
         slot: [ActorT] := handle.state.slice(1)
         slot[0].addr()
@@ -249,13 +217,10 @@ ActorHandle*<M, ActorT>: {
     send = (handle: ActorHandle<M, ActorT>, message: M) bool {
         state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
         cur := state[0]
-        cur.is_full().match ({
-            true => false,
-            _ => {
-                state[0] = cur.push(message)
-                true
-            }
-        })
+        cur.is_full().match ({ true => false, false => {
+            state[0] = cur.push(message)
+            true
+        } })
     }
     run = (handle: ActorHandle<M, ActorT>) void {
         state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
@@ -264,32 +229,23 @@ ActorHandle*<M, ActorT>: {
         messages: [M] := state[0].buf.slice(state[0].cap)
         messages.loop((h, i, slot) {
             cur := state[0]
-            cur.nonempty().match({
-                true => {
-                    message: M := cur.peek()
-                    state[0] = cur.advance()
-                    actor.receive(Context<M>(msg: message))
-                    runtime_checkpoint()
-                },
-                false => { h.break }
-            })
+            cur.nonempty().match ({ true => {
+                message: M := cur.peek()
+                state[0] = cur.advance()
+                actor.receive(Context<M>(msg: message))
+                runtime_checkpoint()
+            }, false => {
+                h.break
+            } })
         })
     }
-    request<A, T> = (
-    handle: ActorHandle<M, ActorT>,
-    alloc: MutPtr<A>,
-    make: (ReplyRef<T>) M
-    ) T {
+    request<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, make: (ReplyRef<T>) M) T {
         reply_to: ReplyRef<T> := reply(alloc)
         handle.send(make(reply_to))
         handle.run()
         reply_to.await(alloc)
     }
-    ask<A, T> = (
-    handle: ActorHandle<M, ActorT>,
-    alloc: MutPtr<A>,
-    issue: (ReplyRef<T>) void
-    ) T {
+    ask<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, issue: (ReplyRef<T>) void) T {
         reply_to: ReplyRef<T> := reply(alloc)
         issue(reply_to)
         handle.run()
@@ -302,7 +258,6 @@ ActorHandle*<M, ActorT>: {
         alloc.release(handle.state)
     }
 }
-
 cell*<A, M> = (alloc: MutPtr<A>, cap: i64) ActorCell<M> {
     engine: ActorEngine<M> := alloc.engine(cap)
     ActorCell<M>(inner: engine)
@@ -312,7 +267,10 @@ spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) ActorHandle<M
     slot: [ActorT] := state.slice(1)
     slot[0] = actor
     cell: ActorCell<M> := alloc.cell(cap)
-    ActorHandle<M, ActorT>(inner_cell: cell, state: state)
+    ActorHandle<M, ActorT>(
+        inner_cell: cell,
+        state: state,
+    )
 }
 try_spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) Result<ActorHandle<M, ActorT>, IoError> {
     alloc.try_acquire(sizeof(ActorT)).match ({
@@ -321,33 +279,36 @@ try_spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) Result<Ac
             slot[0] = actor
             cell: Result<ActorCell<M>, IoError> := alloc.try_cell(cap)
             cell.match ({
-                .Ok(c) => {
-                    ok: Result<ActorHandle<M, ActorT>, IoError> := .Ok(ActorHandle<M, ActorT>(inner_cell: c, state: state))
+                .Ok(c)  => {
+                    ok: Result<ActorHandle<M, ActorT>, IoError> := .Ok(ActorHandle<M, ActorT>(
+                        inner_cell: c,
+                        state: state,
+                    ))
                     ok
                 },
                 .Err(e) => {
                     alloc.release(state)
                     err: Result<ActorHandle<M, ActorT>, IoError> := .Err(e)
                     err
-                }
+                },
             })
         },
-        .Err(e) => {
+        .Err(e)    => {
             err: Result<ActorHandle<M, ActorT>, IoError> := .Err(e)
             err
-        }
+        },
     })
 }
 try_cell*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorCell<M>, IoError> {
     engine: Result<ActorEngine<M>, IoError> := alloc.try_engine(cap)
     engine.match ({
-        .Ok(e) => {
+        .Ok(e)  => {
             ok: Result<ActorCell<M>, IoError> := .Ok(ActorCell<M>(inner: e))
             ok
         },
         .Err(e) => {
             err: Result<ActorCell<M>, IoError> := .Err(e)
             err
-        }
+        },
     })
 }

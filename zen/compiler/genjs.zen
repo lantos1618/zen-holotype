@@ -25,112 +25,93 @@
 //     array/object; pointer arithmetic remains unsupported.
 // A program that stays inside the value subset round-trips through node and computes the same number
 // the C backend would.
-
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData,
-    BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData,
-    IndexData, IndexSetData, LoopData, LambdaData, BlockData, IfData, FnTData, lit } = compiler.genc
-
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, IfData, FnTData, lit } = compiler.genc
 // ── int -> decimal digits (byte access only, mirroring genc_emit so genjs self-hosts) ───────
 js_string<A> = (a: MutPtr<A>, cap: i64) String {
-    String(ptr: a.acquire(cap), len: 0, cap: cap)
+    String(
+        ptr: a.acquire(cap),
+        len: 0,
+        cap: cap,
+    )
 }
 js_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
-    String(ptr: a.resize(s.ptr, ncap), len: s.len, cap: ncap)
+    String(
+        ptr: a.resize(s.ptr, ncap),
+        len: s.len,
+        cap: ncap,
+    )
 }
-js_reserve<A> = (a: MutPtr<A>, s: String, need: i64) String {
-    (s.len + need > s.cap).match ({ true => a.js_grow(s, (s.cap + need) * 2), false => s })
-}
+js_reserve<A> = (a: MutPtr<A>, s: String, need: i64) String { (s.len + need > s.cap).match ({ true => a.js_grow(s, (s.cap + need) * 2), false => s }) }
 js_push<A> = (s: String, a: MutPtr<A>, b: u8) String {
     r := a.js_reserve(s, 1)
     r.ptr.offset(r.len).store(b)
-    String(ptr: r.ptr, len: r.len + 1, cap: r.cap)
+    String(
+        ptr: r.ptr,
+        len: r.len + 1,
+        cap: r.cap,
+    )
 }
 js_append<A> = (s: String, a: MutPtr<A>, t: str) String {
     cur := s
     bs: [u8] := t.view()
-    bs.loop((h, i, b) { cur = cur.js_push(a, b) })
+    bs.loop((h, i, b) {
+        cur = cur.js_push(a, b)
+    })
     cur
 }
-
 jsbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
 jsdigit = (d: i64) u8 { jsbyte("0123456789", d) }
 // negatives walk the NEGATIVE side (digits via negated remainders) so INT64_MIN — whose `0 - n`
 // overflows — emits correctly instead of recursing forever.
-js_int_neg = (s: String, alloc: Ptr<Malloc>, n: i64) String {
-    (n > 0 - 10).match ({
-        true  => s.js_push(alloc, jsdigit(0 - n)),
-        false => s.js_int_neg(alloc, n / 10).js_push(alloc, jsdigit(0 - (n % 10)))
-    })
-}
-js_int* = (s: String, alloc: Ptr<Malloc>, n: i64) String {
-    (n < 0).match ({ true => s.js_append(alloc, "-").js_int_neg(alloc, n), false => s.js_int_nat(alloc, n) }) }
-js_int_nat = (s: String, alloc: Ptr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.js_push(alloc, jsdigit(n)),
-        false => s.js_int(alloc, n / 10).js_push(alloc, jsdigit(n % 10))
-    })
-}
-
+js_int_neg = (s: String, alloc: Ptr<Malloc>, n: i64) String { (n > 0 - 10).match ({ true => s.js_push(alloc, jsdigit(0 - n)), false => s.js_int_neg(alloc, n / 10).js_push(alloc, jsdigit(0 - n % 10)) }) }
+js_int* = (s: String, alloc: Ptr<Malloc>, n: i64) String { (n < 0).match ({ true => s.js_append(alloc, "-").js_int_neg(alloc, n), false => s.js_int_nat(alloc, n) }) }
+js_int_nat = (s: String, alloc: Ptr<Malloc>, n: i64) String { (n < 10).match ({ true => s.js_push(alloc, jsdigit(n)), false => s.js_int(alloc, n / 10).js_push(alloc, jsdigit(n % 10)) }) }
 // ── emit an expression (recursive) ──────────────────────────────────────────
 js_expr* = (s: String, alloc: Ptr<Malloc>, e: Ptr<Expr>) String {
-    e.match ({                                       // match auto-derefs the Ptr<Expr>
-        .Int(n)  => s.js_int(alloc, n),
-        .Byte(n) => s.js_int(alloc, n),       // a char literal — the same integer, just typed u8 in check
-        .FloatLit(ft) => s.js_append(alloc, ft), // a JS number IS a double — the literal's text is native here
-        .Var(v)  => s.js_append(alloc, v.name),
-        .Bin(b)  => s.js_bin(alloc, b),
-        .Call(c) => s.js_call(alloc, c),
-        .MethodCall(mc) => s.js_append(alloc, "/* undesugared-method-call */"),   // desugared to Call before codegen
-        .Cond(d) => s.js_cond(alloc, d),
-        .Member(m) => s.js_member(alloc, m),                                // JS objects are structural — p.x
-        .Arrow(a)  => s.js_expr(alloc, a.obj).js_append(alloc, ".").js_append(alloc, a.field),  // no pointers in JS — also p.x
-        .MakeEnum(m)   => s.js_mkenum(alloc, m),
-        .MakeStruct(m) => s.js_mkstruct(alloc, m),
-        .Tag(t)   => s.js_append(alloc, "({tag: \"").js_append(alloc, t.variant).js_append(alloc, "\"})"),    // a payloadless variant
-        .Match(m) => s.js_match(alloc, m),
-        .StrLit(sl) => s.js_strlit(alloc, sl.value),
-        .SliceLit(sd) => s.js_slicelit(alloc, sd),
-        .Index(ix)    => s.js_index(alloc, ix),
-        .Loop(l)      => s.js_loop(alloc, l),
-        .Lambda(lm)   => s.js_lambda(alloc, lm),
-        .Block(b)     => s.js_blockexpr(alloc, b)
+    e.match ({
+        .Int(n)         => s.js_int(alloc, n),    // match auto-derefs the Ptr<Expr>
+        .Byte(n)        => s.js_int(alloc, n),    // a char literal — the same integer, just typed u8 in check
+        .FloatLit(ft)   => s.js_append(alloc, ft),    // a JS number IS a double — the literal's text is native here
+        .Var(v)         => s.js_append(alloc, v.name),
+        .Bin(b)         => s.js_bin(alloc, b),
+        .Call(c)        => s.js_call(alloc, c),
+        .MethodCall(mc) => s.js_append(alloc, "/* undesugared-method-call */"),    // desugared to Call before codegen
+        .Cond(d)        => s.js_cond(alloc, d),
+        .Member(m)      => s.js_member(alloc, m),    // JS objects are structural — p.x
+        .Arrow(a)       => s.js_expr(alloc, a.obj).js_append(alloc, ".").js_append(alloc, a.field),    // no pointers in JS — also p.x
+        .MakeEnum(m)    => s.js_mkenum(alloc, m),
+        .MakeStruct(m)  => s.js_mkstruct(alloc, m),
+        .Tag(t)         => s.js_append(alloc, "({tag: \"").js_append(alloc, t.variant).js_append(alloc, "\"})"),    // a payloadless variant
+        .Match(m)       => s.js_match(alloc, m),
+        .StrLit(sl)     => s.js_strlit(alloc, sl.value),
+        .SliceLit(sd)   => s.js_slicelit(alloc, sd),
+        .Index(ix)      => s.js_index(alloc, ix),
+        .Loop(l)        => s.js_loop(alloc, l),
+        .Lambda(lm)     => s.js_lambda(alloc, lm),
+        .Block(b)       => s.js_blockexpr(alloc, b),
     })
 }
-
 // a statement-expression analogue: wrap the statements in an IIFE and return the final expression.
-js_blockexpr = (s: String, alloc: Ptr<Malloc>, b: BlockData) String {
-    s.js_append(alloc, "(() => ").js_return_block(alloc, b.stmts).js_append(alloc, ")()")
-}
+js_blockexpr = (s: String, alloc: Ptr<Malloc>, b: BlockData) String { s.js_append(alloc, "(() => ").js_return_block(alloc, b.stmts).js_append(alloc, ")()") }
 js_return_block = (s: String, alloc: Ptr<Malloc>, body: [Stmt]) String {
     open := s.js_append(alloc, "{ ")
-    body.loop((h, i, st) { open = open.js_block_one(alloc, st, i == body.len - 1).js_append(alloc, " ") })
+    body.loop((h, i, st) {
+        open = open.js_block_one(alloc, st, i == body.len - 1).js_append(alloc, " ")
+    })
     open.js_append(alloc, "}")
 }
 js_block_one = (s: String, alloc: Ptr<Malloc>, st: Stmt, last: bool) String {
-    last.match ({
-        true  => st.match ({
-            .Return(e)   => s.js_append(alloc, "return ").js_expr(alloc, e).js_append(alloc, ";"),
-            .ExprStmt(e) => s.js_append(alloc, "return ").js_expr(alloc, e).js_append(alloc, ";"),
-            _            => s.js_stmt(alloc, st)
-        }),
-        false => s.js_stmt(alloc, st)
-    })
+    last.match ({ true => st.match ({
+        .Return(e)   => s.js_append(alloc, "return ").js_expr(alloc, e).js_append(alloc, ";"),
+        .ExprStmt(e) => s.js_append(alloc, "return ").js_expr(alloc, e).js_append(alloc, ";"),
+        _            => s.js_stmt(alloc, st),
+    }), false => s.js_stmt(alloc, st) })
 }
-
 // loop handler controls: `h.break`/`h.continue` lower to the actual JS loop-control statements.
-js_member = (s: String, alloc: Ptr<Malloc>, m: MemberData) String {
-    eq(m.field, "break_zk").match ({
-        true  => s.js_append(alloc, "break"),
-        false => eq(m.field, "continue_zk").match ({
-            true  => s.js_append(alloc, "continue"),
-            false => s.js_expr(alloc, m.obj).js_append(alloc, ".").js_append(alloc, m.field)
-        })
-    })
-}
-
+js_member = (s: String, alloc: Ptr<Malloc>, m: MemberData) String { eq(m.field, "break_zk").match ({ true => s.js_append(alloc, "break"), false => eq(m.field, "continue_zk").match ({ true => s.js_append(alloc, "continue"), false => s.js_expr(alloc, m.obj).js_append(alloc, ".").js_append(alloc, m.field) }) }) }
 // xs.loop((h, i, x) { body }) -> an IIFE containing a JS for-loop. A Zen slice is `{ptr, len}`.
 js_loop = (s: String, alloc: Ptr<Malloc>, l: LoopData) String {
     head := s.js_append(alloc, "(() => { const _seq = ").js_expr(alloc, l.seq).js_append(alloc, "; for (let ").js_append(alloc, l.idx).js_append(alloc, " = 0; ").js_append(alloc, l.idx).js_append(alloc, " < _seq.len; ").js_append(alloc, l.idx).js_append(alloc, " = ").js_append(alloc, l.idx).js_append(alloc, " + 1) { let ").js_append(alloc, l.elem).js_append(alloc, " = _seq.ptr[").js_append(alloc, l.idx).js_append(alloc, "]; ")
@@ -139,10 +120,11 @@ js_loop = (s: String, alloc: Ptr<Malloc>, l: LoopData) String {
 }
 js_loop_body = (s: String, alloc: Ptr<Malloc>, body: [Stmt]) String {
     out := s
-    body.loop((h, i, st) { out = out.js_stmt(alloc, st).js_append(alloc, " ") })
+    body.loop((h, i, st) {
+        out = out.js_stmt(alloc, st).js_append(alloc, " ")
+    })
     out
 }
-
 // [a, b, c] is represented as the same fat-slice shape the rest of the compiler expects.
 js_slicelit = (s: String, alloc: Ptr<Malloc>, sd: SliceData) String {
     head := s.js_append(alloc, "({ptr: [").js_args(alloc, sd.items).js_append(alloc, "], len: ")
@@ -150,215 +132,139 @@ js_slicelit = (s: String, alloc: Ptr<Malloc>, sd: SliceData) String {
 }
 js_slice_count = (items: [Expr]) i32 {
     n := 0
-    items.loop((h, i, it) { n = n + 1 })
+    items.loop((h, i, it) {
+        n = n + 1
+    })
     n
 }
-js_index = (s: String, alloc: Ptr<Malloc>, ix: IndexData) String {
-    s.js_append(alloc, "(").js_expr(alloc, ix.seq).js_append(alloc, ").ptr[").js_expr(alloc, ix.idx).js_append(alloc, "]")
-}
-
-js_lambda = (s: String, alloc: Ptr<Malloc>, lm: LambdaData) String {
-    s.js_append(alloc, "((").js_params(alloc, lm.params).js_append(alloc, ") => ").js_return_block(alloc, lm.body).js_append(alloc, ")")
-}
-
+js_index = (s: String, alloc: Ptr<Malloc>, ix: IndexData) String { s.js_append(alloc, "(").js_expr(alloc, ix.seq).js_append(alloc, ").ptr[").js_expr(alloc, ix.idx).js_append(alloc, "]") }
+js_lambda = (s: String, alloc: Ptr<Malloc>, lm: LambdaData) String { s.js_append(alloc, "((").js_params(alloc, lm.params).js_append(alloc, ") => ").js_return_block(alloc, lm.body).js_append(alloc, ")") }
 // a binary op. Integer division must TRUNCATE toward zero in JS (Math.trunc), since JS `/` is float;
 // '%' is JS's own remainder (truncating, matching C for these values); everything else is the same token.
-js_bin = (s: String, alloc: Ptr<Malloc>, b: BinData) String {
-    eq(b.op, "/").match ({
-        true  => s.js_append(alloc, "Math.trunc(").js_expr(alloc, b.lhs).js_append(alloc, " / ").js_expr(alloc, b.rhs).js_append(alloc, ")"),
-        false => s.js_append(alloc, "(").js_expr(alloc, b.lhs).js_append(alloc, " ").js_append(alloc, b.op).js_append(alloc, " ").js_expr(alloc, b.rhs).js_append(alloc, ")")
-    })
-}
-
+js_bin = (s: String, alloc: Ptr<Malloc>, b: BinData) String { eq(b.op, "/").match ({ true => s.js_append(alloc, "Math.trunc(").js_expr(alloc, b.lhs).js_append(alloc, " / ").js_expr(alloc, b.rhs).js_append(alloc, ")"), false => s.js_append(alloc, "(").js_expr(alloc, b.lhs).js_append(alloc, " ").js_append(alloc, b.op).js_append(alloc, " ").js_expr(alloc, b.rhs).js_append(alloc, ")") }) }
 // a call. The memory INTRINSICS have no JS form (raw pointers) — emit a clear marker, never a fake
 // function. Everything else is an ordinary `fn(args)`.
-is_intrinsic = (fn: str) bool {
-    eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "addr") || eq(fn, "cstr") ||
-    eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") ||
-    eq(fn, "slice") || eq(fn, "null_ptr")
-}
+is_intrinsic = (fn: str) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "addr") || eq(fn, "cstr") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "slice") || eq(fn, "null_ptr") }
 // BOUNDS-SAFE positional intrinsic args: malformed calls with too few args degrade to literal 0.
-js_arg_at = (s: String, alloc: Ptr<Malloc>, c: CallData, i: i32) String {
-    (i < c.args.len).match ({ true => s.js_expr(alloc, c.args[i].addr()), false => s.js_append(alloc, "0") })
-}
-js_call = (s: String, alloc: Ptr<Malloc>, c: CallData) String {
-    c.raw.match ({ true => s.js_append(alloc, "/* unsupported-in-js: raw @").js_append(alloc, c.fn).js_append(alloc, " */"), false =>
-        eq(c.fn, "__str_eq").match ({ true => s.js_append(alloc, "(").js_arg_at(alloc, c, 0).js_append(alloc, " === ").js_arg_at(alloc, c, 1).js_append(alloc, ")"), false =>
-            eq(c.fn, "__str_ne").match ({ true => s.js_append(alloc, "(").js_arg_at(alloc, c, 0).js_append(alloc, " !== ").js_arg_at(alloc, c, 1).js_append(alloc, ")"), false =>
-                // the numeric casts: JS numbers are doubles, so to_f64 is identity and the int casts truncate
-                // toward zero (Math.trunc — C cast semantics); to_u8 masks to a byte like C's (uint8_t).
-                eq(c.fn, "to_f64").match ({ true => s.js_append(alloc, "(").js_arg_at(alloc, c, 0).js_append(alloc, ")"), false =>
-                    eq(c.fn, "to_i32").match ({ true => s.js_append(alloc, "Math.trunc(").js_arg_at(alloc, c, 0).js_append(alloc, ")"), false =>
-                        eq(c.fn, "to_i64").match ({ true => s.js_append(alloc, "Math.trunc(").js_arg_at(alloc, c, 0).js_append(alloc, ")"), false =>
-                            eq(c.fn, "to_u8").match  ({ true => s.js_append(alloc, "((").js_arg_at(alloc, c, 0).js_append(alloc, ") & 255)"), false =>
-                                eq(c.fn, "slice").match  ({ true => s.js_append(alloc, "({ptr: ").js_arg_at(alloc, c, 0).js_append(alloc, ", len: ").js_arg_at(alloc, c, 1).js_append(alloc, "})"), false =>
-                                    is_intrinsic(c.fn).match ({
-                                        true  => s.js_append(alloc, "/* unsupported-in-js: intrinsic ").js_append(alloc, c.fn).js_append(alloc, " */"),
-                                        false => s.js_append(alloc, c.fn).js_append(alloc, "(").js_args(alloc, c.args).js_append(alloc, ")")
-                                    }) }) }) }) }) }) }) }) })
-}
-
+js_arg_at = (s: String, alloc: Ptr<Malloc>, c: CallData, i: i32) String { (i < c.args.len).match ({ true => s.js_expr(alloc, c.args[i].addr()), false => s.js_append(alloc, "0") }) }
+js_call = (s: String, alloc: Ptr<Malloc>, c: CallData) String { c.raw.match ({ true => s.js_append(alloc, "/* unsupported-in-js: raw @").js_append(alloc, c.fn).js_append(alloc, " */"), false => eq(c.fn, "__str_eq").match ({ true => s.js_append(alloc, "(").js_arg_at(alloc, c, 0).js_append(alloc, " === ").js_arg_at(alloc, c, 1).js_append(alloc, ")"), false => eq(c.fn, "__str_ne").match ({ true => s.js_append(alloc, "(").js_arg_at(alloc, c, 0).js_append(alloc, " !== ").js_arg_at(alloc, c, 1).js_append(alloc, ")"), false => eq(c.fn, "to_f64").match ({ true => s.js_append(alloc, "(").js_arg_at(alloc, c, 0).js_append(alloc, ")"), false => eq(c.fn, "to_i32").match ({ true => s.js_append(alloc, "Math.trunc(").js_arg_at(alloc, c, 0).js_append(alloc, ")"), false => eq(c.fn, "to_i64").match ({ true => s.js_append(alloc, "Math.trunc(").js_arg_at(alloc, c, 0).js_append(alloc, ")"), false => eq(c.fn, "to_u8").match ({ true => s.js_append(alloc, "((").js_arg_at(alloc, c, 0).js_append(alloc, ") & 255)"), false => eq(c.fn, "slice").match ({ true => s.js_append(alloc, "({ptr: ").js_arg_at(alloc, c, 0).js_append(alloc, ", len: ").js_arg_at(alloc, c, 1).js_append(alloc, "})"), false => is_intrinsic(c.fn).match ({ true => s.js_append(alloc, "/* unsupported-in-js: intrinsic ").js_append(alloc, c.fn).js_append(alloc, " */"), false => s.js_append(alloc, c.fn).js_append(alloc, "(").js_args(alloc, c.args).js_append(alloc, ")") }) }) }) }) }) }) }) }) }) }
+// the numeric casts: JS numbers are doubles, so to_f64 is identity and the int casts truncate
+// toward zero (Math.trunc — C cast semantics); to_u8 masks to a byte like C's (uint8_t).
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
 js_args = (s: String, alloc: Ptr<Malloc>, args: [Expr]) String {
     out := s
     args.loop((h, i, arg) {
-        out = (i == 0).match ({ true => out, false => out.js_append(alloc, ", ") })   // comma between, not before
+        out = (i == 0).match ({ true => out, false => out.js_append(alloc, ", ") })    // comma between, not before
         out = out.js_expr(alloc, arg.addr())
     })
     out
 }
-
-js_cond = (s: String, alloc: Ptr<Malloc>, d: CondData) String {
-    s.js_append(alloc, "(").js_expr(alloc, d.c).js_append(alloc, " ? ").js_expr(alloc, d.t).js_append(alloc, " : ").js_expr(alloc, d.e).js_append(alloc, ")")
-}
-
+js_cond = (s: String, alloc: Ptr<Malloc>, d: CondData) String { s.js_append(alloc, "(").js_expr(alloc, d.c).js_append(alloc, " ? ").js_expr(alloc, d.t).js_append(alloc, " : ").js_expr(alloc, d.e).js_append(alloc, ")") }
 // escape one byte for a JS string literal: " -> \" , \ -> \\ , newline -> \n , else itself
-js_escape_byte = (s: String, alloc: Ptr<Malloc>, b: u8) String {
-    (b == '"').match ({
-        true  => s.js_append(alloc, "\\\""),
-        false => (b == '\\').match ({
-            true  => s.js_append(alloc, "\\\\"),
-            false => (b == '\n').match ({ true => s.js_append(alloc, "\\n"), false => s.js_push(alloc, b) })
-        })
-    })
-}
-js_strlit = (s: String, alloc: Ptr<Malloc>, v: str) String {
-    s.js_append(alloc, "\"").js_escape_from(alloc, v, 0).js_append(alloc, "\"")
-}
-js_escape_from = (s: String, alloc: Ptr<Malloc>, v: str, i: i32) String {
-    (jsbyte(v, i) == 0).match ({
-        true  => s,
-        false => s.js_escape_byte(alloc, jsbyte(v, i)).js_escape_from(alloc, v, i + 1)
-    })
-}
-
+js_escape_byte = (s: String, alloc: Ptr<Malloc>, b: u8) String { (b == '"').match ({ true => s.js_append(alloc, "\\\""), false => (b == '\\').match ({ true => s.js_append(alloc, "\\\\"), false => (b == '\n').match ({ true => s.js_append(alloc, "\\n"), false => s.js_push(alloc, b) }) }) }) }
+js_strlit = (s: String, alloc: Ptr<Malloc>, v: str) String { s.js_append(alloc, "\"").js_escape_from(alloc, v, 0).js_append(alloc, "\"") }
+js_escape_from = (s: String, alloc: Ptr<Malloc>, v: str, i: i32) String { (jsbyte(v, i) == 0).match ({ true => s, false => s.js_escape_byte(alloc, jsbyte(v, i)).js_escape_from(alloc, v, i + 1) }) }
 // a payload-carrying enum value `.Some(v)` -> `({tag: "Some", _0: v})` (one payload slot, named _0).
-js_mkenum = (s: String, alloc: Ptr<Malloc>, m: MakeEnumData) String {
-    s.js_append(alloc, "({tag: \"").js_append(alloc, m.variant).js_append(alloc, "\", _0: ").js_expr(alloc, m.payload).js_append(alloc, "})")
-}
-
+js_mkenum = (s: String, alloc: Ptr<Malloc>, m: MakeEnumData) String { s.js_append(alloc, "({tag: \"").js_append(alloc, m.variant).js_append(alloc, "\", _0: ").js_expr(alloc, m.payload).js_append(alloc, "})") }
 // a struct literal `Pt(x: a, y: b)` -> `({x: a, y: b})` (a structural JS object).
 js_mkstruct = (s: String, alloc: Ptr<Malloc>, m: MakeStructData) String {
     out := s.js_append(alloc, "({")
     m.inits.loop((h, i, fi) {
-        out = (i == 0).match ({ true => out, false => out.js_append(alloc, ", ") })   // comma between, not before
+        out = (i == 0).match ({ true => out, false => out.js_append(alloc, ", ") })    // comma between, not before
         out = out.js_append(alloc, fi.name).js_append(alloc, ": ").js_expr(alloc, fi.value)
     })
     out.js_append(alloc, "})")
 }
-
 // ── match -> a ternary chain on the subject's `.tag`, binding the payload `_0` ───────────────
 // An arm with a payload binds via an arrow-IIFE: `((bind) => body)(_subj._0)`; a bare/payloadless
 // arm is just `body`. The last arm is the default (no tag test), matching genc's `_`/last-arm rule.
-js_armbody = (s: String, alloc: Ptr<Malloc>, subj: str, a: ArmData) String {
-    is_empty(a.bind).match ({
-        true  => s.js_append(alloc, "(").js_expr(alloc, a.body).js_append(alloc, ")"),
-        false => s.js_append(alloc, "((").js_append(alloc, a.bind).js_append(alloc, ") => ").js_expr(alloc, a.body).js_append(alloc, ")(").js_append(alloc, subj).js_append(alloc, "._0)")
-    })
-}
-js_test = (s: String, alloc: Ptr<Malloc>, subj: str, ename: str, a: ArmData) String {
-    s.js_append(alloc, "(").js_append(alloc, subj).js_append(alloc, ".tag === \"").js_append(alloc, a.variant).js_append(alloc, "\" ? ").js_armbody(alloc, subj, a).js_append(alloc, " : ")
-}
-js_arms = (s: String, alloc: Ptr<Malloc>, subj: str, ename: str, arms: [ArmData], i: i64) String {
-    (i == arms.len - 1).match ({
-        true  => s.js_armbody(alloc, subj, arms[i]),
-        false => s.js_test(alloc, subj, ename, arms[i]).js_arms(alloc, subj, ename, arms, i + 1).js_append(alloc, ")")
-    })
-}
+js_armbody = (s: String, alloc: Ptr<Malloc>, subj: str, a: ArmData) String { is_empty(a.bind).match ({ true => s.js_append(alloc, "(").js_expr(alloc, a.body).js_append(alloc, ")"), false => s.js_append(alloc, "((").js_append(alloc, a.bind).js_append(alloc, ") => ").js_expr(alloc, a.body).js_append(alloc, ")(").js_append(alloc, subj).js_append(alloc, "._0)") }) }
+js_test = (s: String, alloc: Ptr<Malloc>, subj: str, ename: str, a: ArmData) String { s.js_append(alloc, "(").js_append(alloc, subj).js_append(alloc, ".tag === \"").js_append(alloc, a.variant).js_append(alloc, "\" ? ").js_armbody(alloc, subj, a).js_append(alloc, " : ") }
+js_arms = (s: String, alloc: Ptr<Malloc>, subj: str, ename: str, arms: [ArmData], i: i64) String { (i == arms.len - 1).match ({ true => s.js_armbody(alloc, subj, arms[i]), false => s.js_test(alloc, subj, ename, arms[i]).js_arms(alloc, subj, ename, arms, i + 1).js_append(alloc, ")") }) }
 // bind the subject once to a temp (an arrow-IIFE), then the tag-test chain reads that temp — no
 // re-evaluation, exactly like genc's `({ __auto_type _subj = …; … })`.
-js_match = (s: String, alloc: Ptr<Malloc>, m: MatchData) String {
-    s.js_append(alloc, "((_subj) => ").js_arms(alloc, "_subj", m.ename, m.arms, 0).js_append(alloc, ")(").js_expr(alloc, m.subj).js_append(alloc, ")")
-}
-
+js_match = (s: String, alloc: Ptr<Malloc>, m: MatchData) String { s.js_append(alloc, "((_subj) => ").js_arms(alloc, "_subj", m.ename, m.arms, 0).js_append(alloc, ")(").js_expr(alloc, m.subj).js_append(alloc, ")") }
 // ── statements ──────────────────────────────────────────────────────────────
 js_stmt = (s: String, alloc: Ptr<Malloc>, st: Stmt) String {
     st.match ({
-        .Let(l)    => s.js_append(alloc, "let ").js_append(alloc, l.name).js_append(alloc, " = ").js_expr(alloc, l.value).js_append(alloc, ";"),
-        .Assign(a) => s.js_expr(alloc, a.target).js_append(alloc, " = ").js_expr(alloc, a.value).js_append(alloc, ";"),
-        .Return(e) => s.js_append(alloc, "return ").js_expr(alloc, e).js_append(alloc, ";"),
+        .Let(l)      => s.js_append(alloc, "let ").js_append(alloc, l.name).js_append(alloc, " = ").js_expr(alloc, l.value).js_append(alloc, ";"),
+        .Assign(a)   => s.js_expr(alloc, a.target).js_append(alloc, " = ").js_expr(alloc, a.value).js_append(alloc, ";"),
+        .Return(e)   => s.js_append(alloc, "return ").js_expr(alloc, e).js_append(alloc, ";"),
         .ExprStmt(e) => s.js_expr(alloc, e).js_append(alloc, ";"),
-        .If(f)     => s.js_if(alloc, f),
-        .While(w)  => s.js_append(alloc, "while (").js_expr(alloc, w.c).js_append(alloc, ") ").js_block(alloc, w.body),
-        .IndexSet(x) => s.js_idxset(alloc, x)
+        .If(f)       => s.js_if(alloc, f),
+        .While(w)    => s.js_append(alloc, "while (").js_expr(alloc, w.c).js_append(alloc, ") ").js_block(alloc, w.body),
+        .IndexSet(x) => s.js_idxset(alloc, x),
     })
 }
-
-js_idxset = (s: String, alloc: Ptr<Malloc>, x: IndexSetData) String {
-    s.js_append(alloc, "(").js_expr(alloc, x.seq).js_append(alloc, ").ptr[").js_expr(alloc, x.idx).js_append(alloc, "] = ").js_expr(alloc, x.value).js_append(alloc, ";")
-}
-
+js_idxset = (s: String, alloc: Ptr<Malloc>, x: IndexSetData) String { s.js_append(alloc, "(").js_expr(alloc, x.seq).js_append(alloc, ").ptr[").js_expr(alloc, x.idx).js_append(alloc, "] = ").js_expr(alloc, x.value).js_append(alloc, ";") }
 js_block = (s: String, alloc: Ptr<Malloc>, body: [Stmt]) String {
     open := s.js_append(alloc, "{ ")
-    body.loop((h, i, st) { open = open.js_stmt(alloc, st).js_append(alloc, " ") })
+    body.loop((h, i, st) {
+        open = open.js_stmt(alloc, st).js_append(alloc, " ")
+    })
     open.js_append(alloc, "}")
 }
-
-js_if = (s: String, alloc: Ptr<Malloc>, f: IfData) String {
-    s.js_append(alloc, "if (").js_expr(alloc, f.c).js_append(alloc, ") ").js_block(alloc, f.then).js_append(alloc, " else ").js_block(alloc, f.els)
-}
-
+js_if = (s: String, alloc: Ptr<Malloc>, f: IfData) String { s.js_append(alloc, "if (").js_expr(alloc, f.c).js_append(alloc, ") ").js_block(alloc, f.then).js_append(alloc, " else ").js_block(alloc, f.els) }
 // ── a function: `function name(params) { body }` ────────────────────────────
 js_params<A> = (s: String, alloc: MutPtr<A>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.js_append(alloc, ", ") })
-        out = out.js_append(alloc, p.name)                  // JS is untyped — names only
-    })
+        out = out.js_append(alloc, p.name)
+    })    // JS is untyped — names only
     out
 }
-js_func* = (s: String, alloc: Ptr<Malloc>, f: Func) String {
-    s.js_append(alloc, "function ").js_append(alloc, f.name).js_append(alloc, "(").js_params(alloc, f.params).js_append(alloc, ") ").js_block(alloc, f.body)
-}
-
+js_func* = (s: String, alloc: Ptr<Malloc>, f: Func) String { s.js_append(alloc, "function ").js_append(alloc, f.name).js_append(alloc, "(").js_params(alloc, f.params).js_append(alloc, ") ").js_block(alloc, f.body) }
 // a template (an FnT param or type params with a body) is inlined at call sites in the C model and
 // has no standalone form — skip it, exactly as genc_emit does.
-is_fnt_ty = (t: Ty) bool { t.match ({ .FnT(ft) => true, _ => false }) }
+is_fnt_ty = (t: Ty) bool {
+    t.match ({
+        .FnT(ft) => true,
+        _        => false,
+    })
+}
 fn_has_fnt = (ps: [Param]) bool {
     found := false
-    ps.loop((h, i, p) { found = is_fnt_ty(p.ty).match ({ true => true, false => found }) })
+    ps.loop((h, i, p) {
+        found = is_fnt_ty(p.ty).match ({ true => true, false => found })
+    })
     found
 }
-fn_is_template = (f: Func) bool { (f.params.fn_has_fnt() || (f.tparams.len > 0)) && (f.body.len > 0) }
-
+fn_is_template = (f: Func) bool { (f.params.fn_has_fnt() || f.tparams.len > 0) && f.body.len > 0 }
 // ── a top-level declaration ─────────────────────────────────────────────────
 // Structs/enums emit NOTHING (JS objects are structural — `{x, y}` / `{tag, _0}` need no decl); we
 // drop a one-line comment so the module reads as a record of what was elided. Functions emit a def;
 // a template/foreign/import/raw/global emits nothing (no JS analogue in the value subset).
 js_decl* = (s: String, alloc: Ptr<Malloc>, d: Decl) String {
     d.match ({
-        .DFunc(f)    => fn_is_template(f).match ({ true => s, false => s.js_func(alloc, f) }),
-        .DStruct(sd) => s.js_append(alloc, "// struct ").js_append(alloc, sd.name).js_append(alloc, " — structural in JS"),
-        .DEnum(ed)   => s.js_append(alloc, "// enum ").js_append(alloc, ed.name).js_append(alloc, " — tagged object in JS"),
-        .DRaw(c)     => s,                  // verbatim C has no JS meaning
-        .DImpl(im)   => s,                  // impl record — methods are DFuncs
-        .DForeign(f) => s,                  // foreign decl — no JS body
-        .DImport(im) => s,                  // import — JS modules link separately
-        .DGenStruct(g) => s,               // generic template — only instances would emit
-        .DGenEnum(g)   => s,
-        .DGlobal(g)    => s,                // module global — not in the value subset
-        .DTraitDefault(td) => s             // trait default template — no standalone JS form
+        .DFunc(f)          => fn_is_template(f).match ({ true => s, false => s.js_func(alloc, f) }),
+        .DStruct(sd)       => s.js_append(alloc, "// struct ").js_append(alloc, sd.name).js_append(alloc, " — structural in JS"),
+        .DEnum(ed)         => s.js_append(alloc, "// enum ").js_append(alloc, ed.name).js_append(alloc, " — tagged object in JS"),
+        .DRaw(c)           => s,    // verbatim C has no JS meaning
+        .DImpl(im)         => s,    // impl record — methods are DFuncs
+        .DForeign(f)       => s,    // foreign decl — no JS body
+        .DImport(im)       => s,    // import — JS modules link separately
+        .DGenStruct(g)     => s,    // generic template — only instances would emit
+        .DGenEnum(g)       => s,
+        .DGlobal(g)        => s,    // module global — not in the value subset
+        .DTraitDefault(td) => s,
     })
-}
-
+}    // trait default template — no standalone JS form
 // genJs: a single function -> JS (the runtime-codegen seed, sibling of genC).
-genJsIn* = (a: Ptr<Malloc>, f: Func) String {
-    a.js_string(1024).js_func(a, f)
-}
-
+genJsIn* = (a: Ptr<Malloc>, f: Func) String { a.js_string(1024).js_func(a, f) }
 // Compatibility shim for the historical C ABI; allocator-aware callers use genJsIn.
 genJs* = (f: Func) String {
     a := Malloc(_: 0)
     a.addr().genJsIn(f)
 }
-
 // genModuleJs: a whole translation unit -> a JS module. Each decl on its own line, '\n'-separated.
 genModuleJsIn* = (a: Ptr<Malloc>, decls: [Decl]) String {
     s := a.js_string(4096)
-    decls.loop((h, i, d) { s = s.js_decl(a, d).js_append(a, "\n") })
+    decls.loop((h, i, d) {
+        s = s.js_decl(a, d).js_append(a, "\n")
+    })
     s
 }
-
 // Compatibility shim used by tests' C driver; allocator-aware callers use genModuleJsIn.
 genModuleJs* = (decls: [Decl]) String {
     a := Malloc(_: 0)

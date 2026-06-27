@@ -7,27 +7,19 @@
 //   p := alloc(64)          // RawPtr<u8>
 //   store(p, 7)
 //   release(p)
-
 { Result, IoError, ok_ptr, ok, err } = std.core.result
 { malloc, free } = std.mem.alloc
 { calloc, memcpy } = std.c.libc
-
 // allocate `n` bytes (uninitialised)
 alloc* = (n: i64) RawPtr<u8> { malloc(n) }
-
 try_alloc* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(malloc(n)) }
-
 // allocate `n` bytes, zero-filled
 zeroed* = (n: i64) RawPtr<u8> { calloc(n, 1) }
-
 try_zeroed* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(calloc(n, 1)) }
-
 // copy `n` bytes from src to dst
 copy* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) void { memcpy(dst, src, n) }
-
 // hand the block back to the allocator
 release* = (p: RawPtr<u8>) void { free(p) }
-
 // a typed heap buffer of `n` T's, seeded at [0] — the TYPED replacement for the raw
 // `slice(alloc(n * sizeof(T)), n)` incantation, whose element type is unknowable (census #9: reads
 // through it emitted an invalid `(void*)` cast). The declared `[T]` return gives every later
@@ -39,17 +31,13 @@ of*<T> = (seed: T, n: i64) [T] {
     b[0] = seed
     b
 }
-
 try_of*<T> = (seed: T, n: i64) Result<[T], IoError> {
-    (n <= 0).match ({
-        true => err(IoError.NotFound),
-        false => try_alloc(n * sizeof(T)).match ({
-            .Ok(p) => {
-                b := slice(p, n)
-                b[0] = seed
-                ok(b)
-            },
-            .Err(e) => err(e)
-        })
-    })
+    (n <= 0).match ({ true => err(IoError.NotFound), false => try_alloc(n * sizeof(T)).match ({
+        .Ok(p)  => {
+            b := slice(p, n)
+            b[0] = seed
+            ok(b)
+        },
+        .Err(e) => err(e),
+    }) })
 }

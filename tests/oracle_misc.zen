@@ -16,16 +16,16 @@
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
-
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD := "typedef struct { void* ptr; int64_t len; } zslice; "
-
 // ── shared helpers ────────────────────────────────────────────────────────────
 om_read_file = (mp: MutPtr<Malloc>, path: str) str {
-    mp.contents_in(path).match ({ .Ok(t) => t, .Err(e) => "" })
+    mp.contents_in(path).match ({
+        .Ok(t)  => t,
+        .Err(e) => "",
+    })
 }
 om_not = (b: bool) bool { b.match ({ true => false, false => true }) }
-
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
 om_cat2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
     s := mp.new_in()
@@ -34,7 +34,6 @@ om_cat2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
     mp.finish_in(s)
 }
 om_cat3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str { mp.om_cat2(a, mp.om_cat2(b, c)) }
-
 // ════════════════════════════════════════════════════════════════════════════════
 // traits  <- tests/test_traits.py
 // VALUE: impl methods compile + dispatch via UFCS (incl. a DECLARED trait with an impl).
@@ -42,54 +41,93 @@ om_cat3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str { mp.om_cat2(a, mp.om
 // (`zenc check` emits `error[conformance]`, equivalent to the pytest `check_count(...) == 1`).
 // ════════════════════════════════════════════════════════════════════════════════
 oracle_misc_traits = () i32 {
-    v := run_values("traits value", [
+    v := run_values("traits value", [VCase(
+        src: "Point*: { x: i32, y: i32 }\nPoint.impl(Show, { sumk = (p: Ptr<Point>, k: i32) i32 { p.x + p.y + k } })\ntest* = () i32 { p := Point(x: 3, y: 4)\n p.addr().sumk(10) }",
+        want: "17",
+    ), VCase(
+        src: "Counter*: { n: i32 }\nCounter.impl(Inc, { bump = (c: Ptr<Counter>) i32 { c.n + 1 }  get = (c: Ptr<Counter>) i32 { c.n } })\ntest* = () i32 { c := Counter(n: 41)\n c.addr().bump() }",
+        want: "42",
+    ), VCase(
+        src: "Box*: { v: i32 }\nBox.impl(B, { val = (b: Ptr<Box>) i32 { b.v }  twice = (b: Ptr<Box>) i32 { b.val() + b.val() } })\ntest* = () i32 { b := Box(v: 21)\n b.addr().twice() }",
+        want: "42",
+    ), VCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32, y: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x * 10 + p.y } })\ntest* = () i32 { p := Point(x: 4, y: 2)\n p.addr().render() }",
+        want: "42",
+    )])
     // one impl method via UFCS; field access on a Ptr receiver auto-derefs
-    VCase(src: "Point*: { x: i32, y: i32 }\nPoint.impl(Show, { sumk = (p: Ptr<Point>, k: i32) i32 { p.x + p.y + k } })\ntest* = () i32 { p := Point(x: 3, y: 4)\n p.addr().sumk(10) }", want: "17"),
     // two methods in one impl block
-    VCase(src: "Counter*: { n: i32 }\nCounter.impl(Inc, { bump = (c: Ptr<Counter>) i32 { c.n + 1 }  get = (c: Ptr<Counter>) i32 { c.n } })\ntest* = () i32 { c := Counter(n: 41)\n c.addr().bump() }", want: "42"),
     // an impl method that chains another UFCS call
-    VCase(src: "Box*: { v: i32 }\nBox.impl(B, { val = (b: Ptr<Box>) i32 { b.v }  twice = (b: Ptr<Box>) i32 { b.val() + b.val() } })\ntest* = () i32 { b := Box(v: 21)\n b.addr().twice() }", want: "42"),
     // a DECLARED trait (skipped from codegen) whose impl provides the called method
-    VCase(src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32, y: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x * 10 + p.y } })\ntest* = () i32 { p := Point(x: 4, y: 2)\n p.addr().render() }", want: "42"),
-    ])
-    d := run_verdicts("traits verdict", [
+    d := run_verdicts("traits verdict", [VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x }  area = (p: Ptr<Point>) i32 { p.x } })",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>, k: i32) i32 { p.x + k } })",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x } })",
+        should_pass: false,
+        kind: "conformance",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\narea* = (n: i32) i32 { n }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x } })",
+        should_pass: false,
+        kind: "conformance",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>, k: i32) i32 { p.x } })",
+        should_pass: false,
+        kind: "conformance",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) bool { p.x < 1 } })",
+        should_pass: false,
+        kind: "conformance",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>, k: u8) i32 { p.x } })",
+        should_pass: false,
+        kind: "conformance",
+    )])
     // complete impl conforms
-    VerdictCase(src: "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x }  area = (p: Ptr<Point>) i32 { p.x } })", should_pass: true, kind: ""),
     // matching signature (Self -> Point) conforms
-    VerdictCase(src: "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>, k: i32) i32 { p.x + k } })", should_pass: true, kind: ""),
     // missing a required method -> reject
-    VerdictCase(src: "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x } })", should_pass: false, kind: "conformance"),
     // an unrelated global `area` does NOT satisfy a deficient impl -> reject
-    VerdictCase(src: "Show*: { render: (Ptr<Self>) i32, area: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\narea* = (n: i32) i32 { n }\nPoint.impl(Show, { render = (p: Ptr<Point>) i32 { p.x } })", should_pass: false, kind: "conformance"),
     // arity mismatch (impl takes an extra param) -> reject
-    VerdictCase(src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>, k: i32) i32 { p.x } })", should_pass: false, kind: "conformance"),
     // return-type mismatch (bool vs i32) -> reject
-    VerdictCase(src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>) bool { p.x < 1 } })", should_pass: false, kind: "conformance"),
     // param-type mismatch (u8 vs i32, not the Self param) -> reject
-    VerdictCase(src: "Show*: { render: (Ptr<Self>, i32) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { render = (p: Ptr<Point>, k: u8) i32 { p.x } })", should_pass: false, kind: "conformance"),
-    ])
     v + d
 }
-
 // ════════════════════════════════════════════════════════════════════════════════
 // string_types  <- tests/test_string_types.py
 // text (immortal literal) <: {str, Cstr}; Cstr <: str; but Cstr/str do NOT fit text.
 // ════════════════════════════════════════════════════════════════════════════════
 oracle_misc_string_types = () i32 {
-    run_verdicts("string_types verdict", [
-    // a literal IS text -> accept where text required
-    VerdictCase(src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(\"ok\") }", should_pass: true, kind: ""),
-    // text <: str -> a literal works where a borrowed str is expected
-    VerdictCase(src: "g = (s: str) i32 { 0 }\nmain = () i32 { g(\"ok\") }", should_pass: true, kind: ""),
-    // Cstr <: str -> a finished pointer is a valid const char* to read
-    VerdictCase(src: "g = (s: str) i32 { 0 }\nmain = () i32 { g(cstr(null_ptr())) }", should_pass: true, kind: ""),
-    // cstr(...) is mortal Cstr -> must NOT be accepted where text is required
-    VerdictCase(src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(cstr(null_ptr())) }", should_pass: false, kind: "arg-type"),
-    // a borrowed str param flowing into a text param is rejected too
-    VerdictCase(src: "bar = (x: str) i32 { foo(x) }\nfoo = (s: text) i32 { 0 }\nmain = () i32 { bar(\"hi\") }", should_pass: false, kind: "arg-type"),
-    ])
+    run_verdicts("string_types verdict", [VerdictCase(
+        src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(\"ok\") }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "g = (s: str) i32 { 0 }\nmain = () i32 { g(\"ok\") }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "g = (s: str) i32 { 0 }\nmain = () i32 { g(cstr(null_ptr())) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(cstr(null_ptr())) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "bar = (x: str) i32 { foo(x) }\nfoo = (s: text) i32 { 0 }\nmain = () i32 { bar(\"hi\") }",
+        should_pass: false,
+        kind: "arg-type",
+    )])
 }
-
+// a literal IS text -> accept where text required
+// text <: str -> a literal works where a borrowed str is expected
+// Cstr <: str -> a finished pointer is a valid const char* to read
+// cstr(...) is mortal Cstr -> must NOT be accepted where text is required
+// a borrowed str param flowing into a text param is rejected too
 // ════════════════════════════════════════════════════════════════════════════════
 // num_parse  <- tests/test_num_parse.py
 // Run ONE real program through `zenc run` (std.text.num imports resolved) and assert both the value
@@ -98,7 +136,6 @@ oracle_misc_string_types = () i32 {
 // a small custom `zenc run` + stdout-substring runner.
 // ════════════════════════════════════════════════════════════════════════════════
 NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: str, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: str, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    0\n}\n"
-
 oracle_misc_num_parse = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -106,25 +143,10 @@ oracle_misc_num_parse = () i32 {
     save(mp.zo_path("zo_misc_np.out"), "", 0)
     shell(mp.zo_cmd("./zenc run $ZT/zo_misc_np.zen > $ZT/zo_misc_np.out 2>/dev/null"))
     txt := mp.om_read_file(mp.zo_path("zo_misc_np.out"))
-    run_suite("num_parse (run)", [
-    // value path: numbers parse correctly
-    txt.contains("f_pi|=Ok3.14\n"),
-    txt.contains("f_neg|=Ok-2.5\n"),
-    txt.contains("f_exp|=Ok1000.0\n"),
-    txt.contains("f_int|=Ok42.0\n"),
-    txt.contains("i_ok|=Ok123\n"),
-    txt.contains("r_hex|=Ok255\n"),
-    txt.contains("r_bin|=Ok10\n"),
-    // error-as-value path: garbage / empty / bad-digit is .Err, NOT a silent 0
-    txt.contains("f_bad|=Err\n"),
-    txt.contains("f_mt|=Err\n"),
-    txt.contains("f_dot2|=Err\n"),
-    txt.contains("i_bad|=Err\n"),
-    txt.contains("i_mt|=Err\n"),
-    txt.contains("r_bad|=Err\n"),
-    ])
+    run_suite("num_parse (run)", [txt.contains("f_pi|=Ok3.14\n"), txt.contains("f_neg|=Ok-2.5\n"), txt.contains("f_exp|=Ok1000.0\n"), txt.contains("f_int|=Ok42.0\n"), txt.contains("i_ok|=Ok123\n"), txt.contains("r_hex|=Ok255\n"), txt.contains("r_bin|=Ok10\n"), txt.contains("f_bad|=Err\n"), txt.contains("f_mt|=Err\n"), txt.contains("f_dot2|=Err\n"), txt.contains("i_bad|=Err\n"), txt.contains("i_mt|=Err\n"), txt.contains("r_bad|=Err\n")])
 }
-
+// value path: numbers parse correctly
+// error-as-value path: garbage / empty / bad-digit is .Err, NOT a silent 0
 // ════════════════════════════════════════════════════════════════════════════════
 // acid  <- tests/test_acid.py
 // Every real zen/std/*.zen and zen/compiler/*.zen file is fed THROUGH the EMIT binary AS-IS; the
@@ -132,9 +154,8 @@ oracle_misc_num_parse = () i32 {
 // every top-level non-generic, non-exported declaration name must survive into the emitted C — the
 // Zen equivalent of pytest's `for name in _DECL_RE.findall(src): assert name in out`.
 // ════════════════════════════════════════════════════════════════════════════════
-om_is_alpha = (b: u8) bool { ((b >= 'a') && (b <= 'z')) || ((b >= 'A') && (b <= 'Z')) || (b == '_') }
-om_is_alnum = (b: u8) bool { om_is_alpha(b) || ((b >= '0') && (b <= '9')) }
-
+om_is_alpha = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
+om_is_alnum = (b: u8) bool { om_is_alpha(b) || b >= '0' && b <= '9' }
 // Mirror of `_DECL_RE = ^([a-zA-Z_]\w*)\s*=\s*\(` (re.M): scan `src` for each line-initial
 // `name = (` declaration (col-0 only; `name*`/`name = <T>(` are excluded since the char after the
 // name is not `=`, and a generic's `<` is not `(`), and require every such `name` to appear in `c`.
@@ -145,79 +166,63 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
     sv: [u8] := src.view()
     n := sv.len
     i: i64 := 0
-    ls := true            // at a line start?
+    ls := true    // at a line start?
     ok := true
-    @while(i < n) {
+    @while (i < n) {
         b := sv[i]
-        (ls && om_is_alpha(b)).match ({
-            true => {
-                // identifier [i, e)
-                e := i
-                @while((e < n) && om_is_alnum(sv[e])) { e = e + 1 }
-                // skip spaces/tabs, expect '='
-                q := e
-                @while((q < n) && ((sv[q] == ' ') || (sv[q] == '\t'))) { q = q + 1 }
-                ((q < n) && (sv[q] == '=')).match ({
-                    true => {
-                        // skip spaces/tabs, expect '('
-                        q2 := q + 1
-                        @while((q2 < n) && ((sv[q2] == ' ') || (sv[q2] == '\t'))) { q2 = q2 + 1 }
-                        ((q2 < n) && (sv[q2] == '(')).match ({
-                            true => {
-                                name := mp.substr(src, i, e - i)
-                                contains(c, name).match ({ true => {}, false => { ok = false } })
-                            },
-                            false => {}
-                        })
-                    },
-                    false => {}
-                })
-            },
-            false => {}
-        })
-        ls = (b == '\n')
+        (ls && om_is_alpha(b)).match ({ true => {
+            // identifier [i, e)
+            e := i
+            @while (e < n && om_is_alnum(sv[e])) {
+                e = e + 1
+            }
+            // skip spaces/tabs, expect '='
+            q := e
+            @while (q < n && (sv[q] == ' ' || sv[q] == '\t')) {
+                q = q + 1
+            }
+            (q < n && sv[q] == '=').match ({ true => {
+                // skip spaces/tabs, expect '('
+                q2 := q + 1
+                @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
+                    q2 = q2 + 1
+                }
+                (q2 < n && sv[q2] == '(').match ({ true => {
+                    name := mp.substr(src, i, e - i)
+                    contains(c, name).match ({ true => { }, false => {
+                        ok = false
+                    } })
+                }, false => { } })
+            }, false => { } })
+        }, false => { } })
+        ls = b == '\n'
         i = i + 1
     }
     ok
 }
-
 om_acid_ok = (mp: MutPtr<Malloc>, path: str) bool {
     save(mp.zo_path("zo_misc_acid.c"), "", 0)
     rc := shell(mp.zo_cmd(mp.om_cat3("./zenc emit ", path, " > $ZT/zo_misc_acid.c 2>/dev/null")))
     txt := mp.om_read_file(mp.zo_path("zo_misc_acid.c"))
     src := mp.om_read_file(path)
-    (rc == 0).match ({
-        true  => txt.starts_with(HEAD).match ({
-            true  => mp.om_decls_survive(src, txt),
-            false => false
-        }),
-        false => false
-    })
+    (rc == 0).match ({ true => txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false }), false => false })
 }
-
 oracle_misc_acid = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    files := [
-    "zen/std/atomic.zen", "zen/std/build.zen", "zen/std/json.zen", "zen/std/math.zen",
-    "zen/std/os.zen", "zen/std/rand.zen", "zen/std/scope.zen", "zen/std/sync.zen",
-    "zen/std/thread.zen",
-    "zen/compiler/check.zen", "zen/compiler/check_validate.zen", "zen/compiler/diagnostic.zen",
-    "zen/compiler/genc.zen", "zen/compiler/genc_emit.zen", "zen/compiler/genfmt.zen",
-    "zen/compiler/genjs.zen", "zen/compiler/lex.zen", "zen/compiler/mono.zen",
-    "zen/compiler/parse.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_stmt.zen",
-    "zen/compiler/parse_type.zen"
-    ]
+    files := ["zen/std/atomic.zen", "zen/std/build.zen", "zen/std/json.zen", "zen/std/math.zen", "zen/std/os.zen", "zen/std/rand.zen", "zen/std/scope.zen", "zen/std/sync.zen", "zen/std/thread.zen", "zen/compiler/check.zen", "zen/compiler/check_validate.zen", "zen/compiler/diagnostic.zen", "zen/compiler/genc.zen", "zen/compiler/genc_emit.zen", "zen/compiler/genfmt.zen", "zen/compiler/genjs.zen", "zen/compiler/lex.zen", "zen/compiler/mono.zen", "zen/compiler/parse.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_stmt.zen", "zen/compiler/parse_type.zen"]
     out("acid (emit real sources)")
     out("\n")
     fails := 0
     files.loop((h, i, f) {
-        mp.om_acid_ok(f).match ({ true => out("."), false => { out("F")  fails = fails + 1 } })
+        mp.om_acid_ok(f).match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
     })
     out("\n")
     fails
 }
-
 // ════════════════════════════════════════════════════════════════════════════════
 // differential  <- tests/test_differential.py
 // Large GENERATED constructs (the bug-hunt #15/#16 parser-buffer overflow guard): 80 params, 80
@@ -226,93 +231,72 @@ oracle_misc_acid = () i32 {
 // ════════════════════════════════════════════════════════════════════════════════
 // append a 2-digit identifier suffix ("00".."79") — leading zeros are fine inside an identifier.
 om_app2 = (mp: MutPtr<Malloc>, s: String, n: i32) String {
-    tens: u8 := ('0' + (n / 10))
-    ones: u8 := ('0' + (n - (n / 10) * 10))
+    tens: u8 := '0' + n / 10
+    ones: u8 := '0' + (n - n / 10 * 10)
     s2 := mp.push_in(s, tens)
     mp.push_in(s2, ones)
 }
 // append a decimal integer VALUE (no leading zeros) — for argument / arm constants.
 om_app_int = (mp: MutPtr<Malloc>, s: String, n: i32) String {
-    (n < 10).match ({
-        true  => {
-            d: u8 := ('0' + n)
-            mp.push_in(s, d)
-        },
-        false => {
-            s2 := mp.om_app_int(s, n / 10)
-            d2: u8 := ('0' + (n - (n / 10) * 10))
-            mp.push_in(s2, d2)
-        }
-    })
+    (n < 10).match ({ true => {
+        d: u8 := '0' + n
+        mp.push_in(s, d)
+    }, false => {
+        s2 := mp.om_app_int(s, n / 10)
+        d2: u8 := '0' + (n - n / 10 * 10)
+        mp.push_in(s2, d2)
+    } })
 }
-om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String {
-    (i == 0).match ({ true => s, false => s.append_in(mp, ", ") })
-}
+om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({ true => s, false => s.append_in(mp, ", ") }) }
 // "p00: i32, p01: i32, ..." — param declarations
 om_decl_params = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            s1 := mp.om_sep(s, i)
-            s2 := s1.append_in(mp, "p")
-            s3 := mp.om_app2(s2, i)
-            s4 := s3.append_in(mp, ": i32")
-            mp.om_decl_params(s4, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        s1 := mp.om_sep(s, i)
+        s2 := s1.append_in(mp, "p")
+        s3 := mp.om_app2(s2, i)
+        s4 := s3.append_in(mp, ": i32")
+        mp.om_decl_params(s4, i + 1, n)
+    } })
 }
 // "0, 1, ..., 79" — call argument values
 om_call_args = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            s1 := mp.om_sep(s, i)
-            s2 := mp.om_app_int(s1, i)
-            mp.om_call_args(s2, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        s1 := mp.om_sep(s, i)
+        s2 := mp.om_app_int(s1, i)
+        mp.om_call_args(s2, i + 1, n)
+    } })
 }
 // "x00: i32, x01: i32, ..." — field declarations
 om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            s1 := mp.om_sep(s, i)
-            s2 := s1.append_in(mp, "x")
-            s3 := mp.om_app2(s2, i)
-            s4 := s3.append_in(mp, ": i32")
-            mp.om_decl_fields(s4, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        s1 := mp.om_sep(s, i)
+        s2 := s1.append_in(mp, "x")
+        s3 := mp.om_app2(s2, i)
+        s4 := s3.append_in(mp, ": i32")
+        mp.om_decl_fields(s4, i + 1, n)
+    } })
 }
 // "x00: 0, x01: 1, ..." — struct-literal field inits
 om_init_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            s1 := mp.om_sep(s, i)
-            s2 := s1.append_in(mp, "x")
-            s3 := mp.om_app2(s2, i)
-            s4 := s3.append_in(mp, ": ")
-            s5 := mp.om_app_int(s4, i)
-            mp.om_init_fields(s5, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        s1 := mp.om_sep(s, i)
+        s2 := s1.append_in(mp, "x")
+        s3 := mp.om_app2(s2, i)
+        s4 := s3.append_in(mp, ": ")
+        s5 := mp.om_app_int(s4, i)
+        mp.om_init_fields(s5, i + 1, n)
+    } })
 }
 // "0 => 0, 1 => 2, ..." — match arms (value i => 2*i)
 om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            s1 := mp.om_sep(s, i)
-            s2 := mp.om_app_int(s1, i)
-            s3 := s2.append_in(mp, " => ")
-            s4 := mp.om_app_int(s3, i * 2)
-            mp.om_arms(s4, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        s1 := mp.om_sep(s, i)
+        s2 := mp.om_app_int(s1, i)
+        s3 := s2.append_in(mp, " => ")
+        s4 := mp.om_app_int(s3, i * 2)
+        mp.om_arms(s4, i + 1, n)
+    } })
 }
-
 om_gen_many_params = (mp: MutPtr<Malloc>) str {
     s := mp.new_in()
     s = s.append_in(mp, "f* = (")
@@ -338,16 +322,23 @@ om_gen_many_arms = (mp: MutPtr<Malloc>) str {
     s = s.append_in(mp, ", _ => 999 }) }")
     mp.finish_in(s)
 }
-
 oracle_misc_differential = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    r1 := run_value(VCase(src: mp.om_gen_many_params(), want: "79"))
-    r2 := run_value(VCase(src: mp.om_gen_many_fields(), want: "79"))
-    r3 := run_value(VCase(src: mp.om_gen_many_arms(),   want: "100"))
+    r1 := run_value(VCase(
+        src: mp.om_gen_many_params(),
+        want: "79",
+    ))
+    r2 := run_value(VCase(
+        src: mp.om_gen_many_fields(),
+        want: "79",
+    ))
+    r3 := run_value(VCase(
+        src: mp.om_gen_many_arms(),
+        want: "100",
+    ))
     run_suite("differential (large constructs)", [r1, r2, r3])
 }
-
 // ════════════════════════════════════════════════════════════════════════════════
 // faithful_ast  <- tests/test_faithful_ast.py
 // `zenc fmt --ast` pretty-prints the FAITHFUL AST: UFCS survives the round-trip, the printer doesn't
@@ -407,82 +398,56 @@ om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: str) bool {
     shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null"))
     shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")) == 0
 }
-
 oracle_misc_faithful = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-
     // fmt-output / emit / run scenarios (one bool per pytest assertion class).
-    o_ufcs   := mp.om_do_fmt("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
-    o_chain  := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { 1.add(2).add(3) }\n")
-    o_arms   := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nOpt: Some(i32) | None\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\n")
-    o_bin    := mp.om_do_fmt("check = (n: i32) i32 { (n > 0).match ({ true => 1, false => 0 }) }\n")
-    o_tail   := mp.om_do_fmt("len = (s: str) i32 { 5 }\nf = (s: str) i32 { s.len() }\n")
-    o_ret    := mp.om_do_fmt("g = (n: i32) i32 {\n    (n < 0).match ({ true => { return 9 }, false => {} })\n    n\n}\n")
-    o_imp    := mp.om_do_fmt("{ println } = std.text.fmt\nhelper* = (n: i32) i32 { n }\nmain = () i32 { 0 }\n")
-    o_lam    := mp.om_do_fmt("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n")
-    o_var    := mp.om_do_fmt("sum = (xs: ...i32) i32 { 0 }\n")
-    o_vdef   := mp.om_do_fmt("Pixel: RGB(i32) | Blank = RGB(255)\n")
-    o_emit   := mp.om_do_emit("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
-
-    f1 := run_suite("faithful_ast (fmt/run)", [
+    o_ufcs := mp.om_do_fmt("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    o_chain := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { 1.add(2).add(3) }\n")
+    o_arms := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nOpt: Some(i32) | None\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\n")
+    o_bin := mp.om_do_fmt("check = (n: i32) i32 { (n > 0).match ({ true => 1, false => 0 }) }\n")
+    o_tail := mp.om_do_fmt("len = (s: str) i32 { 5 }\nf = (s: str) i32 { s.len() }\n")
+    o_ret := mp.om_do_fmt("g = (n: i32) i32 {\n    (n < 0).match ({ true => { return 9 }, false => {} })\n    n\n}\n")
+    o_imp := mp.om_do_fmt("{ println } = std.text.fmt\nhelper* = (n: i32) i32 { n }\nmain = () i32 { 0 }\n")
+    o_lam := mp.om_do_fmt("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n")
+    o_var := mp.om_do_fmt("sum = (xs: ...i32) i32 { 0 }\n")
+    o_vdef := mp.om_do_fmt("Pixel: RGB(i32) | Blank = RGB(255)\n")
+    o_emit := mp.om_do_emit("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).match"), om_not(o_bin.contains("n > 0.match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x) {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
     // PHASE 1: emit of `s.len()` still lowers to the flat `len(...)`
-    o_emit.contains("len("),
     // PHASE 2: fmt --ast keeps UFCS — `x.len()`, NOT `len(x)`
-    o_ufcs.contains("x.len()"),
-    om_not(o_ufcs.contains("len(x)")),
     // a multi-arg method chain round-trips with method args inside the parens
-    o_chain.contains("1.add(2).add(3)"),
     // match arms split one-per-line, `=>` aligned, trailing comma, UFCS body kept
-    o_arms.contains(".Some(n) => n.add(1),"),
-    o_arms.contains(".None    => 0,"),
     // a Bin subject of `.match` stays parenthesized
-    o_bin.contains("(n > 0).match"),
-    om_not(o_bin.contains("n > 0.match")),
     // an implicit tail expr prints bare (no spurious `return`)
-    o_tail.contains("s.len()"),
-    om_not(o_tail.contains("return s.len()")),
     // an EXPLICIT early return keeps the keyword
-    o_ret.contains("return 9"),
     // imports print their `= <module>` tail; exported decls keep `*`
-    o_imp.contains("{ println } = std.text.fmt"),
-    o_imp.contains("helper* = (n: i32) i32"),
     // lambda params print bare (annotations discarded), never `x: void`
-    o_lam.contains("(x) {"),
-    om_not(o_lam.contains("x: void")),
     // a `...T` variadic param round-trips as `...T`
-    o_var.contains("xs: ...i32"),
     // a zero-arg variant default keeps its ` = expr` tail
-    o_vdef.contains("Blank = RGB(255)"),
     // UFCS method chain runs to the same value as the prefix form ((5+1)*2 = 12)
-    om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12,
     // a method with extra args lowers to recv-first order (add3(1, 2, 0) = 21)
-    om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21,
     // the formatted source recompiles + runs to the same value (12)
-    mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12,
     // the formatted lambda program recompiles + runs (8)
-    mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8,
     // formatting is a fixpoint on a mixed program
-    om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n"),
-    ])
-
     // round-trip over a REAL corpus: idempotent AND emit(fmt) == emit(orig) per file.
-    corpus := [
-    "zen/std/text/str.zen", "zen/std/core/result.zen", "zen/std/mem/rc.zen",
-    "zen/std/mem/trace.zen", "zen/std/collections/vec.zen", "zen/compiler/lex.zen",
-    "zen/compiler/genjs.zen", "zen/compiler/parse_type.zen", "zen/compiler/parse_expr.zen"
-    ]
+    corpus := ["zen/std/text/str.zen", "zen/std/core/result.zen", "zen/std/mem/rc.zen", "zen/std/mem/trace.zen", "zen/std/collections/vec.zen", "zen/compiler/lex.zen", "zen/compiler/genjs.zen", "zen/compiler/parse_type.zen", "zen/compiler/parse_expr.zen"]
     out("faithful_ast (corpus round-trip)")
     out("\n")
     cfails := 0
     corpus.loop((h, i, rel) {
-        mp.om_corpus_idem(rel).match ({ true => out("."), false => { out("F")  cfails = cfails + 1 } })
-        mp.om_corpus_emit_eq(rel).match ({ true => out("."), false => { out("F")  cfails = cfails + 1 } })
+        mp.om_corpus_idem(rel).match ({ true => out("."), false => {
+            out("F")
+            cfails = cfails + 1
+        } })
+        mp.om_corpus_emit_eq(rel).match ({ true => out("."), false => {
+            out("F")
+            cfails = cfails + 1
+        } })
     })
     out("\n")
     f1 + cfails
 }
-
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 oracle_misc_run* = () i32 {
     fails := 0

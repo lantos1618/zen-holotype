@@ -3,28 +3,27 @@
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { is_null } = std.core.ptr
-
-getcontext  = (ctx: RawPtr<u8>) i32
+getcontext = (ctx: RawPtr<u8>) i32
 makecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void
 swapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32
-
 // ucontext_t is opaque to Zen for now, so these are named glibc x86-64 ABI offsets.
-UC_LINK_OFF    := 8
-UC_SS_SP_OFF   := 16
+UC_LINK_OFF := 8
+UC_SS_SP_OFF := 16
 UC_SS_SIZE_OFF := 32
-UC_CTX_SIZE    := 1024
-CORO_STACK     := 65536
-
+UC_CTX_SIZE := 1024
+CORO_STACK := 65536
 // Per-OS-thread swap state: each worker thread has its OWN current/back/flag so concurrent
 // resume()/checkpoint on different threads can't stomp each other (multi-threaded scheduler).
-cur  := thread_local(null_ptr())
+cur := thread_local(null_ptr())
 back := thread_local(null_ptr())
 flag := thread_local(0)
-
-CoroState: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }
+CoroState: {
+    ctx: RawPtr<u8>,
+    link: RawPtr<u8>,
+    stack: RawPtr<u8>,
+}
 Coro*: {
-    state: RawPtr<u8>
-
+    state: RawPtr<u8>,
     coro_state = (c: Coro) [CoroState] { c.state.slice(1) }
     resume = (c: Coro) i32 {
         cur_state := c.coro_state()[0]
@@ -41,7 +40,6 @@ init_context = (ctx: RawPtr<u8>, stack: RawPtr<u8>, link: RawPtr<u8>) void {
     ctx.offset(UC_SS_SIZE_OFF).store_i64(CORO_STACK)
     ctx.offset(UC_LINK_OFF).store_i64(link)
 }
-
 spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
     stack := alloc.acquire(CORO_STACK)
     ctx := alloc.acquire(UC_CTX_SIZE)
@@ -51,16 +49,18 @@ spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Coro {
     ctx.init_context(stack, lnk)
     makecontext(ctx, work, 0)
     slot: [CoroState] := state.slice(1)
-    slot[0] = CoroState(ctx: ctx, link: lnk, stack: stack)
+    slot[0] = CoroState(
+        ctx: ctx,
+        link: lnk,
+        stack: stack,
+    )
     Coro(state: state)
 }
-spawn*<A> = (alloc: MutPtr<A>, work: () void) Coro {
-    alloc.spawn_in(work)
-}
+spawn*<A> = (alloc: MutPtr<A>, work: () void) Coro { alloc.spawn_in(work) }
 spawn_cleanup<A> = (alloc: MutPtr<A>, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>, e: IoError) Result<Coro, IoError> {
-    stack.is_null().match ({ false => alloc.release(stack), _ })
-    ctx.is_null().match ({ false => alloc.release(ctx), _ })
-    lnk.is_null().match ({ false => alloc.release(lnk), _ })
+    stack.is_null().match ({ true => { }, false => alloc.release(stack) })
+    ctx.is_null().match ({ true => { }, false => alloc.release(ctx) })
+    lnk.is_null().match ({ true => { }, false => alloc.release(lnk) })
     err(e)
 }
 finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawPtr<u8>, work: () void) Result<Coro, IoError> {
@@ -68,36 +68,38 @@ finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawP
     ctx.init_context(stack, lnk)
     makecontext(ctx, work, 0)
     slot: [CoroState] := state.slice(1)
-    slot[0] = CoroState(ctx: ctx, link: lnk, stack: stack)
+    slot[0] = CoroState(
+        ctx: ctx,
+        link: lnk,
+        stack: stack,
+    )
     ok(Coro(state: state))
 }
 try_spawn_with_link<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>) Result<Coro, IoError> {
     alloc.try_acquire(sizeof(CoroState)).match ({
         .Ok(state) => finish_spawn(ctx, stack, lnk, state, work),
-        .Err(e) => alloc.spawn_cleanup(stack, ctx, lnk, e)
+        .Err(e)    => alloc.spawn_cleanup(stack, ctx, lnk, e),
     })
 }
 try_spawn_with_ctx<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>) Result<Coro, IoError> {
     alloc.try_acquire(UC_CTX_SIZE).match ({
         .Ok(lnk) => alloc.try_spawn_with_link(work, stack, ctx, lnk),
-        .Err(e) => alloc.spawn_cleanup(stack, ctx, null_ptr(), e)
+        .Err(e)  => alloc.spawn_cleanup(stack, ctx, null_ptr(), e),
     })
 }
 try_spawn_with_stack<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>) Result<Coro, IoError> {
     alloc.try_acquire(UC_CTX_SIZE).match ({
         .Ok(ctx) => alloc.try_spawn_with_ctx(work, stack, ctx),
-        .Err(e) => alloc.spawn_cleanup(stack, null_ptr(), null_ptr(), e)
+        .Err(e)  => alloc.spawn_cleanup(stack, null_ptr(), null_ptr(), e),
     })
 }
 try_spawn_in*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> {
     alloc.try_acquire(CORO_STACK).match ({
         .Ok(stack) => alloc.try_spawn_with_stack(work, stack),
-        .Err(e) => err(e)
+        .Err(e)    => err(e),
     })
 }
-try_spawn*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> {
-    alloc.try_spawn_in(work)
-}
+try_spawn*<A> = (alloc: MutPtr<A>, work: () void) Result<Coro, IoError> { alloc.try_spawn_in(work) }
 destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
     state := c.coro_state()
     cur_state := state[0]
@@ -106,12 +108,10 @@ destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
     alloc.release(cur_state.link)
     alloc.release(c.state)
 }
-destroy*<A> = (alloc: MutPtr<A>, c: Coro) void {
-    alloc.destroy_in(c)
-}
+destroy*<A> = (alloc: MutPtr<A>, c: Coro) void { alloc.destroy_in(c) }
 checkpoint_current* = () void {
-    is_null(cur).match ({
-        false => { flag = 1  swapcontext(cur, back) },
-        _
-    })
+    is_null(cur).match ({ true => { }, false => {
+        flag = 1
+        swapcontext(cur, back)
+    } })
 }

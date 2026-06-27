@@ -9,37 +9,35 @@
 // - `new_in` / `release_in` use the caller's allocator.
 // - `try_new_in` returns Result so allocation failure can stay in the value flow.
 // - `Resource` at the bottom is only a concrete fixture for tests/examples.
-
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-
-Drop*: { drop: (MutPtr<Self>) void }
-
+Drop*: {
+    drop: (MutPtr<Self>) void,
+}
 Own*<T>: {
-    base: RawPtr<u8>
+    base: RawPtr<u8>,
     val = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }
     get = (o: Own<T>) T { o.val()[0] }
     ptr = (o: Own<T>) MutPtr<T> { o.val()[0].addr() }
     count = (o: Own<T>) i64 { load_i64(o.base) }
     clone = (o: Own<T>) Own<T> {
         store_i64(o.base, load_i64(o.base) + 1)
-        Own<T>( base: o.base )
+        Own<T>(base: o.base)
     }
     release_in<A> = (o: Own<T>, a: MutPtr<A>) void {
         n := load_i64(o.base) - 1
         store_i64(o.base, n)
-        (n == 0).match({ true => o.finalize_in(a), false => {} })
+        (n == 0).match ({ true => o.finalize_in(a), false => { } })
     }
     finalize_in<A> = (o: Own<T>, a: MutPtr<A>) void {
         o.ptr().drop()
         a.release(o.base)
     }
 }
-
 new_in*<A, T> = (a: MutPtr<A>, x: T) Own<T> {
     base := a.acquire(8 + sizeof(T))
     store_i64(base, 1)
-    o := Own<T>( base: base )
+    o := Own<T>(base: base)
     s := o.val()
     s[0] = x
     o
@@ -49,14 +47,18 @@ try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Own<T>, IoError> {
     a.try_acquire(8 + sizeof(T)).match ({
         .Ok(base) => {
             store_i64(base, 1)
-            o := Own<T>( base: base )
+            o := Own<T>(base: base)
             s := o.val()
             s[0] = ox
             ok(o)
         },
-        .Err(e) => err(e)
+        .Err(e)   => err(e),
     })
 }
-Resource*: { id: i32, slot: i32 }
-
-Resource.impl(Drop, { drop = (s: MutPtr<Resource>) void { s.slot = s.id } })
+Resource*: {
+    id: i32,
+    slot: i32,
+}
+Resource.impl(Drop, {
+    drop = (s: MutPtr<Resource>) void { s.slot = s.id }
+})

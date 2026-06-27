@@ -19,26 +19,23 @@
 // portability.
 { malloc, free } = std.mem.alloc
 { pthread_create, pthread_join } = std.c.libc
-
 // a handle to a running thread; `tid` points at the 8-byte pthread_t cell pthread_create filled in.
 JoinHandle*: {
-    tid: RawPtr<u8>          // -> pthread_t (an i64 on glibc)
-}
-
+    tid: RawPtr<u8>,
+}    // -> pthread_t (an i64 on glibc)
 // start `f(arg)` on a fresh OS thread. `f` MUST be non-capturing (see the module header); pass any
 // state it needs through `arg`. Returns a JoinHandle to wait on with `join`.
 spawn* = (f: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) JoinHandle {
-    cell := malloc(8)                        // pthread_t storage; pthread_create writes the id here
+    cell := malloc(8)    // pthread_t storage; pthread_create writes the id here
     pthread_create(cell, null_ptr(), f, arg)
-    JoinHandle( tid: cell )
+    JoinHandle(tid: cell)
 }
-
 // wait for the thread to finish and return whatever its body returned (the `void*` retval). Frees
 // the handle's backing cells, so a JoinHandle is single-use.
 join* = (h: JoinHandle) RawPtr<u8> {
-    retcell := malloc(8)                     // void* out-cell for the thread's return value
+    retcell := malloc(8)    // void* out-cell for the thread's return value
     pthread_join(load_i64(h.tid), retcell)
-    slot: [RawPtr<u8>] := retcell.slice(1)   // read the stored void* back out
+    slot: [RawPtr<u8>] := retcell.slice(1)    // read the stored void* back out
     r := slot[0]
     free(retcell)
     free(h.tid)

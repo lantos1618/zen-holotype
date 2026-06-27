@@ -15,52 +15,46 @@
 // `new_in` (allocator) or wrap an existing cell with `at`.
 { Allocator } = std.mem.alloc
 raw = std.mem.raw
-
 // ── raw primitives over a pointer-to-i64 cell ───────────────────────────────────────────────────
-aload*  = (p: RawPtr<u8>) i64 { atomic_load_i64(p) }
+aload* = (p: RawPtr<u8>) i64 { atomic_load_i64(p) }
 astore* = (p: RawPtr<u8>, v: i64) void { atomic_store_i64(p, v) }
-aadd*   = (p: RawPtr<u8>, delta: i64) i64 { atomic_add_i64(p, delta) }     // fetch-add, returns NEW value
+aadd* = (p: RawPtr<u8>, delta: i64) i64 { atomic_add_i64(p, delta) }    // fetch-add, returns NEW value
 // compare-and-swap: if *p == expected, set *p = desired and return true; else return false.
-acas*   = (p: RawPtr<u8>, expected: i64, desired: i64) bool { atomic_cas_i64(p, expected, desired) }
+acas* = (p: RawPtr<u8>, expected: i64, desired: i64) bool { atomic_cas_i64(p, expected, desired) }
 // full sequentially-consistent memory fence.
 afence* = () void { atomic_fence() }
-
 // ── AtomicI64 — a shared i64 cell ───────────────────────────────────────────────────────────────
 AtomicI64*: {
-    base: RawPtr<u8>                                            // -> i64 cell
-    load  = (a: AtomicI64) i64 { atomic_load_i64(a.base) }
+    base: RawPtr<u8>,
+    load = (a: AtomicI64) i64 { atomic_load_i64(a.base) }
     store = (a: AtomicI64, v: i64) void { atomic_store_i64(a.base, v) }
-    add   = (a: AtomicI64, delta: i64) i64 { atomic_add_i64(a.base, delta) }
-    cas   = (a: AtomicI64, expected: i64, desired: i64) bool { atomic_cas_i64(a.base, expected, desired) }
-    // increment by `delta` with a CAS spin loop, returning the prior value (lock-free, race-safe).
+    add = (a: AtomicI64, delta: i64) i64 { atomic_add_i64(a.base, delta) }
+    cas = (a: AtomicI64, expected: i64, desired: i64) bool { atomic_cas_i64(a.base, expected, desired) }
     fetch_add_cas = (a: AtomicI64, delta: i64) i64 {
-        cur := a.load()
-        a.cas(cur, cur + delta).match ({
-            true  => cur,
-            false => a.fetch_add_cas(delta)
-        })
+        cur := a.load()    // -> i64 cell
+        // increment by `delta` with a CAS spin loop, returning the prior value (lock-free, race-safe).
+        a.cas(cur, cur + delta).match ({ true => cur, false => a.fetch_add_cas(delta) })
     }
 }
 // wrap an existing i64 cell (caller owns its lifetime).
-at* = (cell: RawPtr<u8>) AtomicI64 { AtomicI64( base: cell ) }
+at* = (cell: RawPtr<u8>) AtomicI64 { AtomicI64(base: cell) }
 // allocate a fresh zero-init cell from the caller's allocator, seeded with `init`.
 new_in*<A> = (a: MutPtr<A>, init: i64) AtomicI64 {
     base := a.acquire(8)
-    r := AtomicI64( base: base )
+    r := AtomicI64(base: base)
     r.store(init)
     r
 }
 // hand the cell back to the allocator.
 drop_in*<A> = (r: AtomicI64, a: MutPtr<A>) void { a.release(r.base) }
-
 // ── AtomicBool — a shared boolean over the same i64 cell (0/1) ───────────────────────────────────
 AtomicBool*: {
-    base: RawPtr<u8>
-    load  = (b: AtomicBool) bool { atomic_load_i64(b.base) != 0 }
+    base: RawPtr<u8>,
+    load = (b: AtomicBool) bool { atomic_load_i64(b.base) != 0 }
     store = (b: AtomicBool, v: bool) void { atomic_store_i64(b.base, v.match ({ true => 1, false => 0 })) }
-    // CAS over booleans.
-    cas   = (b: AtomicBool, expected: bool, desired: bool) bool {
+    cas = (b: AtomicBool, expected: bool, desired: bool) bool {
+        // CAS over booleans.
         atomic_cas_i64(b.base, expected.match ({ true => 1, false => 0 }), desired.match ({ true => 1, false => 0 }))
     }
 }
-bool_at* = (cell: RawPtr<u8>) AtomicBool { AtomicBool( base: cell ) }
+bool_at* = (cell: RawPtr<u8>) AtomicBool { AtomicBool(base: cell) }

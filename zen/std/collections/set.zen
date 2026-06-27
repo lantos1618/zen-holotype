@@ -50,205 +50,242 @@
 // (`sets = std.collections.set`) rather than destructuring, so `sets.union` can't collide with another
 // module's `union` after flattening.
 //
-{ Allocator } = std.mem.alloc        // explicit allocator trait
-
+{ Allocator } = std.mem.alloc    // explicit allocator trait
 Set*<T>: {
     elems: RawPtr<u8>,
-    idx:   RawPtr<u8>,
+    idx: RawPtr<u8>,
     len: i64,
-    cap: i64
-
-    // cap + 1 T slots: [0,cap) live entries, slot `cap` is the reusable SCRATCH cell.
-    slots = (s: Set<T>) [T] { slice(s.elems, s.cap + 1) }
-    // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
-    index = (s: Set<T>) [i64] { slice(s.idx, s.cap * 2) }
+    cap: i64,
+    slots = (s: Set<T>) [T] {
+        // cap + 1 T slots: [0,cap) live entries, slot `cap` is the reusable SCRATCH cell.
+        slice(s.elems, s.cap + 1)
+    }
+    index = (s: Set<T>) [i64] {
+        // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
+        slice(s.idx, s.cap * 2)
+    }
     len = (s: Set<T>) i64 { s.len }
-    // a [u8] view of one slot's sizeof(T) bytes — the unit of hashing and equality.
-    bytes_of = (s: Set<T>, slot: i64) [u8] { slice(s.elems.offset(slot * sizeof(T)), sizeof(T)) }
-    // FNV-1a of slot's bytes, folded into [0, cap). cap is always >= 1 at call sites.
+    bytes_of = (s: Set<T>, slot: i64) [u8] {
+        // a [u8] view of one slot's sizeof(T) bytes — the unit of hashing and equality.
+        slice(s.elems.offset(slot * sizeof(T)), sizeof(T))
+    }
     shash = (s: Set<T>, slot: i64) i64 {
+        // FNV-1a of slot's bytes, folded into [0, cap). cap is always >= 1 at call sites.
         bs: [u8] := s.bytes_of(slot)
         h := 2166136261
-        bs.loop((hh, i, b) { h = (h ^ to_i64(b)) * 16777619 })
+        bs.loop((hh, i, b) {
+            h = (h ^ to_i64(b)) * 16777619
+        })
         (h & 4611686018427387903) % s.cap
     }
-    // byte-wise equality of two slots.
     seq = (s: Set<T>, a: i64, b: i64) bool {
+        // byte-wise equality of two slots.
         ab: [u8] := s.bytes_of(a)
         bb: [u8] := s.bytes_of(b)
         eqf := true
-        ab.loop((hh, i, x) { (x == bb[i]).match ({ false => { eqf = false } }) })
+        ab.loop((hh, i, x) {
+            (x == bb[i]).match ({ false => {
+                eqf = false
+            } })
+        })
         eqf
     }
-    // O(1) average: write the query into the scratch slot, hash to a bucket, walk the chain comparing bytes.
     find = (s: Set<T>, x: T) i64 {
-        (s.cap == 0).match ({
-            true  => -1,
-            false => {
-                sl := s.slots()
-                sl[s.cap] = x
-                ix := s.index()
-                s.schain(ix[s.shash(s.cap)])
-            }
-        })
+        // O(1) average: write the query into the scratch slot, hash to a bucket, walk the chain comparing bytes.
+        (s.cap == 0).match ({ true => 0 - 1, false => {
+            sl := s.slots()
+            sl[s.cap] = x
+            ix := s.index()
+            s.schain(ix[s.shash(s.cap)])
+        } })
     }
-    schain = (s: Set<T>, e: i64) i64 {
-        (e < 0).match ({
-            true  => -1,
-            false => s.seq(s.cap, e).match ({ true => e, false => s.schain(s.index()[s.cap + e]) })
-        })
-    }
+    schain = (s: Set<T>, e: i64) i64 { (e < 0).match ({ true => 0 - 1, false => s.seq(s.cap, e).match ({ true => e, false => s.schain(s.index()[s.cap + e]) }) }) }
     has = (s: Set<T>, x: T) bool { s.find(x) >= 0 }
     grow<A> = (s: Set<T>, a: MutPtr<A>) Set<T> {
-        cap := (s.cap * 2) + 1
-        next := Set<T>( elems: a.resize(s.elems, (cap + 1) * sizeof(T)),
-        idx:   a.resize(s.idx, cap * 2 * sizeof(i64)),
-        len: s.len, cap: cap )
+        cap := s.cap * 2 + 1
+        next := Set<T>(
+            elems: a.resize(s.elems, (cap + 1) * sizeof(T)),
+            idx: a.resize(s.idx, cap * 2 * sizeof(i64)),
+            len: s.len,
+            cap: cap,
+        )
         next.reindex()
     }
-    // Rebuild the hash index from the live element column. O(len).
     reindex = (s: Set<T>) Set<T> {
+        // Rebuild the hash index from the live element column. O(len).
         ix := s.index()
         cap := s.cap
-        ix.loop((h, i, v) { (i < cap).match ({ true => { ix[i] = -1 }, false => { h.break } }) })
+        ix.loop((h, i, v) {
+            (i < cap).match ({ true => {
+                ix[i] = 0 - 1
+            }, false => {
+                h.break
+            } })
+        })
         sl := s.slots()
         sl.loop((h, i, e) {
-            (i < s.len).match ({
-                true  => {
-                    b := s.shash(i)
-                    ix[cap + i] = ix[b]
-                    ix[b] = i
-                },
-                false => { h.break }
-            })
+            (i < s.len).match ({ true => {
+                b := s.shash(i)
+                ix[cap + i] = ix[b]
+                ix[b] = i
+            }, false => {
+                h.break
+            } })
         })
         s
     }
-    // Link an already-written element slot into its bucket.
     link = (s: Set<T>, slot: i64) Set<T> {
+        // Link an already-written element slot into its bucket.
         ix := s.index()
-        b  := s.shash(slot)
+        b := s.shash(slot)
         ix[s.cap + slot] = ix[b]
         ix[b] = slot
         s
     }
-    // Append an element (caller has ensured it is absent) and link it into its bucket.
     append<A> = (s: Set<T>, a: MutPtr<A>, x: T) Set<T> {
+        // Append an element (caller has ensured it is absent) and link it into its bucket.
         x := x
         next := (s.len < s.cap).match ({ true => s, false => s.grow(a) })
         sl := next.slots()
         sl[next.len] = x
-        Set<T>( elems: next.elems, idx: next.idx, len: next.len + 1, cap: next.cap ).link(next.len)
+        Set<T>(
+            elems: next.elems,
+            idx: next.idx,
+            len: next.len + 1,
+            cap: next.cap,
+        ).link(next.len)
     }
-    // Insert if absent. RETURNS the updated set — always rebind to the result (`s = s.add(...)`). Adding an
-    // element already present is a no-op (len unchanged). On grow the buffers are realloced, so any handle
-    // captured before this call dangles (see the VALUE-MOLD CONTRACT above).
     add<A> = (s: Set<T>, a: MutPtr<A>, x: T) Set<T> {
+        // Insert if absent. RETURNS the updated set — always rebind to the result (`s = s.add(...)`). Adding an
+        // element already present is a no-op (len unchanged). On grow the buffers are realloced, so any handle
+        // captured before this call dangles (see the VALUE-MOLD CONTRACT above).
         i := s.find(x)
         out: Set<T> := (i < 0).match ({ true => s.append(a, x), false => s })
         out
     }
-    // Delete an element. RETURNS the updated set. Absent element => unchanged. Implemented as a swap-remove
-    // (the last live element fills the hole) followed by a reindex; iteration order is NOT preserved. `a` is
-    // accepted for signature symmetry with the other owned ops — `remove` never reallocs (it does not shrink).
     remove<A> = (s: Set<T>, a: MutPtr<A>, x: T) Set<T> {
+        // Delete an element. RETURNS the updated set. Absent element => unchanged. Implemented as a swap-remove
+        // (the last live element fills the hole) followed by a reindex; iteration order is NOT preserved. `a` is
+        // accepted for signature symmetry with the other owned ops — `remove` never reallocs (it does not shrink).
         i := s.find(x)
-        out: Set<T> := (i < 0).match ({
-            true  => s,
-            false => {
-                sl := s.slots()
-                sl[i] = sl[s.len - 1]
-                next := Set<T>( elems: s.elems, idx: s.idx, len: s.len - 1, cap: s.cap )
-                next.reindex()
-            }
-        })
+        out: Set<T> := (i < 0).match ({ true => s, false => {
+            sl := s.slots()
+            sl[i] = sl[s.len - 1]
+            next := Set<T>(
+                elems: s.elems,
+                idx: s.idx,
+                len: s.len - 1,
+                cap: s.cap,
+            )
+            next.reindex()
+        } })
         out
     }
-    free<A> = (s: Set<T>, a: MutPtr<A>) void { a.release(s.elems)  a.release(s.idx) }
-    // Deep-copy the set into fresh buffers from `a`, giving the result INDEPENDENT storage: mutating the
-    // clone (or the original) never writes through to the other. The clone owns its buffers and must be
-    // `free`d independently. O(len).
+    free<A> = (s: Set<T>, a: MutPtr<A>) void {
+        a.release(s.elems)
+        a.release(s.idx)
+    }
     clone<A> = (s: Set<T>, a: MutPtr<A>) Set<T> {
+        // Deep-copy the set into fresh buffers from `a`, giving the result INDEPENDENT storage: mutating the
+        // clone (or the original) never writes through to the other. The clone owns its buffers and must be
+        // `free`d independently. O(len).
         cap := s.cap
-        next := Set<T>( elems: a.acquire((cap + 1) * sizeof(T)),
-        idx:   a.acquire(cap * 2 * sizeof(i64)),
-        len: s.len, cap: cap )
+        next := Set<T>(
+            elems: a.acquire((cap + 1) * sizeof(T)),
+            idx: a.acquire(cap * 2 * sizeof(i64)),
+            len: s.len,
+            cap: cap,
+        )
         src := s.slots()
         dst := next.slots()
         src.loop((h, i, e) {
-            (i < s.len).match ({
-                true  => { dst[i] = e },
-                false => { h.break }
-            })
+            (i < s.len).match ({ true => {
+                dst[i] = e
+            }, false => {
+                h.break
+            } })
         })
         next.reindex()
     }
-    // Visit every live element, in insertion order (until the first remove). `f` is invoked DIRECTLY in the
-    // loop body so an inline lambda splices in (like map.each_pair / iter.each): `s.each((x){ … })`.
     each = (s: Set<T>, f: (T) void) void {
+        // Visit every live element, in insertion order (until the first remove). `f` is invoked DIRECTLY in the
+        // loop body so an inline lambda splices in (like map.each_pair / iter.each): `s.each((x){ … })`.
         sl := s.slots()
         sl.loop((h, i, e) {
-            (i < s.len).match ({
-                true  => { f(e) },
-                false => { h.break }
-            })
+            (i < s.len).match ({ true => {
+                f(e)
+            }, false => {
+                h.break
+            } })
         })
     }
 }
-
 // a zero-element `Set<T>` with capacity for at least one entry. No seed pins T, so it comes from the LHS
 // annotation: `s: Set<i64> := sets.empty(a)`. A is inferred from `a`. The index is reindexed (its single
 // bucket head cleared to -1) so `find`/`has` on the empty set return absent immediately.
 empty*<T, A> = (a: MutPtr<A>) Set<T> {
-    s := Set<T>( elems: a.acquire((1 + 1) * sizeof(T)), idx: a.acquire(2 * sizeof(i64)), len: 0, cap: 1 )
+    s := Set<T>(
+        elems: a.acquire((1 + 1) * sizeof(T)),
+        idx: a.acquire(2 * sizeof(i64)),
+        len: 0,
+        cap: 1,
+    )
     s.reindex()
 }
-
 // a `Set<T>` seeded with one element, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
 of*<T, A> = (a: MutPtr<A>, first: T) Set<T> {
-    s := Set<T>( elems: a.acquire((1 + 1) * sizeof(T)), idx: a.acquire(2 * sizeof(i64)), len: 1, cap: 1 )
+    s := Set<T>(
+        elems: a.acquire((1 + 1) * sizeof(T)),
+        idx: a.acquire(2 * sizeof(i64)),
+        len: 1,
+        cap: 1,
+    )
     sl := s.slots()
     sl[0] = first
     s.reindex()
 }
-
 // {x} ∪ {y}: a fresh set (buffers from `a`) holding every element of x and y. Starts as a clone of x, then
 // folds y in; the inputs are untouched. O(|x| + |y|).
 union*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Set<T> {
     r := x.clone(a)
     sl := y.slots()
     sl.loop((h, i, e) {
-        (i < y.len).match ({
-            true  => { r = r.add(a, e) },
-            false => { h.break }
-        })
+        (i < y.len).match ({ true => {
+            r = r.add(a, e)
+        }, false => {
+            h.break
+        } })
     })
     r
 }
-
 // {x} ∩ {y}: a fresh set holding the elements present in BOTH. O(|x|) membership probes into y.
 intersect*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Set<T> {
     r: Set<T> := empty(a)
     sl := x.slots()
     sl.loop((h, i, e) {
-        (i < x.len).match ({
-            true  => { y.has(e).match ({ true => { r = r.add(a, e) } }) },
-            false => { h.break }
-        })
+        (i < x.len).match ({ true => {
+            y.has(e).match ({ true => {
+                r = r.add(a, e)
+            } })
+        }, false => {
+            h.break
+        } })
     })
     r
 }
-
 // {x} \ {y}: a fresh set holding the elements of x that are NOT in y. O(|x|) membership probes into y.
 difference*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Set<T> {
     r: Set<T> := empty(a)
     sl := x.slots()
     sl.loop((h, i, e) {
-        (i < x.len).match ({
-            true  => { y.has(e).match ({ false => { r = r.add(a, e) } }) },
-            false => { h.break }
-        })
+        (i < x.len).match ({ true => {
+            y.has(e).match ({ false => {
+                r = r.add(a, e)
+            } })
+        }, false => {
+            h.break
+        } })
     })
     r
 }

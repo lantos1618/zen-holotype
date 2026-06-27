@@ -1,53 +1,36 @@
 // Allocator-backed slice helpers for values that must outlive stack literals.
 // Plain helpers are fail-fast; `try_*` variants return allocation failure as Result.
 // Public constructors take an allocator first; `_in` aliases support UFCS on the allocator.
-
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-
-
-buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] {
-    slice(a.acquire(n * sizeof(T)), n)
-}
-
+buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.acquire(n * sizeof(T)), n) }
 try_buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> {
-    (n <= 0).match ({
-        true => ok(slice(null_ptr(), 0)),
-        false => a.try_acquire(n * sizeof(T)).match ({
-            .Ok(p)  => ok(p.slice(n)),
-            .Err(e) => err(e)
-        })
-    })
+    (n <= 0).match ({ true => ok(slice(null_ptr(), 0)), false => a.try_acquire(n * sizeof(T)).match ({
+        .Ok(p)  => ok(p.slice(n)),
+        .Err(e) => err(e),
+    }) })
 }
-
 dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
     buf := a.buf_in(xs.len, xs)
-    xs.loop((h, i, x) { buf[i] = x })
+    xs.loop((h, i, x) {
+        buf[i] = x
+    })
     buf
 }
-
 try_dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
     a.try_buf_in(xs.len, xs).match ({
         .Ok(buf) => {
-            xs.loop((h, i, x) { buf[i] = x })
+            xs.loop((h, i, x) {
+                buf[i] = x
+            })
             ok(buf)
         },
-        .Err(e) => err(e)
+        .Err(e)  => err(e),
     })
 }
-
-dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
-    a.dup_in(xs)
-}
-
-try_dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
-    a.try_dup_in(xs)
-}
-
-node_in*<A, T> = (a: MutPtr<A>, v: T) Ptr<T> {
-    a.dup_in([v])[0].addr()
-}
-
+dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.dup_in(xs) }
+try_dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_dup_in(xs) }
+node_in*<A, T> = (a: MutPtr<A>, v: T) Ptr<T> { a.dup_in([v])[0].addr() }
 try_node_in*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> {
     a.try_dup_in([v]).match ({
         .Ok(buf) => {
@@ -55,54 +38,46 @@ try_node_in*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> {
             p: Ptr<T> := vals[0].addr()
             ok(p)
         },
-        .Err(e)  => err(e)
+        .Err(e)  => err(e),
     })
 }
-
 concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) [T] {
     buf := a.buf_in(xs.len + ys.len, xs)
-    xs.loop((h, i, x) { buf[i] = x })
-    ys.loop((h, i, y) { buf[xs.len + i] = y })
+    xs.loop((h, i, x) {
+        buf[i] = x
+    })
+    ys.loop((h, i, y) {
+        buf[xs.len + i] = y
+    })
     buf
 }
-
 try_concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> {
     a.try_buf_in(xs.len + ys.len, xs).match ({
         .Ok(buf) => {
-            xs.loop((h, i, x) { buf[i] = x })
-            ys.loop((h, i, y) { buf[xs.len + i] = y })
+            xs.loop((h, i, x) {
+                buf[i] = x
+            })
+            ys.loop((h, i, y) {
+                buf[xs.len + i] = y
+            })
             ok(buf)
         },
-        .Err(e) => err(e)
+        .Err(e)  => err(e),
     })
 }
-
 buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { a.buf_in(n, like) }
-
 try_buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> { a.try_buf_in(n, like) }
-
 dup*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.dup_in(xs) }
-
 try_dup*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_dup_in(xs) }
-
 dupx*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.dupx_in(xs) }
-
 try_dupx*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_dupx_in(xs) }
-
 node*<A, T> = (a: MutPtr<A>, v: T) Ptr<T> { a.node_in(v) }
-
 try_node*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> { a.try_node_in(v) }
-
 concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) [T] { a.concat_in(xs, ys) }
-
 try_concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> { a.try_concat_in(xs, ys) }
-
 // --- views (zero-copy) --------------------------------------------------------------------------
 // `offset` is BYTE arithmetic, so a sub-view advances the ptr by `lo * sizeof(T)`.
-sl_clamp = (v: i64, lo: i64, hi: i64) i64 {
-    (v < lo).match ({ true => lo, false => (v > hi).match ({ true => hi, false => v }) })
-}
-
+sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match ({ true => lo, false => (v > hi).match ({ true => hi, false => v }) }) }
 // sub(xs, lo, hi) — a zero-copy view of xs[lo..hi). lo/hi are clamped to [0, xs.len] (and hi >= lo),
 // so out-of-range bounds yield a shorter/empty view rather than reading past the buffer.
 sub*<T> = (xs: [T], lo: i64, hi: i64) [T] {
@@ -110,33 +85,30 @@ sub*<T> = (xs: [T], lo: i64, hi: i64) [T] {
     h := sl_clamp(hi, l, xs.len)
     slice(xs.ptr.offset(l * sizeof(T)), h - l)
 }
-
 // take(xs, n) — the first n elements; drop(xs, n) — all but the first n. Both are views.
 take*<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }
-
 drop*<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }
-
 // --- reverse (allocates a NEW slice) ------------------------------------------------------------
 reverse_in*<A, T> = (a: MutPtr<A>, xs: [T]) [T] {
     out := a.buf_in(xs.len, xs)
-    xs.loop((h, i, x) { out[xs.len - 1 - i] = x })
+    xs.loop((h, i, x) {
+        out[xs.len - 1 - i] = x
+    })
     out
 }
-
 try_reverse_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
     a.try_buf_in(xs.len, xs).match ({
         .Ok(out) => {
-            xs.loop((h, i, x) { out[xs.len - 1 - i] = x })
+            xs.loop((h, i, x) {
+                out[xs.len - 1 - i] = x
+            })
             ok(out)
         },
-        .Err(e) => err(e)
+        .Err(e)  => err(e),
     })
 }
-
 reverse*<A, T> = (a: MutPtr<A>, xs: [T]) [T] { a.reverse_in(xs) }
-
 try_reverse*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_reverse_in(xs) }
-
 // --- search -------------------------------------------------------------------------------------
 // index_of/contains rely on `==`, which lowers to C `==`: valid for scalar element types
 // (i8..i64, u8..u64, bool, ptr/enum-tag). For struct/aggregate elements use find_by with an
@@ -144,27 +116,22 @@ try_reverse*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.try_revers
 index_of*<T> = (xs: [T], x: T) i64 {
     r := 0 - 1
     xs.loop((h, i, e) {
-        (e == x).match ({
-            true  => (r < 0).match ({ true => { r = i } }),
-            false => {}
-        })
+        (e == x).match ({ true => (r < 0).match ({ true => {
+            r = i
+        } }), false => { } })
     })
     r
 }
-
 contains*<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }
-
 // find_by(xs, pred) — index of the first element satisfying pred, or -1. Works for ANY element
 // type (no equality needed); any_by reports whether such an element exists.
 find_by*<T> = (xs: [T], pred: (T) bool) i64 {
     r := 0 - 1
     xs.loop((h, i, e) {
-        pred(e).match ({
-            true  => (r < 0).match ({ true => { r = i } }),
-            false => {}
-        })
+        pred(e).match ({ true => (r < 0).match ({ true => {
+            r = i
+        } }), false => { } })
     })
     r
 }
-
 any_by*<T> = (xs: [T], pred: (T) bool) bool { xs.find_by(pred) >= 0 }

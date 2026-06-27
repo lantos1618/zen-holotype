@@ -4,47 +4,61 @@
 // OS threads. Both sum 1..N for every actor → identical totals. This is the third backing alongside
 // std.scope's with_sync / with_async. Exit 7 = both drivers agree AND the parallel run used >1 core.
 { with_pool, pool_open, pool_spawn, pool_send, pool_post, pool_drain_inline, pool_quiesce_stop, pool_close, pool_actor_free, workers_busy, Pool } = std.concurrent.pool
-
-NACT    := 6
-PERMSG  := 4000
+NACT := 6
+PERMSG := 4000
 WORKERS := 4
-
 sync_acc := malloc(8)
-par_acc  := malloc(8)
-actors   := malloc(NACT * 8)
-
+par_acc := malloc(8)
+actors := malloc(NACT * 8)
 // the ONE behavior, shared by both drivers: add the message payload to the shared accumulator.
 behave_sync = (user: RawPtr<u8>, msg: i64) void { store_i64(user, load_i64(user) + msg) }
-behave_par  = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, msg) }
-
+behave_par = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, msg) }
 // ── SYNC driver: post messages, drain inline on this thread (no pool, no threads) ──
-post_loop = (a: RawPtr<u8>, k: i64) void { (k < PERMSG).match ({ true => { pool_post(a, k)  post_loop(a, k + 1) }, false => {} }) }
-sync_run = (i: i64) void {
-    (i < NACT).match ({
-        true => {
-            a := pool_spawn(sync_acc, PERMSG + 8, behave_sync)
-            post_loop(a, 0)
-            pool_drain_inline(a)
-            pool_actor_free(a)
-            sync_run(i + 1)
-        },
-        false => {}
-    })
+post_loop = (a: RawPtr<u8>, k: i64) void {
+    (k < PERMSG).match ({ true => {
+        pool_post(a, k)
+        post_loop(a, k + 1)
+    }, false => { } })
 }
-
+sync_run = (i: i64) void {
+    (i < NACT).match ({ true => {
+        a := pool_spawn(sync_acc, PERMSG + 8, behave_sync)
+        post_loop(a, 0)
+        pool_drain_inline(a)
+        pool_actor_free(a)
+        sync_run(i + 1)
+    }, false => { } })
+}
 // ── PARALLEL driver: same payloads, sent through the pool, drained by workers ──
-send_loop = (p: MutPtr<Pool>, a: RawPtr<u8>, k: i64) void { (k < PERMSG).match ({ true => { p.pool_send(a, k)  send_loop(p, a, k + 1) }, false => {} }) }
-par_spawn = (i: i64) void { (i < NACT).match ({ true => { actors.offset(i * 8).store_i64(pool_spawn(par_acc, PERMSG + 16, behave_par))  par_spawn(i + 1) }, false => {} }) }
-par_blast = (p: MutPtr<Pool>, i: i64) void { (i < NACT).match ({ true => { send_loop(p, actors.offset(i * 8).load_i64().offset(0), 0)  par_blast(p, i + 1) }, false => {} }) }
-par_free = (i: i64) void { (i < NACT).match ({ true => { pool_actor_free(actors.offset(i * 8).load_i64().offset(0))  par_free(i + 1) }, false => {} }) }
-
+send_loop = (p: MutPtr<Pool>, a: RawPtr<u8>, k: i64) void {
+    (k < PERMSG).match ({ true => {
+        p.pool_send(a, k)
+        send_loop(p, a, k + 1)
+    }, false => { } })
+}
+par_spawn = (i: i64) void {
+    (i < NACT).match ({ true => {
+        actors.offset(i * 8).store_i64(pool_spawn(par_acc, PERMSG + 16, behave_par))
+        par_spawn(i + 1)
+    }, false => { } })
+}
+par_blast = (p: MutPtr<Pool>, i: i64) void {
+    (i < NACT).match ({ true => {
+        send_loop(p, actors.offset(i * 8).load_i64().offset(0), 0)
+        par_blast(p, i + 1)
+    }, false => { } })
+}
+par_free = (i: i64) void {
+    (i < NACT).match ({ true => {
+        pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
+        par_free(i + 1)
+    }, false => { } })
+}
 main = () i32 {
     store_i64(sync_acc, 0)
     store_i64(par_acc, 0)
-
-    sync_run(0)                              // single-thread inline driver
+    sync_run(0)    // single-thread inline driver
     s := load_i64(sync_acc)
-
     par_spawn(0)
     p := pool_open(WORKERS, NACT + 8)
     par_blast(p, 0)
@@ -53,12 +67,9 @@ main = () i32 {
     par_free(0)
     p.pool_close()
     t := load_i64(par_acc)
-
-    free(sync_acc)  free(par_acc)  free(actors)
-
+    free(sync_acc)
+    free(par_acc)
+    free(actors)
     // both drivers must agree on the exact total; the parallel run must have used >1 core.
-    (s == t).match ({
-        true  => (busy >= 2).match ({ true => 7, false => 3 }),
-        false => 1
-    })
+    (s == t).match ({ true => (busy >= 2).match ({ true => 7, false => 3 }), false => 1 })
 }

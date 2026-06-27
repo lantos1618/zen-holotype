@@ -1,73 +1,76 @@
 // actor_demo.zen - typed chat-room actor with a one-shot reply channel.
 //   $ zenc run examples/actor_demo.zen
-
 { to_exit } = std.core.bool
 alloc = std.mem.heap
 actor = std.concurrent.actor
-
-SayArgs*: { from: str, text: str }
-ChatStats*: { online: i32, posted: i32 }
+SayArgs*: {
+    from: str,
+    text: str,
+}
+ChatStats*: {
+    online: i32,
+    posted: i32,
+}
 ChatMsg*: Join(str) | Say(SayArgs) | GetStats(actor.ReplyRef<ChatStats>)
-
-ChatRoom*: { online: i32, posted: i32 }
-ChatRoom.impl(actor.Receiver<ChatMsg>, {
+ChatRoom*: {
+    online: i32,
+    posted: i32,
+}
+ChatRoom.impl(actor, {
     receive = (room: MutPtr<ChatRoom>, ctx: actor.Context<ChatMsg>) void {
-        ctx.msg.match({
-            .Join(name) => {
+        ctx.msg.match ({
+            .Join(name)         => {
                 room.online = room.online + 1
             },
-            .Say(args) => {
+            .Say(args)          => {
                 room.posted = room.posted + 1
             },
             .GetStats(reply_to) => {
-                reply_to.send(ChatStats(online: room.online, posted: room.posted))
-            }
+                reply_to.send(ChatStats(
+                    online: room.online,
+                    posted: room.posted,
+                ))
+            },
         })
     }
 })
-
 ROOM_CAP := 16
 ChatRoomHandle*<A>: {
     alloc: MutPtr<A>,
     actor: actor.ActorHandle<ChatMsg, ChatRoom>,
-
-    join = (room: ChatRoomHandle<A>, name: str) bool {
-        room.actor.send(.Join(name))
-    }
+    join = (room: ChatRoomHandle<A>, name: str) bool { room.actor.send(.Join(name)) }
     say = (room: ChatRoomHandle<A>, from: str, text: str) bool {
-        room.actor.send(.Say(SayArgs(from: from, text: text)))
+        room.actor.send(.Say(SayArgs(
+            from: from,
+            text: text,
+        )))
     }
-    stats = (room: ChatRoomHandle<A>) ChatStats {
-        room.actor.request(room.alloc, (reply) { .GetStats(reply) })
-    }
-    free = (room: ChatRoomHandle<A>) void {
-        room.actor.free(room.alloc)
-    }
+    stats = (room: ChatRoomHandle<A>) ChatStats { room.actor.request(room.alloc, (reply) { .GetStats(reply) }) }
+    free = (room: ChatRoomHandle<A>) void { room.actor.free(room.alloc) }
 }
-
 chat_room<A> = (heap: MutPtr<A>) ChatRoomHandle<A> {
-    room: actor.ActorHandle<ChatMsg, ChatRoom> := actor.spawn(heap, ROOM_CAP, ChatRoom(online: 0, posted: 0))
-    ChatRoomHandle<A>(alloc: heap, actor: room)
+    room: actor.ActorHandle<ChatMsg, ChatRoom> := actor.spawn(heap, ROOM_CAP, ChatRoom(
+        online: 0,
+        posted: 0,
+    ))
+    ChatRoomHandle<A>(
+        alloc: heap,
+        actor: room,
+    )
 }
-
 simulate_chat<A> = (room: ChatRoomHandle<A>) void {
     room.join("bob")
     room.say("alice", "hey")
 }
-
 main = () i32 {
     heap := alloc.gpa()
     a := heap.addr()
     room := a.chat_room()
-
     room.join("alice")
     first := room.stats()
-
     room.simulate_chat()
     second := room.stats()
-
     room.free()
-
-    ok := (first.online == 1) && (first.posted == 0) && (second.online == 2) && (second.posted == 1)
+    ok := first.online == 1 && first.posted == 0 && second.online == 2 && second.posted == 1
     ok.to_exit()
 }

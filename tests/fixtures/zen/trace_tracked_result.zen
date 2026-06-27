@@ -2,39 +2,55 @@
 halloc = std.mem.heap
 { to_exit } = std.core.bool
 { Node, try_tracked_in } = std.mem.trace
-LimitAlloc: { heap: Heap, remaining: i32, released: i32 }
+LimitAlloc: {
+    heap: Heap,
+    remaining: i32,
+    released: i32,
+}
 LimitAlloc.impl(Allocator, {
     acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {
-        (a.remaining <= 0).match({
-            true => null_ptr(),
-            false => {
-                a.remaining = a.remaining - 1
-                a.heap.addr().acquire(n)
-            }
-        })
+        (a.remaining <= 0).match ({ true => null_ptr(), false => {
+            a.remaining = a.remaining - 1
+            a.heap.addr().acquire(n)
+        } })
     }
-    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-        a.heap.addr().resize(p, n)
-    }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.heap.addr().resize(p, n) }
     release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void {
         a.released = a.released + 1
         a.heap.addr().release(p)
     }
 })
 fails = () bool {
-    c := LimitAlloc(heap: halloc.gpa(), remaining: 0, released: 0)
-    r := c.addr().try_tracked_in(Node(has: 0, kid: null_ptr()))
-    r.match({ .Ok(v) => false, .Err(e) => true })
+    c := LimitAlloc(
+        heap: halloc.gpa(),
+        remaining: 0,
+        released: 0,
+    )
+    r := c.addr().try_tracked_in(Node(
+        has: 0,
+        kid: null_ptr(),
+    ))
+    r.match ({
+        .Ok(v)  => false,
+        .Err(e) => true,
+    })
 }
 succeeds = () bool {
-    c := LimitAlloc(heap: halloc.gpa(), remaining: 1, released: 0)
-    r := c.addr().try_tracked_in(Node(has: 0, kid: null_ptr()))
-    r.match({
-        .Ok(v) => {
+    c := LimitAlloc(
+        heap: halloc.gpa(),
+        remaining: 1,
+        released: 0,
+    )
+    r := c.addr().try_tracked_in(Node(
+        has: 0,
+        kid: null_ptr(),
+    ))
+    r.match ({
+        .Ok(v)  => {
             c.addr().release(v.base)
             c.released == 1
         },
-        .Err(e) => false
+        .Err(e) => false,
     })
 }
 main = () i32 { (fails() && succeeds()).to_exit() }

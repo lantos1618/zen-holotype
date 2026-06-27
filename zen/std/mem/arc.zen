@@ -12,26 +12,22 @@
 // `try_new_in` returns Result so allocation failure can stay in the value flow.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-
 Arc*<T>: {
-    base: RawPtr<u8>                          // -> [ count:i64 | value:T ]
+    base: RawPtr<u8>,
     val = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }
-    get = (r: Arc<T>) T  { r.val()[0] }
+    get = (r: Arc<T>) T { r.val()[0] }
     count = (r: Arc<T>) i64 { load_i64(r.base) }
     clone = (r: Arc<T>) Arc<T> {
         atomic_add_i64(r.base, 1)
-        Arc<T>( base: r.base )
+        Arc<T>(base: r.base)
     }
-    drop_in<A> = (r: Arc<T>, a: MutPtr<A>) void {
-        // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
-        (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => a.release(r.base), false => {} })
-    }
-}
-
+    drop_in<A> = (r: Arc<T>, a: MutPtr<A>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match ({ true => a.release(r.base), false => { } }) }
+}    // -> [ count:i64 | value:T ]
+// free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
 new_in*<A, T> = (a: MutPtr<A>, x: T) Arc<T> {
     base := a.acquire(8 + sizeof(T))
     store_i64(base, 1)
-    r := Arc<T>( base: base )
+    r := Arc<T>(base: base)
     s := r.val()
     s[0] = x
     r
@@ -41,11 +37,11 @@ try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError> {
     a.try_acquire(8 + sizeof(T)).match ({
         .Ok(base) => {
             store_i64(base, 1)
-            r := Arc<T>( base: base )
+            r := Arc<T>(base: base)
             s := r.val()
             s[0] = ax
             ok(r)
         },
-        .Err(e) => err(e)
+        .Err(e)   => err(e),
     })
 }

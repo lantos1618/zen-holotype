@@ -20,121 +20,90 @@
 // twice over one `opendir` handle (count, `rewinddir`, fill) so the `[str]` backbone is sized exactly,
 // then copies each NUL-terminated name (at dirent +19) into allocator-owned storage, since readdir
 // reuses its own buffer across calls. The "." and ".." pseudo-entries are skipped.
-
 { Allocator } = std.mem.alloc
 { Result, IoError, ok, err, ok_if } = std.core.result
 { zeroed, release } = std.mem.raw
 { substr_in, nbuf, len, view } = std.text.str
 { access, mkdir, rmdir, rename, unlink, stat, opendir, readdir, rewinddir, closedir } = std.c.libc
-
 // access(path, F_OK) tests for existence only (no permission bits).
 F_OK := 0
-
 // mkdir mode 0o755 (rwxr-xr-x) in decimal — the usual directory permissions.
 MODE_755 := 493
-
 // `struct stat` on the x86-64 Linux ABI: 144 bytes, st_mode (a 4-byte field whose low bits carry the
 // file type) at +24, st_size (an i64) at +48. We read st_mode with a wider i64 load and mask off the
 // file-type bits — the adjacent st_uid lives above bit 31, clear of the S_IFMT window.
-STAT_SIZE   := 144
+STAT_SIZE := 144
 ST_MODE_OFF := 24
 ST_SIZE_OFF := 48
-S_IFMT      := 61440    // 0o170000 — the file-type mask within st_mode
-S_IFDIR     := 16384    // 0o040000 — directory
-
+S_IFMT := 61440    // 0o170000 — the file-type mask within st_mode
+S_IFDIR := 16384    // 0o040000 — directory
 // `struct dirent`: the NUL-terminated entry name (d_name) sits at +19 on this ABI.
 D_NAME_OFF := 19
-
 // ── metadata queries (no allocation) ──────────────────────────────────────────
-
 // does `path` exist? (any file type; no permission check)
-exists* = (path: str) bool { path.access(F_OK).match ({ 0 => true, _ => false }) }
-
+exists* = (path: str) bool { (path.access(F_OK) == 0).match ({ true => true, false => false }) }
 // is `path` an existing directory? false if it is missing or a non-directory.
 is_dir* = (path: str) bool {
     buf := zeroed(STAT_SIZE)
-    yes := (path.stat(buf) == 0).match ({
-        true  => (buf.offset(ST_MODE_OFF).load_i64() & S_IFMT) == S_IFDIR,
-        false => false
-    })
+    yes := (path.stat(buf) == 0).match ({ true => buf.offset(ST_MODE_OFF).load_i64() & S_IFMT == S_IFDIR, false => false })
     buf.release()
     yes
 }
-
 // `path`'s size in bytes, or -1 when it cannot be stat'd.
 size* = (path: str) i64 {
     buf := zeroed(STAT_SIZE)
-    n := (path.stat(buf) == 0).match ({
-        true  => buf.offset(ST_SIZE_OFF).load_i64(),
-        false => 0 - 1
-    })
+    n := (path.stat(buf) == 0).match ({ true => buf.offset(ST_SIZE_OFF).load_i64(), false => 0 - 1 })
     buf.release()
     n
 }
-
 // ── mutating ops ───────────────────────────────────────────────────────────────
-
 // create directory `path` (mode 0o755). Errors if it exists or the parent is missing.
 make_dir* = (path: str) Result<i32, IoError> { ok_if(path.mkdir(MODE_755)) }
-
 // remove the (empty) directory `path`.
 remove_dir* = (path: str) Result<i32, IoError> { ok_if(path.rmdir()) }
-
 // delete the file `path` (unlink). Companion to make_dir/remove_dir for plain files.
 remove_file* = (path: str) Result<i32, IoError> { ok_if(path.unlink()) }
-
 // rename/move `from` to `to` (atomic within a filesystem).
 rename_path* = (from: str, to: str) Result<i32, IoError> { ok_if(from.rename(to)) }
-
 // ── directory listing ──────────────────────────────────────────────────────────
-
 // the "." / ".." pseudo-entries every directory carries — skipped by read_dir.
 is_dot = (name: str) bool {
     v := name.view()
-    (v.len == 1 && v[0] == '.') || (v.len == 2 && v[0] == '.' && v[1] == '.')
+    v.len == 1 && v[0] == '.' || v.len == 2 && v[0] == '.' && v[1] == '.'
 }
-
 // count the real entries left in `d`'s stream (skipping "." / "..").
 count_entries = (d: RawPtr<u8>) i64 {
     n := 0
     e := d.readdir()
-    @while (e != null_ptr()) {   // iterative: a directory with many entries must not recurse per entry
-        n = n + cstr(e.offset(D_NAME_OFF)).is_dot().match ({ true => 0, false => 1 })
+    @while (e != null_ptr()) {
+        n = n + cstr(e.offset(D_NAME_OFF)).is_dot().match ({ true => 0, false => 1 })    // iterative: a directory with many entries must not recurse per entry
         e = d.readdir()
     }
     n
 }
-
 // copy each remaining entry name into `out[i..]`; return the next free slot.
 fill_entries<A> = (a: MutPtr<A>, d: RawPtr<u8>, out: [str], i: i64) i64 {
     e := d.readdir()
-    (e == null_ptr()).match ({
-        true  => i,
-        false => {
-            name := cstr(e.offset(D_NAME_OFF))
-            ni := name.is_dot().match ({
-                true  => i,
-                false => { out[i] = a.substr_in(name, 0, name.len())  i + 1 }
-            })
-            a.fill_entries(d, out, ni)
-        }
-    })
+    (e == null_ptr()).match ({ true => i, false => {
+        name := cstr(e.offset(D_NAME_OFF))
+        ni := name.is_dot().match ({ true => i, false => {
+            out[i] = a.substr_in(name, 0, name.len())
+            i + 1
+        } })
+        a.fill_entries(d, out, ni)
+    } })
 }
-
 // list `path`'s entries as an allocator-owned `[str]` (each an owned NUL-terminated copy), excluding
 // "." and "..". The order is the directory's own (unsorted). .Err(.NotFound) if `path` can't be opened.
 read_dir*<A> = (a: MutPtr<A>, path: str) Result<[str], IoError> {
     d := path.opendir()
-    out: Result<[str], IoError> := (d == null_ptr()).match ({
-        true  => err(IoError.NotFound),
-        false => {
-            n := d.count_entries()
-            d.rewinddir()
-            buf: [str] := a.nbuf("", n)
-            a.fill_entries(d, buf, 0)
-            d.closedir()
-            ok(buf)
-        }
-    })
+    out: Result<[str], IoError> := (d == null_ptr()).match ({ true => err(IoError.NotFound), false => {
+        n := d.count_entries()
+        d.rewinddir()
+        buf: [str] := a.nbuf("", n)
+        a.fill_entries(d, buf, 0)
+        d.closedir()
+        ok(buf)
+    } })
     out
 }

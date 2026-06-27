@@ -27,183 +27,139 @@
 { len } = std.text.str
 { String, new_in, append_in, finish_in, push_in } = std.text.string
 { Rng, seed, range } = std.rand
-
 // fixed, reproducible seed (NO Date.now — the sequence is identical on every run).
 FZ_SEED := 20260623
 // the two crash-resistance probes, each `timeout`-wrapped at a fixed path (no per-call concat needed).
 FZ_CHECK := "timeout 60 ./zenc check $ZT/zo_fuzz.zen > /dev/null 2>&1"
-FZ_EMIT  := "timeout 60 ./zenc emit  $ZT/zo_fuzz.zen > /dev/null 2>&1"
+FZ_EMIT := "timeout 60 ./zenc emit  $ZT/zo_fuzz.zen > /dev/null 2>&1"
 // a real (well-formed) program; the truncation generator feeds prefixes of it (off-by-token garbage).
-FZ_FULL  := "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
-
+FZ_FULL := "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
 // ── crash decision ──────────────────────────────────────────────────────────────
 // true iff the wait status indicates a signal (segfault/abort) or a timeout/hang — i.e. a real bug.
-fz_crash = (status: i32) bool {
-    (((status & 127) != 0) || (((status >> 8) & 255) >= 124))
-}
-
+fz_crash = (status: i32) bool { status & 127 != 0 || status >> 8 & 255 >= 124 }
 // ── small builders (the value harness can't reach these; we build Zen source strings by hand) ─────
 // append a decimal integer VALUE (no leading zeros) — for generated type-cycle names.
 fz_app_int = (mp: MutPtr<Malloc>, s: String, n: i64) String {
-    (n < 10).match ({
-        true  => {
-            d: u8 := ('0' + n)
-            mp.push_in(s, d)
-        },
-        false => {
-            s2 := mp.fz_app_int(s, n / 10)
-            d2: u8 := ('0' + (n - (n / 10) * 10))
-            mp.push_in(s2, d2)
-        }
-    })
+    (n < 10).match ({ true => {
+        d: u8 := '0' + n
+        mp.push_in(s, d)
+    }, false => {
+        s2 := mp.fz_app_int(s, n / 10)
+        d2: u8 := '0' + (n - n / 10 * 10)
+        mp.push_in(s2, d2)
+    } })
 }
 // append `frag` n times — for N-deep unterminated blocks / parens / tyarg tails.
-fz_rep = (mp: MutPtr<Malloc>, s: String, frag: str, i: i64, n: i64) String {
-    (i >= n).match ({ true => s, false => mp.fz_rep(s.append_in(mp, frag), frag, i + 1, n) })
-}
+fz_rep = (mp: MutPtr<Malloc>, s: String, frag: str, i: i64, n: i64) String { (i >= n).match ({ true => s, false => mp.fz_rep(s.append_in(mp, frag), frag, i + 1, n) }) }
 // "A0*: { f: A1 }\nA1*: { f: A2 }\n...A(n-1)*: { f: A0 }\n" — a by-value struct type cycle of length n.
 fz_cycle = (mp: MutPtr<Malloc>, s: String, i: i64, n: i64) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            s1 := s.append_in(mp, "A")
-            s2 := mp.fz_app_int(s1, i)
-            s3 := s2.append_in(mp, "*: { f: A")
-            s4 := mp.fz_app_int(s3, (i + 1) % n)
-            s5 := s4.append_in(mp, " }\n")
-            mp.fz_cycle(s5, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        s1 := s.append_in(mp, "A")
+        s2 := mp.fz_app_int(s1, i)
+        s3 := s2.append_in(mp, "*: { f: A")
+        s4 := mp.fz_app_int(s3, (i + 1) % n)
+        s5 := s4.append_in(mp, " }\n")
+        mp.fz_cycle(s5, i + 1, n)
+    } })
 }
 // push the first k bytes of `src` — yields an off-by-token truncation of a real program.
-fz_trunc_go = (mp: MutPtr<Malloc>, s: String, sv: [u8], i: i64, k: i64) String {
-    (i >= k).match ({ true => s, false => mp.fz_trunc_go(mp.push_in(s, sv[i]), sv, i + 1, k) })
-}
+fz_trunc_go = (mp: MutPtr<Malloc>, s: String, sv: [u8], i: i64, k: i64) String { (i >= k).match ({ true => s, false => mp.fz_trunc_go(mp.push_in(s, sv[i]), sv, i + 1, k) }) }
 fz_trunc = (mp: MutPtr<Malloc>, src: str, k: i64) str {
     sv := src.view()
-    s  := mp.new_in()
+    s := mp.new_in()
     mp.finish_in(mp.fz_trunc_go(s, sv, 0, k))
 }
-
 // ── input generators (deterministic via the seeded Rng) ───────────────────────────
 // token soup: n random tokens from `toks` joined by spaces.
 fz_soup = (mp: MutPtr<Malloc>, s: String, toks: [str], nt: i64, rp: MutPtr<Rng>, i: i64, n: i64) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            tok := toks[rp.range(0, nt)]
-            s1  := s.append_in(mp, tok)
-            s2  := s1.append_in(mp, " ")
-            mp.fz_soup(s2, toks, nt, rp, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        tok := toks[rp.range(0, nt)]
+        s1 := s.append_in(mp, tok)
+        s2 := s1.append_in(mp, " ")
+        mp.fz_soup(s2, toks, nt, rp, i + 1, n)
+    } })
 }
 // byte noise: n random printable bytes in [32, 126].
 fz_noise = (mp: MutPtr<Malloc>, s: String, rp: MutPtr<Rng>, i: i64, n: i64) String {
-    (i >= n).match ({
-        true  => s,
-        false => {
-            b: u8 := (' ' + rp.range(0, 95))
-            mp.fz_noise(mp.push_in(s, b), rp, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => s, false => {
+        b: u8 := ' ' + rp.range(0, 95)
+        mp.fz_noise(mp.push_in(s, b), rp, i + 1, n)
+    } })
 }
 // grammar-aware malformed programs aimed at the recursion sites (cycles, unterminated nests, tyargs,
 // recursive generics, polymorphic-recursive types, truncations).
-fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) str {
-    pick.match ({
-        0 => mp.finish_in(mp.fz_cycle(mp.new_in(), 0, rp.range(2, 7))),                                  // type cycle
-        1 => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "test* = () i32 { "), "{ ", 0, rp.range(1, 9))),   // unterminated blocks
-        2 => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "test* = () i32 { "), "( ", 0, rp.range(1, 12))),  // unterminated parens
-        3 => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "test* = () i32 { 0 .match ({ "), ".V => 0 ", 0, rp.range(1, 7))),  // unterminated match arms
-        4 => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "Foo"), "<", 0, rp.range(1, 6))),           // malformed `<…>` tail
-        5 => "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }",                // mutual recursive generic fns
-        6 => "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }",                              // polymorphic-recursive type
-        _ => mp.fz_trunc(FZ_FULL, rp.range(1, len(FZ_FULL)))                                               // off-by-token truncation
-    })
-}
-
-// ── run one input through both probes; print '.'/crash report, return the crash count (0..2) ──────
+fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) str { (pick == 0).match ({ true => mp.finish_in(mp.fz_cycle(mp.new_in(), 0, rp.range(2, 7))), false => (pick == 1).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "test* = () i32 { "), "{ ", 0, rp.range(1, 9))), false => (pick == 2).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "test* = () i32 { "), "( ", 0, rp.range(1, 12))), false => (pick == 3).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "test* = () i32 { 0 .match ({ "), ".V => 0 ", 0, rp.range(1, 7))), false => (pick == 4).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().append_in(mp, "Foo"), "<", 0, rp.range(1, 6))), false => (pick == 5).match ({ true => "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", false => (pick == 6).match ({ true => "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", false => mp.fz_trunc(FZ_FULL, rp.range(1, len(FZ_FULL))) }) }) }) }) }) }) }) }    // type cycle
 fz_run_one = (mp: MutPtr<Malloc>, src: str) i32 {
-    save(mp.zo_path("zo_fuzz.zen"), src, len(src))
+    save(mp.zo_path("zo_fuzz.zen"), src, len(src))    // unterminated blocks
+    // unterminated parens
+    // unterminated match arms
+    // malformed `<…>` tail
+    // mutual recursive generic fns
+    // polymorphic-recursive type
+    // off-by-token truncation
+    // ── run one input through both probes; print '.'/crash report, return the crash count (0..2) ──────
     cc := shell(mp.zo_cmd(FZ_CHECK))
     ec := shell(mp.zo_cmd(FZ_EMIT))
     crashes := 0
-    fz_crash(cc).match ({ true => { crashes = crashes + 1 } })
-    fz_crash(ec).match ({ true => { crashes = crashes + 1 } })
-    (crashes > 0).match ({
-        true  => { out("\n!! CRASH/HANG on input: ")  out(src)  out("\n") },
-        false => out(".")
-    })
+    fz_crash(cc).match ({ true => {
+        crashes = crashes + 1
+    } })
+    fz_crash(ec).match ({ true => {
+        crashes = crashes + 1
+    } })
+    (crashes > 0).match ({ true => {
+        out("\n!! CRASH/HANG on input: ")
+        out(src)
+        out("\n")
+    }, false => out(".") })
     crashes
 }
-
 // ── phase drivers (recursive counted loops; depth stays modest) ───────────────────
 fz_soup_phase = (mp: MutPtr<Malloc>, toks: [str], nt: i64, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
-    (i >= n).match ({
-        true  => 0,
-        false => {
-            src := mp.finish_in(mp.fz_soup(mp.new_in(), toks, nt, rp, 0, rp.range(1, 30)))
-            mp.fz_run_one(src) + mp.fz_soup_phase(toks, nt, rp, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => 0, false => {
+        src := mp.finish_in(mp.fz_soup(mp.new_in(), toks, nt, rp, 0, rp.range(1, 30)))
+        mp.fz_run_one(src) + mp.fz_soup_phase(toks, nt, rp, i + 1, n)
+    } })
 }
 fz_noise_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
-    (i >= n).match ({
-        true  => 0,
-        false => {
-            src := mp.finish_in(mp.fz_noise(mp.new_in(), rp, 0, rp.range(1, 60)))
-            mp.fz_run_one(src) + mp.fz_noise_phase(rp, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => 0, false => {
+        src := mp.finish_in(mp.fz_noise(mp.new_in(), rp, 0, rp.range(1, 60)))
+        mp.fz_run_one(src) + mp.fz_noise_phase(rp, i + 1, n)
+    } })
 }
 fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
-    (i >= n).match ({
-        true  => 0,
-        false => {
-            src := mp.fz_targeted(rp, rp.range(0, 8))
-            mp.fz_run_one(src) + mp.fz_target_phase(rp, i + 1, n)
-        }
-    })
+    (i >= n).match ({ true => 0, false => {
+        src := mp.fz_targeted(rp, rp.range(0, 8))
+        mp.fz_run_one(src) + mp.fz_target_phase(rp, i + 1, n)
+    } })
 }
 // crash-class REGRESSIONS: one minimal representative per known malformed-input non-termination bug.
 fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
-    seeds := [
-    "g := g",                                            // self-referential global init
-    "a := b\nb := a",                                    // mutually-referential globals
-    "A*: { b: B } B*: { a: A }",                         // struct A<->B by value
-    "f = () i32 {",                                      // unterminated block
-    "f = () i32 { 0 .match ({ 1 => 2",                   // unterminated match arms
-    "T*: { x: i32 } T.impl(Tr, { m = () void {",         // unterminated impl body
-    "f = () i32 { x := 5  x[0 ",                          // `[` never closed
-    "f = () i32 { s := [1,2]  s[0 = 3 }",                // idxset `[` scan past EOF
-    "Foo<",                                              // `<` with no closing `>`
-    "f<T> = (x: T) T { f(x) }",                          // self-recursive generic -> inliner
-    "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }",
-    "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }",
-    "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"
-    ]
+    seeds := ["g := g", "a := b\nb := a", "A*: { b: B } B*: { a: A }", "f = () i32 {", "f = () i32 { 0 .match ({ 1 => 2", "T*: { x: i32 } T.impl(Tr, { m = () void {", "f = () i32 { x := 5  x[0 ", "f = () i32 { s := [1,2]  s[0 = 3 }", "Foo<", "f<T> = (x: T) T { f(x) }", "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"]    // self-referential global init
+    // mutually-referential globals
+    // struct A<->B by value
+    // unterminated block
+    // unterminated match arms
+    // unterminated impl body
+    // `[` never closed
+    // idxset `[` scan past EOF
+    // `<` with no closing `>`
+    // self-recursive generic -> inliner
     fails := 0
-    seeds.loop((h, i, s) { fails = fails + mp.fz_run_one(s) })
+    seeds.loop((h, i, s) {
+        fails = fails + mp.fz_run_one(s)
+    })
     fails
 }
-
 // ── category entry: run every phase, sum crashes (a non-zero result is a REAL bug to report) ──────
 oracle_fuzz_run* = () i32 {
-    m  := Malloc(_: 0)
+    m := Malloc(_: 0)
     mp := m.addr()
-    r  := seed(FZ_SEED)
+    r := seed(FZ_SEED)
     rp := r.addr()
     // a grammar-flavoured alphabet (mirrors _fuzz_campaign.ALPHA): keywords, punctuation, names.
-    toks := [
-    "test*", "f*", "=", "(", ")", "i32", "i64", "bool", "str", "{", "}", "x", "y", "p",
-    ":=", ":", "5", "0", "1", ".match", "[", "]", "+", "-", "*", "/", "P", "C", "T",
-    "f", "<", ">", "2", "return", "_", "=>", ",", ".", ".Some", ".None", "|", "impl",
-    "Drop", "loop", "addr", "slice", "void", "Ptr", "MutPtr", "&&", "||", "==", "!=",
-    "g", "h", ".Ok", ".Err", "@while", "sizeof", "use*", "Box", "n:"
-    ]
+    toks := ["test*", "f*", "=", "(", ")", "i32", "i64", "bool", "str", "{", "}", "x", "y", "p", ":=", ":", "5", "0", "1", ".match", "[", "]", "+", "-", "*", "/", "P", "C", "T", "f", "<", ">", "2", "return", "_", "=>", ",", ".", ".Some", ".None", "|", "impl", "Drop", "loop", "addr", "slice", "void", "Ptr", "MutPtr", "&&", "||", "==", "!=", "g", "h", ".Ok", ".Err", "@while", "sizeof", "use*", "Box", "n:"]
     nt: i64 := toks.len
-
     out("fuzz: crash-resistance over generated malformed inputs\n")
     out("fuzz seeds (crash-class regressions)\n")
     sf := mp.fz_seed_phase()
@@ -214,8 +170,7 @@ oracle_fuzz_run* = () i32 {
     out("\nfuzz targeted recursion-bombs (60)\n")
     tf := mp.fz_target_phase(rp, 0, 60)
     out("\n")
-
     // report via the standard suite line (one synthetic bool: "no crashes found").
     total := sf + pf + nf + tf
-    run_suite("fuzz (no crash/hang found)", [(total == 0)])
+    run_suite("fuzz (no crash/hang found)", [total == 0])
 }

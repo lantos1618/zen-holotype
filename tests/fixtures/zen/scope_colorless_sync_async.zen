@@ -5,32 +5,31 @@
 { async_in, free_async } = std.concurrent.runtime
 { spawn_in, Coro } = std.concurrent.coroutine
 halloc = std.mem.heap
-
 g_result := 0
-
 // THE colorless body — generic over the scope's backing A; uses Scope's own methods.
-run = (s: MutPtr<Scope<A>>) i32 {
+run<A> = (s: MutPtr<Scope<A>>) i32 {
     p := s.acquire(8)
     store_i64(p, 5)
-    s.checkpoint()                       // sync: no-op ; async: yields the coroutine
+    s.checkpoint()    // sync: no-op ; async: yields the coroutine
     store_i64(p, load_i64(p) + 100)
     to_i32(load_i64(p))
 }
-
 // async driver: run the SAME body under a Scope<AsyncArena>, inside a coroutine, to completion.
 awork = () void {
     h := halloc.gpa()
     a := h.addr().async_in(4096)
-    s := Scope<AsyncArena>( alloc: a.addr(), budget: 0 - 1 )
+    s := Scope<AsyncArena>(
+        alloc: a.addr(),
+        budget: 0 - 1,
+    )
     g_result = run(s.addr())
     a.addr().free_async(h.addr())
 }
-drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => {} }) }
-
+drive = (c: Coro) void { (c.resume() == 1).match ({ true => drive(c), false => { } }) }
 main = () i32 {
     h := halloc.gpa()
-    sync_r := h.addr().with_sync(4096, run)   // sync path: same run, checkpoint no-ops
-    c := h.addr().spawn_in(awork)             // async path: same run, checkpoint yields
+    sync_r := h.addr().with_sync(4096, run)    // sync path: same run, checkpoint no-ops
+    c := h.addr().spawn_in(awork)    // async path: same run, checkpoint yields
     drive(c)
     sb := (sync_r == 105).match ({ true => 1, false => 0 })
     ab := (g_result == 105).match ({ true => 2, false => 0 })

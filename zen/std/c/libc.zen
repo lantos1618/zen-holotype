@@ -16,51 +16,42 @@
 // module only exports what it itself declares. So those three stay declared in
 // std.mem.alloc; every OTHER libc symbol funnels here. (Each symbol still lives in exactly
 // one file — no duplicates.)
-
 // ── memory ───────────────────────────────────────────────────────────────────
 calloc* = (n: i64, size: i64) RawPtr<u8>
 memcpy* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) RawPtr<u8>
-
 // ── strings ──────────────────────────────────────────────────────────────────
 strlen* = (s: str) i64
 strcmp* = (a: str, b: str) i32
-
 // ── POSIX file descriptors ───────────────────────────────────────────────────
-open*  = (path: str, flags: i32, mode: i32) i32
-read*  = (fd: i32, buf: RawPtr<u8>, n: i64) i64
+open* = (path: str, flags: i32, mode: i32) i32
+read* = (fd: i32, buf: RawPtr<u8>, n: i64) i64
 write* = (fd: i32, buf: RawPtr<u8>, n: i64) i64
 close* = (fd: i32) i32
 lseek* = (fd: i32, off: i64, whence: i32) i64
-
 // ── filesystem ───────────────────────────────────────────────────────────────
 unlink* = (path: str) i32
 access* = (path: str, mode: i32) i32
-
 // directories & metadata (std.fs wraps these). `mkdir`/`rmdir`/`rename` return 0 on success, -1 on
 // error. `stat(path, buf)` fills a 144-byte `struct stat` cell (st_mode at +24, st_size at +48 on the
 // x86-64 Linux ABI) — we hand it a RawPtr<u8> at a zeroed cell and read the two fields back, exactly as
 // std.time does for `struct timespec`. glibc ≥ 2.33 exports `stat` directly (no `__xstat` shim needed).
-mkdir*  = (path: str, mode: i32) i32
-rmdir*  = (path: str) i32
+mkdir* = (path: str, mode: i32) i32
+rmdir* = (path: str) i32
 rename* = (from: str, to: str) i32
-stat*   = (path: str, buf: RawPtr<u8>) i32
-
+stat* = (path: str, buf: RawPtr<u8>) i32
 // directory iteration: opendir returns an opaque `DIR*` (NULL on failure), readdir returns the next
 // `struct dirent*` (NULL at end-of-stream) whose NUL-terminated name lives at +19, closedir frees the
 // stream. Both pointers are opaque to Zen — modeled as RawPtr<u8>, the C side owns the storage.
-opendir*   = (path: str) RawPtr<u8>
-readdir*   = (dir: RawPtr<u8>) RawPtr<u8>
+opendir* = (path: str) RawPtr<u8>
+readdir* = (dir: RawPtr<u8>) RawPtr<u8>
 rewinddir* = (dir: RawPtr<u8>) void
-closedir*  = (dir: RawPtr<u8>) i32
-
+closedir* = (dir: RawPtr<u8>) i32
 // ── process ──────────────────────────────────────────────────────────────────
 system* = (cmd: str) i32
-abort*  = () void
+abort* = () void
 getpid* = () i32
-
 // ── environment ──────────────────────────────────────────────────────────────
-getenv* = (name: str) RawPtr<u8>     // char* — NULL when the variable is unset
-
+getenv* = (name: str) RawPtr<u8>    // char* — NULL when the variable is unset
 // ── time / clocks ──────────────────────────────────────────────────────────────
 // clock_gettime(clk_id, struct timespec *tp) fills `tp` with the current reading of clock `clk_id`
 // and returns 0 (or -1 on a bad clock id). `struct timespec` is two pointer-sized words on the
@@ -68,12 +59,10 @@ getenv* = (name: str) RawPtr<u8>     // char* — NULL when the variable is unse
 // 16-byte cell and read tv_sec at +0 / tv_nsec at +8 back out (std.time does exactly that). On glibc
 // ≥ 2.17 the symbol lives in libc itself, so no extra `-lrt` link is needed.
 clock_gettime* = (clk: i32, tp: RawPtr<u8>) i32
-
 // ── pipes (popen returns an opaque FILE*; model as RawPtr<u8>) ────────────────
-popen*  = (cmd: str, mode: str) RawPtr<u8>
+popen* = (cmd: str, mode: str) RawPtr<u8>
 pclose* = (f: RawPtr<u8>) i32
-fgets*  = (buf: RawPtr<u8>, n: i32, f: RawPtr<u8>) RawPtr<u8>
-
+fgets* = (buf: RawPtr<u8>, n: i32, f: RawPtr<u8>) RawPtr<u8>
 // ── threads (POSIX pthread; binaries that use these must link -lpthread) ──────
 // `pthread_t` is an opaque `unsigned long` (8 bytes) on Linux/glibc, so we model it as a
 // plain i64: pthread_create writes it through a RawPtr<u8> cell (the `thread` out-param), and
@@ -86,8 +75,7 @@ fgets*  = (buf: RawPtr<u8>, n: i32, f: RawPtr<u8>) RawPtr<u8>
 // thread body therefore MUST be a NON-CAPTURING fn (Zen capturing closures can't escape) — all
 // state travels through the single `arg` pointer, C-style. `retval` is a `void**` out-cell.
 pthread_create* = (thread: RawPtr<u8>, attr: RawPtr<u8>, start: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) i32
-pthread_join*   = (thread: i64, retval: RawPtr<u8>) i32
-
+pthread_join* = (thread: i64, retval: RawPtr<u8>) i32
 // ── locks & condition variables (the parallelism layer over std.thread) ───────
 // `pthread_mutex_t` and `pthread_cond_t` are OPAQUE structs whose storage size is part of the
 // glibc x86-64 ABI: 40 bytes for the mutex, 48 for the condvar (see std.sync's MUTEX_SIZE /
@@ -97,13 +85,12 @@ pthread_join*   = (thread: i64, retval: RawPtr<u8>) i32
 //
 // `pthread_cond_wait` ATOMICALLY unlocks `mutex`, blocks on `cond`, and re-locks `mutex` on wake —
 // the caller must hold `mutex` going in. Spurious wakeups are possible, so wait in a predicate loop.
-pthread_mutex_init*    = (m: RawPtr<u8>, attr: RawPtr<u8>) i32
-pthread_mutex_lock*    = (m: RawPtr<u8>) i32
-pthread_mutex_unlock*  = (m: RawPtr<u8>) i32
+pthread_mutex_init* = (m: RawPtr<u8>, attr: RawPtr<u8>) i32
+pthread_mutex_lock* = (m: RawPtr<u8>) i32
+pthread_mutex_unlock* = (m: RawPtr<u8>) i32
 pthread_mutex_destroy* = (m: RawPtr<u8>) i32
-
-pthread_cond_init*      = (cond: RawPtr<u8>, attr: RawPtr<u8>) i32
-pthread_cond_wait*      = (cond: RawPtr<u8>, m: RawPtr<u8>) i32
-pthread_cond_signal*    = (cond: RawPtr<u8>) i32
+pthread_cond_init* = (cond: RawPtr<u8>, attr: RawPtr<u8>) i32
+pthread_cond_wait* = (cond: RawPtr<u8>, m: RawPtr<u8>) i32
+pthread_cond_signal* = (cond: RawPtr<u8>) i32
 pthread_cond_broadcast* = (cond: RawPtr<u8>) i32
-pthread_cond_destroy*   = (cond: RawPtr<u8>) i32
+pthread_cond_destroy* = (cond: RawPtr<u8>) i32

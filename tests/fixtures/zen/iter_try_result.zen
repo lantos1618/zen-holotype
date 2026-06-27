@@ -3,16 +3,15 @@ halloc = std.mem.heap
 { Result, IoError } = std.core.result
 { to_exit } = std.core.bool
 { try_map_in, try_filter_in } = std.collections.iter
-LimitAlloc: { left: i32 }
+LimitAlloc: {
+    left: i32,
+}
 LimitAlloc.impl(Allocator, {
     acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {
-        (a.left > 0).match ({
-            true => {
-                a.left = a.left - 1
-                malloc(n)
-            },
-            false => null_ptr()
-        })
+        (a.left > 0).match ({ true => {
+            a.left = a.left - 1
+            malloc(n)
+        }, false => null_ptr() })
     }
     resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
     release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { free(p) }
@@ -21,25 +20,26 @@ success = () bool {
     heap := halloc.gpa()
     a := heap.addr()
     r0: Result<[i32], IoError> := a.try_map_in([1, 2, 3], (x) { x + 1 })
-    r0.match({
+    r0.match ({
         .Ok(mapped) => {
             r1: Result<[i32], IoError> := a.try_filter_in(mapped, (x) { x > 2 })
-            r1.match({
-                .Ok(filtered) => (filtered.len == 2) && (filtered[0] == 3) && (filtered[1] == 4),
-                .Err(e) => false
+            r1.match ({
+                .Ok(filtered) => filtered.len == 2 && filtered[0] == 3 && filtered[1] == 4,
+                .Err(e)       => false,
             })
         },
-        .Err(e) => false
+        .Err(e)     => false,
     })
 }
 failure = () bool {
     lim := LimitAlloc(left: 0)
     r: Result<[i32], IoError> := lim.addr().try_map_in([1], (x) { x })
-    r.match({
-        .Err(e) => e.match({ .NotFound => true, _ => false }),
-        .Ok(xs) => false
+    r.match ({
+        .Err(e) => e.match ({
+            .NotFound => true,
+            _         => false,
+        }),
+        .Ok(xs) => false,
     })
 }
-main = () i32 {
-    (success() && failure()).to_exit()
-}
+main = () i32 { (success() && failure()).to_exit() }
