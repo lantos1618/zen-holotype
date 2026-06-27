@@ -398,6 +398,14 @@ is_cmp_op = (op: str) bool {
     b == '=' || b == '!' || (b == '<' || b == '>') && b1 != b || (b == '&' || b == '|') && b1 == b
 }
 bin_ty = (op: str, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
+// A numeric binop's result is the WIDER operand (max integer rank), so `i32 + i64`
+// is i64 regardless of operand order — kills silent truncation + order-dependence.
+// A numeric LITERAL operand ADAPTS to the other side (it never forces widening), so
+// idiomatic `c + 1` (u8 + int-lit) stays u8 and `'0' + n` keeps the non-literal's width.
+// When a non-literal side lacks a rank (narrow Named widths, non-numeric) we keep lhs.
+num_wider = (lt: Ty, rt: Ty) Ty { (lt.ty_rank() >= 0 && rt.ty_rank() >= 0).match ({ true => (rt.ty_rank() > lt.ty_rank()).match ({ true => rt, false => lt }), false => lt }) }
+num_result = (llit: bool, lt: Ty, rlit: bool, rt: Ty) Ty { llit.match ({ true => rlit.match ({ true => lt, false => rt }), false => rlit.match ({ true => lt, false => num_wider(lt, rt) }) }) }
+bin_ty_e = (env: Env, b: BinData) Ty { b.op.is_cmp_op().match ({ true => tbool(), false => num_result(b.lhs.is_lit_numeric(), env.infer_expr(b.lhs), b.rhs.is_lit_numeric(), env.infer_expr(b.rhs)) }) }
 // Numeric literals are polymorphic until a context fixes their size.
 is_lit_numeric* = (e: Ptr<Expr>) bool {
     load(e).match ({
@@ -478,7 +486,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .Byte(n)       => tu8(),
         .FloatLit(ft)  => tf64(),
         .Var(v)        => env.var_ty(v.name),
-        .Bin(b)        => bin_ty(b.op, env.infer_expr(b.lhs)),
+        .Bin(b)        => env.bin_ty_e(b),
         .Call(c)       => env.infer_call(c),
         .Cond(d)       => env.cond_ty(d),
         .Member(mm)    => env.infer_member(mm),

@@ -57,9 +57,21 @@ unknown_ty = (env: Env, t: Ty) bool {
         .Named(n)   => env.env_named_declared(n).match ({ true => false, false => true }),
         .Ptr(pd)    => env.unknown_ty(load(pd.pointee)),
         .Slice(e)   => env.unknown_ty(load(e)),
-        .Generic(g) => true,
+        // A generic instance is unknown ONLY while a type-arg is still unresolved (an unbound
+        // tparam / void residue): its concrete decl appears only after that arg is pinned. Once
+        // EVERY arg is concrete (`Box<i32>`), the instance is fully known and its mangled name
+        // (`Box_i32`) is authoritative — so a real arg mismatch (`Box<i32>` vs `Box<u8>`) is a Zen
+        // fit error here instead of leaking a `Box_u8` unknown-type to cc.
+        .Generic(g) => env.gen_args_unknown(g.args),
         _           => false,
     }) })
+}
+gen_args_unknown = (env: Env, args: [Ty]) bool {
+    f := false
+    args.loop((h, i, t) {
+        f = env.unknown_ty(t).match ({ true => true, false => f })
+    })
+    f
 }
 // FnT-vs-FnT signature compatibility: same arity, each param type and the return type equal —
 // EXCEPT a position whose type is unknown (an unbound tparam like `S`, generic residue) stays lenient,
@@ -235,10 +247,18 @@ is_trait_method = (decls: [Decl], fn: str) bool {
 // genc/runtime intrinsics with no Zen declaration.
 is_intrinsic = (fn: str) bool { eq(fn, "load").match ({ true => true, false => eq(fn, "store").match ({ true => true, false => eq(fn, "addr").match ({ true => true, false => eq(fn, "assert_nonnull").match ({ true => true, false => eq(fn, "offset").match ({ true => true, false => eq(fn, "cstr").match ({ true => true, false => eq(fn, "slice").match ({ true => true, false => eq(fn, "malloc").match ({ true => true, false => eq(fn, "sizeof").match ({ true => true, false => eq(fn, "load_i64").match ({ true => true, false => eq(fn, "store_i64").match ({ true => true, false => eq(fn, "atomic_add_i64").match ({ true => true, false => eq(fn, "atomic_load_i64").match ({ true => true, false => eq(fn, "atomic_store_i64").match ({ true => true, false => eq(fn, "atomic_cas_i64").match ({ true => true, false => eq(fn, "atomic_fence").match ({ true => true, false => eq(fn, "null_ptr").match ({ true => true, false => eq(fn, "__str_eq").match ({ true => true, false => eq(fn, "__str_ne").match ({ true => true, false => eq(fn, "to_i32").match ({ true => true, false => eq(fn, "to_i64").match ({ true => true, false => eq(fn, "to_u8").match ({ true => true, false => eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }    // Stage 3: panic-on-null guard, RawPtr<T> -> MutPtr<T>
 intrinsic_arity = (fn: str) i32 { eq(fn, "__str_eq").match ({ true => 2, false => eq(fn, "__str_ne").match ({ true => 2, false => eq(fn, "store").match ({ true => 2, false => eq(fn, "offset").match ({ true => 2, false => eq(fn, "slice").match ({ true => 2, false => eq(fn, "null_ptr").match ({ true => 0, false => eq(fn, "atomic_add_i64").match ({ true => 2, false => eq(fn, "atomic_store_i64").match ({ true => 2, false => eq(fn, "atomic_cas_i64").match ({ true => 3, false => eq(fn, "atomic_fence").match ({ true => 0, false => eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) }) }) }) }) }    // lowered str content equality (resolve_bin)
-is_unresolved_trait_call = (env: Env, c: CallData) bool { (c.args.len > 0).match ({ true => env.decls.is_trait_method(c.fn).match ({ true => eq(env.dispatch_name(c), c.fn).match ({ true => env.infer_expr(c.args[0].addr()).recv_name().is_empty().match ({ true => false, false => true }), false => false }), false => false }), false => false }) }    // explicit narrowing/widening casts (also accept f64 — C truncation)
+// A trait-method UFCS call defers to monomorphization ONLY when its receiver type is still
+// unresolved (an unbound tparam / generic residue — `unknown_ty`): the concrete impl appears
+// after the tparam is pinned. A CONCRETE receiver must resolve NOW — if dispatch finds no impl
+// it is a `trait_recv_missing` error, not a deferral that leaks a bare method symbol to the linker.
+is_unresolved_trait_call = (env: Env, c: CallData) bool { (c.args.len > 0).match ({ true => env.decls.is_trait_method(c.fn).match ({ true => eq(env.dispatch_name(c), c.fn).match ({ true => env.unknown_ty(env.infer_expr(c.args[0].addr())), false => false }), false => false }), false => false }) }
+// A trait-method call whose CONCRETE receiver type implements no matching impl (dispatch finds no
+// redirect) and that is neither a free function nor an imported name — would emit a bare `area`
+// call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
+trait_recv_missing = (env: Env, c: CallData) bool { (c.args.len > 0 && env.decls.is_trait_method(c.fn) && env.decls.is_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({ true => eq(env.dispatch_name(c), c.fn) && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false, false => false }) }
 is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }    // explicit int -> f64 cast
 // Intrinsic arity must be checked before emission.
-check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }    // null_ptr() takes no operands
+check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }    // null_ptr() takes no operands
 store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }    // atomic_add_i64(p, delta) -> new value
 store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }    // atomic_store_i64(p, val) -> void
 store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }    // atomic_cas_i64(p, expected, desired) -> bool
@@ -1774,7 +1794,7 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({ true => f.is_imported_generic().match ({ true => 0, false => env.kv_arg_type_kind(f.tparams, ps, c.args) }), false => KARITY() })
 }
-kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => 0, false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => KUNDEFINED() }) }) }) }) }) }) }    // deferred UFCS trait-method call (see check_call)
+kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => KUNDEFINED() }) }) }) }) }) }) }    // deferred UFCS trait-method call (see check_call)
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
