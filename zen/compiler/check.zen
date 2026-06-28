@@ -500,7 +500,7 @@ infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
         .Match(m)      => env.infer_match_ty(m),
         .Index(ix)     => env.index_elem(ix),
         .Loop(l)       => tvoid(),
-        .SliceLit(sd)  => tslice(env.a.tnode(env.sl_elem(sd.items))),
+        .SliceLit(sd)  => tslice(env.a.tnode(sd.elem.is_void_ty().match ({ true => env.sl_elem(sd.items), false => sd.elem }))),
         _              => tvoid(),
     })
 }
@@ -787,9 +787,15 @@ resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         _               => e,
     })
 }
-// Slice literal element type comes from the first item; empty stays void.
+// Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
+// `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
+// expected-type propagation a scalar int slot already gets. Falls back to the first item's type.
 sl_elem = (env: Env, items: [Expr]) Ty { (items.len == 0).match ({ true => tvoid(), false => env.infer_expr(items[0].addr()) }) }
-resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> { a.cenode(slit(env.sl_elem(sd.items), a.resolve_args(env.clr_exp(), sd.items))) }
+sl_elem_exp = (env: Env, items: [Expr]) Ty { env.exp.elem_of().is_void_ty().match ({ true => env.sl_elem(items), false => env.exp.elem_of() }) }
+resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
+    et := env.sl_elem_exp(sd.items)
+    a.cenode(slit(et, a.resolve_args(env.with_exp(et), sd.items)))
+}
 // Field access auto-derefs pointer receivers.
 resolve_member = (a: MutPtr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
     obj := a.resolve_expr(env.clr_exp(), mm.obj)
