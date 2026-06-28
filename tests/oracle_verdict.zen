@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (206)", [VerdictCase(
+    a := run_verdicts("verdict (209)", [VerdictCase(
         src: "test* = () i32 { a: u8 := 300  to_i32(a) }",
         should_pass: false,
         kind: "",
@@ -836,6 +836,21 @@ oracle_verdict_run* = () i32 {
         src: "test* = () i64 { p: RawPtr<i64> := malloc(8)  q := assert_nonnull(p)  store(q, 7)  load(q) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        // M5 turbofish still-accept: explicit type arg that AGREES with the value arg.
+        src: "id<T> = (x: T) T { x }\ntest* = () i32 { to_i32(id<i32>(5)) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // M5 turbofish still-accept: a sizeof-style nullary generic pinned by turbofish.
+        src: "sz<T> = () i64 { sizeof(T) }\ntest* = () i64 { sz<i64>() + sz<i32>() }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // M5 closure still-accept: a correctly-arity'd, correctly-typed `(T,T)T` closure to a HOF.
+        src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a + b }) }",
+        should_pass: true,
+        kind: "",
     )])
     // Stage 3 nullability: deref of a nullable `RawPtr<T>` (T != u8) without a null-check is REJECTED.
     // store / offset through a nullable `RawPtr<T>` are likewise rejected.
@@ -845,7 +860,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (100)", [VerdictCase(
+    b := run_verdicts("verdict-kind (105)", [VerdictCase(
         src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "arity",
@@ -1314,6 +1329,31 @@ oracle_verdict_run* = () i32 {
     ), VerdictCase(
         // R8: assert_nonnull on a non-pointer arg is an arg-type error.
         src: "test* = () i64 { x := 5  q := assert_nonnull(x)  load(q) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        // M5 R3: a turbofish type arg that names no declared type → positioned unknown-type (was a cc leak).
+        src: "sz<T> = () i64 { sizeof(T) }\ntest* = () i32 { to_i32(sz<NoExist>()) }",
+        should_pass: false,
+        kind: "unknown-type",
+    ), VerdictCase(
+        // M5 R4: turbofish on a callee with NO type params → no-type-args (was silently dropped).
+        src: "plain = (x: i64) i64 { x + 1 }\ntest* = () i32 { to_i32(plain<i64>(5)) }",
+        should_pass: false,
+        kind: "no-type-args",
+    ), VerdictCase(
+        // M5 R4: an explicit type arg that contradicts the value arg (`T=str` vs `5:i64`) → arg-type.
+        src: "id<T> = (x: T) T { x }\ntest* = () i32 { to_i32(id<str>(5)) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        // M5 R5: a closure with the WRONG param count for the FnT param → positioned arity.
+        src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a){ a + 1 }) }",
+        should_pass: false,
+        kind: "arity",
+    ), VerdictCase(
+        // M5 R5: a closure whose body produces the wrong type (bool where T is wanted) → arg-type.
+        src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a < b }) }",
         should_pass: false,
         kind: "arg-type",
     ), VerdictCase(
