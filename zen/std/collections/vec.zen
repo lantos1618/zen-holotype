@@ -2,7 +2,6 @@
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, Opt } = std.core.result
-{ fold, each, find, map_into, filter_into } = std.collections.iter
 Vec*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
@@ -85,25 +84,42 @@ Vec*<T>: {
     free<A> = (v: Vec<T>, a: MutPtr<A>) void { a.release(v.ptr) }
     each = (v: Vec<T>, f: (T) void) void {
         // Higher-order helpers over the live elements (`view()`), backed by closures — inline lambdas and
-        // stored closures both work. `each`/`fold`/`find` allocate nothing; `map`/`filter` thread the
-        // allocator and return a fresh Vec (no hidden heap). The `vw: [T] :=` intermediate pins the element
-        // type so the generic iter helper instantiates (a direct `v.view().fold(...)` chain can't infer it).
+        // stored closures both work. Spelled inline (over `view().loop`) rather than delegating to
+        // std.collections.iter, so this module imports no free `fold`/`each`/`find`/`map_into` names — those
+        // would re-export and clash with same-named helpers (e.g. `map.find`) in programs that co-import vec
+        // and map. `each`/`fold`/`find` allocate nothing; `map`/`filter` thread the allocator and return a
+        // fresh Vec (no hidden heap). The `vw: [T] :=` intermediate pins the element type for the loop.
         vw: [T] := v.view()
-        vw.each(f)
+        vw.loop((h, i, x) {
+            f(x)
+        })
     }
     fold = (v: Vec<T>, init: T, f: (T, T) T) T {
+        acc := init
         vw: [T] := v.view()
-        vw.fold(init, f)
+        vw.loop((h, i, x) {
+            acc = f(acc, x)
+        })
+        acc
     }
     find = (v: Vec<T>, pred: (T) bool) Opt<T> {
+        out: Opt<T> := .None
         vw: [T] := v.view()
-        vw.find(pred)
+        vw.loop((h, i, x) {
+            pred(x).match ({ true => {
+                out = .Some(x)
+                h.break
+            }, false => { } })
+        })
+        out
     }
     map<A, U> = (v: Vec<T>, a: MutPtr<A>, f: (T) U) Vec<U> {
         p := a.acquire(v.len * sizeof(U))
         out: [U] := slice(p, v.len)
         vw: [T] := v.view()
-        vw.map_into(out, f)
+        vw.loop((h, i, x) {
+            out[i] = f(x)
+        })
         Vec<U>(
             ptr: p,
             len: v.len,
@@ -114,7 +130,11 @@ Vec*<T>: {
         p := a.acquire(v.len * sizeof(T))
         out: [T] := slice(p, v.len)
         vw: [T] := v.view()
-        n := vw.filter_into(out, keep)
+        n := 0
+        vw.loop((h, i, x) {
+            out[n] = x
+            n = n + keep(x).match ({ true => 1, false => 0 })
+        })
         Vec<T>(
             ptr: p,
             len: n,
