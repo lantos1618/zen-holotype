@@ -49,39 +49,57 @@ write_int = (n: i64) i64 { (n < 0).match ({ true => "-".write_text() + write_neg
 // unlike write_int which would treat the high bit as a sign.
 write_u64 = (n: u64) i64 { (n < 10).match ({ true => write_digit(to_i64(n)), false => write_u64(n / 10) + write_digit(to_i64(n % 10)) }) }
 write_fpad = (n: i64, w: i64) i64 { (w == 1).match ({ true => write_digit(n % 10), false => write_fpad(n / 10, w - 1) + write_digit(n % 10) }) }
-write_frac_digits = (n: i64, w: i64) i64 { (n % 10 == 0 && w > 1).match ({ true => write_frac_digits(n / 10, w - 1), false => write_fpad(n, w) }) }
-write_fparts = (ip: i64, scaled: i64) i64 {
-    whole := write_uint(ip)
-    (scaled == 0).match ({ true => whole + ".0".write_text(), false => whole + ".".write_text() + write_frac_digits(scaled, 6) })
+// ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
+//
+// A printed f64 round-trips for every value needing <= 15 significant digits — which is
+// every literal a human writes (3.14, 0.5, 100.0) AND 0.123456789 (the old fixed 6-decimal
+// path silently truncated it to "0.123457"). 0.1 + 0.2 still prints "0.3": at 15 digits the
+// 0.30000000000000004 representation rounds back to "0.3". 15 (not 16/17) is the most the
+// naive f64-scaling digit extraction stays clean for — 16+ reintroduces noise on round
+// values (65536.0 would print "65535.99999999998"). inf/nan and the e-notation path for
+// magnitudes outside [1e-4, 1e15) are preserved.
+//
+// decimal exponent E of finite x>0: the integer with x / 10^E in [1, 10).
+fexp_up = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => fexp_up(x / 10.0, e + 1) }) }
+fexp_down = (x: f64, e: i64) i64 { (x >= 1.0).match ({ true => e, false => fexp_down(x * 10.0, e - 1) }) }
+fexp = (x: f64) i64 { (x >= 1.0).match ({ true => fexp_up(x, 0), false => fexp_down(x, 0) }) }
+// 10^e as f64 (e any sign); recursive, |e| <= ~308 for any finite f64.
+fpow10 = (e: i64) f64 { (e == 0).match ({ true => 1.0, false => (e < 0).match ({ true => fpow10(e + 1) / 10.0, false => fpow10(e - 1) * 10.0 }) }) }
+// the 15-digit significand of magnitude a (a>0), leading digit at place e. MULTIPLY when
+// e<14 (so we never divide by a tiny 10^-k that underflows to 0); DIVIDE when e>=14.
+fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(a / fpow10(e - 14) + 0.5), false => to_i64(a * fpow10(14 - e) + 0.5) }) }
+// drop trailing zero digits of the significand (keep >= 1 digit), and count digits of n>=1.
+fstrip = (n: i64) i64 { (n % 10 == 0 && n >= 10).match ({ true => fstrip(n / 10), false => n }) }
+fndig = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + fndig(n / 10) }) }
+fpow10i = (n: i64) i64 { (n <= 0).match ({ true => 1, false => 10 * fpow10i(n - 1) }) }
+fzeros = (n: i64) i64 { (n <= 0).match ({ true => 0, false => write_digit(0) + fzeros(n - 1) }) }
+// fixed-notation body for significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).
+write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
+    (e < 0).match ({ true => "0.".write_text() + fzeros(0 - e - 1) + write_uint(digs), false => (ndig <= e + 1).match ({ true => write_uint(digs) + fzeros(e + 1 - ndig) + ".0".write_text(), false => {
+        fw := ndig - (e + 1)    // fractional digit count
+        write_uint(digs / fpow10i(fw)) + ".".write_text() + write_fpad(digs % fpow10i(fw), fw)
+    } }) })
 }
-// Always emit at least one fractional digit so a float is visibly a
-// float (e.g. 2.0 prints "2.0", never "2").
-// Fixed 6-decimal path for "normal" magnitudes (~1e-4 .. 1e15).
-write_fnorm = (x: f64) i64 {
-    ip := to_i64(x)
-    scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
-    (scaled >= 1000000).match ({ true => write_fparts(ip + 1, 0), false => write_fparts(ip, scaled) })
+// scientific-notation body "d.ddd e±EE".
+write_fsci = (digs: i64, ndig: i64, e: i64) i64 {
+    msd := digs / fpow10i(ndig - 1)
+    rest := digs % fpow10i(ndig - 1)
+    mant := write_digit(msd) + ".".write_text() + (ndig == 1).match ({ true => write_digit(0), false => write_fpad(rest, ndig - 1) })
+    sgn := (e < 0).match ({ true => "e-".write_text(), false => "e+".write_text() })
+    mant + sgn + write_uint((e < 0).match ({ true => 0 - e, false => e }))
 }
-// Scientific notation for magnitudes outside the fixed-decimal range, so tiny
-// nonzero values (e.g. 1e-7) and very large ones keep their significant digits
-// instead of underflowing to "0" or overflowing the i64 whole part.
-sci_exp_small = (x: f64, e: i64) i64 { (x >= 1.0).match ({ true => e, false => sci_exp_small(x * 10.0, e + 1) }) }
-sci_exp_large = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => sci_exp_large(x / 10.0, e + 1) }) }
-scale_up = (x: f64, n: i64) f64 { (n == 0).match ({ true => x, false => scale_up(x * 10.0, n - 1) }) }
-scale_down = (x: f64, n: i64) f64 { (n == 0).match ({ true => x, false => scale_down(x / 10.0, n - 1) }) }
-write_sci_small = (x: f64) i64 {
-    e := sci_exp_small(x, 0)
-    mant := scale_up(x, e)
-    write_fnorm(mant) + "e-".write_text() + write_uint(e)
+// non-negative magnitude: zero prints "0.0"; otherwise 15 sig digits, trailing zeros
+// trimmed, in fixed notation for e in [-4,14] and scientific outside it.
+write_fabs_digits = (x: f64) i64 {
+    (x == 0.0).match ({ true => "0.0".write_text(), false => {
+        e0 := fexp(x)
+        d0 := fsig(x, e0)
+        e := (d0 >= 1000000000000000).match ({ true => e0 + 1, false => e0 })    // carry across 10^15
+        digs := fstrip((d0 >= 1000000000000000).match ({ true => d0 / 10, false => d0 }))
+        ndig := fndig(digs)
+        (e >= 0 - 4 && e < 15).match ({ true => write_ffixed(digs, ndig, e), false => write_fsci(digs, ndig, e) })
+    } })
 }
-write_sci_large = (x: f64) i64 {
-    e := sci_exp_large(x, 0)
-    mant := scale_down(x, e)
-    write_fnorm(mant) + "e+".write_text() + write_uint(e)
-}
-// x is the non-negative magnitude. Choose scientific notation only outside the
-// range where the fixed 6-decimal representation keeps full significant digits.
-write_fabs_digits = (x: f64) i64 { (x == 0.0).match ({ true => write_fnorm(x), false => (x < 0.0001).match ({ true => write_sci_small(x), false => (x >= 1000000000000000.0).match ({ true => write_sci_large(x), false => write_fnorm(x) }) }) }) }
 write_float = (x: f64) i64 {
     sp := x.f64_special()
     (sp.at(0) != '\0').match ({ true => sp.write_text(), false => (x < 0.0).match ({ true => "-".write_text() + write_fabs_digits(0.0 - x), false => write_fabs_digits(x) }) })

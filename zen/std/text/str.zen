@@ -348,6 +348,31 @@ join_in*<A> = (a: MutPtr<A>, parts: [str], sep: str) str {
     cstr(out.ptr)
 }
 join*<A> = (a: MutPtr<A>, parts: [str], sep: str) str { a.join_in(parts, sep) }
+// ── concatenation: explicit allocator, NO hidden heap ─────────────────────────
+//
+// Zen has no `str + str` operator on purpose: `+` would hide a malloc. Concatenation is
+// EXPLICIT through the caller's allocator — the same contract as substr_in / join_in. The
+// result is a fresh NUL-terminated `str` owned by `a`.
+//
+//   a.cat("foo", "bar") == "foobar"
+//
+// Named `cat` (not `concat`) because std.core.slice already exports `concat`/`concat_in`
+// for `[T]`; a second `concat` here would collide on the flattened import namespace. For
+// the n-ary `"a" + "b" + "c"` shape, either chain `cat` or reach for `join(parts, "")`:
+//
+//   a.cat(a.cat("a", "b"), "c")  ==  a.join(["a", "b", "c"], "")  ==  "abc"
+//   a.join(["name=", name, "\n"], "")  builds  "name=<name>\n"
+cat_in*<A> = (a: MutPtr<A>, x: str, y: str) str {
+    xv := x.view()
+    yv := y.view()
+    total := xv.len + yv.len
+    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    p := out.copy_at(0, x)
+    out.copy_at(p, y)
+    out[total] = 0
+    cstr(out.ptr)
+}
+cat*<A> = (a: MutPtr<A>, x: str, y: str) str { a.cat_in(x, y) }
 // count NON-overlapping occurrences of `fv` (len >= 1) in `sv`. `nextpos` skips past a match's bytes so
 // "aaaa" has 2 occurrences of "aa", not 3.
 count_occ = (sv: [u8], fv: [u8]) i64 {

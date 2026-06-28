@@ -107,42 +107,80 @@ num_write_fpad = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
         next + 1
     } })
 }
-num_write_frac_digits = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 { (n % 10 == 0 && w > 1).match ({ true => num_write_frac_digits(p, at, n / 10, w - 1), false => num_write_fpad(p, at, n, w) }) }
-num_write_fparts = (p: RawPtr<u8>, at: i64, ip: i64, scaled: i64) i64 {
-    whole := num_write_udigits(p, at, ip)
-    (scaled == 0).match ({ true => whole, false => {
-        p.offset(whole).store('.')
-        num_write_frac_digits(p, whole + 1, scaled, 6)
+num_write_zeros = (p: RawPtr<u8>, at: i64, k: i64) i64 { (k <= 0).match ({ true => at, false => {
+    p.offset(at).store('0')
+    num_write_zeros(p, at + 1, k - 1)
+} }) }
+// ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
+// Mirrors std.text.fmt's streaming f64 writer, but writes into the caller's buffer. A printed
+// f64 round-trips for every value needing <= 15 significant digits (every human-written literal,
+// plus 0.123456789, which the old fixed 6-decimal path truncated to "0.123457"); 0.1+0.2 still
+// prints "0.3". 15 (not 16/17) is the most the naive f64-scaling digit extraction keeps clean.
+// decimal exponent E of finite x>0: the integer with x / 10^E in [1, 10).
+num_fexp_up = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => num_fexp_up(x / 10.0, e + 1) }) }
+num_fexp_down = (x: f64, e: i64) i64 { (x >= 1.0).match ({ true => e, false => num_fexp_down(x * 10.0, e - 1) }) }
+num_fexp = (x: f64) i64 { (x >= 1.0).match ({ true => num_fexp_up(x, 0), false => num_fexp_down(x, 0) }) }
+num_fpow10 = (e: i64) f64 { (e == 0).match ({ true => 1.0, false => (e < 0).match ({ true => num_fpow10(e + 1) / 10.0, false => num_fpow10(e - 1) * 10.0 }) }) }
+// the 15-digit significand of magnitude a (a>0), leading digit at place e. MULTIPLY when e<14
+// (never divide by a tiny 10^-k that underflows to 0); DIVIDE when e>=14.
+num_fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(a / num_fpow10(e - 14) + 0.5), false => to_i64(a * num_fpow10(14 - e) + 0.5) }) }
+num_fstrip = (n: i64) i64 { (n % 10 == 0 && n >= 10).match ({ true => num_fstrip(n / 10), false => n }) }
+num_fndig = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + num_fndig(n / 10) }) }
+num_fpow10i = (n: i64) i64 { (n <= 0).match ({ true => 1, false => 10 * num_fpow10i(n - 1) }) }
+// fixed-notation body: significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).
+num_write_ffixed = (p: RawPtr<u8>, at: i64, digs: i64, ndig: i64, e: i64) i64 {
+    (e < 0).match ({ true => {
+        p.offset(at).store('0')
+        p.offset(at + 1).store('.')
+        z := num_write_zeros(p, at + 2, 0 - e - 1)
+        num_write_udigits(p, z, digs)
+    }, false => (ndig <= e + 1).match ({ true => {
+        d := num_write_udigits(p, at, digs)
+        z := num_write_zeros(p, d, e + 1 - ndig)
+        p.offset(z).store('.')
+        p.offset(z + 1).store('0')
+        z + 2
+    }, false => {
+        fw := ndig - (e + 1)    // fractional digit count
+        d := num_write_udigits(p, at, digs / num_fpow10i(fw))
+        p.offset(d).store('.')
+        num_write_fpad(p, d + 1, digs % num_fpow10i(fw), fw)
+    } }) })
+}
+// scientific-notation body "d.ddd e±EE".
+num_write_fsci = (p: RawPtr<u8>, at: i64, digs: i64, ndig: i64, e: i64) i64 {
+    p.offset(at).store('0' + digs / num_fpow10i(ndig - 1))
+    p.offset(at + 1).store('.')
+    m := (ndig == 1).match ({ true => {
+        p.offset(at + 2).store('0')
+        at + 3
+    }, false => num_write_fpad(p, at + 2, digs % num_fpow10i(ndig - 1), ndig - 1) })
+    p.offset(m).store('e')
+    (e < 0).match ({ true => {
+        p.offset(m + 1).store('-')
+        num_write_udigits(p, m + 2, 0 - e)
+    }, false => {
+        p.offset(m + 1).store('+')
+        num_write_udigits(p, m + 2, e)
     } })
 }
-// Largest magnitude whose integer part still fits in i64 (i64 max ~9.22e18). Above this
-// `to_i64(x)` would overflow, so the fixed-decimal path is replaced by scientific notation.
-F64_DIGIT_MAX := 9000000000000000000.0
-// Fixed-decimal write: integer part + up to 6 fraction digits. Valid only for magnitudes
-// whose integer part fits in i64 (the sci path below feeds it a mantissa in [1, 10)).
-num_write_fabs_normal = (p: RawPtr<u8>, at: i64, x: f64) i64 {
-    ip := to_i64(x)
-    scaled := to_i64((x - to_f64(ip)) * 1000000.0 + 0.5)
-    (scaled >= 1000000).match ({ true => num_write_fparts(p, at, ip + 1, 0), false => num_write_fparts(p, at, ip, scaled) })
+// x is the non-negative magnitude: zero => "0.0"; else 15 sig digits trimmed, fixed for
+// e in [-4,14] and scientific outside it (so 6.022e23 / 1e-7 keep their digits).
+num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
+    (x == 0.0).match ({ true => {
+        p.offset(at).store('0')
+        p.offset(at + 1).store('.')
+        p.offset(at + 2).store('0')
+        at + 3
+    }, false => {
+        e0 := num_fexp(x)
+        d0 := num_fsig(x, e0)
+        e := (d0 >= 1000000000000000).match ({ true => e0 + 1, false => e0 })    // carry across 10^15
+        digs := num_fstrip((d0 >= 1000000000000000).match ({ true => d0 / 10, false => d0 }))
+        ndig := num_fndig(digs)
+        (e >= 0 - 4 && e < 15).match ({ true => num_write_ffixed(p, at, digs, ndig, e), false => num_write_fsci(p, at, digs, ndig, e) })
+    } })
 }
-// Decimal exponent E of a large positive x: the count of /10 steps until x < 10, so x/10^E
-// lands in [1, 10). Recursive (E is small: <= 308 for any finite f64).
-num_sci_exp = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => num_sci_exp(x / 10.0, e + 1) }) }
-num_scale_down = (x: f64, n: i64) f64 { (n == 0).match ({ true => x, false => num_scale_down(x / 10.0, n - 1) }) }
-// Scientific notation "m.mmmmmme+EE" for a large finite positive x (one whose integer part
-// would overflow i64). The mantissa m = x / 10^E is in [1, 10), so it formats via the normal
-// fixed-decimal path. PRECISION: mantissa carries the usual ~15-significant-digit f64 error.
-num_write_sci = (p: RawPtr<u8>, at: i64, x: f64) i64 {
-    e := num_sci_exp(x, 0)
-    mant := num_scale_down(x, e)
-    mend := num_write_fabs_normal(p, at, mant)
-    p.offset(mend).store('e')
-    p.offset(mend + 1).store('+')
-    num_write_udigits(p, mend + 2, e)
-}
-// x is the non-negative magnitude. Above i64's integer range use scientific notation so a
-// finite-but-huge value (e.g. 6.022e23) renders its digits instead of overflowing to "inf".
-num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 { (x > F64_DIGIT_MAX).match ({ true => num_write_sci(p, at, x), false => num_write_fabs_normal(p, at, x) }) }
 // "nan"/"inf"/"-inf" for the IEEE specials, "" for any finite value (incl. large ones, which
 // the formatter renders in scientific notation). A TRUE infinity is detected arithmetically:
 // for finite x, x - x == 0; for +/-inf, inf - inf == nan != 0. Magnitude alone is NOT used —
