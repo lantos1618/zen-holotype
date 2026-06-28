@@ -813,9 +813,23 @@ collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
 //    of the SAME trait get two DISTINCT tparams. A trait is detected as a trait-shaped DStruct (all
 //    fields are methods) or a cross-type `Type.impl(Trait)` (ty != trname; a data struct's self-impl
 //    has ty == trname and must NOT count) or a defaulted trait method.
-collect_trait = (buf: [Param], cnt: i32, d: Decl) i32 {
+// is struct `name` impl'd anywhere (a DImpl.trname)? A real trait IS impl'd; a DATA struct that merely
+// holds function-VALUE (closure) fields is NOT — both are "structs with FnT fields" by shape, so this
+// USAGE check is what tells a closure record apart from a trait. Mirrors genc_emit.struct_is_impld; a
+// closure-record param (e.g. `b: Box` where Box holds `op: (i32)i32`) must NOT desugar to a trait bound.
+struct_impld_p = (decls: [Decl], name: str) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im) => eq(im.trname, name).match ({ true => true, false => found }),
+            _          => found,
+        })
+    })
+    found
+}
+collect_trait = (buf: [Param], decls: [Decl], cnt: i32, d: Decl) i32 {
     d.match ({
-        .DStruct(sd)       => d.is_trait().match ({ true => buf.tv_add_name(cnt, sd.name), false => cnt }),
+        .DStruct(sd)       => (d.is_trait() && decls.struct_impld_p(sd.name)).match ({ true => buf.tv_add_name(cnt, sd.name), false => cnt }),
         .DImpl(im)         => eq(im.ty, im.trname).match ({ true => cnt, false => buf.tv_add_name(cnt, im.trname) }),
         .DTraitDefault(td) => buf.tv_add_name(cnt, td.trname),
         _                  => cnt,
@@ -825,7 +839,7 @@ collect_traits = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
     buf := a.decltype_buf(decls.len + 8)
     n := 0
     decls.loop((h, i, d) {
-        n = buf.collect_trait(n, d)
+        n = buf.collect_trait(decls, n, d)
     })
     buf.take_params(n)
 }
