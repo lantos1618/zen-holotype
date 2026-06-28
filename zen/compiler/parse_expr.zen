@@ -294,12 +294,25 @@ is_index_at = (src: str, pos: i32) bool {
     sc := src.scan(pos)
     src.is_lbracket(sc.tok) && src.nl_between(pos, sc.tok.start).match ({ true => false, false => true })
 }
-// A postfix call suffix `base(args)` — a CHAINED call where `base` is itself a call result (or any
-// non-bare-name expr), e.g. `make_adder(10)(5)`. Same-line gate (mirrors is_index_at): a `(` that
-// opens a NEW line is a parenthesized statement, not a continuation of the previous expression.
+// A postfix call suffix `base(args)` — a CHAINED call `make_adder(10)(5)` where `base` is itself a
+// call result. ADJACENCY is the gate: the `(` must touch the base's last token with NO intervening
+// whitespace (`)(`, the lexical signature of a chain). A `(` separated by a space/newline opens a NEW
+// statement — Zen separates statements by whitespace, so `… / 2.0  (ng == g).match(…)` is two
+// statements, NOT a call of `2.0`. Same-line-only (as for `[index]`) is too weak: it would glue a
+// whitespace-separated parenthesized statement onto the previous expression.
 is_call_at = (src: str, pos: i32) bool {
     sc := src.scan(pos)
-    src.is_lparen(sc.tok) && src.nl_between(pos, sc.tok.start).match ({ true => false, false => true })
+    src.is_lparen(sc.tok) && sc.tok.start == pos
+}
+// Only a CALL-result (or a prior chain BLOCK, for `f(a)(b)(c)`) is a valid chained-call base: those are
+// the forms that can yield a closure VALUE. Restricting here (with adjacency above) keeps the suffix from
+// firing on a literal/binop/index base that merely abuts a `(` — which would change program semantics.
+is_chain_base = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)  => true,
+        .Block(b) => true,
+        _         => false,
+    })
 }
 nl_between = (src: str, lo: i32, hi: i32) bool { (lo >= hi).match ({ true => false, false => (src.at(lo) == '\n').match ({ true => true, false => src.nl_between(lo + 1, hi) }) }) }    // a newline in the gap before the next token?
 is_loop_kw = (src: str, t: Token) bool {
@@ -326,7 +339,7 @@ is_variant_break = (src: str, base: PExpr, pos: i32) bool {
     fld := src.scan(dot.next)
     src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start)) && is_upper_byte(subj_name(base.expr).at(0)).match ({ true => false, false => true })
 }
-parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr { src.is_match_at(base.next).match ({ true => a.parse_match(src, base), false => src.is_loop_at(base.next).match ({ true => a.parse_loop(src, base), false => (src.is_field_at(base.next) && src.is_variant_break(base, base.next).match ({ true => false, false => true })).match ({ true => a.parse_field(src, base), false => src.is_index_at(base.next).match ({ true => a.parse_index(src, base), false => src.is_call_at(base.next).match ({ true => a.parse_chained_call(src, base), false => base }) }) }) }) }) }
+parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr { src.is_match_at(base.next).match ({ true => a.parse_match(src, base), false => src.is_loop_at(base.next).match ({ true => a.parse_loop(src, base), false => (src.is_field_at(base.next) && src.is_variant_break(base, base.next).match ({ true => false, false => true })).match ({ true => a.parse_field(src, base), false => src.is_index_at(base.next).match ({ true => a.parse_index(src, base), false => (src.is_call_at(base.next) && base.expr.is_chain_base()).match ({ true => a.parse_chained_call(src, base), false => base }) }) }) }) }) }
 // Lower a chained call `base(args)` (base is a closure-valued expression, not a bare name) to a block
 // `({ __chaintmp_N := base  __chaintmp_N(args) })`: binding the callee to a LOCAL reuses the supported
 // closure-local-call path (compiler.check.clos_local_call_name rewrites `__chaintmp_N(args)` to the
