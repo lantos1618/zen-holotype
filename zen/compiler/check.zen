@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -515,9 +515,23 @@ pointee_of = (t: Ty) Ty {
 targ_of = (env: Env, params: [Param], args: [Expr], tp: str) Ty {
     found := tvoid()
     params.loop((h, i, p) {
-        found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(env.infer_expr(args[i].addr()), tp), false => found }), false => found })
+        found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => env.unify_arg(p.ty, args[i].addr(), tp), false => found }), false => found })
     })
     found
+}
+// A lambda arg has no inferrable value type (infer_expr -> void). When a tparam sits in the closure's
+// RETURN position `(T) U`, bind it from the lambda's DECLARED return type so it never defaults to void.
+unify_arg = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: str) Ty {
+    load(arg).match ({
+        .Lambda(lm) => pty.lam_ret_unify(lm, tp),
+        _           => pty.unify_ty(env.infer_expr(arg), tp),
+    })
+}
+lam_ret_unify = (pty: Ty, lm: LambdaData, tp: str) Ty {
+    pty.match ({
+        .FnT(ft) => lm.ret.is_void_ty().match ({ true => tvoid(), false => load(ft.ret).unify_ty(lm.ret, tp) }),
+        _        => tvoid(),
+    })
 }
 ret_targ_of = (env: Env, ret: Ty, tp: str) Ty { env.exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(env.exp, tp) }) }
 call_targ* = (env: Env, f: Func, args: [Expr], tp: str) Ty {
@@ -2039,7 +2053,9 @@ lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: str) Ty {
             ft.params.loop((h, i, pt) {
                 found = found.is_void_ty().match ({ true => (i < lm.params.len).match ({ true => pt.unify_ty(decls.lam_param_payload(lm.body, lm.params[i].name), tp), false => found }), false => found })
             })
-            found
+            // A tparam appearing ONLY in the closure's RETURN position `(T) U` binds from the lambda's
+            // DECLARED return type (else it would default to void -> a `[void]` result, a silent miscompile).
+            found.is_void_ty().match ({ true => lm.ret.is_void_ty().match ({ true => found, false => load(ft.ret).unify_ty(lm.ret, tp) }), false => found })
         },
         _        => tvoid(),
     })
@@ -2231,7 +2247,7 @@ xform_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData
         ps = a.add_subst_param(ps, p.name)
         xs = a.add_subst_arg(xs, p.name)
     })
-    a.cenode(lam(lm.params, a.xform_body(decls, idx, lm.body, ps, xs, env, tvoid())))
+    a.cenode(lam_r(lm.params, a.xform_body(decls, idx, lm.body, ps, xs, env, tvoid()), lm.ret))
 }
 xform_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> { a.xform_expr_exp(decls, idx, e, params, fargs, env, tvoid()) }
 xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
@@ -3066,7 +3082,7 @@ lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
         .SliceLit(sd)  => a.cenode(slit(sd.elem, a.lift_rw_args(decls, idx, gcp, gen, sd.items))),
         .Loop(l)       => a.cenode(eloop(a.lift_rw_expr(decls, idx, gcp, gen, l.seq), l.idx, l.elem, l.elemTy, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), l.body), l.h)),
         .Block(bl)     => a.cenode(block(a.lift_rw_body(decls, idx, gcp, gen, tvoid(), bl.stmts))),
-        .Lambda(lm)    => a.cenode(lam(lm.params, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), lm.body))),
+        .Lambda(lm)    => a.cenode(lam_r(lm.params, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), lm.body), lm.ret)),
         _              => e,
     })
 }
@@ -3227,7 +3243,7 @@ clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
         .SliceLit(sd)  => a.cenode(slit(sd.elem, a.clos_sub_args(ps, sd.items))),
         .Loop(l)       => a.cenode(eloop(a.clos_sub_expr(ps, l.seq), l.idx, l.elem, l.elemTy, a.clos_sub_body(ps, l.body), l.h)),
         .Block(bl)     => a.cenode(block(a.clos_sub_body(ps, bl.stmts))),
-        .Lambda(lm)    => a.cenode(lam(lm.params, a.clos_sub_body(ps, lm.body))),
+        .Lambda(lm)    => a.cenode(lam_r(lm.params, a.clos_sub_body(ps, lm.body), lm.ret)),
         _              => e,
     })
 }
@@ -3257,7 +3273,7 @@ clos_tail_lambda = (body: [Stmt]) bool {
     }) })
 }
 clos_tail_lam_of = (body: [Stmt]) LambdaData {
-    none := LambdaData(params: empty_params(), body: no_stmts())
+    none := LambdaData(params: empty_params(), body: no_stmts(), ret: tvoid())
     body[body.len - 1].match ({
         .ExprStmt(e) => load(e).match ({ .Lambda(lm) => lm, _ => none }),
         .Return(r)   => load(r).match ({ .Lambda(lm) => lm, _ => none }),

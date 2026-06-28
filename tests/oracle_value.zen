@@ -919,6 +919,19 @@ oracle_value_run* = () i32 {
         src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] := [1, 2, 3]  d: [i64] := xs.map((x) { to_i64(x) * 1000000000 })  d[2] }",
         want: "3000000000",
     ), VCase(
+        // M5 — generic `map` whose output element type `U` appears ONLY in the closure's RETURN position
+        // `(T) U` (never in an arg), with the result bound to an UNANNOTATED let. U is inferred from the
+        // lambda's DECLARED return type `i64` (regression: it used to default to void -> a `[void]` slice
+        // that silently summed to 23 instead of 50). [1,2,3,4]+10 = [11,12,13,14], sum = 50.
+        src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i64] := [1, 2, 3, 4]  ys := xs.map((x: i64) i64 { x + 10 })  s := 0  ys.loop((h, i, v) { s = s + v })  s }",
+        want: "50",
+    ), VCase(
+        // M5 — same closure-return inference but DISTINCT element types T=i32 -> U=i64, the `<T,U>` proof,
+        // and the binding is STILL unannotated: U=i64 comes purely from the closure's declared return.
+        // d[2] = 3 * 1e9 = 3000000000 (overflows i32, so a void/i32 element would be wrong).
+        src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] := [1, 2, 3]  d := xs.map((x: i32) i64 { to_i64(x) * 1000000000 })  d[2] }",
+        want: "3000000000",
+    ), VCase(
         // M2 HOF — allocating `filter` (evens of [1,2,3,4] = [2,4]). Packs kept elements; len*10 + sum of
         // the two kept = 2*10 + 2 + 4 = 26. The predicate is a first-class closure arg.
         src: "malloc = (n: i64) RawPtr<u8>\nfilter<T> = (xs: [T], keep: (T) bool) [T] { buf: [T] := slice(malloc(xs.len * sizeof(T)), xs.len)  n := 0  xs.loop((h, i, x) { buf[n] = x  n = n + keep(x).match ({ true => 1, false => 0 }) })  slice(buf[0].addr(), n) }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  ev: [i32] := xs.filter((x) { x % 2 == 0 })  to_i32(ev.len) * 10 + ev[0] + ev[1] }",
