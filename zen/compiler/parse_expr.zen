@@ -1,6 +1,6 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
 { Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
-{ Token, Scan, scan, is_hex_prefix } = compiler.lex
+{ Token, Scan, scan, is_hex_prefix, is_bin_prefix, is_oct_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
 { is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, register_anon } = compiler.parse_type
@@ -62,6 +62,20 @@ lexeme* = (a: MutPtr<Malloc>, src: str, t: Token) str {
         cstr(p)
     } })
 }
+// A float literal carries its source text verbatim into C, but C float syntax rejects `_`; copy the
+// span dropping any digit separators (`1_000.5` -> `1000.5`).
+copy_no_us = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.copy_no_us(pos + 1, end, dst, di), false => {
+        store(offset(dst, di), src.at(pos))
+        src.copy_no_us(pos + 1, end, dst, di + 1)
+    } }), false => di })
+}
+float_lexeme = (a: MutPtr<Malloc>, src: str, t: Token) str {
+    p := a.acquire(t.len + 1)
+    n := src.copy_no_us(t.start, t.start + t.len, p, 0)
+    store(offset(p, n), 0)
+    cstr(p)
+}
 is_op* = (src: str, t: Token, c: u8) bool {
     t.kind.match ({
         .Sym => src.at(t.start) == c,
@@ -72,11 +86,14 @@ is_addsub = (src: str, t: Token) bool { src.is_op(t, '+') || src.is_op(t, '-') }
 is_muldiv = (src: str, t: Token) bool { src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%') }
 op_str = (b: u8) str { (b == '+').match ({ true => "+", false => (b == '-').match ({ true => "-", false => (b == '*').match ({ true => "*", false => (b == '%').match ({ true => "%", false => "/" }) }) }) }) }
 digit_val = (b: u8) i32 { b - '0' }
-to_int_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => src.to_int_from(pos + 1, end, acc * 10 + src.at(pos).digit_val()), false => acc }) }
+// `_` digit separators are skipped (they carry no value); every base accumulator threads past them.
+to_int_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.to_int_from(pos + 1, end, acc), false => src.to_int_from(pos + 1, end, acc * 10 + src.at(pos).digit_val()) }), false => acc }) }
 hex_val = (b: u8) i32 { b.is_digit().match ({ true => b - '0', false => (b >= 'a' && b <= 'f').match ({ true => b - 'a' + 10, false => b - 'A' + 10 }) }) }
-hex_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => src.hex_from(pos + 1, end, acc * 16 + src.at(pos).hex_val()), false => acc }) }
-// `0x...` parses base-16; otherwise decimal.
-to_int = (src: str, t: Token) i64 { src.is_hex_prefix(t.start).match ({ true => src.hex_from(t.start + 2, t.start + t.len, 0), false => src.to_int_from(t.start, t.start + t.len, 0) }) }
+hex_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.hex_from(pos + 1, end, acc), false => src.hex_from(pos + 1, end, acc * 16 + src.at(pos).hex_val()) }), false => acc }) }
+bin_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.bin_from(pos + 1, end, acc), false => src.bin_from(pos + 1, end, acc * 2 + src.at(pos).digit_val()) }), false => acc }) }
+oct_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.oct_from(pos + 1, end, acc), false => src.oct_from(pos + 1, end, acc * 8 + src.at(pos).digit_val()) }), false => acc }) }
+// `0x...` base-16, `0b...` base-2, `0o...` base-8; otherwise decimal.
+to_int = (src: str, t: Token) i64 { src.is_hex_prefix(t.start).match ({ true => src.hex_from(t.start + 2, t.start + t.len, 0), false => src.is_bin_prefix(t.start).match ({ true => src.bin_from(t.start + 2, t.start + t.len, 0), false => src.is_oct_prefix(t.start).match ({ true => src.oct_from(t.start + 2, t.start + t.len, 0), false => src.to_int_from(t.start, t.start + t.len, 0) }) }) }) }
 parse_atom* = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
     // DEPTH CAP (see parse_type.zen): every nested expression form — parens, prefix `-`/`!`, slice
     // literals, `.match`/`.loop`, lambdas — funnels through parse_atom, so one guard here bounds them
@@ -98,7 +115,7 @@ parse_base = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
             next: sc.next,
         ),
         .Float => PExpr(
-            expr: a.enode(flit(a.lexeme(src, sc.tok))),
+            expr: a.enode(flit(a.float_lexeme(src, sc.tok))),
             next: sc.next,
         ),
         .Char  => PExpr(

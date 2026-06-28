@@ -11,7 +11,7 @@
 //   sc := scan(src, 0)        // one token + where to resume
 //   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
 //   sc.next                   // feed back into scan for the next token
-{ at, is_digit, is_hex, is_alpha, is_alnum, is_space } = std.text.bytes
+{ at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space } = std.text.bytes
 // ── tokens ───────────────────────────────────────────────────────────────────
 TokKind*: Ident | Int | Float | Str | Char | Sym | Eof
 Token*: {
@@ -52,11 +52,19 @@ skip_bc_d = (src: str, pos: i32, depth: i32) i32 {
 skip = (src: str, pos: i32) i32 { is_space(at(src, pos)).match ({ true => src.skip(pos + 1), false => src.is_comment(pos).match ({ true => src.skip(src.skip_line(pos + 2)), false => src.is_block_open(pos).match ({ true => src.skip(src.skip_block_comment(pos + 2)), false => pos }) }) }) }    // a nested `/*`
 // ── span ends: advance while the class holds ───────────────────────────────────
 ident_end = (src: str, pos: i32) i32 { is_alnum(at(src, pos)).match ({ true => src.ident_end(pos + 1), false => pos }) }
-int_end = (src: str, pos: i32) i32 { is_digit(at(src, pos)).match ({ true => src.int_end(pos + 1), false => pos }) }
-hex_end = (src: str, pos: i32) i32 { is_hex(at(src, pos)).match ({ true => src.hex_end(pos + 1), false => pos }) }
-// a number span from its first digit: `0x…` runs over hex digits, otherwise decimal digits.
+// A `_` between two digits (`1_000`, `0xFF_FF`) is a separator and part of the span; a leading/
+// trailing `_` or `__` is NOT consumed (it only advances when a digit of the class follows), so a
+// var `x_1` / `_y` still scans as an identifier.
+int_end = (src: str, pos: i32) i32 { is_digit(at(src, pos)).match ({ true => src.int_end(pos + 1), false => (at(src, pos) == '_' && is_digit(at(src, pos + 1))).match ({ true => src.int_end(pos + 1), false => pos }) }) }
+hex_end = (src: str, pos: i32) i32 { is_hex(at(src, pos)).match ({ true => src.hex_end(pos + 1), false => (at(src, pos) == '_' && is_hex(at(src, pos + 1))).match ({ true => src.hex_end(pos + 1), false => pos }) }) }
+bin_end = (src: str, pos: i32) i32 { is_bin(at(src, pos)).match ({ true => src.bin_end(pos + 1), false => (at(src, pos) == '_' && is_bin(at(src, pos + 1))).match ({ true => src.bin_end(pos + 1), false => pos }) }) }
+oct_end = (src: str, pos: i32) i32 { is_oct(at(src, pos)).match ({ true => src.oct_end(pos + 1), false => (at(src, pos) == '_' && is_oct(at(src, pos + 1))).match ({ true => src.oct_end(pos + 1), false => pos }) }) }
+// a number span from its first digit: `0x…` runs over hex digits, `0b…` binary, `0o…` octal,
+// otherwise decimal digits.
 is_hex_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'x' || at(src, pos + 1) == 'X') }
-num_end = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.hex_end(pos + 2), false => src.int_end(pos + 1) }) }
+is_bin_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'b' || at(src, pos + 1) == 'B') }
+is_oct_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'o' || at(src, pos + 1) == 'O') }
+num_end = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.hex_end(pos + 2), false => src.is_bin_prefix(pos).match ({ true => src.bin_end(pos + 2), false => src.is_oct_prefix(pos).match ({ true => src.oct_end(pos + 2), false => src.int_end(pos + 1) }) }) }) }
 // scientific exponent: `[eE][+-]?[0-9]+` right after the mantissa. Returns the end past the
 // exponent when one is present, else `pos` unchanged — so `1e` (no digit) / `1einstein` /
 // `x.e` are NOT mis-consumed; the exponent only fuses when a digit actually follows.
@@ -114,10 +122,10 @@ num_tok = (src: str, pos: i32) Scan {
     // `1.5e-3`, `6.022e23`, `1.0E5`. The dot must be followed by a digit, so `1.match` /
     // `xs[0].addr()` still scan as an Int + a `.` postfix; the exponent only fuses when a digit
     // follows `e`, so `x.e` / a var `e1` are untouched. Hex (`0x…`) never floats.
-    hex := src.is_hex_prefix(pos)
-    has_frac := hex.match ({ true => false, false => at(src, e) == '.' && is_digit(at(src, e + 1)) })
+    nofloat := src.is_hex_prefix(pos) || src.is_bin_prefix(pos) || src.is_oct_prefix(pos)
+    has_frac := nofloat.match ({ true => false, false => at(src, e) == '.' && is_digit(at(src, e + 1)) })
     me := has_frac.match ({ true => src.int_end(e + 1), false => e })
-    end := hex.match ({ true => me, false => src.exp_end(me) })
+    end := nofloat.match ({ true => me, false => src.exp_end(me) })
     (has_frac || end > me).match ({ true => mk(.Float, pos, end), false => mk(.Int, pos, e) })
 }
 scan_one = (src: str, pos: i32, b: u8) Scan { is_alpha(b).match ({ true => mk(.Ident, pos, src.ident_end(pos + 1)), false => is_digit(b).match ({ true => src.num_tok(pos), false => (b == '"').match ({ true => mk(.Str, pos, src.str_end(pos + 1)), false => (b == '\'').match ({ true => mk(.Char, pos, src.char_end(pos + 1)), false => mk(.Sym, pos, src.sym_end(pos)) }) }) }) }) }
