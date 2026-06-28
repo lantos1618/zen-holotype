@@ -1,9 +1,9 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, lam_r, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix, is_bin_prefix, is_oct_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, register_anon } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, TyEnd, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, register_anon } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 PExpr*: {
     expr: Ptr<Expr>,
@@ -1224,12 +1224,14 @@ fill_lname = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd 
 parse_lambda = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     buf := a.param_buf()
     pe := a.fill_lnames(src, open.next, buf, 0)
-    bpos := src.is_lbrace(src.scan(pe.next).tok).match ({ true => pe.next, false => a.parse_ty(src, pe.next).next })    // optional return type before the body '{'
-    ob := src.scan(bpos)
+    // optional return type before the body '{' — KEEP it (lam_r) so a generic call can infer a tparam
+    // bound only by a closure-param's return position `(T) U`.
+    rt := src.is_lbrace(src.scan(pe.next).tok).match ({ true => TyEnd(ty: tvoid(), next: pe.next), false => a.parse_ty(src, pe.next) })
+    ob := src.scan(rt.next)
     body := a.build_body(src, ob.next)
     endp := src.skip_block(ob.next)
     a.parse_postfix(src, PExpr(
-        expr: a.enode(lam(buf.take_params(pe.count), body)),
+        expr: a.enode(lam_r(buf.take_params(pe.count), body, rt.ty)),
         next: endp,
     ))
 }
