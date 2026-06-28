@@ -306,8 +306,14 @@ map_suite = (mp: MutPtr<Malloc>) i32 {
             src := mp.strip_comments_in(raw)
             grow := mp.region(src, "try_grow", "append<A>")
             appnd := mp.region(src, "try_append", "put<A>")
-            of := mp.after_marker(src, "try_of*")
-            run_suite("boundaries: map try paths use result helpers", [grow.contains(".try_acquire("), grow.not_contains(".acquire("), appnd.contains(".try_grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire("), of.not_contains(".acquire(")])
+            of := mp.region(src, "try_of*", "IntMap")
+            // IntMap<V> (i64-keyed twin) must hold the same discipline; bound the checks to the section
+            // after the `IntMap` marker so its try_grow/try_append/try_int_of resolve to the int versions.
+            isrc := mp.after_marker(src, "IntMap")
+            igrow := mp.region(isrc, "try_grow", "append<A>")
+            iappnd := mp.region(isrc, "try_append", "put<A>")
+            iof := mp.after_marker(isrc, "try_int_of*")
+            run_suite("boundaries: map try paths use result helpers", [grow.contains(".try_acquire("), grow.not_contains(".acquire("), appnd.contains(".try_grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire("), of.not_contains(".acquire("), igrow.contains(".try_acquire("), igrow.not_contains(".acquire("), iappnd.contains(".try_grow("), iappnd.not_contains(".acquire("), iof.contains(".try_acquire("), iof.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
     })

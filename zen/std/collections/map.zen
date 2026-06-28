@@ -397,3 +397,350 @@ try_of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoErro
         },
     })
 }
+// ── IntMap<V> — an i64-KEYED associative map, the integer twin of Map<T> ──────────────────────────
+// Same value-mold contract, allocator threading, open-hash index, and grow strategy as Map<T> above;
+// the ONLY differences are the key column holds raw `i64` values (not borrowed `str` pointers, so there
+// is no outlives-the-map rule — keys are copied by value) and key comparison/hashing is integer-native:
+// `==` for equality and `ihash` (a splitmix-style multiplicative mix) for bucketing. Use IntMap when
+// keys are addresses, ids, or any integer. Constructors are `int_empty`/`int_of`/`try_int_of`; the
+// Map-owned ops (put/get/has/len/free/clone/each_pair, plus the try_* Result variants) live on the
+// type and dispatch by receiver, so a program can use a str Map and an IntMap side by side.
+//
+//   alloc := default()
+//   a := alloc.addr()
+//   m: IntMap<i32> := maps.int_empty(a)    // T from the LHS annotation; A inferred from a
+//   m = m.put(a, 42, 7)                     // insert — grows through alloc when full
+//   m = m.put(a, 42, 9)                     // upsert — same key overwrites in place
+//   n := m.get(42, 0)                       // 9; absent keys produce the default
+//   m.free(a)
+IntMap*<V>: {
+    keys: RawPtr<u8>,
+    vals: RawPtr<u8>,
+    idx: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+    keys = (m: IntMap<V>) [i64] {
+        // Live view over the LEN live entries (slots [0, len), insertion order, no gaps). Sized to
+        // `len` so a `.loop` walks only real entries. The one-past-len append writer uses keys_all().
+        slice(m.keys, m.len)
+    }
+    vals = (m: IntMap<V>) [V] { slice(m.vals, m.len) }
+    keys_all = (m: IntMap<V>) [i64] {
+        // CAP-sized view for the one-past-len append write (slot [len], in-bounds in the backing buffer).
+        slice(m.keys, m.cap)
+    }
+    vals_all = (m: IntMap<V>) [V] { slice(m.vals, m.cap) }
+    index = (m: IntMap<V>) [i64] {
+        // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
+        slice(m.idx, m.cap * 2)
+    }
+    len = (m: IntMap<V>) i64 { m.len }
+    find = (m: IntMap<V>, k: i64) i64 {
+        // O(1) average: hash to a bucket, walk the chain comparing keys with `==`.
+        (m.cap == 0).match ({ true => 0 - 1, false => ifind(m.keys(), m.index(), m.cap, ihash(k, m.cap), k) })
+    }
+    set = (m: IntMap<V>, i: i64, v: V) IntMap<V> {
+        vals := m.vals()
+        vals[i] = v
+        m
+    }
+    get_at = (m: IntMap<V>, i: i64, dflt: V) V { (i < 0).match ({ true => dflt, false => m.vals()[i] }) }
+    get = (m: IntMap<V>, k: i64, dflt: V) V { m.get_at(m.find(k), dflt) }
+    has = (m: IntMap<V>, k: i64) bool { m.find(k) >= 0 }
+    grow<A> = (m: IntMap<V>, a: MutPtr<A>) IntMap<V> {
+        cap := m.cap * 2 + 1
+        next := IntMap<V>(
+            keys: a.resize(m.keys, cap * sizeof(i64)),
+            vals: a.resize(m.vals, cap * sizeof(V)),
+            idx: a.resize(m.idx, cap * 2 * sizeof(MIdx)),
+            len: m.len,
+            cap: cap,
+        )
+        next.reindex()
+    }
+    try_grow<A> = (m: IntMap<V>, a: MutPtr<A>) Result<IntMap<V>, IoError> {
+        cap := m.cap * 2 + 1
+        a.try_acquire(cap * sizeof(i64)).match ({
+            .Ok(kp) => {
+                a.try_acquire(cap * sizeof(V)).match ({
+                    .Ok(vp) => {
+                        a.try_acquire(cap * 2 * sizeof(MIdx)).match ({
+                            .Ok(ip) => {
+                                oldks := m.keys()
+                                oldvs := m.vals()
+                                next := IntMap<V>(
+                                    keys: kp,
+                                    vals: vp,
+                                    idx: ip,
+                                    len: m.len,
+                                    cap: cap,
+                                )
+                                keys := next.keys()
+                                vals := next.vals()
+                                oldks.loop((h, i, k) {
+                                    (i < m.len).match ({ true => {
+                                        keys[i] = k
+                                        vals[i] = oldvs[i]
+                                    }, false => {
+                                        h.break
+                                    } })
+                                })
+                                a.release(m.keys)
+                                a.release(m.vals)
+                                a.release(m.idx)
+                                ok: Result<IntMap<V>, IoError> := .Ok(next.reindex())
+                                ok
+                            },
+                            .Err(e) => {
+                                a.release(kp)
+                                a.release(vp)
+                                err: Result<IntMap<V>, IoError> := .Err(e)
+                                err
+                            },
+                        })
+                    },
+                    .Err(e) => {
+                        a.release(kp)
+                        err: Result<IntMap<V>, IoError> := .Err(e)
+                        err
+                    },
+                })
+            },
+            .Err(e) => {
+                err: Result<IntMap<V>, IoError> := .Err(e)
+                err
+            },
+        })
+    }
+    reindex = (m: IntMap<V>) IntMap<V> {
+        // Rebuild the hash index from the live key column. O(len).
+        ix := m.index()
+        cap := m.cap
+        ix.loop((h, i, v) {
+            (i < cap).match ({ true => {
+                ix[i] = 0 - 1
+            }, false => {
+                h.break
+            } })
+        })
+        ks := m.keys()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                b := ihash(k, cap)
+                ix[cap + i] = ix[b]
+                ix[b] = i
+            }, false => {
+                h.break
+            } })
+        })
+        m
+    }
+    link = (m: IntMap<V>, slot: i64) IntMap<V> {
+        // Append a key/val pair (caller has ensured the key is absent) and link it into its bucket.
+        ix := m.index()
+        b := ihash(m.keys()[slot], m.cap)
+        ix[m.cap + slot] = ix[b]
+        ix[b] = slot
+        m
+    }
+    append<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) IntMap<V> {
+        k := k
+        v := v
+        next := (m.len < m.cap).match ({ true => m, false => m.grow(a) })
+        keys := next.keys_all()
+        vals := next.vals_all()
+        keys[next.len] = k
+        vals[next.len] = v
+        IntMap<V>(
+            keys: next.keys,
+            vals: next.vals,
+            idx: next.idx,
+            len: next.len + 1,
+            cap: next.cap,
+        ).link(next.len)
+    }
+    try_append<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) Result<IntMap<V>, IoError> {
+        k := k
+        v := v
+        out: Result<IntMap<V>, IoError> := (m.len < m.cap).match ({ true => {
+            keys := m.keys_all()
+            vals := m.vals_all()
+            keys[m.len] = k
+            vals[m.len] = v
+            ok: Result<IntMap<V>, IoError> := .Ok(IntMap<V>(
+                keys: m.keys,
+                vals: m.vals,
+                idx: m.idx,
+                len: m.len + 1,
+                cap: m.cap,
+            ).link(m.len))
+            ok
+        }, false => {
+            m.try_grow(a).match ({
+                .Ok(next) => {
+                    keys := next.keys_all()
+                    vals := next.vals_all()
+                    keys[next.len] = k
+                    vals[next.len] = v
+                    ok: Result<IntMap<V>, IoError> := .Ok(IntMap<V>(
+                        keys: next.keys,
+                        vals: next.vals,
+                        idx: next.idx,
+                        len: next.len + 1,
+                        cap: next.cap,
+                    ).link(next.len))
+                    ok
+                },
+                .Err(e)   => {
+                    err: Result<IntMap<V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        } })
+        out
+    }
+    put<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) IntMap<V> {
+        // Insert or upsert. RETURNS the updated map — always rebind to the result (`m = m.put(...)`).
+        // On grow the buffers are realloced, so a handle captured before this call dangles (VALUE-MOLD
+        // CONTRACT). On an existing key the value is overwritten IN PLACE.
+        i := m.find(k)
+        out: IntMap<V> := (i < 0).match ({ true => m.append(a, k, v), false => m.set(i, v) })
+        out
+    }
+    try_put<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) Result<IntMap<V>, IoError> {
+        // Result-returning `put` (allocation failure is a value). Same contract: use the returned map.
+        i := m.find(k)
+        out: Result<IntMap<V>, IoError> := (i < 0).match ({ true => m.try_append(a, k, v), false => {
+            next := m.set(i, v)
+            ok: Result<IntMap<V>, IoError> := .Ok(next)
+            ok
+        } })
+        out
+    }
+    free<A> = (m: IntMap<V>, a: MutPtr<A>) void {
+        a.release(m.keys)
+        a.release(m.vals)
+        a.release(m.idx)
+    }
+    clone<A> = (m: IntMap<V>, a: MutPtr<A>) IntMap<V> {
+        // Deep-copy into fresh buffers from `a`, giving the result INDEPENDENT storage. Keys and values
+        // are both copied by value (i64 keys carry no borrow). The clone owns its buffers and must be
+        // `free`d independently. O(len).
+        cap := m.cap
+        next := IntMap<V>(
+            keys: a.acquire(cap * sizeof(i64)),
+            vals: a.acquire(cap * sizeof(V)),
+            idx: a.acquire(cap * 2 * sizeof(MIdx)),
+            len: m.len,
+            cap: cap,
+        )
+        srcks := m.keys()
+        srcvs := m.vals()
+        dstks := next.keys()
+        dstvs := next.vals()
+        srcks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                dstks[i] = k
+                dstvs[i] = srcvs[i]
+            }, false => {
+                h.break
+            } })
+        })
+        next.reindex()
+    }
+    each_pair = (m: IntMap<V>, f: (i64, V) void) void {
+        // Visit every live entry as (key, value) together, in insertion order. `f` is invoked DIRECTLY
+        // in the loop body so an inline lambda splices in (like iter.each).
+        ks := m.keys()
+        vs := m.vals()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                f(k, vs[i])
+            }, false => {
+                h.break
+            } })
+        })
+    }
+}
+// splitmix-style multiplicative mix of an i64 key, folded into [0, cap). cap is always >= 1 at call
+// sites. Two xorshift-multiply rounds (multiply wraps under -fwrapv, which is exactly the avalanche we
+// want) then a final mask to non-negative before the mod, so the bucket is always in [0, cap).
+ihash = (k: i64, cap: i64) i64 {
+    h := k
+    h = (h ^ h >> 33) * 1099511628211
+    h = (h ^ h >> 29) * 1099511628211
+    h = h ^ h >> 32
+    (h & 4611686018427387903) % cap
+}
+// Walk bucket chain b for key k in the index ix over key column ks (cap entries, links at [cap..]).
+ifind = (ks: [i64], ix: [i64], cap: i64, b: i64, k: i64) i64 { ichain(ks, ix, cap, ix[b], k) }
+ichain = (ks: [i64], ix: [i64], cap: i64, e: i64, k: i64) i64 { (e < 0).match ({ true => 0 - 1, false => (ks[e] == k).match ({ true => e, false => ichain(ks, ix, cap, ix[cap + e], k) }) }) }
+// a zero-entry `IntMap<V>` with capacity for at least one entry. V comes from the LHS annotation:
+// `m: IntMap<i32> := maps.int_empty(a)`. A is inferred from `a`. The single bucket head is cleared to -1.
+int_empty*<V, A> = (a: MutPtr<A>) IntMap<V> {
+    m := IntMap<V>(
+        keys: a.acquire(sizeof(i64)),
+        vals: a.acquire(sizeof(V)),
+        idx: a.acquire(2 * sizeof(MIdx)),
+        len: 0,
+        cap: 1,
+    )
+    m.reindex()
+}
+// an `IntMap<V>` seeded with one entry, its buffers acquired from `a`. V inferred from the seed value.
+int_of*<V, A> = (a: MutPtr<A>, seed_key: i64, seed_val: V) IntMap<V> {
+    m := IntMap<V>(
+        keys: a.acquire(sizeof(i64)),
+        vals: a.acquire(sizeof(V)),
+        idx: a.acquire(2 * sizeof(MIdx)),
+        len: 1,
+        cap: 1,
+    )
+    keys := m.keys()
+    vals := m.vals()
+    keys[0] = seed_key
+    vals[0] = seed_val
+    m.reindex()
+}
+try_int_of*<V, A> = (a: MutPtr<A>, seed_key: i64, seed_val: V) Result<IntMap<V>, IoError> {
+    a.try_acquire(sizeof(i64)).match ({
+        .Ok(kp) => {
+            a.try_acquire(sizeof(V)).match ({
+                .Ok(vp) => {
+                    a.try_acquire(2 * sizeof(MIdx)).match ({
+                        .Ok(ip) => {
+                            m := IntMap<V>(
+                                keys: kp,
+                                vals: vp,
+                                idx: ip,
+                                len: 1,
+                                cap: 1,
+                            )
+                            keys := m.keys()
+                            vals := m.vals()
+                            keys[0] = seed_key
+                            vals[0] = seed_val
+                            ok: Result<IntMap<V>, IoError> := .Ok(m.reindex())
+                            ok
+                        },
+                        .Err(e) => {
+                            a.release(kp)
+                            a.release(vp)
+                            err: Result<IntMap<V>, IoError> := .Err(e)
+                            err
+                        },
+                    })
+                },
+                .Err(e) => {
+                    a.release(kp)
+                    err: Result<IntMap<V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<IntMap<V>, IoError> := .Err(e)
+            err
+        },
+    })
+}

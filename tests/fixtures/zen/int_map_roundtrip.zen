@@ -1,0 +1,36 @@
+// Proof that std.collections.map.IntMap<V> (i64 keys) round-trips: put (1->10),(2->20),(1000000->99),
+// get them back, a missing key returns the default, overwrite an existing key, and enough entries to
+// cross a resize (cap starts at 1, so 64 inserts force several grows). The existing str-keyed Map<i32>
+// program (map_wordfreq.zen et al.) is exercised separately by oracle_build; this fixture is IntMap-only.
+halloc = std.mem.heap
+maps = std.collections.map
+{ println } = std.text.fmt
+main = () i32 {
+    alloc := halloc.gpa()
+    a := alloc.addr()
+    m: maps.IntMap<i32> := maps.int_empty(a)
+    m = m.put(a, 1, 10)
+    m = m.put(a, 2, 20)
+    m = m.put(a, 1000000, 99)
+    println(m.get(1, 0 - 1))    // 10
+    println(m.get(2, 0 - 1))    // 20
+    println(m.get(1000000, 0 - 1))    // 99
+    println(m.get(7, 0 - 1))    // -1 (missing -> default)
+    m = m.put(a, 1, 11)    // overwrite
+    println(m.get(1, 0 - 1))    // 11
+    println(m.has(2).match ({ true => 1, false => 0 }))    // 1
+    println(m.has(7).match ({ true => 1, false => 0 }))    // 0
+    // cross several resizes: insert keys 0..63 with value k*100 (cap starts at 1 -> many grows)
+    n := 0
+    @while (n < 64) {
+        m = m.put(a, n, n * 100)
+        n = n + 1
+    }
+    println(m.get(0, 0 - 1))    // 0
+    println(m.get(50, 0 - 1))    // 5000
+    println(m.get(63, 0 - 1))    // 6300
+    println(m.get(64, 0 - 1))    // -1 (never inserted)
+    println(m.len())    // 65: {1,2,1000000} + {0..63}, the {1,2} overlap overwrites in place
+    m.free(a)
+    0
+}
