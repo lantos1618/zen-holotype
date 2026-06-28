@@ -853,6 +853,44 @@ oracle_value_run* = () i32 {
         // M1.1 DIRECT chained call over a MULTI-capture closure: make_lin(3, 7)(5) = 3*5 + 7 = 22.
         src: "make_lin = (m: i64, b: i64) (i64) i64 { (x: i64) i64 { m * x + b } }\ntest* = () i64 { make_lin(3, 7)(5) }",
         want: "22",
+    ), VCase(
+        // M2 HOF — generic `fold` with an INLINE lambda. The accumulator closure is a first-class arg to
+        // a generic fn; 1+2+3 = 6. Locks the std.collections.iter.fold shape end to end.
+        src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T { acc := init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  xs.fold(0, (a, x) { a + x }) }",
+        want: "6",
+    ), VCase(
+        // M2 HOF — same generic `fold` but the reducer is a STORED closure (`g`), not an inline lambda.
+        // Both call paths must yield 6: the stored-closure path is the M1 keystone non-inlined repr.
+        src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T { acc := init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  g := (a: i32, x: i32) i32 { a + x }  xs.fold(0, g) }",
+        want: "6",
+    ), VCase(
+        // M2 HOF — allocating generic `map` (doubling). New slice of f(x); 2+4+6 = 12. The `out: [U] :=`
+        // annotation pins the element type off the raw allocator pointer (else a void-element miscompile).
+        src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  d: [i32] := xs.map((x) { x * 2 })  d[0] + d[1] + d[2] }",
+        want: "12",
+    ), VCase(
+        // M2 HOF — generic `map` with DISTINCT element types T=i32 -> U=i64 (the <T,U> proof). f widens
+        // each i32 to i64 and scales past 2^31; d[2] = 3 * 1e9 = 3000000000 (would overflow i32).
+        src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] := [1, 2, 3]  d: [i64] := xs.map((x) { to_i64(x) * 1000000000 })  d[2] }",
+        want: "3000000000",
+    ), VCase(
+        // M2 HOF — allocating `filter` (evens of [1,2,3,4] = [2,4]). Packs kept elements; len*10 + sum of
+        // the two kept = 2*10 + 2 + 4 = 26. The predicate is a first-class closure arg.
+        src: "malloc = (n: i64) RawPtr<u8>\nfilter<T> = (xs: [T], keep: (T) bool) [T] { buf: [T] := slice(malloc(xs.len * sizeof(T)), xs.len)  n := 0  xs.loop((h, i, x) { buf[n] = x  n = n + keep(x).match ({ true => 1, false => 0 }) })  slice(buf[0].addr(), n) }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  ev: [i32] := xs.filter((x) { x % 2 == 0 })  to_i32(ev.len) * 10 + ev[0] + ev[1] }",
+        want: "26",
+    ), VCase(
+        // M2 HOF — `each` with a closure that mutates a CAPTURED accumulator. No allocation; the captured
+        // `tot` must see every element: 1+2+3+4 = 10. Exercises capture-by-reference through the loop.
+        src: "each<T> = (xs: [T], f: (T) void) void { xs.loop((h, i, x) { f(x) }) }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  tot := 0  xs.each((x) { tot = tot + x })  tot }",
+        want: "10",
+    ), VCase(
+        // M2 HOF — `find` first element > 2, reported as Opt<T>.Some; stops at the hit via h.break. = 3.
+        src: "Opt<T>: Some(T) | None\nfind<T> = (xs: [T], pred: (T) bool) Opt<T> { out: Opt<T> := .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  xs.find((x) { x > 2 }).match ({ .Some(v) => v, .None => 99 }) }",
+        want: "3",
+    ), VCase(
+        // M2 HOF — `find` with no match returns Opt<T>.None (sentinel 99). Guards the empty-result arm.
+        src: "Opt<T>: Some(T) | None\nfind<T> = (xs: [T], pred: (T) bool) Opt<T> { out: Opt<T> := .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  xs.find((x) { x > 9 }).match ({ .Some(v) => v, .None => 99 }) }",
+        want: "99",
     )])
 }
 // {}-template interpolation core (mirrors std.text.fmt.format's scanner standalone, since
