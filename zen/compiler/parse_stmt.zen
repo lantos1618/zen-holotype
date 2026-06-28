@@ -4,11 +4,11 @@
 // from compiler.parse_expr and the type/brace helpers from compiler.parse_type.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Stmt, slet, slett, slet_at, slett_at, sassign, sassign_at, sidxset, sidxset_at, swhile, sret, sexpr, vref, tvoid } = compiler.genc
+{ Stmt, slet, slett, slet_at, slett_at, sassign, sassign_at, sidxset, sidxset_at, swhile, sret, sexpr, vref, eindex, bin_at, tvoid } = compiler.genc
 { Token, scan } = compiler.lex
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ enode, lexeme, is_op, is_dot, is_field_colon, parse_atom, parse_or } = compiler.parse_expr
+{ enode, lexeme, is_op, is_dot, is_field_colon, op_str, parse_atom, parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, pdepth_enter, pdepth_exit, pdepth_over } = compiler.parse_type
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -106,6 +106,33 @@ is_idxset_here = (src: str, pos: i32) bool {
         _      => false,
     })
 }
+// ── compound assignment `+= -= *= /= %=` ────────────────────────────────────────
+// PURE desugar: `lhs OP= rhs` → `lhs = lhs OP rhs` (reuse Assign/IndexSet + Bin — no new AST).
+// The lexer fuses each compound op into one 2-byte Sym (an arith op then '='). is_compound_op
+// recognizes it; the byte at `start` names the binary op (op_str). The lhs is a simple place
+// (local / field chain / index) so re-reading it as the left operand is harmless.
+is_compound_op = (src: str, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 2 && src.at(t.start + 1) == '=' && (src.at(t.start) == '+' || src.at(t.start) == '-' || src.at(t.start) == '*' || src.at(t.start) == '/' || src.at(t.start) == '%'),
+        _    => false,
+    })
+}
+// `name[…] OP=` — an Ident, a '[', past the matching ']', then a compound-assign op.
+is_compound_idxset_here = (src: str, pos: i32) bool {
+    nt := src.scan(pos)
+    nt.tok.kind.match ({
+        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({ true => src.is_compound_op(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok), false => false }),
+        _      => false,
+    })
+}
+// `name (.field | [i])* OP=` — a place expression then a compound-assign op (the non-index case).
+is_compound_set_here = (src: str, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Ident => src.is_compound_op(src.scan(src.skip_place(sc.next)).tok),
+        _      => false,
+    })
+}
 // is there a `return` keyword at `pos`? (the Ident "return", NOT followed by ':=' or '=' — those
 // make `return` an ordinary variable name being bound/assigned, not the early-return keyword).
 is_return_kw = (src: str, t: Token) bool {
@@ -120,8 +147,8 @@ is_return_here = (src: str, pos: i32) bool {
 }
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
-SKind*: SLet | SLetT | SIdx | SSet | SWhile | SRet | SExpr
-stmt_kind = (a: MutPtr<Malloc>, src: str, pos: i32) SKind { a.is_typed_let_here(src, pos).match ({ true => .SLetT, false => src.is_let_here(pos).match ({ true => .SLet, false => src.is_idxset_here(pos).match ({ true => .SIdx, false => src.is_set_here(pos).match ({ true => .SSet, false => src.is_while_here(pos).match ({ true => .SWhile, false => src.is_return_here(pos).match ({ true => .SRet, false => .SExpr }) }) }) }) }) }) }
+SKind*: SLet | SLetT | SIdx | SSet | SCIdx | SCSet | SWhile | SRet | SExpr
+stmt_kind = (a: MutPtr<Malloc>, src: str, pos: i32) SKind { a.is_typed_let_here(src, pos).match ({ true => .SLetT, false => src.is_let_here(pos).match ({ true => .SLet, false => src.is_idxset_here(pos).match ({ true => .SIdx, false => src.is_set_here(pos).match ({ true => .SSet, false => src.is_compound_idxset_here(pos).match ({ true => .SCIdx, false => src.is_compound_set_here(pos).match ({ true => .SCSet, false => src.is_while_here(pos).match ({ true => .SWhile, false => src.is_return_here(pos).match ({ true => .SRet, false => .SExpr }) }) }) }) }) }) }) }) }
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
 parse_stmts = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
@@ -140,6 +167,8 @@ parse_stmts_inner = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
         .SLetT  => a.parse_typed_let_stmt(src, pos),
         .SIdx   => a.parse_idxset_stmt(src, pos),
         .SSet   => a.parse_set_stmt(src, pos),
+        .SCIdx  => a.parse_comp_idxset_stmt(src, pos),
+        .SCSet  => a.parse_comp_set_stmt(src, pos),
         .SWhile => a.parse_while_stmt(src, pos),
         .SRet   => a.parse_return_stmt(src, pos),
         .SExpr  => a.parse_ret_stmt(src, pos),
@@ -162,6 +191,33 @@ parse_set_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     eq := src.scan(lhs.next)    // '='
     v := a.parse_or(src, eq.next)    // value
     a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts(src, v.next))
+}
+// `name[i] OP= rhs`  →  `name[i] = name[i] OP rhs`. The index is re-parsed for the left operand so
+// the two index expressions are independent AST (no shared node). Reuses sidxset, like parse_idxset_stmt.
+parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    nt := src.scan(pos)    // the array name
+    name := a.lexeme(src, nt.tok)
+    lb := src.scan(nt.next)    // '['
+    ie := a.parse_or(src, lb.next)    // the index (store target)
+    rb := src.scan(ie.next)    // ']'
+    op := src.scan(rb.next)    // the `OP=` token
+    ops := src.at(op.tok.start).op_str()
+    v := a.parse_or(src, op.next)    // rhs
+    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or(src, lb.next).expr, tvoid()))    // name[i] read
+    nv := a.enode(bin_at(ops, cur, v.expr, op.tok.start))
+    a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), nv, nt.tok.start), a.parse_stmts(src, v.next))
+}
+// `place OP= rhs`  →  `place = place OP rhs` (non-index lvalue). parse_atom is pure, so reading the
+// place twice from the same position yields two independent copies — one the target, one the operand.
+parse_comp_set_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
+    start := src.scan(pos).tok.start
+    lhs := a.parse_atom(src, pos)    // store target (Var or Member chain)
+    cur := a.parse_atom(src, pos)    // identical copy, the left operand
+    op := src.scan(lhs.next)    // the `OP=` token
+    ops := src.at(op.tok.start).op_str()
+    v := a.parse_or(src, op.next)    // rhs
+    nv := a.enode(bin_at(ops, cur.expr, v.expr, op.tok.start))
+    a.scons(sassign_at(lhs.expr, nv, start), a.parse_stmts(src, v.next))
 }
 parse_let_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt := src.scan(pos)    // the bound name
@@ -284,6 +340,8 @@ block_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
         .SLetT  => a.block_typed_let(src, pos),
         .SIdx   => a.block_idxset(src, pos),    // buf[i] = v  inside a loop/if body
         .SSet   => a.block_set(src, pos),
+        .SCIdx  => a.block_comp_idxset(src, pos),    // buf[i] += v
+        .SCSet  => a.block_comp_set(src, pos),    // x += v / s.n += v
         .SWhile => a.block_while(src, pos),
         .SRet   => a.block_return(src, pos),    // an early `return <expr>` inside a block
         .SExpr  => a.block_expr(src, pos),
@@ -352,6 +410,39 @@ block_set = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     rest := a.parse_block(src, v.next)
     BlockEnd(
         list: a.scons(sassign_at(lhs.expr, v.expr, start), rest.list),
+        next: rest.next,
+    )
+}
+// compound `name[i] OP= rhs` inside a block — same desugar as parse_comp_idxset_stmt
+block_comp_idxset = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
+    nt := src.scan(pos)    // the array name
+    name := a.lexeme(src, nt.tok)
+    lb := src.scan(nt.next)    // '['
+    ie := a.parse_or(src, lb.next)    // index (store target)
+    rb := src.scan(ie.next)    // ']'
+    op := src.scan(rb.next)    // the `OP=` token
+    ops := src.at(op.tok.start).op_str()
+    v := a.parse_or(src, op.next)    // rhs
+    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or(src, lb.next).expr, tvoid()))
+    nv := a.enode(bin_at(ops, cur, v.expr, op.tok.start))
+    rest := a.parse_block(src, v.next)
+    BlockEnd(
+        list: a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), nv, nt.tok.start), rest.list),
+        next: rest.next,
+    )
+}
+// compound `place OP= rhs` inside a block — same desugar as parse_comp_set_stmt
+block_comp_set = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
+    start := src.scan(pos).tok.start
+    lhs := a.parse_atom(src, pos)    // store target
+    cur := a.parse_atom(src, pos)    // operand copy
+    op := src.scan(lhs.next)    // the `OP=` token
+    ops := src.at(op.tok.start).op_str()
+    v := a.parse_or(src, op.next)    // rhs
+    nv := a.enode(bin_at(ops, cur.expr, v.expr, op.tok.start))
+    rest := a.parse_block(src, v.next)
+    BlockEnd(
+        list: a.scons(sassign_at(lhs.expr, nv, start), rest.list),
         next: rest.next,
     )
 }
