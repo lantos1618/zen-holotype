@@ -16,13 +16,17 @@
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(HERE)..)
 
-CC      ?= cc
+# Use ccache transparently when it's installed (caches the ~3MB zenc.gen.c recompile); plain `cc`
+# otherwise, so the build is byte-identical whether or not ccache is present. An explicit `CC=...`
+# in the environment still wins (this only sets the default).
+CCACHE  := $(shell command -v ccache 2>/dev/null)
+CC      ?= $(if $(CCACHE),ccache cc,cc)
 CFLAGS  ?= -std=gnu11 -fwrapv -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 
-.PHONY: zenc regen clean oracle
+.PHONY: zenc regen clean oracle oracle-fast setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # Built to a per-builder pid temp then atomically `mv`d into place: two concurrent `make` runs (e.g.
@@ -47,3 +51,29 @@ clean:
 #   make -f bootstrap/Makefile oracle
 oracle: zenc
 	cd $(ROOT) && ZO=/tmp/zo_oracle.$$$$ && $(ZENC) build tests/oracle.zen -o $$ZO && $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+
+# Fast SMOKE subset of the oracle (~13s vs ~3min): runs only the quick deterministic correctness
+# suites (value + verdict) via ZEN_ORACLE_FAST and SKIPS the slow subprocess-heavy suites (modules /
+# build / boundaries / misc / fuzz / fixpoint). For inner-loop iteration only — the full `make
+# oracle` above stays the merge gate. See tests/oracle.zen for which suites the flag selects.
+#   make -f bootstrap/Makefile oracle-fast
+oracle-fast: zenc
+	cd $(ROOT) && ZO=/tmp/zo_oracle_fast.$$$$ && $(ZENC) build tests/oracle.zen -o $$ZO && ZEN_ORACLE_FAST=1 $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+
+# Register the local git merge driver that auto-resolves the generated seed (bootstrap/zenc.gen.c).
+# `.gitattributes` maps that path to `merge=zenseed`; this points the driver at scripts/zenseed-merge.sh.
+# Merge drivers live in LOCAL git config (not committed), so every clone must run this once.
+# After a merge/rebase that touched the seed, run `make resolve-seed` to reproduce it from source.
+setup-git:
+	cd $(ROOT) && git config merge.zenseed.name "zen generated-seed (regen from .zen source after merge)" \
+	  && git config merge.zenseed.driver '$(ROOT)/scripts/zenseed-merge.sh %O %A %B %P' \
+	  && echo "registered merge.zenseed driver; run 'make -f bootstrap/Makefile resolve-seed' after a seed merge"
+
+# Reproduce + stage the committed seed from the .zen sources after a merge/rebase resolved the seed
+# conflict (the seed is a build artifact, so a textual merge is meaningless — regen is the truth).
+# Use AFTER the conflict is resolved to a clean file (the zenseed driver does this automatically, or
+# `git rebase -X theirs` / `git checkout --theirs bootstrap/zenc.gen.c` by hand): builds zenc from the
+# resolved seed, regenerates the byte-exact seed, and stages it. Commit it yourself (or, mid-rebase,
+# `git add bootstrap/zenc.gen.c && git rebase --continue`).
+resolve-seed: regen
+	cd $(ROOT) && git add bootstrap/zenc.gen.c && echo "seed regenerated + staged — commit it (or 'git rebase --continue' if mid-rebase)"
