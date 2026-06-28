@@ -2359,13 +2359,24 @@ ka_mcall_args = (a: MutPtr<Malloc>, mc: MethodCallData) [Expr] {
 ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i32, ar: Expr) i32 {
     (i < params.len).match ({ true => tparams.ty_mentions_tparam(params[i].ty).match ({ true => {
         ct := env.a.subst_ty_in(tparams, targs, params[i].ty)
-        (env.unknown_ty(ct) || ar.is_lambda_arg() || ct.is_fnt()).match ({ true => 0, false => {
+        (env.unknown_ty(ct) || ar.is_ctx_typed_arg() || ct.is_fnt()).match ({ true => 0, false => {
             lv := ar.addr().lit_slot_verdict(ct)
             (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(ar.addr()), ct) })
         } })
     }, false => 0 }), false => 0 })
 }
 is_lambda_arg = (e: Expr) bool { e.match ({ .Lambda(lm) => true, _ => false }) }
+// args whose CONCRETE type is fixed by context, not by standalone inference: a lambda (FnT, checked
+// separately), and a BARE enum constructor / tag `.Variant(…)` — its enum is chosen by the expected
+// param type during mono (e.g. `.Num(7)` may be `Tok` or `Expr`), so inferring it here mis-rejects.
+is_ctx_typed_arg = (e: Expr) bool {
+    e.match ({
+        .Lambda(lm)  => true,
+        .MakeEnum(m) => true,
+        .Tag(t)      => true,
+        _            => false,
+    })
+}
 // (R5) a lambda bound to an FnT parameter: its declared param COUNT must match the FnT's, and — when the
 // FnT's concrete (substituted) param/return types are known — the lambda's body value must fit the FnT
 // return type. Bind each lambda param to the FnT's substituted param type, then infer the body's value.
@@ -2418,11 +2429,16 @@ ka_lambda_at = (env: Env, ftparams: [Param], targs: [Ty], params: [Param], i: i3
 }
 // per-call arg checks: (c) explicit-arg mismatches + (R5) closure arity/return, against the SAME pinned
 // type-arg buffer. Run only for a KNOWN local callee whose signature is visible here.
+// The explicit-mismatch (c) check fires ONLY when the call carries turbofish `<…>` (the user PINNED the
+// bindings, so a contradicting value arg is a real error). A purely-inferred generic call leaves arg
+// typing to monomorphization (a bare `.Variant` / cross-enum residue resolves only there). The closure
+// arity/return check (R5) runs regardless, since HOF closures rarely carry turbofish.
 ka_args_check = (env: Env, tparams: [Param], f: Func, args: [Expr], etargs: [Ty], pos: i32) i32 {
     targs := env.ka_targs(f, args, etargs)
+    tf := etargs.len > 0
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(env.ka_mismatch_at(f.tparams, targs, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos))).kv_kor(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos))
+        acc = acc.kv_kor(tf.match ({ true => env.ka_mismatch_at(f.tparams, targs, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)), false => 0 })).kv_kor(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos))
     })
     acc
 }
