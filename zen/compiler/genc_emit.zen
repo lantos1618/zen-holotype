@@ -35,7 +35,12 @@ any_payload = (vs: [VariantDef]) bool {
 }
 gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
-        .Int(n)         => s.gen_int(alloc, n),
+        // Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
+        // (32-bit), so `100000 * 100000` (or `1 << 40`) would overflow at int width BEFORE any i64
+        // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
+        // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
+        // computes, and the i32 store/cast narrows back.
+        .Int(n)         => s.gen_int(alloc, n).gstr_append(alloc, "LL"),
         .Byte(n)        => s.gen_int(alloc, n),
         .FloatLit(ft)   => s.gstr_append(alloc, ft),
         .Var(v)         => s.gstr_append(alloc, v.name),
