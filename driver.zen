@@ -120,9 +120,11 @@ write_runnable_c = (tmpc: str, gen: String) bool {
         true
     } })
 }
-// cc -std=gnu11 -w -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
+// cc -std=gnu11 -w -fno-diagnostics-show-caret -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
 // ccflags/links come from a project's zen.toml (extra .c files + `-l` libs); empty for single files.
-cc_command = (mp: MutPtr<Malloc>, root: str, tmpc: str, out: str, ccflags: str, links: str) str { mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ").gstr_append(mp, tmpc).gstr_append(mp, " ").gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ").gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links).gstr_append(mp, " -lm").gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp) }    // libm: always link (sin/cos/log/exp/pow); free if unused
+// -fno-diagnostics-show-caret: the emitted C is one giant line, so cc's caret snippet would dump the
+// ENTIRE ~100KB program to stderr on a (compiler-bug) cc error. Suppress the snippet; keep file:line:col.
+cc_command = (mp: MutPtr<Malloc>, root: str, tmpc: str, out: str, ccflags: str, links: str) str { mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -fwrapv -w -fno-diagnostics-show-caret -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ").gstr_append(mp, tmpc).gstr_append(mp, " ").gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ").gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links).gstr_append(mp, " -lm").gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp) }    // libm: always link (sin/cos/log/exp/pow); free if unused
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc failure.
 compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccflags: str, links: str) i32 {
     rp := mp.resolve_prog(root, path, src)
@@ -131,7 +133,10 @@ compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccfl
     (mp.report_check(raw, decls, rp, path, src) == 0).match ({ true => {
         gen := mp.genModuleIn(decls)
         tmpc := mp.TMPC()
-        write_runnable_c(tmpc, gen).match ({ true => (mp.cc_command(root, tmpc, out, ccflags, links).system() == 0).match ({ true => 0, false => 1 }), false => 1 })
+        write_runnable_c(tmpc, gen).match ({ true => (mp.cc_command(root, tmpc, out, ccflags, links).system() == 0).match ({ true => 0, false => {
+            derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
+            1
+        } }), false => 1 })
     }, false => 1 })
 }
 // ── subcommands ───────────────────────────────────────────────────────────────────────────────────
