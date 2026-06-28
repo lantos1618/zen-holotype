@@ -378,6 +378,24 @@ is_walrus = (src: str, t: Token) bool {
     })
 }
 decl_is_global = (src: str, pos: i32) bool { src.is_walrus(src.decl_marker(pos).tok) }
+// a TYPED top-level global `name : Type := expr` — matches the in-function typed-let form. The marker is
+// a single ':' (not ':=', a plain global; not ': {', a struct); after the annotation the operator must be
+// ':=' (walrus). It must be ':=', NOT '=': an enum's default-valued first variant reads as `Name = value`
+// (`Colour: Red = RGB(...) | …`), so a single '=' here is an enum, not a global. The annotation drives
+// nothing the inferred type wouldn't (resolve_global re-infers from the init), so it is parsed + discarded.
+decl_is_typed_global = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
+    m := src.decl_marker(pos)
+    (src.is_colon(m.tok) && m.tok.len == 1).match ({ true => src.is_lbrace(src.scan(m.next).tok).match ({ true => false, false => {
+        te := a.parse_ty(src, m.next)
+        src.is_walrus(src.scan(te.next).tok)
+    } }), false => false })
+}
+// position just past a typed global's init expression (the type annotation is skipped, init parsed).
+typed_global_end = (a: MutPtr<Malloc>, src: str, pos: i32) i32 {
+    m := src.decl_marker(pos)
+    te := a.parse_ty(src, m.next)
+    a.parse_or(src, src.scan(te.next).next).next
+}
 // a MODULE-ALIAS binding `name = std.mem.raw` / `name = sibling` — a `name = <ident…>` whose RHS is NOT a
 // function literal (`= (params)…`). The faithful parser would otherwise mis-read it as a function decl and
 // swallow the following decls. Routed to fill_global so the RHS parses as an ordinary (Member-chain) expr.
@@ -479,7 +497,7 @@ decl_is_impl* = (src: str, pos: i32) bool {
 }
 fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     a.note_export_if_starred(src, pos)
-    src.decl_is_impl(pos).match ({ true => a.fill_impl(src, pos, buf, i), false => (src.decl_is_global(pos) || src.decl_is_module_alias(pos)).match ({ true => a.fill_global(src, pos, buf, i), false => src.decl_is_struct(pos).match ({ true => a.fill_struct(src, pos, buf, i), false => src.decl_is_enum(pos).match ({ true => a.fill_enum(src, pos, buf, i), false => a.fill_func(src, pos, buf, i) }) }) }) })
+    src.decl_is_impl(pos).match ({ true => a.fill_impl(src, pos, buf, i), false => (src.decl_is_global(pos) || src.decl_is_module_alias(pos)).match ({ true => a.fill_global(src, pos, buf, i), false => a.decl_is_typed_global(src, pos).match ({ true => a.fill_typed_global(src, pos, buf, i), false => src.decl_is_struct(pos).match ({ true => a.fill_struct(src, pos, buf, i), false => src.decl_is_enum(pos).match ({ true => a.fill_enum(src, pos, buf, i), false => a.fill_func(src, pos, buf, i) }) }) }) }) })
 }
 // A module global whose init is `thread_local(x)` becomes a thread-local global with init `x`.
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
@@ -500,6 +518,18 @@ fill_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     alias := src.is_eq_tok(mk.tok)    // single `=` (a module alias) vs `:=` (a value global)
     pe := a.parse_or(src, mk.next)
     buf[i] = a.global_decl(nm, pe.expr, alias, nt.tok.start)
+    a.fill_decls(src, pe.next, buf, i + 1)
+}
+// `name : Type := expr` — a typed value global (always a value global, never a module alias — those
+// carry no annotation — so alias = false). The type annotation is parsed then discarded (re-inferred).
+fill_typed_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    nt := src.scan(pos)
+    nm := a.lexeme(src, nt.tok)
+    m := src.decl_marker(pos)    // the single ':'
+    te := a.parse_ty(src, m.next)    // the (discarded) type annotation; te.next lands at ':='
+    op := src.scan(te.next)
+    pe := a.parse_or(src, op.next)
+    buf[i] = a.global_decl(nm, pe.expr, false, nt.tok.start)
     a.fill_decls(src, pe.next, buf, i + 1)
 }
 // Impl methods become mangled functions plus one DImpl conformance record.
@@ -996,6 +1026,13 @@ named_span = (a: MutPtr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
         is_type: false,
         start: start,
         next: a.parse_or(src, src.decl_marker(pos).next).next,
+    ), false => a.decl_is_typed_global(src, pos).match ({ true => DeclSpan(
+        name: nm,
+        named: true,
+        eof: false,
+        is_type: false,
+        start: start,
+        next: a.typed_global_end(src, pos),
     ), false => src.decl_is_struct(pos).match ({ true => DeclSpan(
         name: nm,
         named: true,
@@ -1017,7 +1054,7 @@ named_span = (a: MutPtr<Malloc>, src: str, pos: i32, start: i32) DeclSpan {
         is_type: false,
         start: start,
         next: a.parse_decl_at(src, pos).next,
-    ) }) }) }) })
+    ) }) }) }) }) })
 }
 // Parse impl methods into scratch buffers only to find the block end.
 impl_scratch = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(1024 * sizeof(Decl)), 1024) }
