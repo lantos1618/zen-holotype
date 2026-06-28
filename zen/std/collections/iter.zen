@@ -1,12 +1,13 @@
-// std.collections.iter - slice iteration helpers.
+// std.collections.iter - slice iteration helpers, all backed by closures.
 //
-// `fold`, `each`, `map_into`, and `filter_into` allocate nothing. Allocating
-// `[i32]` helpers require the caller allocator (`map_in`, `filter_in`, and
-// the receiver-style `map`, `filter` aliases).
+// `fold`, `each`, `find`, `map_into`, and `filter_into` allocate nothing. Allocating
+// `[U]`/`[T]` helpers thread the caller allocator (`map_in`, `filter_in`, and the
+// receiver-style `map`, `filter` aliases) — no hidden heap.
 // `try_*` variants keep allocator failure in the value flow.
-// For other element types, use the generic `_into` forms with your own buffer.
+// The closure args (`f`, `keep`, `pred`) are first-class: inline lambdas and stored
+// closures both work, generic over the element type. `find` reports its hit as `Opt<T>`.
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError, ok, err } = std.core.result
+{ Result, IoError, Opt, ok, err } = std.core.result
 fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
     acc := init
     xs.loop((h, i, x) {
@@ -18,6 +19,19 @@ each*<T> = (xs: [T], f: (T) void) void {
     xs.loop((h, i, x) {
         f(x)
     })
+}
+// First element satisfying `pred`, as `Opt<T>` (`.None` if none match). Allocates nothing; stops at the
+// first hit via `h.break`. `pred` is invoked DIRECTLY in the loop body so an inline lambda splices in:
+// `xs.find((x){ x > 2 })`; a stored `p := (x: T) bool { … }  xs.find(p)` works too.
+find*<T> = (xs: [T], pred: (T) bool) Opt<T> {
+    out: Opt<T> := .None
+    xs.loop((h, i, x) {
+        pred(x).match ({ true => {
+            out = .Some(x)
+            h.break
+        }, false => { } })
+    })
+    out
 }
 // map/filter into a caller-provided output slice. The caller owns `out`, so
 // these allocate nothing; they just transform.
@@ -36,17 +50,20 @@ filter_into*<T> = (xs: [T], out: [T], keep: (T) bool) i64 {
     })
     n
 }
-map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] {
-    out := slice(a.acquire(xs.len * 4), xs.len)
+map_in*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) [U] {
+    out: [U] := slice(a.acquire(xs.len * sizeof(U)), xs.len)
     xs.loop((h, i, x) {
         out[i] = f(x)
     })
     out
 }
-try_map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> {
-    (xs.len <= 0).match ({ true => ok(slice(null_ptr(), 0)), false => a.try_acquire(xs.len * 4).match ({
+try_map_in*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError> {
+    (xs.len <= 0).match ({ true => {
+        empty: [U] := slice(null_ptr(), 0)
+        ok(empty)
+    }, false => a.try_acquire(xs.len * sizeof(U)).match ({
         .Ok(p)  => {
-            out := p.slice(xs.len)
+            out: [U] := p.slice(xs.len)
             xs.loop((h, i, x) {
                 out[i] = f(x)
             })
@@ -55,8 +72,8 @@ try_map_in*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> 
         .Err(e) => err(e),
     }) })
 }
-filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
-    buf := slice(a.acquire(xs.len * 4), xs.len)
+filter_in*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) [T] {
+    buf: [T] := slice(a.acquire(xs.len * sizeof(T)), xs.len)
     n := 0
     xs.loop((h, i, x) {
         buf[n] = x
@@ -64,10 +81,13 @@ filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] {
     })
     slice(buf[0].addr(), n)
 }
-try_filter_in*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> {
-    (xs.len <= 0).match ({ true => ok(slice(null_ptr(), 0)), false => a.try_acquire(xs.len * 4).match ({
+try_filter_in*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError> {
+    (xs.len <= 0).match ({ true => {
+        empty: [T] := slice(null_ptr(), 0)
+        ok(empty)
+    }, false => a.try_acquire(xs.len * sizeof(T)).match ({
         .Ok(p)  => {
-            buf := p.slice(xs.len)
+            buf: [T] := p.slice(xs.len)
             n := 0
             xs.loop((h, i, x) {
                 buf[n] = x
@@ -103,7 +123,7 @@ sort*<T> = (xs: [T], less: (T, T) bool) void {
         })
     })
 }
-map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) [i32] { a.map_in(xs, f) }
-try_map*<A> = (a: MutPtr<A>, xs: [i32], f: (i32) i32) Result<[i32], IoError> { a.try_map_in(xs, f) }
-filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) [i32] { a.filter_in(xs, keep) }
-try_filter*<A> = (a: MutPtr<A>, xs: [i32], keep: (i32) bool) Result<[i32], IoError> { a.try_filter_in(xs, keep) }
+map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) [U] { a.map_in(xs, f) }
+try_map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError> { a.try_map_in(xs, f) }
+filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) [T] { a.filter_in(xs, keep) }
+try_filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError> { a.try_filter_in(xs, keep) }
