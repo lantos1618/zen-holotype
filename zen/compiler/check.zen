@@ -1048,7 +1048,7 @@ arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
 resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        buf[i] = arm(ar.variant, ar.bind, a.resolve_expr(a.arm_env(env, t, ar), ar.body))
+        buf[i] = arm_at(ar.variant, ar.bind, a.resolve_expr(a.arm_env(env, t, ar), ar.body), ar.pos)
     })
     buf
 }
@@ -1240,7 +1240,7 @@ resolve_let = (a: MutPtr<Malloc>, env: Env, l: LetData) Stmt {
     // unannotated let has no target type, so the enclosing function's `exp` must not leak in. Else a
     // generic call whose return is a bare tparam (`with_sync … R`) unifies R against that stray exp
     // (e.g. main's i32) and the let is mistyped — value Result, type i32.
-    slett(l.name, ty, v)
+    slett_at(l.name, ty, v, l.pos)
 }
 // A DISCARDED (statement-position) match/cond keeps the enclosing function's expected (return) type, so
 // an early `return .Err(x)` / `return .Ok(v)` inside a branch infers its enum from the DECLARED return
@@ -1425,6 +1425,7 @@ resolve_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) Func 
         ret: f.ret,
         tparams: f.tparams,
         body: a.resolve_body(env, f.body),
+        pos: f.pos,
     )
 }
 resolve_global = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) Decl {
@@ -1581,7 +1582,24 @@ is_template_call = (decls: [Decl], name: str) bool { decls.the_func(name).is_gen
 idx_template_call = (idx: DeclIndex, decls: [Decl], name: str) bool { idx.idx_func(decls, name).is_generic_fn() }
 subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: str, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
-    (idx < 0).match ({ true => e, false => args[idx].addr() })
+    (idx < 0).match ({ true => e, false => a.subst_keep_pos(args[idx].addr(), e.ref_pos()) })
+}
+// A substituted reference is a renamed local's `vref` (built pos-less) or a spliced source arg. When
+// the substitution target is a bare Var, carry the ORIGINAL reference's source position onto a fresh
+// node (so a later diagnostic — e.g. a non-exhaustive match on a local subject — still gets a caret);
+// a non-Var arg keeps its own node (and its own positions) unchanged.
+subst_keep_pos = (a: MutPtr<Malloc>, arg: Ptr<Expr>, p: i32) Ptr<Expr> {
+    load(arg).match ({
+        .Var(v) => a.cenode(vref_at(v.name, (v.pos <= 0).match ({ true => p, false => v.pos }))),
+        _       => arg,
+    })
+}
+// the source position of a substituted REFERENCE (always a Var at the xform `.Var` call site).
+ref_pos = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v) => v.pos,
+        _       => 0,
+    })
 }
 // THE keystone: `subst_var` splices the SAME arg AST node into every param use, so a param used N
 // times re-evaluates the arg N times (double-effect / double-alloc / UAF) and a param used 0 times
@@ -2098,7 +2116,7 @@ subst_expr = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Pt
 }
 subst_stmt = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
     st.match ({
-        .Let(l)      => slett(l.name, a.subst_ty_in(tparams, targs, l.ty), a.subst_expr(tparams, targs, l.value)),
+        .Let(l)      => slett_at(l.name, a.subst_ty_in(tparams, targs, l.ty), a.subst_expr(tparams, targs, l.value), l.pos),
         .Assign(x)   => sassign_at(a.subst_expr(tparams, targs, x.target), a.subst_expr(tparams, targs, x.value), x.pos),
         .Return(r)   => sret(a.subst_expr(tparams, targs, r)),
         .ExprStmt(e) => sexpr(a.subst_expr(tparams, targs, e)),
@@ -2242,7 +2260,7 @@ xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, params
     out := st
     st.match ({
         .Let(l)      => {
-            out = st.let_value_lambda().match ({ true => sexpr(a.cenode(block(no_stmts()))), false => slett(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty)) })
+            out = st.let_value_lambda().match ({ true => sexpr(a.cenode(block(no_stmts()))), false => slett_at(a.local_name_at(l.name, env, params.len), l.ty, a.xform_expr_exp(decls, idx, l.value, params, fargs, env, l.ty), l.pos) })
         },    // lambda-alias let: dropped (spliced at uses)
         .Assign(x)   => {
             out = sassign_at(a.xform_expr(decls, idx, x.target, params, fargs, env), a.xform_expr(decls, idx, x.value, params, fargs, env), x.pos)
@@ -2325,6 +2343,7 @@ inline_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
             ret: f.ret,
             tparams: f.tparams,
             body: a.xform_body(decls, idx, f.body, empty_params(), empty_args(), a.params_env(f.params), f.ret),
+            pos: f.pos,
         )),
         _         => d,
     })
@@ -3024,7 +3043,7 @@ lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
 // function type — `fnret` carries that type; `tail` marks the body's last (implicit-return) statement.
 lift_rw_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], fnret: Ty, tail: bool, st: Stmt) Stmt {
     st.match ({
-        .Let(l)      => slett(l.name, l.ty, a.lift_rw_expr(decls, idx, gcp, gen, l.value)),
+        .Let(l)      => slett_at(l.name, l.ty, a.lift_rw_expr(decls, idx, gcp, gen, l.value), l.pos),
         .Assign(x)   => sassign_at(a.lift_rw_expr(decls, idx, gcp, gen, x.target), a.lift_rw_expr(decls, idx, gcp, gen, x.value), x.pos),
         .Return(r)   => sret(a.lift_at(decls, idx, gcp, gen, fnret, r)),
         .ExprStmt(e) => sexpr(tail.match ({ true => a.lift_at(decls, idx, gcp, gen, fnret, e), false => a.lift_rw_expr(decls, idx, gcp, gen, e) })),
@@ -3048,6 +3067,7 @@ lift_rw_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
             ret: f.ret,
             tparams: f.tparams,
             body: a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body),
+            pos: f.pos,
         )),
         _         => d,
     })

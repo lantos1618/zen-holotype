@@ -1234,6 +1234,42 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        // R2: a NESTED field write through a read-only `Ptr<T>` mutates `*b` — reject like the direct set.
+        src: "Inner*: { v: i64 }\nBox*: { inner: Inner }\npoke* = (b: Ptr<Box>) void { b.inner.v = 99 }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        // R2 (accept): the SAME nested write through a `MutPtr<T>` is legal.
+        src: "Inner*: { v: i64 }\nBox*: { inner: Inner }\npoke* = (b: MutPtr<Box>) void { b.inner.v = 99 }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // R3: an index-set into a slice field of a read-only `Ptr<T>` writes into `*b` — reject.
+        src: "Buf*: { data: [i64] }\npoke* = (b: Ptr<Buf>) void { b.data[0] = 99 }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        // R3 (accept): the SAME index-set through a `MutPtr<T>` is legal.
+        src: "Buf*: { data: [i64] }\npoke* = (b: MutPtr<Buf>) void { b.data[0] = 99 }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // accept: writing through a MutPtr field reached FROM a read-only Ptr base mutates that field's
+        // target, not `*b` — the recursion stops at the first (writable) pointer indirection.
+        src: "Inner*: { v: i64 }\nBox*: { inner: MutPtr<Inner> }\npoke* = (b: Ptr<Box>) void { b.inner.v = 99 }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // R6: exhaustiveness on a LOCAL-binding match subject (not a param) still rejects.
+        src: "E*: A | B | Cc\ntest* = () i32 { e := E.A  e.match({ .A => 1, .B => 2 })  0 }",
+        should_pass: false,
+        kind: "exhaustiveness",
+    ), VerdictCase(
+        // R7: a non-void body that falls through with no produced value is a return-fit error.
+        src: "test* = () i32 { x := 5 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
         // R1: passing a read-only `Ptr<T>` where a `MutPtr<T>` is wanted is an arg-type error.
         src: "Counter*: { n: i32 }\ndo_bump* = (c: MutPtr<Counter>) void { c.n = c.n + 1 }\ntest* = () i32 { c := Counter(n: 0)  p: Ptr<Counter> := c.addr()  do_bump(p)  c.n }",
         should_pass: false,
