@@ -1051,6 +1051,22 @@ oracle_build_run* = () i32 {
     ), DiagCase(
         src: "{ Scope, with_sync } = std.scope\nhalloc = std.mem.heap\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> { s.acquire(8) }\nmain = () i32 { h := halloc.gpa()  h.addr().with_sync(4096, leak)  0 }\n",
         wants: ["error[scope-escape]: value from scope `s` escapes its scope"],
+    ), DiagCase(
+        // R2: a NESTED field write through a read-only `Ptr<T>` is positioned on the write target.
+        src: "Inner: { v: i64 }\nBox: { inner: Inner }\npoke = (b: Ptr<Box>) void { b.inner.v = 99 }\nmain = () i32 { 0 }\n",
+        wants: [":3:29: error[ptr-write]: cannot write through a read-only `Ptr<T>`", "  poke = (b: Ptr<Box>) void { b.inner.v = 99 }", "                              ^", "hint: give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it"],
+    ), DiagCase(
+        // R3: an index-set into a slice field of a read-only `Ptr<T>`.
+        src: "Buf: { data: [i64] }\npoke = (b: Ptr<Buf>) void { b.data[0] = 99 }\nmain = () i32 { 0 }\n",
+        wants: [":2:29: error[ptr-write]: cannot write through a read-only `Ptr<T>`", "  poke = (b: Ptr<Buf>) void { b.data[0] = 99 }", "                              ^", "hint: give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it"],
+    ), DiagCase(
+        // R6: exhaustiveness on a LOCAL-binding subject is now positioned on the subject (was position-less).
+        src: "E: A | B | Cc\nmain = () i32 {\n    e := E.A\n    e.match ({ .A => 1, .B => 2 })\n    0\n}\n",
+        wants: [":4:5: error[exhaustiveness]: match does not cover every variant", "      e.match ({ .A => 1, .B => 2 })", "      ^", "hint: add arms for every variant, or add an explicit `_` arm"],
+    ), DiagCase(
+        // R7: a value-less body tail is positioned on the last statement, with the fall-through message.
+        src: "main = () i32 { x := 5 }\n",
+        wants: [":1:17: error[return-fit]: function body falls through with no value; add a trailing expression of the declared return type", "  main = () i32 { x := 5 }", "                  ^"],
     )])
     // a ONE-ARMED bool `.match` in VALUE position is non-exhaustive (the missing branch has no value):
     // a POSITIONED exhaustiveness diagnostic, identical in shape to the enum case above — NOT the old
