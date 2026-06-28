@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
+{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix, is_bin_prefix, is_oct_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -827,13 +827,34 @@ parse_ident = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
-    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => PExpr(
+    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => src.looks_turbofish(nx.next).match ({ true => a.parse_turbofish_call(src, name, nx.next, sc.tok.start), false => PExpr(
         expr: a.enode(vref_at(name, sc.tok.start)),
         next: sc.next,
-    ) }), false => PExpr(
+    ) }) }), false => PExpr(
         expr: a.enode(vref_at(name, sc.tok.start)),
         next: sc.next,
     ) }) })
+}
+// Turbofish: `name<Type, …>(args)` — an explicit-type-arg CALL (positional args, NOT a struct lit).
+// Disambiguates from comparison: require a well-formed `<Type…>` (parse_type tokens, matching `>`)
+// IMMEDIATELY followed by a `(` that is NOT a `field:` struct (that's looks_generic_lit's job). If
+// the shape isn't exact, `<` stays the comparison operator (so `a < b`, `a < b && c > d` are intact).
+looks_turbofish = (src: str, pos: i32) bool {
+    after := src.tyargs_end(pos, 1)
+    (after < 0).match ({ true => false, false => {
+        sc := src.scan(after)
+        src.is_lparen(sc.tok).match ({ true => src.paren_is_struct(sc.next).match ({ true => false, false => true }), false => false })
+    } })
+}
+parse_turbofish_call = (a: MutPtr<Malloc>, src: str, name: str, pos: i32, at: i32) PExpr {
+    ta := a.parse_tyargs(src, pos)    // pos just past '<'
+    lp := src.scan(ta.next)    // the '('
+    buf := a.arg_buf()
+    ae := a.fill_args(src, lp.next, buf, 0)
+    PExpr(
+        expr: a.enode(call_targs_at(name, buf.take_args(ae.count), ta.args, at)),
+        next: ae.next,
+    )
 }
 // Decide whether `<...>` starts generic struct construction, not a comparison.
 looks_generic_lit = (src: str, pos: i32) bool {

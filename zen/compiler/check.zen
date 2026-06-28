@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -178,7 +178,9 @@ cenode<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf[0].addr()
 }
 // Pos-preserving rebuilds. Bare call()/vref() are only for synthesized nodes.
-recall = (a: MutPtr<Malloc>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(c.raw.match ({ true => raw_call_at(fn, args, c.pos), false => call_at(fn, args, c.pos) })) }
+recall = (a: MutPtr<Malloc>, c: CallData, fn: str, args: [Expr]) Ptr<Expr> { a.cenode(call_full(fn, args, c.targs, c.pos, c.raw)) }
+// like recall but with REWRITTEN explicit type args (for tparam substitution through an inlined body).
+recall_t = (a: MutPtr<Malloc>, c: CallData, fn: str, args: [Expr], targs: [Ty]) Ptr<Expr> { a.cenode(call_full(fn, args, targs, c.pos, c.raw)) }
 revar = (a: MutPtr<Malloc>, v: VarData, name: str) Ptr<Expr> { a.cenode(vref_at(name, v.pos)) }
 var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }
 abuf = (a: MutPtr<Malloc>, n: i64) [ArmData] { slice(a.acquire(n * sizeof(ArmData)), n) }
@@ -522,10 +524,12 @@ call_targ* = (env: Env, f: Func, args: [Expr], tp: str) Ty {
     arg := env.targ_of(f.params, args, tp)
     arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
 }
-call_targs = (env: Env, f: Func, args: [Expr]) [Ty] {
+// etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
+// overriding inference; an absent one (i past etargs) falls back to inferring from the value args.
+call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
     buf := env.a.tbuf(f.tparams.len)
     f.tparams.loop((h, i, tp) {
-        buf[i] = env.call_targ(f, args, tp.name)
+        buf[i] = (i < etargs.len).match ({ true => etargs[i], false => env.call_targ(f, args, tp.name) })
     })
     buf
 }
@@ -583,7 +587,7 @@ fnt_ret = (t: Ty) Ty {
 gen_call_ret = (env: Env, c: CallData) Ty {
     dn := env.dispatch_name(c)
     f := env.env_func(dn)
-    eq(f.name, "").match ({ true => env.var_or_global(c.fn).fnt_ret(), false => (f.tparams.len > 0).match ({ true => env.a.subst_ty_in(f.tparams, env.call_targs(f, c.args), f.ret), false => f.ret }) })
+    eq(f.name, "").match ({ true => env.var_or_global(c.fn).fnt_ret(), false => (f.tparams.len > 0).match ({ true => env.a.subst_ty_in(f.tparams, env.call_targs(f, c.args, c.targs), f.ret), false => f.ret }) })
 }
 // not a known function: an INDIRECT call through a function-VALUE (a fn-valued local or field
 // bound to a local) — its result type is the value's FnT return type.
@@ -1036,22 +1040,22 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     fn := env.env_func(dn)
     ps := fn.params
     tmpl := fn.is_generic_fn()
-    targs := tmpl.match ({ true => env.call_targs(fn, c.args), false => no_tys() })
+    targs := tmpl.match ({ true => env.call_targs(fn, c.args, c.targs), false => no_tys() })
     buf := a.cebuf(c.args.len)
     c.args.loop((h, i, ar) {
         ex := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
     cclos := env.clos_local_call_name(c.fn)
-    env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => eq(cclos, "").match ({ false => a.clos_call_rewrite(c, cclos, buf), true => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf)) }) }) })
+    env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => eq(cclos, "").match ({ false => a.clos_call_rewrite(c, cclos, buf), true => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(ps, buf)) }) }) })
 }
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
 // it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
 // for the never-instantiated template itself — it stays the bare template name. This guard keeps
 // resolve_call idempotent across passes and unchanged for every non-recursive call.
-rec_dispatch = (env: Env, dn: str, fn: Func, args: [Expr]) str {
+rec_dispatch = (env: Env, dn: str, fn: Func, args: [Expr], etargs: [Ty]) str {
     (eq(fn.name, dn) && fn.params.len == args.len && fn.rc_is_rec_gen_f()).match ({ true => {
-        m := env.a.mangle_str_in(dn, env.call_targs(fn, args))
+        m := env.a.mangle_str_in(dn, env.call_targs(fn, args, etargs))
         (env.didx.func_idx.get(m, 0 - 1) >= 0).match ({ true => m, false => dn })
     }, false => dn })
 }
@@ -2053,10 +2057,12 @@ infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [E
     arg := params.infer_one(a, cargs, tp, env, decls, idx)
     arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
 }
-infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
+// etargs = explicit turbofish type args: a present one PINS the i-th tparam (overriding inference),
+// an absent one (i past etargs) is inferred from value args / expected type as before.
+infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex, etargs: [Ty]) [Ty] {
     buf := a.tbuf(tparams.len)
     tparams.loop((h, i, tp) {
-        buf[i] = params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls, idx)
+        buf[i] = (i < etargs.len).match ({ true => etargs[i], false => params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls, idx) })
     })
     buf
 }
@@ -2122,7 +2128,7 @@ subst_expr = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Pt
         .Cond(d)       => a.cenode(cond_oa(a.subst_expr(tparams, targs, d.c), a.subst_expr(tparams, targs, d.t), a.subst_expr(tparams, targs, d.e), d.oa)),
         .Member(m)     => a.cenode(member_at(a.subst_expr(tparams, targs, m.obj), m.field, m.pos)),
         .Arrow(ar)     => a.cenode(arrow_at(a.subst_expr(tparams, targs, ar.obj), ar.field, ar.pos)),
-        .Call(c)       => a.recall(c, c.fn, a.subst_exprs(tparams, targs, c.args)),
+        .Call(c)       => a.recall_t(c, c.fn, a.subst_exprs(tparams, targs, c.args), a.subst_targs(tparams, targs, c.targs)),
         .MakeEnum(mk)  => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(tparams, targs, mk.payload)),
         .Tag(t)        => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant),
         .MakeStruct(m) => a.cenode(a.subst_genlit(tparams, targs, m)),
@@ -2166,7 +2172,7 @@ is_inlining = (v: Ptr<VList>, name: str) bool {
         .VCons(c) => (eq(c.name, name) && c.ty.is_empty_named()).match ({ true => true, false => c.tail.is_inlining(name) }),
     })
 }
-inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, cargs: [Expr], env: Ptr<VList>, exp: Ty, etargs: [Ty]) Ptr<Expr> {
     tf := idx.idx_func(decls, name)
     ienv := a.vcons(name, tnamed(""), env)
     // A function's body MUST produce its DECLARED return type, so that (targ-substituted) return is the
@@ -2175,7 +2181,7 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
     // subject): a generic constructor in inner's tail still binds T/E from inner's own `R<str,IoError>`
     // return. The call-site `exp` is used only to infer unconstrained tparams (infer_targs).
     (tf.tparams.len > 0).match ({ true => {
-        targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx)
+        targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, etargs)
         ab := a.bind_args(decls, idx, tf.params, cargs, ienv)
         a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, a.subst_ty_in(tf.tparams, targs, tf.ret))))
     }, false => {
@@ -2183,7 +2189,7 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
         a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, tf.body, tf.params, ab.fargs, ab.env, tf.ret)))
     } })
 }
-maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> { idx.idx_template_call(decls, c.fn).match ({ true => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).rc_is_rec_gen_f()).match ({ true => a.recall(c, c.fn, cargs), false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({ true => a.inline_template(decls, idx, c.fn, cargs, env, exp), false => a.recall(c, c.fn, cargs) }) }), false => a.recall(c, c.fn, cargs) }) }
+maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> { idx.idx_template_call(decls, c.fn).match ({ true => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).rc_is_rec_gen_f()).match ({ true => a.recall(c, c.fn, cargs), false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({ true => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs), false => a.recall(c, c.fn, cargs) }) }), false => a.recall(c, c.fn, cargs) }) }
 // A recursive generic fn cannot be inlined (the splice never terminates); leave the call as a
 // bare call to the template name. compiler.check's mono_rec emits one concrete C instance per
 // (template, concrete-targs) and resolve_call rewrites the call to it. (is_inlining is the same
@@ -2758,7 +2764,7 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
     dn := env.dispatch_name(c)
     f := env.env_func(dn)
     (eq(f.name, dn) && f.params.len == c.args.len && f.rc_is_rec_gen_f()).match ({ true => {
-        targs := env.call_targs(f, c.args)
+        targs := env.call_targs(f, c.args, c.targs)
         m := env.a.mangle_str_in(dn, targs)
         buf.rc_has(c2, m).match ({ true => c2, false => buf.rc_add(c2, GenericData(
             name: dn,
