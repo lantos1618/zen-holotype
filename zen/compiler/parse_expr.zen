@@ -873,7 +873,10 @@ tyargs_end* = (src: str, pos: i32, depth: i32) i32 {
         return 0 - 1
     } })
     sc := src.scan(pos)
-    src.is_langle(sc.tok).match ({ true => src.tyargs_end(sc.next, depth + 1), false => src.is_rangle(sc.tok).match ({ true => (depth == 1).match ({ true => sc.next, false => src.tyargs_end(sc.next, depth - 1) }), false => src.is_tyarg_tok(sc.tok).match ({ true => src.tyargs_end(sc.next, depth), false => 0 - 1 }) }) })
+    // A `>>` token (lexed as one shift op) closes TWO generic levels in EXPRESSION position, mirroring
+    // parse_type's gt_resume split. Must be tested BEFORE is_rangle: `is_op(t, '>')` matches on the FIRST
+    // char only, so a `>>` would otherwise be mis-read as a single close that skips both '>' chars.
+    src.is_langle(sc.tok).match ({ true => src.tyargs_end(sc.next, depth + 1), false => src.is_shr_close(sc.tok).match ({ true => (depth == 1).match ({ true => sc.tok.start + 1, false => (depth == 2).match ({ true => sc.next, false => src.tyargs_end(sc.next, depth - 2) }) }), false => src.is_rangle(sc.tok).match ({ true => (depth == 1).match ({ true => sc.next, false => src.tyargs_end(sc.next, depth - 1) }), false => src.is_tyarg_tok(sc.tok).match ({ true => src.tyargs_end(sc.next, depth), false => 0 - 1 }) }) }) })
 }
 is_tyarg_tok = (src: str, t: Token) bool { is_ident_tok(t) || src.is_comma(t) || src.is_lbracket(t) || src.is_rbracket(t) || src.is_lparen(t) || src.is_rparen(t) }    // fn-type args `() R` — a `(A,B) R` element inside `Name<…>`
 // Generic struct construction is `Name<...>(f: v)`.
