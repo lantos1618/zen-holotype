@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, eindex, eloop, LoopData, lam, slet, slett, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -2433,20 +2433,23 @@ expand_defaults = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
 // UFCS form). This pass — run at the very START of resolve_module, before any other pass — rewrites each
 // MethodCall back into the EXACT flat `Call(fn: method, args: [recv] ++ args, pos: method-pos, raw: false)`
 // the old flattening parser produced, so the resolve/inline/genc pipeline downstream is byte-for-byte
-// unchanged. The walk mutates IN PLACE: parse_module builds a fresh tree (no aliased nodes), so each
-// child node is rewritten through its own Ptr/slice slot, touching nothing but the MethodCall sites.
+// unchanged. The walk is FUNCTIONAL: `dmc_expr_val` returns the (possibly new) node, and each parent is
+// rebuilt with its lowered children. Reading an AST node through its read-only `Ptr<Expr>` slot and
+// reconstructing it (rather than storing through that slot) keeps the rewriter sound under pointer-kind
+// checking — a read-only `Ptr` is never silently treated as a writable `MutPtr` (the R1 rule). Mutable
+// SLICE storage (a [Stmt]/[Expr]/[FieldInit]/[ArmData] element, reached via `.addr()`) is updated in place.
 desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     decls.loop((h, i, d) {
-        a.dmc_decl(d)
+        store(decls[i].addr(), a.dmc_decl(d))
     })
     decls
 }
-dmc_decl = (a: MutPtr<Malloc>, d: Decl) void {
+dmc_decl = (a: MutPtr<Malloc>, d: Decl) Decl {
     d.match ({
-        .DFunc(f)          => a.dmc_body(f.body),
-        .DGlobal(g)        => a.dmc_expr(g.init),
-        .DTraitDefault(td) => a.dmc_body(td.fn.body),
-        _                  => { },
+        .DFunc(f)          => { a.dmc_body(f.body)  d },
+        .DGlobal(g)        => .DGlobal(GlobalData(name: g.name, ty: g.ty, init: a.dmc_expr_val(g.init), tl: g.tl, alias: g.alias, pos: g.pos)),
+        .DTraitDefault(td) => { a.dmc_body(td.fn.body)  d },
+        _                  => d,
     })
 }
 dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
@@ -2454,95 +2457,81 @@ dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
         a.dmc_stmt(body[i].addr())
     })
 }
-dmc_stmt = (a: MutPtr<Malloc>, sp: Ptr<Stmt>) void {
+// `sp` is a MUTABLE slot (a [Stmt] slice element), so the rebuilt statement is stored back through it.
+dmc_stmt = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
     sp.match ({
-        .Let(l)      => a.dmc_expr(l.value),
-        .Assign(asn) => {
-            a.dmc_expr(asn.target)
-            a.dmc_expr(asn.value)
-        },
-        .Return(e)   => a.dmc_expr(e),
+        .Let(l)      => store(sp, slett_at(l.name, l.ty, a.dmc_expr_val(l.value), l.pos)),
+        .Assign(asn) => store(sp, sassign_at(a.dmc_expr_val(asn.target), a.dmc_expr_val(asn.value), asn.pos)),
+        .Return(e)   => store(sp, sret(a.dmc_expr_val(e))),
         .If(f)       => {
-            a.dmc_expr(f.c)
             a.dmc_body(f.then)
             a.dmc_body(f.els)
+            store(sp, sif(a.dmc_expr_val(f.c), f.then, f.els))
         },
         .While(w)    => {
-            a.dmc_expr(w.c)
             a.dmc_body(w.body)
+            store(sp, swhile(a.dmc_expr_val(w.c), w.body))
         },
-        .IndexSet(x) => {
-            a.dmc_expr(x.seq)
-            a.dmc_expr(x.idx)
-            a.dmc_expr(x.value)
-        },
-        .ExprStmt(e) => a.dmc_expr(e),
+        .IndexSet(x) => store(sp, sidxset_at(a.dmc_expr_val(x.seq), a.dmc_expr_val(x.idx), x.elem, a.dmc_expr_val(x.value), x.pos)),
+        .ExprStmt(e) => store(sp, sexpr(a.dmc_expr_val(e))),
     })
 }
+// `args[i]` is a mutable [Expr] slot, so each lowered element is stored back in place.
 dmc_args = (a: MutPtr<Malloc>, args: [Expr]) void {
     args.loop((h, i, ar) {
-        a.dmc_expr(args[i].addr())
+        store(args[i].addr(), load(a.dmc_expr_val(args[i].addr())))
     })
 }
 dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
     inits.loop((h, i, fi) {
-        a.dmc_expr(fi.value)
+        store(inits[i].addr(), finit(fi.name, a.dmc_expr_val(fi.value)))
     })
 }
 dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
     arms.loop((h, i, ar) {
-        a.dmc_expr(ar.body)
+        store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
     })
 }
 // `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
-// old parse_method built (buf[0] = recv, method args from index 1, via call_at).
+// old parse_method built (buf[0] = recv, method args from index 1, via call_at). The recv and args are
+// lowered first (recv functionally, args in their mutable slice slots).
 dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
+    rv := a.dmc_expr_val(mc.recv)
+    a.dmc_args(mc.args)
     buf := a.cebuf(mc.args.len + 1)
-    buf[0] = load(mc.recv)
+    buf[0] = load(rv)
     mc.args.loop((h, i, ar) {
         buf[i + 1] = mc.args[i]
     })
     call_at(mc.method, buf, mc.pos)
 }
-// `ep` is REWRITTEN in place (MethodCall -> Call lowering below), so it is a writable `MutPtr<Expr>`,
-// not a read-only `Ptr<Expr>` (Stage-2 mutability: a `store` through a `Ptr<T>` is rejected).
-dmc_expr = (a: MutPtr<Malloc>, ep: MutPtr<Expr>) void {
+remk_match = (m: MatchData, subj: Ptr<Expr>) Expr { m.ptr.match ({ true => ematchp(subj, m.ename, m.arms), false => ematch(subj, m.ename, m.arms) }) }
+// FUNCTIONAL rewrite: returns the lowered node. A node with single `Ptr<Expr>` children is rebuilt with
+// the lowered children (preserving every field/position); a node whose children live in mutable slices is
+// mutated in place and the SAME node pointer is returned. Only a `MethodCall` actually changes shape.
+dmc_expr_val = (a: MutPtr<Malloc>, ep: Ptr<Expr>) Ptr<Expr> {
     ep.match ({
-        .Bin(b)         => {
-            a.dmc_expr(b.lhs)
-            a.dmc_expr(b.rhs)
-        },
-        .Call(c)        => a.dmc_args(c.args),
-        .MethodCall(mc) => {
-            a.dmc_expr(mc.recv)
-            a.dmc_args(mc.args)
-            store(ep, a.dmc_lower(mc))
-        },
-        .Cond(d)        => {
-            a.dmc_expr(d.c)
-            a.dmc_expr(d.t)
-            a.dmc_expr(d.e)
-        },
-        .Member(m)      => a.dmc_expr(m.obj),
-        .Arrow(ar)      => a.dmc_expr(ar.obj),
-        .MakeEnum(m)    => a.dmc_expr(m.payload),
-        .MakeStruct(m)  => a.dmc_inits(m.inits),
+        .Bin(b)         => a.cenode(bin_at(b.op, a.dmc_expr_val(b.lhs), a.dmc_expr_val(b.rhs), b.pos)),
+        .Call(c)        => { a.dmc_args(c.args)  ep },
+        .MethodCall(mc) => a.cenode(a.dmc_lower(mc)),
+        .Cond(d)        => a.cenode(cond_oa(a.dmc_expr_val(d.c), a.dmc_expr_val(d.t), a.dmc_expr_val(d.e), d.oa)),
+        .Member(m)      => a.cenode(member_at(a.dmc_expr_val(m.obj), m.field, m.pos)),
+        .Arrow(ar)      => a.cenode(arrow_at(a.dmc_expr_val(ar.obj), ar.field, ar.pos)),
+        .MakeEnum(m)    => a.cenode(mkenumg(m.ty, m.mty, m.targs, m.variant, a.dmc_expr_val(m.payload))),
+        .MakeStruct(m)  => { a.dmc_inits(m.inits)  ep },
         .Match(m)       => {
-            a.dmc_expr(m.subj)
             a.dmc_arms(m.arms)
+            a.cenode(remk_match(m, a.dmc_expr_val(m.subj)))
         },
-        .SliceLit(sd)   => a.dmc_args(sd.items),
-        .Index(ix)      => {
-            a.dmc_expr(ix.seq)
-            a.dmc_expr(ix.idx)
-        },
+        .SliceLit(sd)   => { a.dmc_args(sd.items)  ep },
+        .Index(ix)      => a.cenode(eindex(a.dmc_expr_val(ix.seq), a.dmc_expr_val(ix.idx), ix.elem)),
         .Loop(l)        => {
-            a.dmc_expr(l.seq)
             a.dmc_body(l.body)
+            a.cenode(eloop(a.dmc_expr_val(l.seq), l.idx, l.elem, l.elemTy, l.body, l.h))
         },
-        .Lambda(lm)     => a.dmc_body(lm.body),
-        .Block(b)       => a.dmc_body(b.stmts),
-        _               => { },
+        .Lambda(lm)     => { a.dmc_body(lm.body)  ep },
+        .Block(b)       => { a.dmc_body(b.stmts)  ep },
+        _               => ep,
     })
 }
 // Enum-variant defaults (`Name = expr`) are parsed with a void payload + the default expr; before any
@@ -3233,9 +3222,15 @@ is_nonnull_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_ptr() || t.ptr_kind_of
 // byte-buffer floor — the trusted allocator/FFI primitive — derefs freely (so it is NOT nullable here).
 // `Ptr<T>` / `MutPtr<T>` are non-null, so they are never nullable.
 is_nullable_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_raw_ptr()).match ({ true => t.is_raw_ptr_ty().match ({ true => false, false => true }), false => false }) }
+// Pointer-kind direction (R1): a read-only `Ptr<T>` (k_ptr) value must NOT satisfy a writable
+// `MutPtr<T>` (k_mut_ptr) slot — that would launder the read-only guarantee (silently grant write
+// access). Every other direction stays permissive (a writable `MutPtr` fits a read-only `Ptr` slot;
+// same-kind fits; non-pointers are unaffected since `ptr_kind_of` is -1 for them). The `RawPtr<u8>`
+// floor keeps its own coercion (is_raw_ptr_ty, handled before this check is reached).
+ptr_kind_fits* = (g: Ty, w: Ty) bool { (w.ptr_kind_of() == k_mut_ptr() && g.ptr_kind_of() == k_ptr()).match ({ true => false, false => true }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
-    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.ty_eq(w) }) }) })
+    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => (g.ty_eq(w) && g.ptr_kind_fits(w)) }) }) })
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }
