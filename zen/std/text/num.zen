@@ -121,9 +121,17 @@ num_fexp_up = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => num
 num_fexp_down = (x: f64, e: i64) i64 { (x >= 1.0).match ({ true => e, false => num_fexp_down(x * 10.0, e - 1) }) }
 num_fexp = (x: f64) i64 { (x >= 1.0).match ({ true => num_fexp_up(x, 0), false => num_fexp_down(x, 0) }) }
 num_fpow10 = (e: i64) f64 { (e == 0).match ({ true => 1.0, false => (e < 0).match ({ true => num_fpow10(e + 1) / 10.0, false => num_fpow10(e - 1) * 10.0 }) }) }
-// the 15-digit significand of magnitude a (a>0), leading digit at place e. MULTIPLY when e<14
-// (never divide by a tiny 10^-k that underflows to 0); DIVIDE when e>=14.
-num_fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(a / num_fpow10(e - 14) + 0.5), false => to_i64(a * num_fpow10(14 - e) + 0.5) }) }
+// 10^n as an EXACT f64 for 0 <= n <= 22 (every power of ten up to 10^22 is representable, so the
+// chained ×10 is exact — beyond 22 it would start rounding).
+num_fpow10x = (n: i64) f64 { (n <= 0).match ({ true => 1.0, false => 10.0 * num_fpow10x(n - 1) }) }
+// the 15-digit significand of magnitude a (a>0), leading digit at place e. Scale a so its leading
+// digit lands at place 14, in CHUNKS of <=22 exact powers — never materialize a single 10^k that
+// overflows f64 to +inf (which made a*inf garbage for tiny magnitudes ~e-292 and below). Chunking
+// by exact 10^22 also minimizes rounding, so a true power of ten (1e-300) scales to exactly 10^15
+// and the carry below renormalizes it to "1.0e-300" instead of "9.99999999999999e-301".
+num_fscale_up = (a: f64, k: i64) f64 { (k <= 22).match ({ true => a * num_fpow10x(k), false => num_fscale_up(a * num_fpow10x(22), k - 22) }) }
+num_fscale_dn = (a: f64, k: i64) f64 { (k <= 22).match ({ true => a / num_fpow10x(k), false => num_fscale_dn(a / num_fpow10x(22), k - 22) }) }
+num_fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(num_fscale_dn(a, e - 14) + 0.5), false => to_i64(num_fscale_up(a, 14 - e) + 0.5) }) }
 num_fstrip = (n: i64) i64 { (n % 10 == 0 && n >= 10).match ({ true => num_fstrip(n / 10), false => n }) }
 num_fndig = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + num_fndig(n / 10) }) }
 num_fpow10i = (n: i64) i64 { (n <= 0).match ({ true => 1, false => 10 * num_fpow10i(n - 1) }) }

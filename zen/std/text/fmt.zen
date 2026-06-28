@@ -65,9 +65,17 @@ fexp_down = (x: f64, e: i64) i64 { (x >= 1.0).match ({ true => e, false => fexp_
 fexp = (x: f64) i64 { (x >= 1.0).match ({ true => fexp_up(x, 0), false => fexp_down(x, 0) }) }
 // 10^e as f64 (e any sign); recursive, |e| <= ~308 for any finite f64.
 fpow10 = (e: i64) f64 { (e == 0).match ({ true => 1.0, false => (e < 0).match ({ true => fpow10(e + 1) / 10.0, false => fpow10(e - 1) * 10.0 }) }) }
-// the 15-digit significand of magnitude a (a>0), leading digit at place e. MULTIPLY when
-// e<14 (so we never divide by a tiny 10^-k that underflows to 0); DIVIDE when e>=14.
-fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(a / fpow10(e - 14) + 0.5), false => to_i64(a * fpow10(14 - e) + 0.5) }) }
+// 10^n as an EXACT f64 for 0 <= n <= 22 (every power of ten up to 10^22 is representable, so the
+// chained ×10 is exact — beyond 22 it would start rounding).
+fpow10x = (n: i64) f64 { (n <= 0).match ({ true => 1.0, false => 10.0 * fpow10x(n - 1) }) }
+// the 15-digit significand of magnitude a (a>0), leading digit at place e. Scale a so its leading
+// digit lands at place 14, in CHUNKS of <=22 exact powers — never materialize a single 10^k that
+// overflows f64 to +inf (which made a*inf garbage for tiny magnitudes ~e-292 and below). Chunking
+// by exact 10^22 also minimizes rounding, so a true power of ten (1e-300) scales to exactly 10^15
+// and the carry below renormalizes it to "1.0e-300" instead of "9.99999999999999e-301".
+fscale_up = (a: f64, k: i64) f64 { (k <= 22).match ({ true => a * fpow10x(k), false => fscale_up(a * fpow10x(22), k - 22) }) }
+fscale_dn = (a: f64, k: i64) f64 { (k <= 22).match ({ true => a / fpow10x(k), false => fscale_dn(a / fpow10x(22), k - 22) }) }
+fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(fscale_dn(a, e - 14) + 0.5), false => to_i64(fscale_up(a, 14 - e) + 0.5) }) }
 // drop trailing zero digits of the significand (keep >= 1 digit), and count digits of n>=1.
 fstrip = (n: i64) i64 { (n % 10 == 0 && n >= 10).match ({ true => fstrip(n / 10), false => n }) }
 fndig = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + fndig(n / 10) }) }
