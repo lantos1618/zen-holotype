@@ -1012,6 +1012,25 @@ is_slice_len_call = (env: Env, fn: str, buf: [Expr]) bool {
         _         => false,
     }), false => false })
 }
+// `g(args)` where `g` is a LOCAL of by-value closure-struct type (lower_closures generated a struct
+// `__clos_K` for it plus a call fn `__clos_K_call`) is an indirect closure call. Return the call-fn
+// name if `g` is such a local (its type is a Named struct with a matching `_call` fn in the index),
+// else "". The closure value is threaded as the call's first argument (its captured environment).
+clos_local_call_name = (env: Env, name: str) str {
+    eq(env.env_func(name).name, "").match ({ true => env.var_ty(name).match ({
+        .Named(sn) => {
+            cn := env.a.clos_call_name(sn)
+            (env.didx.func_idx.get(cn, 0 - 1) >= 0).match ({ true => cn, false => "" })
+        },
+        _          => "",
+    }), false => "" })
+}
+clos_call_rewrite = (a: MutPtr<Malloc>, c: CallData, cn: str, buf: [Expr]) Ptr<Expr> {
+    args := a.cebuf(buf.len + 1)
+    args[0] = vref(c.fn)
+    buf.loop((h, i, e) { args[i + 1] = e })
+    a.cenode(call_at(cn, args, c.pos))
+}
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     dn := env.dispatch_name(c)
     fn := env.env_func(dn)
@@ -1023,7 +1042,8 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
-    env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf)) }) })
+    cclos := env.clos_local_call_name(c.fn)
+    env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => eq(cclos, "").match ({ false => a.clos_call_rewrite(c, cclos, buf), true => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args), a.collect_varargs(ps, buf)) }) }) })
 }
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
 // it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
@@ -3090,6 +3110,231 @@ lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     })
     slice(out.ptr, k)
 }
+// ── M1 keystone: ESCAPING capturing closures → a by-value closure struct ─────────────────────────
+// A function whose DECLARED return is a function type `(P…)R` and whose body TAIL is a lambda that
+// CAPTURES the function's parameters cannot inline-splice (it escapes the frame) nor bare-fn-lift (a
+// bare C function pointer carries no environment). Lower it to a by-value closure with NO hidden heap:
+//   • a generated struct `__clos_K { p1: T1, … }` holding the enclosing params by value;
+//   • a top-level call fn `__clos_K_call = (__clenv: __clos_K, P…) R { body[pN -> __clenv.pN] }`.
+// The tail lambda becomes the struct literal `__clos_K{ p1: p1, … }`, so the function returns the
+// closure BY VALUE (a struct copy). A later indirect call `g(args)` on a closure-typed local is
+// rewritten by resolve_call to `__clos_K_call(g, args)`. SUPPORTED captures are the enclosing
+// function's PARAMETERS; a lambda that captures a non-parameter LOCAL is left untouched (it falls
+// through to the clean error[lambda-value]). The whole enclosing param row is captured (harmless
+// over-capture keeps the lowering simple and avoids per-name free analysis for the struct shape).
+clos_struct_name = (a: MutPtr<Malloc>, k: i64) str { a.lift_digits(a.gstr_string(24).gstr_append(a, "__clos_"), k).gstr_finish(a) }
+clos_call_name = (a: MutPtr<Malloc>, structn: str) str { a.gstr_string(32).gstr_append(a, structn).gstr_append(a, "_call").gstr_finish(a) }
+clos_params_has = (ps: [Param], n: str) bool { ps.param_index(n) >= 0 }
+// Does the lambda body capture a FREE name that is NOT one of the enclosing function's params (and not
+// a lambda-bound name / top-level / true|false)? Such a closure is unsupported here → leave it be.
+clos_bad_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], xs: [Expr]) bool {
+    found := false
+    xs.loop((h, i, x) { found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, bound, ps, x.addr()) }) })
+    found
+}
+clos_bad_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], inits: [FieldInit]) bool {
+    found := false
+    inits.loop((h, i, fi) { found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, bound, ps, fi.value) }) })
+    found
+}
+clos_bad_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], arms: [ArmData]) bool {
+    found := false
+    arms.loop((h, i, ar) { found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, a.vcons(ar.bind, tvoid(), bound), ps, ar.body) }) })
+    found
+}
+clos_bad_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], body: [Stmt]) bool {
+    found := false
+    b := bound
+    body.loop((h, i, st) {
+        found = found.match ({ true => true, false => a.clos_bad_stmt(decls, idx, b, ps, st) })
+        b = a.lift_extend(b, st)
+    })
+    found
+}
+clos_bad_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], st: Stmt) bool {
+    st.match ({
+        .Let(l)      => a.clos_bad_expr(decls, idx, bound, ps, l.value),
+        .Assign(x)   => a.clos_bad_expr(decls, idx, bound, ps, x.target) || a.clos_bad_expr(decls, idx, bound, ps, x.value),
+        .Return(r)   => a.clos_bad_expr(decls, idx, bound, ps, r),
+        .ExprStmt(e) => a.clos_bad_expr(decls, idx, bound, ps, e),
+        .If(f)       => a.clos_bad_expr(decls, idx, bound, ps, f.c) || a.clos_bad_body(decls, idx, bound, ps, f.then) || a.clos_bad_body(decls, idx, bound, ps, f.els),
+        .While(w)    => a.clos_bad_expr(decls, idx, bound, ps, w.c) || a.clos_bad_body(decls, idx, bound, ps, w.body),
+        .IndexSet(x) => a.clos_bad_expr(decls, idx, bound, ps, x.seq) || a.clos_bad_expr(decls, idx, bound, ps, x.idx) || a.clos_bad_expr(decls, idx, bound, ps, x.value),
+    })
+}
+clos_bad_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)        => lift_is_captured(decls, idx, bound, v.name) && (ps.clos_params_has(v.name) == false),
+        .Bin(b)        => a.clos_bad_expr(decls, idx, bound, ps, b.lhs) || a.clos_bad_expr(decls, idx, bound, ps, b.rhs),
+        .Call(c)       => a.clos_bad_args(decls, idx, bound, ps, c.args),
+        .Cond(d)       => a.clos_bad_expr(decls, idx, bound, ps, d.c) || a.clos_bad_expr(decls, idx, bound, ps, d.t) || a.clos_bad_expr(decls, idx, bound, ps, d.e),
+        .Member(m)     => a.clos_bad_expr(decls, idx, bound, ps, m.obj),
+        .Arrow(ar)     => a.clos_bad_expr(decls, idx, bound, ps, ar.obj),
+        .MakeEnum(mk)  => a.clos_bad_expr(decls, idx, bound, ps, mk.payload),
+        .MakeStruct(s) => a.clos_bad_inits(decls, idx, bound, ps, s.inits),
+        .Match(m)      => a.clos_bad_expr(decls, idx, bound, ps, m.subj) || a.clos_bad_arms(decls, idx, bound, ps, m.arms),
+        .Index(ix)     => a.clos_bad_expr(decls, idx, bound, ps, ix.seq) || a.clos_bad_expr(decls, idx, bound, ps, ix.idx),
+        .SliceLit(sd)  => a.clos_bad_args(decls, idx, bound, ps, sd.items),
+        .Loop(l)       => a.clos_bad_expr(decls, idx, bound, ps, l.seq) || a.clos_bad_body(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), ps, l.body),
+        .Block(bl)     => a.clos_bad_body(decls, idx, bound, ps, bl.stmts),
+        .Lambda(la)    => a.clos_bad_body(decls, idx, a.lift_lamparams(bound, la.params), ps, la.body),
+        _              => false,
+    })
+}
+// substitute every reference to a captured param `p` with `__clenv.p` (a member access) in the lifted
+// body. Captured-param names never collide with the lambda's own params (those are bound, not free), so
+// a flat name-keyed substitution is correct for the supported shape.
+clos_sub_var = (a: MutPtr<Malloc>, ps: [Param], v: VarData) Ptr<Expr> { ps.clos_params_has(v.name).match ({ true => a.cenode(member_at(a.cenode(vref("__clenv")), v.name, v.pos)), false => a.cenode(vref_at(v.name, v.pos)) }) }
+clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
+    buf := a.cebuf(xs.len)
+    xs.loop((h, i, x) { buf[i] = load(a.clos_sub_expr(ps, x.addr())) })
+    buf
+}
+clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
+    buf := a.fbuf(inits.len)
+    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.clos_sub_expr(ps, fi.value)) })
+    buf
+}
+clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
+    buf := a.abuf(arms.len)
+    arms.loop((h, i, ar) { buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) })
+    buf
+}
+clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
+    load(e).match ({
+        .Var(v)        => a.clos_sub_var(ps, v),
+        .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.clos_sub_inits(ps, s.inits), s.pos)),
+        .Bin(b)        => a.cenode(bin_at(b.op, a.clos_sub_expr(ps, b.lhs), a.clos_sub_expr(ps, b.rhs), b.pos)),
+        .Cond(d)       => a.cenode(cond_oa(a.clos_sub_expr(ps, d.c), a.clos_sub_expr(ps, d.t), a.clos_sub_expr(ps, d.e), d.oa)),
+        .Member(m)     => a.cenode(member_at(a.clos_sub_expr(ps, m.obj), m.field, m.pos)),
+        .Arrow(ar)     => a.cenode(arrow_at(a.clos_sub_expr(ps, ar.obj), ar.field, ar.pos)),
+        .Call(c)       => a.recall(c, c.fn, a.clos_sub_args(ps, c.args)),
+        .MakeEnum(mk)  => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.clos_sub_expr(ps, mk.payload))),
+        .Match(m)      => m.ptr.match ({ true => a.cenode(ematchp(a.clos_sub_expr(ps, m.subj), m.ename, a.clos_sub_arms(ps, m.arms))), false => a.cenode(ematch(a.clos_sub_expr(ps, m.subj), m.ename, a.clos_sub_arms(ps, m.arms))) }),
+        .Index(ix)     => a.cenode(eindex(a.clos_sub_expr(ps, ix.seq), a.clos_sub_expr(ps, ix.idx), ix.elem)),
+        .SliceLit(sd)  => a.cenode(slit(sd.elem, a.clos_sub_args(ps, sd.items))),
+        .Loop(l)       => a.cenode(eloop(a.clos_sub_expr(ps, l.seq), l.idx, l.elem, l.elemTy, a.clos_sub_body(ps, l.body), l.h)),
+        .Block(bl)     => a.cenode(block(a.clos_sub_body(ps, bl.stmts))),
+        .Lambda(lm)    => a.cenode(lam(lm.params, a.clos_sub_body(ps, lm.body))),
+        _              => e,
+    })
+}
+clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
+    st.match ({
+        .Let(l)      => slett_at(l.name, l.ty, a.clos_sub_expr(ps, l.value), l.pos),
+        .Assign(x)   => sassign_at(a.clos_sub_expr(ps, x.target), a.clos_sub_expr(ps, x.value), x.pos),
+        .Return(r)   => sret(a.clos_sub_expr(ps, r)),
+        .ExprStmt(e) => sexpr(a.clos_sub_expr(ps, e)),
+        .If(f)       => sif(a.clos_sub_expr(ps, f.c), a.clos_sub_body(ps, f.then), a.clos_sub_body(ps, f.els)),
+        .While(w)    => swhile(a.clos_sub_expr(ps, w.c), a.clos_sub_body(ps, w.body)),
+        .IndexSet(x) => sidxset_at(a.clos_sub_expr(ps, x.seq), a.clos_sub_expr(ps, x.idx), x.elem, a.clos_sub_expr(ps, x.value), x.pos),
+    })
+}
+clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] {
+    buf := a.sbuf(body.len)
+    body.loop((h, i, st) { buf[i] = a.clos_sub_stmt(ps, st) })
+    buf
+}
+// the tail (implicit-return) lambda of a body, if any: the last statement is a bare expression that is
+// itself a lambda literal. (a `return <lambda>` tail works too.)
+clos_tail_lambda = (body: [Stmt]) bool {
+    (body.len == 0).match ({ true => false, false => body[body.len - 1].match ({
+        .ExprStmt(e) => load(e).match ({ .Lambda(lm) => true, _ => false }),
+        .Return(r)   => load(r).match ({ .Lambda(lm) => true, _ => false }),
+        _            => false,
+    }) })
+}
+clos_tail_lam_of = (body: [Stmt]) LambdaData {
+    none := LambdaData(params: empty_params(), body: no_stmts())
+    body[body.len - 1].match ({
+        .ExprStmt(e) => load(e).match ({ .Lambda(lm) => lm, _ => none }),
+        .Return(r)   => load(r).match ({ .Lambda(lm) => lm, _ => none }),
+        _            => none,
+    })
+}
+// build the lifted call fn's params: `__clenv: __clos_K` then each lambda param typed from the FnT sig.
+clos_call_params = (a: MutPtr<Malloc>, structn: str, lm: LambdaData, ft: FnTData) [Param] {
+    ps := a.pbuf(lm.params.len + 1)
+    ps[0] = param("__clenv", tnamed(structn))
+    lm.params.loop((h, i, p) { ps[i + 1] = param(p.name, (i < ft.params.len).match ({ true => ft.params[i], false => tvoid() })) })
+    ps
+}
+// the closure struct's fields = the enclosing function's params (captured by value).
+clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
+    fs := a.acquire(fps.len * sizeof(Field))
+    out: [Field] := slice(fs, fps.len)
+    fps.loop((h, i, p) { out[i] = field(p.name, p.ty) })
+    out
+}
+// the closure literal's field inits = each captured param bound to its own current value.
+clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
+    buf := a.fbuf(fps.len)
+    fps.loop((h, i, p) { buf[i] = finit(p.name, a.cenode(vref(p.name))) })
+    buf
+}
+// rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
+clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
+    buf := a.sbuf(body.len)
+    body.loop((h, i, st) { buf[i] = (i == body.len - 1).match ({ true => sret(mk), false => st }) })
+    buf
+}
+// does `f` return a capturing-over-params closure we can lower? (FnT return + tail lambda + it captures
+// at least one param + it captures NOTHING but params).
+clos_lowerable = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) bool {
+    f.ret.match ({
+        .FnT(ft) => f.body.clos_tail_lambda().match ({ true => {
+            lm := f.body.clos_tail_lam_of()
+            cap := a.lift_liftable(decls, idx, lm) == false    // captures something
+            bad := a.clos_bad_body(decls, idx, a.lift_lamparams(a.vnil(), lm.params), f.params, lm.body)
+            cap && (bad == false) && (f.params.len > 0)
+        }, false => false }),
+        _        => false,
+    })
+}
+// lower one function (caller checked clos_lowerable): emit the struct + call fn into `gen` (2 decls at
+// 2*id and 2*id+1), bump the closure counter, and return the rewritten enclosing function (returns the
+// struct by value; ret type becomes the closure struct).
+clos_lower_func = (a: MutPtr<Malloc>, ccp: RawPtr<u8>, gen: [Decl], f: Func) Decl {
+    ft := f.ret.match ({ .FnT(g) => g, _ => FnTData(params: no_tys(), ret: a.tnode(tvoid())) })
+    lm := f.body.clos_tail_lam_of()
+    id := load_i64(ccp)
+    structn := a.clos_struct_name(id)
+    calln := a.clos_call_name(structn)
+    gen[(id * 2).to_i32()] = dstruct(StructDecl(name: structn, fields: a.clos_struct_fields(f.params), pos: 0))
+    gen[(id * 2 + 1).to_i32()] = dfunc(Func(
+        name: calln,
+        params: a.clos_call_params(structn, lm, ft),
+        ret: load(ft.ret),
+        tparams: empty_params(),
+        body: a.clos_sub_body(f.params, lm.body),
+    ))
+    store_i64(ccp, id + 1)
+    mk := a.cenode(mkstruct(structn, a.clos_struct_inits(f.params)))
+    dfunc(Func(
+        name: f.name,
+        params: f.params,
+        ret: tnamed(structn),
+        tparams: f.tparams,
+        body: a.clos_replace_tail(f.body, mk),
+        pos: f.pos,
+    ))
+}
+lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+    ccp: RawPtr<u8> := a.acquire(8)
+    store_i64(ccp, 0)
+    gen := a.dbuf(4096)
+    out := a.dbuf(decls.len + 4096)
+    decls.loop((h, i, d) {
+        out[i] = d.match ({
+            .DFunc(f) => a.clos_lowerable(decls, idx, f).match ({ true => a.clos_lower_func(ccp, gen, f), false => d }),
+            _         => d,
+        })
+    })
+    n := load_i64(ccp) * 2
+    k := decls.len
+    gen.loop((h, i, g) { (i < n.to_i32()).match ({ true => { out[k] = g  k = k + 1 } }) })
+    slice(out.ptr, k)
+}
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     decls0 := a.expand_defaults(a.desugar_method_calls(raw))
     decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
@@ -3119,10 +3364,14 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     // emit one concrete fn per recursive-generic instance BEFORE the final resolve, so each instance
     // body gets resolved (dispatch on its concrete types) and resolve_call rewrites recursive calls to it.
     exp2 := a.mono_rec(inl2, i2idx)
+    // lower ESCAPING capturing closures (a fn returning a lambda over its params) to a by-value closure
+    // struct + a top-level call fn, BEFORE the non-capturing lift and the final resolve. The final
+    // resolve then sees the rewritten return type (the closure struct) and rewrites indirect calls.
+    clos := a.lower_closures(exp2, a.build_decl_index(exp2))
     // lift non-capturing lambda LITERALS in value positions (struct-field inits / returns) to top-level
     // fns BEFORE the final resolve, so the generated fns + the fn-value references they leave behind get
-    // resolved. Capturing lambdas are left for check_validate's error[lambda-value].
-    lifted := a.lift_lambdas(exp2, a.build_decl_index(exp2))
+    // resolved. Remaining capturing lambdas are left for check_validate's error[lambda-value].
+    lifted := a.lift_lambdas(clos, a.build_decl_index(clos))
     eidx := a.build_decl_index(lifted)
     out2 := a.dbuf(lifted.len)
     lifted.loop((h, i, d) {
