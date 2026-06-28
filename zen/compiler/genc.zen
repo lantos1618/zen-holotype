@@ -27,9 +27,10 @@ BinData*: {
 CallData*: {
     fn: str,
     args: [Expr],
+    targs: [Ty],
     pos: i32,
     raw: bool,
-}    // fn(a, b, …) or @fn(a, b, …); pos = fn byte offset (0 = synthesized)
+}    // fn(a, b, …) or @fn(a, b, …); targs = explicit turbofish type args `fn<T,…>(…)` (empty = inferred); pos = fn byte offset (0 = synthesized)
 // a FAITHFUL method call `recv.method(args)` — preserves the UFCS surface syntax that the parser would
 // otherwise FLATTEN into a `Call(fn: method, args: [recv] ++ args)`. parse_module keeps MethodCall (so the
 // formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
@@ -386,30 +387,20 @@ bin_at* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr {
     ))
 }
 bin* = (op: str, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
-call* = (fn: str, args: [Expr]) Expr {
+call_full* = (fn: str, args: [Expr], targs: [Ty], p: i32, raw: bool) Expr {
     .Call(CallData(
         fn: fn,
         args: args,
-        pos: 0,
-        raw: false,
-    ))
-}
-call_at* = (fn: str, args: [Expr], p: i32) Expr {
-    .Call(CallData(
-        fn: fn,
-        args: args,
+        targs: targs,
         pos: p,
-        raw: false,
+        raw: raw,
     ))
 }
-raw_call_at* = (fn: str, args: [Expr], p: i32) Expr {
-    .Call(CallData(
-        fn: fn,
-        args: args,
-        pos: p,
-        raw: true,
-    ))
-}
+call* = (fn: str, args: [Expr]) Expr { call_full(fn, args, no_tys(), 0, false) }
+call_at* = (fn: str, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, false) }
+raw_call_at* = (fn: str, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, true) }
+// explicit turbofish call `fn<T, …>(args)` — type args pinned at the call site.
+call_targs_at* = (fn: str, args: [Expr], targs: [Ty], p: i32) Expr { call_full(fn, args, targs, p, false) }
 emcall* = (recv: Ptr<Expr>, method: str, args: [Expr], p: i32) Expr {
     .MethodCall(MethodCallData(
         recv: recv,
