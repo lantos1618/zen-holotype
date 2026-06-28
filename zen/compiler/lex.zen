@@ -30,9 +30,23 @@ Scan*: {
 // instead of compiling the truncated prefix. (An unterminated STRING is caught by the parser
 // itself — its token still reaches str_open; a swallowed comment never surfaces as a token.)
 lex_failed := 0
+// byte offset of the first lexer error that carried one (0 = none) — the `/*` of an unterminated
+// block comment, or the `0` of a malformed radix literal. parse_module folds it into the
+// __syntax_error sentinel so the KPARSE diagnostic can caret the failing site (mirrors perr_set_at).
+lex_err_off := 0
 lerr_set = () void { lex_failed = 1 }
-lerr_reset* = () void { lex_failed = 0 }
+lerr_set_at = (off: i32) void {
+    (lex_err_off == 0).match ({ true => {
+        lex_err_off = off
+    } })
+    lex_failed = 1
+}
+lerr_reset* = () void {
+    lex_failed = 0
+    lex_err_off = 0
+}
 lerr_get* = () bool { lex_failed == 1 }
+lerr_off_get* = () i32 { lex_err_off }
 // ── skip whitespace, `//` line comments, and `/* */` block comments → next significant pos ──
 is_comment = (src: str, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '/' }
 is_block_open = (src: str, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '*' }
@@ -40,15 +54,16 @@ skip_line = (src: str, pos: i32) i32 {
     b := at(src, pos)
     (b == '\0' || b == '\n').match ({ true => pos, false => src.skip_line(pos + 1) })
 }    // stop at NUL / newline
-skip_block_comment = (src: str, pos: i32) i32 { src.skip_bc_d(pos, 1) }    // pos just past `/*`
+skip_block_comment = (src: str, pos: i32) i32 { src.skip_bc_d(pos, 1, pos - 2) }    // pos just past `/*`; the `/*` opens at pos-2
 // NESTED block comments: track depth so `/* /* */ */` closes at the OUTER `*/`, not the first one.
-skip_bc_d = (src: str, pos: i32, depth: i32) i32 {
+// `open` carries the byte offset of the OUTER `/*` so an unterminated comment can caret its start.
+skip_bc_d = (src: str, pos: i32, depth: i32, open: i32) i32 {
     b := at(src, pos)
     (b == '\0').match ({ true => {
-        lerr_set()
+        lerr_set_at(open)
         pos
-    }, false => (b == '/' && at(src, pos + 1) == '*').match ({ true => src.skip_bc_d(pos + 2, depth + 1), false => (b == '*' && at(src, pos + 1) == '/').match ({ true => (depth == 1).match ({ true => pos + 2, false => src.skip_bc_d(pos + 2, depth - 1) }), false => src.skip_bc_d(pos + 1, depth) }) }) })
-}    // unterminated — stop at NUL and FLAG it
+    }, false => (b == '/' && at(src, pos + 1) == '*').match ({ true => src.skip_bc_d(pos + 2, depth + 1, open), false => (b == '*' && at(src, pos + 1) == '/').match ({ true => (depth == 1).match ({ true => pos + 2, false => src.skip_bc_d(pos + 2, depth - 1, open) }), false => src.skip_bc_d(pos + 1, depth, open) }) }) })
+}    // unterminated — stop at NUL and FLAG it (positioned at the opening `/*`)
 skip = (src: str, pos: i32) i32 { is_space(at(src, pos)).match ({ true => src.skip(pos + 1), false => src.is_comment(pos).match ({ true => src.skip(src.skip_line(pos + 2)), false => src.is_block_open(pos).match ({ true => src.skip(src.skip_block_comment(pos + 2)), false => pos }) }) }) }    // a nested `/*`
 // ── span ends: advance while the class holds ───────────────────────────────────
 ident_end = (src: str, pos: i32) i32 { is_alnum(at(src, pos)).match ({ true => src.ident_end(pos + 1), false => pos }) }
@@ -64,7 +79,18 @@ oct_end = (src: str, pos: i32) i32 { is_oct(at(src, pos)).match ({ true => src.o
 is_hex_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'x' || at(src, pos + 1) == 'X') }
 is_bin_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'b' || at(src, pos + 1) == 'B') }
 is_oct_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'o' || at(src, pos + 1) == 'O') }
-num_end = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.hex_end(pos + 2), false => src.is_bin_prefix(pos).match ({ true => src.bin_end(pos + 2), false => src.is_oct_prefix(pos).match ({ true => src.oct_end(pos + 2), false => src.int_end(pos + 1) }) }) }) }
+num_end = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.radix_end(pos + 2, src.hex_end(pos + 2)), false => src.is_bin_prefix(pos).match ({ true => src.radix_end(pos + 2, src.bin_end(pos + 2)), false => src.is_oct_prefix(pos).match ({ true => src.radix_end(pos + 2, src.oct_end(pos + 2)), false => src.int_end(pos + 1) }) }) }) }
+// Validate a `0x`/`0b`/`0o` radix literal. `ds` = first digit (just past the 2-char prefix), `e` =
+// end of the consumed base-digit run. Two malformings flag a positioned lexer error (caret at the
+// `0` of the prefix, ds-2): an EMPTY literal (no digit consumed, `0b`/`0o`/`0x`) and a digit-run
+// immediately followed by an alphanumeric that is NOT a valid digit of the base (`0o9`, `0b19`,
+// `0xFFg`) — which the old scanner silently split into two tokens with the wrong value.
+radix_end = (src: str, ds: i32, e: i32) i32 {
+    (e == ds || is_alnum(at(src, e))).match ({ true => {
+        lerr_set_at(ds - 2)
+        e
+    }, false => e })
+}
 // scientific exponent: `[eE][+-]?[0-9]+` right after the mantissa. Returns the end past the
 // exponent when one is present, else `pos` unchanged — so `1e` (no digit) / `1einstein` /
 // `x.e` are NOT mis-consumed; the exponent only fuses when a digit actually follows.
