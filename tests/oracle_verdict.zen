@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (194)", [VerdictCase(
+    a := run_verdicts("verdict (198)", [VerdictCase(
         src: "test* = () i32 { a: u8 := 300  to_i32(a) }",
         should_pass: false,
         kind: "",
@@ -814,6 +814,28 @@ oracle_verdict_run* = () i32 {
         src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { c := Circle(r: 4)  c.addr().area() }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        // R1: a read-only `Ptr<T>` value must NOT satisfy a writable `MutPtr<T>` parameter (silent
+        // write-laundering). do_bump would mutate through a pointer the caller declared read-only.
+        src: "Counter*: { n: i32 }\ndo_bump* = (c: MutPtr<Counter>) void { c.n = c.n + 1 }\ntest* = () i32 { c := Counter(n: 0)  p: Ptr<Counter> := c.addr()  do_bump(p)  c.n }",
+        should_pass: false,
+        kind: "",
+    ), VerdictCase(
+        // R1 still-accept: a writable `MutPtr<T>` DOES satisfy a read-only `Ptr<T>` parameter.
+        src: "Counter*: { n: i32 }\npeek* = (c: Ptr<Counter>) i32 { c.n }\ntest* = () i32 { c := Counter(n: 0)  p: MutPtr<Counter> := c.addr()  peek(p) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // R8: assert_nonnull on a genuinely non-pointer arg (a scalar) is rejected (would emit a void
+        // value into a non-void slot at cc time).
+        src: "test* = () i64 { x := 5  q := assert_nonnull(x)  load(q) }",
+        should_pass: false,
+        kind: "",
+    ), VerdictCase(
+        // R8 still-accept: assert_nonnull on a real nullable `RawPtr<T>` narrows it to `MutPtr<T>`.
+        src: "test* = () i64 { p: RawPtr<i64> := malloc(8)  q := assert_nonnull(p)  store(q, 7)  load(q) }",
+        should_pass: true,
+        kind: "",
     )])
     // Stage 3 nullability: deref of a nullable `RawPtr<T>` (T != u8) without a null-check is REJECTED.
     // store / offset through a nullable `RawPtr<T>` are likewise rejected.
@@ -823,7 +845,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (97)", [VerdictCase(
+    b := run_verdicts("verdict-kind (100)", [VerdictCase(
         src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "arity",
@@ -1211,6 +1233,21 @@ oracle_verdict_run* = () i32 {
         src: "use* = (p: RawPtr<u8>) i32 { 0 }\ntest* = () i32 { b: RawPtr<u8> := malloc(8)  use(b) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        // R1: passing a read-only `Ptr<T>` where a `MutPtr<T>` is wanted is an arg-type error.
+        src: "Counter*: { n: i32 }\ndo_bump* = (c: MutPtr<Counter>) void { c.n = c.n + 1 }\ntest* = () i32 { c := Counter(n: 0)  p: Ptr<Counter> := c.addr()  do_bump(p)  c.n }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        // R8: assert_nonnull on a non-pointer arg is an arg-type error.
+        src: "test* = () i64 { x := 5  q := assert_nonnull(x)  load(q) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        // Q3: calling a DEFINED non-function local is `not-callable`, distinct from `undefined-name`.
+        src: "test* = () i32 { x := 5  x(3)  0 }",
+        should_pass: false,
+        kind: "not-callable",
     )])
     // statement-position one-armed bool guard now ACCEPTS (was the position-less undefined-name sentinel).
     // value-position one-armed bool match now rejects for the RIGHT reason: a positioned exhaustiveness
