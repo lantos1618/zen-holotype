@@ -838,6 +838,21 @@ oracle_value_run* = () i32 {
         // M1 closure: MULTIPLE captured params, the closure called twice with different args.
         src: "make_lin = (m: i64, b: i64) (i64) i64 { (x: i64) i64 { m * x + b } }\ntest* = () i64 { f := make_lin(3, 7)  f(5) + f(0) }",
         want: "29",
+    ), VCase(
+        // M1.1 DIRECT chained call `make_adder(10)(5)`: the callee is a call-result of closure type, so
+        // the chained-call suffix binds it to a temp and routes through the closure-local call path. Was
+        // a silent miscompile (dropped the capture → 5); must be 15.
+        src: "make_adder = (base: i64) (i64) i64 { (x: i64) i64 { x + base } }\ntest* = () i64 { make_adder(10)(5) }",
+        want: "15",
+    ), VCase(
+        // M1.1 chained call in ARGUMENT position `dbl(make_adder(10)(5))`: `f(a)(b)` must parse anywhere
+        // an expression is valid, not only at statement position. (10+5)*2 = 30.
+        src: "dbl = (n: i64) i64 { n * 2 }\nmake_adder = (base: i64) (i64) i64 { (x: i64) i64 { x + base } }\ntest* = () i64 { dbl(make_adder(10)(5)) }",
+        want: "30",
+    ), VCase(
+        // M1.1 DIRECT chained call over a MULTI-capture closure: make_lin(3, 7)(5) = 3*5 + 7 = 22.
+        src: "make_lin = (m: i64, b: i64) (i64) i64 { (x: i64) i64 { m * x + b } }\ntest* = () i64 { make_lin(3, 7)(5) }",
+        want: "22",
     )])
 }
 // {}-template interpolation core (mirrors std.text.fmt.format's scanner standalone, since
