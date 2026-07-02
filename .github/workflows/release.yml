@@ -1,6 +1,8 @@
 name: Release
 
-# Push a tag like `v0.1.0` to cut a release.
+# Push a tag like `v0.1.0` to cut a release. Runs the same Python-free gate as
+# CI (build + oracle + seed fixpoint), then packages the source tarball and the
+# zenc binary, and dry-runs a build from the tarball before publishing.
 on:
   push:
     tags: ["v*"]
@@ -8,31 +10,28 @@ on:
 permissions:
   contents: write          # create the GitHub release
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dev dependencies
-        run: pip install -r requirements-dev.txt
 
       - name: Build zenc
         run: make -f bootstrap/Makefile zenc
 
-      - name: Tests
-        run: pytest -q
+      - name: Oracle (full)
+        run: make -f bootstrap/Makefile oracle
 
-      - name: Regenerate bootstrap C
+      - name: Seed fixpoint (self-build, committed seed must be byte-exact)
         run: |
-          make -f bootstrap/Makefile regen
-          if ! git diff --quiet -- bootstrap/zenc.gen.c; then
-            echo "::error::bootstrap/zenc.gen.c is stale - run 'make -f bootstrap/Makefile regen' and commit"
-            git diff -- bootstrap/zenc.gen.c
+          ./zenc --build-self bootstrap/zenc.gen.c .
+          if ! git diff --exit-code -- bootstrap/zenc.gen.c; then
+            echo "::error::bootstrap/zenc.gen.c is stale — run 'make -f bootstrap/Makefile regen' and commit the regenerated seed"
             exit 1
           fi
 
@@ -42,19 +41,17 @@ jobs:
           cp zenc dist/zenc
           tar czf dist/zen-${{ github.ref_name }}-src.tar.gz \
             README.md ARCHITECTURE.md CHANGELOG.md FEATURES.md VISION.md \
-            bootstrap zen examples tools tests \
-            pytest.ini requirements.txt requirements-dev.txt
+            bootstrap zen driver.zen examples tests scripts
 
-      - name: Release dry-run
+      - name: Release dry-run (tarball builds and self-checks from scratch)
         run: |
           rm -rf /tmp/relcheck && mkdir -p /tmp/relcheck
           tar xzf dist/zen-${{ github.ref_name }}-src.tar.gz -C /tmp/relcheck
           cd /tmp/relcheck
-          pip install -r requirements-dev.txt
           make -f bootstrap/Makefile zenc
-          pytest -q
+          make -f bootstrap/Makefile oracle-fast
           cp bootstrap/zenc.gen.c /tmp/zenc.gen.c.before
-          make -f bootstrap/Makefile regen
+          ./zenc --build-self bootstrap/zenc.gen.c .
           cmp -s /tmp/zenc.gen.c.before bootstrap/zenc.gen.c
 
       - name: Create GitHub release
