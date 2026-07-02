@@ -721,7 +721,27 @@ oracle_modules_run* = () i32 {
         )],
         entry: "p.zen",
         want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "geo.zen",
+            src: "Point*: { x: i32, y: i32 }\nnorm1* = (p: Point) i32 { p.x + p.y }\nscale* = (p: Point, k: i32) Point { Point(x: p.x * k, y: p.y * k) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "g = geo\nmain = () i32 { g.Point(x: 3, y: 4).scale(2).norm1() }\n",
+        )],
+        entry: "p.zen",
+        want: 14,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "s = std.text.str\nmain = () i32 {\n  name := \"hello\"\n  name.eq(\"hello\").match ({ true => to_i32(name.len()), false => 0 })\n}\n",
+        )],
+        entry: "p.zen",
+        want: 5,
     )])
+    // ── UFCS through module aliases: x.f(a) resolves to alias__f by receiver type ────────────
+    // `g = geo` + `g.Point(…).scale(2).norm1()` — the method chain resolves without flat imports.
+    // `s = std.text.str` + `name.eq(…)` / `name.len()` — std fns as methods through the alias.
     // ── sibling import loading (test_user_imports) ──────────────────────────────────────────
     // ── namespace binds `x = mod` + qualified `x.fn()` (test_user_imports) ───────────────────
     // ── import-head spacing variants all resolve the sibling (test_modules_oracle) ───────────
@@ -1239,6 +1259,92 @@ oracle_modules_run* = () i32 {
         entry: "p.zen",
         should_pass: true,
         needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "aa.zen",
+            src: "Pt*: { v: i32 }\nbump* = (p: Pt, k: i32) Pt { Pt(v: p.v + k) }\n",
+        ), ModFile(
+            name: "bb.zen",
+            src: "a0 = aa\nbump* = (p: a0.Pt, k: i32) a0.Pt { a0.Pt(v: p.v * k) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "x = aa\ny = bb\nmain = () i32 {\n  p := x.Pt(v: 3)\n  p.bump(2).v\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "ambiguous method `bump` on `Pt`",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "aa.zen",
+            src: "Pt*: { v: i32 }\nbump* = (p: Pt, k: i32) Pt { Pt(v: p.v + k) }\n",
+        ), ModFile(
+            name: "bb.zen",
+            src: "a0 = aa\nbump* = (p: a0.Pt, k: i32) a0.Pt { a0.Pt(v: p.v * k) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "x = aa\ny = bb\nmain = () i32 {\n  p := x.Pt(v: 3)\n  x.bump(p, 2).v\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ hidden } = vv\nmain = () i32 { hidden(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "m = vv\nmain = () i32 { m.hidden(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "Secret: { v: i32 }\nshown* = (x: i32) i32 { x + 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "m = vv\nmain = () i32 {\n  s := m.Secret(v: 1)\n  s.v\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ shown } = vv\nm = vv\nmain = () i32 { shown(1) + m.shown(2) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\n",
+        ), ModFile(
+            name: "mid.zen",
+            src: "{ shown } = vv\nwrap* = (x: i32) i32 { shown(x) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ shown } = mid\nmain = () i32 { shown(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
     )])
     // the checker-path dup-fn diagnostic NAMES the colliding symbol (the resolver's rich
     // fail_dup_user only covers imported-user-module vs imported-user-module; entry-vs-dep
@@ -1250,6 +1356,12 @@ oracle_modules_run* = () i32 {
     // should flip to should_pass: true.
     // the dup-fn render carries a real source position: the caret line for the entry-vs-dep
     // collision above points into the DEP module file (multi-module span mapping).
+    // ── UFCS through module aliases: AMBIGUITY rejects positioned, naming both candidates ─────
+    // two aliases provide `bump(Pt, i32)` → `p.bump(2)` rejects; the qualified `x.bump(p, 2)` accepts.
+    // ── visibility: `*` is ENFORCED — error[private-name] ────────────────────────────────────
+    // flat `{ hidden } = vv`, qualified `m.hidden(…)`, and a qualified private TYPE all reject;
+    // exported names accept via both forms; a name the module itself imports stays importable
+    // (transitive re-export — visibility is decided at the defining module).
     // ── the net is NOT hollow: cross-module calls are arity/arg-type checked (test_modules_oracle) ──
     // ── transitive / clash rejections (test_resolver_oracle) ─────────────────────────────────
     // ── namespace-bound diagnostics keep the USER source span (test_user_imports) ────────────

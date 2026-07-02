@@ -10,7 +10,9 @@
 { String } = std.text.string
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
-{ view, eq } = std.text.str
+{ view, eq, is_empty } = std.text.str
+{ render_diagnostic } = compiler.diagnostic
+{ getEnv } = std.os
 is_ws = (b: u8) bool { b == ' ' || b == '\t' }
 lstrip = (s: str, p: i32) i32 { at(s, p).is_ws().match ({ true => s.lstrip(p + 1), false => p }) }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
@@ -244,7 +246,7 @@ line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool { (j == m).ma
 seen_scan = (set: String, name: String, i: i64) bool { (i >= set.len).match ({ true => false, false => set.line_eq(i, name, 0, name.len).match ({ true => true, false => set.seen_scan(name, set.snext_line(i)) }) }) }
 snext_line = (set: String, i: i64) i64 { (i >= set.len).match ({ true => set.len, false => (set.res_sbyte(i) == '\n').match ({ true => i + 1, false => set.snext_line(i + 1) }) }) }
 seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
-add_name = (set: String, a: MutPtr<Malloc>, name: String) String { set.rappend_string(a, name).rpush(a, 10) }
+add_name* = (set: String, a: MutPtr<Malloc>, name: String) String { set.rappend_string(a, name).rpush(a, 10) }
 append_string = (out: String, a: MutPtr<Malloc>, src: String) String {
     cur := out
     bs: [u8] := src.bytes()
@@ -361,7 +363,8 @@ ProvidedSymbol*: {
     imported: bool,
     foreign: bool,
     is_type: bool,
-}
+    is_pub: bool,
+}    // is_pub: the decl name carries the `*` export marker (imported symbols: false)
 ModuleGraph*: {
     imports: [ImportEdge],
     symbols: [ProvidedSymbol],
@@ -484,7 +487,7 @@ fail_import_cycle = (a: MutPtr<Malloc>, inpath: str, id: String) i32 {
     0
 }
 // Probe first so missing modules get a distinct error from unreadable modules.
-file_exists = (path: str) bool {
+file_exists* = (path: str) bool {
     fd := open(path, O_RDONLY, 0)
     (fd >= 0).match ({ true => {
         close(fd)
@@ -1141,6 +1144,7 @@ fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: str, p: i32, out: [ProvidedSym
                             imported: true,
                             foreign: false,
                             is_type: false,
+                            is_pub: false,
                         )
                         idx = idx + 1
                         pos = ie
@@ -1201,6 +1205,7 @@ fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: str, p:
                                     imported: false,
                                     foreign: src.is_foreign_span(sp.start, sp.next),
                                     is_type: sp.is_type,
+                                    is_pub: src.at(ie) == '*',
                                 )
                                 idx = idx + 1
                             },
@@ -1695,7 +1700,7 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: str, p: i32, first: bo
     })
     cur
 }
-strip_ns_into = (out: String, a: MutPtr<Malloc>, s: str, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String, first: bool) String {
+strip_ns_into* = (out: String, a: MutPtr<Malloc>, s: str, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String, first: bool) String {
     hs := a.gstr_string(4096).strip_ns_lines_into(a, s, p, true)
     raw := hs.gstr_finish(a)
     (raw.at(0) == 0).match ({ true => out, false => {
@@ -1774,12 +1779,179 @@ check_parsed_program_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     root := p.module("")
     a.check_linked_kind(root.decls, a.root_link_decls(p))
 }
+// ── VISIBILITY: `*` exports are ENFORCED across modules (error[private-name]) ─────────────────────
+// A top-level name is cross-module visible only when its declaration carries the `*` export marker
+// (`name* = …`, `Type*: …`, `GLOBAL* := …`). Both consumption forms are checked per module, over the
+// ORIGINAL module sources, so the diagnostic points at the exact user line:col:
+//   • flat import heads:    `{ hidden } = mod`                    → error[private-name] at `hidden`
+//   • alias-qualified uses: `m = mod` + `m.hidden(…)`/`m.Hidden`  → error[private-name] at `hidden`
+// A name the target module itself only IMPORTS stays importable (transitive re-export is the one
+// sanctioned pass-through; visibility is decided at the DEFINING module's head). `c = std.io.c`-style
+// aliases skip the qualified scan: their qualifiers are stripped wholesale (strip_all_quals), the
+// module is a raw libc surface. ZEN_VIS_REPORT=1 downgrades the error to a report-only sweep (print
+// every violation, never exit) — the migration mode used to prove the tree clean before enforcing.
+vis_report_mode = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).match ({ true => false, false => true }) }
+// 1-based line number of byte `p` (loop over the source slice, not recursion: sources are large).
+vis_line_of = (s: str, p: i32) i32 {
+    n := 1
+    bs: [u8] := s.view()
+    bs.loop((h, i, b) {
+        (to_i32(i) >= p).match ({ true => {
+            h.break
+        }, false => (b == '\n').match ({ true => {
+            n = n + 1
+        }, false => { } }) })
+    })
+    n
+}
+// start of the line containing `p` (backward scan; lines are short, recursion is bounded).
+vis_bol = (s: str, p: i32) i32 { (p <= 0).match ({ true => 0, false => (s.at(p - 1) == '\n').match ({ true => p, false => s.vis_bol(p - 1) }) }) }
+vis_fail = (a: MutPtr<Malloc>, path: str, src: str, pos: i32, width: i32, name: String, id: String, report: bool) i32 {
+    line := src.vis_line_of(pos)
+    col := pos - src.vis_bol(pos) + 1
+    m0 := a.gstr_string(192).gstr_append(a, "`")
+    m1 := a.mappend_string(m0, name)
+    m2 := m1.gstr_append(a, "` is private in module '")
+    m3 := a.mappend_id_name(m2, id)
+    msg := m3.gstr_append(a, "' (its declaration has no `*` export)").gstr_finish(a)
+    h0 := a.gstr_string(128).gstr_append(a, "export it with `")
+    h1 := a.mappend_string(h0, name)
+    hint := h1.gstr_append(a, "*` in the defining module, or use the module's public surface").gstr_finish(a)
+    eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1))
+    report.match ({ true => 0, false => exit(1) })
+}
+// does `name` match a symbol the target module DEFINES but does not export? (imported symbols
+// pass through — re-export; unknown names are left to the existing unknown-name validation.)
+vis_symbol_private = (symbols: [ProvidedSymbol], name: str) bool {
+    priv := false
+    found := false
+    symbols.loop((h, i, s) {
+        found.match ({ true => { }, false => s.symbol_matches(name).match ({ true => {
+            found = true
+            priv = s.imported.match ({ true => false, false => s.is_pub.match ({ true => false, false => true }) })
+        }, false => { } }) })
+    })
+    priv
+}
+// flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
+vis_check_head = (a: MutPtr<Malloc>, path: str, src: str, p: i32, target: ModuleGraph, id: String, report: bool) i32 {
+    pos := src.lstrip(p) + 1
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => (b == '}' || b == 0).match ({ true => {
+            h.break
+        }, false => b.is_alpha().match ({ true => {
+            ie := src.res_ident_end(pos)
+            hd := a.mimport_head_name(src, pos, ie)
+            target.symbols.vis_symbol_private(hd.gstr_finish(a)).match ({ true => {
+                a.vis_fail(path, src, pos, ie - pos, a.mimport_name_span(src, pos, ie), id, report)
+            }, false => { } })
+            pos = ie
+        }, false => {
+            pos = pos + 1
+        } }) }) })
+    })
+    0
+}
+// skip past a (possibly unterminated) `/* … */` block comment without copying.
+vis_skip_block = (s: str, p: i32) i32 {
+    pos := p + 2
+    bs: [u8] := s.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
+            h.break
+        }, false => (b == '*' && s.at(ii + 1) == '/').match ({ true => {
+            pos = ii + 2
+            h.break
+        }, false => {
+            pos = ii + 1
+        } }) }) })
+    })
+    pos
+}
+// skip past a quoted literal (string or char) without copying, honoring escapes.
+vis_skip_lit = (s: str, p: i32) i32 {
+    q := s.at(p)
+    pos := p
+    esc := false
+    bs: [u8] := s.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
+            h.break
+        }, false => {
+            pos = pos + 1
+            esc.match ({ true => {
+                esc = false
+            }, false => (b == '\\').match ({ true => {
+                esc = true
+            }, false => (ii > p && b == q).match ({ true => {
+                h.break
+            }, false => { } }) }) })
+        } }) })
+    })
+    pos
+}
+// s[p..e) == w, byte-exact (idents are short; recursion is bounded).
+vis_span_eq_at = (s: str, p: i32, e: i32, w: String, j: i64) bool { (p + to_i32(j) == e).match ({ true => j == w.len, false => (j < w.len && s.at(p + to_i32(j)) == w.res_sbyte(j)).match ({ true => s.vis_span_eq_at(p, e, w, j + 1), false => false }) }) }
+// alias-qualified uses `alias.name` in `src`: `name` must be exported by the aliased module.
+// Comment/string spans are skipped; the ident-boundary + dot shape mirrors rewrite_quals exactly,
+// so anything the rewriter WOULD have resolved is what gets visibility-checked.
+vis_scan_quals = (a: MutPtr<Malloc>, path: str, src: str, alias: String, target: ModuleGraph, id: String, report: bool) i32 {
+    pos := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
+            h.break
+        }, false => src.line_comment_at(pos).match ({ true => {
+            pos = src.next_line(pos)
+        }, false => src.block_comment_at(pos).match ({ true => {
+            pos = src.vis_skip_block(pos)
+        }, false => src.quoted_at(pos).match ({ true => {
+            pos = src.vis_skip_lit(pos)
+        }, false => (b.is_alpha() && (pos == 0 || src.at(pos - 1).is_alnum().match ({ true => false, false => true }))).match ({ true => {
+            ie := src.res_ident_end(pos)
+            (src.vis_span_eq_at(pos, ie, alias, 0) && src.at(ie) == '.' && src.at(ie + 1).is_alpha()).match ({ true => {
+                me := src.res_ident_end(ie + 1)
+                nm := a.mimport_name_span(src, ie + 1, me)
+                target.symbols.vis_symbol_private(nm.gstr_finish(a)).match ({ true => {
+                    a.vis_fail(path, src, ie + 1, me - ie - 1, a.mimport_name_span(src, ie + 1, me), id, report)
+                }, false => { } })
+                pos = me
+            }, false => {
+                pos = ie
+            } })
+        }, false => {
+            pos = pos + 1
+        } }) }) }) }) }) })
+    })
+    0
+}
+vis_enforce_edge = (a: MutPtr<Malloc>, table: ModuleTable, path: str, src: str, edge: ImportEdge, report: bool) i32 {
+    id := edge.edge_id_in(a)
+    table.has_id(id).match ({ true => {
+        entry := table.module_id(id)
+        edge.namespace.match ({ true => id.id_is_std_io_c().match ({ true => 0, false => a.vis_scan_quals(path, src, edge.edge_alias_in(a), entry.graph, id, report) }), false => a.vis_check_head(path, src, edge.start, entry.graph, id, report) })
+    }, false => 0 })
+}
+enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
+    table.modules.loop((h, i, entry) {
+        entry.graph.imports.loop((h2, j, edge) {
+            a.vis_enforce_edge(table, entry.path, entry.source, edge, report)
+        })
+    })
+    0
+}
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
     a.scan_dotted_imports(inpath, mainsrc)
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
+    a.enforce_visibility(table, vis_report_mode())
     ns := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
     nsl := ns.c.out.len
     body := ns.c.out.strip_ns_into(a, mainsrc, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, ns.c.out.len == 0)
