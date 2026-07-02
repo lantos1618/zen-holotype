@@ -3,6 +3,7 @@
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
+{ expect } = std.core.result
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
 { eq, is_empty, starts_with, ends_with } = std.text.str
@@ -3207,11 +3208,22 @@ mu_ty_is_container = (t: Ty) bool {
         _           => false,
     })
 }
-// the `(Self, …) Self` shape: first param and return are the SAME non-pointer, non-primitive type.
+// does `ret` hand back the (possibly realloc'd) container `p0`? Two spellings: plain `(Self, …) Self`,
+// and the Result-always mold `(Self, …) Result<Self, E>` (Map.put/append/grow return the updated
+// container in the Ok payload — the receiver header is invalidated all the same, so a discard is
+// exactly as dangerous).
+mu_ret_is_self = (ret: Ty, p0: Ty) bool {
+    ret.match ({
+        .Generic(g) => eq(g.name, "Result").match ({ true => g.args.len >= 1 && g.args[0].mu_ty_is_container() && eq(g.args[0].recv_name(), p0.recv_name()), false => eq(ret.recv_name(), p0.recv_name()) }),
+        _           => eq(ret.recv_name(), p0.recv_name()),
+    })
+}
+// the `(Self, …) Self` / `(Self, …) Result<Self, E>` shape: first param and (Ok-unwrapped) return are
+// the SAME non-pointer, non-primitive type.
 mu_is_value_mold = (f: Func) bool {
     (f.params.len == 0).match ({ true => false, false => {
         p0 := f.params[0].ty
-        (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({ true => eq(p0.recv_name(), f.ret.recv_name()), false => false })
+        (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({ true => f.ret.mu_ret_is_self(p0), false => false })
     } })
 }
 mu_methods_have = (methods: [Param], m: str) bool {
@@ -3237,14 +3249,14 @@ mu_index_methods = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64
         vm := a.mu_func_value_mold(decls, idx, ty, p.name)
         prev := m.get(p.name, 0)
         next: i64 := vm.match ({ true => (prev == 0).match ({ true => 1, false => (prev == 1).match ({ true => 1, false => 2 }) }), false => 2 })
-        a.mu_index_methods(decls, idx, m.put(a, p.name, next), ty, methods, j + 1)
+        a.mu_index_methods(decls, idx, m.put(a, p.name, next).expect("check: method-mold index alloc"), ty, methods, j + 1)
     } })
 }
 mu_index_impl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64>, im: ImplData) Map<i64> { eq(im.ty, im.trname).match ({ true => a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0), false => m }) }
 // method name → 1 iff it is an inherent method AND value-mold on EVERY struct that declares it.
 mu_build_index = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
     seed: i64 := 0 - 1
-    m := of(a, "", seed)
+    m := of(a, "", seed).expect("check: method-mold index alloc")
     decls.loop((h, i, d) {
         m = d.match ({
             .DImpl(im) => a.mu_index_impl(decls, idx, m, im),
@@ -4100,10 +4112,17 @@ sx_is_acquire = (e: Ptr<Expr>) bool {
         _               => false,
     })
 }
+// `make_in(…)` bare, or the Result-unified `make_in(…).expect(…)` — the arena constructor returns
+// Result<Arena, IoError> now, so the textbook scratch shape carries an `.expect` wrapper; unwrap it
+// (an `.expect` whose receiver is NOT a scratch source still classifies clean, e.g. Arc `new_in`).
 sx_is_make_in = (e: Ptr<Expr>) bool {
     load(e).match ({
-        .Call(c)        => eq(c.fn, "make_in") && c.args.len >= 1,
-        .MethodCall(mc) => eq(mc.method, "make_in"),
+        .Call(c)        => eq(c.fn, "make_in") && c.args.len >= 1 || eq(c.fn, "expect") && c.args.len >= 1 && c.args[0].match ({
+            .Call(c2)        => eq(c2.fn, "make_in") && c2.args.len >= 1,
+            .MethodCall(mc2) => eq(mc2.method, "make_in"),
+            _                => false,
+        }),
+        .MethodCall(mc) => eq(mc.method, "make_in") || eq(mc.method, "expect") && mc.recv.sx_is_make_in(),
         _               => false,
     })
 }

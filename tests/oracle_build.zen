@@ -52,19 +52,19 @@ ShellCase*: {
 }
 // helper: build the command body  `./zenc build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
 build_cmd = (mp: MutPtr<Malloc>, path: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "./zenc build ")
-    s = s.append_in(mp, path)
-    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null")
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "./zenc build ").expect("oracle: oom")
+    s = s.append_in(mp, path).expect("oracle: oom")
+    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null").expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 // helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
 // (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
 run_cmd = (mp: MutPtr<Malloc>, want_exit: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ")
-    s = s.append_in(mp, want_exit)
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ").expect("oracle: oom")
+    s = s.append_in(mp, want_exit).expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 // run ONE build fixture: build must succeed, then exit code (+ optional stdout) must match.
 run_fixture* = (fc: FixtureCase) bool {
@@ -96,13 +96,13 @@ run_fixtures* = (name: str, cs: [FixtureCase]) i32 {
 }
 // helper: build a one-arg command  `./zenc <verb> <path> <redirect>`
 cmd_for = (mp: MutPtr<Malloc>, verb: str, path: str, redirect: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "./zenc ")
-    s = s.append_in(mp, verb)
-    s = s.append_in(mp, " ")
-    s = s.append_in(mp, path)
-    s = s.append_in(mp, redirect)
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "./zenc ").expect("oracle: oom")
+    s = s.append_in(mp, verb).expect("oracle: oom")
+    s = s.append_in(mp, " ").expect("oracle: oom")
+    s = s.append_in(mp, path).expect("oracle: oom")
+    s = s.append_in(mp, redirect).expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
 all_present_absent = (txt: str, present: [str], absent: [str]) bool {
@@ -783,7 +783,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/vec_try_result.zen",
+        path: "tests/fixtures/zen/vec_result.zen",
         want_exit: "0",
         want_out: "",
         check_out: false,
@@ -853,7 +853,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/map_try_result.zen",
+        path: "tests/fixtures/zen/map_result.zen",
         want_exit: "0",
         want_out: "",
         check_out: false,
@@ -1221,8 +1221,8 @@ oracle_build_run* = () i32 {
         absent: ["print_owned", "print_int", "println_int", "try_write_int_in", "try_write_float_in"],
     ), DocCase(
         target: "std.text.string",
-        present: ["init*<A>", "new_in*<A>", "try_init*<A>", "try_new_in*<A>"],
-        absent: ["try_new*<A>", "new* = "],
+        present: ["init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError>", "new_in*<A> = (a: MutPtr<A>) Result<String, IoError>"],
+        absent: ["try_init", "try_new", "new* = "],
     ), DocCase(
         target: "std.mem.own",
         present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Own<T>, IoError>"],
@@ -1273,32 +1273,32 @@ oracle_build_run* = () i32 {
         absent: ["buf_of", "new_i32", "new_u8"],
     ), DocCase(
         target: "std.mem.arena",
-        present: ["make_in*<A>", "try_make_in*<A>"],
-        absent: ["arena_new", "try_arena_new"],
+        present: ["make_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError>"],
+        absent: ["try_make_in", "arena_new", "try_arena_new"],
     ), DocCase(
         target: "std.collections.vec",
-        present: ["of*<T, A>", "try_of*<T, A>"],
-        absent: ["vec_of", "try_vec_of", "vpush", "vgrow", "vfree", "vitems", "vlen"],
+        present: ["of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError>", "empty*<T, A>"],
+        absent: ["try_of", "try_push", "try_grow", "vec_of", "try_vec_of", "vpush", "vgrow", "vfree", "vitems", "vlen"],
     ), DocCase(
         target: "std.collections.map",
-        present: ["of*<T, A>", "try_of*<T, A>"],
-        absent: ["map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
+        present: ["of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError>", "int_of*<V, A> = (a: MutPtr<A>, seed_key: i64, seed_val: V) Result<IntMap<V>, IoError>"],
+        absent: ["try_of", "try_put", "try_append", "try_int_of", "map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
     ), DocCase(
         target: "std.collections.iter",
         present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError>"],
         absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<A> = (a: MutPtr<A>, xs: [i32]", "try_map", "try_filter"],
     ), DocCase(
         target: "std.mem.trace",
-        present: ["Rc*<T>: {", "tracked_in*<A, T>", "tracked*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T>", "try_tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError>", "root_in*<A, T>", "root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void", "try_root_in*<A, T>", "try_root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Rc<Node>, child: Rc<Node>) void", "collect_in*<A>", "collect*<A> = (alloc: MutPtr<A>) void", "try_collect_in*<A>", "try_collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError>"],
-        absent: ["tracked*<T> = (x: T)", "collect* = () void", "hcount*", "list_push*", "trace_child*", "node_set_kid*", "cc_mark*", "blk_drop*", "trace_child", "node_set_kid", "hcount", "list_push", "cc_mark", "blk_drop"],
+        present: ["Rc*<T>: {", "tracked_in*<A, T>", "tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError>", "root_in*<A, T>", "root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Rc<Node>, child: Rc<Node>) void", "collect_in*<A>", "collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError>"],
+        absent: ["tracked*<T> = (x: T)", "collect* = () void", "hcount*", "list_push*", "trace_child*", "node_set_kid*", "cc_mark*", "blk_drop*", "trace_child", "node_set_kid", "hcount", "list_push", "cc_mark", "blk_drop", "try_tracked", "try_root", "try_collect"],
     ), DocCase(
         target: "std.text.str",
-        present: ["dup_bytes*<A> = (a: MutPtr<A>, s: str) [u8]", "try_dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>", "substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str", "try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>", "at* = (s: str, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: str) Result<i64, ParseError>", "what made try_parse_int refuse"],
-        absent: ["char_at", "str_parse_int"],
+        present: ["dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>", "dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>", "substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>", "substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>", "at* = (s: str, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: str) Result<i64, ParseError>", "what made try_parse_int refuse"],
+        absent: ["try_dup_bytes", "try_substr", "char_at", "str_parse_int"],
     ), DocCase(
         target: "std.text.num",
-        present: ["integer_in*<A> = (a: MutPtr<A>, n: i64) String", "integer*<A> = (a: MutPtr<A>, n: i64) String", "try_integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "try_integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "float_in*<A> = (a: MutPtr<A>, x: f64) String", "float*<A> = (a: MutPtr<A>, x: f64) String", "try_float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>", "try_float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>"],
-        absent: ["int_string", "float_string", "int_to_str", "float_to_str"],
+        present: ["integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "uinteger_in*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError>", "float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>", "float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>"],
+        absent: ["try_integer", "try_uinteger", "try_float", "int_string", "float_string", "int_to_str", "float_to_str"],
     ), DocCase(
         target: "std.io.file",
         present: ["out* = (s: str) i64", "out_bytes* = (bytes: [u8]) i64", "contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError>", "contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError>", "save* = (path: str, data: str, n: i64) Result<i64, IoError>", "shell* = (cmd: str) i32", "Reads a whole file into an allocator-owned NUL-terminated buffer."],

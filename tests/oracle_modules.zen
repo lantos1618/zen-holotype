@@ -31,6 +31,7 @@
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, is_empty, view } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
+{ expect } = std.core.result
 { integer_in } = std.text.num
 { zo_path, zo_cmd } = oracle_lib
 // one source file of a project: `name` is the basename (e.g. "p.zen"), `src` its full text.
@@ -75,64 +76,64 @@ ModStdinCase*: {
 mod_dir = (mp: MutPtr<Malloc>) str { mp.zo_path("zo_mods/") }
 // concat two / three strings through an allocator-owned String (no fixed-buffer assumptions).
 join2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, a)
-    s = s.append_in(mp, b)
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, a).expect("oracle: oom")
+    s = s.append_in(mp, b).expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 join3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, a)
-    s = s.append_in(mp, b)
-    s = s.append_in(mp, c)
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, a).expect("oracle: oom")
+    s = s.append_in(mp, b).expect("oracle: oom")
+    s = s.append_in(mp, c).expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 // concat an arbitrary list of pieces through an allocator-owned String.
 joinv = (mp: MutPtr<Malloc>, parts: [str]) str {
-    s := mp.new_in()
+    s := mp.new_in().expect("oracle: oom")
     parts.loop((h, i, p) {
-        s = s.append_in(mp, p)
+        s = s.append_in(mp, p).expect("oracle: oom")
     })
-    mp.finish_in(s)
+    mp.finish_in(s).expect("oracle: oom")
 }
 // ── source generators (for the recursion-depth / stack-growth stress cases) ──────────────────────
 // "v0* = () i32 { 0 }\n" … "v{n-1}* = () i32 { (i%10) }\n" — an n-decl module body.
 gen_decls = (mp: MutPtr<Malloc>, n: i32) str {
-    s := mp.new_in()
+    s := mp.new_in().expect("oracle: oom")
     i := 0
     @while (i < n) {
-        s = s.append_in(mp, "v")
-        s = s.append_in(mp, mp.integer_in(to_i64(i)).finish_in(mp))
-        s = s.append_in(mp, "* = () i32 { ")
-        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).finish_in(mp))
-        s = s.append_in(mp, " }\n")
+        s = s.append_in(mp, "v").expect("oracle: oom")
+        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect("oracle: oom").finish_in(mp).expect("oracle: oom")).expect("oracle: oom")
+        s = s.append_in(mp, "* = () i32 { ").expect("oracle: oom")
+        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).expect("oracle: oom").finish_in(mp).expect("oracle: oom")).expect("oracle: oom")
+        s = s.append_in(mp, " }\n").expect("oracle: oom")
         i = i + 1
     }
-    mp.finish_in(s)
+    mp.finish_in(s).expect("oracle: oom")
 }
 // "v0, v1, … v{n-1}" — a comma-separated import-head name list.
 gen_names = (mp: MutPtr<Malloc>, n: i32) str {
-    s := mp.new_in()
+    s := mp.new_in().expect("oracle: oom")
     i := 0
     @while (i < n) {
         (i > 0).match ({ true => {
-            s = s.append_in(mp, ", ")
+            s = s.append_in(mp, ", ").expect("oracle: oom")
         } })
-        s = s.append_in(mp, "v")
-        s = s.append_in(mp, mp.integer_in(to_i64(i)).finish_in(mp))
+        s = s.append_in(mp, "v").expect("oracle: oom")
+        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect("oracle: oom").finish_in(mp).expect("oracle: oom")).expect("oracle: oom")
         i = i + 1
     }
-    mp.finish_in(s)
+    mp.finish_in(s).expect("oracle: oom")
 }
 // `chunk` repeated `n` times.
 gen_repeat = (mp: MutPtr<Malloc>, chunk: str, n: i32) str {
-    s := mp.new_in()
+    s := mp.new_in().expect("oracle: oom")
     i := 0
     @while (i < n) {
-        s = s.append_in(mp, chunk)
+        s = s.append_in(mp, chunk).expect("oracle: oom")
         i = i + 1
     }
-    mp.finish_in(s)
+    mp.finish_in(s).expect("oracle: oom")
 }
 // fresh temp project dir, then every file written into it (paths are mod_dir + basename).
 write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
@@ -466,21 +467,21 @@ oracle_modules_run* = () i32 {
             src: "of* = (n: i32) i32 { n + 5 }\n",
         ), ModFile(
             name: "p.zen",
-            src: "vec = std.collections.vec\nmaps = std.collections.map\nright = right\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  v := vec.of(a, [10, 20])\n  m := maps.of(a, \"x\", 1)\n  ok := v.get(0) + v.get(1) + m.get(\"x\", 0) + right.of(6)\n  v.free(alloc.addr())\n  m.free(alloc.addr())\n  ok\n}\n",
+            src: "vec = std.collections.vec\nmaps = std.collections.map\n{ expect } = std.core.result\nright = right\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  v := vec.of(a, [10, 20]).expect(\"of\")\n  m := maps.of(a, \"x\", 1).expect(\"of\")\n  ok := v.get(0) + v.get(1) + m.get(\"x\", 0) + right.of(6)\n  v.free(alloc.addr())\n  m.free(alloc.addr())\n  ok\n}\n",
         )],
         entry: "p.zen",
         want: 42,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "vec = std.collections.vec\nheap = std.mem.heap\nsum = (v: vec.Vec<i32>) i32 { v.get(0) + v.get(1) }\nmain = () i32 {\n  h := heap.gpa()\n  v := vec.of(h.addr(), [19, 23])\n  v.sum()\n}\n",
+            src: "vec = std.collections.vec\n{ expect } = std.core.result\nheap = std.mem.heap\nsum = (v: vec.Vec<i32>) i32 { v.get(0) + v.get(1) }\nmain = () i32 {\n  h := heap.gpa()\n  v := vec.of(h.addr(), [19, 23]).expect(\"of\")\n  v.sum()\n}\n",
         )],
         entry: "p.zen",
         want: 42,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "slice = std.core.slice\n{ expect } = std.core.result\ntext = std.text.str\nheap = std.mem.heap\nmain = () i32 {\n  h := heap.gpa()\n  nums := slice.dup(h.addr(), [10, 20]).expect(\"dup\")\n  bytes := text.dup_bytes(h.addr(), \"ab\")\n  ok := (nums[0] == 10) && (nums[1] == 20) && (bytes[0] == 'a') && (bytes[1] == 'b')\n  ok.match({ true => 0, false => 1 })\n}\n",
+            src: "slice = std.core.slice\n{ expect } = std.core.result\ntext = std.text.str\nheap = std.mem.heap\nmain = () i32 {\n  h := heap.gpa()\n  nums := slice.dup(h.addr(), [10, 20]).expect(\"dup\")\n  bytes := text.dup_bytes(h.addr(), \"ab\").expect(\"dupb\")\n  ok := (nums[0] == 10) && (nums[1] == 20) && (bytes[0] == 'a') && (bytes[1] == 'b')\n  ok.match({ true => 0, false => 1 })\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -521,7 +522,7 @@ oracle_modules_run* = () i32 {
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "arena = std.mem.arena\nrc = std.mem.rc\narc = std.mem.arc\nown = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc := halloc.gpa()\n  ar := arena.make_in(alloc.addr(), 64)\n  r := rc.new_in(alloc.addr(), 11).expect(\"rc\")\n  a := arc.new_in(alloc.addr(), 13).expect(\"arc\")\n  o := own.new_in(alloc.addr(), own.Resource(id: 17, slot: 0)).expect(\"own\")\n  ok := (ar.addr().used() == 0) && (r.get() == 11) && (a.get() == 13) && (o.get().id == 17)\n  ar.addr().free_in(alloc.addr())\n  r.drop_in(alloc.addr())\n  a.drop_in(alloc.addr())\n  o.release_in(alloc.addr())\n  ok.match({ true => 0, false => 1 })\n}\n",
+            src: "arena = std.mem.arena\nrc = std.mem.rc\narc = std.mem.arc\nown = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc := halloc.gpa()\n  ar := arena.make_in(alloc.addr(), 64).expect(\"arena\")\n  r := rc.new_in(alloc.addr(), 11).expect(\"rc\")\n  a := arc.new_in(alloc.addr(), 13).expect(\"arc\")\n  o := own.new_in(alloc.addr(), own.Resource(id: 17, slot: 0)).expect(\"own\")\n  ok := (ar.addr().used() == 0) && (r.get() == 11) && (a.get() == 13) && (o.get().id == 17)\n  ar.addr().free_in(alloc.addr())\n  r.drop_in(alloc.addr())\n  a.drop_in(alloc.addr())\n  o.release_in(alloc.addr())\n  ok.match({ true => 0, false => 1 })\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -531,14 +532,14 @@ oracle_modules_run* = () i32 {
             src: "integer* = (n: i32) i32 { n + 1 }\nfloat* = (n: i32) i32 { n + 2 }\n",
         ), ModFile(
             name: "p.zen",
-            src: "halloc = std.mem.heap\n{ finish_in } = std.text.string\nnum = std.text.num\nright = right\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nmain = () i32 {\n  heap := halloc.gpa()\n  hp := heap.addr()\n  i := num.integer(hp, -12).finish_in(hp)\n  f := num.float(hp, 1.5).finish_in(hp)\n  ok := eq(i, \"-12\") && eq(f, \"1.5\") && (right.integer(10) == 11) && (right.float(10) == 12)\n  ok.to_exit()\n}\n",
+            src: "halloc = std.mem.heap\n{ finish_in } = std.text.string\n{ expect } = std.core.result\nnum = std.text.num\nright = right\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nmain = () i32 {\n  heap := halloc.gpa()\n  hp := heap.addr()\n  i := num.integer(hp, -12).expect(\"int\").finish_in(hp).expect(\"fin\")\n  f := num.float(hp, 1.5).expect(\"flt\").finish_in(hp).expect(\"fin\")\n  ok := eq(i, \"-12\") && eq(f, \"1.5\") && (right.integer(10) == 11) && (right.float(10) == 12)\n  ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ integer_in, float_in, try_integer_in, try_float_in } = std.text.num\nhalloc = std.mem.heap\n{ eq } = std.text.str\n{ finish_in } = std.text.string\n{ to_exit } = std.core.bool\nmain = () i32 {\n  a := halloc.gpa()\n  i := a.addr().integer_in(-12)\n  f := a.addr().float_in(1.5)\n  ok_fast := eq(a.addr().finish_in(i), \"-12\") && eq(a.addr().finish_in(f), \"1.5\")\n  ri := a.addr().try_integer_in(42)\n  rf := a.addr().try_float_in(42.25)\n  ok_try := ri.match({ .Ok(x) => eq(a.addr().finish_in(x), \"42\"), .Err(e) => false }) && rf.match({ .Ok(x) => eq(a.addr().finish_in(x), \"42.25\"), .Err(e) => false })\n  (ok_fast && ok_try).to_exit()\n}\n",
+            src: "{ integer_in, float_in } = std.text.num\nhalloc = std.mem.heap\n{ expect } = std.core.result\n{ eq } = std.text.str\n{ finish_in } = std.text.string\n{ to_exit } = std.core.bool\nmain = () i32 {\n  a := halloc.gpa()\n  i := a.addr().integer_in(-12).expect(\"int\")\n  f := a.addr().float_in(1.5).expect(\"flt\")\n  ok_fast := eq(a.addr().finish_in(i).expect(\"fin\"), \"-12\") && eq(a.addr().finish_in(f).expect(\"fin\"), \"1.5\")\n  ri := a.addr().integer_in(42)\n  rf := a.addr().float_in(42.25)\n  ok_try := ri.match({ .Ok(x) => eq(a.addr().finish_in(x).expect(\"fin\"), \"42\"), .Err(e) => false }) && rf.match({ .Ok(x) => eq(a.addr().finish_in(x).expect(\"fin\"), \"42.25\"), .Err(e) => false })\n  (ok_fast && ok_try).to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -565,7 +566,7 @@ oracle_modules_run* = () i32 {
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ to_exit } = std.core.bool\n{ String, new_in } = std.text.string\n{ Result, IoError, expect } = std.core.result\nheap = std.mem.heap\nactor = std.concurrent.actor\nColour*: { r: u8, g: u8, b: u8 }\nhex_digit = (n: u8) u8 { (n < 10).match({ true => '0' + n, false => ('a' + n) - 10 }) }\npush_byte<A> = (s: String, a: MutPtr<A>, v: u8) String {\n    s2 := s.push_in(a, hex_digit(v / 16))\n    s2.push_in(a, hex_digit(v % 16))\n}\nPixelMsg*: Draw(Colour) | Clear\nCanvas*: { drawn: i32 }\nCanvas.impl(actor.Receiver<PixelMsg>, {\n    receive = (cv: MutPtr<Canvas>, ctx: actor.Context<PixelMsg>) void {\n        ctx.msg.match({ .Draw(c) => { cv.drawn = cv.drawn + 1 }, .Clear => { cv.drawn = 0 } })\n    }\n})\nmain = () i32 {\n  h := heap.gpa()\n  a := h.addr()\n  c := Colour(r: 255, g: 128, b: 0)\n  s := a.new_in().push_in(a, '#').push_byte(a, c.r).push_byte(a, c.g).push_byte(a, c.b)\n  hx := s.finish_in(a)\n  canvas_r: Result<actor.ActorHandle<PixelMsg, Canvas>, IoError> := actor.spawn(a, 8, Canvas(drawn: 0))\n  canvas := canvas_r.expect(\"spawn canvas\")\n  canvas.send(.Draw(c))\n  canvas.send(.Clear)\n  canvas.send(.Draw(c))\n  canvas.run()\n  canvas.free(a)\n  ok := (hx.at(0) == '#') && (hx.at(1) == 'f') && (hx.at(2) == 'f') && (hx.at(3) == '8')\n  ok.to_exit()\n}\n",
+            src: "{ to_exit } = std.core.bool\n{ String, new_in } = std.text.string\n{ Result, IoError, expect } = std.core.result\nheap = std.mem.heap\nactor = std.concurrent.actor\nColour*: { r: u8, g: u8, b: u8 }\nhex_digit = (n: u8) u8 { (n < 10).match({ true => '0' + n, false => ('a' + n) - 10 }) }\npush_byte<A> = (s: String, a: MutPtr<A>, v: u8) String {\n    s2 := s.push_in(a, hex_digit(v / 16)).expect(\"push\")\n    s2.push_in(a, hex_digit(v % 16)).expect(\"push\")\n}\nPixelMsg*: Draw(Colour) | Clear\nCanvas*: { drawn: i32 }\nCanvas.impl(actor.Receiver<PixelMsg>, {\n    receive = (cv: MutPtr<Canvas>, ctx: actor.Context<PixelMsg>) void {\n        ctx.msg.match({ .Draw(c) => { cv.drawn = cv.drawn + 1 }, .Clear => { cv.drawn = 0 } })\n    }\n})\nmain = () i32 {\n  h := heap.gpa()\n  a := h.addr()\n  c := Colour(r: 255, g: 128, b: 0)\n  s := a.new_in().expect(\"new\").push_in(a, '#').expect(\"push\").push_byte(a, c.r).push_byte(a, c.g).push_byte(a, c.b)\n  hx := s.finish_in(a).expect(\"fin\")\n  canvas_r: Result<actor.ActorHandle<PixelMsg, Canvas>, IoError> := actor.spawn(a, 8, Canvas(drawn: 0))\n  canvas := canvas_r.expect(\"spawn canvas\")\n  canvas.send(.Draw(c))\n  canvas.send(.Clear)\n  canvas.send(.Draw(c))\n  canvas.run()\n  canvas.free(a)\n  ok := (hx.at(0) == '#') && (hx.at(1) == 'f') && (hx.at(2) == 'f') && (hx.at(3) == '8')\n  ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -633,42 +634,42 @@ oracle_modules_run* = () i32 {
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\n{ import_edges } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\narena = std.mem.arena\nmain = () i32 {\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 4096)\n    src := \"{ println } = std.text.fmt\\nactor = std.concurrent.actor\\nhelper = helper\\nmain = () i32 { 0 }\\n\"\n    edges := a.addr().import_edges(src)\n    ok := (edges.len == 3)\n        && (!edges[0].namespace) && eq(edges[0].module, \"std/text/fmt\") && eq(edges[0].alias, \"\") && (edges[0].start == 0) && (edges[0].next == 27)\n        && edges[1].namespace && eq(edges[1].module, \"std/concurrent/actor\") && eq(edges[1].alias, \"actor\") && (edges[1].start == 27) && (edges[1].next == 56)\n        && edges[2].namespace && eq(edges[2].module, \"u/helper\") && eq(edges[2].alias, \"helper\") && (edges[2].start == 56) && (edges[2].next == 72)\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
+            src: "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ import_edges } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\narena = std.mem.arena\nmain = () i32 {\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 4096).expect(\"arena\")\n    src := \"{ println } = std.text.fmt\\nactor = std.concurrent.actor\\nhelper = helper\\nmain = () i32 { 0 }\\n\"\n    edges := a.addr().import_edges(src).expect(\"edges\")\n    ok := (edges.len == 3)\n        && (!edges[0].namespace) && eq(edges[0].module, \"std/text/fmt\") && eq(edges[0].alias, \"\") && (edges[0].start == 0) && (edges[0].next == 27)\n        && edges[1].namespace && eq(edges[1].module, \"std/concurrent/actor\") && eq(edges[1].alias, \"actor\") && (edges[1].start == 27) && (edges[1].next == 56)\n        && edges[2].namespace && eq(edges[2].module, \"u/helper\") && eq(edges[2].alias, \"helper\") && (edges[2].start == 56) && (edges[2].next == 72)\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ Allocator, Heap } = std.mem.alloc\nhalloc = std.mem.heap\n{ Result, IoError } = std.core.result\n{ ImportEdge, try_import_edges } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nLimitAlloc: { heap: Heap, left: i32 }\nLimitAlloc.impl(Allocator, {\n    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {\n        (a.left <= 0).match({\n            true => null_ptr(),\n            false => {\n                a.left = a.left - 1\n                a.heap.addr().acquire(n)\n            }\n        })\n    }\n    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { a.heap.addr().release(p) }\n})\nfailed = (r: Result<[ImportEdge], IoError>) bool {\n    r.match({ .Err(e) => true, .Ok(xs) => false })\n}\nmain = () i32 {\n    src := \"right = right\\n\"\n    none := LimitAlloc(heap: halloc.gpa(), left: 0)\n    only_slice := LimitAlloc(heap: halloc.gpa(), left: 1)\n    no_alias := LimitAlloc(heap: halloc.gpa(), left: 2)\n    enough := LimitAlloc(heap: halloc.gpa(), left: 3)\n    r0: Result<[ImportEdge], IoError> := none.addr().try_import_edges(src)\n    r1: Result<[ImportEdge], IoError> := only_slice.addr().try_import_edges(src)\n    r2: Result<[ImportEdge], IoError> := no_alias.addr().try_import_edges(src)\n    r3: Result<[ImportEdge], IoError> := enough.addr().try_import_edges(src)\n    ok3 := r3.match({\n        .Ok(edges) => (edges.len == 1) && edges[0].namespace && eq(edges[0].module, \"u/right\") && eq(edges[0].alias, \"right\"),\n        .Err(e) => false\n    })\n    (r0.failed() && r1.failed() && r2.failed() && ok3).to_exit()\n}\n",
+            src: "{ Allocator, Heap } = std.mem.alloc\nhalloc = std.mem.heap\n{ Result, IoError } = std.core.result\n{ ImportEdge, import_edges } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nLimitAlloc: { heap: Heap, left: i32 }\nLimitAlloc.impl(Allocator, {\n    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {\n        (a.left <= 0).match({\n            true => null_ptr(),\n            false => {\n                a.left = a.left - 1\n                a.heap.addr().acquire(n)\n            }\n        })\n    }\n    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { a.heap.addr().release(p) }\n})\nfailed = (r: Result<[ImportEdge], IoError>) bool {\n    r.match({ .Err(e) => true, .Ok(xs) => false })\n}\nmain = () i32 {\n    src := \"right = right\\n\"\n    none := LimitAlloc(heap: halloc.gpa(), left: 0)\n    only_slice := LimitAlloc(heap: halloc.gpa(), left: 1)\n    no_alias := LimitAlloc(heap: halloc.gpa(), left: 2)\n    enough := LimitAlloc(heap: halloc.gpa(), left: 3)\n    r0: Result<[ImportEdge], IoError> := none.addr().import_edges(src)\n    r1: Result<[ImportEdge], IoError> := only_slice.addr().import_edges(src)\n    r2: Result<[ImportEdge], IoError> := no_alias.addr().import_edges(src)\n    r3: Result<[ImportEdge], IoError> := enough.addr().import_edges(src)\n    ok3 := r3.match({\n        .Ok(edges) => (edges.len == 1) && edges[0].namespace && eq(edges[0].module, \"u/right\") && eq(edges[0].alias, \"right\"),\n        .Err(e) => false\n    })\n    (r0.failed() && r1.failed() && r2.failed() && ok3).to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\n{ provided_symbols_in } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\narena = std.mem.arena\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 4096)\n    src := \"{ helper } = dep\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n    symbols := scratch.addr().provided_symbols_in(a.addr(), src)\n    ok := (symbols.len == 4)\n        && symbols[0].imported && (!symbols[0].foreign) && eq(symbols[0].name, \"helper\") && (symbols[0].start == 2) && (symbols[0].next == 8) && (symbols[0].decl_start == 2) && (symbols[0].decl_next == 8)\n        && (!symbols[1].imported) && symbols[1].foreign && eq(symbols[1].name, \"foreign\") && (symbols[1].start == 17) && (symbols[1].next == 24) && (symbols[1].decl_start == 17) && (symbols[1].decl_next == 39)\n        && (!symbols[2].imported) && (!symbols[2].foreign) && eq(symbols[2].name, \"Thing\") && (symbols[2].start == 40) && (symbols[2].next == 45) && (symbols[2].decl_start == 40) && (symbols[2].decl_next == 58)\n        && (!symbols[3].imported) && (!symbols[3].foreign) && eq(symbols[3].name, \"run\") && (symbols[3].start == 59) && (symbols[3].next == 62) && (symbols[3].decl_start == 59) && (symbols[3].decl_next == 78)\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
+            src: "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ provided_symbols_in } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\narena = std.mem.arena\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 4096).expect(\"arena\")\n    src := \"{ helper } = dep\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n    symbols := scratch.addr().provided_symbols_in(a.addr(), src).expect(\"syms\")\n    ok := (symbols.len == 4)\n        && symbols[0].imported && (!symbols[0].foreign) && eq(symbols[0].name, \"helper\") && (symbols[0].start == 2) && (symbols[0].next == 8) && (symbols[0].decl_start == 2) && (symbols[0].decl_next == 8)\n        && (!symbols[1].imported) && symbols[1].foreign && eq(symbols[1].name, \"foreign\") && (symbols[1].start == 17) && (symbols[1].next == 24) && (symbols[1].decl_start == 17) && (symbols[1].decl_next == 39)\n        && (!symbols[2].imported) && (!symbols[2].foreign) && eq(symbols[2].name, \"Thing\") && (symbols[2].start == 40) && (symbols[2].next == 45) && (symbols[2].decl_start == 40) && (symbols[2].decl_next == 58)\n        && (!symbols[3].imported) && (!symbols[3].foreign) && eq(symbols[3].name, \"run\") && (symbols[3].start == 59) && (symbols[3].next == 62) && (symbols[3].decl_start == 59) && (symbols[3].decl_next == 78)\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ Allocator, Heap } = std.mem.alloc\nhalloc = std.mem.heap\n{ to_exit } = std.core.bool\n{ ProvidedSymbol, try_symbol_key_in } = std.internal.resolve\n{ String } = std.text.string\n{ eq } = std.text.str\nLimit: { heap: Heap, remaining: i32 }\nLimit.impl(Allocator, {\n    acquire = (a: MutPtr<Limit>, n: i64) RawPtr<u8> {\n        (a.remaining <= 0).match({\n            true => null_ptr(),\n            false => {\n                a.remaining = a.remaining - 1\n                a.heap.addr().acquire(n)\n            }\n        })\n    }\n    resize = (a: MutPtr<Limit>, p: RawPtr<u8>, n: i64) RawPtr<u8> {\n        a.heap.addr().resize(p, n)\n    }\n    release = (a: MutPtr<Limit>, p: RawPtr<u8>) void {\n        a.heap.addr().release(p)\n    }\n})\nmain = () i32 {\n    sym := ProvidedSymbol(name: \"struct\", start: 0, next: 0, decl_start: 0, decl_next: 0, imported: false, foreign: false)\n    ok_alloc := Limit(heap: halloc.gpa(), remaining: 1)\n    good := sym.try_symbol_key_in(ok_alloc.addr()).match({\n        .Ok(key) => eq(key.finish_in(ok_alloc.addr()), \"struct_zk\"),\n        .Err(e) => false\n    })\n    fail_alloc := Limit(heap: halloc.gpa(), remaining: 0)\n    failed := sym.try_symbol_key_in(fail_alloc.addr()).match({\n        .Ok(key) => false,\n        .Err(e) => true\n    })\n    (good && failed).to_exit()\n}\n",
+            src: "{ Allocator, Heap } = std.mem.alloc\nhalloc = std.mem.heap\n{ to_exit } = std.core.bool\n{ expect } = std.core.result\n{ ProvidedSymbol, symbol_key_in } = std.internal.resolve\n{ String } = std.text.string\n{ eq } = std.text.str\nLimit: { heap: Heap, remaining: i32 }\nLimit.impl(Allocator, {\n    acquire = (a: MutPtr<Limit>, n: i64) RawPtr<u8> {\n        (a.remaining <= 0).match({\n            true => null_ptr(),\n            false => {\n                a.remaining = a.remaining - 1\n                a.heap.addr().acquire(n)\n            }\n        })\n    }\n    resize = (a: MutPtr<Limit>, p: RawPtr<u8>, n: i64) RawPtr<u8> {\n        a.heap.addr().resize(p, n)\n    }\n    release = (a: MutPtr<Limit>, p: RawPtr<u8>) void {\n        a.heap.addr().release(p)\n    }\n})\nmain = () i32 {\n    sym := ProvidedSymbol(name: \"struct\", start: 0, next: 0, decl_start: 0, decl_next: 0, imported: false, foreign: false)\n    ok_alloc := Limit(heap: halloc.gpa(), remaining: 1)\n    good := sym.symbol_key_in(ok_alloc.addr()).match({\n        .Ok(key) => eq(key.finish_in(ok_alloc.addr()).expect(\"fin\"), \"struct_zk\"),\n        .Err(e) => false\n    })\n    fail_alloc := Limit(heap: halloc.gpa(), remaining: 0)\n    failed := sym.symbol_key_in(fail_alloc.addr()).match({\n        .Ok(key) => false,\n        .Err(e) => true\n    })\n    (good && failed).to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\n{ module_graph_in } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\narena = std.mem.arena\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 4096)\n    src := \"{ helper, if } = dep\\nbytes = std.text.bytes\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n    g := scratch.addr().module_graph_in(a.addr(), src)\n    ok := (g.import_count() == 2) && (g.symbol_count() == 5)\n        && (!g.imports[0].namespace) && eq(g.imports[0].module, \"u/dep\") && eq(g.imports[0].alias, \"\")\n        && g.imports[1].namespace && eq(g.imports[1].module, \"std/text/bytes\") && eq(g.imports[1].alias, \"bytes\")\n        && g.has(\"helper\") && g.has(\"if_zk\") && g.has(\"foreign\") && g.has(\"Thing\") && g.has(\"run\")\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
+            src: "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ module_graph_in } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\narena = std.mem.arena\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 4096).expect(\"arena\")\n    src := \"{ helper, if } = dep\\nbytes = std.text.bytes\\nforeign = (n: i64) i32\\nThing*: { a: i32 }\\nrun* = () i32 { 1 }\\n\"\n    g := scratch.addr().module_graph_in(a.addr(), src)\n    ok := (g.import_count() == 2) && (g.symbol_count() == 5)\n        && (!g.imports[0].namespace) && eq(g.imports[0].module, \"u/dep\") && eq(g.imports[0].alias, \"\")\n        && g.imports[1].namespace && eq(g.imports[1].module, \"std/text/bytes\") && eq(g.imports[1].alias, \"bytes\")\n        && g.has(\"helper\") && g.has(\"if_zk\") && g.has(\"foreign\") && g.has(\"Thing\") && g.has(\"run\")\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ strip_ns_into, add_name } = std.internal.resolve\n{ Malloc } = std.mem.alloc\n{ String, init } = std.text.string\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nsname = (s: str) String { a := Malloc(_: 0)  a.addr().init(32).append_in(a.addr(), s) }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    quals := ap.init(32).add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1)\n    src := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright.thing()\\n}\\n\"\n    out := ap.init(256).strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap)\n    want := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright__thing()\\n}\"\n    eq(out, want).to_exit()\n}\n",
+            src: "{ strip_ns_into, add_name } = std.internal.resolve\n{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\n{ String, init } = std.text.string\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nsname = (s: str) String { a := Malloc(_: 0)  a.addr().init(32).expect(\"init\").append_in(a.addr(), s).expect(\"oom\") }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    quals := ap.init(32).expect(\"init\").add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).expect(\"init\").add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1).expect(\"init\")\n    src := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright.thing()\\n}\\n\"\n    out := ap.init(256).expect(\"init\").strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap).expect(\"oom\")\n    want := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright__thing()\\n}\"\n    eq(out, want).to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -695,21 +696,21 @@ oracle_modules_run* = () i32 {
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: mp.joinv([z, "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\n{ import_edges } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := halloc.gpa()\n    src := \"", edges700_esc(mp, edges700), "\"\n    edges := a.addr().import_edges(src)\n    last := edges.len - 1\n    ok := (edges.len == 702)\n        && edges[0].namespace && eq(edges[0].alias, \"first\") && eq(edges[0].module, \"u/first\")\n        && edges[last].namespace.match({ true => false, false => true }) && eq(edges[last].module, \"u/last\")\n    ok.to_exit()\n}\n"]),
+            src: mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ import_edges } = std.internal.resolve\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := halloc.gpa()\n    src := \"", edges700_esc(mp, edges700), "\"\n    edges := a.addr().import_edges(src).expect(\"edges\")\n    last := edges.len - 1\n    ok := (edges.len == 702)\n        && edges[0].namespace && eq(edges[0].alias, \"first\") && eq(edges[0].module, \"u/first\")\n        && edges[last].namespace.match({ true => false, false => true }) && eq(edges[last].module, \"u/last\")\n    ok.to_exit()\n}\n"]),
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\n{ provided_symbols_in, module_graph_in, decl_names_in, all_decl_names_in } = std.internal.resolve\n{ finish_in, new_in, append_in } = std.text.string\n{ eq, contains } = std.text.str\n{ integer_in } = std.text.num\n{ to_exit } = std.core.bool\narena = std.mem.arena\ngenimps = (mp: MutPtr<Malloc>) str {\n    s := mp.new_in()\n    s = s.append_in(mp, \"{ \")\n    i := 0\n    @while (i < 40) {\n        (i > 0).match ({ true => { s = s.append_in(mp, \", \") }, false => {} })\n        s = s.append_in(mp, \"imp\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).finish_in(mp))\n        i = i + 1\n    }\n    s = s.append_in(mp, \" } = dep\\nforeign = (n: i64) i32\\n\")\n    mp.finish_in(s)\n}\ngensyms = (mp: MutPtr<Malloc>) str {\n    s := mp.new_in()\n    i := 0\n    @while (i < 220) {\n        s = s.append_in(mp, \"sym\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).finish_in(mp))\n        s = s.append_in(mp, \"* = () i32 { \")\n        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).finish_in(mp))\n        s = s.append_in(mp, \" }\\n\")\n        i = i + 1\n    }\n    mp.finish_in(s)\n}\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 65536)\n    src := scratch.addr().new_in().append_in(scratch.addr(), scratch.addr().genimps()).append_in(scratch.addr(), scratch.addr().gensyms()).finish_in(scratch.addr())\n    symbols := scratch.addr().provided_symbols_in(a.addr(), src)\n    g := scratch.addr().module_graph_in(a.addr(), src)\n    names := g.decl_names_in(scratch.addr()).finish_in(scratch.addr())\n    all := g.all_decl_names_in(scratch.addr()).finish_in(scratch.addr())\n    last := symbols.len - 1\n    ok := (symbols.len == 261)\n        && symbols[0].imported && eq(symbols[0].name, \"imp0\")\n        && symbols[last].imported.match({ true => false, false => true }) && eq(symbols[last].name, \"sym219\")\n        && (g.symbol_count() == 261) && g.has(\"imp39\") && g.has(\"sym219\")\n        && names.contains(\"sym219\") && (!names.contains(\"foreign\")) && (!names.contains(\"imp39\"))\n        && all.contains(\"sym219\") && all.contains(\"foreign\") && (!all.contains(\"imp39\"))\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
+            src: "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ provided_symbols_in, module_graph_in, decl_names_in, all_decl_names_in } = std.internal.resolve\n{ finish_in, new_in, append_in } = std.text.string\n{ eq, contains } = std.text.str\n{ integer_in } = std.text.num\n{ to_exit } = std.core.bool\narena = std.mem.arena\ngenimps = (mp: MutPtr<Malloc>) str {\n    s := mp.new_in().expect(\"oom\")\n    s = s.append_in(mp, \"{ \").expect(\"oom\")\n    i := 0\n    @while (i < 40) {\n        (i > 0).match ({ true => { s = s.append_in(mp, \", \").expect(\"oom\") }, false => {} })\n        s = s.append_in(mp, \"imp\").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        i = i + 1\n    }\n    s = s.append_in(mp, \" } = dep\\nforeign = (n: i64) i32\\n\").expect(\"oom\")\n    mp.finish_in(s).expect(\"oom\")\n}\ngensyms = (mp: MutPtr<Malloc>) str {\n    s := mp.new_in().expect(\"oom\")\n    i := 0\n    @while (i < 220) {\n        s = s.append_in(mp, \"sym\").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        s = s.append_in(mp, \"* = () i32 { \").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        s = s.append_in(mp, \" }\\n\").expect(\"oom\")\n        i = i + 1\n    }\n    mp.finish_in(s).expect(\"oom\")\n}\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 65536).expect(\"arena\")\n    src := scratch.addr().new_in().expect(\"oom\").append_in(scratch.addr(), scratch.addr().genimps()).expect(\"oom\").append_in(scratch.addr(), scratch.addr().gensyms()).expect(\"oom\").finish_in(scratch.addr()).expect(\"oom\")\n    symbols := scratch.addr().provided_symbols_in(a.addr(), src).expect(\"syms\")\n    g := scratch.addr().module_graph_in(a.addr(), src)\n    names := g.decl_names_in(scratch.addr()).finish_in(scratch.addr()).expect(\"oom\")\n    all := g.all_decl_names_in(scratch.addr()).finish_in(scratch.addr()).expect(\"oom\")\n    last := symbols.len - 1\n    ok := (symbols.len == 261)\n        && symbols[0].imported && eq(symbols[0].name, \"imp0\")\n        && symbols[last].imported.match({ true => false, false => true }) && eq(symbols[last].name, \"sym219\")\n        && (g.symbol_count() == 261) && g.has(\"imp39\") && g.has(\"sym219\")\n        && names.contains(\"sym219\") && (!names.contains(\"foreign\")) && (!names.contains(\"imp39\"))\n        && all.contains(\"sym219\") && all.contains(\"foreign\") && (!all.contains(\"imp39\"))\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ strip_ns_into, add_name } = std.internal.resolve\n{ Malloc } = std.mem.alloc\n{ String, init } = std.text.string\n{ contains, len, view } = std.text.str\n{ new_in, append_in, finish_in } = std.text.string\n{ to_exit } = std.core.bool\nsname = (s: str) String { a := Malloc(_: 0)  a.addr().init(32).append_in(a.addr(), s) }\ngenrep = (mp: MutPtr<Malloc>, chunk: str, n: i32) str { s := mp.new_in()  i := 0  @while (i < n) { s = s.append_in(mp, chunk)  i = i + 1 }  mp.finish_in(s) }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    body := ap.genrep(\"right.thing()\\n\", 3500)\n    src := ap.new_in().append_in(ap, \"main = () i32 {\\n\").append_in(ap, body).append_in(ap, \"}\\n\").finish_in(ap)\n    quals := ap.init(32).add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1)\n    out := ap.init(65536).strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap)\n    ok := out.contains(\"right__thing()\") && (!out.contains(\"right.thing()\"))\n    ok.to_exit()\n}\n",
+            src: "{ strip_ns_into, add_name } = std.internal.resolve\n{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\n{ String, init } = std.text.string\n{ contains, len, view } = std.text.str\n{ new_in, append_in, finish_in } = std.text.string\n{ to_exit } = std.core.bool\nsname = (s: str) String { a := Malloc(_: 0)  a.addr().init(32).expect(\"init\").append_in(a.addr(), s).expect(\"oom\") }\ngenrep = (mp: MutPtr<Malloc>, chunk: str, n: i32) str { s := mp.new_in().expect(\"oom\")  i := 0  @while (i < n) { s = s.append_in(mp, chunk).expect(\"oom\")  i = i + 1 }  mp.finish_in(s).expect(\"oom\") }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    body := ap.genrep(\"right.thing()\\n\", 3500)\n    src := ap.new_in().expect(\"oom\").append_in(ap, \"main = () i32 {\\n\").expect(\"oom\").append_in(ap, body).expect(\"oom\").append_in(ap, \"}\\n\").expect(\"oom\").finish_in(ap).expect(\"oom\")\n    quals := ap.init(32).expect(\"init\").add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).expect(\"init\").add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1).expect(\"init\")\n    out := ap.init(65536).expect(\"init\").strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap).expect(\"oom\")\n    ok := out.contains(\"right__thing()\") && (!out.contains(\"right.thing()\"))\n    ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -748,9 +749,9 @@ oracle_modules_run* = () i32 {
     // std.internal.ast's decl buffer uses an explicit allocator (Counting allocator observes the acquire/release).
     // ── std.internal.resolve PUBLIC API, driven as Zen programs via `zenc run` (test_user_imports) ──
     // import_edges: structured edges with module/alias/namespace/start/next.
-    // try_import_edges: an allocator that fails after K acquires returns .Err; with enough budget, .Ok.
+    // import_edges (Result): an allocator that fails after K acquires returns .Err; with enough budget, .Ok.
     // provided_symbols: imported / foreign / type / fn symbols with precise spans.
-    // try_symbol_key_in: keyword-safe symbol key with a Result allocator path.
+    // symbol_key_in: keyword-safe symbol key with a Result allocator path.
     // module_graph: import edges + symbol set with keyword-safe keys.
     // strip_ns_into preserves multi-line block comments while rewriting qualified calls.
     // ── stress: huge generated projects/sources resolve without recursive stack growth ───────
@@ -1136,6 +1137,22 @@ oracle_modules_run* = () i32 {
     ), ModVerdictCase(
         files: [ModFile(
             name: "p.zen",
+            src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  m := maps.of(a, \"x\", 1).expect(\"of\")\n  m.put(a, \"y\", 2)\n  m.free(a)\n  0\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "must-use",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  m := maps.of(a, \"x\", 1).expect(\"of\")\n  m = m.put(a, \"y\", 2).expect(\"put\")\n  m.free(a)\n  0\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
             src: "Box*: {\n    v: i32\n    bump = (b: Box, n: i32) Box { Box( v: b.v + n ) }\n    get = (b: Box) i32 { b.v }\n}\nmain = () i32 {\n  b := Box( v: 1 )\n  b = b.bump(5)\n  b.get()\n}\n",
         )],
         entry: "p.zen",
@@ -1207,7 +1224,8 @@ oracle_modules_run* = () i32 {
     // two imported modules sharing a name still dedup silently (dependency-first, no false dup).
     // unknown type names in annotations / returns / lets are rejected (driver unknown-type pass).
     // defined / primitive / generic / imported types must NOT be flagged (no false positive).
-    // must-use: a discarded value-mold (Self,…) Self self-mutation result is rejected; rebind/tail OK.
+    // must-use: a discarded value-mold (Self,…) Self self-mutation result is rejected; rebind/tail OK;
+    // the Result-always mold (Self,…) Result<Self, E> (Map.put) rejects the same discard, rebind+expect OK.
     // lambdas: a bound local lambda used as a HOF arg compiles; a non-capturing field/returned lambda
     // is lifted (accepts); a CAPTURING field lambda rejects with error[lambda-value].
     // ── a large namespace-bound compiler module resolves without overflowing the resolver ────
@@ -1311,19 +1329,19 @@ oracle_modules_run* = () i32 {
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a
 // Zen string literal in the GENERATED program text. The byte we look for is ASCII 10.
 esc_nl = (mp: MutPtr<Malloc>, s: str) str {
-    out := mp.new_in()
+    out := mp.new_in().expect("oracle: oom")
     v: [u8] := s.view()
     i: i64 := 0
     n: i64 := len(s)
     @while (i < n) {
         (v[i] == 10).match ({ true => {
-            out = out.append_in(mp, "\\n")
+            out = out.append_in(mp, "\\n").expect("oracle: oom")
         }, false => {
-            out = out.push_in(mp, v[i])
+            out = out.push_in(mp, v[i]).expect("oracle: oom")
         } })
         i = i + 1
     }
-    mp.finish_in(out)
+    mp.finish_in(out).expect("oracle: oom")
 }
 edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1352,8 +1370,8 @@ edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 //   (slice.buf/dup, bytes.at, str.at, alloc.default, num.integer/float+Result, collections.of, vec.Vec<T>,
 //   runtime.sync/async, actor.cell, string+actor coexist, slice+str dup coexist, cown.buf/file, ownership
 //   ctors); loader-error quality + collision origin/hint; emit resolution-before-cgen + literal/comment
-//   preservation; the std.internal.resolve PUBLIC API as `zenc run` programs (import_edges, try_import_edges,
-//   provided_symbols_in, try_symbol_key_in, module_graph_in, strip_ns_into) INCLUDING the stack-growth
+//   preservation; the std.internal.resolve PUBLIC API as `zenc run` programs (import_edges,
+//   provided_symbols_in, symbol_key_in, module_graph_in, strip_ns_into — all Result-always) INCLUDING the stack-growth
 //   stress (240/120/260 decls, 700 edges, 220 symbols, 3500-call rewrite — sources generated in-Zen); and
 //   stdin no-program-dir mode. The THREE deep-loader tests — resolve_program_data /
 //   resolve_parsed_program / check_parsed_program (module_table, parsed-program AST boundary, graph-linked

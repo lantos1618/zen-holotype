@@ -16,6 +16,7 @@
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
+{ expect } = std.core.result
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD := "typedef struct { void* ptr; int64_t len; } zslice; "
 // ── shared helpers ────────────────────────────────────────────────────────────
@@ -28,10 +29,10 @@ om_read_file = (mp: MutPtr<Malloc>, path: str) str {
 om_not = (b: bool) bool { b.match ({ true => false, false => true }) }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
 om_cat2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, a)
-    s = s.append_in(mp, b)
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, a).expect("oracle: oom")
+    s = s.append_in(mp, b).expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 om_cat3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str { mp.om_cat2(a, mp.om_cat2(b, c)) }
 // ════════════════════════════════════════════════════════════════════════════════
@@ -188,7 +189,7 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
                     q2 = q2 + 1
                 }
                 (q2 < n && sv[q2] == '(').match ({ true => {
-                    name := mp.substr(src, i, e - i)
+                    name := mp.substr(src, i, e - i).expect("oracle: oom")
                     contains(c, name).match ({ true => { }, false => {
                         ok = false
                     } })
@@ -233,28 +234,28 @@ oracle_misc_acid = () i32 {
 om_app2 = (mp: MutPtr<Malloc>, s: String, n: i32) String {
     tens: u8 := ('0' + n / 10).to_u8()
     ones: u8 := ('0' + (n - n / 10 * 10)).to_u8()
-    s2 := mp.push_in(s, tens)
-    mp.push_in(s2, ones)
+    s2 := mp.push_in(s, tens).expect("oracle: oom")
+    mp.push_in(s2, ones).expect("oracle: oom")
 }
 // append a decimal integer VALUE (no leading zeros) — for argument / arm constants.
 om_app_int = (mp: MutPtr<Malloc>, s: String, n: i32) String {
     (n < 10).match ({ true => {
         d: u8 := ('0' + n).to_u8()
-        mp.push_in(s, d)
+        mp.push_in(s, d).expect("oracle: oom")
     }, false => {
         s2 := mp.om_app_int(s, n / 10)
         d2: u8 := ('0' + (n - n / 10 * 10)).to_u8()
-        mp.push_in(s2, d2)
+        mp.push_in(s2, d2).expect("oracle: oom")
     } })
 }
-om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({ true => s, false => s.append_in(mp, ", ") }) }
+om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({ true => s, false => s.append_in(mp, ", ").expect("oracle: oom") }) }
 // "p00: i32, p01: i32, ..." — param declarations
 om_decl_params = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "p")
+        s2 := s1.append_in(mp, "p").expect("oracle: oom")
         s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": i32")
+        s4 := s3.append_in(mp, ": i32").expect("oracle: oom")
         mp.om_decl_params(s4, i + 1, n)
     } })
 }
@@ -270,9 +271,9 @@ om_call_args = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
 om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "x")
+        s2 := s1.append_in(mp, "x").expect("oracle: oom")
         s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": i32")
+        s4 := s3.append_in(mp, ": i32").expect("oracle: oom")
         mp.om_decl_fields(s4, i + 1, n)
     } })
 }
@@ -280,9 +281,9 @@ om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
 om_init_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "x")
+        s2 := s1.append_in(mp, "x").expect("oracle: oom")
         s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": ")
+        s4 := s3.append_in(mp, ": ").expect("oracle: oom")
         s5 := mp.om_app_int(s4, i)
         mp.om_init_fields(s5, i + 1, n)
     } })
@@ -292,35 +293,35 @@ om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
         s2 := mp.om_app_int(s1, i)
-        s3 := s2.append_in(mp, " => ")
+        s3 := s2.append_in(mp, " => ").expect("oracle: oom")
         s4 := mp.om_app_int(s3, i * 2)
         mp.om_arms(s4, i + 1, n)
     } })
 }
 om_gen_many_params = (mp: MutPtr<Malloc>) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "f* = (")
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "f* = (").expect("oracle: oom")
     s = mp.om_decl_params(s, 0, 80)
-    s = s.append_in(mp, ") i32 { p79 }\ntest* = () i32 { f(")
+    s = s.append_in(mp, ") i32 { p79 }\ntest* = () i32 { f(").expect("oracle: oom")
     s = mp.om_call_args(s, 0, 80)
-    s = s.append_in(mp, ") }")
-    mp.finish_in(s)
+    s = s.append_in(mp, ") }").expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 om_gen_many_fields = (mp: MutPtr<Malloc>) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "S*: { ")
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "S*: { ").expect("oracle: oom")
     s = mp.om_decl_fields(s, 0, 80)
-    s = s.append_in(mp, " }\ntest* = () i32 { S(")
+    s = s.append_in(mp, " }\ntest* = () i32 { S(").expect("oracle: oom")
     s = mp.om_init_fields(s, 0, 80)
-    s = s.append_in(mp, ").x79 }")
-    mp.finish_in(s)
+    s = s.append_in(mp, ").x79 }").expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 om_gen_many_arms = (mp: MutPtr<Malloc>) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "test* = () i32 { (50).match({ ")
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "test* = () i32 { (50).match({ ").expect("oracle: oom")
     s = mp.om_arms(s, 0, 80)
-    s = s.append_in(mp, ", _ => 999 }) }")
-    mp.finish_in(s)
+    s = s.append_in(mp, ", _ => 999 }) }").expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 oracle_misc_differential = () i32 {
     m := Malloc(_: 0)

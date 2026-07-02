@@ -1540,6 +1540,10 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "scratch-escape",
     ), VerdictCase(
+        src: "{ Arena, make_in } = std.mem.arena\n{ expect } = std.core.result\nhalloc = std.mem.heap\nPk*: {\n    mem: Arena,\n}\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Pk) bool { true }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    ar := a.make_in(64).expect(\"m\")\n    h := H(id: 1)\n    h.send(Pk(mem: ar))\n    0\n}",
+        should_pass: false,
+        kind: "scratch-escape",
+    ), VerdictCase(
         src: "Pk*: {\n    n: i32,\n    s: str,\n}\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Pk) bool { true }\ntest* = () i32 {\n    h := H(id: 1)\n    h.send(Pk(\n        n: 5,\n        s: \"hi\",\n    ))\n    0\n}",
         should_pass: true,
         kind: "",
@@ -1560,7 +1564,9 @@ oracle_verdict_run* = () i32 {
     // actor boundary. Rejects (error[scratch-escape]): a send whose enum payload carries a local
     // `a.acquire(…)` pointer; a send of a slice-literal-backed struct (stack storage); spawn state
     // embedding a local acquire pointer (the judges' `Counter(seen: <spawner-local>)` repro), bound
-    // OR embedded directly. Accepts (no over-rejection): plain-value sends, Arc-wrapped sends
+    // OR embedded directly; a send embedding an arena bound via the Result-unified
+    // `make_in(…).expect(…)` (the checker unwraps `.expect` over a scratch source).
+    // Accepts (no over-rejection): plain-value sends, Arc-wrapped sends
     // (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
     // plain-value `Room(n: 7)` spawn state.
     // or_return in a GLOBAL initializer: there is NO enclosing function to return the Err to —

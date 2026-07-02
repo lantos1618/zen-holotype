@@ -21,6 +21,7 @@
 { out, contents_in, shell } = std.io.file
 { eq, ne, view, is_empty, split_in, nbuf, find, contains, substr } = std.text.str
 { new_in, push_in, finish_in } = std.text.string
+{ expect } = std.core.result
 { run_suite, zo_path, zo_cmd } = oracle_lib
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SHARED byte-scan machinery: faithful port of python's `re` over `_code`-stripped source.
@@ -113,19 +114,19 @@ file_has = (sv: [u8], name: str, kind: i64) bool {
 // handling, matching python.) Returns an allocator-owned NUL-terminated copy.
 strip_comments_in = (mp: MutPtr<Malloc>, src: str) str {
     sv := src.view()
-    s := mp.new_in()
+    s := mp.new_in().expect("oracle: oom")
     in_comment := false
     sv.loop((h, i, b) {
         (b == '\n').match ({ true => {
-            s = s.push_in(mp, b)
+            s = s.push_in(mp, b).expect("oracle: oom")
             in_comment = false
         }, false => in_comment.match ({ true => { }, false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({ true => {
             in_comment = true
         }, false => {
-            s = s.push_in(mp, b)
+            s = s.push_in(mp, b).expect("oracle: oom")
         } }) }) })
     })
-    mp.finish_in(s)
+    mp.finish_in(s).expect("oracle: oom")
 }
 // everything strictly AFTER the first occurrence of `m` (python `src.split(m,1)[1]`); "" if absent.
 after_marker = (mp: MutPtr<Malloc>, src: str, m: str) str {
@@ -133,14 +134,14 @@ after_marker = (mp: MutPtr<Malloc>, src: str, m: str) str {
     (i < 0).match ({ true => "", false => {
         sv := src.view()
         start := i + m.view().len
-        mp.substr(src, start, sv.len - start)
+        mp.substr(src, start, sv.len - start).expect("oracle: oom")
     } })
 }
 // everything strictly BEFORE the first occurrence of `m` (python `s.split(m,1)[0]`); all of `s` if
 // `m` is absent (python returns the whole string as the sole split field).
 before_marker = (mp: MutPtr<Malloc>, s: str, m: str) str {
     j := s.find(m)
-    (j < 0).match ({ true => s, false => mp.substr(s, 0, j) })
+    (j < 0).match ({ true => s, false => mp.substr(s, 0, j).expect("oracle: oom") })
 }
 // the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
 region = (mp: MutPtr<Malloc>, src: str, m1: str, m2: str) str { mp.before_marker(mp.after_marker(src, m1), m2) }
@@ -298,29 +299,30 @@ io_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// SUITE 7: std.collections.map try-paths use the Result allocator helpers (try_acquire/try_grow).
+// SUITE 7: std.collections.map fallible paths (the unified Result API) use the Result allocator
+// helpers — grow/of go through try_acquire, append grows through grow; never a bare panicking acquire.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 map_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in("zen/std/collections/map.zen").match ({
         .Ok(raw) => {
             src := mp.strip_comments_in(raw)
-            grow := mp.region(src, "try_grow", "append<A>")
-            appnd := mp.region(src, "try_append", "put<A>")
-            of := mp.region(src, "try_of*", "IntMap")
+            grow := mp.region(src, "grow<A>", "reindex = ")
+            appnd := mp.region(src, "append<A>", "put<A>")
+            of := mp.region(src, "of*<T, A>", "IntMap")
             // IntMap<V> (i64-keyed twin) must hold the same discipline; bound the checks to the section
-            // after the `IntMap` marker so its try_grow/try_append/try_int_of resolve to the int versions.
+            // after the `IntMap` marker so its grow/append/int_of resolve to the int versions.
             isrc := mp.after_marker(src, "IntMap")
-            igrow := mp.region(isrc, "try_grow", "append<A>")
-            iappnd := mp.region(isrc, "try_append", "put<A>")
-            iof := mp.after_marker(isrc, "try_int_of*")
-            run_suite("boundaries: map try paths use result helpers", [grow.contains(".try_acquire("), grow.not_contains(".acquire("), appnd.contains(".try_grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire("), of.not_contains(".acquire("), igrow.contains(".try_acquire("), igrow.not_contains(".acquire("), iappnd.contains(".try_grow("), iappnd.not_contains(".acquire("), iof.contains(".try_acquire("), iof.not_contains(".acquire(")])
+            igrow := mp.region(isrc, "grow<A>", "reindex = ")
+            iappnd := mp.region(isrc, "append<A>", "put<A>")
+            iof := mp.after_marker(isrc, "int_of*")
+            run_suite("boundaries: map fallible paths use result helpers", [grow.contains(".try_acquire("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire("), of.not_contains(".acquire("), igrow.contains(".try_acquire("), igrow.not_contains(".acquire("), iappnd.contains(".grow("), iappnd.not_contains(".acquire("), iof.contains(".try_acquire("), iof.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// SUITE 8: std.text.fmt allocator-backed numeric writes (Result-always) use the fallible num
-// helpers; the plain streaming writes never touch an allocator.
+// SUITE 8: std.text.fmt allocator-backed numeric writes (Result-always) go through the unified
+// Result num helpers (never a bare acquire); the plain streaming writes never touch an allocator.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 fmt_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in("zen/std/text/fmt.zen").match ({
@@ -332,7 +334,7 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
             // "// Display" is a comment marker — stripped by `_code`, so (faithfully) absent here, which
             // makes `wf` run from `write_float = ` to EOF (python's split returns the whole remainder).
             wf := mp.region(src, "write_float = ", "// Display")
-            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.contains(".try_integer_in("), ti.not_contains(".integer_in("), tf.contains(".try_float_in("), tf.not_contains(".float_in("), wi.not_contains(".integer_in(") && wi.not_contains(".write_int_in("), wf.not_contains(".float_in(") && wf.not_contains(".write_float_in("), src.not_contains("default()")])
+            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.contains(".integer_in("), ti.not_contains(".acquire("), tf.contains(".float_in("), tf.not_contains(".acquire("), wi.not_contains(".integer_in(") && wi.not_contains(".write_int_in("), wf.not_contains(".float_in(") && wf.not_contains(".write_float_in("), src.not_contains("default()")])
         },
         .Err(e)  => run_suite("boundaries: fmt (unreadable)", [false]),
     })

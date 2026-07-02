@@ -50,11 +50,17 @@
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
-{ Result, Opt, err } = std.core.result
+{ Result, Opt, IoError, err, expect } = std.core.result
 { Malloc } = std.mem.alloc
 { String, new_in, push_in, append_in, finish_in } = std.text.string
 { view, substr_in, eq } = std.text.str
 { parse_f64, float_in } = std.text.num
+// ── OOM policy ────────────────────────────────────────────────────────────────
+// The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
+// threads Malloc scratch whose exhaustion is fatal by policy, so builder Results are unwrapped at
+// the module boundary with these two helpers — parse/stringify keep their observable behavior.
+jok = (r: Result<String, IoError>) String { r.expect("std.json: allocation failed") }
+jfin = (r: Result<str, IoError>) str { r.expect("std.json: allocation failed") }
 // ── the value type ───────────────────────────────────────────────────────────
 Entry*: {
     key: str,
@@ -173,11 +179,11 @@ hex4 = (sv: [u8], at: i64) i64 {
     (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).match ({ true => 0 - 1, false => d0 * 4096 + d1 * 256 + d2 * 16 + d3 })
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
-push_utf8 = (a: MutPtr<Malloc>, sb: String, cp: i64) String { (cp < 128).match ({ true => sb.push_in(a, cp.to_u8()), false => (cp < 2048).match ({ true => sb.push_in(a, (192 | cp >> 6).to_u8()).push_in(a, (128 | cp & 63).to_u8()), false => sb.push_in(a, (224 | cp >> 12).to_u8()).push_in(a, (128 | cp >> 6 & 63).to_u8()).push_in(a, (128 | cp & 63).to_u8()) }) }) }
+push_utf8 = (a: MutPtr<Malloc>, sb: String, cp: i64) String { (cp < 128).match ({ true => sb.push_in(a, cp.to_u8()).jok(), false => (cp < 2048).match ({ true => sb.push_in(a, (192 | cp >> 6).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(), false => sb.push_in(a, (224 | cp >> 12).to_u8()).jok().push_in(a, (128 | cp >> 6 & 63).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok() }) }) }
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded str + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
 parse_string_raw = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<StrStep, JsonError> {
-    sb: String := a.new_in()
+    sb: String := a.new_in().jok()
     endpos: i64 := 0 - 1
     errpos: i64 := 0 - 1
     resume: i64 := pos + 1
@@ -189,28 +195,28 @@ parse_string_raw = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<StrS
             errpos = i
             h.break
         }, false => (sv[i + 1] == '"').match ({ true => {
-            sb = sb.push_in(a, '"')
+            sb = sb.push_in(a, '"').jok()
             resume = i + 2
         }, false => (sv[i + 1] == '\\').match ({ true => {
-            sb = sb.push_in(a, '\\')
+            sb = sb.push_in(a, '\\').jok()
             resume = i + 2
         }, false => (sv[i + 1] == '/').match ({ true => {
-            sb = sb.push_in(a, '/')
+            sb = sb.push_in(a, '/').jok()
             resume = i + 2
         }, false => (sv[i + 1] == 'n').match ({ true => {
-            sb = sb.push_in(a, '\n')
+            sb = sb.push_in(a, '\n').jok()
             resume = i + 2
         }, false => (sv[i + 1] == 't').match ({ true => {
-            sb = sb.push_in(a, '\t')
+            sb = sb.push_in(a, '\t').jok()
             resume = i + 2
         }, false => (sv[i + 1] == 'r').match ({ true => {
-            sb = sb.push_in(a, '\r')
+            sb = sb.push_in(a, '\r').jok()
             resume = i + 2
         }, false => (sv[i + 1] == 'b').match ({ true => {
-            sb = sb.push_in(a, 8.to_u8())
+            sb = sb.push_in(a, 8.to_u8()).jok()
             resume = i + 2
         }, false => (sv[i + 1] == 'f').match ({ true => {
-            sb = sb.push_in(a, 12.to_u8())
+            sb = sb.push_in(a, 12.to_u8()).jok()
             resume = i + 2
         }, false => (sv[i + 1] == 'u').match ({ true => (i + 5 >= sv.len).match ({ true => {
             errpos = i
@@ -228,11 +234,11 @@ parse_string_raw = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<StrS
             errpos = i
             h.break
         } }) }) }) }) }) }) }) }) }) }), false => {
-            sb = sb.push_in(a, b)
+            sb = sb.push_in(a, b).jok()
             resume = i + 1
         } }) }) })
     })
-    (endpos < 0).match ({ true => (errpos >= 0).match ({ true => err(.BadString(errpos)), false => err(.UnexpectedEof) }), false => sstep_ok(sb.finish_in(a), endpos) })
+    (endpos < 0).match ({ true => (errpos >= 0).match ({ true => err(.BadString(errpos)), false => err(.UnexpectedEof) }), false => sstep_ok(sb.finish_in(a).jfin(), endpos) })
 }
 // ── scalar parsers ─────────────────────────────────────────────────────────────
 // match sv[pos..] against `word`; on success produce `v` at pos+len, else BadLiteral.
@@ -260,7 +266,7 @@ parse_number = (a: MutPtr<Malloc>, src: str, sv: [u8], pos: i64) Result<Step, Js
     })
     n := endp - pos
     (n <= 0).match ({ true => err(.BadNumber(pos)), false => {
-        txt := a.substr_in(src, pos, n)
+        txt := a.substr_in(src, pos, n).expect("std.json: allocation failed")
         parse_f64(txt).match ({
             .Ok(f)  => step_ok(.Num(f), endp),
             .Err(_) => err(.BadNumber(pos)),
@@ -343,45 +349,45 @@ parse* = (a: MutPtr<Malloc>, s: str) Result<Value, JsonError> {
 hex_digit = (n: i64) u8 { (n < 10).match ({ true => ('0'.to_i64() + n).to_u8(), false => ('a'.to_i64() + n - 10).to_u8() }) }
 write_u_esc = (a: MutPtr<Malloc>, sb: String, b: u8) String {
     bi := b.to_i64()
-    sb.push_in(a, '\\').push_in(a, 'u').push_in(a, '0').push_in(a, '0').push_in(a, hex_digit(bi >> 4 & 15)).push_in(a, hex_digit(bi & 15))
+    sb.push_in(a, '\\').jok().push_in(a, 'u').jok().push_in(a, '0').jok().push_in(a, '0').jok().push_in(a, hex_digit(bi >> 4 & 15)).jok().push_in(a, hex_digit(bi & 15)).jok()
 }
-write_esc_byte = (a: MutPtr<Malloc>, sb: String, b: u8) String { (b == '"').match ({ true => sb.push_in(a, '\\').push_in(a, '"'), false => (b == '\\').match ({ true => sb.push_in(a, '\\').push_in(a, '\\'), false => (b == '\n').match ({ true => sb.push_in(a, '\\').push_in(a, 'n'), false => (b == '\t').match ({ true => sb.push_in(a, '\\').push_in(a, 't'), false => (b == '\r').match ({ true => sb.push_in(a, '\\').push_in(a, 'r'), false => (b < 32).match ({ true => a.write_u_esc(sb, b), false => sb.push_in(a, b) }) }) }) }) }) }) }
+write_esc_byte = (a: MutPtr<Malloc>, sb: String, b: u8) String { (b == '"').match ({ true => sb.push_in(a, '\\').jok().push_in(a, '"').jok(), false => (b == '\\').match ({ true => sb.push_in(a, '\\').jok().push_in(a, '\\').jok(), false => (b == '\n').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 'n').jok(), false => (b == '\t').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 't').jok(), false => (b == '\r').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 'r').jok(), false => (b < 32).match ({ true => a.write_u_esc(sb, b), false => sb.push_in(a, b).jok() }) }) }) }) }) }) }
 write_str_lit = (a: MutPtr<Malloc>, sb: String, s: str) String {
-    out: String := sb.push_in(a, '"')
+    out: String := sb.push_in(a, '"').jok()
     sv := s.view()
     sv.loop((h, i, b) {
         out = a.write_esc_byte(out, b)
     })
-    out.push_in(a, '"')
+    out.push_in(a, '"').jok()
 }
 write_arr = (a: MutPtr<Malloc>, sb: String, xs: [Value]) String {
-    out: String := sb.push_in(a, '[')
+    out: String := sb.push_in(a, '[').jok()
     xs.loop((h, i, x) {
         (i > 0).match ({ true => {
-            out = out.push_in(a, ',')
+            out = out.push_in(a, ',').jok()
         } })
         out = a.write_value(out, x)
     })
-    out.push_in(a, ']')
+    out.push_in(a, ']').jok()
 }
 write_obj = (a: MutPtr<Malloc>, sb: String, o: Object) String {
-    out: String := sb.push_in(a, '{')
+    out: String := sb.push_in(a, '{').jok()
     es := o.entries
     es.loop((h, i, e) {
         (i > 0).match ({ true => {
-            out = out.push_in(a, ',')
+            out = out.push_in(a, ',').jok()
         } })
         out = a.write_str_lit(out, e.key)
-        out = out.push_in(a, ':')
+        out = out.push_in(a, ':').jok()
         out = a.write_value(out, e.val)
     })
-    out.push_in(a, '}')
+    out.push_in(a, '}').jok()
 }
 write_value = (a: MutPtr<Malloc>, sb: String, v: Value) String {
     v.match ({
-        .Null    => sb.append_in(a, "null"),
-        .Bool(b) => b.match ({ true => sb.append_in(a, "true"), false => sb.append_in(a, "false") }),
-        .Num(n)  => sb.append_in(a, a.float_in(n).finish_in(a)),
+        .Null    => sb.append_in(a, "null").jok(),
+        .Bool(b) => b.match ({ true => sb.append_in(a, "true").jok(), false => sb.append_in(a, "false").jok() }),
+        .Num(n)  => sb.append_in(a, a.float_in(n).jok().finish_in(a).jfin()).jok(),
         .Str(s)  => a.write_str_lit(sb, s),
         .Arr(xs) => a.write_arr(sb, xs),
         .Obj(o)  => a.write_obj(sb, o),
@@ -389,9 +395,9 @@ write_value = (a: MutPtr<Malloc>, sb: String, v: Value) String {
 }
 // Serialize a Value to compact JSON text (Malloc-owned, NUL-terminated str).
 stringify* = (a: MutPtr<Malloc>, v: Value) str {
-    sb: String := a.new_in()
+    sb: String := a.new_in().jok()
     sb = a.write_value(sb, v)
-    sb.finish_in(a)
+    sb.finish_in(a).jfin()
 }
 // ── accessors ──────────────────────────────────────────────────────────────────
 // index of `key` in the object's entry list, or -1 (O(n) linear scan).

@@ -1,6 +1,6 @@
 // std.text.str — borrowed `str` helpers plus allocator-owned byte copies.
-// Allocating helpers take the caller allocator explicitly; `try_*` returns Result so allocation
-// failure stays in the value flow.
+// Allocating helpers take the caller allocator explicitly and return Result so allocation
+// failure stays in the value flow (`.expect("…")` at fail-fast roots).
 { Allocator, try_acquire } = std.mem.alloc
 { Result, Opt, IoError, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
@@ -17,14 +17,7 @@ copy_bytes = (src: [u8], out: [u8]) void {
         out[i] = b
     })
 }
-dup_bytes_in*<A> = (a: MutPtr<A>, s: str) [u8] {
-    src := s.view()
-    out: [u8] := a.acquire(src.len.alloc_size()).slice(src.len)
-    src.copy_bytes(out)
-    out
-}
-dup_bytes*<A> = (a: MutPtr<A>, s: str) [u8] { a.dup_bytes_in(s) }
-try_dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
+dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
     src := s.view()
     a.try_acquire(src.len.alloc_size()).match ({
         .Ok(p)  => {
@@ -35,7 +28,7 @@ try_dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
         .Err(e) => err(e),
     })
 }
-try_dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.try_dup_bytes_in(s) }
+dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.dup_bytes_in(s) }
 // ── search ──────────────────────────────────────────────────────────────────
 // do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
 has_at = (sv: [u8], pv: [u8], at: i64) bool {
@@ -99,16 +92,7 @@ copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out[m] = 0
 }
 // Out-of-range is clamped: a.substr("hi", 1, 99) == "i"; a.substr("hi", 5, 2) == "".
-substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str {
-    sv := s.view()
-    lo := start.pin(0, sv.len)
-    m := n.pin(0, sv.len - lo)
-    out: [u8] := a.acquire(m + 1).slice(m + 1)
-    sv.copy_substr(out, lo, m)
-    cstr(out.ptr)
-}
-substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) str { a.substr_in(s, start, n) }
-try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> {
+substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> {
     sv := s.view()
     lo := start.pin(0, sv.len)
     m := n.pin(0, sv.len - lo)
@@ -121,7 +105,7 @@ try_substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoErr
         .Err(e) => err(e),
     })
 }
-try_substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> { a.try_substr_in(s, start, n) }
+substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> { a.substr_in(s, start, n) }
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
 at* = (s: str, i: i64) u8 {
     sv := s.view()
@@ -182,12 +166,12 @@ trim_in*<A> = (a: MutPtr<A>, s: str) str {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
-    a.substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 }))
+    a.substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 })).expect("std.text.str: allocation failed")
 }
 trim*<A> = (a: MutPtr<A>, s: str) str { a.trim_in(s) }
 rtrim_in*<A> = (a: MutPtr<A>, s: str) str {
     v: [u8] := s.view()
-    a.substr_in(s, 0, v.ws_end())
+    a.substr_in(s, 0, v.ws_end()).expect("std.text.str: allocation failed")
 }
 rtrim*<A> = (a: MutPtr<A>, s: str) str { a.rtrim_in(s) }
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): like `ltrim`, dropping a prefix only
@@ -199,7 +183,7 @@ trim_prefix* = (s: str, prefix: str) str { s.starts_with(prefix).match ({ true =
 // trim_suffix("file.zen", ".zen") == "file".
 trim_suffix_in*<A> = (a: MutPtr<A>, s: str, suffix: str) str {
     n := s.len()
-    s.ends_with(suffix).match ({ true => a.substr_in(s, 0, n - suffix.len()), false => a.substr_in(s, 0, n) })
+    s.ends_with(suffix).match ({ true => a.substr_in(s, 0, n - suffix.len()).expect("std.text.str: allocation failed"), false => a.substr_in(s, 0, n).expect("std.text.str: allocation failed") })
 }
 trim_suffix*<A> = (a: MutPtr<A>, s: str, suffix: str) str { a.trim_suffix_in(s, suffix) }
 // ── splitting: fields and words ───────────────────────────────────────────────
@@ -225,12 +209,12 @@ split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
     start: i64 := 0
     sv.loop((h, i, b) {
         (b == sep).match ({ true => {
-            out[fi] = a.substr_in(s, start, i - start)    // current field's start offset
+            out[fi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current field's start offset
             fi = fi + 1
             start = i + 1
         }, false => { } })
     })
-    out[fi] = a.substr_in(s, start, sv.len - start)
+    out[fi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
     out
 }
 split*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] { a.split_in(s, sep) }
@@ -253,7 +237,7 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
     start: i64 := 0 - 1
     sv.loop((h, i, b) {
         b.is_space().match ({ true => (start >= 0).match ({ true => {
-            out[wi] = a.substr_in(s, start, i - start)    // current word's start offset, -1 when between words
+            out[wi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current word's start offset, -1 when between words
             wi = wi + 1
             start = 0 - 1
         } }), false => (start < 0).match ({ true => {
@@ -261,7 +245,7 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
         } }) })
     })
     (start >= 0).match ({ true => {
-        out[wi] = a.substr_in(s, start, sv.len - start)
+        out[wi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
         wi = wi + 1
     } })
     out
@@ -392,7 +376,7 @@ count_occ = (sv: [u8], fv: [u8]) i64 {
 replace_in*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str {
     sv := s.view()
     fv := from.view()
-    (fv.len == 0).match ({ true => a.substr_in(s, 0, sv.len), false => {
+    (fv.len == 0).match ({ true => a.substr_in(s, 0, sv.len).expect("std.text.str: allocation failed"), false => {
         cnt := sv.count_occ(fv)    // empty pattern: unchanged copy (no infinite loop)
         total := sv.len + cnt * (to.len() - fv.len)
         out: [u8] := a.acquire(total + 1).slice(total + 1)

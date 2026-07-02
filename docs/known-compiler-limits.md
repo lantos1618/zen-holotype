@@ -14,12 +14,12 @@ Importing both `std.text.string` and `std.concurrent.actor` produced a cascade o
 `error[struct-field]` / `error[arity]` errors, even when used in unrelated code.
 
 Root cause: a flattened program has ONE global decl namespace and NO function overloading
-(`func_idx.put` overwrites by name). `std.text.string` exports `new_in`/`try_new_in` (arity-1
-`String` builders) and `std.mem.arena` ALSO exported `new_in`/`try_new_in` (arity-2 `Arena`
+(`func_idx.put` overwrites by name). `std.text.string` exports `new_in` (arity-1
+`String` builders) and `std.mem.arena` ALSO exported `new_in` (arity-2 `Arena`
 constructors). `actor` pulls `arena` in transitively (actor → runtime → arena), so both bare
 `new_in` decls landed in one TU and `m.addr().new_in()` resolved to the wrong arity.
 
-Fix: arena's constructors were renamed to the type-unique `make_in` / `try_make_in`
+Fix: arena's constructor was renamed to the type-unique `make_in`
 (string/rc/arc/own keep `new_in`). The shared `new_in` convention is fine as long as two
 same-named allocator-constructors don't reach one flattened program; arena was the one
 reachable beside `String`.

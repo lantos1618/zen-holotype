@@ -83,7 +83,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   `Result`; `panic` is the explicit, greppable abort for invariant breaks (not the default
   path). The stdlib fast/fallible contract is documented in [ERROR_POLICY.md](ERROR_POLICY.md).
 - **Allocator and FFI ownership rule** (`zen/std/concurrent/cown.zen`) — Zen-owned memory takes
-  an explicit allocator from program setup (`cown.buf(alloc, n)` / `cown.try_buf(alloc, n)` /
+  an explicit allocator from program setup (`cown.buf(alloc, n)` returns `Result` /
   `Buf.free(alloc)`).
   FFI handles remain the raw floor below that discipline: a C descriptor or pointer crosses
   back as a raw handle, then gets wrapped in a small type with the matching release operation
@@ -92,7 +92,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - **Coroutine allocation is Result-shaped** (`zen/std/concurrent/coroutine.zen`) —
   `spawn` / `spawn_in` return `Result<Coro, IoError>` and clean up partial
   stack/context allocations on failure; there is no separate `try_*` doubling.
-  The scheduler keeps `run` / `run_in` as the fast path plus `try_run` / `try_run_in`,
+  The scheduler exposes `run` / `run_in`, which return `Result` directly (no `try_*` doubling),
   so the caller can keep flag-buffer allocation failure in the value flow.
 - **Metaprogramming is values, not pragmas** — there is no `@emit` and no comptime
   evaluator. A generator is an ordinary function returning `[Decl]`, emitted by
@@ -116,7 +116,7 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - **`std.collections.iter`** — `fold` / `each` over slices + closures, plus two flavours of map/filter:
   `map_into`/`filter_into` are **generic** and write into a caller-owned buffer (no allocation),
   while **`map`/`filter`** return a **fresh heap slice** the caller owns (`map([1,2,3], (x){x*2})`
-  → a new `[i32]`). `try_map_in` / `try_filter_in` return `Result<[i32], IoError>` for
+  → a new `[i32]`). `map_in` / `filter_in` return `Result<[i32], IoError>` for
   allocator failure. The allocating forms are `[i32]` today; a generic version needs
   type-parameter `sizeof`.
 - **`std.mem.raw`** — the library's raw libc heap floor: `alloc` / `zeroed` / `copy` / `release`,
@@ -144,16 +144,16 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   `Arena` also implements the trait; namespace-bound `arena.new_in` lets callers
   choose the backing allocator.
 - **`std.mem.own` / `std.mem.rc` / `std.mem.arc`** — library ownership types with allocator-first
-  constructors (`new_in`) plus `try_new_in` for value-shaped allocation failure. These modules can
+  constructors (`new_in`) returning `Result` for value-shaped allocation failure. These modules can
   all export the same natural names when imported through namespace binds such as `rc = std.mem.rc`
   and `arc = std.mem.arc`.
 - **`std.collections.vec`** — a growable array that threads the allocator explicitly:
   namespace-bound `vec.of(a, [1, 2])`, then `v.push(a, x)` (grows via `a.resize`) /
-  `v.get(i)` / `v.len()` / `v.free(a)`, plus `vec.try_of(a, xs)` and `v.try_push(a, x)` for
-  `Result`-shaped allocation failure.
+  `v.get(i)` / `v.len()` / `v.free(a)`; `of` and `push` return `Result` directly for
+  `Result`-shaped allocation failure (no `try_*` doubling).
 - **`std.collections.map`** — a str-keyed `Map<T>` with the same allocator-visible
-  shape: namespace-bound `maps.of(a, "k", 1)` / `maps.try_of(...)`, with receiver
-  methods `m.put`, `m.try_put`, `m.get`, `m.has`, `m.len`, and `m.free`.
+  shape: namespace-bound `maps.of(a, "k", 1)` (returns `Result`), with receiver
+  methods `m.put` (returns `Result`), `m.get`, `m.has`, `m.len`, and `m.free`.
 - **`compiler.genc` (+ `mono` / `genc_emit`) — shared AST + monomorphization, then the C backend, in Zen, AND the compiler's own
   codegen.** It defines the **one AST** the whole pipeline shares — expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond`/`Member`/`Arrow`/`MakeEnum`/`Tag`/`Match`/`StrLit`, statements
