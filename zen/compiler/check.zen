@@ -21,8 +21,25 @@ DeclIndex*: {
     global_idx: Map<i64>,
     impl_idx: Map<i64>,
     tdef_idx: Map<i64>,
+    alias_idx: Map<i64>,
 }    // DFunc.name | DForeign.name → index
 tdkey = (a: MutPtr<Malloc>, tr: str, m: str) str { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "	").gstr_append(a, m).gstr_finish(a) }    // DStruct.name → index
+// ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
+// std.internal.resolve loads `m = std.collections.hmap` by prefixing hmap's top-level value decls
+// with `m__`. alias_idx maps the BARE method tail (`put` for `m__put`) to a decl index, so the
+// UFCS fallback in dispatch_name can O(1)-reject names that no alias provides (the common case for
+// intrinsics like `store`/`offset` and deferred trait methods) before scanning for candidates.
+// byte position of the LAST `__` separator in `name`, or -1 when it has none.
+alias_sep_from = (name: str, p: i32, last: i32) i32 { (name.at(p) == 0).match ({ true => last, false => (name.at(p) == '_' && name.at(p + 1) == '_').match ({ true => name.alias_sep_from(p + 1, p), false => name.alias_sep_from(p + 1, last) }) }) }
+alias_sep = (name: str) i32 { name.alias_sep_from(0, 0 - 1) }
+// the method tail after the separator (`put` of `m__put`) — a NUL-terminated suffix, no copy.
+alias_tail = (name: str, sep: i32) str { cstr(offset(name, to_i64(sep + 2))) }
+// register `name` under its tail iff it is alias-shaped: a NON-EMPTY prefix (skips compiler
+// internals like `__str_eq`/`__clos_1_call`, whose separator is at position 0).
+alias_note = (m: Map<i64>, a: MutPtr<Malloc>, name: str, i: i64) Map<i64> {
+    sep := name.alias_sep()
+    (sep > 0).match ({ true => m.put(a, name.alias_tail(sep), i).expect("check: decl-index alloc"), false => m })
+}
 build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
     seed: i64 := 0 - 1    // DEnum.name → index
     // DGlobal.name → index
@@ -36,6 +53,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
         global_idx: of(a, "", seed).expect("check: decl-index alloc"),
         impl_idx: of(a, "", seed).expect("check: decl-index alloc"),
         tdef_idx: of(a, "", seed).expect("check: decl-index alloc"),
+        alias_idx: of(a, "", seed).expect("check: decl-index alloc"),
     )
     decls.loop((h, i, d) {
         d.match ({
@@ -47,6 +65,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
+                    alias_idx: idx.alias_idx.alias_note(a, f.name, i),
                 )
             },
             .DForeign(f)       => {
@@ -57,6 +76,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
+                    alias_idx: idx.alias_idx.alias_note(a, f.name, i),
                 )
             },
             .DStruct(s)        => {
@@ -67,6 +87,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
+                    alias_idx: idx.alias_idx,
                 )
             },
             .DEnum(e)          => {
@@ -77,6 +98,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
+                    alias_idx: idx.alias_idx,
                 )
             },
             .DGlobal(g)        => {
@@ -87,6 +109,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx.put(a, g.name, i).expect("check: decl-index alloc"),
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
+                    alias_idx: idx.alias_idx,
                 )
             },
             .DImpl(im)         => {
@@ -97,6 +120,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx.put(a, im.ty, i).expect("check: decl-index alloc"),
                     tdef_idx: idx.tdef_idx,
+                    alias_idx: idx.alias_idx,
                 )
             },
             .DTraitDefault(td) => {
@@ -107,6 +131,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i).expect("check: decl-index alloc"),
+                    alias_idx: idx.alias_idx,
                 )
             },
             _                  => { },
@@ -650,7 +675,11 @@ dispatch_name = (env: Env, c: CallData) str {
         tyname := env.infer_expr(c.args[0].addr()).dispatch_recv_name()
         // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
         // impl scan entirely (the common case for primitive/struct receivers).
-        (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({ true => c.fn, false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname) })
+        dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({ true => c.fn, false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname) })
+        eq(dn, c.fn).match ({ true => {
+            cs := env.alias_ufcs_candidates(c.fn, tyname)
+            (cs.count == 1).match ({ true => cs.first, false => c.fn })
+        }, false => dn })
     }, false => c.fn })
 }
 dispatch_recv_name = (t: Ty) str {
@@ -659,6 +688,74 @@ dispatch_recv_name = (t: Ty) str {
         .Ptr(pd)    => load(pd.pointee).dispatch_recv_name(),
         _           => t.recv_name(),
     })
+}
+// Compiler-level call intrinsics (typed in infer_call / lowered by genc). Lives here — not in
+// check_validate, which now imports it — so the alias-UFCS fallback below can refuse to shadow them.
+is_intrinsic* = (fn: str) bool { eq(fn, "load").match ({ true => true, false => eq(fn, "store").match ({ true => true, false => eq(fn, "addr").match ({ true => true, false => eq(fn, "assert_nonnull").match ({ true => true, false => eq(fn, "offset").match ({ true => true, false => eq(fn, "cstr").match ({ true => true, false => eq(fn, "slice").match ({ true => true, false => eq(fn, "malloc").match ({ true => true, false => eq(fn, "sizeof").match ({ true => true, false => eq(fn, "load_i64").match ({ true => true, false => eq(fn, "store_i64").match ({ true => true, false => eq(fn, "atomic_add_i64").match ({ true => true, false => eq(fn, "atomic_load_i64").match ({ true => true, false => eq(fn, "atomic_store_i64").match ({ true => true, false => eq(fn, "atomic_cas_i64").match ({ true => true, false => eq(fn, "atomic_fence").match ({ true => true, false => eq(fn, "null_ptr").match ({ true => true, false => eq(fn, "__str_eq").match ({ true => true, false => eq(fn, "__str_ne").match ({ true => true, false => eq(fn, "to_i32").match ({ true => true, false => eq(fn, "to_i64").match ({ true => true, false => eq(fn, "to_u8").match ({ true => true, false => eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
+// ── UFCS THROUGH MODULE ALIASES ──────────────────────────────────────────────────────────────────
+// `m = std.collections.hmap` binds hmap's top-level fns as `m__put`/`m__get`/… in the flat program,
+// so `x.put(k, v)` (desugared to `put(x, k, v)`) used to resolve ONLY when `put` was flat-imported —
+// forcing flat imports and their name-collision trap. When a called name is otherwise UNDEFINED,
+// search the alias-prefixed decls whose tail is the method name and whose FIRST parameter's head
+// type matches the receiver's inferred head type (deterministic: decl order):
+//   exactly one → dispatch_name routes the call to it (resolve_call then rewrites, as for traits);
+//   two or more → the call stays unresolved; the validator reports the positioned undefined-name
+//   error and denrich_ambiguous_msg (check_validate) names the candidates.
+// Guards keep this a pure FALLBACK — it never fires for intrinsics, known top-level fns, locally
+// bound names (locals shadow, #370), value globals, receivers without a concrete head type
+// (pre-inline tparam receivers), or candidates whose first-param head is their OWN tparam — so no
+// program that resolves today changes meaning, and rejected programs can only gain a resolution.
+AliasCands*: {
+    count: i32,
+    first: str,
+    second: str,
+}
+alias_cands_none = () AliasCands {
+    AliasCands(
+        count: 0,
+        first: "",
+        second: "",
+    )
+}
+tparam_names_have = (tps: [Param], name: str) bool {
+    f := false
+    tps.loop((h, i, tp) {
+        f = eq(tp.name, name).match ({ true => true, false => f })
+    })
+    f
+}
+// is `f` an alias-prefixed candidate for method `fn` on receiver head `tyname`?
+alias_cand_matches = (f: Func, fn: str, tyname: str) bool {
+    sep := f.name.alias_sep()
+    (sep > 0 && f.params.len > 0).match ({ true => eq(f.name.alias_tail(sep), fn).match ({ true => {
+        head := f.params[0].ty.dispatch_recv_name()
+        is_empty(head).match ({ true => false, false => eq(head, tyname) && f.tparams.tparam_names_have(head) == false })
+    }, false => false }), false => false })
+}
+alias_ufcs_candidates* = (env: Env, fn: str, tyname: str) AliasCands {
+    (is_empty(tyname) || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).match ({ true => {
+        return alias_cands_none()
+    } })
+    cnt := 0
+    first := ""
+    second := ""
+    env.decls.loop((h, i, d) {
+        hit := d.match ({
+            .DFunc(f)    => f.alias_cand_matches(fn, tyname).match ({ true => f.name, false => "" }),
+            .DForeign(f) => f.alias_cand_matches(fn, tyname).match ({ true => f.name, false => "" }),
+            _            => "",
+        })
+        is_empty(hit).match ({ true => { }, false => {
+            second = (cnt == 1).match ({ true => hit, false => second })
+            first = (cnt == 0).match ({ true => hit, false => first })
+            cnt = cnt + 1
+        } })
+    })
+    AliasCands(
+        count: cnt,
+        first: first,
+        second: second,
+    )
 }
 fnt_ret = (t: Ty) Ty {
     t.match ({

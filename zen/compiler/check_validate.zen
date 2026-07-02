@@ -1,12 +1,13 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
 { eq, is_empty, starts_with, ends_with } = std.text.str
+{ String } = std.text.string
 // Local fn is known iff the_func finds it by name (sentinel name is ""). The linear `is_known_fn`
 // remains for the few decls-only callers; Env-reachable sites use `env_known_fn` (O(1) via the index).
 is_known_fn = (decls: [Decl], fn: str) bool { eq(decls.the_func(fn).name, fn) }
@@ -270,8 +271,9 @@ trait_declaring = (decls: [Decl], m: str) str {
     })
     found
 }
-// genc/runtime intrinsics with no Zen declaration.
-is_intrinsic = (fn: str) bool { eq(fn, "load").match ({ true => true, false => eq(fn, "store").match ({ true => true, false => eq(fn, "addr").match ({ true => true, false => eq(fn, "assert_nonnull").match ({ true => true, false => eq(fn, "offset").match ({ true => true, false => eq(fn, "cstr").match ({ true => true, false => eq(fn, "slice").match ({ true => true, false => eq(fn, "malloc").match ({ true => true, false => eq(fn, "sizeof").match ({ true => true, false => eq(fn, "load_i64").match ({ true => true, false => eq(fn, "store_i64").match ({ true => true, false => eq(fn, "atomic_add_i64").match ({ true => true, false => eq(fn, "atomic_load_i64").match ({ true => true, false => eq(fn, "atomic_store_i64").match ({ true => true, false => eq(fn, "atomic_cas_i64").match ({ true => true, false => eq(fn, "atomic_fence").match ({ true => true, false => eq(fn, "null_ptr").match ({ true => true, false => eq(fn, "__str_eq").match ({ true => true, false => eq(fn, "__str_ne").match ({ true => true, false => eq(fn, "to_i32").match ({ true => true, false => eq(fn, "to_i64").match ({ true => true, false => eq(fn, "to_u8").match ({ true => true, false => eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }    // Stage 3: panic-on-null guard, RawPtr<T> -> MutPtr<T>
+// genc/runtime intrinsics with no Zen declaration: is_intrinsic — now DEFINED in compiler.check
+// (imported above) so the alias-UFCS fallback there can refuse to shadow an intrinsic name.
+// Stage 3: panic-on-null guard, RawPtr<T> -> MutPtr<T>
 intrinsic_arity = (fn: str) i32 { eq(fn, "__str_eq").match ({ true => 2, false => eq(fn, "__str_ne").match ({ true => 2, false => eq(fn, "store").match ({ true => 2, false => eq(fn, "offset").match ({ true => 2, false => eq(fn, "slice").match ({ true => 2, false => eq(fn, "null_ptr").match ({ true => 0, false => eq(fn, "atomic_add_i64").match ({ true => 2, false => eq(fn, "atomic_store_i64").match ({ true => 2, false => eq(fn, "atomic_cas_i64").match ({ true => 3, false => eq(fn, "atomic_fence").match ({ true => 0, false => eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) }) }) }) }) }    // lowered str content equality (resolve_bin)
 // A trait-method UFCS call defers to monomorphization ONLY when its receiver type is still
 // unresolved (an unbound tparam / generic residue — `unknown_ty`): the concrete impl appears
@@ -2321,13 +2323,38 @@ denrich_makestruct_msg = (env: Env, sd: MakeStructData) str {
         is_empty(bad).match ({ true => "", false => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, sd.ty).gstr_append(a, "` has no field `").gstr_append(a, bad).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(fields)).gstr_append(a, ")").gstr_finish(a) })
     }, false => "" })
 }
+// ambiguous alias-UFCS call: TWO+ `alias__fn` decls match the receiver's head type, so
+// dispatch_name refused to pick one and the call stayed an undefined name. Name the candidates
+// in their surface (dotted) form so the fix — a qualified call — is copy-pasteable.
+denrich_dotted = (s: String, a: MutPtr<Malloc>, name: str, p: i32) String {
+    b := at(name, p)
+    (b == 0).match ({ true => s, false => (b == '_' && at(name, p + 1) == '_').match ({ true => s.gstr_push(a, '.').denrich_dotted(a, name, p + 2), false => s.gstr_push(a, b).denrich_dotted(a, name, p + 1) }) })
+}
+denrich_ambiguous_msg = (env: Env, c: CallData) str {
+    (c.args.len == 0).match ({ true => {
+        return ""
+    } })
+    tyname := env.infer_expr(c.args[0].addr()).dispatch_recv_name()
+    cs := env.alias_ufcs_candidates(c.fn, tyname)
+    (cs.count < 2).match ({ true => {
+        return ""
+    } })
+    a := env.a
+    s := a.gstr_string(192).gstr_append(a, "ambiguous method `").gstr_append(a, c.fn).gstr_append(a, "` on `").gstr_append(a, tyname).gstr_append(a, "`: both `")
+    s = s.denrich_dotted(a, cs.first, 0).gstr_append(a, "` and `").denrich_dotted(a, cs.second, 0).gstr_append(a, "` match the receiver")
+    (cs.count > 2).match ({ true => {
+        s = s.gstr_append(a, " (and more)")
+    }, false => { } })
+    s = s.gstr_append(a, " - call it qualified, e.g. `").denrich_dotted(a, cs.first, 0).gstr_append(a, "(recv, ...)`")
+    s.gstr_finish(a)
+}
 denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) str {
     load(e).match ({
         .Bin(b)         => (code == KOPERAND() && b.pos.pos_or(load(b.lhs).expr_pos()) == off).match ({ true => env.denrich_operand_msg(b), false => desc_or(a.denrich_expr(env, b.lhs, off, code), a.denrich_expr(env, b.rhs, off, code)) }),
         .Member(m)      => (code == KSTRUCTFIELD() && m.pos.pos_or(load(m.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(m.field, env.infer_expr(m.obj)), false => a.denrich_expr(env, m.obj, off, code) }),
         .Arrow(ar)      => (code == KSTRUCTFIELD() && ar.pos.pos_or(load(ar.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(ar.field, env.infer_expr(ar.obj)), false => a.denrich_expr(env, ar.obj, off, code) }),
         .MakeStruct(sd) => (code == KSTRUCTFIELD() && sd.pos.pos_or((sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() })) == off).match ({ true => env.denrich_makestruct_msg(sd), false => a.denrich_inits(env, sd.inits, off, code) }),
-        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }),
+        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KUNDEFINED() && c.pos == off).match ({ true => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }) }),
         .SliceLit(sd)   => a.denrich_args(env, sd.items, off, code),
         .Index(ix)      => desc_or(a.denrich_expr(env, ix.seq, off, code), a.denrich_expr(env, ix.idx, off, code)),
         .Cond(d)        => desc_or(a.denrich_expr(env, d.c, off, code), desc_or(a.denrich_expr(env, d.t, off, code), a.denrich_expr(env, d.e, off, code))),
@@ -2405,9 +2432,9 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) str {
     res
 }
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
-// dup-fn error at `off`, else "".
+// dup-fn/undefined-name error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN()).match ({ true => {
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED()).match ({ true => {
         return ""
     } })
     (code == KDUPFN()).match ({ true => {
