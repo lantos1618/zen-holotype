@@ -955,6 +955,18 @@ oracle_value_run* = () i32 {
         // outside (1+2). Guards runtime resolution, not just the checker verdict. = 13.
         src: "f = (a: i32, b: i32) i32 { a + b }\napply<T> = (x: T, f: (T) T) T { f(x) }\ntest* = () i32 { apply(5, (v: i32) i32 { v * 2 }) + f(1, 2) }",
         want: "13",
+    ), VCase(
+        // SHADOWING — an FnT param named after an INTRINSIC (`store_i64`): the inliner substitutes
+        // the actual callee, so the call runs dbl(21)=42, NOT the store_i64 intrinsic expansion.
+        // Guards the emit-layer name-dispatch agreeing with the checker's shadow semantics.
+        src: "dbl = (v: i64) i64 { v * 2 }\ng = (store_i64: (i64) i64) i64 { store_i64(21) }\ntest* = () i32 { to_i32(g(dbl)) }",
+        want: "42",
+    ), VCase(
+        // or_return in a CONDITIONAL position (&& rhs) with the receiver's FULL Result type matching
+        // the enclosing fn's — must stay accepted AND run (guards the Ok-payload check's leniency
+        // gate: same Ok + same Err = legal, only a mismatched Ok side rejects). = 5.
+        src: "R: Ok(bool) | Err(i32)\ngk = (ok: i32) R { (ok == 1).match ({ true => R.Ok(true), false => R.Err(9) }) }\nf = (flag: bool, ok: i32) R {\n    b := flag && gk(ok).or_return()\n    R.Ok(b)\n}\ntest* = () i32 { f(true, 1).match ({ .Ok(v) => v.match ({ true => 5, false => 2 }), .Err(e) => 0, }) }",
+        want: "5",
     )])
 }
 // {}-template interpolation core (mirrors std.text.fmt.format's scanner standalone, since

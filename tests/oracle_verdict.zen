@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (212)", [VerdictCase(
+    a := run_verdicts("verdict (213)", [VerdictCase(
         src: "test* = () i32 { a: u8 := 300  to_i32(a) }",
         should_pass: false,
         kind: "",
@@ -855,7 +855,13 @@ oracle_verdict_run* = () i32 {
         src: "f* = (a: i64, b: i64) i64 { a + b }\ndouble* = (v: i64) i64 { v * 2 }\ntest* = () i64 { f := double\nf(4) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "dbl* = (v: i64) i64 { v * 2 }\ng* = (store_i64: (i64) i64) i64 { store_i64(21) }\ntest* = () i32 { to_i32(g(dbl)) }",
+        should_pass: true,
+        kind: "",
     )])
+    // SHADOWING accept: an FnT param NAMED AFTER AN INTRINSIC (`store_i64: (i64) i64`) is a
+    // genuine function-valued shadow — checked via the indirect-call path, never intrinsic arity.
     // glue-fix reject: `x := Res` ⏎ `.Okv(1)` is TWO statements (no silent glue into
     // `Res.Okv(1)`), so the bare type name `Res` used as a value is surfaced as an error.
     // glue-fix still-accept: the qualified ctor with its dot on the SAME line as the type.
@@ -893,7 +899,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (137)", [VerdictCase(
+    b := run_verdicts("verdict-kind (146)", [VerdictCase(
         src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "arity",
@@ -1386,6 +1392,18 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\ngk = () Result<i32, IoError> { .Err(.NotFound) }\nadd1 = (n: i32) i32 { n + 1 }\nG := gk().or_return()\nH := add1(6)\ntest* = () i32 { H }",
+        should_pass: false,
+        kind: "or-return",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\ngk = (ok: i32) Result<bool, IoError> { (ok == 1).match ({ true => .Ok(true), false => .Err(.NotFound) }) }\nf = (flag: bool, ok: i32) Result<i32, IoError> {\n    b := flag && gk(ok).or_return()\n    .Ok(b.match ({ true => 7, false => 3 }))\n}\ntest* = () i32 { f(true, 1).match ({ .Ok(v) => v, .Err(e) => 0, }) }",
+        should_pass: false,
+        kind: "or-return",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\nstep = (n: i32) Result<bool, IoError> { (n < 3).match ({ true => .Ok(true), false => .Ok(false) }) }\nf = (k: i32) Result<i32, IoError> {\n    n := k\n    @while (step(n).or_return()) { n = n + 1 }\n    .Ok(n)\n}\ntest* = () i32 { f(0).match ({ .Ok(v) => v, .Err(e) => 0, }) }",
+        should_pass: false,
+        kind: "or-return",
+    ), VerdictCase(
         src: "f* = (a: i64, b: i64) i64 { a + b }\napply* = (x: i64, f: (i64) i64) i64 { f(x, x) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 2 }) }",
         should_pass: false,
         kind: "arity",
@@ -1393,6 +1411,30 @@ oracle_verdict_run* = () i32 {
         src: "f* = (a: i64, b: i64) i64 { a + b }\napply<T> = (x: T, f: (T) T) T { f(x) }\ntest* = () i64 { apply(5, (a, b){ a }) }",
         should_pass: false,
         kind: "arity",
+    ), VerdictCase(
+        src: "g* = (store_i64: i64) i64 {\n    p := malloc(8)\n    store_i64(p)\n    load_i64(p)\n}\ntest* = () i32 { to_i32(g(1)) }",
+        should_pass: false,
+        kind: "not-callable",
+    ), VerdictCase(
+        src: "g* = (to_i64: i64) i64 { to_i64(5, 6, 7) }\ntest* = () i32 { to_i32(g(100)) }",
+        should_pass: false,
+        kind: "not-callable",
+    ), VerdictCase(
+        src: "f* = (a: i64, b: i64) i64 { a + b }\ng* = (f: i64) i64 { f(7) }\ntest* = () i64 { g(9) }",
+        should_pass: false,
+        kind: "not-callable",
+    ), VerdictCase(
+        src: "{ at } = std.text.bytes\ng* = (at: i64) u8 { at(\"xy\") }\ntest* = () i32 { to_i32(g(9)) }",
+        should_pass: false,
+        kind: "not-callable",
+    ), VerdictCase(
+        src: "dbl* = (v: i64) i64 { v * 2 }\napply* = (n: i64, f: (i64) i64) i64 { (n == 0).match ({ true => f(7), false => apply(n - 1, f) }) }\ntest* = () i32 { to_i32(apply(4, dbl)) }",
+        should_pass: false,
+        kind: "recursive-hof",
+    ), VerdictCase(
+        src: "apply* = (n: i64, apply: (i64) i64) i64 { apply(n) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 2 }) }",
+        should_pass: true,
+        kind: "",
     ), VerdictCase(
         src: "halloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    p := a.acquire(16)\n    q := p\n    a.release(p)\n    a.release(q)\n    0\n}",
         should_pass: false,
@@ -1442,6 +1484,29 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // or_return in a GLOBAL initializer: there is NO enclosing function to return the Err to —
+    // the lowered early-return silently aborted zen__init_globals, leaving every later global
+    // zero (H stayed 0, exit 0 instead of 7). Positioned or-return error at check time.
+    // Ok-payload mismatch, CONDITIONAL position (&& rhs): the lowering returns the receiver
+    // VERBATIM, so a Result<bool,E> receiver in a Result<i32,E> fn emitted `return Result_bool_E`
+    // inside a value block the return-fit scan never reaches → cc error as an internal compiler
+    // bug. The or-return check now requires the Ok payloads to agree too.
+    // Ok-payload mismatch in a @while condition — the other conditional position that dodged
+    // the return-fit scan and died at cc.
+    // SHADOWING is not a skip: a call through a KNOWN non-FnT param that shadows an INTRINSIC
+    // (`store_i64: i64`) is not-callable — genc dispatches calls by NAME, so accepting this
+    // emitted the intrinsic expansion with the value arg degraded to literal 0 (a silent 0-write).
+    // same hole, cast intrinsic: `to_i64: i64` param called with 3 args ran as the CAST of the
+    // first arg (extras dropped). Known non-FnT shadow → not-callable, not a silent accept.
+    // SHADOWING is not a skip: calling through an i64 param that shadows a top-level fn is
+    // not-callable at CHECK time (used to pass check, then die at cc: "'f' is not a function").
+    // SHADOWING is not a skip, IMPORTED flavor: an i64 param shadowing an imported fn (`at`)
+    // is equally not-callable — same cc-error leak class as the top-level-fn shadow.
+    // RECURSIVE HOF: a self-recursive fn with an FnT param is inline-only — its residual
+    // self-call after the unroll bound references a C symbol that is never emitted (link error
+    // reported as an internal compiler bug). Positioned reject at check time instead.
+    // recursive-hof leniency: an FnT PARAM named after the fn itself SHADOWS it — the body's
+    // `apply(n)` is an indirect call through the param, not recursion. Must stay accepted.
     // SHADOWING does not blunt the checks: a wrong-arity call THROUGH the shadowed FnT param
     // (`f: (i64) i64` called with two args) is still an arity error — via the indirect-call path,
     // not top-level `f`'s signature.

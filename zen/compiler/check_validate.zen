@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of } = compiler.check
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
 { at, is_alnum } = std.text.bytes
@@ -260,11 +260,21 @@ is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }    //
 // A fn's OWN params and locals SHADOW same-named top-level names in its body: a call through a
 // locally-bound name (e.g. a closure param `f` while a top-level `f` exists) must NEVER be judged
 // against the top-level fn / intrinsic / import — the emitted C scopes the local as the call target.
-// An FnT-typed shadow still gets the indirect-call arity/arg checks (fnval path); a non-FnT or
-// not-yet-typable shadow (pre-inline generic bodies) is skipped, never over-rejected.
+// An FnT-typed shadow still gets the indirect-call arity/arg checks (fnval path); a KNOWN non-FnT
+// shadow is not-callable (see shadow_not_callable); only a not-yet-typable shadow (pre-inline
+// generic bodies) is skipped, never over-rejected.
 shadows_toplevel = (env: Env, fn: str) bool { env.is_local(fn) && (env.env_known_fn(fn) || fn.is_intrinsic() || env.decls.is_imported(fn) || env.decls.is_trait_method(fn)) }
+// A call THROUGH a non-FnT shadow: the local is a scalar/struct, so the call can never succeed — and
+// worse, genc's call dispatch is by NAME, so a "skipped" call to an intrinsic-named local (e.g. a
+// param `store_i64: i64`) is still emitted as the INTRINSIC expansion, silently writing wrong values.
+// Reject when the local's type is concretely KNOWN (calling an i64 is never valid); stay lenient only
+// for an unknown/untypable shadow (pre-inline generic bodies), preserving #370's no-over-rejection.
+shadow_not_callable = (env: Env, fn: str) bool {
+    t := env.var_or_global(fn)
+    (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
+}
 // Intrinsic arity must be checked before emission.
-check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 0 }), false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }) }    // null_ptr() takes no operands
+check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => env.shadow_not_callable(c.fn).match ({ true => 1, false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }) }    // null_ptr() takes no operands
 store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }    // atomic_add_i64(p, delta) -> new value
 store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }    // atomic_store_i64(p, val) -> void
 store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }    // atomic_cas_i64(p, expected, desired) -> bool
@@ -1795,9 +1805,9 @@ diagnostic_span_width = (src: str, pos: i32) i32 {
         (n < 1).match ({ true => 1, false => n })
     } }) })
 }
-diagnostic_kind_name = (code: i32) str { (code == 1).match ({ true => "arity", false => (code == 2).match ({ true => "arg-type", false => (code == 3).match ({ true => "undefined-name", false => (code == 4).match ({ true => "struct-field", false => (code == 5).match ({ true => "exhaustiveness", false => (code == 6).match ({ true => "dup-variant", false => (code == 7).match ({ true => "operand-type", false => (code == 8).match ({ true => "index", false => (code == 9).match ({ true => "return-fit", false => (code == 10).match ({ true => "assign-fit", false => (code == 11).match ({ true => "conformance", false => (code == 12).match ({ true => "dup-fn", false => (code == 13).match ({ true => "value-pos-return", false => (code == 14).match ({ true => "parse", false => (code == 15).match ({ true => "ownership", false => (code == 16).match ({ true => "trait-bound", false => (code == 17).match ({ true => "unknown-type", false => (code == 18).match ({ true => "lambda-value", false => (code == 19).match ({ true => "must-use", false => (code == 20).match ({ true => "need-annotation", false => (code == 21).match ({ true => "ptr-write", false => (code == 22).match ({ true => "infinite-type", false => (code == 23).match ({ true => "null-deref", false => (code == 24).match ({ true => "not-callable", false => (code == 25).match ({ true => "return-fit", false => (code == 26).match ({ true => "no-type-args", false => (code == 27).match ({ true => "or-return", false => "type" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
-diagnostic_message = (code: i32) str { (code == 1).match ({ true => "wrong number of arguments", false => (code == 2).match ({ true => "argument type does not fit the parameter", false => (code == 3).match ({ true => "undefined name", false => (code == 4).match ({ true => "unknown struct field or invalid field access", false => (code == 5).match ({ true => "match does not cover every variant", false => (code == 6).match ({ true => "duplicate match arm variant", false => (code == 7).match ({ true => "operator cannot be applied to these operand types", false => (code == 8).match ({ true => "invalid index operation", false => (code == 9).match ({ true => "returned value does not fit the declared return type", false => (code == 10).match ({ true => "assigned value does not fit the variable's type", false => (code == 11).match ({ true => "impl does not satisfy the trait", false => (code == 12).match ({ true => "duplicate top-level definition", false => (code == 13).match ({ true => "early `return` in a value-position match arm", false => (code == 14).match ({ true => "syntax error: unparseable top-level input", false => (code == 15).match ({ true => "use of an owner after release/drop", false => (code == 16).match ({ true => "type argument does not satisfy the trait bound", false => (code == 17).match ({ true => "unknown type name", false => (code == 18).match ({ true => "a lambda can only be used directly as a call argument", false => (code == 19).match ({ true => "result of a self-mutating container method is discarded; the receiver is invalid after this call", false => (code == 20).match ({ true => "cannot infer the type parameter of this binding", false => (code == 21).match ({ true => "cannot write through a read-only `Ptr<T>`", false => (code == 22).match ({ true => "type contains itself by value, so it has infinite size", false => (code == 23).match ({ true => "`RawPtr<T>` may be null; deref requires a null-check first", false => (code == 24).match ({ true => "value is not a function", false => (code == 25).match ({ true => "function body falls through with no value; add a trailing expression of the declared return type", false => (code == 26).match ({ true => "this function takes no type arguments", false => (code == 27).match ({ true => "`.or_return()` requires the enclosing function to return a `Result` with the receiver's error type", false => "type error" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
-diagnostic_hint = (code: i32) str { (code == 1).match ({ true => "check the callee signature and pass exactly the declared parameters", false => (code == 2).match ({ true => "check the argument type or add an explicit conversion at the call site", false => (code == 3).match ({ true => "declare the name, import it, or qualify the intended module binding", false => (code == 4).match ({ true => "check the struct literal or field access against the declared fields", false => (code == 5).match ({ true => "add arms for every variant, or add an explicit `_` arm", false => (code == 6).match ({ true => "remove the repeated match arm for this variant", false => (code == 7).match ({ true => "use an operator supported by both operand types", false => (code == 8).match ({ true => "index only slice-like values with an integer index", false => (code == 9).match ({ true => "make the returned value fit the function's declared return type", false => (code == 10).match ({ true => "make the assigned value fit the target's type", false => (code == 11).match ({ true => "define every required trait method with the exact receiver, parameter, and return types", false => (code == 12).match ({ true => "rename one definition or move it behind a real module namespace", false => (code == 13).match ({ true => "return a value from the arm instead of using early `return` in value position", false => (code == 14).match ({ true => "check the syntax around this top-level declaration", false => (code == 15).match ({ true => "after release/drop, bind a fresh owner instead of reusing the consumed local", false => (code == 16).match ({ true => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound", false => (code == 17).match ({ true => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)", false => (code == 18).match ({ true => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)", false => (code == 19).match ({ true => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle", false => (code == 20).match ({ true => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`", false => (code == 21).match ({ true => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it", false => (code == 22).match ({ true => "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value", false => (code == 23).match ({ true => "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref", false => (code == 24).match ({ true => "call a function, or store a function value in this name before calling it", false => (code == 26).match ({ true => "remove the `<…>` type arguments, or call a generic function", false => (code == 27).match ({ true => "declare the return type as `Result<_, E>` with the receiver's error type E, or handle the `Result` with `.match`", false => "" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
+diagnostic_kind_name = (code: i32) str { (code == 1).match ({ true => "arity", false => (code == 2).match ({ true => "arg-type", false => (code == 3).match ({ true => "undefined-name", false => (code == 4).match ({ true => "struct-field", false => (code == 5).match ({ true => "exhaustiveness", false => (code == 6).match ({ true => "dup-variant", false => (code == 7).match ({ true => "operand-type", false => (code == 8).match ({ true => "index", false => (code == 9).match ({ true => "return-fit", false => (code == 10).match ({ true => "assign-fit", false => (code == 11).match ({ true => "conformance", false => (code == 12).match ({ true => "dup-fn", false => (code == 13).match ({ true => "value-pos-return", false => (code == 14).match ({ true => "parse", false => (code == 15).match ({ true => "ownership", false => (code == 16).match ({ true => "trait-bound", false => (code == 17).match ({ true => "unknown-type", false => (code == 18).match ({ true => "lambda-value", false => (code == 19).match ({ true => "must-use", false => (code == 20).match ({ true => "need-annotation", false => (code == 21).match ({ true => "ptr-write", false => (code == 22).match ({ true => "infinite-type", false => (code == 23).match ({ true => "null-deref", false => (code == 24).match ({ true => "not-callable", false => (code == 25).match ({ true => "return-fit", false => (code == 26).match ({ true => "no-type-args", false => (code == 27).match ({ true => "or-return", false => (code == 28).match ({ true => "recursive-hof", false => "type" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
+diagnostic_message = (code: i32) str { (code == 1).match ({ true => "wrong number of arguments", false => (code == 2).match ({ true => "argument type does not fit the parameter", false => (code == 3).match ({ true => "undefined name", false => (code == 4).match ({ true => "unknown struct field or invalid field access", false => (code == 5).match ({ true => "match does not cover every variant", false => (code == 6).match ({ true => "duplicate match arm variant", false => (code == 7).match ({ true => "operator cannot be applied to these operand types", false => (code == 8).match ({ true => "invalid index operation", false => (code == 9).match ({ true => "returned value does not fit the declared return type", false => (code == 10).match ({ true => "assigned value does not fit the variable's type", false => (code == 11).match ({ true => "impl does not satisfy the trait", false => (code == 12).match ({ true => "duplicate top-level definition", false => (code == 13).match ({ true => "early `return` in a value-position match arm", false => (code == 14).match ({ true => "syntax error: unparseable top-level input", false => (code == 15).match ({ true => "use of an owner after release/drop", false => (code == 16).match ({ true => "type argument does not satisfy the trait bound", false => (code == 17).match ({ true => "unknown type name", false => (code == 18).match ({ true => "a lambda can only be used directly as a call argument", false => (code == 19).match ({ true => "result of a self-mutating container method is discarded; the receiver is invalid after this call", false => (code == 20).match ({ true => "cannot infer the type parameter of this binding", false => (code == 21).match ({ true => "cannot write through a read-only `Ptr<T>`", false => (code == 22).match ({ true => "type contains itself by value, so it has infinite size", false => (code == 23).match ({ true => "`RawPtr<T>` may be null; deref requires a null-check first", false => (code == 24).match ({ true => "value is not a function", false => (code == 25).match ({ true => "function body falls through with no value; add a trailing expression of the declared return type", false => (code == 26).match ({ true => "this function takes no type arguments", false => (code == 27).match ({ true => "`.or_return()` requires the enclosing function to return the receiver's `Result` type", false => (code == 28).match ({ true => "recursive function with a function-typed parameter — its body is inlined per call site, so the recursive call has no emitted function to land on", false => "type error" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
+diagnostic_hint = (code: i32) str { (code == 1).match ({ true => "check the callee signature and pass exactly the declared parameters", false => (code == 2).match ({ true => "check the argument type or add an explicit conversion at the call site", false => (code == 3).match ({ true => "declare the name, import it, or qualify the intended module binding", false => (code == 4).match ({ true => "check the struct literal or field access against the declared fields", false => (code == 5).match ({ true => "add arms for every variant, or add an explicit `_` arm", false => (code == 6).match ({ true => "remove the repeated match arm for this variant", false => (code == 7).match ({ true => "use an operator supported by both operand types", false => (code == 8).match ({ true => "index only slice-like values with an integer index", false => (code == 9).match ({ true => "make the returned value fit the function's declared return type", false => (code == 10).match ({ true => "make the assigned value fit the target's type", false => (code == 11).match ({ true => "define every required trait method with the exact receiver, parameter, and return types", false => (code == 12).match ({ true => "rename one definition or move it behind a real module namespace", false => (code == 13).match ({ true => "return a value from the arm instead of using early `return` in value position", false => (code == 14).match ({ true => "check the syntax around this top-level declaration", false => (code == 15).match ({ true => "after release/drop, bind a fresh owner instead of reusing the consumed local", false => (code == 16).match ({ true => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound", false => (code == 17).match ({ true => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)", false => (code == 18).match ({ true => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)", false => (code == 19).match ({ true => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle", false => (code == 20).match ({ true => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`", false => (code == 21).match ({ true => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it", false => (code == 22).match ({ true => "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value", false => (code == 23).match ({ true => "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref", false => (code == 24).match ({ true => "call a function, or store a function value in this name before calling it", false => (code == 26).match ({ true => "remove the `<…>` type arguments, or call a generic function", false => (code == 27).match ({ true => "declare the enclosing function's return type as the receiver's `Result<T, E>` (same Ok and error types), or handle the `Result` with `.match`", false => (code == 28).match ({ true => "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function", false => "" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
 check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
     (packed == 0).match ({ true => check_diagnostic_none(), false => {
         code := packed & 31
@@ -1990,7 +2000,7 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({ true => f.is_imported_generic().match ({ true => 0, false => env.kv_arg_type_kind(f.tparams, ps, c.args) }), false => KARITY() })
 }
-kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => 0 }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
+kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
@@ -2697,12 +2707,29 @@ ka_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     )
     a.ka_body_kind(env, f.tparams, f.body)
 }
+// ── recursive HOF: a self-recursive fn with an FnT param ─────────────────────────────────────────
+// A bodied fn with an FnT param is a TEMPLATE (genc.is_generic_fn): it is inlined at each call site
+// and NEVER emitted as a standalone C function. The inliner unrolls a bounded number of self-call
+// levels, so the residual self-call survives in the emitted C as a call to a symbol that has no
+// definition — an "undefined reference" at LINK time, misreported as an internal compiler bug (and
+// shallow recursion only "works" when cc constant-folds the dead residual call). Until such fns are
+// monomorphized per FnT arg, reject them with a positioned error. Lenient guard: a PARAM named after
+// the fn itself shadows it (see shadows_toplevel), so its calls are indirect, not recursion.
+KRECHOF = () i32 { 28 }    // a recursive function with a function-typed parameter (inline-only, so the self-call can never be emitted)
+ka_param_named = (ps: [Param], nm: str) bool {
+    found := false
+    ps.loop((h, i, p) {
+        found = eq(p.name, nm).match ({ true => true, false => found })
+    })
+    found
+}
+ka_rec_hof_kind = (f: Func) i32 { (f.params.has_fnt_param() && f.body.len > 0 && f.params.ka_param_named(f.name) == false && f.body.rc_calls_body(f.name)).match ({ true => KRECHOF().kv_at(f.pos), false => 0 }) }
 check_module_arg_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.ka_func_kind(decls, idx, f),
+            .DFunc(f) => f.ka_rec_hof_kind().kv_kor(a.ka_func_kind(decls, idx, f)),
             _         => 0,
         }))
     })
@@ -2723,8 +2750,11 @@ check_module_arg_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], sr
 KORRETURN = () i32 { 27 }    // `.or_return()` in a function whose return type is not a matching Result
 ko_is_or_call = (c: CallData) bool { eq(c.fn, "or_return") && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { eq(mc.method, "or_return") && mc.args.len == 0 }
-// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
-// A tparam-typed / unknown side defers (concrete only after monomorphization).
+// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree — and
+// so must the `Ok` payloads: the lowering returns the RECEIVER verbatim on Err, so the receiver's
+// whole Result type must be the enclosing fn's (a `Result<bool, E>` receiver in a `Result<i32, E>`
+// fn emits `return <Result_bool_E>` and dies at cc in conditional positions the return-fit scan
+// never reaches). A tparam-typed / unknown side defers (concrete only after monomorphization).
 ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, pos: i32) i32 {
     (tps.ty_mentions_tparam(want) || env.unknown_ty(want)).match ({ true => 0, false => {
         fE := env.subj_variant_payload(want, "Err")
@@ -2732,10 +2762,17 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, pos: i32) i32 {
             rt := env.infer_expr(recv)
             (rt.is_void_ty() || env.unknown_ty(rt) || tps.ty_mentions_tparam(rt)).match ({ true => 0, false => {
                 rE := env.subj_variant_payload(rt, "Err")
-                (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({ true => 0, false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({ true => 0, false => KORRETURN().kv_at(pos) }) })
+                (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({ true => 0, false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({ true => env.ko_ok_at(tps, want, rt, pos), false => KORRETURN().kv_at(pos) }) })
             } })
         } })
     } })
+}
+// the Ok side of the same judgment, entered only once both Err payloads are known and agree.
+// Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
+ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
+    fO := env.subj_variant_payload(want, "Ok")
+    rO := env.subj_variant_payload(rt, "Ok")
+    (fO.is_void_ty() || rO.is_void_ty() || env.unknown_ty(fO) || env.unknown_ty(rO) || tps.ty_mentions_tparam(fO) || tps.ty_mentions_tparam(rO)).match ({ true => 0, false => (fO.ty_eq(rO) || rO.ty_eq(fO)).match ({ true => 0, false => KORRETURN().kv_at(pos) }) })
 }
 ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData) i32 {
     own := ko_is_or_call(c).match ({ true => env.ko_at(tps, want, c.args[0].addr(), c.pos), false => 0 })
@@ -2815,13 +2852,29 @@ ko_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     )
     a.ko_body_kind(env, f.tparams, f.ret, f.body)
 }
+// `.or_return()` in a GLOBAL initializer has NO enclosing function to return the Err to: the lowered
+// early-return would silently abort `zen__init_globals` mid-way, leaving every later global
+// zero-initialized (no diagnostic, wrong exit values). Walk the initializer with a non-Result `want`
+// (i32) so ANY or_return inside it reports KORRETURN at its own position — the same "no matching
+// Result to propagate into" judgment the fn-body walk makes, with nothing lenient to defer to.
+ko_global_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
+    env := Env(
+        vars: a.params_env(empty_params()),
+        decls: decls,
+        didx: idx,
+        exp: tvoid(),
+        a: a,
+    )
+    is_expr_null(g.init).match ({ true => 0, false => env.ko_expr_kind(empty_params(), ti32(), g.init) })
+}
 check_module_or_return_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.ko_func_kind(decls, idx, f),
-            _         => 0,
+            .DFunc(f)   => a.ko_func_kind(decls, idx, f),
+            .DGlobal(g) => a.ko_global_kind(decls, idx, g),
+            _           => 0,
         }))
     })
     acc
