@@ -8,8 +8,8 @@
 { Token, scan } = compiler.lex
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ enode, lexeme, is_op, is_dot, is_field_colon, op_str, parse_atom, parse_or } = compiler.parse_expr
-{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, pdepth_enter, pdepth_exit, pdepth_over } = compiler.parse_type
+{ enode, lexeme, is_op, is_dot, is_field_colon, op_str, parse_atom, parse_or, parse_or_nested } = compiler.parse_expr
+{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
@@ -157,7 +157,9 @@ parse_stmts = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     // consumed as a one-token bad statement) would overflow the C stack. Past the cap, stop the list
     // (perr already set) — the same effect as reaching the body's end.
     pdepth_enter()
+    d := delim_save()    // a body is STATEMENT level even inside an open delimiter (a lambda/block arg)
     r := pdepth_over().match ({ true => a.snil(), false => a.parse_stmts_inner(src, pos) })
+    delim_restore(d)
     pdepth_exit()
     r
 }
@@ -179,7 +181,7 @@ parse_idxset_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
     lb := src.scan(nt.next)    // '['
-    ie := a.parse_or(src, lb.next)    // the index
+    ie := a.parse_or_nested(src, lb.next)    // the index
     rb := src.scan(ie.next)    // ']'
     eq := src.scan(rb.next)    // '='
     v := a.parse_or(src, eq.next)    // the value
@@ -198,12 +200,12 @@ parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<SList> {
     nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
     lb := src.scan(nt.next)    // '['
-    ie := a.parse_or(src, lb.next)    // the index (store target)
+    ie := a.parse_or_nested(src, lb.next)    // the index (store target)
     rb := src.scan(ie.next)    // ']'
     op := src.scan(rb.next)    // the `OP=` token
     ops := src.at(op.tok.start).op_str()
     v := a.parse_or(src, op.next)    // rhs
-    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or(src, lb.next).expr, tvoid()))    // name[i] read
+    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))    // name[i] read
     nv := a.enode(bin_at(ops, cur, v.expr, op.tok.start))
     a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), nv, nt.tok.start), a.parse_stmts(src, v.next))
 }
@@ -284,7 +286,7 @@ parse_while = (a: MutPtr<Malloc>, src: str, pos: i32) WhileEnd {
     at := src.scan(pos)    // '@'
     wk := src.scan(at.next)    // 'while'
     lp := src.skip_to_lparen(wk.next)    // pos just past '('
-    c := a.parse_or(src, lp)    // condition (stops at ')')
+    c := a.parse_or_nested(src, lp)    // condition (stops at ')') — inside the open '('
     rp := src.scan(c.next)    // ')'
     bstart := src.skip_to_brace(rp.next)    // pos just past '{'
     blk := a.parse_block(src, bstart)
@@ -309,10 +311,12 @@ parse_block* = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     // the Eof case. The bail consumes no token, but the caller re-dispatches from a position that advances
     // by a full cap's worth of nesting each outer pass, so the retry chain stays shallow and terminates.
     pdepth_enter()
+    d := delim_save()    // a brace block re-enters STATEMENT level (see parse_type.delim_depth)
     r := pdepth_over().match ({ true => BlockEnd(
         list: a.snil(),
         next: pos,
     ), false => a.parse_block_inner(src, pos) })
+    delim_restore(d)
     pdepth_exit()
     r
 }
@@ -373,7 +377,7 @@ block_idxset = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
     lb := src.scan(nt.next)    // '['
-    ie := a.parse_or(src, lb.next)    // index
+    ie := a.parse_or_nested(src, lb.next)    // index
     rb := src.scan(ie.next)    // ']'
     eq := src.scan(rb.next)    // '='
     v := a.parse_or(src, eq.next)    // value
@@ -418,12 +422,12 @@ block_comp_idxset = (a: MutPtr<Malloc>, src: str, pos: i32) BlockEnd {
     nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
     lb := src.scan(nt.next)    // '['
-    ie := a.parse_or(src, lb.next)    // index (store target)
+    ie := a.parse_or_nested(src, lb.next)    // index (store target)
     rb := src.scan(ie.next)    // ']'
     op := src.scan(rb.next)    // the `OP=` token
     ops := src.at(op.tok.start).op_str()
     v := a.parse_or(src, op.next)    // rhs
-    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or(src, lb.next).expr, tvoid()))
+    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))
     nv := a.enode(bin_at(ops, cur, v.expr, op.tok.start))
     rest := a.parse_block(src, v.next)
     BlockEnd(

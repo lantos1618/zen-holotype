@@ -55,6 +55,31 @@ pdepth_over* = () bool {
     }, false => false })
 }
 pdepth_reset* = () void { parse_depth = 0 }
+// ── STATEMENT-LEVEL tracker for the variant-break rule ──────────────────────────
+// (see parse_expr.is_variant_break) The newline+`.Uppercase` statement break may only fire where a
+// new statement can BEGIN. Inside an unclosed delimiter — call/ctor/index/slice/struct-literal
+// element lists, a `(group)`, a match-arm value — a newline cannot start a statement, so a
+// `.Variant` broken onto its own line there is a CONTINUATION of the expression, not a break.
+// Expression descents into open delimiters bump this depth (parse_expr.parse_or_nested); a brace
+// BLOCK re-enters statement level (parse_stmts / parse_block save-0-restore around the body).
+delim_depth := 0
+delim_enter* = () void { delim_depth = delim_depth + 1 }
+delim_exit* = () void { delim_depth = delim_depth - 1 }
+stmt_level* = () bool { delim_depth == 0 }
+delim_save* = () i32 {
+    d := delim_depth
+    delim_depth = 0
+    d
+}
+delim_restore* = (d: i32) void { delim_depth = d }
+delim_reset* = () void { delim_depth = 0 }
+// byte offset of the `.` of the LAST variant break that FIRED (0 = none). parse.fill_decls consults
+// it: a top-level parse failure exactly AT that dot means the break split the statement there, so
+// the diagnostic can name the newline+`.Uppercase` rule instead of the generic KPARSE message.
+vbreak_off := 0
+vbreak_note* = (off: i32) void { vbreak_off = off }
+vbreak_get* = () i32 { vbreak_off }
+vbreak_reset* = () void { vbreak_off = 0 }
 // ── anonymous (structural) struct accumulator ─────────────────────────────────────
 // Anonymous struct TYPES `{ q: i32, r: i32 }` are desugared, at parse time, to a synthesized named
 // StructDecl (`__anon_q_r`, the structural name from mangle_anon_in) referenced as a `Named` type.

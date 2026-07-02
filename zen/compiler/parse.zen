@@ -7,7 +7,7 @@
 { Malloc } = std.mem.alloc
 { parse_or, parse_bxor, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
-{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_set_at, perr_reset, perr_get, perr_off_get, pdepth_reset, anon_reset, anon_decls_get } = compiler.parse_type
+{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_set_at, perr_reset, perr_get, perr_off_get, pdepth_reset, delim_reset, vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
 // `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: {
     func: Func,
@@ -484,7 +484,10 @@ fill_decls = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
             .Ident => a.fill_decl(src, pos, buf, i),
             _      => {
                 perr_set_at(sc.tok.start)
-                buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(perr_off_get())))
+                // a failure exactly AT the last fired variant break's `.` is the split-statement
+                // shape: a NEGATIVE offset selects the rule-naming KVBREAK diagnostic (0 - off).
+                off := (sc.tok.start == vbreak_get() && vbreak_get() != 0).match ({ true => 0 - sc.tok.start, false => perr_off_get() })
+                buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(off)))
                 a.fill_decls(src, sc.next, buf, i + 1)
             },
         }) }),
@@ -946,6 +949,8 @@ implicit_tparams = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
 parse_module* = (a: MutPtr<Malloc>, src: str) [Decl] {
     perr_reset()
     pdepth_reset()
+    delim_reset()
+    vbreak_reset()
     lerr_reset()
     a.anon_reset()
     a.exports_reset()
@@ -978,7 +983,8 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
             i = i - 1
         }
         off := (perr_off_get() == 0).match ({ true => lerr_off_get(), false => perr_off_get() })
-        buf[0] = dglobal("__syntax_error", tvoid(), a.enode(lit(off)))
+        voff := (off == vbreak_get() && off != 0).match ({ true => 0 - off, false => off })    // vbreak dot → KVBREAK
+        buf[0] = dglobal("__syntax_error", tvoid(), a.enode(lit(voff)))
         buf.take_decls(n + 1)
     } })
 }
