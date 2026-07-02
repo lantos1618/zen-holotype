@@ -1,7 +1,8 @@
 // std.collections.map — a str-keyed associative map `Map<T>` with an EXPLICIT allocator, in the std.collections.vec mold.
 // Every op that allocates takes the allocator as `a: MutPtr<A>` and goes through std.mem.alloc's `Allocator`
-// trait — nothing here hides a malloc. `of` plus `Map.put` is fail-fast like Vec; `try_*`
-// variants return Result<Map<T>, IoError> so callers can handle allocation failure as a value.
+// trait — nothing here hides a malloc. Fallible ops (`of`, `put`, `append`, `grow`) return
+// Result<Map<T>, IoError> — allocation failure is a value: `.expect("…")` at fail-fast roots,
+// `.or_return()` inside Result-returning fns.
 //
 // Lookup is O(1) AVERAGE via an open hash index (FNV-1a over the key bytes, separate chaining into the
 // insertion-ordered key/val columns). The index lives in one i64 buffer of `2*cap` slots: the first `cap`
@@ -15,20 +16,19 @@
 //
 //   alloc := default()
 //   a := alloc.addr()
-//   w := maps.of(a, "the", 1)              // fail-fast Map<i32>; T inferred from the seed
-//   w  = w.put(a, "cat", 2)                // insert — grows through alloc when full
-//   r := maps.try_of(a, "the", 1)          // Result<Map<i32>, IoError>
-//   w  = w.put(a, "the", 9)                // upsert — same key overwrites in place
+//   w := maps.of(a, "the", 1).expect("of")    // Map<i32>; T inferred from the seed
+//   w  = w.put(a, "cat", 2).expect("put")     // insert — grows through alloc when full
+//   w  = w.put(a, "the", 9).expect("put")     // upsert — same key overwrites in place
 //   n := w.get("the", 0)                   // 9; absent keys produce the default
 //   w.free(a)                              // hand all buffers back to alloc
 //
 // Allocator-threaded constructors remain free functions; Map-owned operations live on Map<T>, so
-// callers use w.put(...), w.try_put(...), w.free(...), w.get(...), w.has(...), and w.len().
+// callers use w.put(...), w.free(...), w.get(...), w.has(...), and w.len().
 //
 // VALUE-MOLD CONTRACT (read before sharing a Map handle). A `Map<T>` is a small by-value header
 // {keys, vals, idx, len, cap} over allocator-owned buffers, exactly like std.collections.vec. Two
 // consequences follow from that — both are by-design, not bugs:
-//   1. ALWAYS USE THE RETURNED MAP. `put`/`try_put` may grow, which reallocs the buffers and returns
+//   1. ALWAYS USE THE RETURNED MAP. `put` may grow, which reallocs the buffers and returns
 //      an updated header whose pointers differ from the input's. A handle captured BEFORE such a grow
 //      then points at freed memory — reading or further mutating it is use-after-free. Treat a Map
 //      like a fresh value each op: `m = m.put(a, k, v)`; never keep and reuse a pre-`put` copy.
@@ -59,7 +59,7 @@ Map*<T>: {
         // Live view over the LEN live entries (stored compactly in slots [0, len) in insertion
         // order — there is no delete, so no gaps). Sized to `len`, NOT `cap`: a `.loop` over the
         // result iterates only real entries instead of walking the empty/NULL tail of the backing
-        // table (which segfaults). The append writers (`append`/`try_append`/`of`) index slot
+        // table (which segfaults). The append writers (`append`/`of`) index slot
         // `len` (one past) via raw pointer arithmetic, which ignores the slice's `.len`, so writing
         // the next slot still lands in the cap-sized backing buffer — only `.loop`/`.len` consumers
         // observe the tighter bound.
@@ -89,18 +89,7 @@ Map*<T>: {
     get_at = (m: Map<T>, i: i64, dflt: T) T { (i < 0).match ({ true => dflt, false => m.vals()[i] }) }
     get = (m: Map<T>, k: str, dflt: T) T { m.get_at(m.find(k), dflt) }
     has = (m: Map<T>, k: str) bool { m.find(k) >= 0 }
-    grow<A> = (m: Map<T>, a: MutPtr<A>) Map<T> {
-        cap := m.cap * 2 + 1
-        next := Map<T>(
-            keys: a.resize(m.keys, cap * sizeof(MKey)),
-            vals: a.resize(m.vals, cap * sizeof(T)),
-            idx: a.resize(m.idx, cap * 2 * sizeof(MIdx)),
-            len: m.len,
-            cap: cap,
-        )
-        next.reindex()
-    }
-    try_grow<A> = (m: Map<T>, a: MutPtr<A>) Result<Map<T>, IoError> {
+    grow<A> = (m: Map<T>, a: MutPtr<A>) Result<Map<T>, IoError> {
         cap := m.cap * 2 + 1
         a.try_acquire(cap * sizeof(MKey)).match ({
             .Ok(kp) => {
@@ -186,23 +175,7 @@ Map*<T>: {
         ix[b] = slot
         m
     }
-    append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Map<T> {
-        k := k
-        v := v
-        next := (m.len < m.cap).match ({ true => m, false => m.grow(a) })
-        keys := next.keys_all()
-        vals := next.vals_all()
-        keys[next.len] = k
-        vals[next.len] = v
-        Map<T>(
-            keys: next.keys,
-            vals: next.vals,
-            idx: next.idx,
-            len: next.len + 1,
-            cap: next.cap,
-        ).link(next.len)
-    }
-    try_append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
+    append<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
         k := k
         v := v
         out: Result<Map<T>, IoError> := (m.len < m.cap).match ({ true => {
@@ -219,7 +192,7 @@ Map*<T>: {
             ).link(m.len))
             ok
         }, false => {
-            m.try_grow(a).match ({
+            m.grow(a).match ({
                 .Ok(next) => {
                     keys := next.keys_all()
                     vals := next.vals_all()
@@ -242,21 +215,14 @@ Map*<T>: {
         } })
         out
     }
-    put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Map<T> {
-        // Insert or upsert. RETURNS the updated map — always rebind to the result (`m = m.put(...)`).
-        // On grow the buffers are realloced, so any handle captured before this call dangles (see the
-        // VALUE-MOLD CONTRACT above). On an existing key the value is overwritten IN PLACE, so the new
-        // value is visible through every header that shares this map's storage; `clone` first for an
-        // independent copy.
+    put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
+        // Insert or upsert (allocation failure is a value). RETURNS the updated map — always rebind to
+        // the result (`m = m.put(...).expect("…")`). On grow the buffers are realloced, so any handle
+        // captured before this call dangles (see the VALUE-MOLD CONTRACT above). On an existing key the
+        // value is overwritten IN PLACE, so the new value is visible through every header that shares
+        // this map's storage; `clone` first for an independent copy.
         i := m.find(k)
-        out: Map<T> := (i < 0).match ({ true => m.append(a, k, v), false => m.set(i, v) })
-        out
-    }
-    try_put<A> = (m: Map<T>, a: MutPtr<A>, k: str, v: T) Result<Map<T>, IoError> {
-        // Result-returning `put` (allocation failure is a value). Same contract: use the returned map; a
-        // pre-call handle is invalid after a grow, and an upsert mutates shared storage in place.
-        i := m.find(k)
-        out: Result<Map<T>, IoError> := (i < 0).match ({ true => m.try_append(a, k, v), false => {
+        out: Result<Map<T>, IoError> := (i < 0).match ({ true => m.append(a, k, v), false => {
             next := m.set(i, v)
             ok: Result<Map<T>, IoError> := .Ok(next)
             ok
@@ -341,21 +307,7 @@ empty*<T, A> = (a: MutPtr<A>) Map<T> {
 }
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
-of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Map<T> {
-    m := Map<T>(
-        keys: a.acquire(sizeof(MKey)),
-        vals: a.acquire(sizeof(T)),
-        idx: a.acquire(2 * sizeof(MIdx)),
-        len: 1,
-        cap: 1,
-    )
-    keys := m.keys()
-    vals := m.vals()
-    keys[0] = seed_key
-    vals[0] = seed_val
-    m.reindex()
-}
-try_of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError> {
+of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError> {
     a.try_acquire(sizeof(MKey)).match ({
         .Ok(kp) => {
             a.try_acquire(sizeof(T)).match ({
@@ -402,15 +354,15 @@ try_of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoErro
 // the ONLY differences are the key column holds raw `i64` values (not borrowed `str` pointers, so there
 // is no outlives-the-map rule — keys are copied by value) and key comparison/hashing is integer-native:
 // `==` for equality and `ihash` (a splitmix-style multiplicative mix) for bucketing. Use IntMap when
-// keys are addresses, ids, or any integer. Constructors are `int_empty`/`int_of`/`try_int_of`; the
-// Map-owned ops (put/get/has/len/free/clone/each_pair, plus the try_* Result variants) live on the
-// type and dispatch by receiver, so a program can use a str Map and an IntMap side by side.
+// keys are addresses, ids, or any integer. Constructors are `int_empty`/`int_of`; the Map-owned
+// ops (put/get/has/len/free/clone/each_pair) live on the type and dispatch by receiver, so a
+// program can use a str Map and an IntMap side by side.
 //
 //   alloc := default()
 //   a := alloc.addr()
 //   m: IntMap<i32> := maps.int_empty(a)    // T from the LHS annotation; A inferred from a
-//   m = m.put(a, 42, 7)                     // insert — grows through alloc when full
-//   m = m.put(a, 42, 9)                     // upsert — same key overwrites in place
+//   m = m.put(a, 42, 7).expect("put")       // insert — grows through alloc when full
+//   m = m.put(a, 42, 9).expect("put")       // upsert — same key overwrites in place
 //   n := m.get(42, 0)                       // 9; absent keys produce the default
 //   m.free(a)
 IntMap*<V>: {
@@ -447,18 +399,7 @@ IntMap*<V>: {
     get_at = (m: IntMap<V>, i: i64, dflt: V) V { (i < 0).match ({ true => dflt, false => m.vals()[i] }) }
     get = (m: IntMap<V>, k: i64, dflt: V) V { m.get_at(m.find(k), dflt) }
     has = (m: IntMap<V>, k: i64) bool { m.find(k) >= 0 }
-    grow<A> = (m: IntMap<V>, a: MutPtr<A>) IntMap<V> {
-        cap := m.cap * 2 + 1
-        next := IntMap<V>(
-            keys: a.resize(m.keys, cap * sizeof(i64)),
-            vals: a.resize(m.vals, cap * sizeof(V)),
-            idx: a.resize(m.idx, cap * 2 * sizeof(MIdx)),
-            len: m.len,
-            cap: cap,
-        )
-        next.reindex()
-    }
-    try_grow<A> = (m: IntMap<V>, a: MutPtr<A>) Result<IntMap<V>, IoError> {
+    grow<A> = (m: IntMap<V>, a: MutPtr<A>) Result<IntMap<V>, IoError> {
         cap := m.cap * 2 + 1
         a.try_acquire(cap * sizeof(i64)).match ({
             .Ok(kp) => {
@@ -543,23 +484,7 @@ IntMap*<V>: {
         ix[b] = slot
         m
     }
-    append<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) IntMap<V> {
-        k := k
-        v := v
-        next := (m.len < m.cap).match ({ true => m, false => m.grow(a) })
-        keys := next.keys_all()
-        vals := next.vals_all()
-        keys[next.len] = k
-        vals[next.len] = v
-        IntMap<V>(
-            keys: next.keys,
-            vals: next.vals,
-            idx: next.idx,
-            len: next.len + 1,
-            cap: next.cap,
-        ).link(next.len)
-    }
-    try_append<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) Result<IntMap<V>, IoError> {
+    append<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) Result<IntMap<V>, IoError> {
         k := k
         v := v
         out: Result<IntMap<V>, IoError> := (m.len < m.cap).match ({ true => {
@@ -576,7 +501,7 @@ IntMap*<V>: {
             ).link(m.len))
             ok
         }, false => {
-            m.try_grow(a).match ({
+            m.grow(a).match ({
                 .Ok(next) => {
                     keys := next.keys_all()
                     vals := next.vals_all()
@@ -599,18 +524,13 @@ IntMap*<V>: {
         } })
         out
     }
-    put<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) IntMap<V> {
-        // Insert or upsert. RETURNS the updated map — always rebind to the result (`m = m.put(...)`).
-        // On grow the buffers are realloced, so a handle captured before this call dangles (VALUE-MOLD
-        // CONTRACT). On an existing key the value is overwritten IN PLACE.
+    put<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) Result<IntMap<V>, IoError> {
+        // Insert or upsert (allocation failure is a value). RETURNS the updated map — always rebind to
+        // the result (`m = m.put(...).expect("…")`). On grow the buffers are realloced, so a handle
+        // captured before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value is
+        // overwritten IN PLACE.
         i := m.find(k)
-        out: IntMap<V> := (i < 0).match ({ true => m.append(a, k, v), false => m.set(i, v) })
-        out
-    }
-    try_put<A> = (m: IntMap<V>, a: MutPtr<A>, k: i64, v: V) Result<IntMap<V>, IoError> {
-        // Result-returning `put` (allocation failure is a value). Same contract: use the returned map.
-        i := m.find(k)
-        out: Result<IntMap<V>, IoError> := (i < 0).match ({ true => m.try_append(a, k, v), false => {
+        out: Result<IntMap<V>, IoError> := (i < 0).match ({ true => m.append(a, k, v), false => {
             next := m.set(i, v)
             ok: Result<IntMap<V>, IoError> := .Ok(next)
             ok
@@ -688,21 +608,7 @@ int_empty*<V, A> = (a: MutPtr<A>) IntMap<V> {
     m.reindex()
 }
 // an `IntMap<V>` seeded with one entry, its buffers acquired from `a`. V inferred from the seed value.
-int_of*<V, A> = (a: MutPtr<A>, seed_key: i64, seed_val: V) IntMap<V> {
-    m := IntMap<V>(
-        keys: a.acquire(sizeof(i64)),
-        vals: a.acquire(sizeof(V)),
-        idx: a.acquire(2 * sizeof(MIdx)),
-        len: 1,
-        cap: 1,
-    )
-    keys := m.keys()
-    vals := m.vals()
-    keys[0] = seed_key
-    vals[0] = seed_val
-    m.reindex()
-}
-try_int_of*<V, A> = (a: MutPtr<A>, seed_key: i64, seed_val: V) Result<IntMap<V>, IoError> {
+int_of*<V, A> = (a: MutPtr<A>, seed_key: i64, seed_val: V) Result<IntMap<V>, IoError> {
     a.try_acquire(sizeof(i64)).match ({
         .Ok(kp) => {
             a.try_acquire(sizeof(V)).match ({

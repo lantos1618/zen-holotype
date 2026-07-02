@@ -3,7 +3,7 @@
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
-{ panic } = std.core.result
+{ panic, expect } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
 { String } = std.text.string
 { at } = std.text.bytes
@@ -30,18 +30,18 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
     // (trait "\t" method) → presence: the trait provides a default for the method
     // the combined key for a trait-default lookup; trait/method are identifiers, so a TAB can't collide.
     idx := DeclIndex(
-        func_idx: of(a, "", seed),
-        struct_idx: of(a, "", seed),
-        enum_idx: of(a, "", seed),
-        global_idx: of(a, "", seed),
-        impl_idx: of(a, "", seed),
-        tdef_idx: of(a, "", seed),
+        func_idx: of(a, "", seed).expect("check: decl-index alloc"),
+        struct_idx: of(a, "", seed).expect("check: decl-index alloc"),
+        enum_idx: of(a, "", seed).expect("check: decl-index alloc"),
+        global_idx: of(a, "", seed).expect("check: decl-index alloc"),
+        impl_idx: of(a, "", seed).expect("check: decl-index alloc"),
+        tdef_idx: of(a, "", seed).expect("check: decl-index alloc"),
     )
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f)          => {
                 idx = DeclIndex(
-                    func_idx: idx.func_idx.put(a, f.name, i),
+                    func_idx: idx.func_idx.put(a, f.name, i).expect("check: decl-index alloc"),
                     struct_idx: idx.struct_idx,
                     enum_idx: idx.enum_idx,
                     global_idx: idx.global_idx,
@@ -51,7 +51,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
             },
             .DForeign(f)       => {
                 idx = DeclIndex(
-                    func_idx: idx.func_idx.put(a, f.name, i),
+                    func_idx: idx.func_idx.put(a, f.name, i).expect("check: decl-index alloc"),
                     struct_idx: idx.struct_idx,
                     enum_idx: idx.enum_idx,
                     global_idx: idx.global_idx,
@@ -62,7 +62,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
             .DStruct(s)        => {
                 idx = DeclIndex(
                     func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx.put(a, s.name, i),
+                    struct_idx: idx.struct_idx.put(a, s.name, i).expect("check: decl-index alloc"),
                     enum_idx: idx.enum_idx,
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
@@ -73,7 +73,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                 idx = DeclIndex(
                     func_idx: idx.func_idx,
                     struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx.put(a, e.name, i),
+                    enum_idx: idx.enum_idx.put(a, e.name, i).expect("check: decl-index alloc"),
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
@@ -84,7 +84,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     func_idx: idx.func_idx,
                     struct_idx: idx.struct_idx,
                     enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx.put(a, g.name, i),
+                    global_idx: idx.global_idx.put(a, g.name, i).expect("check: decl-index alloc"),
                     impl_idx: idx.impl_idx,
                     tdef_idx: idx.tdef_idx,
                 )
@@ -95,7 +95,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     struct_idx: idx.struct_idx,
                     enum_idx: idx.enum_idx,
                     global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx.put(a, im.ty, i),
+                    impl_idx: idx.impl_idx.put(a, im.ty, i).expect("check: decl-index alloc"),
                     tdef_idx: idx.tdef_idx,
                 )
             },
@@ -106,7 +106,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     enum_idx: idx.enum_idx,
                     global_idx: idx.global_idx,
                     impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i),
+                    tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i).expect("check: decl-index alloc"),
                 )
             },
             _                  => { },

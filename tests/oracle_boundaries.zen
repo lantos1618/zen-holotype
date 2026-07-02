@@ -299,22 +299,23 @@ io_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// SUITE 7: std.collections.map try-paths use the Result allocator helpers (try_acquire/try_grow).
+// SUITE 7: std.collections.map fallible paths (the unified Result API) use the Result allocator
+// helpers — grow/of go through try_acquire, append grows through grow; never a bare panicking acquire.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 map_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in("zen/std/collections/map.zen").match ({
         .Ok(raw) => {
             src := mp.strip_comments_in(raw)
-            grow := mp.region(src, "try_grow", "append<A>")
-            appnd := mp.region(src, "try_append", "put<A>")
-            of := mp.region(src, "try_of*", "IntMap")
+            grow := mp.region(src, "grow<A>", "reindex = ")
+            appnd := mp.region(src, "append<A>", "put<A>")
+            of := mp.region(src, "of*<T, A>", "IntMap")
             // IntMap<V> (i64-keyed twin) must hold the same discipline; bound the checks to the section
-            // after the `IntMap` marker so its try_grow/try_append/try_int_of resolve to the int versions.
+            // after the `IntMap` marker so its grow/append/int_of resolve to the int versions.
             isrc := mp.after_marker(src, "IntMap")
-            igrow := mp.region(isrc, "try_grow", "append<A>")
-            iappnd := mp.region(isrc, "try_append", "put<A>")
-            iof := mp.after_marker(isrc, "try_int_of*")
-            run_suite("boundaries: map try paths use result helpers", [grow.contains(".try_acquire("), grow.not_contains(".acquire("), appnd.contains(".try_grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire("), of.not_contains(".acquire("), igrow.contains(".try_acquire("), igrow.not_contains(".acquire("), iappnd.contains(".try_grow("), iappnd.not_contains(".acquire("), iof.contains(".try_acquire("), iof.not_contains(".acquire(")])
+            igrow := mp.region(isrc, "grow<A>", "reindex = ")
+            iappnd := mp.region(isrc, "append<A>", "put<A>")
+            iof := mp.after_marker(isrc, "int_of*")
+            run_suite("boundaries: map fallible paths use result helpers", [grow.contains(".try_acquire("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire("), of.not_contains(".acquire("), igrow.contains(".try_acquire("), igrow.not_contains(".acquire("), iappnd.contains(".grow("), iappnd.not_contains(".acquire("), iof.contains(".try_acquire("), iof.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
     })
