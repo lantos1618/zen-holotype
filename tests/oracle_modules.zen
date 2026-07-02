@@ -1137,6 +1137,22 @@ oracle_modules_run* = () i32 {
     ), ModVerdictCase(
         files: [ModFile(
             name: "p.zen",
+            src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  m := maps.of(a, \"x\", 1).expect(\"of\")\n  m.put(a, \"y\", 2)\n  m.free(a)\n  0\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "must-use",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  m := maps.of(a, \"x\", 1).expect(\"of\")\n  m = m.put(a, \"y\", 2).expect(\"put\")\n  m.free(a)\n  0\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
             src: "Box*: {\n    v: i32\n    bump = (b: Box, n: i32) Box { Box( v: b.v + n ) }\n    get = (b: Box) i32 { b.v }\n}\nmain = () i32 {\n  b := Box( v: 1 )\n  b = b.bump(5)\n  b.get()\n}\n",
         )],
         entry: "p.zen",
@@ -1208,7 +1224,8 @@ oracle_modules_run* = () i32 {
     // two imported modules sharing a name still dedup silently (dependency-first, no false dup).
     // unknown type names in annotations / returns / lets are rejected (driver unknown-type pass).
     // defined / primitive / generic / imported types must NOT be flagged (no false positive).
-    // must-use: a discarded value-mold (Self,…) Self self-mutation result is rejected; rebind/tail OK.
+    // must-use: a discarded value-mold (Self,…) Self self-mutation result is rejected; rebind/tail OK;
+    // the Result-always mold (Self,…) Result<Self, E> (Map.put) rejects the same discard, rebind+expect OK.
     // lambdas: a bound local lambda used as a HOF arg compiles; a non-capturing field/returned lambda
     // is lifted (accepts); a CAPTURING field lambda rejects with error[lambda-value].
     // ── a large namespace-bound compiler module resolves without overflowing the resolver ────
