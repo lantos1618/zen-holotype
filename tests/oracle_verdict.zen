@@ -772,7 +772,7 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "",
     ), VerdictCase(
-        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ntest* = () i32 { bu: Box<u8> := mk(255)  0 }",
+        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ntest* = () i32 { bu: Box<u8> := mk(256)  0 }",
         should_pass: false,
         kind: "assign-fit",
     ), VerdictCase(
@@ -780,9 +780,9 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ngetu8* = () Box<u8> { mk(7) }\ntest* = () i32 { 0 }",
+        src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ngetu8* = () Box<u8> { mk(300) }\ntest* = () i32 { 0 }",
         should_pass: false,
-        kind: "return-fit",
+        kind: "assign-fit",
     ), VerdictCase(
         src: "f* = () i32 { a: i32 := 0  b: i64 := 4294967297  a + b }\ntest* = () i32 { f() }",
         should_pass: false,
@@ -888,6 +888,11 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "parse",
     )])
+    // hole 4, post-literal-strength: the annotation PINS T=u8 and the literal COERCES
+    // (255 fits u8, like `u: u8 := 255`), so acceptance moved to the fit boundary: an
+    // OUT-OF-RANGE literal (256) is what must reject now.
+    // return position likewise: T=u8 from the declared return, 7 coerces; a literal that
+    // CANNOT fit u8 (300) still rejects (the fit fires at the pinned arg binding).
     // a bounded generic `draw<A: Show>` called with a type that has NO Show impl: rejected at
     // the CALL SITE as trait-bound (the kvb raw-decls pass), never as undefined-name/arity.
     // the SAME bounded call with the satisfying type stays green.
@@ -911,10 +916,10 @@ oracle_verdict_run* = () i32 {
     // `.Okv(1),` continues the arm expression instead of manufacturing a parse error at the `,`.
     // variant-break TOP-LEVEL reject: `G := S` ⏎ `.Okv(2)` splits at statement level; the leftover
     // `.Okv(2)` cannot start a decl — reported as the rule-naming KVBREAK `parse` diagnostic.
-    // soundness hole 4: a generic call's CONCRETE result type (Box<i32> from mk(255)) must be
-    // fit-checked against the annotation Box<u8> — a real mismatch, not an unknown leaked to cc.
+    // soundness hole 4 (updated by literal binding-strength): the annotation pins T, the literal
+    // coerces when it FITS; a literal that cannot fit the pinned T (256 in u8) still rejects.
     // hole 4 still-accept: the inferred instance IS correct (Box<i32>), so it type-checks.
-    // hole 4 return position: returning Box<i32> from a Box<u8> function is a return-fit error.
+    // hole 4 return position: the declared return pins T=u8; an unfittable literal (300) rejects.
     // soundness hole 5: i32 + i64 is i64 (the WIDER operand), so it cannot fit an i32 slot —
     // no silent truncation, and no order-dependence (`a + b` and `b + a` both reject).
     // hole 5 still-accept: legitimate i64 math and same-width i32 math are unchanged.

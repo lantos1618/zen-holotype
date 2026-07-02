@@ -1,0 +1,29 @@
+// Binding strength at generic calls: receiver/typed args pin a tparam; an untyped literal is the
+// WEAKEST source — it must coerce to the pinned type (sizeof proves which type each call bound),
+// never rebind it to the literal's default width.
+{ println } = std.text.fmt
+sz<T> = (x: T) i64 { sizeof(T) }
+Box<T>: {
+    v: T,
+    pick = (b: Box<T>, k: T) i64 { sz(k) }
+}
+first<T> = (k: T, b: Box<T>) i64 { sz(k) }
+mixed<T> = (b: Box<T>, k: T, j: T) i64 { sz(k) }
+mk<T> = (x: T) Box<T> { Box<T>(v: x) }
+main = () i32 {
+    x: i64 := 5
+    b := Box<i64>(v: x)
+    println(b.pick(2))    // literal non-first: receiver pins T=i64 -> 8
+    println(b.pick(x))    // typed arg -> 8
+    println(first(3, b))    // literal FIRST: the later receiver still pins -> 8
+    println(mixed(b, 4, x))    // mixed literal+typed args -> 8
+    y: i32 := 7
+    c := Box<i32>(v: y)
+    println(c.pick(2))    // explicit i32 pin: literal coerces to i32 -> 4
+    println(sz(to_i64(0)))    // a call arg with concrete return type pins T -> 8
+    println(sz(9))    // literal-only binding still allowed as last resort -> 4
+    bu: Box<u8> := mk(255)    // annotation pins T=u8; 255 fits -> coerces like `u: u8 := 255`
+    println(sz(bu.v))    // 1
+    println(bu.v)
+    0
+}
