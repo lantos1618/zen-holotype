@@ -268,7 +268,10 @@ check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ tr
 store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }    // atomic_add_i64(p, delta) -> new value
 store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }    // atomic_store_i64(p, val) -> void
 store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }    // atomic_cas_i64(p, expected, desired) -> bool
-derefs_nullable = (env: Env, c: CallData) bool { ((eq(c.fn, "load") || eq(c.fn, "store") || eq(c.fn, "offset")) && c.args.len >= 1).match ({ true => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(), false => false }) }    // atomic_fence() -> void
+// every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
+// word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
+is_deref_intrinsic = (fn: str) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_load_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
+derefs_nullable = (env: Env, c: CallData) bool { (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({ true => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(), false => false }) }    // atomic_fence() -> void
 null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({ true => 1, false => 0 }) }    // atomic_load_i64/load_i64/load/addr/cstr/malloc/sizeof/to_* (incl. to_f64) = 1
 // Generic UFCS trait calls may need to defer even if a top-level fn has the same name.
 // `@malloc` is not a magic allocator; use an ordinary foreign function or allocator API.
@@ -1134,6 +1137,61 @@ dead_remove = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: str) Ptr<DeadList> 
         .DeadCons(c) => eq(c.name, name).match ({ true => a.dead_remove(c.tail, name), false => a.dead_cons(c.name, a.dead_remove(c.tail, name)) }),
     })
 }
+// ── ALIAS CLASSES (name-only) ────────────────────────────────────────────────────────────────────
+// `q := p` copies a POINTER, not the allocation: freeing either name frees the ONE allocation, so a
+// later use (or second free) of the other name is a hole the per-name kill-set misses. We track
+// direct pointer-copy binds (`q := p` / `q = p`, both bare locals, pointer-typed) as ALIAS PAIRS;
+// killing any name kills its whole (transitive) alias class, while REVIVAL stays per-name: rebinding
+// `q` detaches only `q` (its pairs are dropped, only `q` leaves the kill-set). Anything indirect —
+// field reads, call returns, `.addr()` — is deliberately untracked (under-reject, never over-reject),
+// matching the bare-locals-only scope of the rest of this pass.
+AliasList: AliasNil | AliasCons(AliasCell)
+AliasCell: {
+    x: str,
+    y: str,
+    tail: Ptr<AliasList>,
+}
+alias_buf = (a: MutPtr<Malloc>) [AliasList] { slice(a.acquire(sizeof(AliasList)), 1) }
+alias_node = (a: MutPtr<Malloc>, v: AliasList) Ptr<AliasList> {
+    buf := a.alias_buf()
+    buf[0] = v
+    buf[0].addr()
+}
+alias_nil = (a: MutPtr<Malloc>) Ptr<AliasList> { a.alias_node(.AliasNil) }
+alias_cons = (a: MutPtr<Malloc>, x: str, y: str, tail: Ptr<AliasList>) Ptr<AliasList> {
+    a.alias_node(.AliasCons(AliasCell(
+        x: x,
+        y: y,
+        tail: tail,
+    )))
+}
+// drop every pair mentioning `name` — a rebind of `name` detaches it from its old class.
+alias_drop = (a: MutPtr<Malloc>, al: Ptr<AliasList>, name: str) Ptr<AliasList> {
+    al.match ({
+        .AliasNil     => al,
+        .AliasCons(c) => (eq(c.x, name) || eq(c.y, name)).match ({ true => a.alias_drop(c.tail, name), false => a.alias_cons(c.x, c.y, a.alias_drop(c.tail, name)) }),
+    })
+}
+// grow `acc` with every name reachable from `name` through the pair list (transitive closure; `acc`
+// doubles as the visited set, so shared members are added once and cycles terminate).
+alias_reach = (a: MutPtr<Malloc>, rest: Ptr<AliasList>, full: Ptr<AliasList>, name: str, acc: Ptr<DeadList>) Ptr<DeadList> {
+    rest.match ({
+        .AliasNil     => acc,
+        .AliasCons(c) => {
+            out := acc
+            (eq(c.x, name) && out.dead_has(c.y) == false).match ({ true => {
+                out = a.alias_reach(full, full, c.y, a.dead_cons(c.y, out))
+            }, false => { } })
+            (eq(c.y, name) && out.dead_has(c.x) == false).match ({ true => {
+                out = a.alias_reach(full, full, c.x, a.dead_cons(c.x, out))
+            }, false => { } })
+            a.alias_reach(c.tail, full, name, out)
+        },
+    })
+}
+// kill `name` AND its alias class: every class member joins the kill-set (its own fresh closure set,
+// so members already dead never mask the traversal).
+dead_kill = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, al: Ptr<AliasList>, name: str) Ptr<DeadList> { a.dead_union(a.alias_reach(al, al, name, a.dead_cons(name, a.dead_nil())), seen) }
 owner_base = (t: Ty) str {
     t.match ({
         .Generic(g) => g.name,
@@ -1229,68 +1287,95 @@ rebind_stmt_name = (st: Stmt) str {
         _          => "",
     })
 }
+// the source name of a direct pointer copy (`q := p` / `q = p`): a bare Var whose inferred type is a
+// pointer (any `.Ptr` kind). Non-pointer copies (ints, structs, owners) never join an alias class.
+copy_src_name = (env: Env, e: Ptr<Expr>) str {
+    load(e).match ({
+        .Var(v) => env.infer_expr(e).ty_is_ptr_t().match ({ true => v.name, false => "" }),
+        _       => "",
+    })
+}
+alias_src_name = (env: Env, st: Stmt) str {
+    st.match ({
+        .Let(l)    => env.copy_src_name(l.value),
+        .Assign(x) => env.copy_src_name(x.value),
+        _          => "",
+    })
+}
+// thread the alias-pair set across a statement: a rebind detaches the target from its old class,
+// then a direct pointer copy pairs target and source. Runs alongside own_step (aliases established
+// BEFORE a statement govern that statement's kills).
+alias_step = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<AliasList> {
+    rb := rebind_stmt_name(st)
+    out := rb.is_empty().match ({ true => al, false => a.alias_drop(al, rb) })
+    src := env.alias_src_name(st)
+    (rb.is_empty() == false && src.is_empty() == false && eq(rb, src) == false).match ({ true => {
+        out = a.alias_cons(rb, src, out)
+    }, false => { } })
+    out
+}
 // count an assign TARGET as a use only when it is NOT a bare local (a bare `p = …` is a rebind/revival,
 // not a read of `p`; a compound `arr[i] = …` / `m.f = …` reads the base/index, so still check those).
-own_assign_target_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, t: Ptr<Expr>) i32 {
+own_assign_target_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, t: Ptr<Expr>) i32 {
     load(t).match ({
         .Var(v) => 0,
-        _       => a.own_expr_err(env, seen, t),
+        _       => a.own_expr_err(env, seen, al, t),
     })
 }
-kv_own_assign_target_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, t: Ptr<Expr>) i32 {
+kv_own_assign_target_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, t: Ptr<Expr>) i32 {
     load(t).match ({
         .Var(v) => 0,
-        _       => a.kv_own_expr_kind(env, seen, t),
+        _       => a.kv_own_expr_kind(env, seen, al, t),
     })
 }
-own_args_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
+own_args_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc + a.own_expr_err(env, seen, ar.addr())
+        acc = acc + a.own_expr_err(env, seen, al, ar.addr())
     })
     acc
 }
-own_inits_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
+own_inits_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc + a.own_expr_err(env, seen, fi.value)
+        acc = acc + a.own_expr_err(env, seen, al, fi.value)
     })
     acc
 }
-own_arms_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
+own_arms_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc + a.own_expr_err(a.arm_env(env, subjty, ar), seen, ar.body)
+        acc = acc + a.own_expr_err(a.arm_env(env, subjty, ar), seen, al, ar.body)
     })
     acc
 }
-own_expr_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+own_expr_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v)        => seen.dead_has(v.name).match ({ true => 1, false => 0 }),
-        .Call(c)       => a.own_args_err(env, seen, c.args) + env.is_default_owner_method(c).match ({ true => 1, false => 0 }),
-        .Index(ix)     => a.own_expr_err(env, seen, ix.seq) + a.own_expr_err(env, seen, ix.idx),
-        .Bin(b)        => a.own_expr_err(env, seen, b.lhs) + a.own_expr_err(env, seen, b.rhs),
-        .Cond(d)       => a.own_expr_err(env, seen, d.c) + a.own_expr_err(env, seen, d.t) + a.own_expr_err(env, seen, d.e),
-        .Member(m)     => a.own_expr_err(env, seen, m.obj),
-        .Arrow(ar)     => a.own_expr_err(env, seen, ar.obj),
-        .Match(m)      => a.own_expr_err(env, seen, m.subj) + a.own_arms_err(env, seen, env.infer_expr(m.subj), m.arms),
-        .MakeEnum(mk)  => a.own_expr_err(env, seen, mk.payload),
-        .MakeStruct(s) => a.own_inits_err(env, seen, s.inits),
-        .SliceLit(sd)  => a.own_args_err(env, seen, sd.items),
-        .Loop(l)       => a.own_expr_err(env, seen, l.seq) + a.own_body_err(env, seen, l.body),
-        .Block(b)      => a.own_body_err(env, seen, b.stmts),
+        .Call(c)       => a.own_args_err(env, seen, al, c.args) + env.is_default_owner_method(c).match ({ true => 1, false => 0 }),
+        .Index(ix)     => a.own_expr_err(env, seen, al, ix.seq) + a.own_expr_err(env, seen, al, ix.idx),
+        .Bin(b)        => a.own_expr_err(env, seen, al, b.lhs) + a.own_expr_err(env, seen, al, b.rhs),
+        .Cond(d)       => a.own_expr_err(env, seen, al, d.c) + a.own_expr_err(env, seen, al, d.t) + a.own_expr_err(env, seen, al, d.e),
+        .Member(m)     => a.own_expr_err(env, seen, al, m.obj),
+        .Arrow(ar)     => a.own_expr_err(env, seen, al, ar.obj),
+        .Match(m)      => a.own_expr_err(env, seen, al, m.subj) + a.own_arms_err(env, seen, al, env.infer_expr(m.subj), m.arms),
+        .MakeEnum(mk)  => a.own_expr_err(env, seen, al, mk.payload),
+        .MakeStruct(s) => a.own_inits_err(env, seen, al, s.inits),
+        .SliceLit(sd)  => a.own_args_err(env, seen, al, sd.items),
+        .Loop(l)       => a.own_expr_err(env, seen, al, l.seq) + a.own_body_err(env, seen, al, l.body) + a.loop_outer_frees(env, seen, al, l),
+        .Block(b)      => a.own_body_err(env, seen, al, b.stmts),
         _              => 0,
     })
 }
-own_stmt_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
+own_stmt_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => a.own_expr_err(env, seen, l.value),
-        .Assign(x)   => a.own_assign_target_err(env, seen, x.target) + a.own_expr_err(env, seen, x.value),
-        .Return(r)   => a.own_expr_err(env, seen, r),
-        .ExprStmt(e) => a.own_expr_err(env, seen, e),
-        .If(f)       => a.own_expr_err(env, seen, f.c) + a.own_body_err(env, seen, f.then) + a.own_body_err(env, seen, f.els),
-        .While(w)    => a.own_expr_err(env, seen, w.c) + a.own_body_err(env, seen, w.body),
-        .IndexSet(x) => a.own_expr_err(env, seen, x.seq) + a.own_expr_err(env, seen, x.idx) + a.own_expr_err(env, seen, x.value),
+        .Let(l)      => a.own_expr_err(env, seen, al, l.value),
+        .Assign(x)   => a.own_assign_target_err(env, seen, al, x.target) + a.own_expr_err(env, seen, al, x.value),
+        .Return(r)   => a.own_expr_err(env, seen, al, r),
+        .ExprStmt(e) => a.own_expr_err(env, seen, al, e),
+        .If(f)       => a.own_expr_err(env, seen, al, f.c) + a.own_body_err(env, seen, al, f.then) + a.own_body_err(env, seen, al, f.els),
+        .While(w)    => a.own_expr_err(env, seen, al, w.c) + a.own_body_err(env, seen, al, w.body) + a.loop_body_outer_frees(env, seen, al, w.body, a.dead_nil()),
+        .IndexSet(x) => a.own_expr_err(env, seen, al, x.seq) + a.own_expr_err(env, seen, al, x.idx) + a.own_expr_err(env, seen, al, x.value),
     })
 }
 consume_name = (env: Env, st: Stmt) str {
@@ -1329,89 +1414,152 @@ expr_falls_through = (e: Ptr<Expr>) bool {
         _         => true,
     })
 }
-// net dead-set after a (possibly branching) statement body — threads own_step + env exactly like
-// own_body_err / kv_own_body_kind, but returns the final kill-set instead of an error count.
-own_dead_body = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+// net dead-set after a (possibly branching) statement body — threads own_step + alias_step + env
+// exactly like own_body_err / kv_own_body_kind, but returns the final kill-set instead of an error count.
+own_dead_body = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) Ptr<DeadList> {
     e := env
     d := seen
+    al2 := al
     body.loop((h, i, st) {
-        d = a.own_step(e, d, st)
+        d = a.own_step(e, d, al2, st)
+        al2 = a.alias_step(e, al2, st)
         e = a.extend_env(e, st)
     })
     d
 }
 // union of the per-arm net dead-sets, over the arms that fall through (a returning arm contributes
 // nothing to the post-match set). Each arm is evaluated from the pre-match kill-set `seen`.
-own_dead_arms = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) Ptr<DeadList> {
+own_dead_arms = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, subjty: Ty, arms: [ArmData]) Ptr<DeadList> {
     out := seen
     arms.loop((h, i, ar) {
         expr_falls_through(ar.body).match ({ true => {
-            out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, ar.body), out)
+            out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, al, ar.body), out)
         }, false => { } })
     })
     out
 }
 // net dead-set after an expression in statement position (a statement-position match, a block, a ternary,
 // or a bare free/consume call as a match-arm body). Mirrors own_step's free/consume detection.
-own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
+own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
     load(e).match ({
-        .Block(b) => a.own_dead_body(env, seen, b.stmts),
-        .Match(m) => a.own_dead_arms(env, seen, env.infer_expr(m.subj), m.arms),
+        .Block(b) => a.own_dead_body(env, seen, al, b.stmts),
+        .Match(m) => a.own_dead_arms(env, seen, al, env.infer_expr(m.subj), m.arms),
         // a bool `.match` lowers to a Cond (ternary); apply the same fall-through exclusion as match arms
         // so a branch that ends in `return` does not propagate its frees past the conditional.
-        .Cond(d)  => a.dead_union(expr_falls_through(d.t).match ({ true => a.own_dead_expr(env, seen, d.t), false => seen }), expr_falls_through(d.e).match ({ true => a.own_dead_expr(env, seen, d.e), false => seen })),
+        .Cond(d)  => a.dead_union(expr_falls_through(d.t).match ({ true => a.own_dead_expr(env, seen, al, d.t), false => seen }), expr_falls_through(d.e).match ({ true => a.own_dead_expr(env, seen, al, d.e), false => seen })),
+        // a loop body may run: its frees are conditionally dead after the loop (same may-rule as branches).
+        .Loop(l)  => a.own_dead_body(env, seen, al, l.body),
         .Call(c)  => {
             out := seen
             fn := env.alloc_free_call_name(c)
             fn.is_empty().match ({ false => {
-                out = a.dead_cons(fn, out)
+                out = a.dead_kill(out, al, fn)
             } })
             cn := env.is_consume_method(c).match ({ true => c.recv_var_name(), false => env.send_consume(c) })
             cn.is_empty().match ({ false => {
-                out = a.dead_cons(cn, out)
+                out = a.dead_kill(out, al, cn)
             } })
             out
         },
         _         => seen,
     })
 }
-own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) Ptr<DeadList> {
     out := seen
     // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
     nm := env.consume_name(st)
     nm.is_empty().match ({ false => {
-        out = a.dead_cons(nm, out)
+        out = a.dead_kill(out, al, nm)
     } })
-    // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead.
+    // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead — and its
+    //    whole alias class with it (every member names the SAME allocation).
     fn := env.alloc_free_stmt_name(st)
     fn.is_empty().match ({ false => {
-        out = a.dead_cons(fn, out)
+        out = a.dead_kill(out, al, fn)
     } })
     // 2b. branch-aware: descend into if/while bodies and statement-position matches/blocks so a free
     //     inside a branch enters the kill-set (conditionally dead → dead after the branch). Only branches
     //     that FALL THROUGH contribute; free-then-rebind within one branch nets to ALIVE via own_step.
     out = st.match ({
-        .If(f)       => a.dead_union(body_falls_through(f.then).match ({ true => a.own_dead_body(env, out, f.then), false => out }), body_falls_through(f.els).match ({ true => a.own_dead_body(env, out, f.els), false => out })),
-        .While(w)    => body_falls_through(w.body).match ({ true => a.own_dead_body(env, out, w.body), false => out }),
-        .ExprStmt(e) => a.own_dead_expr(env, out, e),
+        .If(f)       => a.dead_union(body_falls_through(f.then).match ({ true => a.own_dead_body(env, out, al, f.then), false => out }), body_falls_through(f.els).match ({ true => a.own_dead_body(env, out, al, f.els), false => out })),
+        .While(w)    => body_falls_through(w.body).match ({ true => a.own_dead_body(env, out, al, w.body), false => out }),
+        .ExprStmt(e) => a.own_dead_expr(env, out, al, e),
         _            => out,
     })
-    // 3. revival — a (re)bind of a local clears its dead state. Runs LAST so `p = a.resize(p, n)`
-    //    (free old p in step 2, then rebind p here) nets to ALIVE, while `q := a.resize(p, n)` leaves
-    //    p dead (q != p).
+    // 3. revival — a (re)bind of a local clears its dead state (ONLY that name: an alias of it stays
+    //    dead). Runs LAST so `p = a.resize(p, n)` (free old p in step 2, then rebind p here) nets to
+    //    ALIVE, while `q := a.resize(p, n)` leaves p dead (q != p).
     rb := rebind_stmt_name(st)
     rb.is_empty().match ({ false => {
         out = a.dead_remove(out, rb)
     } })
     out
 }
-own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
+// ── FREE-IN-LOOP ─────────────────────────────────────────────────────────────────────────────────
+// A loop body runs N times, but the lexical walk sees it once: a body that frees a local declared
+// OUTSIDE the loop and does not rebind it before the iteration ends frees the same pointer again on
+// the next iteration — a double-free the single walk misses. The net kill-set of ONE body walk
+// (branch-aware, so a conditional free counts — the same may-rule as the post-branch dead-set)
+// contains exactly the names freed-per-iteration; any of them declared OUTSIDE the body (not a body
+// `let`, not a loop binding) is flagged. The `p = a.resize(p, n)` grow idiom rebinds in the same
+// statement, so it nets to alive and stays legal; free-then-`return` arms are excluded by the usual
+// fall-through rule (the loop is exited, no second free).
+// every `let` name anywhere in a body (incl. nested arms/blocks/loops): fresh per iteration.
+loop_lets = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+    out := acc
+    body.loop((h, i, st) {
+        out = a.loop_lets_stmt(out, st)
+    })
+    out
+}
+loop_lets_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)      => a.loop_lets_expr(a.dead_cons(l.name, acc), l.value),
+        .Assign(x)   => a.loop_lets_expr(acc, x.value),
+        .Return(r)   => a.loop_lets_expr(acc, r),
+        .ExprStmt(e) => a.loop_lets_expr(acc, e),
+        .If(f)       => a.loop_lets(a.loop_lets(acc, f.then), f.els),
+        .While(w)    => a.loop_lets(acc, w.body),
+        _            => acc,
+    })
+}
+loop_lets_expr = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .Block(b) => a.loop_lets(acc, b.stmts),
+        .Match(m) => a.loop_lets_arms(acc, m.arms),
+        .Cond(d)  => a.loop_lets_expr(a.loop_lets_expr(acc, d.t), d.e),
+        .Loop(l)  => a.loop_lets(a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, acc))), l.body),
+        _         => acc,
+    })
+}
+loop_lets_arms = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
+    out := acc
+    arms.loop((h, i, ar) {
+        out = a.loop_lets_expr(out, ar.body)
+    })
+    out
+}
+// count each net-new dead name declared OUTSIDE the body, once (`done` dedupes the cons-list walk).
+count_loop_freed = (a: MutPtr<Malloc>, net: Ptr<DeadList>, base: Ptr<DeadList>, locals: Ptr<DeadList>, done: Ptr<DeadList>) i32 {
+    net.match ({
+        .DeadNil     => 0,
+        .DeadCons(c) => (base.dead_has(c.name) || locals.dead_has(c.name) || done.dead_has(c.name)).match ({ true => a.count_loop_freed(c.tail, base, locals, done), false => 1 + a.count_loop_freed(c.tail, base, locals, a.dead_cons(c.name, done)) }),
+    })
+}
+loop_body_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt], binds: Ptr<DeadList>) i32 {
+    net := a.own_dead_body(env, seen, al, body)
+    a.count_loop_freed(net, seen, a.loop_lets(binds, body), a.dead_nil())
+}
+loop_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, l: LoopData) i32 { a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil())))) }
+own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) i32 {
     acc := 0
     e := env
     d := seen
+    al2 := al
     body.loop((h, i, st) {
-        acc = a.own_stmt_err(e, d, st) + acc
-        d = a.own_step(e, d, st)
+        acc = a.own_stmt_err(e, d, al2, st) + acc
+        d = a.own_step(e, d, al2, st)
+        al2 = a.alias_step(e, al2, st)
         e = a.extend_env(e, st)
     })
     acc
@@ -1424,7 +1572,7 @@ own_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
         exp: f.ret,
         a: a,
     )
-    a.own_body_err(env, a.dead_nil(), f.body)
+    a.own_body_err(env, a.dead_nil(), a.alias_nil(), f.body)
 }
 check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
@@ -1738,64 +1886,67 @@ stmt_pos = (st: Stmt) i32 {
         .IndexSet(x) => x.pos.pos_or(load(x.seq).expr_pos()),
     })
 }
+body_pos = (body: [Stmt]) i32 { (body.len == 0).match ({ true => 0, false => body[0].stmt_pos() }) }
 // Ownership kind pass mirrors the raw ownership count pass above.
-kv_own_args_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, args: [Expr]) i32 {
+kv_own_args_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, ar.addr()))
+        acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, al, ar.addr()))
     })
     acc
 }
-kv_own_inits_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, inits: [FieldInit]) i32 {
+kv_own_inits_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, fi.value))
+        acc = acc.kv_kor(a.kv_own_expr_kind(env, seen, al, fi.value))
     })
     acc
 }
-kv_own_arms_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, subjty: Ty, arms: [ArmData]) i32 {
+kv_own_arms_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.kv_own_expr_kind(a.arm_env(env, subjty, ar), seen, ar.body))
+        acc = acc.kv_kor(a.kv_own_expr_kind(a.arm_env(env, subjty, ar), seen, al, ar.body))
     })
     acc
 }
-kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v)        => seen.dead_has(v.name).match ({ true => KOWNERSHIP().kv_at(v.pos), false => 0 }),
-        .Call(c)       => a.kv_own_args_kind(env, seen, c.args).kv_kor(env.is_default_owner_method(c).match ({ true => KOWNERSHIP().kv_at(c.pos), false => 0 })),
-        .Index(ix)     => a.kv_own_expr_kind(env, seen, ix.seq).kv_kor(a.kv_own_expr_kind(env, seen, ix.idx)),
-        .Bin(b)        => a.kv_own_expr_kind(env, seen, b.lhs).kv_kor(a.kv_own_expr_kind(env, seen, b.rhs)),
-        .Cond(d)       => a.kv_own_expr_kind(env, seen, d.c).kv_kor(a.kv_own_expr_kind(env, seen, d.t)).kv_kor(a.kv_own_expr_kind(env, seen, d.e)),
-        .Member(m)     => a.kv_own_expr_kind(env, seen, m.obj),
-        .Arrow(ar)     => a.kv_own_expr_kind(env, seen, ar.obj),
-        .Match(m)      => a.kv_own_expr_kind(env, seen, m.subj).kv_kor(a.kv_own_arms_kind(env, seen, env.infer_expr(m.subj), m.arms)),
-        .MakeEnum(mk)  => a.kv_own_expr_kind(env, seen, mk.payload),
-        .MakeStruct(s) => a.kv_own_inits_kind(env, seen, s.inits),
-        .SliceLit(sd)  => a.kv_own_args_kind(env, seen, sd.items),
-        .Loop(l)       => a.kv_own_expr_kind(env, seen, l.seq).kv_kor(a.kv_own_body_kind(env, seen, l.body)),
-        .Block(b)      => a.kv_own_body_kind(env, seen, b.stmts),
+        .Call(c)       => a.kv_own_args_kind(env, seen, al, c.args).kv_kor(env.is_default_owner_method(c).match ({ true => KOWNERSHIP().kv_at(c.pos), false => 0 })),
+        .Index(ix)     => a.kv_own_expr_kind(env, seen, al, ix.seq).kv_kor(a.kv_own_expr_kind(env, seen, al, ix.idx)),
+        .Bin(b)        => a.kv_own_expr_kind(env, seen, al, b.lhs).kv_kor(a.kv_own_expr_kind(env, seen, al, b.rhs)),
+        .Cond(d)       => a.kv_own_expr_kind(env, seen, al, d.c).kv_kor(a.kv_own_expr_kind(env, seen, al, d.t)).kv_kor(a.kv_own_expr_kind(env, seen, al, d.e)),
+        .Member(m)     => a.kv_own_expr_kind(env, seen, al, m.obj),
+        .Arrow(ar)     => a.kv_own_expr_kind(env, seen, al, ar.obj),
+        .Match(m)      => a.kv_own_expr_kind(env, seen, al, m.subj).kv_kor(a.kv_own_arms_kind(env, seen, al, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)  => a.kv_own_expr_kind(env, seen, al, mk.payload),
+        .MakeStruct(s) => a.kv_own_inits_kind(env, seen, al, s.inits),
+        .SliceLit(sd)  => a.kv_own_args_kind(env, seen, al, sd.items),
+        .Loop(l)       => a.kv_own_expr_kind(env, seen, al, l.seq).kv_kor(a.kv_own_body_kind(env, seen, al, l.body)).kv_kor(a.loop_outer_frees(env, seen, al, l).kv_one(KOWNERSHIP()).kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
+        .Block(b)      => a.kv_own_body_kind(env, seen, al, b.stmts),
         _              => 0,
     })
 }
-kv_own_stmt_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, st: Stmt) i32 {
+kv_own_stmt_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => a.kv_own_expr_kind(env, seen, l.value),
-        .Assign(x)   => a.kv_own_assign_target_kind(env, seen, x.target).kv_kor(a.kv_own_expr_kind(env, seen, x.value)),
-        .Return(r)   => a.kv_own_expr_kind(env, seen, r),
-        .ExprStmt(e) => a.kv_own_expr_kind(env, seen, e),
-        .If(f)       => a.kv_own_expr_kind(env, seen, f.c).kv_kor(a.kv_own_body_kind(env, seen, f.then)).kv_kor(a.kv_own_body_kind(env, seen, f.els)),
-        .While(w)    => a.kv_own_expr_kind(env, seen, w.c).kv_kor(a.kv_own_body_kind(env, seen, w.body)),
-        .IndexSet(x) => a.kv_own_expr_kind(env, seen, x.seq).kv_kor(a.kv_own_expr_kind(env, seen, x.idx)).kv_kor(a.kv_own_expr_kind(env, seen, x.value)),
+        .Let(l)      => a.kv_own_expr_kind(env, seen, al, l.value),
+        .Assign(x)   => a.kv_own_assign_target_kind(env, seen, al, x.target).kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
+        .Return(r)   => a.kv_own_expr_kind(env, seen, al, r),
+        .ExprStmt(e) => a.kv_own_expr_kind(env, seen, al, e),
+        .If(f)       => a.kv_own_expr_kind(env, seen, al, f.c).kv_kor(a.kv_own_body_kind(env, seen, al, f.then)).kv_kor(a.kv_own_body_kind(env, seen, al, f.els)),
+        .While(w)    => a.kv_own_expr_kind(env, seen, al, w.c).kv_kor(a.kv_own_body_kind(env, seen, al, w.body)).kv_kor(a.loop_body_outer_frees(env, seen, al, w.body, a.dead_nil()).kv_one(KOWNERSHIP()).kv_at(load(w.c).expr_pos().pos_or(body_pos(w.body)))),
+        .IndexSet(x) => a.kv_own_expr_kind(env, seen, al, x.seq).kv_kor(a.kv_own_expr_kind(env, seen, al, x.idx)).kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
     })
 }
-kv_own_body_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, body: [Stmt]) i32 {
+kv_own_body_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) i32 {
     acc := 0
     e := env
     d := seen
+    al2 := al
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.kv_own_stmt_kind(e, d, st))
-        d = a.own_step(e, d, st)
+        acc = acc.kv_kor(a.kv_own_stmt_kind(e, d, al2, st))
+        d = a.own_step(e, d, al2, st)
+        al2 = a.alias_step(e, al2, st)
         e = a.extend_env(e, st)
     })
     acc
@@ -1808,7 +1959,7 @@ kv_own_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: F
         exp: f.ret,
         a: a,
     )
-    a.kv_own_body_kind(env, a.dead_nil(), f.body)
+    a.kv_own_body_kind(env, a.dead_nil(), a.alias_nil(), f.body)
 }
 check_module_ownership_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
