@@ -134,14 +134,14 @@ after_marker = (mp: MutPtr<Malloc>, src: str, m: str) str {
     (i < 0).match ({ true => "", false => {
         sv := src.view()
         start := i + m.view().len
-        mp.substr(src, start, sv.len - start)
+        mp.substr(src, start, sv.len - start).expect("oracle: oom")
     } })
 }
 // everything strictly BEFORE the first occurrence of `m` (python `s.split(m,1)[0]`); all of `s` if
 // `m` is absent (python returns the whole string as the sole split field).
 before_marker = (mp: MutPtr<Malloc>, s: str, m: str) str {
     j := s.find(m)
-    (j < 0).match ({ true => s, false => mp.substr(s, 0, j) })
+    (j < 0).match ({ true => s, false => mp.substr(s, 0, j).expect("oracle: oom") })
 }
 // the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
 region = (mp: MutPtr<Malloc>, src: str, m1: str, m2: str) str { mp.before_marker(mp.after_marker(src, m1), m2) }
@@ -321,8 +321,8 @@ map_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// SUITE 8: std.text.fmt allocator-backed numeric writes (Result-always) use the fallible num
-// helpers; the plain streaming writes never touch an allocator.
+// SUITE 8: std.text.fmt allocator-backed numeric writes (Result-always) go through the unified
+// Result num helpers (never a bare acquire); the plain streaming writes never touch an allocator.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 fmt_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in("zen/std/text/fmt.zen").match ({
@@ -334,7 +334,7 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
             // "// Display" is a comment marker — stripped by `_code`, so (faithfully) absent here, which
             // makes `wf` run from `write_float = ` to EOF (python's split returns the whole remainder).
             wf := mp.region(src, "write_float = ", "// Display")
-            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.contains(".try_integer_in("), ti.not_contains(".integer_in("), tf.contains(".try_float_in("), tf.not_contains(".float_in("), wi.not_contains(".integer_in(") && wi.not_contains(".write_int_in("), wf.not_contains(".float_in(") && wf.not_contains(".write_float_in("), src.not_contains("default()")])
+            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.contains(".integer_in("), ti.not_contains(".acquire("), tf.contains(".float_in("), tf.not_contains(".acquire("), wi.not_contains(".integer_in(") && wi.not_contains(".write_int_in("), wf.not_contains(".float_in(") && wf.not_contains(".write_float_in("), src.not_contains("default()")])
         },
         .Err(e)  => run_suite("boundaries: fmt (unreadable)", [false]),
     })
