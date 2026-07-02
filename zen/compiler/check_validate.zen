@@ -1704,6 +1704,12 @@ fn_name_of = (d: Decl) str {
         _         => "",
     })
 }
+fn_pos_of = (d: Decl) i32 {
+    d.match ({
+        .DFunc(f) => f.pos,
+        _         => 0,
+    })
+}
 fn_dup_before = (decls: [Decl], name: str, upto: i64) bool {
     f := false
     decls.loop((h, i, d) {
@@ -2310,11 +2316,26 @@ denrich_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, off: 
     )
     a.denrich_body(env, f.body, off, code)
 }
-// the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound
-// error at `off`, else "".
+// dup-fn enrichment: NAME the symbol that is defined twice. `off` is the LATER definition's name
+// offset (kv_dup_name_kind anchors there), so the decl whose pos matches — and whose name an
+// EARLIER decl already binds — is the colliding one; the render already points file:line:col at it.
+denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) str {
+    res := ""
+    decls.loop((h, i, d) {
+        nm := d.fn_name_of()
+        hit := is_empty(res) && is_empty(nm) == false && d.fn_pos_of() == off && decls.fn_dup_before(nm, i)
+        res = hit.match ({ true => a.gstr_string(96).gstr_append(a, "duplicate top-level definition of `").gstr_append(a, nm).gstr_append(a, "` — an earlier definition of this name already exists in the flattened program").gstr_finish(a), false => res })
+    })
+    res
+}
+// the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
+// dup-fn error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND()).match ({ true => {
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN()).match ({ true => {
         return ""
+    } })
+    (code == KDUPFN()).match ({ true => {
+        return a.denrich_dupfn(decls, off)
     } })
     idx := a.build_decl_index(decls)
     res := ""
@@ -3451,12 +3472,26 @@ kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
     })
     acc.kv_at(im.pos)
 }
+// dup-fn, position-carrying: the FIRST duplicated fn name, anchored at the LATER definition's name
+// offset (the earlier definition is the established binding), so the driver renders file:line:col +
+// a caret at the colliding definition — even when it lives in an imported module (pick_render maps
+// the flat offset to whichever module's source contains it). pos 0 (synthesized) degrades to the
+// bare kind, exactly the pre-position behavior.
+kv_dup_name_kind = (decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) {
+        nm := d.fn_name_of()
+        dup := is_empty(nm).match ({ true => false, false => decls.fn_dup_before(nm, i) })
+        acc = acc.kv_kor(dup.match ({ true => KDUPFN().kv_at(d.fn_pos_of()), false => 0 }))
+    })
+    acc
+}
 // the KIND of the FIRST error check_module would have counted, in the same order: dup-fn names
 // first, then each decl's body (DFunc) / impl (DImpl). Returns KNONE (0) for an accepting module.
 // A CHECK-KIND binary reads this; check_module's COUNT is untouched, so the oracle's verdict path
 // (which exits with the count) keeps working unchanged.
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc := decls.dup_name_errs().kv_one(KDUPFN())
+    acc := decls.kv_dup_name_kind()
     idx := a.build_decl_index(decls)
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
