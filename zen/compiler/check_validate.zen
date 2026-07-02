@@ -2858,94 +2858,110 @@ check_module_arg_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], sr
 KORRETURN = () i32 { 27 }    // `.or_return()` in a function whose return type is not a matching Result
 ko_is_or_call = (c: CallData) bool { eq(c.fn, "or_return") && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { eq(mc.method, "or_return") && mc.args.len == 0 }
-// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree — and
-// so must the `Ok` payloads: the lowering returns the RECEIVER verbatim on Err, so the receiver's
-// whole Result type must be the enclosing fn's (a `Result<bool, E>` receiver in a `Result<i32, E>`
-// fn emits `return <Result_bool_E>` and dies at cc in conditional positions the return-fit scan
-// never reaches). A tparam-typed / unknown side defers (concrete only after monomorphization).
-ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, pos: i32) i32 {
+// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
+// The `Ok` payloads are POSITION-dependent (`cnd` = conditionally-evaluated position):
+//   - UNCONDITIONAL positions (direct let value, call/ctor args, mid-chain receivers, match
+//     subjects, non-shortcircuit operands, …) hoist to a statement-level let whose lowering
+//     REBUILDS the Err return as the enclosing fn's Result (orret_err_value in compiler.check), so
+//     the receiver's Ok payload is unconstrained — it is consumed locally, only E must line up.
+//   - CONDITIONAL positions (`&&`/`||` right operands, cond/match branch values, `@while`
+//     conditions, lambda/loop/value-block bodies) lower in place with the receiver returned
+//     VERBATIM (their local expected type is not the fn's return type, so the rebuild can't fire):
+//     there the receiver's whole Result type must still be the enclosing fn's (a `Result<bool, E>`
+//     receiver in a `Result<i32, E>` fn emits `return <Result_bool_E>` and dies at cc in positions
+//     the return-fit scan never reaches — #377's miscompile).
+// A tparam-typed / unknown side defers (concrete only after monomorphization).
+ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32) i32 {
     (tps.ty_mentions_tparam(want) || env.unknown_ty(want)).match ({ true => 0, false => {
         fE := env.subj_variant_payload(want, "Err")
         fE.is_void_ty().match ({ true => KORRETURN().kv_at(pos), false => {
             rt := env.infer_expr(recv)
             (rt.is_void_ty() || env.unknown_ty(rt) || tps.ty_mentions_tparam(rt)).match ({ true => 0, false => {
                 rE := env.subj_variant_payload(rt, "Err")
-                (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({ true => 0, false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({ true => env.ko_ok_at(tps, want, rt, pos), false => KORRETURN().kv_at(pos) }) })
+                (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({ true => 0, false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({ true => cnd.match ({ true => env.ko_ok_at(tps, want, rt, pos), false => 0 }), false => KORRETURN().kv_at(pos) }) })
             } })
         } })
     } })
 }
-// the Ok side of the same judgment, entered only once both Err payloads are known and agree.
-// Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
+// the Ok side of the same judgment (CONDITIONAL positions only), entered once both Err payloads are
+// known and agree. Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
 ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
     fO := env.subj_variant_payload(want, "Ok")
     rO := env.subj_variant_payload(rt, "Ok")
     (fO.is_void_ty() || rO.is_void_ty() || env.unknown_ty(fO) || env.unknown_ty(rO) || tps.ty_mentions_tparam(fO) || tps.ty_mentions_tparam(rO)).match ({ true => 0, false => (fO.ty_eq(rO) || rO.ty_eq(fO)).match ({ true => 0, false => KORRETURN().kv_at(pos) }) })
 }
-ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData) i32 {
-    own := ko_is_or_call(c).match ({ true => env.ko_at(tps, want, c.args[0].addr(), c.pos), false => 0 })
-    own.kv_kor(env.ko_args_kind(tps, want, c.args))
+ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
+    own := ko_is_or_call(c).match ({ true => env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos), false => 0 })
+    own.kv_kor(env.ko_args_kind(tps, want, c.args, cnd))
 }
-ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData) i32 {
-    own := ko_is_or_mcall(mc).match ({ true => env.ko_at(tps, want, mc.recv, mc.pos), false => 0 })
-    own.kv_kor(env.ko_expr_kind(tps, want, mc.recv)).kv_kor(env.ko_args_kind(tps, want, mc.args))
+ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
+    own := ko_is_or_mcall(mc).match ({ true => env.ko_at(tps, want, mc.recv, cnd, mc.pos), false => 0 })
+    own.kv_kor(env.ko_expr_kind(tps, want, mc.recv, cnd)).kv_kor(env.ko_args_kind(tps, want, mc.args, cnd))
 }
-ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>) i32 {
+// `cnd` marks descent into a CONDITIONALLY-evaluated / value-block position (see ko_at): those
+// or_returns lower in place (verbatim receiver return), so the strict full-Result check applies.
+// It is set on entry and never cleared — a statement nested under a conditional value is still
+// conditional. `&&`/`||` LEFT operands and cond/match SUBJECTS evaluate unconditionally and hoist,
+// so they inherit.
+ko_is_sc = (op: str) bool { eq(op, "&&") || eq(op, "||") }
+ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
     load(e).match ({
-        .Call(c)        => env.ko_call_kind(tps, want, c),
-        .MethodCall(mc) => env.ko_mcall_kind(tps, want, mc),
-        .Index(ix)      => env.ko_expr_kind(tps, want, ix.seq).kv_kor(env.ko_expr_kind(tps, want, ix.idx)),
-        .Bin(b)         => env.ko_expr_kind(tps, want, b.lhs).kv_kor(env.ko_expr_kind(tps, want, b.rhs)),
-        .Cond(d)        => env.ko_expr_kind(tps, want, d.c).kv_kor(env.ko_expr_kind(tps, want, d.t)).kv_kor(env.ko_expr_kind(tps, want, d.e)),
-        .Member(m)      => env.ko_expr_kind(tps, want, m.obj),
-        .Arrow(ar)      => env.ko_expr_kind(tps, want, ar.obj),
-        .Match(m)       => env.ko_expr_kind(tps, want, m.subj).kv_kor(env.ko_arms_kind(tps, want, env.infer_expr(m.subj), m.arms)),
-        .MakeEnum(mk)   => env.ko_expr_kind(tps, want, mk.payload),
-        .MakeStruct(sd) => env.ko_inits_kind(tps, want, sd.inits),
-        .SliceLit(sd)   => env.ko_args_kind(tps, want, sd.items),
-        .Lambda(lm)     => env.a.ko_body_kind(env, tps, want, lm.body),
-        .Block(b)       => env.a.ko_body_kind(env, tps, want, b.stmts),
-        .Loop(l)        => env.ko_expr_kind(tps, want, l.seq).kv_kor(env.a.ko_body_kind(env, tps, want, l.body)),
+        .Call(c)        => env.ko_call_kind(tps, want, c, cnd),
+        .MethodCall(mc) => env.ko_mcall_kind(tps, want, mc, cnd),
+        .Index(ix)      => env.ko_expr_kind(tps, want, ix.seq, cnd).kv_kor(env.ko_expr_kind(tps, want, ix.idx, cnd)),
+        .Bin(b)         => env.ko_expr_kind(tps, want, b.lhs, cnd).kv_kor(env.ko_expr_kind(tps, want, b.rhs, ko_is_sc(b.op) || cnd)),
+        .Cond(d)        => env.ko_expr_kind(tps, want, d.c, cnd).kv_kor(env.ko_expr_kind(tps, want, d.t, true)).kv_kor(env.ko_expr_kind(tps, want, d.e, true)),
+        .Member(m)      => env.ko_expr_kind(tps, want, m.obj, cnd),
+        .Arrow(ar)      => env.ko_expr_kind(tps, want, ar.obj, cnd),
+        .Match(m)       => env.ko_expr_kind(tps, want, m.subj, cnd).kv_kor(env.ko_arms_kind(tps, want, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)   => env.ko_expr_kind(tps, want, mk.payload, cnd),
+        .MakeStruct(sd) => env.ko_inits_kind(tps, want, sd.inits, cnd),
+        .SliceLit(sd)   => env.ko_args_kind(tps, want, sd.items, cnd),
+        .Lambda(lm)     => env.a.ko_body_kind(env, tps, want, lm.body, true),
+        .Block(b)       => env.a.ko_body_kind(env, tps, want, b.stmts, true),
+        .Loop(l)        => env.ko_expr_kind(tps, want, l.seq, cnd).kv_kor(env.a.ko_body_kind(env, tps, want, l.body, true)),
         _               => 0,
     })
 }
-ko_args_kind = (env: Env, tps: [Param], want: Ty, args: [Expr]) i32 {
+ko_args_kind = (env: Env, tps: [Param], want: Ty, args: [Expr], cnd: bool) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(env.ko_expr_kind(tps, want, args[i].addr()))
+        acc = acc.kv_kor(env.ko_expr_kind(tps, want, args[i].addr(), cnd))
     })
     acc
 }
-ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit]) i32 {
+ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(env.ko_expr_kind(tps, want, fi.value))
+        acc = acc.kv_kor(env.ko_expr_kind(tps, want, fi.value, cnd))
     })
     acc
 }
+// arm BODIES are always conditional (only the taken arm evaluates) — and a statement-position
+// match resolves its arms under a cleared expected type, so the rebuild can't fire there either.
 ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body))
+        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
     })
     acc
 }
-ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt) i32 {
+ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: bool) i32 {
     st.match ({
-        .Let(l)      => env.ko_expr_kind(tps, want, l.value),
-        .Assign(x)   => env.ko_expr_kind(tps, want, x.target).kv_kor(env.ko_expr_kind(tps, want, x.value)),
-        .Return(r)   => env.ko_expr_kind(tps, want, r),
-        .ExprStmt(e) => env.ko_expr_kind(tps, want, e),
-        .If(f)       => env.ko_expr_kind(tps, want, f.c).kv_kor(a.ko_body_kind(env, tps, want, f.then)).kv_kor(a.ko_body_kind(env, tps, want, f.els)),
-        .While(w)    => env.ko_expr_kind(tps, want, w.c).kv_kor(a.ko_body_kind(env, tps, want, w.body)),
-        .IndexSet(x) => env.ko_expr_kind(tps, want, x.seq).kv_kor(env.ko_expr_kind(tps, want, x.idx)).kv_kor(env.ko_expr_kind(tps, want, x.value)),
+        .Let(l)      => env.ko_expr_kind(tps, want, l.value, cnd),
+        .Assign(x)   => env.ko_expr_kind(tps, want, x.target, cnd).kv_kor(env.ko_expr_kind(tps, want, x.value, cnd)),
+        .Return(r)   => env.ko_expr_kind(tps, want, r, cnd),
+        .ExprStmt(e) => env.ko_expr_kind(tps, want, e, cnd),
+        .If(f)       => env.ko_expr_kind(tps, want, f.c, cnd).kv_kor(a.ko_body_kind(env, tps, want, f.then, cnd)).kv_kor(a.ko_body_kind(env, tps, want, f.els, cnd)),
+        .While(w)    => env.ko_expr_kind(tps, want, w.c, true).kv_kor(a.ko_body_kind(env, tps, want, w.body, cnd)),
+        .IndexSet(x) => env.ko_expr_kind(tps, want, x.seq, cnd).kv_kor(env.ko_expr_kind(tps, want, x.idx, cnd)).kv_kor(env.ko_expr_kind(tps, want, x.value, cnd)),
     })
 }
-ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt]) i32 {
+ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
     acc := 0
     e := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ko_stmt_kind(e, tps, want, st))
+        acc = acc.kv_kor(a.ko_stmt_kind(e, tps, want, st, cnd))
         e = a.extend_env(e, st)
     })
     acc
@@ -2958,7 +2974,7 @@ ko_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
         exp: f.ret,
         a: a,
     )
-    a.ko_body_kind(env, f.tparams, f.ret, f.body)
+    a.ko_body_kind(env, f.tparams, f.ret, f.body, false)
 }
 // `.or_return()` in a GLOBAL initializer has NO enclosing function to return the Err to: the lowered
 // early-return would silently abort `zen__init_globals` mid-way, leaving every later global
@@ -2973,7 +2989,7 @@ ko_global_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalDat
         exp: tvoid(),
         a: a,
     )
-    is_expr_null(g.init).match ({ true => 0, false => env.ko_expr_kind(empty_params(), ti32(), g.init) })
+    is_expr_null(g.init).match ({ true => 0, false => env.ko_expr_kind(empty_params(), ti32(), g.init, false) })
 }
 check_module_or_return_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)

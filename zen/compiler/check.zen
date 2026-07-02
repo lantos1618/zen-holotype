@@ -1433,6 +1433,66 @@ or_temp_name = (a: MutPtr<Malloc>, name: str) str {
     s = s.gstr_append(a, name)
     s.gstr_finish(a)
 }
+// ── the Err-guard's return value ──
+// VERBATIM receiver when its whole Result type is the enclosing fn's, or when either side is not
+// fully concrete here (tparam/unknown residue — the pre-#377 behavior). Otherwise REBUILT as the
+// ENCLOSING fn's Result carrying the receiver's Err payload: `(Want){ .tag=Err, .u.Err=tmp.u.Err }`.
+// The rebuild is what lets a fallible pipeline chain steps with DIFFERENT Ok types — a
+// `Result<Cfg, E>` receiver inside a `Result<i32, E>` fn: the Ok payload is consumed locally by the
+// binding this lowering feeds, so only E must line up (v1: exact same E, no From/Into).
+// `env.exp` here IS the fn's return type wherever the statement-level hoisting lowering runs (fn
+// bodies, if/while bodies); conditional-position wraps (resolve_orx) run under a local expected
+// type, where the gate below fails closed to the verbatim return — matching the or-return
+// validator, which keeps the strict full-Result requirement exactly there (ko_at's `cnd`).
+// The concreteness gate mirrors the validator's unknown_ty deferrals (plus the prim widths), so
+// every receiver/return pair the validator accepts with differing Ok payloads gets the rebuild.
+orret_prim_named = (n: str) bool { eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32") }
+orret_gen_declared = (decls: [Decl], n: str) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DGenStruct(g) => eq(g.name, n).match ({ true => true, false => found }),
+            .DGenEnum(g)   => eq(g.name, n).match ({ true => true, false => found }),
+            _              => found,
+        })
+    })
+    found
+}
+orret_named_known = (env: Env, n: str) bool { env.didx.struct_idx.get(n, 0 - 1) >= 0 || env.didx.enum_idx.get(n, 0 - 1) >= 0 || env.decls.orret_gen_declared(n) || n.orret_prim_named() }
+orret_ty_known = (env: Env, t: Ty) bool {
+    t.match ({
+        .Void       => false,
+        .Named(n)   => env.orret_named_known(n),
+        .Generic(g) => env.orret_args_known(g.args),
+        .Ptr(pd)    => env.orret_ty_known(load(pd.pointee)),
+        .Slice(e)   => env.orret_ty_known(load(e)),
+        _           => true,
+    })
+}
+orret_args_known = (env: Env, args: [Ty]) bool {
+    k := true
+    args.loop((h, i, t) {
+        k = env.orret_ty_known(t).match ({ true => k, false => false })
+    })
+    k
+}
+// Build `Want.Err(payload)` for a concrete want (Named enum or generic instance). The generic
+// instance's mono name is the fn return type's own, so gen_types has already emitted it.
+orret_mkerr = (a: MutPtr<Malloc>, want: Ty, payload: Ptr<Expr>, tmp: str) Ptr<Expr> {
+    want.match ({
+        .Named(n)   => a.cenode(mkenumg(n, n, no_tys(), "Err", payload)),
+        .Generic(g) => a.cenode(mkenumg(g.name, eq(g.mangled, "").match ({ true => a.mangle_str_in(g.name, g.args), false => g.mangled }), g.args, "Err", payload)),
+        _           => a.cenode(vref(tmp)),
+    })
+}
+orret_err_value = (a: MutPtr<Malloc>, env: Env, t: Ty, tmp: str, ptr: bool) Ptr<Expr> {
+    want := env.exp
+    (t.ty_eq(want) || want.ty_eq(t) || env.orret_ty_known(want) == false || env.orret_ty_known(t) == false).match ({ true => a.cenode(vref(tmp)), false => {
+        wE := env.subj_variant_payload(want, "Err")
+        rE := env.subj_variant_payload(t, "Err")
+        (wE.is_void_ty() || rE.is_void_ty() || wE.ty_eq(rE) == false).match ({ true => a.cenode(vref(tmp)), false => a.orret_mkerr(want, a.subj_payload(a.cenode(vref(tmp)), "Err", ptr), tmp) })
+    } })
+}
 lower_or_return_let = (a: MutPtr<Malloc>, env: Env, l: LetData) [Stmt] {
     recv2 := a.resolve_expr(env.clr_exp(), a.or_return_recv(l.value))
     t := env.infer_expr(recv2)
@@ -1442,7 +1502,7 @@ lower_or_return_let = (a: MutPtr<Malloc>, env: Env, l: LetData) [Stmt] {
     cnd := a.cenode(bin("==", a.subj_tag(a.cenode(vref(tmp)), ptr), a.cenode(vref(a.tag_const(en, "Err")))))
     buf := a.sbuf(3)
     buf[0] = slett(tmp, t, recv2)
-    buf[1] = sif(cnd, a.one_stmt(sret(a.cenode(vref(tmp)))), no_stmts())
+    buf[1] = sif(cnd, a.one_stmt(sret(a.orret_err_value(env, t, tmp, ptr))), no_stmts())
     buf[2] = slett(l.name, env.subj_variant_payload(t, "Ok"), a.subj_payload(a.cenode(vref(tmp)), "Ok", ptr))
     buf
 }
