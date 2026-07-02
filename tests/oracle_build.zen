@@ -322,7 +322,7 @@ oracle_build_run* = () i32 {
         want_out: "-71.25",
         check_out: true,
     ), FixtureCase(
-        path: "tests/fixtures/zen/fmt_numeric_try_write.zen",
+        path: "tests/fixtures/zen/fmt_numeric_write_result.zen",
         want_exit: "0",
         want_out: "42",
         check_out: true,
@@ -330,7 +330,7 @@ oracle_build_run* = () i32 {
     // build/run a struct program (zenc build emits a runnable binary): p.x*p.y = 12.
     // U1.3 std-import resolution: eq("ab","ab")=true=>1, eq("ab","xy")=false=>0.
     // enum match numeric arms widen the result type (i64) so got==big() holds.
-    // fmt numeric write/try-write helpers thread an explicit (counting/limiting) allocator.
+    // fmt numeric write helpers (Result-always) thread an explicit (counting/limiting) allocator.
     // ── (b) build+run+stdout fixtures (print / text / map acceptance programs) ───────────────────
     so := run_fixtures("build stdout", [FixtureCase(
         path: "tests/fixtures/zen/print_text_and_ints.zen",
@@ -736,7 +736,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/core_slice_try_result.zen",
+        path: "tests/fixtures/zen/core_slice_result.zen",
         want_exit: "0",
         want_out: "",
         check_out: false,
@@ -746,7 +746,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/iter_try_result.zen",
+        path: "tests/fixtures/zen/iter_result.zen",
         want_exit: "0",
         want_out: "",
         check_out: false,
@@ -811,7 +811,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/own_rc_arc_try_constructors.zen",
+        path: "tests/fixtures/zen/own_rc_arc_constructors_result.zen",
         want_exit: "0",
         want_out: "",
         check_out: false,
@@ -856,7 +856,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/scheduler_try_run.zen",
+        path: "tests/fixtures/zen/scheduler_run_result.zen",
         want_exit: "0",
         want_out: "",
         check_out: false,
@@ -955,7 +955,8 @@ oracle_build_run* = () i32 {
         want_out: "42\n1\n2\n3\n",
         check_out: true,
     )])
-    // ── (f) more `zenc check` rejects (string/slice/own/rc/arc allocator-first; typed-local mismatch) ─
+    // ── (f) more `zenc check` rejects (string/slice/own/rc/arc allocator-first — the former try_* twins
+    // now double as deleted-name rejects; typed-local mismatch) ─
     vd2 := run_verdicts("build check 2", [VerdictCase(
         src: "{ new } = std.text.string\nmain = () i32 { s := new()  0 }\n",
         should_pass: false,
@@ -1116,14 +1117,14 @@ oracle_build_run* = () i32 {
         src: "good = () i32 { 1 }\n@@@ !!!\nmain = () i32 { good() + 6 }\n",
         wants: ["syntax error"],
     ), DiagCase(
-        src: "halloc = std.mem.heap\n{ Resource, new_in } = std.mem.own\nmain = () i32 {\n    alloc := halloc.gpa()\n    o := alloc.addr().new_in(Resource(id: 7, slot: 0))\n    o.release_in(alloc.addr())\n    o.get().id\n}\n",
-        wants: [":7:5: error[ownership]: use of an owner after release/drop", "      o.get().id", "      ^", "hint: after release/drop, bind a fresh owner instead of reusing the consumed local"],
+        src: "halloc = std.mem.heap\n{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nmain = () i32 {\n    alloc := halloc.gpa()\n    o := alloc.addr().new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    o.release_in(alloc.addr())\n    o.get().id\n}\n",
+        wants: [":8:5: error[ownership]: use of an owner after release/drop", "      o.get().id", "      ^", "hint: after release/drop, bind a fresh owner instead of reusing the consumed local"],
     ), DiagCase(
-        src: "halloc = std.mem.heap\n{ new_in } = std.mem.rc\nmain = () i32 {\n    alloc := halloc.gpa()\n    r := alloc.addr().new_in(41)\n    r.drop_in(alloc.addr())\n    r.get()\n}\n",
-        wants: [":7:5: error[ownership]: use of an owner after release/drop", "      r.get()", "      ^"],
+        src: "halloc = std.mem.heap\n{ new_in } = std.mem.rc\n{ expect } = std.core.result\nmain = () i32 {\n    alloc := halloc.gpa()\n    r := alloc.addr().new_in(41).expect(\"rc\")\n    r.drop_in(alloc.addr())\n    r.get()\n}\n",
+        wants: [":8:5: error[ownership]: use of an owner after release/drop", "      r.get()", "      ^"],
     ), DiagCase(
-        src: "halloc = std.mem.heap\n{ new_in } = std.mem.arc\nmain = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr().new_in(41)\n    a.drop_in(alloc.addr())\n    a.get()\n}\n",
-        wants: [":7:5: error[ownership]: use of an owner after release/drop", "      a.get()", "      ^"],
+        src: "halloc = std.mem.heap\n{ new_in } = std.mem.arc\n{ expect } = std.core.result\nmain = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr().new_in(41).expect(\"arc\")\n    a.drop_in(alloc.addr())\n    a.get()\n}\n",
+        wants: [":8:5: error[ownership]: use of an owner after release/drop", "      a.get()", "      ^"],
     ), DiagCase(
         src: "{ Scope, with_sync } = std.scope\nhalloc = std.mem.heap\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> {\n    p := s.acquire(8)\n    p\n}\nmain = () i32 { h := halloc.gpa()  h.addr().with_sync(4096, leak)  0 }\n",
         wants: [":5:5: error[scope-escape]: value from scope `s` escapes its scope", "      p", "      ^", "hint: do not return a pointer from `s.acquire(...)`"],
@@ -1167,40 +1168,40 @@ oracle_build_run* = () i32 {
     // ── (i) `zenc doc` public-surface + legacy-name assertions across the std modules + genc.zen ──
     dc := run_docs("build doc", [DocCase(
         target: "std.text.fmt",
-        present: ["# std.text.fmt", "Display*: {", "write_int_in*<A> = (a: MutPtr<A>, n: i64) i64", "write_float_in*<A> = (a: MutPtr<A>, x: f64) i64", "try_write_int_in*<A> = (a: MutPtr<A>, n: i64) Result<i64, IoError>", "try_write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError>", "print*<T> = (x: T) i64 { x.fmt_print() }", "println*<T> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
-        absent: ["print_owned", "print_int", "println_int"],
+        present: ["# std.text.fmt", "Display*: {", "write_int_in*<A> = (a: MutPtr<A>, n: i64) Result<i64, IoError>", "write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError>", "print*<T> = (x: T) i64 { x.fmt_print() }", "println*<T> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
+        absent: ["print_owned", "print_int", "println_int", "try_write_int_in", "try_write_float_in"],
     ), DocCase(
         target: "std.text.string",
         present: ["init*<A>", "new_in*<A>", "try_init*<A>", "try_new_in*<A>"],
         absent: ["try_new*<A>", "new* = "],
     ), DocCase(
         target: "std.mem.own",
-        present: ["new_in*<A, T>", "try_new_in*<A, T>"],
-        absent: ["new*<T>", "try_new*<T>", "release = (o: Own<T>)", "own_new", "own_clone", "own_ptr", "own_release"],
+        present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Own<T>, IoError>"],
+        absent: ["new*<T>", "try_new", "release = (o: Own<T>)", "own_new", "own_clone", "own_ptr", "own_release"],
     ), DocCase(
         target: "std.mem.rc",
-        present: ["new_in*<A, T>", "try_new_in*<A, T>"],
-        absent: ["new*<T>", "try_new*<T>", "drop = (r: Rc<T>)", "rc_new", "rc_get", "rc_clone", "rc_drop", "rc_count"],
+        present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Rc<T>, IoError>"],
+        absent: ["new*<T>", "try_new", "drop = (r: Rc<T>)", "rc_new", "rc_get", "rc_clone", "rc_drop", "rc_count"],
     ), DocCase(
         target: "std.mem.arc",
-        present: ["new_in*<A, T>", "try_new_in*<A, T>"],
-        absent: ["new*<T>", "try_new*<T>", "drop = (r: Arc<T>)", "arc_new", "arc_get", "arc_clone", "arc_drop", "arc_count"],
+        present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError>"],
+        absent: ["new*<T>", "try_new", "drop = (r: Arc<T>)", "arc_new", "arc_get", "arc_clone", "arc_drop", "arc_count"],
     ), DocCase(
         target: "std.concurrent.actor",
         present: ["ActorRef*<M>: {", "ReplyRef*<T>: {", "ActorEngine*<M>: {", "ActorCell*<M>: {", "cell*<A, M>", "spawn*<A, M, ActorT>"],
         absent: ["reply*<", "try_reply", "try_spawn", "try_cell", "try_engine", "Mailbox", "ActorSystem", "ActorState", "actor_ref", "actor_system", "run_actor", "make_reply"],
     ), DocCase(
         target: "std.core.slice",
-        present: ["buf_in*<A, T>", "try_buf_in*<A, T>", "buf*<A, T>", "try_buf*<A, T>", "dup*<A, T>", "node*<A, T>", "concat*<A, T>"],
-        absent: ["buf*<T>", "try_buf*<T>", "dup*<T>", "node*<T>", "concat*<T>", "nbuf", "try_nbuf"],
+        present: ["buf_in*<A, T>", "buf*<A, T>", "dup*<A, T>", "node*<A, T>", "concat*<A, T>"],
+        absent: ["buf*<T>", "try_buf", "dup*<T>", "try_dup", "node*<T>", "try_node", "concat*<T>", "try_concat", "nbuf"],
     ), DocCase(
         target: "std.text.bytes",
         present: ["at* = (s: str, i: i32) u8", "is_digit*"],
         absent: ["byte_at"],
     ), DocCase(
         target: "std.concurrent.cown",
-        present: ["buf*<A>", "try_buf*<A>", "file*<A> = (alloc: MutPtr<A>, path: str)", "file_in*<A>"],
-        absent: ["buf_alloc", "buf_free", "file_open", "file_wrap"],
+        present: ["buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError>", "file*<A> = (alloc: MutPtr<A>, path: str)", "file_in*<A>"],
+        absent: ["try_buf", "buf_alloc", "buf_free", "file_open", "file_wrap"],
     ), DocCase(
         target: "std.concurrent.runtime",
         present: ["sync_in*<A> = (backing: MutPtr<A>, cap: i64) SyncArena", "async_in*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena", "sync*<A> = (backing: MutPtr<A>, cap: i64) SyncArena", "async*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena"],
@@ -1211,8 +1212,8 @@ oracle_build_run* = () i32 {
         absent: ["try_spawn"],
     ), DocCase(
         target: "std.concurrent.sched",
-        present: ["run_in*<A>", "try_run_in*<A>", "try_run*<A>"],
-        absent: [],
+        present: ["run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError>", "run*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError>"],
+        absent: ["try_run"],
     ), DocCase(
         target: "std.mem.heap",
         present: ["gpa* = () Heap"],
@@ -1235,8 +1236,8 @@ oracle_build_run* = () i32 {
         absent: ["map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
     ), DocCase(
         target: "std.collections.iter",
-        present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) [U]", "try_map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) [T]", "try_filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError>"],
-        absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<A> = (a: MutPtr<A>, xs: [i32]"],
+        present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError>"],
+        absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<A> = (a: MutPtr<A>, xs: [i32]", "try_map", "try_filter"],
     ), DocCase(
         target: "std.mem.trace",
         present: ["Rc*<T>: {", "tracked_in*<A, T>", "tracked*<A, T> = (alloc: MutPtr<A>, x: T) Rc<T>", "try_tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError>", "root_in*<A, T>", "root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) void", "try_root_in*<A, T>", "try_root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Rc<Node>, child: Rc<Node>) void", "collect_in*<A>", "collect*<A> = (alloc: MutPtr<A>) void", "try_collect_in*<A>", "try_collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError>"],
