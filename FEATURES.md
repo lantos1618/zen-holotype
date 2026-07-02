@@ -89,10 +89,10 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   back as a raw handle, then gets wrapped in a small type with the matching release operation
   (`cown.file(path)` / `cown.file_in(alloc, path)` over `open`/`close`, closing the descriptor
   again if wrapping it in `Own<File>` cannot allocate).
-- **Coroutine allocation follows the same split** (`zen/std/concurrent/coroutine.zen`) —
-  `spawn` / `spawn_in` are the fast path, while `try_spawn` / `try_spawn_in` return
-  `Result<Coro, IoError>` and clean up partial stack/context allocations on failure.
-  The scheduler mirrors that shape with `run` / `run_in` plus `try_run` / `try_run_in`,
+- **Coroutine allocation is Result-shaped** (`zen/std/concurrent/coroutine.zen`) —
+  `spawn` / `spawn_in` return `Result<Coro, IoError>` and clean up partial
+  stack/context allocations on failure; there is no separate `try_*` doubling.
+  The scheduler keeps `run` / `run_in` as the fast path plus `try_run` / `try_run_in`,
   so the caller can keep flag-buffer allocation failure in the value flow.
 - **Metaprogramming is values, not pragmas** — there is no `@emit` and no comptime
   evaluator. A generator is an ordinary function returning `[Decl]`, emitted by

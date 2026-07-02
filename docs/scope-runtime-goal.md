@@ -38,8 +38,9 @@ The unanimous *missing* piece was cancellation: `checkpoint` must return a value
   open/read/write/close in io/file.zen, write/strlen/abort in result.zen, strlen in str.zen) into ONE `std.c.libc`;
   everyone imports it. malloc lives in one file. Low risk; pure consolidation.
 - **M1 — `checkpoint -> Signal`.** Add `Signal: Go | Stop(CancelReason)` + `CancelReason: Deadline | Parent | User`;
-  change `Runtime.checkpoint` trait + 3 impls (Sync/Heap = `.Go`, Async = `checkpoint_current()  sig_go()`).
-  No live consumers today → low blast radius. The spine. [DONE]
+  change `Runtime.checkpoint` trait + 3 impls (Sync/Heap = `.Go`, Async = `checkpoint_current()` then
+  a direct `.Go` — the interim `sig_go()` helper was retired once the newline + `.Uppercase`
+  statement rule landed). No live consumers today → low blast radius. The spine. [DONE]
 - **M2 — implicit type params.** `resolve.zen`/`parse.zen` collect-free-tyvars pass: a short all-caps type-position name
   that is unbound binds as an implicit param BEFORE undefined-name fires. Makes `<A>` optional (don't rewrite 334 sites). [DONE a4a75a4]
 - **M3 — `std.scope`.** `Scope` struct + in-body methods (`acquire`/`onExit`/`drain`/`child`/`checkpoint`) + `with` on the arenas.

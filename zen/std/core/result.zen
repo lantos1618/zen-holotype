@@ -16,14 +16,22 @@ PANIC_STDERR_FD := 2
 ok_if* = (rc: i32) Result<i32, IoError> { (rc >= 0).match ({ true => .Ok(rc), false => .Err(.Errno(rc)) }) }
 // Converts a nullable libc pointer into Result.
 ok_ptr* = (p: RawPtr<u8>) Result<RawPtr<u8>, IoError> { (p == null_ptr()).match ({ true => .Err(.NotFound), false => .Ok(p) }) }
-// Explicit abort for impossible states.
+// Explicit abort for impossible states. panic owns the framing so every give-up site prints
+// exactly like the compiler's runtime panics (div-zero/OOB guards in the genc preamble):
+// `zen: panic: <msg>` + newline on stderr, then abort.
 panic* = (msg: str) void {
+    prefix := "zen: panic: "
+    pn := prefix.strlen()
+    PANIC_STDERR_FD.write(prefix.slice(pn).ptr, pn)
     n := msg.strlen()
     PANIC_STDERR_FD.write(msg.slice(n).ptr, n)
+    newline := "\n"
+    nn := newline.strlen()
+    PANIC_STDERR_FD.write(newline.slice(nn).ptr, nn)
     abort()
 }
 // ── Result combinators (UFCS: `r.expect("…")`, `r.or(fallback)`) ─────────────────────────────────
-// Ok payload, or PANIC with `msg` (printed verbatim to stderr, then abort). The message is
+// Ok payload, or PANIC with `msg` (framed as `zen: panic: <msg>` + newline, then abort). The message is
 // MANDATORY — there is deliberately NO bare `unwrap`: every give-up site names its invariant.
 expect*<T, E> = (r: Result<T, E>, msg: str) T {
     r.match ({
