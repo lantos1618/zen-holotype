@@ -2,7 +2,7 @@
 halloc = std.mem.heap
 { Result, IoError } = std.core.result
 { to_exit } = std.core.bool
-{ try_map_in, try_filter_in } = std.collections.iter
+{ dup_in, concat_in, node_in } = std.core.slice
 LimitAlloc: {
     left: i32,
 }
@@ -19,21 +19,27 @@ LimitAlloc.impl(Allocator, {
 success = () bool {
     heap := halloc.gpa()
     a := heap.addr()
-    r0: Result<[i32], IoError> := a.try_map_in([1, 2, 3], (x) { x + 1 })
+    r0: Result<[i32], IoError> := a.dup_in([1, 2])
     r0.match ({
-        .Ok(mapped) => {
-            r1: Result<[i32], IoError> := a.try_filter_in(mapped, (x) { x > 2 })
+        .Ok(xs) => {
+            r1: Result<[i32], IoError> := a.concat_in(xs, [3, 4])
             r1.match ({
-                .Ok(filtered) => filtered.len == 2 && filtered[0] == 3 && filtered[1] == 4,
-                .Err(e)       => false,
+                .Ok(ys) => {
+                    rp: Result<Ptr<i32>, IoError> := a.node_in(5)
+                    rp.match ({
+                        .Ok(p)  => ys[0] == 1 && ys[3] == 4 && load(p) == 5,
+                        .Err(e) => false,
+                    })
+                },
+                .Err(e) => false,
             })
         },
-        .Err(e)     => false,
+        .Err(e) => false,
     })
 }
 failure = () bool {
     lim := LimitAlloc(left: 0)
-    r: Result<[i32], IoError> := lim.addr().try_map_in([1], (x) { x })
+    r: Result<[i32], IoError> := lim.addr().dup_in([1])
     r.match ({
         .Err(e) => e.match ({
             .NotFound => true,
