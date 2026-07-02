@@ -22,3 +22,71 @@ panic* = (msg: str) void {
     PANIC_STDERR_FD.write(msg.slice(n).ptr, n)
     abort()
 }
+// ── Result combinators (UFCS: `r.expect("…")`, `r.or(fallback)`) ─────────────────────────────────
+// Ok payload, or PANIC with `msg` (printed verbatim to stderr, then abort). The message is
+// MANDATORY — there is deliberately NO bare `unwrap`: every give-up site names its invariant.
+expect*<T, E> = (r: Result<T, E>, msg: str) T {
+    r.match ({
+        .Ok(v)  => v,
+        .Err(e) => {
+            panic(msg)
+            // unreachable — panic aborts; the recursion only satisfies the arm's type.
+            r.expect(msg)
+        },
+    })
+}
+// Ok payload, or `default`.
+or*<T, E> = (r: Result<T, E>, default: T) T {
+    r.match ({
+        .Ok(v)  => v,
+        .Err(e) => default,
+    })
+}
+// Ok payload, or `f(err)` — lazy fallback that can inspect the error.
+or_else*<T, E> = (r: Result<T, E>, f: (E) T) T {
+    r.match ({
+        .Ok(v)  => v,
+        .Err(e) => f(e),
+    })
+}
+// Map the error channel, leaving Ok untouched: Result<T, E> → Result<T, F>.
+map_err*<T, E, F> = (r: Result<T, E>, f: (E) F) Result<T, F> {
+    r.match ({
+        .Ok(v)  => .Ok(v),
+        .Err(e) => .Err(f(e)),
+    })
+}
+// ── Opt mirrors (flat namespace has no overloading, so the names carry the type) ─────────────────
+// Some payload, or PANIC with `msg` (same contract as expect; no bare unwrap here either).
+expect_some*<T> = (o: Opt<T>, msg: str) T {
+    o.match ({
+        .Some(v) => v,
+        .None    => {
+            panic(msg)
+            // unreachable — panic aborts; the recursion only satisfies the arm's type.
+            o.expect_some(msg)
+        },
+    })
+}
+// Some payload, or `default`.
+some_or*<T> = (o: Opt<T>, default: T) T {
+    o.match ({
+        .Some(v) => v,
+        .None    => default,
+    })
+}
+// Some payload, or `f()` — lazy fallback (no error payload to pass, unlike or_else).
+some_or_else*<T> = (o: Opt<T>, f: () T) T {
+    o.match ({
+        .Some(v) => v,
+        .None    => f(),
+    })
+}
+// map_err has no Opt mirror: Opt carries no error channel to map. The bridge is ok_or:
+// Opt<T> → Result<T, E>, tagging None with the caller's error value.
+ok_or*<T, E> = (o: Opt<T>, e: E) Result<T, E> {
+    o.match ({
+        .Some(v) => .Ok(v),
+        .None    => .Err(e),
+    })
+}
