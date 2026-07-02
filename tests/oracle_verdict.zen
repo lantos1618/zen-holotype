@@ -772,82 +772,62 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "",
     ), VerdictCase(
-        // soundness hole 4: a generic call's CONCRETE result type (Box<i32> from mk(255)) must be
-        // fit-checked against the annotation Box<u8> — a real mismatch, not an unknown leaked to cc.
         src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ntest* = () i32 { bu: Box<u8> := mk(255)  0 }",
         should_pass: false,
         kind: "assign-fit",
     ), VerdictCase(
-        // hole 4 still-accept: the inferred instance IS correct (Box<i32>), so it type-checks.
         src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\nunbox<T> = (b: Box<T>) T { b.v }\ntest* = () i32 { bi: Box<i32> := mk(7)  unbox(bi) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // hole 4 return position: returning Box<i32> from a Box<u8> function is a return-fit error.
         src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ngetu8* = () Box<u8> { mk(7) }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "return-fit",
     ), VerdictCase(
-        // soundness hole 5: i32 + i64 is i64 (the WIDER operand), so it cannot fit an i32 slot —
-        // no silent truncation, and no order-dependence (`a + b` and `b + a` both reject).
         src: "f* = () i32 { a: i32 := 0  b: i64 := 4294967297  a + b }\ntest* = () i32 { f() }",
         should_pass: false,
         kind: "return-fit",
     ), VerdictCase(
-        // hole 5 still-accept: legitimate i64 math and same-width i32 math are unchanged.
         src: "f* = () i64 { a: i64 := 3  b: i64 := 4294967297  a + b }\ng* = () i32 { a: i32 := 5  b: i32 := 7  a + b }\ntest* = () i32 { g() }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // hole 5 still-accept: a numeric LITERAL operand adapts, so `c + 1` (u8 + int-lit) stays u8.
         src: "f* = (c: u8) u8 { c + 1 }\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // soundness hole 6: a UFCS trait method on a receiver that does NOT impl the trait (Box has
-        // no Area impl) is a trait-bound error, not a bare `area` symbol leaked to the linker.
         src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nBox*: { w: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { b := Box(w: 3)  b.addr().area() }",
         should_pass: false,
         kind: "trait-bound",
     ), VerdictCase(
-        // hole 6 still-accept: valid UFCS trait dispatch (Circle DOES impl Area) resolves and runs.
         src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { c := Circle(r: 4)  c.addr().area() }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // R1: a read-only `Ptr<T>` value must NOT satisfy a writable `MutPtr<T>` parameter (silent
-        // write-laundering). do_bump would mutate through a pointer the caller declared read-only.
         src: "Counter*: { n: i32 }\ndo_bump* = (c: MutPtr<Counter>) void { c.n = c.n + 1 }\ntest* = () i32 { c := Counter(n: 0)  p: Ptr<Counter> := c.addr()  do_bump(p)  c.n }",
         should_pass: false,
         kind: "",
     ), VerdictCase(
-        // R1 still-accept: a writable `MutPtr<T>` DOES satisfy a read-only `Ptr<T>` parameter.
         src: "Counter*: { n: i32 }\npeek* = (c: Ptr<Counter>) i32 { c.n }\ntest* = () i32 { c := Counter(n: 0)  p: MutPtr<Counter> := c.addr()  peek(p) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // R8: assert_nonnull on a genuinely non-pointer arg (a scalar) is rejected (would emit a void
-        // value into a non-void slot at cc time).
         src: "test* = () i64 { x := 5  q := assert_nonnull(x)  load(q) }",
         should_pass: false,
         kind: "",
     ), VerdictCase(
-        // R8 still-accept: assert_nonnull on a real nullable `RawPtr<T>` narrows it to `MutPtr<T>`.
         src: "test* = () i64 { p: RawPtr<i64> := malloc(8)  q := assert_nonnull(p)  store(q, 7)  load(q) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // M5 turbofish still-accept: explicit type arg that AGREES with the value arg.
         src: "id<T> = (x: T) T { x }\ntest* = () i32 { to_i32(id<i32>(5)) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // M5 turbofish still-accept: a sizeof-style nullary generic pinned by turbofish.
         src: "sz<T> = () i64 { sizeof(T) }\ntest* = () i64 { sz<i64>() + sz<i32>() }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // M5 closure still-accept: a correctly-arity'd, correctly-typed `(T,T)T` closure to a HOF.
         src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a + b }) }",
         should_pass: true,
         kind: "",
@@ -863,6 +843,26 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // soundness hole 4: a generic call's CONCRETE result type (Box<i32> from mk(255)) must be
+    // fit-checked against the annotation Box<u8> — a real mismatch, not an unknown leaked to cc.
+    // hole 4 still-accept: the inferred instance IS correct (Box<i32>), so it type-checks.
+    // hole 4 return position: returning Box<i32> from a Box<u8> function is a return-fit error.
+    // soundness hole 5: i32 + i64 is i64 (the WIDER operand), so it cannot fit an i32 slot —
+    // no silent truncation, and no order-dependence (`a + b` and `b + a` both reject).
+    // hole 5 still-accept: legitimate i64 math and same-width i32 math are unchanged.
+    // hole 5 still-accept: a numeric LITERAL operand adapts, so `c + 1` (u8 + int-lit) stays u8.
+    // soundness hole 6: a UFCS trait method on a receiver that does NOT impl the trait (Box has
+    // no Area impl) is a trait-bound error, not a bare `area` symbol leaked to the linker.
+    // hole 6 still-accept: valid UFCS trait dispatch (Circle DOES impl Area) resolves and runs.
+    // R1: a read-only `Ptr<T>` value must NOT satisfy a writable `MutPtr<T>` parameter (silent
+    // write-laundering). do_bump would mutate through a pointer the caller declared read-only.
+    // R1 still-accept: a writable `MutPtr<T>` DOES satisfy a read-only `Ptr<T>` parameter.
+    // R8: assert_nonnull on a genuinely non-pointer arg (a scalar) is rejected (would emit a void
+    // value into a non-void slot at cc time).
+    // R8 still-accept: assert_nonnull on a real nullable `RawPtr<T>` narrows it to `MutPtr<T>`.
+    // M5 turbofish still-accept: explicit type arg that AGREES with the value arg.
+    // M5 turbofish still-accept: a sizeof-style nullary generic pinned by turbofish.
+    // M5 closure still-accept: a correctly-arity'd, correctly-typed `(T,T)T` closure to a HOF.
     // Stage 3 nullability: deref of a nullable `RawPtr<T>` (T != u8) without a null-check is REJECTED.
     // store / offset through a nullable `RawPtr<T>` are likewise rejected.
     // `assert_nonnull` proves non-null (yields `MutPtr<T>`), so the subsequent load is accepted.
@@ -871,7 +871,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (105)", [VerdictCase(
+    b := run_verdicts("verdict-kind (108)", [VerdictCase(
         src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "arity",
@@ -1156,8 +1156,6 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "parse",
     ), VerdictCase(
-        // R4: a base digit out of range right after the prefix (`0o9`, `0b2`, `0b19`, `0xFFg`) used
-        // to split into two tokens with the wrong value — now a positioned lexer error.
         src: "test* = () i32 { 0o9 }",
         should_pass: false,
         kind: "parse",
@@ -1170,7 +1168,6 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "parse",
     ), VerdictCase(
-        // R5: a lone radix prefix with no digits (`0b`/`0o`/`0x`) used to be accepted as value 0.
         src: "test* = () i32 { 0b }",
         should_pass: false,
         kind: "parse",
@@ -1183,12 +1180,10 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "parse",
     ), VerdictCase(
-        // Q4: an unterminated `/* */` block comment now carets its opening `/*` (was positionless).
         src: "test* = () i32 { 0 }\n/* unterminated\n",
         should_pass: false,
         kind: "parse",
     ), VerdictCase(
-        // a valid radix literal + a valid block comment still lex correctly (no over-rejection).
         src: "test* = () i32 { /* hi */ 0xFF_FF + 0b1010 + 0o17 }",
         should_pass: true,
         kind: "",
@@ -1297,82 +1292,102 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // R2: a NESTED field write through a read-only `Ptr<T>` mutates `*b` — reject like the direct set.
         src: "Inner*: { v: i64 }\nBox*: { inner: Inner }\npoke* = (b: Ptr<Box>) void { b.inner.v = 99 }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "ptr-write",
     ), VerdictCase(
-        // R2 (accept): the SAME nested write through a `MutPtr<T>` is legal.
         src: "Inner*: { v: i64 }\nBox*: { inner: Inner }\npoke* = (b: MutPtr<Box>) void { b.inner.v = 99 }\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // R3: an index-set into a slice field of a read-only `Ptr<T>` writes into `*b` — reject.
         src: "Buf*: { data: [i64] }\npoke* = (b: Ptr<Buf>) void { b.data[0] = 99 }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "ptr-write",
     ), VerdictCase(
-        // R3 (accept): the SAME index-set through a `MutPtr<T>` is legal.
         src: "Buf*: { data: [i64] }\npoke* = (b: MutPtr<Buf>) void { b.data[0] = 99 }\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // accept: writing through a MutPtr field reached FROM a read-only Ptr base mutates that field's
-        // target, not `*b` — the recursion stops at the first (writable) pointer indirection.
         src: "Inner*: { v: i64 }\nBox*: { inner: MutPtr<Inner> }\npoke* = (b: Ptr<Box>) void { b.inner.v = 99 }\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // R6: exhaustiveness on a LOCAL-binding match subject (not a param) still rejects.
         src: "E*: A | B | Cc\ntest* = () i32 { e := E.A  e.match({ .A => 1, .B => 2 })  0 }",
         should_pass: false,
         kind: "exhaustiveness",
     ), VerdictCase(
-        // R7: a non-void body that falls through with no produced value is a return-fit error.
         src: "test* = () i32 { x := 5 }",
         should_pass: false,
         kind: "return-fit",
     ), VerdictCase(
-        // R1: passing a read-only `Ptr<T>` where a `MutPtr<T>` is wanted is an arg-type error.
         src: "Counter*: { n: i32 }\ndo_bump* = (c: MutPtr<Counter>) void { c.n = c.n + 1 }\ntest* = () i32 { c := Counter(n: 0)  p: Ptr<Counter> := c.addr()  do_bump(p)  c.n }",
         should_pass: false,
         kind: "arg-type",
     ), VerdictCase(
-        // R8: assert_nonnull on a non-pointer arg is an arg-type error.
         src: "test* = () i64 { x := 5  q := assert_nonnull(x)  load(q) }",
         should_pass: false,
         kind: "arg-type",
     ), VerdictCase(
-        // M5 R3: a turbofish type arg that names no declared type → positioned unknown-type (was a cc leak).
         src: "sz<T> = () i64 { sizeof(T) }\ntest* = () i32 { to_i32(sz<NoExist>()) }",
         should_pass: false,
         kind: "unknown-type",
     ), VerdictCase(
-        // M5 R4: turbofish on a callee with NO type params → no-type-args (was silently dropped).
         src: "plain = (x: i64) i64 { x + 1 }\ntest* = () i32 { to_i32(plain<i64>(5)) }",
         should_pass: false,
         kind: "no-type-args",
     ), VerdictCase(
-        // M5 R4: an explicit type arg that contradicts the value arg (`T=str` vs `5:i64`) → arg-type.
         src: "id<T> = (x: T) T { x }\ntest* = () i32 { to_i32(id<str>(5)) }",
         should_pass: false,
         kind: "arg-type",
     ), VerdictCase(
-        // M5 R5: a closure with the WRONG param count for the FnT param → positioned arity.
         src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a){ a + 1 }) }",
         should_pass: false,
         kind: "arity",
     ), VerdictCase(
-        // M5 R5: a closure whose body produces the wrong type (bool where T is wanted) → arg-type.
         src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a < b }) }",
         should_pass: false,
         kind: "arg-type",
     ), VerdictCase(
-        // Q3: calling a DEFINED non-function local is `not-callable`, distinct from `undefined-name`.
         src: "test* = () i32 { x := 5  x(3)  0 }",
         should_pass: false,
         kind: "not-callable",
+    ), VerdictCase(
+        src: "R: Ok(i32) | Err(i32)\ng = () R { R.Ok(5) }\ntest* = () i32 { x := g().or_return()  x }",
+        should_pass: false,
+        kind: "or-return",
+    ), VerdictCase(
+        src: "R1: Ok(i32) | Err(i32)\nR2: Ok(i32) | Err(text)\ng = () R1 { R1.Ok(5) }\nf = () R2 { x := g().or_return()  R2.Ok(x) }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "or-return",
+    ), VerdictCase(
+        src: "R: Ok(i32) | Err(i32)\ng = () R { R.Ok(5) }\nf = () R { return R.Ok(g().or_return() + 1) }\ntest* = () i32 { f().match ({ .Ok(v) => v, .Err(e) => 0 }) }",
+        should_pass: true,
+        kind: "",
     )])
+    // R4: a base digit out of range right after the prefix (`0o9`, `0b2`, `0b19`, `0xFFg`) used
+    // to split into two tokens with the wrong value — now a positioned lexer error.
+    // R5: a lone radix prefix with no digits (`0b`/`0o`/`0x`) used to be accepted as value 0.
+    // Q4: an unterminated `/* */` block comment now carets its opening `/*` (was positionless).
+    // a valid radix literal + a valid block comment still lex correctly (no over-rejection).
+    // R2: a NESTED field write through a read-only `Ptr<T>` mutates `*b` — reject like the direct set.
+    // R2 (accept): the SAME nested write through a `MutPtr<T>` is legal.
+    // R3: an index-set into a slice field of a read-only `Ptr<T>` writes into `*b` — reject.
+    // R3 (accept): the SAME index-set through a `MutPtr<T>` is legal.
+    // accept: writing through a MutPtr field reached FROM a read-only Ptr base mutates that field's
+    // target, not `*b` — the recursion stops at the first (writable) pointer indirection.
+    // R6: exhaustiveness on a LOCAL-binding match subject (not a param) still rejects.
+    // R7: a non-void body that falls through with no produced value is a return-fit error.
+    // R1: passing a read-only `Ptr<T>` where a `MutPtr<T>` is wanted is an arg-type error.
+    // R8: assert_nonnull on a non-pointer arg is an arg-type error.
+    // M5 R3: a turbofish type arg that names no declared type → positioned unknown-type (was a cc leak).
+    // M5 R4: turbofish on a callee with NO type params → no-type-args (was silently dropped).
+    // M5 R4: an explicit type arg that contradicts the value arg (`T=str` vs `5:i64`) → arg-type.
+    // M5 R5: a closure with the WRONG param count for the FnT param → positioned arity.
+    // M5 R5: a closure whose body produces the wrong type (bool where T is wanted) → arg-type.
+    // Q3: calling a DEFINED non-function local is `not-callable`, distinct from `undefined-name`.
+    // or_return in a fn whose return type is NOT a Result → positioned or-return error.
+    // or_return whose receiver's Err type differs from the enclosing fn's Err type → or-return.
+    // or_return in EXPRESSION position (return position, mid-expression) in a matching-Result fn: accepted.
     // statement-position one-armed bool guard now ACCEPTS (was the position-less undefined-name sentinel).
     // value-position one-armed bool match now rejects for the RIGHT reason: a positioned exhaustiveness
     // error (NOT the old position-less undefined-name path).

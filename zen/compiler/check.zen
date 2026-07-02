@@ -784,7 +784,12 @@ resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
     (sd.targs.len > 0).match ({ true => a.genlit_g(env, sd, inits), false => a.resolve_genlit_bare(env, sd, inits) })
 }
 // Rebuild expressions with resolved enum, constructor, member, and loop metadata.
-resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
+// Entry hook: an expression that still holds unconditional-position `.or_return()` calls (only
+// possible in CONDITIONALLY-evaluated positions — cond/match branch values, `&&`/`||` right
+// operands — since fill_orx already hoisted every statement-level occurrence) is wrapped into a
+// value block scoped to that branch. See the "or_return in EXPRESSION position" section below.
+resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> { (e.orx_count() > 0).match ({ true => a.resolve_orx(env, e), false => a.resolve_expr_plain(env, e) }) }
+resolve_expr_plain = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)       => a.resolve_match(env, m),
         .MakeEnum(mk)   => a.resolve_mkenum(env, mk.ty, mk.mty, mk.targs, mk.variant, mk.payload),
@@ -1052,7 +1057,9 @@ clos_local_call_name = (env: Env, name: str) str {
 clos_call_rewrite = (a: MutPtr<Malloc>, c: CallData, cn: str, buf: [Expr]) Ptr<Expr> {
     args := a.cebuf(buf.len + 1)
     args[0] = vref(c.fn)
-    buf.loop((h, i, e) { args[i + 1] = e })
+    buf.loop((h, i, e) {
+        args[i + 1] = e
+    })
     a.cenode(call_at(cn, args, c.pos))
 }
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
@@ -1067,7 +1074,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
     cclos := env.clos_local_call_name(c.fn)
-    env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => eq(cclos, "").match ({ false => a.clos_call_rewrite(c, cclos, buf), true => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(ps, buf)) }) }) })
+    env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => eq(cclos, "").match ({ true => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(ps, buf)) }), false => a.clos_call_rewrite(c, cclos, buf) }) })
 }
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
 // it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
@@ -1354,7 +1361,7 @@ let_is_or_return = (st: Stmt) bool {
         _       => false,
     })
 }
-stmt_out_span = (st: Stmt) i32 { st.let_is_or_return().match ({ true => 3, false => 1 }) }
+stmt_out_span = (st: Stmt) i32 { st.orx_stmt_count() * 3 + st.let_is_or_return().match ({ true => 3, false => 1 }) }    // each hoisted expression-position or_return adds a 3-stmt let-lowering
 body_out_len = (body: [Stmt]) i32 {
     n := 0
     body.loop((h, i, st) {
@@ -1401,6 +1408,251 @@ lower_or_return = (a: MutPtr<Malloc>, env: Env, st: Stmt) [Stmt] {
     })
     out
 }
+// ── or_return in EXPRESSION position ─────────────────────────────────────────────────────────
+// `recv.or_return()` is legal in ANY expression position, not just as a whole let value: mid-chain
+// (`f().or_return().m()`), as a call argument, in return/trailing position, and in match arms. Each
+// expression-position occurrence is HOISTED into a fresh direct let `_orx_K := recv.or_return()` —
+// which reuses the 3-stmt let-lowering above — and the original site reads the temp. Hoists are
+// emitted left-to-right in source order and innermost-first (a receiver's own or_returns hoist
+// before the outer one), so the FIRST Err in evaluation order is the one propagated.
+// UNCONDITIONALLY-evaluated positions hoist to statement level (fill_orx), where the Err-guard `if`
+// is a real statement the inliner's early-return lift can see. CONDITIONALLY-evaluated positions —
+// cond/match branch values and `&&`/`||` right operands — must NOT hoist past their guard: those
+// are wrapped in place into a value block `({ _orx := recv.or_return()  _orx })` when resolve_expr
+// reaches the branch (resolve_orx), so the receiver only evaluates if its branch is taken.
+// orx_count counts the hoistable (unconditional-position) or_returns of ONE expression. Nested
+// statement bodies (Block/Loop/Lambda/If/While) and conditional branches are NOT counted — each is
+// resolved in its own scope, where this same machinery fires again. Resolution erases every
+// or_return, so the count is 0 on already-resolved trees (the re-resolve passes stay idempotent).
+is_shortcircuit = (op: str) bool { eq(op, "&&") || eq(op, "||") }
+is_orx_hoist = (c: CallData) bool { eq(c.fn, "or_return") && c.args.len == 1 }
+orx_count = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => c.args.orx_count_args() + is_orx_hoist(c).match ({ true => 1, false => 0 }),
+        .Bin(b)         => is_shortcircuit(b.op).match ({ true => b.lhs.orx_count(), false => b.lhs.orx_count() + b.rhs.orx_count() }),
+        .Cond(d)        => d.c.orx_count(),
+        .Match(m)       => m.subj.orx_count(),
+        .Member(mm)     => mm.obj.orx_count(),
+        .Arrow(ar)      => ar.obj.orx_count(),
+        .MakeEnum(mk)   => mk.payload.orx_count(),
+        .MakeStruct(sd) => sd.inits.orx_count_inits(),
+        .SliceLit(sd)   => sd.items.orx_count_args(),
+        .Index(ix)      => ix.seq.orx_count() + ix.idx.orx_count(),
+        .Loop(l)        => l.seq.orx_count(),
+        _               => 0,
+    })
+}
+orx_count_args = (args: [Expr]) i32 {
+    n := 0
+    args.loop((h, i, ar) {
+        n = n + args[i].addr().orx_count()
+    })
+    n
+}
+orx_count_inits = (inits: [FieldInit]) i32 {
+    n := 0
+    inits.loop((h, i, fi) {
+        n = n + fi.value.orx_count()
+    })
+    n
+}
+// hoistable or_returns of one STATEMENT: a direct `x := recv.or_return()` let keeps its top call
+// (the existing let-lowering owns it) but hoists any or_return nested in the receiver. A While
+// condition re-evaluates per iteration, so it never hoists (resolve_orx wraps it in place instead).
+orx_stmt_count = (st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => l.value.is_or_return_call().match ({ true => l.value.orx_recv_count(), false => l.value.orx_count() }),
+        .Assign(x)   => x.target.orx_count() + x.value.orx_count(),
+        .Return(r)   => r.orx_count(),
+        .ExprStmt(e) => e.orx_count(),
+        .If(f)       => f.c.orx_count(),
+        .While(w)    => 0,
+        .IndexSet(x) => x.seq.orx_count() + x.idx.orx_count() + x.value.orx_count(),
+    })
+}
+orx_recv_count = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c) => c.args.orx_count_args(),
+        _        => 0,
+    })
+}
+// A hoist temp name: `_orx_<slot>_<pos>`. The slot (the running hoist index of the enclosing scope)
+// disambiguates same-position synthesized calls; the source pos disambiguates statements (slots
+// restart per statement, but two statements never share a user-written call position).
+orx_digits = (a: MutPtr<Malloc>, s: String, n: i64) String {
+    (n < 10).match ({ true => s.gstr_push(a, ('0' + n).to_u8()), false => {
+        hs := a.orx_digits(s, n / 10)    // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve
+        hs.gstr_push(a, ('0' + n % 10).to_u8())
+    } })
+}
+orx_name = (a: MutPtr<Malloc>, slot: i32, pos: i32) str {
+    s := a.gstr_string(48)
+    s = s.gstr_append(a, "_orx_")
+    s = a.orx_digits(s, slot.to_i64())
+    s = s.gstr_append(a, "_")
+    s = a.orx_digits(s, pos.to_i64())
+    s.gstr_finish(a)
+}
+// The rewrite walk mirrors orx_count exactly: it returns the rebuilt expression plus the running
+// hoist-slot index, writing one direct `_orx_K := recv.or_return()` let (still UNRESOLVED — the
+// caller feeds it back through the existing let-lowering) into hbuf per hoisted occurrence.
+// Rebuilds use the *_at position-preserving ctors so diagnostics keep their carets.
+OrxRw: {
+    e: Ptr<Expr>,
+    n: i32,
+}
+OrxRwA: {
+    args: [Expr],
+    n: i32,
+}
+orx_rw_mk = (e: Ptr<Expr>, n: i32) OrxRw {
+    OrxRw(
+        e: e,
+        n: n,
+    )
+}
+orx_rw = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
+    (e.orx_count() == 0).match ({ true => orx_rw_mk(e, n), false => load(e).match ({
+        .Call(c)        => a.orx_rw_call(hbuf, base, n, c),
+        .Bin(b)         => a.orx_rw_bin(hbuf, base, n, b),
+        .Cond(d)        => {
+            cc := a.orx_rw(hbuf, base, n, d.c)
+            orx_rw_mk(a.cenode(cond_oa(cc.e, d.t, d.e, d.oa)), cc.n)
+        },
+        .Match(m)       => {
+            s2 := a.orx_rw(hbuf, base, n, m.subj)
+            orx_rw_mk(a.cenode(remk_match(m, s2.e)), s2.n)
+        },
+        .Member(mm)     => {
+            o2 := a.orx_rw(hbuf, base, n, mm.obj)
+            orx_rw_mk(a.cenode(member_at(o2.e, mm.field, mm.pos)), o2.n)
+        },
+        .Arrow(ar)      => {
+            o2 := a.orx_rw(hbuf, base, n, ar.obj)
+            orx_rw_mk(a.cenode(arrow_at(o2.e, ar.field, ar.pos)), o2.n)
+        },
+        .MakeEnum(mk)   => {
+            p2 := a.orx_rw(hbuf, base, n, mk.payload)
+            orx_rw_mk(a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, p2.e)), p2.n)
+        },
+        .MakeStruct(sd) => a.orx_rw_mkstruct(hbuf, base, n, sd),
+        .SliceLit(sd)   => {
+            r := a.orx_rw_args(hbuf, base, n, sd.items)
+            orx_rw_mk(a.cenode(slit(sd.elem, r.args)), r.n)
+        },
+        .Index(ix)      => {
+            s2 := a.orx_rw(hbuf, base, n, ix.seq)
+            i2 := a.orx_rw(hbuf, base, s2.n, ix.idx)
+            orx_rw_mk(a.cenode(eindex(s2.e, i2.e, ix.elem)), i2.n)
+        },
+        .Loop(l)        => {
+            s2 := a.orx_rw(hbuf, base, n, l.seq)
+            orx_rw_mk(a.cenode(eloop(s2.e, l.idx, l.elem, l.elemTy, l.body, l.h)), s2.n)
+        },
+        _               => orx_rw_mk(e, n),
+    }) })
+}
+orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
+    buf := a.cebuf(args.len)
+    k := n0
+    args.loop((h, i, ar) {
+        r := a.orx_rw(hbuf, base, k, args[i].addr())
+        buf[i] = load(r.e)
+        k = r.n
+    })
+    OrxRwA(
+        args: buf,
+        n: k,
+    )
+}
+// args first (innermost-first: the receiver's own hoists land before this one), then hoist the
+// or_return call itself into a fresh temp let and read the temp at the original site.
+orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
+    r := a.orx_rw_args(hbuf, base, n, c.args)
+    ncall := a.recall(c, c.fn, r.args)
+    is_orx_hoist(c).match ({ true => {
+        nm := a.orx_name(base + r.n, c.pos)
+        hbuf[r.n] = slett_at(nm, tvoid(), ncall, c.pos)
+        orx_rw_mk(a.cenode(vref_at(nm, c.pos)), r.n + 1)
+    }, false => orx_rw_mk(ncall, r.n) })
+}
+// a short-circuit rhs is conditionally evaluated: leave it for resolve_orx to wrap in place.
+orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
+    l2 := a.orx_rw(hbuf, base, n, b.lhs)
+    is_shortcircuit(b.op).match ({ true => orx_rw_mk(a.cenode(bin_at(b.op, l2.e, b.rhs, b.pos)), l2.n), false => {
+        r2 := a.orx_rw(hbuf, base, l2.n, b.rhs)
+        orx_rw_mk(a.cenode(bin_at(b.op, l2.e, r2.e, b.pos)), r2.n)
+    } })
+}
+orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
+    buf := a.fbuf(sd.inits.len)
+    k := n
+    sd.inits.loop((h, i, fi) {
+        r := a.orx_rw(hbuf, base, k, fi.value)
+        buf[i] = finit(fi.name, r.e)
+        k = r.n
+    })
+    orx_rw_mk(a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, buf, sd.pos)), k)
+}
+// rewrite ONE statement's expressions, hoisting into hbuf; the statement itself is rebuilt with the
+// temps substituted. A direct or_return let keeps its top call (only its receiver is rewritten).
+orx_rw_recv = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
+    out := e
+    load(e).match ({
+        .Call(c) => {
+            r := a.orx_rw_args(hbuf, base, 0, c.args)
+            out = a.recall(c, c.fn, r.args)
+        },
+        _        => { },
+    })
+    out
+}
+orx_rw_stmt = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
+    out := st
+    st.match ({
+        .Let(l)      => {
+            out = l.value.is_or_return_call().match ({ true => slett_at(l.name, l.ty, a.orx_rw_recv(hbuf, base, l.value), l.pos), false => slett_at(l.name, l.ty, a.orx_rw(hbuf, base, 0, l.value).e, l.pos) })
+        },
+        .Assign(x)   => {
+            t2 := a.orx_rw(hbuf, base, 0, x.target)
+            v2 := a.orx_rw(hbuf, base, t2.n, x.value)
+            out = sassign_at(t2.e, v2.e, x.pos)
+        },
+        .Return(r)   => {
+            out = sret(a.orx_rw(hbuf, base, 0, r).e)
+        },
+        .ExprStmt(e) => {
+            out = sexpr(a.orx_rw(hbuf, base, 0, e).e)
+        },
+        .If(f)       => {
+            out = sif(a.orx_rw(hbuf, base, 0, f.c).e, f.then, f.els)
+        },
+        .IndexSet(x) => {
+            s2 := a.orx_rw(hbuf, base, 0, x.seq)
+            i2 := a.orx_rw(hbuf, base, s2.n, x.idx)
+            v2 := a.orx_rw(hbuf, base, i2.n, x.value)
+            out = sidxset_at(s2.e, i2.e, x.elem, v2.e, x.pos)
+        },
+        _            => { },
+    })
+    out
+}
+// conditional-position wrap (the resolve_expr entry hook): hoist this expression's or_returns into
+// a fresh VALUE BLOCK — `({ _orx_0 := recv.or_return()  …  <expr'> })` — resolved as a value body,
+// so the direct temp lets take the existing 3-stmt lowering and the tail keeps the expected type.
+// In a statement-position match/cond the branch block is later spliced into real `if` statements
+// (branch_stmts), so the Err-guard's `return` stays visible to the inliner's early-return lift.
+resolve_orx = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
+    k := e.orx_count()
+    hbuf := a.sbuf(k)
+    r := a.orx_rw(hbuf, 0, 0, e)
+    stmts := a.sbuf(k + 1)
+    hbuf.loop((h, i, hst) {
+        stmts[i] = hst
+    })
+    stmts[k] = sexpr(r.e)
+    a.cenode(block(a.resolve_value_body(env, stmts)))
+}
 // Resolve a statement sequence while threading let bindings.
 noop2 = () void { }
 resolve_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) [Stmt] { a.resolve_body_ex(env, body, false) }
@@ -1415,11 +1667,44 @@ resolve_body_ex = (a: MutPtr<Malloc>, env: Env, body: [Stmt], vtail: bool) [Stmt
 fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void { (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i, o, vtail), false => noop2() }) }
 fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
     st := body[i]
-    st.let_is_or_return().match ({ true => a.fill_or_return(env, body, buf, i, o, vtail), false => {
+    k := st.orx_stmt_count()
+    (k > 0).match ({ true => a.fill_orx(env, body, buf, i, o, vtail, k), false => st.let_is_or_return().match ({ true => a.fill_or_return(env, body, buf, i, o, vtail), false => {
         resolved := a.resolve_stmt(env, st, i == body.len - 1, vtail)
         buf[o] = resolved
         a.fill_stmts(a.extend_env(env, resolved), body, buf, i + 1, o + 1, vtail)
+    } }) })
+}
+// A statement holding k expression-position or_returns: hoist each into a fresh direct temp let
+// (orx_rw_stmt), run every hoisted let through the SAME 3-stmt let-lowering, then emit the rewritten
+// statement itself (which may still be a direct or_return let — its own lowering unchanged). The
+// output slot count is exactly stmt_out_span's 3*k + (3|1), keeping body_out_len's buffer sizing.
+fill_orx = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool, k: i32) void {
+    hbuf := a.sbuf(k)
+    st2 := a.orx_rw_stmt(hbuf, o, body[i])
+    env2 := env
+    oo := o
+    hbuf.loop((h, j, hst) {
+        ls := a.lower_or_return(env2, hst)
+        buf[oo] = ls[0]
+        buf[oo + 1] = ls[1]
+        buf[oo + 2] = ls[2]
+        env2 = a.extend_env(a.extend_env(a.extend_env(env2, ls[0]), ls[1]), ls[2])
+        oo = oo + 3
+    })
+    st2.let_is_or_return().match ({ true => {
+        ls := a.lower_or_return(env2, st2)
+        buf[oo] = ls[0]
+        buf[oo + 1] = ls[1]
+        buf[oo + 2] = ls[2]
+        env2 = a.extend_env(a.extend_env(a.extend_env(env2, ls[0]), ls[1]), ls[2])
+        oo = oo + 3
+    }, false => {
+        resolved := a.resolve_stmt(env2, st2, i == body.len - 1, vtail)
+        buf[oo] = resolved
+        env2 = a.extend_env(env2, resolved)
+        oo = oo + 1
     } })
+    a.fill_stmts(env2, body, buf, i + 1, oo, vtail)
 }
 fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
     stmts := a.lower_or_return(env, body[i])
@@ -2513,9 +2798,22 @@ desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
 }
 dmc_decl = (a: MutPtr<Malloc>, d: Decl) Decl {
     d.match ({
-        .DFunc(f)          => { a.dmc_body(f.body)  d },
-        .DGlobal(g)        => .DGlobal(GlobalData(name: g.name, ty: g.ty, init: a.dmc_expr_val(g.init), tl: g.tl, alias: g.alias, pos: g.pos)),
-        .DTraitDefault(td) => { a.dmc_body(td.fn.body)  d },
+        .DFunc(f)          => {
+            a.dmc_body(f.body)
+            d
+        },
+        .DGlobal(g)        => .DGlobal(GlobalData(
+            name: g.name,
+            ty: g.ty,
+            init: a.dmc_expr_val(g.init),
+            tl: g.tl,
+            alias: g.alias,
+            pos: g.pos,
+        )),
+        .DTraitDefault(td) => {
+            a.dmc_body(td.fn.body)
+            d
+        },
         _                  => d,
     })
 }
@@ -2579,25 +2877,40 @@ remk_match = (m: MatchData, subj: Ptr<Expr>) Expr { m.ptr.match ({ true => ematc
 dmc_expr_val = (a: MutPtr<Malloc>, ep: Ptr<Expr>) Ptr<Expr> {
     ep.match ({
         .Bin(b)         => a.cenode(bin_at(b.op, a.dmc_expr_val(b.lhs), a.dmc_expr_val(b.rhs), b.pos)),
-        .Call(c)        => { a.dmc_args(c.args)  ep },
+        .Call(c)        => {
+            a.dmc_args(c.args)
+            ep
+        },
         .MethodCall(mc) => a.cenode(a.dmc_lower(mc)),
         .Cond(d)        => a.cenode(cond_oa(a.dmc_expr_val(d.c), a.dmc_expr_val(d.t), a.dmc_expr_val(d.e), d.oa)),
         .Member(m)      => a.cenode(member_at(a.dmc_expr_val(m.obj), m.field, m.pos)),
         .Arrow(ar)      => a.cenode(arrow_at(a.dmc_expr_val(ar.obj), ar.field, ar.pos)),
         .MakeEnum(m)    => a.cenode(mkenumg(m.ty, m.mty, m.targs, m.variant, a.dmc_expr_val(m.payload))),
-        .MakeStruct(m)  => { a.dmc_inits(m.inits)  ep },
+        .MakeStruct(m)  => {
+            a.dmc_inits(m.inits)
+            ep
+        },
         .Match(m)       => {
             a.dmc_arms(m.arms)
             a.cenode(remk_match(m, a.dmc_expr_val(m.subj)))
         },
-        .SliceLit(sd)   => { a.dmc_args(sd.items)  ep },
+        .SliceLit(sd)   => {
+            a.dmc_args(sd.items)
+            ep
+        },
         .Index(ix)      => a.cenode(eindex(a.dmc_expr_val(ix.seq), a.dmc_expr_val(ix.idx), ix.elem)),
         .Loop(l)        => {
             a.dmc_body(l.body)
             a.cenode(eloop(a.dmc_expr_val(l.seq), l.idx, l.elem, l.elemTy, l.body, l.h))
         },
-        .Lambda(lm)     => { a.dmc_body(lm.body)  ep },
-        .Block(b)       => { a.dmc_body(b.stmts)  ep },
+        .Lambda(lm)     => {
+            a.dmc_body(lm.body)
+            ep
+        },
+        .Block(b)       => {
+            a.dmc_body(b.stmts)
+            ep
+        },
         _               => ep,
     })
 }
@@ -3157,17 +3470,23 @@ clos_params_has = (ps: [Param], n: str) bool { ps.param_index(n) >= 0 }
 // a lambda-bound name / top-level / true|false)? Such a closure is unsupported here → leave it be.
 clos_bad_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], xs: [Expr]) bool {
     found := false
-    xs.loop((h, i, x) { found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, bound, ps, x.addr()) }) })
+    xs.loop((h, i, x) {
+        found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, bound, ps, x.addr()) })
+    })
     found
 }
 clos_bad_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], inits: [FieldInit]) bool {
     found := false
-    inits.loop((h, i, fi) { found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, bound, ps, fi.value) }) })
+    inits.loop((h, i, fi) {
+        found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, bound, ps, fi.value) })
+    })
     found
 }
 clos_bad_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], arms: [ArmData]) bool {
     found := false
-    arms.loop((h, i, ar) { found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, a.vcons(ar.bind, tvoid(), bound), ps, ar.body) }) })
+    arms.loop((h, i, ar) {
+        found = found.match ({ true => true, false => a.clos_bad_expr(decls, idx, a.vcons(ar.bind, tvoid(), bound), ps, ar.body) })
+    })
     found
 }
 clos_bad_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], body: [Stmt]) bool {
@@ -3192,7 +3511,7 @@ clos_bad_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
 }
 clos_bad_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], e: Ptr<Expr>) bool {
     load(e).match ({
-        .Var(v)        => lift_is_captured(decls, idx, bound, v.name) && (ps.clos_params_has(v.name) == false),
+        .Var(v)        => lift_is_captured(decls, idx, bound, v.name) && ps.clos_params_has(v.name) == false,
         .Bin(b)        => a.clos_bad_expr(decls, idx, bound, ps, b.lhs) || a.clos_bad_expr(decls, idx, bound, ps, b.rhs),
         .Call(c)       => a.clos_bad_args(decls, idx, bound, ps, c.args),
         .Cond(d)       => a.clos_bad_expr(decls, idx, bound, ps, d.c) || a.clos_bad_expr(decls, idx, bound, ps, d.t) || a.clos_bad_expr(decls, idx, bound, ps, d.e),
@@ -3215,17 +3534,23 @@ clos_bad_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
 clos_sub_var = (a: MutPtr<Malloc>, ps: [Param], v: VarData) Ptr<Expr> { ps.clos_params_has(v.name).match ({ true => a.cenode(member_at(a.cenode(vref("__clenv")), v.name, v.pos)), false => a.cenode(vref_at(v.name, v.pos)) }) }
 clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
     buf := a.cebuf(xs.len)
-    xs.loop((h, i, x) { buf[i] = load(a.clos_sub_expr(ps, x.addr())) })
+    xs.loop((h, i, x) {
+        buf[i] = load(a.clos_sub_expr(ps, x.addr()))
+    })
     buf
 }
 clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
-    inits.loop((h, i, fi) { buf[i] = finit(fi.name, a.clos_sub_expr(ps, fi.value)) })
+    inits.loop((h, i, fi) {
+        buf[i] = finit(fi.name, a.clos_sub_expr(ps, fi.value))
+    })
     buf
 }
 clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
-    arms.loop((h, i, ar) { buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) })
+    arms.loop((h, i, ar) {
+        buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos)
+    })
     buf
 }
 clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
@@ -3260,23 +3585,41 @@ clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
 }
 clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] {
     buf := a.sbuf(body.len)
-    body.loop((h, i, st) { buf[i] = a.clos_sub_stmt(ps, st) })
+    body.loop((h, i, st) {
+        buf[i] = a.clos_sub_stmt(ps, st)
+    })
     buf
 }
 // the tail (implicit-return) lambda of a body, if any: the last statement is a bare expression that is
 // itself a lambda literal. (a `return <lambda>` tail works too.)
 clos_tail_lambda = (body: [Stmt]) bool {
     (body.len == 0).match ({ true => false, false => body[body.len - 1].match ({
-        .ExprStmt(e) => load(e).match ({ .Lambda(lm) => true, _ => false }),
-        .Return(r)   => load(r).match ({ .Lambda(lm) => true, _ => false }),
+        .ExprStmt(e) => load(e).match ({
+            .Lambda(lm) => true,
+            _           => false,
+        }),
+        .Return(r)   => load(r).match ({
+            .Lambda(lm) => true,
+            _           => false,
+        }),
         _            => false,
     }) })
 }
 clos_tail_lam_of = (body: [Stmt]) LambdaData {
-    none := LambdaData(params: empty_params(), body: no_stmts(), ret: tvoid())
+    none := LambdaData(
+        params: empty_params(),
+        body: no_stmts(),
+        ret: tvoid(),
+    )
     body[body.len - 1].match ({
-        .ExprStmt(e) => load(e).match ({ .Lambda(lm) => lm, _ => none }),
-        .Return(r)   => load(r).match ({ .Lambda(lm) => lm, _ => none }),
+        .ExprStmt(e) => load(e).match ({
+            .Lambda(lm) => lm,
+            _           => none,
+        }),
+        .Return(r)   => load(r).match ({
+            .Lambda(lm) => lm,
+            _           => none,
+        }),
         _            => none,
     })
 }
@@ -3284,26 +3627,34 @@ clos_tail_lam_of = (body: [Stmt]) LambdaData {
 clos_call_params = (a: MutPtr<Malloc>, structn: str, lm: LambdaData, ft: FnTData) [Param] {
     ps := a.pbuf(lm.params.len + 1)
     ps[0] = param("__clenv", tnamed(structn))
-    lm.params.loop((h, i, p) { ps[i + 1] = param(p.name, (i < ft.params.len).match ({ true => ft.params[i], false => tvoid() })) })
+    lm.params.loop((h, i, p) {
+        ps[i + 1] = param(p.name, (i < ft.params.len).match ({ true => ft.params[i], false => tvoid() }))
+    })
     ps
 }
 // the closure struct's fields = the enclosing function's params (captured by value).
 clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
     fs := a.acquire(fps.len * sizeof(Field))
     out: [Field] := slice(fs, fps.len)
-    fps.loop((h, i, p) { out[i] = field(p.name, p.ty) })
+    fps.loop((h, i, p) {
+        out[i] = field(p.name, p.ty)
+    })
     out
 }
 // the closure literal's field inits = each captured param bound to its own current value.
 clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
     buf := a.fbuf(fps.len)
-    fps.loop((h, i, p) { buf[i] = finit(p.name, a.cenode(vref(p.name))) })
+    fps.loop((h, i, p) {
+        buf[i] = finit(p.name, a.cenode(vref(p.name)))
+    })
     buf
 }
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
     buf := a.sbuf(body.len)
-    body.loop((h, i, st) { buf[i] = (i == body.len - 1).match ({ true => sret(mk), false => st }) })
+    body.loop((h, i, st) {
+        buf[i] = (i == body.len - 1).match ({ true => sret(mk), false => st })
+    })
     buf
 }
 // does `f` return a capturing-over-params closure we can lower? (FnT return + tail lambda + it captures
@@ -3314,7 +3665,7 @@ clos_lowerable = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) boo
             lm := f.body.clos_tail_lam_of()
             cap := a.lift_liftable(decls, idx, lm) == false    // captures something
             bad := a.clos_bad_body(decls, idx, a.lift_lamparams(a.vnil(), lm.params), f.params, lm.body)
-            cap && (bad == false) && (f.params.len > 0)
+            cap && bad == false && f.params.len > 0
         }, false => false }),
         _        => false,
     })
@@ -3323,12 +3674,22 @@ clos_lowerable = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) boo
 // 2*id and 2*id+1), bump the closure counter, and return the rewritten enclosing function (returns the
 // struct by value; ret type becomes the closure struct).
 clos_lower_func = (a: MutPtr<Malloc>, ccp: RawPtr<u8>, gen: [Decl], f: Func) Decl {
-    ft := f.ret.match ({ .FnT(g) => g, _ => FnTData(params: no_tys(), ret: a.tnode(tvoid())) })
+    ft := f.ret.match ({
+        .FnT(g) => g,
+        _       => FnTData(
+            params: no_tys(),
+            ret: a.tnode(tvoid()),
+        ),
+    })
     lm := f.body.clos_tail_lam_of()
     id := load_i64(ccp)
     structn := a.clos_struct_name(id)
     calln := a.clos_call_name(structn)
-    gen[(id * 2).to_i32()] = dstruct(StructDecl(name: structn, fields: a.clos_struct_fields(f.params), pos: 0))
+    gen[(id * 2).to_i32()] = dstruct(StructDecl(
+        name: structn,
+        fields: a.clos_struct_fields(f.params),
+        pos: 0,
+    ))
     gen[(id * 2 + 1).to_i32()] = dfunc(Func(
         name: calln,
         params: a.clos_call_params(structn, lm, ft),
@@ -3360,7 +3721,12 @@ lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     })
     n := load_i64(ccp) * 2
     k := decls.len
-    gen.loop((h, i, g) { (i < n.to_i32()).match ({ true => { out[k] = g  k = k + 1 } }) })
+    gen.loop((h, i, g) {
+        (i < n.to_i32()).match ({ true => {
+            out[k] = g
+            k = k + 1
+        } })
+    })
     slice(out.ptr, k)
 }
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
@@ -3513,7 +3879,7 @@ ptr_kind_of* = (t: Ty) i32 {
 is_readonly_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() }
 // A NON-NULL pointer: `Ptr<T>` (k_ptr) or `MutPtr<T>` (k_mut_ptr). These can never be null, so a slot
 // of this kind cannot be left default-zeroed and cannot be filled by a nullable `RawPtr<T>`.
-is_nonnull_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_ptr() || t.ptr_kind_of() == k_mut_ptr()) }
+is_nonnull_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() || t.ptr_kind_of() == k_mut_ptr() }
 // Stage 3 nullability: a `RawPtr<T>` (kind == k_raw_ptr) is NULLABLE and must be proven non-null
 // (via `assert_nonnull`, which yields a `MutPtr<T>`) before a deref. EXCEPTION: the `RawPtr<u8>`
 // byte-buffer floor — the trusted allocator/FFI primitive — derefs freely (so it is NOT nullable here).
@@ -3527,7 +3893,7 @@ is_nullable_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_raw_ptr()).match ({ t
 ptr_kind_fits* = (g: Ty, w: Ty) bool { (w.ptr_kind_of() == k_mut_ptr() && g.ptr_kind_of() == k_ptr()).match ({ true => false, false => true }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
-    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => (g.ty_eq(w) && g.ptr_kind_fits(w)) }) }) })
+    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.ty_eq(w) && g.ptr_kind_fits(w) }) }) })
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }
