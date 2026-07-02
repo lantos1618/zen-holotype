@@ -528,6 +528,49 @@ fail_unknown_module = (a: MutPtr<Malloc>, inpath: str, id: String, path: str) i3
     exit(1)
     0
 }
+// ── DOTTED LOCAL IMPORT GUARD ──────────────────────────────────────────────────────────────────
+// `{ help } = util.helpers` matches NO marker: it isn't `= std.`/`= compiler.`, and the sibling
+// marker requires a bare name (no dot). The line was silently skipped by the loader, the checker
+// trusted the imported names, and the build died at link ("undefined reference to `help`") behind
+// the compiler-bug banner. Catch the shape up front and tell the real story instead.
+// end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
+dotted_path_end = (s: str, p: i32) i32 {
+    e := s.res_ident_end(p)
+    (s.at(e) == '.' && s.at(e + 1).is_alpha()).match ({ true => s.dotted_path_end(e + 1), false => e })
+}
+// `= <ident>.<ident>…` where the head segment is neither `std` nor `compiler`.
+is_dotted_user_marker_at = (s: str, p: i32) bool { (s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.res_ident_end(p + 2)) == '.' && s.at(s.res_ident_end(p + 2) + 1).is_alpha()).match ({ true => s.is_marker_at(p).match ({ true => false, false => true }), false => false }) }
+dotted_marker_after = (s: str, p: i32) i32 { (s.at(p) == ' ').match ({ true => s.dotted_marker_after(p + 1), false => s.is_dotted_user_marker_at(p).match ({ true => p, false => 0 - 1 }) }) }
+// within ONE line: position of a `= a.b` marker after the import's closing `}`, else -1.
+dotted_marker_from = (s: str, p: i32) i32 {
+    b := s.at(p)
+    (b == 0 || b == '\n').match ({ true => 0 - 1, false => (b == '}').match ({ true => s.dotted_marker_after(p + 1), false => s.dotted_marker_from(p + 1) }) })
+}
+fail_dotted_import = (a: MutPtr<Malloc>, inpath: str, src: str, p: i32) i32 {
+    e := src.dotted_path_end(p)
+    msg := a.gstr_string(256).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: no module '")
+    m2 := msg.rappend_span(a, src, p, e).gstr_append(a, "' (local imports name a single sibling file: `{ f } = helper` loads helper.zen next to ").gstr_append(a, inpath).gstr_append(a, "; only std/compiler modules use dotted paths, e.g. `std.text.fmt`)")
+    line := m2.gstr_push(a, 10)
+    eprint(line.gstr_finish(a))
+    exit(1)
+    0
+}
+scan_dotted_imports = (a: MutPtr<Malloc>, inpath: str, src: str) i32 {
+    pos := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => {
+            ls := src.lstrip(pos)
+            mk := src.opens_import(ls).match ({ true => src.dotted_marker_from(ls), false => 0 - 1 })
+            (mk >= 0).match ({ true => {
+                a.fail_dotted_import(inpath, src, mk + 2)
+            }, false => { } })
+            pos = src.next_line(pos)
+        } })
+    })
+    0
+}
 fail_unreadable = (a: MutPtr<Malloc>, inpath: str, path: str) str {
     msg := a.gstr_string(160).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: cannot read module file ")
     with_path := msg.gstr_append(a, path)
@@ -539,7 +582,10 @@ fail_unreadable = (a: MutPtr<Malloc>, inpath: str, path: str) str {
 read_module_file = (a: MutPtr<Malloc>, path: str) Result<str, IoError> { a.contents_in(path) }
 read_module = (a: MutPtr<Malloc>, inpath: str, path: str) str {
     a.read_module_file(path).match ({
-        .Ok(s)  => s,
+        .Ok(s)  => {
+            a.scan_dotted_imports(path, s)
+            s
+        },
         .Err(e) => a.fail_unreadable(inpath, path),
     })
 }
@@ -1731,6 +1777,7 @@ check_parsed_program_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
+    a.scan_dotted_imports(inpath, mainsrc)
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     ns := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
