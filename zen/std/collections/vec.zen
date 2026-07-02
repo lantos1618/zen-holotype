@@ -1,4 +1,6 @@
 // std.collections.vec — generic growable Vec<T> with explicit allocator-threaded storage.
+// Fallible ops (`of`, `push`, `grow`) return Result<Vec<T>, IoError> — allocation failure is a
+// value: `.expect("…")` at fail-fast roots, `.or_return()` inside Result-returning fns.
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, Opt } = std.core.result
@@ -14,15 +16,7 @@ Vec*<T>: {
     }
     len = (v: Vec<T>) i64 { v.len }
     get = (v: Vec<T>, i: i64) T { v.buf()[i] }
-    grow<A> = (v: Vec<T>, a: MutPtr<A>) Vec<T> {
-        ncap := v.cap * 2 + 1
-        Vec<T>(
-            ptr: a.resize(v.ptr, ncap * sizeof(T)),
-            len: v.len,
-            cap: ncap,
-        )
-    }
-    try_grow<A> = (v: Vec<T>, a: MutPtr<A>) Result<Vec<T>, IoError> {
+    grow<A> = (v: Vec<T>, a: MutPtr<A>) Result<Vec<T>, IoError> {
         ncap := v.cap * 2 + 1
         a.try_resize(v.ptr, ncap * sizeof(T)).match ({
             .Ok(p)  => {
@@ -39,18 +33,7 @@ Vec*<T>: {
             },
         })
     }
-    push<A> = (v: Vec<T>, a: MutPtr<A>, x: T) Vec<T> {
-        x := x
-        r := (v.len < v.cap).match ({ true => v, false => v.grow(a) })
-        b := r.buf()
-        b[r.len] = x
-        Vec<T>(
-            ptr: r.ptr,
-            len: r.len + 1,
-            cap: r.cap,
-        )
-    }
-    try_push<A> = (v: Vec<T>, a: MutPtr<A>, x: T) Result<Vec<T>, IoError> {
+    push<A> = (v: Vec<T>, a: MutPtr<A>, x: T) Result<Vec<T>, IoError> {
         x := x
         out: Result<Vec<T>, IoError> := (v.len < v.cap).match ({ true => {
             b := v.buf()
@@ -62,7 +45,7 @@ Vec*<T>: {
             ))
             vok
         }, false => {
-            v.try_grow(a).match ({
+            v.grow(a).match ({
                 .Ok(r)  => {
                     b := r.buf()
                     b[r.len] = x
@@ -153,19 +136,7 @@ empty*<T, A> = (a: MutPtr<A>) Vec<T> {
     )
 }
 // a `Vec<T>` seeded from a slice (copies `xs`), its buffer acquired from `a`. T inferred from `xs`, A from `a`.
-of*<T, A> = (a: MutPtr<A>, xs: [T]) Vec<T> {
-    v := Vec<T>(
-        ptr: a.acquire(xs.len * sizeof(T)),
-        len: xs.len,
-        cap: xs.len,
-    )
-    b := v.buf()
-    xs.loop((h, i, x) {
-        b[i] = x
-    })
-    v
-}
-try_of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError> {
+of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError> {
     (xs.len <= 0).match ({ true => {
         vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
             ptr: null_ptr(),

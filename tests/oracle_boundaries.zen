@@ -21,6 +21,7 @@
 { out, contents_in, shell } = std.io.file
 { eq, ne, view, is_empty, split_in, nbuf, find, contains, substr } = std.text.str
 { new_in, push_in, finish_in } = std.text.string
+{ expect } = std.core.result
 { run_suite, zo_path, zo_cmd } = oracle_lib
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SHARED byte-scan machinery: faithful port of python's `re` over `_code`-stripped source.
@@ -113,19 +114,19 @@ file_has = (sv: [u8], name: str, kind: i64) bool {
 // handling, matching python.) Returns an allocator-owned NUL-terminated copy.
 strip_comments_in = (mp: MutPtr<Malloc>, src: str) str {
     sv := src.view()
-    s := mp.new_in()
+    s := mp.new_in().expect("oracle: oom")
     in_comment := false
     sv.loop((h, i, b) {
         (b == '\n').match ({ true => {
-            s = s.push_in(mp, b)
+            s = s.push_in(mp, b).expect("oracle: oom")
             in_comment = false
         }, false => in_comment.match ({ true => { }, false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({ true => {
             in_comment = true
         }, false => {
-            s = s.push_in(mp, b)
+            s = s.push_in(mp, b).expect("oracle: oom")
         } }) }) })
     })
-    mp.finish_in(s)
+    mp.finish_in(s).expect("oracle: oom")
 }
 // everything strictly AFTER the first occurrence of `m` (python `src.split(m,1)[1]`); "" if absent.
 after_marker = (mp: MutPtr<Malloc>, src: str, m: str) str {

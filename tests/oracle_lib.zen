@@ -28,6 +28,7 @@
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, is_empty } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
+{ expect } = std.core.result
 { integer_in } = std.text.num
 { getpid } = std.c.libc
 // ── PER-RUN UNIQUE TEMP NAMESPACE (concurrency safety) ────────────────────────────────────────────
@@ -50,18 +51,18 @@
 //       one-at-a-time. Per-run uniqueness gives the same correctness with full parallelism.)
 // the private scratch directory for this run, e.g. `/tmp/zo.12345` (no trailing slash).
 zo_dir* = (mp: MutPtr<Malloc>) str {
-    b := mp.new_in()
-    b = b.append_in(mp, "/tmp/zo.")
-    b = b.append_in(mp, mp.finish_in(mp.integer_in(getpid().to_i64())))
-    mp.finish_in(b)
+    b := mp.new_in().expect("oracle: oom")
+    b = b.append_in(mp, "/tmp/zo.").expect("oracle: oom")
+    b = b.append_in(mp, mp.finish_in(mp.integer_in(getpid().to_i64())).expect("oracle: oom")).expect("oracle: oom")
+    mp.finish_in(b).expect("oracle: oom")
 }
 // build `<zo_dir>/<name>` — a scratch path private to this oracle run (for std.io save/contents_in).
 zo_path* = (mp: MutPtr<Malloc>, name: str) str {
-    b := mp.new_in()
-    b = b.append_in(mp, mp.zo_dir())
-    b = b.append_in(mp, "/")
-    b = b.append_in(mp, name)
-    mp.finish_in(b)
+    b := mp.new_in().expect("oracle: oom")
+    b = b.append_in(mp, mp.zo_dir()).expect("oracle: oom")
+    b = b.append_in(mp, "/").expect("oracle: oom")
+    b = b.append_in(mp, name).expect("oracle: oom")
+    mp.finish_in(b).expect("oracle: oom")
 }
 // wrap a shell command body so it can use `$ZT` for the private scratch dir; the dir is (re)created
 // first so any command can write into it even before a std.io save runs. No cross-run lock is needed:
@@ -69,12 +70,12 @@ zo_path* = (mp: MutPtr<Malloc>, name: str) str {
 // intermediates (`/tmp/zenc_zd_<pid>.*`), so concurrent oracle runs never collide — they run fully
 // in parallel.
 zo_cmd* = (mp: MutPtr<Malloc>, body: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "ZT=")
-    s = s.append_in(mp, mp.zo_dir())
-    s = s.append_in(mp, "; mkdir -p \"$ZT\"; ")
-    s = s.append_in(mp, body)
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "ZT=").expect("oracle: oom")
+    s = s.append_in(mp, mp.zo_dir()).expect("oracle: oom")
+    s = s.append_in(mp, "; mkdir -p \"$ZT\"; ").expect("oracle: oom")
+    s = s.append_in(mp, body).expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 // create the private scratch dir (idempotent); call once at oracle startup before any std.io save.
 zo_ensure* = () i32 {
@@ -86,10 +87,10 @@ zo_ensure* = () i32 {
 zo_cleanup* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    s := mp.new_in()
-    s = s.append_in(mp, "rm -rf ")
-    s = s.append_in(mp, mp.zo_dir())
-    shell(mp.finish_in(s))
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "rm -rf ").expect("oracle: oom")
+    s = s.append_in(mp, mp.zo_dir()).expect("oracle: oom")
+    shell(mp.finish_in(s).expect("oracle: oom"))
 }
 // a VALUE case: `src` defines `test* = () iNN { … }`; the emitted program must compute (print) `want`.
 VCase*: {
@@ -113,11 +114,11 @@ DiagCase*: {
 }
 // build the diagnostic needle `error[<kind>]` for a kind label.
 kind_needle = (mp: MutPtr<Malloc>, kind: str) str {
-    s := mp.new_in()
-    s = s.append_in(mp, "error[")
-    s = s.append_in(mp, kind)
-    s = s.append_in(mp, "]")
-    mp.finish_in(s)
+    s := mp.new_in().expect("oracle: oom")
+    s = s.append_in(mp, "error[").expect("oracle: oom")
+    s = s.append_in(mp, kind).expect("oracle: oom")
+    s = s.append_in(mp, "]").expect("oracle: oom")
+    mp.finish_in(s).expect("oracle: oom")
 }
 // VALUE: emit C for the case, compile it with tests/oracle_runner.c, run it, compare the printed int
 // to `want`. /tmp/zo_out.txt is cleared first so a stale value can't masquerade as a pass when emit
