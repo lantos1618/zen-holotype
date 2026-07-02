@@ -3,7 +3,7 @@
 { Token, Scan, scan, is_hex_prefix, is_bin_prefix, is_oct_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, TyEnd, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, register_anon } = compiler.parse_type
+{ is_lbrace, is_lbracket, is_rbrace, is_rbracket, is_rparen, is_comma, is_langle, is_rangle, tok_eq, tok_in, parse_tyargs, parse_ty, TyEnd, param_buf, take_params, skip_block, PEnd, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, register_anon, delim_enter, delim_exit, stmt_level, vbreak_note } = compiler.parse_type
 { build_body, parse_block, materialize } = compiler.parse_stmt
 PExpr*: {
     expr: Ptr<Expr>,
@@ -252,7 +252,7 @@ fill_payload_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i:
             next: pos,
         )
     } })
-    v := a.parse_or(src, pos)
+    v := a.parse_or_nested(src, pos)
     buf[i] = finit(a.payload_fname(i), v.expr)
     after := src.scan(v.next)
     src.is_comma(after.tok).match ({ true => a.fill_payload_args(src, after.next, buf, i + 1), false => {
@@ -314,7 +314,32 @@ is_chain_base = (e: Ptr<Expr>) bool {
         _         => false,
     })
 }
-nl_between = (src: str, lo: i32, hi: i32) bool { (lo >= hi).match ({ true => false, false => (src.at(lo) == '\n').match ({ true => true, false => src.nl_between(lo + 1, hi) }) }) }    // a newline in the gap before the next token?
+// a newline in the gap before the next token? COMMENT-AWARE: a comment is whitespace, so its
+// CONTENT must never change the parse — a newline INSIDE a `/* … */` block comment is not a line
+// break (`Res /* two\nlines */ .Okv(1)` stays ONE line), while the newline that TERMINATES a `//`
+// line comment is a real break (everything after it is a new line). Both scans stay inside the
+// [lo, hi) gap between two real tokens, so any comment the lexer skipped there is complete.
+nl_between = (src: str, lo: i32, hi: i32) bool {
+    (lo >= hi).match ({ true => {
+        return false
+    } })
+    (src.at(lo) == '\n').match ({ true => {
+        return true
+    } })
+    (src.at(lo) == '/' && lo + 1 < hi && src.at(lo + 1) == '/').match ({ true => {
+        return src.raw_nl(lo + 2, hi)
+    } })    // `//` runs to its newline; that newline counts
+    (src.at(lo) == '/' && lo + 1 < hi && src.at(lo + 1) == '*').match ({ true => {
+        return src.nl_between(src.skip_gap_comment(lo + 2, hi), hi)
+    } })    // `/* … */` is a single space
+    src.nl_between(lo + 1, hi)
+}
+// raw '\n' scan (the pre-comment-aware nl_between): used for the tail of a `//` comment, whose
+// terminating newline is a real line break.
+raw_nl = (src: str, lo: i32, hi: i32) bool { (lo >= hi).match ({ true => false, false => src.at(lo) == '\n' || src.raw_nl(lo + 1, hi) }) }
+// skip past the `*/` closing a block comment inside a token gap; an unterminated tail (only
+// possible when hi is the EOF sentinel) just ends the gap scan.
+skip_gap_comment = (src: str, pos: i32, hi: i32) i32 { (pos + 1 >= hi).match ({ true => hi, false => (src.at(pos) == '*' && src.at(pos + 1) == '/').match ({ true => pos + 2, false => src.skip_gap_comment(pos + 1, hi) }) }) }
 is_loop_kw = (src: str, t: Token) bool {
     t.kind.match ({
         .Ident => src.tok_eq(t, "loop"),
@@ -335,10 +360,24 @@ is_loop_at = (src: str, pos: i32) bool {
 // is_index_at): a leading-dot ctor begins a NEW statement so a NEWLINE always precedes it; a
 // `.Uppercase` on the SAME line as its base is a qualified ctor or genuine UPPERCASE FIELD access
 // (`s.Big`, `o.inner.Val`) and must NOT break.
+// STATEMENT-LEVEL ONLY (stmt_level, parse_type.zen): inside an unclosed `(`/`[`/arm value a new
+// statement cannot begin, so breaking there could only manufacture a parse error — the split
+// `true => Res` ⏎ `.Okv(1),` arm and the parenthesized `(Res` ⏎ `.Okv(2))` stay one expression.
 is_variant_break = (src: str, pos: i32) bool {
     dot := src.scan(pos)
     fld := src.scan(dot.next)
-    src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start))
+    br := stmt_level() && src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start))
+    br.match ({ true => vbreak_note(dot.tok.start) })    // remember the dot for the KVBREAK diagnostic
+    br
+}
+// parse a full expression INSIDE an open delimiter (call/ctor/index/slice/struct-lit element,
+// paren group, match-arm value): a new statement cannot begin there, so the newline+`.Uppercase`
+// variant break is suppressed for the sub-parse (see is_variant_break / parse_type.delim_depth).
+parse_or_nested* = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
+    delim_enter()
+    r := a.parse_or(src, pos)
+    delim_exit()
+    r
 }
 parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr { src.is_match_at(base.next).match ({ true => a.parse_match(src, base), false => src.is_loop_at(base.next).match ({ true => a.parse_loop(src, base), false => (src.is_field_at(base.next) && src.is_variant_break(base.next).match ({ true => false, false => true })).match ({ true => a.parse_field(src, base), false => src.is_index_at(base.next).match ({ true => a.parse_index(src, base), false => (src.is_call_at(base.next) && base.expr.is_chain_base()).match ({ true => a.parse_chained_call(src, base), false => base }) }) }) }) }) }
 // Lower a chained call `base(args)` (base is a closure-valued expression, not a bare name) to a block
@@ -384,7 +423,7 @@ parse_loop = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
 }
 parse_index = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
     lb := src.scan(base.next)
-    ie := a.parse_or(src, lb.next)
+    ie := a.parse_or_nested(src, lb.next)
     rb := src.scan(ie.next)
     a.parse_postfix(src, PExpr(
         expr: a.enode(eindex(base.expr, ie.expr, tvoid())),
@@ -477,7 +516,7 @@ ret_arm_stmts = (a: MutPtr<Malloc>, v: Ptr<Expr>) [Stmt] {
     buf
 }
 parse_arm_return = (a: MutPtr<Malloc>, src: str, kw: Scan) PExpr {
-    v := a.parse_or(src, kw.next)
+    v := a.parse_or_nested(src, kw.next)
     PExpr(
         expr: a.enode(block(a.ret_arm_stmts(v.expr))),
         next: v.next,
@@ -486,7 +525,7 @@ parse_arm_return = (a: MutPtr<Malloc>, src: str, kw: Scan) PExpr {
 // Match arm body: brace block, a bare `return expr`, or a single expression.
 parse_arm_body = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
     sc := src.scan(pos)
-    src.is_lbrace(sc.tok).match ({ true => a.parse_arm_block(src, sc), false => src.is_return_arm(sc.tok).match ({ true => a.parse_arm_return(src, sc), false => a.parse_or(src, pos) }) })
+    src.is_lbrace(sc.tok).match ({ true => a.parse_arm_block(src, sc), false => src.is_return_arm(sc.tok).match ({ true => a.parse_arm_return(src, sc), false => a.parse_or_nested(src, pos) }) })
 }
 parse_arm_block = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     // Use parse_block so statement-position match arms do not turn trailing expressions into real returns.
@@ -981,7 +1020,7 @@ fill_ainit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) P
     nt := src.scan(pos)    // field name
     nm := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)    // ':'
-    v := a.parse_or(src, colon.next)    // the value expression
+    v := a.parse_or_nested(src, colon.next)    // the value expression
     buf[i] = finit(nm, v.expr)
     after := src.scan(v.next)    // ',' / next field / '}'
     src.is_comma(after.tok).match ({ true => a.fill_ainits(src, after.next, buf, i + 1), false => is_ident_tok(after.tok).match ({ true => a.fill_ainits(src, v.next, buf, i + 1), false => PEnd(
@@ -1019,7 +1058,7 @@ fill_pinit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) P
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)
-    v := a.parse_or(src, colon.next)
+    v := a.parse_or_nested(src, colon.next)
     buf[i] = finit(nm, v.expr)
     after := src.scan(v.next)
     src.is_comma(after.tok).match ({ true => a.fill_pinits(src, after.next, buf, i + 1), false => {
@@ -1089,7 +1128,7 @@ fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
             next: pos,
         )
     } })
-    arg := a.parse_or(src, pos)
+    arg := a.parse_or_nested(src, pos)
     buf[i] = load(arg.expr)
     after := src.scan(arg.next)
     src.is_comma(after.tok).match ({ true => a.fill_args(src, after.next, buf, i + 1), false => {
@@ -1103,7 +1142,7 @@ fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     } })
 }
 parse_paren = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
-    inner := a.parse_or(src, open.next)
+    inner := a.parse_or_nested(src, open.next)
     close := src.scan(inner.next)
     src.is_rparen(close.tok).match ({ true => PExpr(
         expr: inner.expr,
@@ -1155,7 +1194,7 @@ fill_sitem = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
             next: pos,
         )
     } })
-    it := a.parse_or(src, pos)
+    it := a.parse_or_nested(src, pos)
     buf[i] = load(it.expr)
     after := src.scan(it.next)
     src.is_comma(after.tok).match ({ true => a.fill_sitems(src, after.next, buf, i + 1), false => {

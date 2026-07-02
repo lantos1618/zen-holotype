@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (213)", [VerdictCase(
+    a := run_verdicts("verdict (216)", [VerdictCase(
         src: "test* = () i32 { a: u8 := 300  to_i32(a) }",
         should_pass: false,
         kind: "",
@@ -859,6 +859,18 @@ oracle_verdict_run* = () i32 {
         src: "dbl* = (v: i64) i64 { v * 2 }\ng* = (store_i64: (i64) i64) i64 { store_i64(21) }\ntest* = () i32 { to_i32(g(dbl)) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "Res: Okv(i32) | Nov\ntest* = () Res { Res /* two\nlines */ .Okv(1) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Res: Okv(i32) | Nov\npick = (c: bool) Res { c.match ({ true => Res\n.Okv(1), false => Res.Nov, }) }\ntest* = () Res { pick(true) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Res: Okv(i32) | Nov\nS := Res.Okv(1)\nG := S\n.Okv(2)\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "parse",
     )])
     // SHADOWING accept: an FnT param NAMED AFTER AN INTRINSIC (`store_i64: (i64) i64`) is a
     // genuine function-valued shadow — checked via the indirect-call path, never intrinsic arity.
@@ -871,6 +883,12 @@ oracle_verdict_run* = () i32 {
     // decl is still validated — the shadowed `f(x)` call must not be judged against top-level `f`.
     // SHADOWING accept, non-generic: an FnT param named `f` in a plain fn shadows top-level `f`.
     // SHADOWING accept: a LET-bound fn value named after a top-level fn — the local wins.
+    // variant-break COMMENT-AWARE accept: a newline inside a /* */ block comment is not a line
+    // break, so `Res /* two\nlines */ .Okv(1)` is ONE qualified ctor (comment content is inert).
+    // variant-break DEPTH accept: in a match-arm VALUE no statement can begin, so `true => Res` ⏎
+    // `.Okv(1),` continues the arm expression instead of manufacturing a parse error at the `,`.
+    // variant-break TOP-LEVEL reject: `G := S` ⏎ `.Okv(2)` splits at statement level; the leftover
+    // `.Okv(2)` cannot start a decl — reported as the rule-naming KVBREAK `parse` diagnostic.
     // soundness hole 4: a generic call's CONCRETE result type (Box<i32> from mk(255)) must be
     // fit-checked against the annotation Box<u8> — a real mismatch, not an unknown leaked to cc.
     // hole 4 still-accept: the inferred instance IS correct (Box<i32>), so it type-checks.

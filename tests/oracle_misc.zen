@@ -448,6 +448,19 @@ oracle_misc_faithful = () i32 {
     out("\n")
     f1 + cfails
 }
+// ── variant-break shapes (#364 follow-up): fmt round-trip must preserve behavior ──
+// The comment-gap ctor and the depth-suppressed splits (paren group / slice element / match-arm
+// value) all normalize to the one-line `Type.Variant(…)` under fmt; the formatted source must
+// recompile and run to the SAME value, and formatting must be a fixpoint on the raw shapes.
+oracle_misc_vbreak = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    s_cmt := "Res: Okv(i32) | Nov\nmain = () i32 {\n    x := Res /* continuation\n    comment */ .Okv(42)\n    x.match ({ .Okv(v) => v, .Nov => 9, })\n}\n"
+    s_arm := "Res: Okv(i32) | Nov\npick = (c: bool) Res {\n    c.match ({\n        true => Res\n        .Okv(1),\n        false => Res.Nov,\n    })\n}\nmain = () i32 { pick(true).match ({ .Okv(v) => v + 41, .Nov => 9, }) }\n"
+    s_paren := "Res: Okv(i32) | Nov\nmain = () i32 {\n    x := (Res\n    .Okv(2))\n    x.match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
+    s_slice := "Res: Okv(i32) | Nov\nmain = () i32 {\n    xs: [Res] := [Res.Okv(1), Res\n    .Okv(2)]\n    xs[1].match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
+    run_suite("variant-break fmt round-trip", [om_run_rc(s_cmt) == 42, mp.om_fmt_then_run(s_cmt) == 42, om_run_rc(s_arm) == 42, mp.om_fmt_then_run(s_arm) == 42, om_run_rc(s_paren) == 42, mp.om_fmt_then_run(s_paren) == 42, om_run_rc(s_slice) == 42, mp.om_fmt_then_run(s_slice) == 42, om_fmt_idem(s_cmt), om_fmt_idem(s_arm), om_fmt_idem(s_paren), om_fmt_idem(s_slice)])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 oracle_misc_run* = () i32 {
     fails := 0
@@ -457,5 +470,6 @@ oracle_misc_run* = () i32 {
     fails = fails + oracle_misc_acid()
     fails = fails + oracle_misc_differential()
     fails = fails + oracle_misc_faithful()
+    fails = fails + oracle_misc_vbreak()
     fails
 }
