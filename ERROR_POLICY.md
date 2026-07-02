@@ -19,8 +19,9 @@ unwinding. `panic` is reserved for invariants that cannot sensibly continue.
 ## Runtime safety (trustworthy execution)
 
 A program that passes `zenc check` must not silently corrupt at runtime. The C backend emits guards so
-that undefined behaviour becomes a deterministic, message-bearing `panic` (write to stderr + `abort`),
-never a SIGFPE or a garbage read:
+that undefined behaviour becomes a deterministic, message-bearing `panic` (`zen: panic: <message>` +
+newline on stderr, then `abort`; `std.core.result.panic` and the `expect` combinators use the same
+framing), never a SIGFPE or a garbage read:
 
 | Operation | Policy | Mechanism |
 |-----------|--------|-----------|
@@ -63,8 +64,8 @@ allocation shim.
 | `std.text.num` | allocator-first `integer`, `integer_in`, `float`, `float_in` | `try_integer`, `try_integer_in`, `try_float`, `try_float_in` | Numeric formatting allocates owned `String` buffers through the caller allocator; no default-heap wrappers are exported. |
 | `std.text.fmt` | `print`, `println`, direct numeric writers, plus `write_int_in`, `write_float_in` | `try_write_int_in`, `try_write_float_in` | Default numeric printing streams bytes directly and does not allocate; allocator-backed helpers remain available when callers want the owned-String formatting path. |
 | `std.collections` | `Vec.push`, `vec.of`, `Map.put`, `maps.of`, `iter.map_in`, `iter.filter_in` | `Vec.try_push`, `vec.try_of`, `Map.try_put`, `maps.try_of`, `iter.try_map_in`, `iter.try_filter_in` | Vec, Map, and allocating iter helpers keep fast allocator paths plus `Result` paths for recoverable allocation failure. Namespace binds let collection modules export natural constructor names. |
-| `std.concurrent.actor` | `cell`, `engine`, `spawn`, `cell.reply` | `try_cell`, `try_engine`, `try_spawn`, `cell.try_reply` | Actor queues, handles, state blocks, and reply channels allocate through the caller allocator; draining checkpoints internally and does not require the allocator to double as a runtime; `try_*` variants release partially acquired storage before returning `.Err`. |
-| `std.concurrent.coroutine/sched` | `spawn`, `spawn_in`, `destroy`, `destroy_in`, `run`, `run_in` | `try_spawn`, `try_spawn_in`, `try_run`, `try_run_in` | Coroutine stack, context, link context, state blocks, and scheduler flag buffers allocate through the caller allocator; `try_spawn*` releases any partial stack/context allocation before returning `.Err`, and `try_run*` returns `.Err` before resuming tasks when flag allocation fails. |
+| `std.concurrent.actor` | `tell`, `run`, `free` (non-allocating sends, drains, teardown) | `cell`, `engine`, `spawn`, `cell.reply`, `request`, `ask` — every allocating entry point returns `Result` directly; no `try_*` doubling | Actor queues, handles, state blocks, and reply channels allocate through the caller allocator; draining checkpoints internally and does not require the allocator to double as a runtime; constructors release partially acquired storage before returning `.Err`. |
+| `std.concurrent.coroutine/sched` | `destroy`, `destroy_in`, `run`, `run_in` | `spawn`, `spawn_in` (return `Result<Coro, IoError>` directly; no `try_*` doubling), plus scheduler `try_run`, `try_run_in` | Coroutine stack, context, link context, state blocks, and scheduler flag buffers allocate through the caller allocator; `spawn*` releases any partial stack/context allocation before returning `.Err`, and `try_run*` returns `.Err` before resuming tasks when flag allocation fails. |
 | `std.concurrent.cown` | `cown.buf`, `Buf.free` | `cown.try_buf`, `cown.file`, `cown.file_in` | Buffers allocate through the caller allocator; `try_buf` lifts allocation failure into `Result`. File wrappers convert `open` failure into `IoError` and close the descriptor if wrapping it in `Own<File>` fails. |
 | `std.io` | POSIX descriptor calls and `file.shell` | `file.contents`, `file.contents_in`, `file.save` | File helpers convert open/read/write failure into `IoError`. Raw descriptor calls stay low-level. |
 | `std.internal.resolve` | `import_edges`, `provided_symbols_in`, `module_graph_in` | `try_import_edges` | Scanner-only import edges can use any allocator and expose a fallible path. Parser-backed symbol/graph APIs still need `Malloc` scratch for parser boundary checks, but kept result slices and normalized strings can be backed by a caller allocator. |
@@ -79,7 +80,7 @@ exist:
 - `std.text`: allocation failure, parse failure, and numeric-formatting allocation failure are matched as values.
 - `std.collections`: Vec/Map fallible allocation preserves existing values on failure; iter map/filter allocation failure returns `.Err`.
 - `std.concurrent.actor`: actor cell, stateful actor spawn, and cell-scoped reply allocation return `Result`, and partial allocation failure releases already acquired storage.
-- `std.concurrent.coroutine/sched`: failed `try_spawn` returns `.Err` and releases any stack/context blocks already acquired; failed `try_run` returns `.Err` before resuming any coroutine.
+- `std.concurrent.coroutine/sched`: failed `spawn` returns `.Err` and releases any stack/context blocks already acquired; failed `try_run` returns `.Err` before resuming any coroutine.
 - `std.internal.resolve`: scanner-only import-edge loading works with heap and arena allocators, and `try_import_edges` reports edge slice, module-string, and alias-string allocation failure.
 - `std.concurrent.cown`: buffer allocation failure returns `.Err`, and file descriptor wrapping closes the descriptor on allocation failure.
 - `std.io`: missing files, denied writes, successful writes, and successful reads

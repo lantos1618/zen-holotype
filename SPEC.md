@@ -342,7 +342,8 @@ Allocator-threaded std APIs make allocation visible in signatures. Examples:
 `maps.of(a, "k", 1)`, `m.try_put(a, "k", 2)`, `maps.try_of(a, "k", 1)`,
 `a.try_map_in([1, 2], (x) { x + 1 })`, `arena.new_in(a, 1024)`,
 `slice.dup(a, [1, 2])`, `a.try_dup_in([1, 2])`, `own.new_in(a, value)`, `rc.try_new_in(a, value)`,
-`a.try_cell(16)`, `cell.reply(a)`, and `cell.try_reply(a)`.
+`actor.cell(a, 16)`, and `cell.reply(a)` — the actor constructors return `Result`
+directly; there is no separate `try_*` doubling.
 
 Current safety status: these APIs exist and are tested, and the checker rejects
 same-body local use after `Own<T>.release_in(...)`, `Rc<T>.drop_in(...)`, or
@@ -363,9 +364,13 @@ Opt<T>: Some(T) | None
 IoError*: NotFound | Denied | Eof | Errno(i32)
 ```
 
-Callers branch with `.match`. `std.core.result` also provides sentinel-lifting
-helpers such as `ok_if` and `ok_ptr`, and `panic` as an explicit abort for
-invariants.
+Callers branch with `.match`, propagate with `.or_return()` (unwrap `.Ok`, or
+early-return the `.Err` from the enclosing `Result`-returning function), and
+give up on invariants with `.expect("...")` / `.expect_some("...")` (unwrap or
+panic with the mandatory message). `std.core.result` also provides sentinel-lifting
+helpers such as `ok_if` and `ok_ptr`, the combinators `or` / `or_else` /
+`map_err`, and `panic` as an explicit abort for invariants (framed as
+`zen: panic: <msg>` on stderr, matching the runtime's div-zero/OOB panics).
 
 The stdlib still has fast paths, raw sentinel APIs, and `Result` APIs. The
 current policy documents which paths are intended to be recoverable; moving that
@@ -394,8 +399,9 @@ one is available; richer multi-diagnostic flows remain roadmap work.
 
 Concurrency support is stdlib-level today:
 
-- `std.concurrent.coroutine`: coroutine substrate over context switching,
-  with `try_spawn` / `try_spawn_in` for fallible stack/context allocation;
+- `std.concurrent.coroutine`: coroutine substrate over context switching;
+  `spawn` / `spawn_in` return `Result<Coro, IoError>` and clean up partial
+  stack/context allocation before returning `.Err`;
 - `std.concurrent.runtime`: sync/async runtime and colorless `checkpoint`,
   with namespace-bound `runtime.sync` / `runtime.async` constructors;
 - `std.concurrent.sched`: small scheduler, with `try_run` / `try_run_in`
@@ -417,12 +423,14 @@ lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,
 drives a receiver through `await_reply`, wraps request/reply flows through
 `request`, and frees the engine storage through `free`. Actor cells infer
 their message type from typed destinations such as
-`cell: actor.ActorCell<Msg> := actor.cell(heap.addr(), 16)`, where `actor`
-is a namespace bind for `std.concurrent.actor` and `heap` may come from
-namespace-bound `alloc.default()`.
+`cell_r: Result<actor.ActorCell<Msg>, IoError> := actor.cell(heap.addr(), 16)`,
+then unwrap with `cell_r.expect("cell allocation")` (or keep the failure in the
+value flow with `.match` / `.or_return()`), where `actor` is a namespace bind
+for `std.concurrent.actor` and `heap` may come from namespace-bound
+`alloc.gpa()` (`alloc = std.mem.heap`).
 `ActorHandle<M, ActorT>` is the higher-level stateful actor wrapper. A program
-can create one with `actor.spawn(heap.addr(), 16, ActorState(...))`, or use
-`actor.try_spawn(...)` when allocation failure should stay in the value flow.
+creates one with `actor.spawn(heap.addr(), 16, ActorState(...))`, which returns
+`Result<ActorHandle<M, ActorT>, IoError>`.
 It sends typed messages with `handle.tell(message)`, drains its owned state with
 `handle.run()`, wraps request/reply flows through `handle.request(...)`, and
 releases storage with `handle.free(heap.addr())`. Actor state persists across
@@ -431,9 +439,9 @@ multiple drains.
 typed message, for example `(reply) { .GetStats(reply) }`, enqueues it, drains
 the receiver, awaits the reply, and releases the reply storage. The lower-level
 `ask` method remains available for callbacks that need side effects before
-draining. Fallible variants `actor.try_spawn`, `cell.try_reply`, and
-`try_cell` return `Result` values and clean up partial allocation before
-returning `.Err`.
+draining. The allocating entry points — `actor.spawn`, `actor.cell`,
+`actor.engine`, and `cell.reply` — all return `Result` and clean up partial
+allocation before returning `.Err`; there are no separate `try_*` variants.
 
 ## Backends
 
