@@ -3223,6 +3223,55 @@ check_module_main_diagnostic_from_source* = (decls: [Decl], src: str) CheckDiagn
     packed := decls.main_params_kind()
     (packed == 0).match ({ true => check_diagnostic_none(), false => src.check_diagnostic_from_source(packed, 1) })
 }
+// ── reserved-name: a top-level fn redefining a compiler intrinsic (KRESERVEDNAME) ──────────────────
+// Call emission dispatches on the NAME (genc call_kind / is_intrinsic), so a user top-level
+// `load = (x: i64) i64 { … }` never receives its calls: `load(41)` still compiles to the intrinsic
+// pointer deref — a miscompile behind a green check (a cc error at best, a wrong value or a
+// segfault at runtime at worst). Locals and params that shadow intrinsics are already sound
+// (shadows_toplevel routes their calls through the local, #370/#377), struct/impl methods are
+// hoisted under mangled `impl_…` names, and FOREIGN decls stay allowed (std.mem.alloc re-declares
+// `malloc`/`free` as bodyless prototypes) — so the reject is scoped to BODIED top-level DFuncs,
+// the one shape whose calls are unwinnably captured by the intrinsic.
+KRESERVEDNAME = () i32 { 31 }    // a top-level fn named after a compiler intrinsic (its calls would hit the intrinsic)
+reserved_name_kind = (decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) {
+        acc = acc.kv_kor(d.match ({
+            .DFunc(f) => f.name.is_intrinsic().match ({ true => KRESERVEDNAME().kv_at(f.pos), false => 0 }),
+            _         => 0,
+        }))
+    })
+    acc
+}
+// the offending fn's NAME, straight off the first colliding decl — exact even when its pos is 0
+// (a decl at byte 0 packs as "no position", so a source-copy subject would truncate).
+reserved_name_of = (decls: [Decl]) str {
+    n := ""
+    decls.loop((h, i, d) {
+        n = is_empty(n).match ({ true => d.match ({
+            .DFunc(f) => f.name.is_intrinsic().match ({ true => f.name, false => "" }),
+            _         => "",
+        }), false => n })
+    })
+    n
+}
+check_module_reserved_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := decls.reserved_name_kind()
+    (packed == 0).match ({ true => check_diagnostic_none(), false => {
+        pos := packed >> 5
+        w := src.diagnostic_span_width(pos)
+        subject := a.gstr_string(32).gstr_append(a, "`").gstr_append(a, decls.reserved_name_of()).gstr_append(a, "`").gstr_finish(a)
+        CheckDiagnostic(
+            code: packed & 31,
+            kind: "reserved-name",
+            source_offset: pos,
+            span_width: w,
+            count: 1,
+            message: a.gstr_string(192).gstr_append(a, subject).gstr_append(a, " is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function").gstr_finish(a),
+            hint: a.gstr_string(64).gstr_append(a, "rename — ").gstr_append(a, subject).gstr_append(a, " is a compiler intrinsic").gstr_finish(a),
+        )
+    } })
+}
 // ── must-use: a DISCARDED value-mold ((Self,…) Self) self-mutation (Stage-2 A.1) ───────────────────────
 // A value-mold CONTAINER method (`Map.put`, `Set.add`, … — shape `(Self, …) Self`) RETURNS the updated
 // container and INVALIDATES the receiver: a grow reallocs the backing buffer, so the input header is left
