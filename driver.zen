@@ -1,7 +1,7 @@
 // driver.zen — the zenc CLI, in Zen. Dispatches on the command line and drives the compiler
 // (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
 // once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
-{ arg, getEnv } = std.os
+{ arg, argc, getEnv } = std.os
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
@@ -223,11 +223,25 @@ build_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec, flag: str, outarg: str)
         })
     }, false => 1 })
 }
+// shell-quote one forwarded arg for the `system()` sh -c line: wrap in single quotes,
+// an embedded `'` becomes `'\''` (close, escaped quote, reopen).
+quote_arg = (s: String, mp: MutPtr<Malloc>, t: str) String {
+    cur := s.gstr_push(mp, '\'')
+    v: [u8] := t.view()
+    v.loop((h, i, b) {
+        cur = (b == '\'').match ({ true => cur.gstr_append(mp, "'\\''"), false => cur.gstr_push(mp, b) })
+    })
+    cur.gstr_push(mp, '\'')
+}
+append_run_args = (s: String, mp: MutPtr<Malloc>, i: i32, n: i32) String { (i >= n).match ({ true => s, false => s.gstr_push(mp, ' ').quote_arg(mp, arg(i)).append_run_args(mp, i + 1, n) }) }
+// `zenc run <file> a b c` — everything after the source path is forwarded to the program's argv
+// (arg(3)..; the program reads it back via std.os.arg(i)/argc(), argv[0] being the temp binary).
+run_command = (mp: MutPtr<Malloc>, bin: str) str { mp.gstr_string(128).gstr_append(mp, bin).append_run_args(mp, 3, argc()).gstr_finish(mp) }
 run_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 {
     spec.ok.match ({ true => contents_in(mp, spec.source).match ({
         .Ok(src) => {
             bin := mp.TMPBIN()
-            (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links) == 0).match ({ true => bin.system() / 256, false => 1 })
+            (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links) == 0).match ({ true => mp.run_command(bin).system() / 256, false => 1 })
         },
         .Err(e)  => {
             derr("zenc: cannot open input: ")
