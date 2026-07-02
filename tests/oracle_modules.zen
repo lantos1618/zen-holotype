@@ -558,14 +558,14 @@ oracle_modules_run* = () i32 {
             src: "cell* = (n: i32) i32 { n + 35 }\n",
         ), ModFile(
             name: "p.zen",
-            src: "heap = std.mem.heap\nactor = std.concurrent.actor\nright = right\n{ to_exit } = std.core.bool\nMsg*: Ping(actor.ReplyRef<i32>)\nRoom*: { n: i32 }\nRoom.impl(actor.Receiver<Msg>, {\n    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match({ .Ping(reply_to) => reply_to.send(7) })\n    }\n})\nmain = () i32 {\n  h := heap.gpa()\n  cell: actor.ActorCell<Msg> := actor.cell(h.addr(), 4)\n  room := Room(n: 0)\n  out: i32 := cell.request(h.addr(), room.addr(), (reply_to) { .Ping(reply_to) })\n  cell.free(h.addr())\n  ((out + right.cell(35)) == 77).to_exit()\n}\n",
+            src: "heap = std.mem.heap\nactor = std.concurrent.actor\nright = right\n{ to_exit } = std.core.bool\n{ Result, IoError, expect } = std.core.result\nMsg*: Ping(actor.ReplyRef<i32>)\nRoom*: { n: i32 }\nRoom.impl(actor.Receiver<Msg>, {\n    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match({ .Ping(reply_to) => reply_to.send(7) })\n    }\n})\nmain = () i32 {\n  h := heap.gpa()\n  cell_r: Result<actor.ActorCell<Msg>, IoError> := actor.cell(h.addr(), 4)\n  cell := cell_r.expect(\"cell alloc\")\n  room := Room(n: 0)\n  out_r: Result<i32, IoError> := cell.request(h.addr(), room.addr(), (reply_to) { .Ping(reply_to) })\n  out := out_r.expect(\"reply alloc\")\n  cell.free(h.addr())\n  ((out + right.cell(35)) == 77).to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
     ), ModValCase(
         files: [ModFile(
             name: "p.zen",
-            src: "{ to_exit } = std.core.bool\n{ String, new_in } = std.text.string\nheap = std.mem.heap\nactor = std.concurrent.actor\nColour*: { r: u8, g: u8, b: u8 }\nhex_digit = (n: u8) u8 { (n < 10).match({ true => '0' + n, false => ('a' + n) - 10 }) }\npush_byte<A> = (s: String, a: MutPtr<A>, v: u8) String {\n    s2 := s.push_in(a, hex_digit(v / 16))\n    s2.push_in(a, hex_digit(v % 16))\n}\nPixelMsg*: Draw(Colour) | Clear\nCanvas*: { drawn: i32 }\nCanvas.impl(actor.Receiver<PixelMsg>, {\n    receive = (cv: MutPtr<Canvas>, ctx: actor.Context<PixelMsg>) void {\n        ctx.msg.match({ .Draw(c) => { cv.drawn = cv.drawn + 1 }, .Clear => { cv.drawn = 0 } })\n    }\n})\nmain = () i32 {\n  h := heap.gpa()\n  a := h.addr()\n  c := Colour(r: 255, g: 128, b: 0)\n  s := a.new_in().push_in(a, '#').push_byte(a, c.r).push_byte(a, c.g).push_byte(a, c.b)\n  hx := s.finish_in(a)\n  canvas: actor.ActorHandle<PixelMsg, Canvas> := actor.spawn(a, 8, Canvas(drawn: 0))\n  canvas.send(.Draw(c))\n  canvas.send(.Clear)\n  canvas.send(.Draw(c))\n  canvas.run()\n  canvas.free(a)\n  ok := (hx.at(0) == '#') && (hx.at(1) == 'f') && (hx.at(2) == 'f') && (hx.at(3) == '8')\n  ok.to_exit()\n}\n",
+            src: "{ to_exit } = std.core.bool\n{ String, new_in } = std.text.string\n{ Result, IoError, expect } = std.core.result\nheap = std.mem.heap\nactor = std.concurrent.actor\nColour*: { r: u8, g: u8, b: u8 }\nhex_digit = (n: u8) u8 { (n < 10).match({ true => '0' + n, false => ('a' + n) - 10 }) }\npush_byte<A> = (s: String, a: MutPtr<A>, v: u8) String {\n    s2 := s.push_in(a, hex_digit(v / 16))\n    s2.push_in(a, hex_digit(v % 16))\n}\nPixelMsg*: Draw(Colour) | Clear\nCanvas*: { drawn: i32 }\nCanvas.impl(actor.Receiver<PixelMsg>, {\n    receive = (cv: MutPtr<Canvas>, ctx: actor.Context<PixelMsg>) void {\n        ctx.msg.match({ .Draw(c) => { cv.drawn = cv.drawn + 1 }, .Clear => { cv.drawn = 0 } })\n    }\n})\nmain = () i32 {\n  h := heap.gpa()\n  a := h.addr()\n  c := Colour(r: 255, g: 128, b: 0)\n  s := a.new_in().push_in(a, '#').push_byte(a, c.r).push_byte(a, c.g).push_byte(a, c.b)\n  hx := s.finish_in(a)\n  canvas_r: Result<actor.ActorHandle<PixelMsg, Canvas>, IoError> := actor.spawn(a, 8, Canvas(drawn: 0))\n  canvas := canvas_r.expect(\"spawn canvas\")\n  canvas.send(.Draw(c))\n  canvas.send(.Clear)\n  canvas.send(.Draw(c))\n  canvas.run()\n  canvas.free(a)\n  ok := (hx.at(0) == '#') && (hx.at(1) == 'f') && (hx.at(2) == 'f') && (hx.at(3) == '8')\n  ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -1202,7 +1202,7 @@ oracle_modules_run* = () i32 {
     // generic-heavy modules check clean on their own.
     // bug 3: multi-line impl bodies (runtime) + multi-line imports (ast) resolve clean.
     // std.concurrent.actor standalone-checks: indented `sent = true` is code, not an import of sibling `true`;
-    // and actor exports spawn/try_spawn despite the coroutine substrate owning the same names.
+    // and actor exports spawn despite the coroutine substrate owning the same name.
     // a user decl that collides with a name in its imported std closure is rejected (no silent shadow).
     // two imported modules sharing a name still dedup silently (dependency-first, no false dup).
     // unknown type names in annotations / returns / lets are rejected (driver unknown-type pass).
@@ -1292,9 +1292,9 @@ oracle_modules_run* = () i32 {
     // import-head spacing variants all emit the resolved sibling call (test_modules_oracle).
     dc := run_mod_docs("modules doc (exported signatures)", [ModDocCase(
         module: "std.concurrent.actor",
-        present: ["spawn*<A, M, ActorT>", "try_spawn*<A, M, ActorT>"],
+        present: ["spawn*<A, M, ActorT>", "cell*<A, M>"],
     )])
-    // std.concurrent.actor exports the generic spawn/try_spawn signatures.
+    // std.concurrent.actor exports the generic Result-returning spawn/cell signatures.
     sd := run_mod_stdins("modules stdin (no program dir)", [ModStdinCase(
         src: "{ helper } = b\nmain = () i32 { helper(21) }\n",
         should_succeed: false,
@@ -1333,7 +1333,7 @@ edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 //   check`/`run`/`doc` over a small program, so each became a ModVerdictCase / ModValCase / ModDocCase:
 //     generic_decl_co_imports(fmt+rc,vec+rc,fmt+arc,fmt+drop), generic_heavy_module_alone(io.c,cown),
 //     ns_bind_qualified_call_runs(c=std.io.c→37), std_runtime/std_ast imports_clean, std_actor standalone
-//     + spawn/try_spawn doc, user_shadow_of_imported_std_name(dup), import_vs_import_collision(first-wins),
+//     + spawn/cell doc, user_shadow_of_imported_std_name(dup), import_vs_import_collision(first-wins),
 //     std_ast_builders_usable, std_ast_decl_buffer_uses_explicit_allocator, undefined-type
 //     (annotation/return/local-let/nested-let), value-mold must-use (discard reject / rebind / tail),
 //     defined+imported types not flagged, lambda (hof-arg / field-lift / capturing-reject / returned-lift).

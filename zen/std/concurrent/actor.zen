@@ -87,16 +87,7 @@ ReplyRef*<T>: {
     }
 }
 context*<M> = (msg: M) Context<M> { Context<M>(msg: msg) }
-reply<A, T> = (alloc: MutPtr<A>) ReplyRef<T> {
-    value := alloc.acquire(sizeof(T))
-    ready := alloc.acquire(8)
-    ready.store_i64(0)
-    ReplyRef<T>(
-        value: value,
-        ready: ready,
-    )
-}
-try_reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
+reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
     alloc.try_acquire(sizeof(T)).match ({
         .Ok(value) => {
             alloc.try_acquire(8).match ({
@@ -121,19 +112,7 @@ try_reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
         },
     })
 }
-make_system<A, M> = (alloc: MutPtr<A>, cap: i64) ActorSystem<M> {
-    state := alloc.acquire(ACTOR_STATE_SIZE)
-    messages := alloc.acquire(cap * sizeof(M))
-    slot := state.slice(1)
-    slot[0] = Ring<M>(
-        buf: messages,
-        head: 0,
-        tail: 0,
-        cap: cap,
-    )
-    ActorSystem<M>(state: state)
-}
-try_make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoError> {
+make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoError> {
     alloc.try_acquire(ACTOR_STATE_SIZE).match ({
         .Ok(state) => {
             alloc.try_acquire(cap * sizeof(M)).match ({
@@ -167,12 +146,8 @@ ActorEngine*<M>: {
     drain<ActorT> = (engine: ActorEngine<M>, actor: MutPtr<ActorT>) void { engine.sys.run(actor) }
     free<A> = (engine: ActorEngine<M>, alloc: MutPtr<A>) void { engine.sys.free(alloc) }
 }
-engine*<A, M> = (alloc: MutPtr<A>, cap: i64) ActorEngine<M> {
-    sys: ActorSystem<M> := alloc.make_system(cap)
-    ActorEngine<M>(sys: sys)
-}
-try_engine*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorEngine<M>, IoError> {
-    sys: Result<ActorSystem<M>, IoError> := alloc.try_make_system(cap)
+engine*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorEngine<M>, IoError> {
+    sys: Result<ActorSystem<M>, IoError> := alloc.make_system(cap)
     sys.match ({
         .Ok(s)  => {
             ok: Result<ActorEngine<M>, IoError> := .Ok(ActorEngine<M>(sys: s))
@@ -188,22 +163,39 @@ ActorCell*<M>: {
     inner: ActorEngine<M>,
     ref = (cell: ActorCell<M>) ActorRef<M> { cell.inner.ref() }
     send = (cell: ActorCell<M>, message: M) bool { cell.ref().send(message) }
-    reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) ReplyRef<T> { alloc.reply() }
-    try_reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> { alloc.try_reply() }
+    reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> { alloc.reply() }
     drain<ActorT> = (cell: ActorCell<M>, actor: MutPtr<ActorT>) void { cell.inner.drain(actor) }
     await_reply<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, reply_to: ReplyRef<T>) T {
         cell.drain(actor)
         reply_to.await(alloc)
     }
-    ask<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, issue: (ReplyRef<T>) void) T {
-        reply_to: ReplyRef<T> := cell.reply(alloc)
-        issue(reply_to)
-        cell.await_reply(alloc, actor, reply_to)
+    ask<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, issue: (ReplyRef<T>) void) Result<T, IoError> {
+        r: Result<ReplyRef<T>, IoError> := cell.reply(alloc)
+        r.match ({
+            .Ok(reply_to) => {
+                issue(reply_to)
+                done: Result<T, IoError> := .Ok(cell.await_reply(alloc, actor, reply_to))
+                done
+            },
+            .Err(e)       => {
+                failed: Result<T, IoError> := .Err(e)
+                failed
+            },
+        })
     }
-    request<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, make: (ReplyRef<T>) M) T {
-        reply_to: ReplyRef<T> := cell.reply(alloc)
-        cell.send(make(reply_to))
-        cell.await_reply(alloc, actor, reply_to)
+    request<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, make: (ReplyRef<T>) M) Result<T, IoError> {
+        r: Result<ReplyRef<T>, IoError> := cell.reply(alloc)
+        r.match ({
+            .Ok(reply_to) => {
+                cell.send(make(reply_to))
+                done: Result<T, IoError> := .Ok(cell.await_reply(alloc, actor, reply_to))
+                done
+            },
+            .Err(e)       => {
+                failed: Result<T, IoError> := .Err(e)
+                failed
+            },
+        })
     }
     free<A> = (cell: ActorCell<M>, alloc: MutPtr<A>) void { cell.inner.free(alloc) }
 }
@@ -239,17 +231,35 @@ ActorHandle*<M, ActorT>: {
             } })
         })
     }
-    request<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, make: (ReplyRef<T>) M) T {
-        reply_to: ReplyRef<T> := reply(alloc)
-        handle.send(make(reply_to))
-        handle.run()
-        reply_to.await(alloc)
+    request<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, make: (ReplyRef<T>) M) Result<T, IoError> {
+        r: Result<ReplyRef<T>, IoError> := alloc.reply()
+        r.match ({
+            .Ok(reply_to) => {
+                handle.send(make(reply_to))
+                handle.run()
+                done: Result<T, IoError> := .Ok(reply_to.await(alloc))
+                done
+            },
+            .Err(e)       => {
+                failed: Result<T, IoError> := .Err(e)
+                failed
+            },
+        })
     }
-    ask<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, issue: (ReplyRef<T>) void) T {
-        reply_to: ReplyRef<T> := reply(alloc)
-        issue(reply_to)
-        handle.run()
-        reply_to.await(alloc)
+    ask<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, issue: (ReplyRef<T>) void) Result<T, IoError> {
+        r: Result<ReplyRef<T>, IoError> := alloc.reply()
+        r.match ({
+            .Ok(reply_to) => {
+                issue(reply_to)
+                handle.run()
+                done: Result<T, IoError> := .Ok(reply_to.await(alloc))
+                done
+            },
+            .Err(e)       => {
+                failed: Result<T, IoError> := .Err(e)
+                failed
+            },
+        })
     }
     free<A> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>) void {
         state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
@@ -258,26 +268,12 @@ ActorHandle*<M, ActorT>: {
         alloc.release(handle.state)
     }
 }
-cell*<A, M> = (alloc: MutPtr<A>, cap: i64) ActorCell<M> {
-    engine: ActorEngine<M> := alloc.engine(cap)
-    ActorCell<M>(inner: engine)
-}
-spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) ActorHandle<M, ActorT> {
-    state := alloc.acquire(sizeof(ActorT))
-    slot: [ActorT] := state.slice(1)
-    slot[0] = actor
-    cell: ActorCell<M> := alloc.cell(cap)
-    ActorHandle<M, ActorT>(
-        inner_cell: cell,
-        state: state,
-    )
-}
-try_spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) Result<ActorHandle<M, ActorT>, IoError> {
+spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) Result<ActorHandle<M, ActorT>, IoError> {
     alloc.try_acquire(sizeof(ActorT)).match ({
         .Ok(state) => {
             slot: [ActorT] := state.slice(1)
             slot[0] = actor
-            cell: Result<ActorCell<M>, IoError> := alloc.try_cell(cap)
+            cell: Result<ActorCell<M>, IoError> := alloc.cell(cap)
             cell.match ({
                 .Ok(c)  => {
                     ok: Result<ActorHandle<M, ActorT>, IoError> := .Ok(ActorHandle<M, ActorT>(
@@ -299,8 +295,8 @@ try_spawn*<A, M, ActorT> = (alloc: MutPtr<A>, cap: i64, actor: ActorT) Result<Ac
         },
     })
 }
-try_cell*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorCell<M>, IoError> {
-    engine: Result<ActorEngine<M>, IoError> := alloc.try_engine(cap)
+cell*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorCell<M>, IoError> {
+    engine: Result<ActorEngine<M>, IoError> := alloc.engine(cap)
     engine.match ({
         .Ok(e)  => {
             ok: Result<ActorCell<M>, IoError> := .Ok(ActorCell<M>(inner: e))
