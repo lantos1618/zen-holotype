@@ -899,7 +899,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (146)", [VerdictCase(
+    b := run_verdicts("verdict-kind (154)", [VerdictCase(
         src: "g* = (x: i32) i32 { x }\nf* = (flags: RawPtr<u8>, i: i32, n: i32) void { (i < n).match({ true => { g(1, 2, 3)  store_i64(flags, 1) }, false => {} }) }\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "arity",
@@ -1483,7 +1483,46 @@ oracle_verdict_run* = () i32 {
         src: "halloc = std.mem.heap\nf = (n: i32) i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    p := a.acquire(8)\n    (n > 3).match ({ true => {\n        a.release(p)\n        return 1\n    }, false => { } })\n    a.release(p)\n    0\n}\ntest* = () i32 { f(2) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "{ Result, IoError, expect } = std.core.result\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Put(RawPtr<u8>)\nRoom*: {\n    n: i32,\n}\nRoom.impl(actor, {\n    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Put(b) => {\n                room.n = room.n + 1\n            },\n            _       => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.spawn(a, 4, Room(n: 0))\n    h := r.expect(\"spawn failed\")\n    p := a.acquire(16)\n    h.send(.Put(p))\n    a.release(p)\n    h.free(a)\n    0\n}",
+        should_pass: false,
+        kind: "scratch-escape",
+    ), VerdictCase(
+        src: "Pk*: {\n    xs: [i64],\n}\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Pk) bool { true }\ntest* = () i32 {\n    v: [i64] := [1, 2, 3]\n    h := H(id: 1)\n    h.send(Pk(xs: v))\n    0\n}",
+        should_pass: false,
+        kind: "scratch-escape",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Inc(i32)\nCounter*: {\n    total: i64,\n    seen: RawPtr<u8>,\n}\nCounter.impl(actor, {\n    receive = (c: MutPtr<Counter>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Inc(n) => {\n                c.total = c.total + to_i64(n)\n            },\n            _       => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    scratch := a.acquire(64)\n    r: Result<actor.ActorHandle<Msg, Counter>, IoError> := actor.spawn(a, 4, Counter(\n        total: 0,\n        seen: scratch,\n    ))\n    a.release(scratch)\n    0\n}",
+        should_pass: false,
+        kind: "scratch-escape",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Inc(i32)\nCounter*: {\n    total: i64,\n    seen: RawPtr<u8>,\n}\nCounter.impl(actor, {\n    receive = (c: MutPtr<Counter>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Inc(n) => {\n                c.total = c.total + to_i64(n)\n            },\n            _       => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<actor.ActorHandle<Msg, Counter>, IoError> := actor.spawn(a, 4, Counter(\n        total: 0,\n        seen: a.acquire(64),\n    ))\n    0\n}",
+        should_pass: false,
+        kind: "scratch-escape",
+    ), VerdictCase(
+        src: "Pk*: {\n    n: i32,\n    s: str,\n}\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Pk) bool { true }\ntest* = () i32 {\n    h := H(id: 1)\n    h.send(Pk(\n        n: 5,\n        s: \"hi\",\n    ))\n    0\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Result, IoError, expect } = std.core.result\n{ Arc, new_in } = std.mem.arc\nhalloc = std.mem.heap\nBlob*: {\n    v: i64,\n}\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Arc<Blob>) bool { true }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<Arc<Blob>, IoError> := a.new_in(Blob(v: 42))\n    v := r.expect(\"arc alloc\")\n    h := H(id: 1)\n    h.send(v)\n    0\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Result, IoError, expect } = std.core.result\n{ Arc, new_in } = std.mem.arc\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nBlob*: {\n    v: i64,\n}\nMsg*: Ping\nHolder*: {\n    cell: Arc<Blob>,\n}\nHolder.impl(actor, {\n    receive = (hd: MutPtr<Holder>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Ping => { },\n            _     => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    ar: Result<Arc<Blob>, IoError> := a.new_in(Blob(v: 7))\n    cell := ar.expect(\"arc alloc\")\n    r: Result<actor.ActorHandle<Msg, Holder>, IoError> := actor.spawn(a, 4, Holder(cell: cell))\n    0\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Ping\nRoom*: {\n    n: i32,\n}\nRoom.impl(actor, {\n    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Ping => { },\n            _     => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.spawn(a, 4, Room(n: 7))\n    0\n}",
+        should_pass: true,
+        kind: "",
     )])
+    // M1 slice 1 (rt-scoped-runtime, docs/rt-scoped-runtime.md): spawner scratch must not cross an
+    // actor boundary. Rejects (error[scratch-escape]): a send whose enum payload carries a local
+    // `a.acquire(…)` pointer; a send of a slice-literal-backed struct (stack storage); spawn state
+    // embedding a local acquire pointer (the judges' `Counter(seen: <spawner-local>)` repro), bound
+    // OR embedded directly. Accepts (no over-rejection): plain-value sends, Arc-wrapped sends
+    // (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
+    // plain-value `Room(n: 7)` spawn state.
     // or_return in a GLOBAL initializer: there is NO enclosing function to return the Err to —
     // the lowered early-return silently aborted zen__init_globals, leaving every later global
     // zero (H stayed 0, exit 0 instead of 7). Positioned or-return error at check time.
