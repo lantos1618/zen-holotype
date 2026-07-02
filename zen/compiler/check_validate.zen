@@ -1838,11 +1838,11 @@ diagnostic_message = (code: i32) str { (code == 1).match ({ true => "wrong numbe
 diagnostic_hint = (code: i32) str { (code == 1).match ({ true => "check the callee signature and pass exactly the declared parameters", false => (code == 2).match ({ true => "check the argument type or add an explicit conversion at the call site", false => (code == 3).match ({ true => "declare the name, import it, or qualify the intended module binding", false => (code == 4).match ({ true => "check the struct literal or field access against the declared fields", false => (code == 5).match ({ true => "add arms for every variant, or add an explicit `_` arm", false => (code == 6).match ({ true => "remove the repeated match arm for this variant", false => (code == 7).match ({ true => "use an operator supported by both operand types", false => (code == 8).match ({ true => "index only slice-like values with an integer index", false => (code == 9).match ({ true => "make the returned value fit the function's declared return type", false => (code == 10).match ({ true => "make the assigned value fit the target's type", false => (code == 11).match ({ true => "define every required trait method with the exact receiver, parameter, and return types", false => (code == 12).match ({ true => "rename one definition or move it behind a real module namespace", false => (code == 13).match ({ true => "return a value from the arm instead of using early `return` in value position", false => (code == 14).match ({ true => "check the syntax around this top-level declaration", false => (code == 15).match ({ true => "after release/drop, bind a fresh owner instead of reusing the consumed local", false => (code == 16).match ({ true => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound", false => (code == 17).match ({ true => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)", false => (code == 18).match ({ true => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)", false => (code == 19).match ({ true => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle", false => (code == 20).match ({ true => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`", false => (code == 21).match ({ true => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it", false => (code == 22).match ({ true => "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value", false => (code == 23).match ({ true => "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref", false => (code == 24).match ({ true => "call a function, or store a function value in this name before calling it", false => (code == 26).match ({ true => "remove the `<…>` type arguments, or call a generic function", false => (code == 27).match ({ true => "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x := recv.or_return()`), or handle the `Result` with `.match`", false => (code == 28).match ({ true => "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function", false => (code == 29).match ({ true => "keep the qualified constructor's `.` on the same line as its type (`Type.Variant(…)`)", false => (code == 30).match ({ true => "declare it `main = () i32 { … }` and bind capabilities inside the body; read CLI args with `std.os.arg(i)`/`argc()`", false => "" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
 check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
     (packed == 0).match ({ true => check_diagnostic_none(), false => {
-        code := packed & 31
+        code := packed & 63
         CheckDiagnostic(
             code: code,
             kind: code.diagnostic_kind_name(),
-            source_offset: packed >> 5,
+            source_offset: packed >> 6,
             span_width: 1,
             count: count.positive_count(),
             message: code.diagnostic_message(),
@@ -1889,11 +1889,13 @@ diagnostic_from_source* = (src: str, packed: i32, count: i32) Diagnostic { src.c
 kv_kor = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
 // a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
 kv_one = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
-// pack a SOURCE POSITION into a kind code: kinds are 1..31 (5 bits), so `kind + pos*32` carries the
+// pack a SOURCE POSITION into a kind code: kinds are 1..63 (6 bits), so `kind + pos*64` carries the
 // error's byte offset alongside it (pos 0 = unknown/synthesized — the bare kind, the old encoding).
-// Consumers unpack with `& 31` / `>> 5`. Applied only at leaves that HAVE a pos (Call/Var); an
-// already-packed nested result is never re-packed: values above 31 already carry an offset.
-kv_at = (k: i32, p: i32) i32 { (k == 0 || k > 31 || p <= 0).match ({ true => k, false => k + p * 32 }) }
+// Consumers unpack with `& 63` / `>> 6`. Applied only at leaves that HAVE a pos (Call/Var); an
+// already-packed nested result is never re-packed: values above 63 already carry an offset.
+// Capacity: i32 packing caps the flat-source byte offset at (2^31-1)/64 ≈ 33.5 MB; the whole
+// in-tree Zen source is < 1 MB today, so headroom is ~38x before i64 packing would be needed.
+kv_at = (k: i32, p: i32) i32 { (k == 0 || k > 63 || p <= 0).match ({ true => k, false => k + p * 64 }) }
 expr_pos = (e: Expr) i32 {
     e.match ({
         .Var(v)         => v.pos,
@@ -3258,11 +3260,11 @@ reserved_name_of = (decls: [Decl]) str {
 check_module_reserved_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := decls.reserved_name_kind()
     (packed == 0).match ({ true => check_diagnostic_none(), false => {
-        pos := packed >> 5
+        pos := packed >> 6
         w := src.diagnostic_span_width(pos)
         subject := a.gstr_string(32).gstr_append(a, "`").gstr_append(a, decls.reserved_name_of()).gstr_append(a, "`").gstr_finish(a)
         CheckDiagnostic(
-            code: packed & 31,
+            code: packed & 63,
             kind: "reserved-name",
             source_offset: pos,
             span_width: w,
@@ -4392,8 +4394,8 @@ sx_hint = (code: i32) str { (code == KSCRATCHSEND()).match ({ true => "construct
 check_module_scratch_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_scratch_kind(decls)
     (packed == 0).match ({ true => check_diagnostic_none(), false => {
-        code := packed & 31
-        pos := packed >> 5
+        code := packed & 63
+        pos := packed >> 6
         w := src.diagnostic_span_width(pos)
         CheckDiagnostic(
             code: code,
