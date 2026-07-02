@@ -1,0 +1,31 @@
+// SPIKE: Hash trait + generic dispatch probe for HMap<K, V>.
+Hash*: {
+    hash: (Self) i64,
+    heq: (Self, Self) bool,
+}
+i64.impl(Hash, {
+    hash = (k: i64) i64 {
+        h := k
+        h = (h ^ h >> 33) * 1099511628211
+        h = (h ^ h >> 29) * 1099511628211
+        h ^ h >> 32
+    }
+    heq = (x: i64, y: i64) bool { x == y }
+})
+str.impl(Hash, {
+    hash = (k: str) i64 {
+        bs: [u8] := k.view()
+        h := 2166136261
+        bs.loop((hh, i, b) {
+            h = (h ^ to_i64(b)) * 16777619
+        })
+        h
+    }
+    heq = (x: str, y: str) bool { seq(x, y) }
+})
+{ view, eq } = std.text.str
+seq = (x: str, y: str) bool { eq(x, y) }
+// probe: generic fn dispatching hash/heq on K
+probe*<K: Hash> = (x: K, y: K) i64 {
+    x.heq(y).match ({ true => x.hash() & 1023, false => 0 - 1 })
+}
