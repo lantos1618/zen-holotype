@@ -1,6 +1,7 @@
 { Allocator, Heap } = std.mem.alloc
 halloc = std.mem.heap
 { to_exit } = std.core.bool
+{ expect } = std.core.result
 trace = std.mem.trace
 LimitAlloc: {
     heap: Heap,
@@ -30,13 +31,13 @@ root_fails = () bool {
     node := trace.tracked_in(heap.addr(), trace.Node(
         has: 0,
         kid: null_ptr(),
-    ))
+    )).expect("tracked")
     lim := LimitAlloc(
         heap: halloc.gpa(),
         remaining: 0,
         released: 0,
     )
-    r := trace.try_root_in(lim.addr(), node)
+    r := trace.root_in(lim.addr(), node)
     heap.addr().release(node.base)
     r.match ({
         .Ok(v)  => false,
@@ -53,21 +54,21 @@ collect_succeeds = () bool {
     left := trace.tracked_in(a, trace.Node(
         has: 0,
         kid: null_ptr(),
-    ))
+    )).expect("tracked")
     right := trace.tracked_in(a, trace.Node(
         has: 0,
         kid: null_ptr(),
-    ))
+    )).expect("tracked")
     trace.set_kid(left, right)
     trace.set_kid(right, left)
-    ok_roots := trace.try_root_in(a, left).match ({
+    ok_roots := trace.root_in(a, left).match ({
         .Ok(v)  => true,
         .Err(e) => false,
-    }) && trace.try_root_in(a, right).match ({
+    }) && trace.root_in(a, right).match ({
         .Ok(v)  => true,
         .Err(e) => false,
     })
-    ok_collect := trace.try_collect_in(a).match ({
+    ok_collect := trace.collect_in(a).match ({
         .Ok(v)  => true,
         .Err(e) => false,
     })
@@ -83,20 +84,20 @@ collect_scratch_fails = () bool {
     left := trace.tracked_in(a, trace.Node(
         has: 0,
         kid: null_ptr(),
-    ))
+    )).expect("tracked")
     right := trace.tracked_in(a, trace.Node(
         has: 0,
         kid: null_ptr(),
-    ))
+    )).expect("tracked")
     trace.set_kid(left, right)
     trace.set_kid(right, left)
-    trace.try_root_in(a, left)
-    trace.try_root_in(a, right)
-    failed := trace.try_collect_in(a).match ({
+    trace.root_in(a, left)
+    trace.root_in(a, right)
+    failed := trace.collect_in(a).match ({
         .Ok(v)  => false,
         .Err(e) => true,
     })
-    trace.collect_in(c.heap.addr())
+    trace.collect_in(c.heap.addr()).expect("collect")
     failed
 }
 main = () i32 { (root_fails() && collect_succeeds() && collect_scratch_fails()).to_exit() }
