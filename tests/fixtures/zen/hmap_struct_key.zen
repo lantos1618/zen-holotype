@@ -1,0 +1,87 @@
+// STRUCT keys: a 2-field key type gets Hash via one impl (hash combining with `mix`), proving K
+// is not restricted to scalars. Exercises collisions + growth (100 grid points through cap
+// 1->3->...->127), field-order sensitivity (Pt(1,2) != Pt(2,1)), delete, and value structs too.
+hm = std.collections.hmap
+{ Hash, mix } = std.collections.hmap
+{ println } = std.text.fmt
+halloc = std.mem.heap
+Pt: {
+    x: i64,
+    y: i64,
+}
+Pt.impl(Hash, {
+    hash = (p: Pt) i64 { mix(p.x, p.y) }
+    heq = (a: Pt, b: Pt) bool { a.x == b.x && a.y == b.y }
+})
+main = () i32 {
+    alloc := halloc.gpa()
+    a := alloc.addr()
+    z: i64 := 0
+    m := hm.of(a, Pt(
+        x: 0,
+        y: 0,
+    ), z).expect("of")
+    // 10x10 grid, value = x*10+y
+    x: i64 := 0
+    @while (x < 10) {
+        y: i64 := 0
+        @while (y < 10) {
+            m = m.put(a, Pt(
+                x: x,
+                y: y,
+            ), x * 10 + y).expect("put")
+            y = y + 1
+        }
+        x = x + 1
+    }
+    println(m.len())    // 100 (the seed Pt(0,0) was upserted, not duplicated)
+    println(m.get_or(Pt(
+        x: 7,
+        y: 3,
+    ), 0 - 1))    // 73
+    println(m.get_or(Pt(
+        x: 3,
+        y: 7,
+    ), 0 - 1))    // 37 — field order matters
+    println(m.get_or(Pt(
+        x: 10,
+        y: 0,
+    ), 0 - 1))    // -1 (absent)
+    // every grid point lookup-correct after growth
+    good: i64 := 0
+    x = 0
+    @while (x < 10) {
+        y: i64 := 0
+        @while (y < 10) {
+            (m.get_or(Pt(
+                x: x,
+                y: y,
+            ), 0 - 1) == x * 10 + y).match ({ true => {
+                good = good + 1
+            }, false => { } })
+            y = y + 1
+        }
+        x = x + 1
+    }
+    println(good)    // 100
+    // delete a whole row, verify the row is gone and the rest survives
+    y: i64 := 0
+    @while (y < 10) {
+        m = m.delete(Pt(
+            x: 5,
+            y: y,
+        ))
+        y = y + 1
+    }
+    println(m.len())    // 90
+    println(m.has(Pt(
+        x: 5,
+        y: 5,
+    )).match ({ true => 1, false => 0 }))    // 0
+    println(m.get_or(Pt(
+        x: 6,
+        y: 5,
+    ), 0 - 1))    // 65
+    m.free(a)
+    0
+}

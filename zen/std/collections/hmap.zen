@@ -1,0 +1,437 @@
+// std.collections.hmap — `HMap<K, V>`, the FULLY GENERIC associative map: any key type K that
+// implements the `Hash` trait below, any value type V. The generic twin of std.collections.map's
+// str-keyed `Map<T>` / i64-keyed `IntMap<V>` (which the compiler consumes and which stay as-is);
+// same allocator threading, open-hash index, and grow strategy — plus `delete`, which those lack.
+//
+// KEYS ARE TRAIT-DISPATCHED. `Hash` declares `hash` (key → i64) and `heq` (key equality); impls
+// for i64/i32/u8/str ship right here, so scalar and string keys work out of the box. A STRUCT key
+// is one impl away — combine the field hashes with `mix`:
+//
+//   Pt: { x: i64, y: i64 }
+//   Pt.impl(Hash, {
+//       hash = (p: Pt) i64 { mix(p.x, p.y) }
+//       heq = (a: Pt, b: Pt) bool { a.x == b.x && a.y == b.y }
+//   })
+//
+// GOTCHA (untyped literals): an UNTYPED integer literal at a fully-generic call site defaults to
+// i32, so seeding with `of(a, 42, v)` makes an HMap<i32, V>. Impls for both i32 and i64 ship here
+// so either works — but type the key (`k: i64 := 42`) when the map must be HMap<i64, V>.
+//
+// Every op that allocates returns Result<_, IoError> — allocation failure is a value. `of` seeds
+// one entry and infers K/V from it, so it chains: `m := hmap.of(a, k, v).expect("of")`. `empty`'s
+// K/V appear only in its RETURN type, which inference can't reach through a `.expect` chain —
+// pin them with a two-step annotation instead:
+//
+//   r: Result<HMap<str, i64>, IoError> := hmap.empty(a)
+//   m := r.expect("empty")
+//   m = m.put(a, "the", 1).expect("put")      // insert — grows through alloc when full
+//   m = m.put(a, "the", 9).expect("put")      // upsert — same key overwrites in place
+//   n := m.get("the")                          // Opt<i64>: .Some(9); absent keys are .None
+//   c := m.get_or("dog", 0)                    // 0 — get with a default
+//   m = m.delete("the")                        // remove — the slot is reused by later puts
+//   m.each((k, v) { ... })                     // visit every live pair
+//   m.keys().loop((h, i, k) { ... })           // or walk the key/value columns directly
+//   m.free(a)                                  // hand all buffers back to alloc
+//
+// Lookup is O(1) AVERAGE: `k.hash()` folds into [0, cap) buckets, separate chaining into the
+// key/val columns. The index lives in one i64 buffer of `2*cap` slots — the first `cap` are bucket
+// HEADS (entry index or -1), the next `cap` are per-entry NEXT links — rebuilt on grow.
+//
+// Layout: two PARALLEL buffers of `cap` slots (`keys` holds K's, `vals` holds V's, both BY VALUE)
+// plus `len` live entries and the index. A str key stores the borrowed pointer (str is a pointer
+// type), so it must outlive the map — same rule as Map<T>.
+//
+// DELETE is swap-remove: the last entry moves into the freed slot and both chains are re-linked in
+// place — O(chain) work, no allocation, no tombstones. len shrinks and the slot is REUSED by the
+// next insert (this map does not only grow). The cost: insertion order is NOT preserved across a
+// delete (Map<T> iteration order guarantees don't carry over).
+//
+// VALUE-MOLD CONTRACT (same as Map<T>/Vec<T> — by-design, not bugs): an HMap is a small by-value
+// header over allocator-owned buffers.
+//   1. ALWAYS USE THE RETURNED MAP: `put` may grow (realloc) and `delete` drops len — a stale
+//      pre-call header points at freed memory or lies about len. Rebind every time:
+//      `m = m.put(...).expect("…")`, `m = m.delete(k)`.
+//   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one HMap share one backing store; in-place
+//      upserts are visible through every copy.
+{ Result, IoError, Opt } = std.core.result
+{ Allocator, try_acquire } = std.mem.alloc
+{ eq, view } = std.text.str
+Hash*: {
+    hash: (Self) i64,
+    heq: (Self, Self) bool,
+}
+// splitmix-style multiplicative mix of an i64 (multiply wraps under -fwrapv — that wrap IS the
+// avalanche). Full-width: callers fold into a bucket range themselves (hbucket below).
+hmix = (k: i64) i64 {
+    h := k
+    h = (h ^ h >> 33) * 1099511628211
+    h = (h ^ h >> 29) * 1099511628211
+    h ^ h >> 32
+}
+// Combine two i64s into one hash — the hash-combining helper for STRUCT keys: fold fields left to
+// right, `mix(mix(p.a, p.b), p.c)`. Each side is mixed before combining so low-entropy fields
+// (small ints, enum tags) still spread across the table.
+mix* = (a: i64, b: i64) i64 { hmix(hmix(a) * 1099511628211 ^ hmix(b)) }
+i64.impl(Hash, {
+    hash = (k: i64) i64 { hmix(k) }
+    heq = (x: i64, y: i64) bool { x == y }
+})
+i32.impl(Hash, {
+    hash = (k: i32) i64 { hmix(to_i64(k)) }
+    heq = (x: i32, y: i32) bool { x == y }
+})
+u8.impl(Hash, {
+    hash = (k: u8) i64 { hmix(to_i64(k)) }
+    heq = (x: u8, y: u8) bool { x == y }
+})
+str.impl(Hash, {
+    hash = (k: str) i64 {
+        // FNV-1a over the key bytes (same hash Map<T> uses). Equality is BYTE-WISE `eq` from
+        // std.text.str — `==` on str compares pointers, never use it for keys.
+        bs: [u8] := k.view()
+        h := 2166136261
+        bs.loop((hh, i, b) {
+            h = (h ^ to_i64(b)) * 16777619
+        })
+        h
+    }
+    heq = (x: str, y: str) bool { eq(x, y) }
+})
+// k's bucket in [0, cap): full hash, masked non-negative, folded by mod. cap >= 1 at all call sites.
+hbucket<K: Hash> = (k: K, cap: i64) i64 { (k.hash() & 4611686018427387903) % cap }
+// Walk bucket chain e for key k in index ix over key column ks (links live at ix[cap + entry]).
+hchain<K: Hash> = (ks: [K], ix: [i64], cap: i64, e: i64, k: K) i64 { (e < 0).match ({ true => 0 - 1, false => ks[e].heq(k).match ({ true => e, false => hchain(ks, ix, cap, ix[cap + e], k) }) }) }
+// Unlink entry e from the bucket chain headed at ix[b] (e IS in that chain).
+hunlink = (ix: [i64], cap: i64, b: i64, e: i64) void {
+    (ix[b] == e).match ({ true => {
+        ix[b] = ix[cap + e]
+    }, false => {
+        hunlink_from(ix, cap, ix[b], e)
+    } })
+}
+hunlink_from = (ix: [i64], cap: i64, p: i64, e: i64) void {
+    (ix[cap + p] == e).match ({ true => {
+        ix[cap + p] = ix[cap + e]
+    }, false => {
+        hunlink_from(ix, cap, ix[cap + p], e)
+    } })
+}
+HMap*<K, V>: {
+    keys: RawPtr<u8>,
+    vals: RawPtr<u8>,
+    idx: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+    keys = (m: HMap<K, V>) [K] {
+        // Live view over the LEN live entries (slots [0, len), no gaps — delete backfills by
+        // swap-remove). Sized to `len` so a `.loop` walks only real entries; the one-past-len
+        // append write goes through keys_all().
+        slice(m.keys, m.len)
+    }
+    vals = (m: HMap<K, V>) [V] { slice(m.vals, m.len) }
+    keys_all = (m: HMap<K, V>) [K] {
+        // CAP-sized view for the one-past-len append write (slot [len] is in-bounds in the
+        // backing buffer, just past the len-sized keys()/vals() views).
+        slice(m.keys, m.cap)
+    }
+    vals_all = (m: HMap<K, V>) [V] { slice(m.vals, m.cap) }
+    index = (m: HMap<K, V>) [i64] {
+        // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
+        slice(m.idx, m.cap * 2)
+    }
+    len = (m: HMap<K, V>) i64 { m.len }
+    find = (m: HMap<K, V>, k: K) i64 {
+        // Entry index of k, or -1. O(1) average: hash to a bucket, walk the chain with heq.
+        (m.cap == 0).match ({ true => 0 - 1, false => {
+            ix := m.index()
+            hchain(m.keys(), ix, m.cap, ix[hbucket(k, m.cap)], k)
+        } })
+    }
+    has = (m: HMap<K, V>, k: K) bool { m.find(k) >= 0 }
+    get = (m: HMap<K, V>, k: K) Opt<V> {
+        // The value under k as an option: .Some(v) if present, .None if absent.
+        i := m.find(k)
+        out: Opt<V> := (i < 0).match ({ true => .None, false => .Some(m.vals()[i]) })
+        out
+    }
+    get_or = (m: HMap<K, V>, k: K, dflt: V) V {
+        i := m.find(k)
+        (i < 0).match ({ true => dflt, false => m.vals()[i] })
+    }
+    grow<A> = (m: HMap<K, V>, a: MutPtr<A>) Result<HMap<K, V>, IoError> {
+        cap := m.cap * 2 + 1
+        a.try_acquire(cap * sizeof(K)).match ({
+            .Ok(kp) => {
+                a.try_acquire(cap * sizeof(V)).match ({
+                    .Ok(vp) => {
+                        a.try_acquire(cap * 2 * sizeof(i64)).match ({
+                            .Ok(ip) => {
+                                oldks := m.keys()
+                                oldvs := m.vals()
+                                next := HMap<K, V>(
+                                    keys: kp,
+                                    vals: vp,
+                                    idx: ip,
+                                    len: m.len,
+                                    cap: cap,
+                                )
+                                keys := next.keys()
+                                vals := next.vals()
+                                oldks.loop((h, i, k) {
+                                    (i < m.len).match ({ true => {
+                                        keys[i] = k
+                                        vals[i] = oldvs[i]
+                                    }, false => {
+                                        h.break
+                                    } })
+                                })
+                                a.release(m.keys)
+                                a.release(m.vals)
+                                a.release(m.idx)
+                                ok: Result<HMap<K, V>, IoError> := .Ok(next.reindex())
+                                ok
+                            },
+                            .Err(e) => {
+                                a.release(kp)
+                                a.release(vp)
+                                err: Result<HMap<K, V>, IoError> := .Err(e)
+                                err
+                            },
+                        })
+                    },
+                    .Err(e) => {
+                        a.release(kp)
+                        err: Result<HMap<K, V>, IoError> := .Err(e)
+                        err
+                    },
+                })
+            },
+            .Err(e) => {
+                err: Result<HMap<K, V>, IoError> := .Err(e)
+                err
+            },
+        })
+    }
+    reindex = (m: HMap<K, V>) HMap<K, V> {
+        // Rebuild the hash index from the live key column. O(len).
+        ix := m.index()
+        cap := m.cap
+        ix.loop((h, i, v) {
+            (i < cap).match ({ true => {
+                ix[i] = 0 - 1
+            }, false => {
+                h.break
+            } })
+        })
+        ks := m.keys()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                b := hbucket(k, cap)
+                ix[cap + i] = ix[b]
+                ix[b] = i
+            }, false => {
+                h.break
+            } })
+        })
+        m
+    }
+    link = (m: HMap<K, V>, slot: i64) HMap<K, V> {
+        // Append a key/val pair (caller has ensured the key is absent) and link it into its bucket.
+        ix := m.index()
+        b := hbucket(m.keys()[slot], m.cap)
+        ix[m.cap + slot] = ix[b]
+        ix[b] = slot
+        m
+    }
+    append<A> = (m: HMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<HMap<K, V>, IoError> {
+        k := k
+        v := v
+        out: Result<HMap<K, V>, IoError> := (m.len < m.cap).match ({ true => {
+            keys := m.keys_all()
+            vals := m.vals_all()
+            keys[m.len] = k
+            vals[m.len] = v
+            ok: Result<HMap<K, V>, IoError> := .Ok(HMap<K, V>(
+                keys: m.keys,
+                vals: m.vals,
+                idx: m.idx,
+                len: m.len + 1,
+                cap: m.cap,
+            ).link(m.len))
+            ok
+        }, false => {
+            m.grow(a).match ({
+                .Ok(next) => {
+                    keys := next.keys_all()
+                    vals := next.vals_all()
+                    keys[next.len] = k
+                    vals[next.len] = v
+                    ok: Result<HMap<K, V>, IoError> := .Ok(HMap<K, V>(
+                        keys: next.keys,
+                        vals: next.vals,
+                        idx: next.idx,
+                        len: next.len + 1,
+                        cap: next.cap,
+                    ).link(next.len))
+                    ok
+                },
+                .Err(e)   => {
+                    err: Result<HMap<K, V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        } })
+        out
+    }
+    put<A> = (m: HMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<HMap<K, V>, IoError> {
+        // Insert or upsert (allocation failure is a value). RETURNS the updated map — always
+        // rebind (`m = m.put(...).expect("…")`): on grow the buffers are realloced, so a handle
+        // captured before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value
+        // is overwritten IN PLACE (visible through every header sharing this storage).
+        i := m.find(k)
+        out: Result<HMap<K, V>, IoError> := (i < 0).match ({ true => m.append(a, k, v), false => {
+            vals := m.vals()
+            vals[i] = v
+            ok: Result<HMap<K, V>, IoError> := .Ok(m)
+            ok
+        } })
+        out
+    }
+    delete = (m: HMap<K, V>, k: K) HMap<K, V> {
+        // Remove k if present — swap-remove: unlink the entry from its chain, move the LAST entry
+        // into the freed slot (re-linking it under its new index), shrink len. No allocation, no
+        // tombstones; the slot is reused by the next insert. Absent keys are a no-op. RETURNS the
+        // updated map — always rebind (`m = m.delete(k)`): a stale header lies about len.
+        e := m.find(k)
+        (e < 0).match ({ true => m, false => {
+            ix := m.index()
+            ks := m.keys()
+            vs := m.vals()
+            hunlink(ix, m.cap, hbucket(ks[e], m.cap), e)
+            last := m.len - 1
+            (e < last).match ({ true => {
+                // move the last entry down into the freed slot and re-link it there
+                hunlink(ix, m.cap, hbucket(ks[last], m.cap), last)
+                ks[e] = ks[last]
+                vs[e] = vs[last]
+                b := hbucket(ks[e], m.cap)
+                ix[m.cap + e] = ix[b]
+                ix[b] = e
+            }, false => { } })
+            HMap<K, V>(
+                keys: m.keys,
+                vals: m.vals,
+                idx: m.idx,
+                len: last,
+                cap: m.cap,
+            )
+        } })
+    }
+    free<A> = (m: HMap<K, V>, a: MutPtr<A>) void {
+        a.release(m.keys)
+        a.release(m.vals)
+        a.release(m.idx)
+    }
+    each = (m: HMap<K, V>, f: (K, V) void) void {
+        // Visit every live entry as (key, value). `f` is invoked DIRECTLY in the loop body so an
+        // inline lambda splices in (like iter.each). Order is the column order — insertion order
+        // until the first delete perturbs it.
+        ks := m.keys()
+        vs := m.vals()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                f(k, vs[i])
+            }, false => {
+                h.break
+            } })
+        })
+    }
+}
+// a zero-entry `HMap<K, V>` with capacity for one entry (so `put` has a slot before the first
+// grow; growth is 1→3→7→15…). K/V appear only in the return type, so pin them with a TWO-STEP
+// annotation (a one-line `.expect` chain can't reach them — see the header comment):
+//   r: Result<HMap<str, i64>, IoError> := hmap.empty(a)
+//   m := r.expect("empty")
+empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
+    a.try_acquire(sizeof(K)).match ({
+        .Ok(kp) => {
+            a.try_acquire(sizeof(V)).match ({
+                .Ok(vp) => {
+                    a.try_acquire(2 * sizeof(i64)).match ({
+                        .Ok(ip) => {
+                            m := HMap<K, V>(
+                                keys: kp,
+                                vals: vp,
+                                idx: ip,
+                                len: 0,
+                                cap: 1,
+                            )
+                            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
+                            ok
+                        },
+                        .Err(e) => {
+                            a.release(kp)
+                            a.release(vp)
+                            err: Result<HMap<K, V>, IoError> := .Err(e)
+                            err
+                        },
+                    })
+                },
+                .Err(e) => {
+                    a.release(kp)
+                    err: Result<HMap<K, V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<HMap<K, V>, IoError> := .Err(e)
+            err
+        },
+    })
+}
+// an `HMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from
+// the seed pair (Zen has no call-site type args), so this one CHAINS:
+//   m := hmap.of(a, k, v).expect("of")
+of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
+    a.try_acquire(sizeof(K)).match ({
+        .Ok(kp) => {
+            a.try_acquire(sizeof(V)).match ({
+                .Ok(vp) => {
+                    a.try_acquire(2 * sizeof(i64)).match ({
+                        .Ok(ip) => {
+                            m := HMap<K, V>(
+                                keys: kp,
+                                vals: vp,
+                                idx: ip,
+                                len: 1,
+                                cap: 1,
+                            )
+                            keys := m.keys()
+                            vals := m.vals()
+                            keys[0] = seed_key
+                            vals[0] = seed_val
+                            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
+                            ok
+                        },
+                        .Err(e) => {
+                            a.release(kp)
+                            a.release(vp)
+                            err: Result<HMap<K, V>, IoError> := .Err(e)
+                            err
+                        },
+                    })
+                },
+                .Err(e) => {
+                    a.release(kp)
+                    err: Result<HMap<K, V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<HMap<K, V>, IoError> := .Err(e)
+            err
+        },
+    })
+}
