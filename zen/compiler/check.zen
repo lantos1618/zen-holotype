@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { panic, expect } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
@@ -222,6 +222,15 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
         .VCons(c) => eq(c.name, name).match ({ true => c.ty, false => c.tail.lookup_var(name) }),
     })
 }
+// The innermost enclosing function's DECLARED return type, threaded through the variable environment
+// under an unlexable name (identifiers cannot start with a digit, so no user binding collides; the
+// same trick as the inliner's in-progress-template marker). A `return <expr>` operand is typed against
+// THIS — never the positional expected type, which is void everywhere but a body's tail statement
+// (a guard-match `return err(e)` sits inside a lowered If branch; a value-position arm's `return`
+// sits in a block whose own value expectation is the ARM type). Lambda bodies bind their own (possibly
+// void) entry so an enclosing function's return type never leaks into a lambda's `return`.
+bind_fnret* = (a: MutPtr<Malloc>, vars: Ptr<VList>, ret: Ty) Ptr<VList> { a.vcons("0return", ret, vars) }
+fnret_of* = (v: Ptr<VList>) Ty { v.lookup_var("0return") }
 // Infer global init types; bind the global name while doing so to avoid self-recursive lookup.
 infer_global_init = (env: Env, name: str, init: Ptr<Expr>) Ty {
     env2 := Env(
@@ -482,7 +491,12 @@ last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
         _            => tvoid(),
     })
 }
-block_ty = (env: Env, b: BlockData) Ty { env.block_ty_from(b.stmts, 0) }
+// A value-position Block whose LAST statement is an explicit `return` DIVERGES — it yields no value
+// (control leaves the fn), so it contributes NO type constraint: a match/cond with such an arm takes
+// its type from the OTHER arms. Only arm/loop blocks can look like this; fn/lambda BODIES (where the
+// parser's implicit trailing return IS the value) are typed as [Stmt] via block_ty_from directly and
+// keep last_stmt_ty's Return-as-value rule. See genc.blk_diverges.
+block_ty = (env: Env, b: BlockData) Ty { b.stmts.stmts_diverge().match ({ true => tvoid(), false => env.block_ty_from(b.stmts, 0) }) }
 block_ty_from = (env: Env, stmts: [Stmt], i: i32) Ty { (i >= stmts.len).match ({ true => tvoid(), false => (i == stmts.len - 1).match ({ true => env.last_stmt_ty(stmts), false => env.a.extend_env(env, stmts[i]).block_ty_from(stmts, i + 1) }) }) }
 // Prefer a concrete stored index element type; generic inlining may make re-inference lose it.
 index_elem = (env: Env, ix: IndexData) Ty { ix.elem.is_void_ty().match ({ true => env.infer_expr(ix.seq).elem_of(), false => ix.elem }) }
@@ -1369,7 +1383,11 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) 
             out = sassign_at(a.resolve_expr(env, x.target), a.resolve_expr(env.clr_exp(), x.value), x.pos)
         },
         .Return(r)   => {
-            out = sret(a.resolve_expr(env, r))
+            // A return's operand is expected to be the ENCLOSING FN's return type, wherever the
+            // return sits (guard-match arm, value-position arm block, loop body). Falls back to the
+            // positional exp when no fnret is bound (globals) or the fn returns void.
+            rt := env.vars.fnret_of()
+            out = sret(a.resolve_expr(rt.is_void_ty().match ({ true => env, false => env.with_exp(rt) }), r))
         },
         .ExprStmt(e) => {
             last.match ({ true => (env.exp.is_void_ty() == false).match ({ true => {
@@ -1850,7 +1868,7 @@ loop_env* = (a: MutPtr<Malloc>, env: Env, l: LoopData) Env {
 // Rebuild decls with resolved bodies/inits.
 resolve_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) Func {
     env := Env(
-        vars: a.params_env(f.params),
+        vars: a.bind_fnret(a.params_env(f.params), f.ret),
         decls: decls,
         didx: idx,
         exp: f.ret,
@@ -2267,7 +2285,9 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
 inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     lamx.match ({
         .Lambda(lm) => {
-            ab := a.bind_args(decls, idx, lm.params, cargs, env)
+            // spliced lambda body: its `return`s are the LAMBDA's, so bind its own (possibly void)
+            // return type over the caller's.
+            ab := a.bind_args(decls, idx, lm.params, cargs, a.bind_fnret(env, lm.ret))
             a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, lm.body, lm.params, ab.fargs, ab.env, tvoid())))
         },
         .Var(v)     => a.var_call(v, cargs),
@@ -2319,7 +2339,8 @@ light_extend = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], idx
     })
 }
 light_block_ty_from = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], idx: DeclIndex, i: i32) Ty { (i >= stmts.len).match ({ true => tvoid(), false => (i == stmts.len - 1).match ({ true => a.light_last_stmt_ty(stmts, env, decls, idx), false => a.light_block_ty_from(stmts, a.light_extend(env, stmts[i], decls, idx), decls, idx, i + 1) }) }) }
-light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty { a.light_block_ty_from(b.stmts, env, decls, idx, 0) }
+// mirrors block_ty: a diverging value block (trailing explicit `return`) has no value type.
+light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty { b.stmts.stmts_diverge().match ({ true => tvoid(), false => a.light_block_ty_from(b.stmts, env, decls, idx, 0) }) }
 light_member_ty = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, obj: Ty, field: str) Ty {
     obj.ty_under_ptr().match ({
         .Generic(g) => a.gen_struct_field(decls, g.name, field, g.args),
@@ -2726,12 +2747,16 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
     // inlined fn is called WITHOUT expected context (e.g. `inner(..).match(..)`, the call as a match
     // subject): a generic constructor in inner's tail still binds T/E from inner's own `R<str,IoError>`
     // return. The call-site `exp` is used only to infer unconstrained tparams (infer_targs).
+    // bind_fnret: the inlined body's OWN return type shadows the caller's for any `return` inside it
+    // (a template's non-tail returns are lifted by blockify/cps_value, but their operands still infer
+    // against the template's declared return, targ-substituted).
     (tf.tparams.len > 0).match ({ true => {
         targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, etargs)
-        ab := a.bind_args(decls, idx, tf.params, cargs, ienv)
-        a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, a.subst_ty_in(tf.tparams, targs, tf.ret))))
+        rsub := a.subst_ty_in(tf.tparams, targs, tf.ret)
+        ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, rsub))
+        a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, rsub)))
     }, false => {
-        ab := a.bind_args(decls, idx, tf.params, cargs, ienv)
+        ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, tf.ret))
         a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, tf.body, tf.params, ab.fargs, ab.env, tf.ret)))
     } })
 }
@@ -2771,7 +2796,9 @@ xform_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData
         ps = a.add_subst_param(ps, p.name)
         xs = a.add_subst_arg(xs, p.name)
     })
-    a.cenode(lam_r(lm.params, a.xform_body(decls, idx, lm.body, ps, xs, env, tvoid()), lm.ret))
+    // bind the lambda's OWN return type (possibly void) so an enclosing fn's fnret never leaks
+    // into the lambda body's `return`s.
+    a.cenode(lam_r(lm.params, a.xform_body(decls, idx, lm.body, ps, xs, a.bind_fnret(env, lm.ret), tvoid()), lm.ret))
 }
 xform_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> { a.xform_expr_exp(decls, idx, e, params, fargs, env, tvoid()) }
 xform_expr_exp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
@@ -2838,7 +2865,11 @@ xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, params
             out = sassign_at(a.xform_expr(decls, idx, x.target, params, fargs, env), a.xform_expr(decls, idx, x.value, params, fargs, env), x.pos)
         },
         .Return(r)   => {
-            out = sret(a.xform_expr_exp(decls, idx, r, params, fargs, env, exp))
+            // a return's operand infers against the enclosing fn's return type (threaded via
+            // bind_fnret), NOT the positional exp — which is void for every non-tail statement, so
+            // a guard-arm `return err(e)` inlined here otherwise instantiates err<void, E>.
+            rt := env.fnret_of()
+            out = sret(a.xform_expr_exp(decls, idx, r, params, fargs, env, rt.is_void_ty().match ({ true => exp, false => rt })))
         },
         .ExprStmt(e) => {
             out = sexpr(a.xform_expr_exp(decls, idx, e, params, fargs, env, exp))
@@ -2914,7 +2945,7 @@ inline_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
             params: f.params,
             ret: f.ret,
             tparams: f.tparams,
-            body: a.xform_body(decls, idx, f.body, empty_params(), empty_args(), a.params_env(f.params), f.ret),
+            body: a.xform_body(decls, idx, f.body, empty_params(), empty_args(), a.bind_fnret(a.params_env(f.params), f.ret), f.ret),
             pos: f.pos,
         )),
         _         => d,

@@ -553,6 +553,24 @@ lam_r* = (params: [Param], body: [Stmt], ret: Ty) Expr {
     ))
 }
 block* = (stmts: [Stmt]) Expr { .Block(BlockData(stmts: stmts)) }
+// A braced value-position body (match/cond arm) whose LAST statement is an explicit `return`
+// DIVERGES: it yields no value (control leaves the enclosing function), so it contributes nothing
+// to the surrounding match/cond value type and must emit as real statements, never be flattened to
+// an expression. Only arm/loop blocks (parse_block) can look like this: fn/lambda BODIES also end
+// in .Return (the parser's implicit trailing return), but those never reach value positions intact —
+// the inliner's blockify strips the trailing return (ret_to_expr / cps_value) before splicing.
+stmts_diverge* = (stmts: [Stmt]) bool {
+    (stmts.len > 0).match ({ true => stmts[stmts.len - 1].match ({
+        .Return(r) => true,
+        _          => false,
+    }), false => false })
+}
+blk_diverges* = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Block(b) => b.stmts.stmts_diverge(),
+        _         => false,
+    })
+}
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
 // (compiler.check splices it), never emitted as a C function — so genModule skips it.
 is_fnt* = (t: Ty) bool {
