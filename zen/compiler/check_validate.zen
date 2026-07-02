@@ -1,6 +1,6 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -3941,4 +3941,234 @@ check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
         message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
         hint: "use Arc<T> for a value shared between actors, or send a value/owned copy",
     ) })
+}
+// ── M1 slice 1 (rt-scoped-runtime): SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────
+// docs/rt-scoped-runtime.md M1: memory that must not cross an actor boundary, crossing it — the
+// judged-FATAL v1 hole (cross-actor UAF, docs/rt-design-judge-ruling-2026-07.md hole 1: memory in
+// the SPAWNER's scratch handed to an actor that outlives it). Two rules, enforced lexically +
+// name-based over the RAW pre-desugar decls (driver-only, the send-Rc pass's shape):
+//   1. send-payload: the payload of an actor send (`send` / `pool_send`, last argument) must not
+//      carry a SPAWNER-LOCAL allocation — a local bound to `<allocator>.acquire(…)` or arena
+//      `make_in(…)`, a slice literal (a C compound literal: STACK storage), or `<local>.addr()` —
+//      bare, or embedded directly in a struct-literal field / enum payload. The sender's scratch is
+//      freed independently of the receiving actor → use-after-free.
+//   2. actor-state: the same classification applied to `spawn`'s initial actor-state argument
+//      (construct-under-actor until the real rt lands: actor state must not embed spawner scratch).
+// DELIBERATELY LENIENT wherever classification is uncertain (fn returns, `.expect(…)`, member
+// reads, params, arm binds, generic payloads): Arc/Rc-backed values arrive via
+// `new_in(…).expect(…)`/`clone()` — call results, so they classify clean; plain values are clean;
+// a rebind to anything clean REVIVES the name. Only the blatant textbook shapes reject.
+// Arity guards keep unrelated `spawn`s out: std.thread's `spawn(fn, arg)` is a 2-arg Call and the
+// coroutine `h.spawn(fn)` a 1-arg MethodCall — neither matches the 3-arg actor `spawn` surface.
+KSCRATCHSEND = () i32 { 29 }     // a send payload carries spawner-local scratch
+KSCRATCHSTATE = () i32 { 30 }    // spawn's initial actor state embeds spawner-local scratch
+// a scratch-SOURCE expression: memory whose lifetime is the spawner's frame/allocator, in either
+// surface form (flat `acquire(a, n)` or UFCS `a.acquire(n)` — this pass runs pre-desugar).
+sx_is_acquire = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)        => eq(c.fn, "acquire") && c.args.len >= 1,
+        .MethodCall(mc) => eq(mc.method, "acquire"),
+        _               => false,
+    })
+}
+sx_is_make_in = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)        => eq(c.fn, "make_in") && c.args.len >= 1,
+        .MethodCall(mc) => eq(mc.method, "make_in"),
+        _               => false,
+    })
+}
+// `<var>.addr()` — the address of a stack slot in the spawner's frame.
+sx_is_addr_of_var = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)        => (eq(c.fn, "addr") && c.args.len == 1).match ({ true => c.args[0].match ({
+            .Var(v) => true,
+            _       => false,
+        }), false => false }),
+        .MethodCall(mc) => (eq(mc.method, "addr") && mc.args.len == 0).match ({ true => load(mc.recv).match ({
+            .Var(v) => true,
+            _       => false,
+        }), false => false }),
+        _               => false,
+    })
+}
+sx_is_slicelit = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .SliceLit(sd) => true,
+        _             => false,
+    })
+}
+sx_is_source = (e: Ptr<Expr>) bool { e.sx_is_acquire() || e.sx_is_make_in() || e.sx_is_addr_of_var() || e.sx_is_slicelit() }
+// does a let/assign VALUE make its binding spawner-scratch? a direct source, or an alias of a
+// tainted local (`q := p`). Anything else (calls, member reads, literals) stays clean — lenient.
+sx_taints = (taint: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    e.sx_is_source().match ({ true => true, false => load(e).match ({
+        .Var(v) => taint.dead_has(v.name),
+        _       => false,
+    }) })
+}
+// thread the taint set across one statement: a Let/Assign of a source (or an alias) taints the
+// name; a (re)bind to anything clean REVIVES it, so a reused name never over-rejects.
+sx_step = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)    => taint.sx_taints(l.value).match ({ true => a.dead_cons(l.name, taint), false => a.dead_remove(taint, l.name) }),
+        .Assign(x) => load(x.target).match ({
+            .Var(v) => taint.sx_taints(x.value).match ({ true => a.dead_cons(v.name, taint), false => a.dead_remove(taint, v.name) }),
+            _       => taint,
+        }),
+        _          => taint,
+    })
+}
+// fresh binders (lambda params, loop idx/elem/handler, arm binds) shadow any same-named taint.
+sx_drop_params = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, ps: [Param]) Ptr<DeadList> {
+    out := taint
+    ps.loop((h, i, p) {
+        out = a.dead_remove(out, p.name)
+    })
+    out
+}
+// a positioned anchor for a source expression (expr_pos has no MethodCall arm; this pass sees the
+// pre-desugar UFCS form, so `a.acquire(n)` anchors at the method name).
+sx_pos = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .MethodCall(mc) => mc.pos.pos_or(load(mc.recv).expr_pos()),
+        _               => load(e).expr_pos(),
+    })
+}
+// the offending source offset inside a send-payload / spawn-state expression: a tainted bare local,
+// a direct source expression, or one embedded in a struct-literal field / enum payload / nested
+// literal. Everything else (calls, member reads, plain values) is 0 = clean.
+sx_payload_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    e.sx_is_source().match ({ true => e.sx_pos().pos_or(1), false => load(e).match ({
+        .Var(v)        => taint.dead_has(v.name).match ({ true => v.pos.pos_or(1), false => 0 }),
+        .MakeEnum(mk)  => a.sx_payload_pos(taint, mk.payload),
+        .MakeStruct(s) => a.sx_inits_pos(taint, s.inits),
+        _              => 0,
+    }) })
+}
+sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(a.sx_payload_pos(taint, fi.value))
+    })
+    acc
+}
+// pack an offending position under a rule kind (0 = clean stays 0 — kv_at alone would emit a bare kind).
+sx_kv = (pos: i32, k: i32) i32 { (pos == 0).match ({ true => 0, false => kv_at(k, pos) }) }
+// actor-send / spawn surfaces (name-based, arity-guarded): the PAYLOAD/STATE is the LAST argument.
+//   send:      `send(h, m)` (2+ args) / `h.send(m)` — ActorRef/ActorHandle/ActorCell/ReplyRef
+//   pool_send: `pool_send(p, a, m)` (3 args) / `p.pool_send(a, m)` (2 args)
+//   spawn:     `spawn(alloc, cap, state)` (3 args) / `alloc.spawn(cap, state)` (2-arg MethodCall) /
+//              module-qualified `actor.spawn(alloc, cap, state)` (3-arg MethodCall on the alias)
+sx_call_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
+    sk := (eq(c.fn, "send") && c.args.len >= 2 || eq(c.fn, "pool_send") && c.args.len == 3).match ({ true => a.sx_payload_pos(taint, c.args[c.args.len - 1].addr()).sx_kv(KSCRATCHSEND()), false => 0 })
+    st := (eq(c.fn, "spawn") && c.args.len == 3).match ({ true => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(KSCRATCHSTATE()), false => 0 })
+    sk.kv_kor(st)
+}
+sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
+    sk := (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSEND()), false => 0 })
+    st := (eq(mc.method, "spawn") && (mc.args.len == 2 || mc.args.len == 3)).match ({ true => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()), false => 0 })
+    sk.kv_kor(st)
+}
+sx_args_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(a.sx_expr_kind(taint, ar.addr()))
+    })
+    acc
+}
+sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        t2 := is_empty(ar.bind).match ({ true => taint, false => a.dead_remove(taint, ar.bind) })
+        acc = acc.kv_kor(a.sx_expr_kind(t2, ar.body))
+    })
+    acc
+}
+sx_inits_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(a.sx_expr_kind(taint, fi.value))
+    })
+    acc
+}
+sx_expr_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => a.sx_call_kind(taint, c).kv_kor(a.sx_args_kind(taint, c.args)),
+        .MethodCall(mc) => a.sx_mcall_kind(taint, mc).kv_kor(a.sx_expr_kind(taint, mc.recv)).kv_kor(a.sx_args_kind(taint, mc.args)),
+        .Bin(b)         => a.sx_expr_kind(taint, b.lhs).kv_kor(a.sx_expr_kind(taint, b.rhs)),
+        .Index(ix)      => a.sx_expr_kind(taint, ix.seq).kv_kor(a.sx_expr_kind(taint, ix.idx)),
+        .Cond(d)        => a.sx_expr_kind(taint, d.c).kv_kor(a.sx_expr_kind(taint, d.t)).kv_kor(a.sx_expr_kind(taint, d.e)),
+        .Member(m)      => a.sx_expr_kind(taint, m.obj),
+        .Arrow(ar)      => a.sx_expr_kind(taint, ar.obj),
+        .Match(m)       => a.sx_expr_kind(taint, m.subj).kv_kor(a.sx_arms_kind(taint, m.arms)),
+        .MakeEnum(mk)   => a.sx_expr_kind(taint, mk.payload),
+        .MakeStruct(s)  => a.sx_inits_kind(taint, s.inits),
+        .SliceLit(sd)   => a.sx_args_kind(taint, sd.items),
+        .Loop(l)        => a.sx_expr_kind(taint, l.seq).kv_kor(a.sx_body_kind(a.dead_remove(a.dead_remove(a.dead_remove(taint, l.idx), l.elem), l.h), l.body)),
+        .Lambda(lm)     => a.sx_body_kind(a.sx_drop_params(taint, lm.params), lm.body),
+        .Block(b)       => a.sx_body_kind(taint, b.stmts),
+        _               => 0,
+    })
+}
+sx_stmt_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.sx_expr_kind(taint, l.value),
+        .Assign(x)   => a.sx_expr_kind(taint, x.target).kv_kor(a.sx_expr_kind(taint, x.value)),
+        .Return(r)   => a.sx_expr_kind(taint, r),
+        .ExprStmt(e) => a.sx_expr_kind(taint, e),
+        .If(f)       => a.sx_expr_kind(taint, f.c).kv_kor(a.sx_body_kind(taint, f.then)).kv_kor(a.sx_body_kind(taint, f.els)),
+        .While(w)    => a.sx_expr_kind(taint, w.c).kv_kor(a.sx_body_kind(taint, w.body)),
+        .IndexSet(x) => a.sx_expr_kind(taint, x.seq).kv_kor(a.sx_expr_kind(taint, x.idx)).kv_kor(a.sx_expr_kind(taint, x.value)),
+    })
+}
+sx_body_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    t := taint
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.sx_stmt_kind(t, st))
+        t = a.sx_step(t, st)
+    })
+    acc
+}
+sx_func_kind = (a: MutPtr<Malloc>, f: Func) i32 { a.sx_body_kind(a.dead_nil(), f.body) }
+check_module_scratch_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    decls.loop((h, i, d) {
+        acc = acc.kv_kor(d.match ({
+            .DFunc(f) => a.sx_func_kind(f),
+            _         => 0,
+        }))
+    })
+    acc
+}
+check_module_scratch* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_scratch_kind(decls) == 0).match ({ true => 0, false => 1 }) }
+// name the value in the message (teach-the-fix, spec §5): copy the identifier the caret points at
+// out of the source; a non-identifier anchor (a slice literal's first item, a synthesized pos)
+// falls back to a generic subject.
+sx_push_name = (s: String, a: MutPtr<Malloc>, src: str, pos: i32, i: i32, w: i32) String { (i >= w).match ({ true => s, false => sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w) }) }
+sx_subject = (a: MutPtr<Malloc>, src: str, pos: i32, w: i32) str {
+    src.at(pos).is_alnum().match ({ true => a.gstr_string(w + 4).gstr_append(a, "`").sx_push_name(a, src, pos, 0, w).gstr_append(a, "`").gstr_finish(a), false => "this value" })
+}
+sx_message = (a: MutPtr<Malloc>, code: i32, subject: str) str {
+    tail := (code == KSCRATCHSEND()).match ({ true => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)", false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)" })
+    a.gstr_string(256).gstr_append(a, subject).gstr_append(a, tail).gstr_finish(a)
+}
+sx_hint = (code: i32) str { (code == KSCRATCHSEND()).match ({ true => "construct it inside the actor, wrap it in Arc (`new_in(alloc, v)`) and send that, or send by value", false => "construct it inside the actor, wrap it in Arc (`new_in(alloc, v)`), or pass the state as plain values" }) }
+check_module_scratch_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    packed := a.check_module_scratch_kind(decls)
+    (packed == 0).match ({ true => check_diagnostic_none(), false => {
+        code := packed & 31
+        pos := packed >> 5
+        w := src.diagnostic_span_width(pos)
+        CheckDiagnostic(
+            code: code,
+            kind: "scratch-escape",
+            source_offset: pos,
+            span_width: w,
+            count: 1,
+            message: a.sx_message(code, a.sx_subject(src, pos, w)),
+            hint: code.sx_hint(),
+        )
+    } })
 }
