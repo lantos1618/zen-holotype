@@ -328,18 +328,19 @@ is_loop_at = (src: str, pos: i32) bool {
 // A statement-leading enum constructor `.Ok(x)` after a COMPLETED expression is a NEW statement,
 // not a `.field` chain continuation: Zen has no semicolons, so `g + 1  .Ok(g)` is two statements.
 // Methods/fields are lowercase, so a `.` followed by an UPPERCASE name is never a real field access
-// — it is either a qualified ctor `Type.Variant` (base is an Uppercase type-name Var, handled by
-// parse_field/is_qual_ctor) or a leading-dot ctor. Only the latter BREAKS the chain: an Uppercase
-// `.Name` whose base is NOT an Uppercase type-name Var ends the previous expression. SAME-LINE GATE
-// (mirrors is_index_at): a leading-dot ctor begins a NEW statement so a NEWLINE always precedes it;
-// a `.Uppercase` on the SAME line as its base is genuine UPPERCASE FIELD access (`s.Big`, `o.inner.Val`)
-// and must NOT break. The uppercase-subject carve-out leaves qualified ctors (`Type.Variant`) intact.
-is_variant_break = (src: str, base: PExpr, pos: i32) bool {
+// — it is either a qualified ctor `Type.Variant` (handled by parse_field/is_qual_ctor) or a
+// leading-dot ctor. The rule is TOTAL: a NEWLINE before a `.Uppercase` ALWAYS ends the previous
+// statement — a qualified ctor must keep its dot on the SAME line as the type (`Res.Okv(y)`), else
+// `x := Res` ⏎ `.Okv(y)` would silently glue into `Res.Okv(y)`. SAME-LINE GATE (mirrors
+// is_index_at): a leading-dot ctor begins a NEW statement so a NEWLINE always precedes it; a
+// `.Uppercase` on the SAME line as its base is a qualified ctor or genuine UPPERCASE FIELD access
+// (`s.Big`, `o.inner.Val`) and must NOT break.
+is_variant_break = (src: str, pos: i32) bool {
     dot := src.scan(pos)
     fld := src.scan(dot.next)
-    src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start)) && is_upper_byte(subj_name(base.expr).at(0)).match ({ true => false, false => true })
+    src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start))
 }
-parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr { src.is_match_at(base.next).match ({ true => a.parse_match(src, base), false => src.is_loop_at(base.next).match ({ true => a.parse_loop(src, base), false => (src.is_field_at(base.next) && src.is_variant_break(base, base.next).match ({ true => false, false => true })).match ({ true => a.parse_field(src, base), false => src.is_index_at(base.next).match ({ true => a.parse_index(src, base), false => (src.is_call_at(base.next) && base.expr.is_chain_base()).match ({ true => a.parse_chained_call(src, base), false => base }) }) }) }) }) }
+parse_postfix = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr { src.is_match_at(base.next).match ({ true => a.parse_match(src, base), false => src.is_loop_at(base.next).match ({ true => a.parse_loop(src, base), false => (src.is_field_at(base.next) && src.is_variant_break(base.next).match ({ true => false, false => true })).match ({ true => a.parse_field(src, base), false => src.is_index_at(base.next).match ({ true => a.parse_index(src, base), false => (src.is_call_at(base.next) && base.expr.is_chain_base()).match ({ true => a.parse_chained_call(src, base), false => base }) }) }) }) }) }
 // Lower a chained call `base(args)` (base is a closure-valued expression, not a bare name) to a block
 // `({ __chaintmp_N := base  __chaintmp_N(args) })`: binding the callee to a LOCAL reuses the supported
 // closure-local-call path (compiler.check.clos_local_call_name rewrites `__chaintmp_N(args)` to the
