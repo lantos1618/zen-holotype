@@ -7,7 +7,7 @@ in the build path: `cc` builds the `zenc` binary from committed C, and `zenc` re
 C byte-for-byte (a deterministic **fixpoint**).
 
 It is a real-but-rough compiler: the core (self-hosting, FFI, generics, traits, a memory
-model, a work-stealing actor runtime) is well ahead of the user-facing surface and stdlib
+model, a multicore actor runtime) is well ahead of the user-facing surface and stdlib
 breadth. Treat it as a working language you can read and hack on, not a finished product.
 
 The guiding idea: **pin down what every value _is_ with type structure, and you lock out
@@ -110,7 +110,7 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 | collections | `std.collections.{vec, map, set, iter}` |
 | text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
 | memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
-| concurrent | `std.concurrent.{actor, pool, sched, runtime, coroutine, cown, ring}` — actors on a work-stealing thread pool |
+| concurrent | `std.concurrent.{actor, pool, sched, runtime, coroutine, cown, ring}` — actors on a multi-threaded pool (one global run queue; work-stealing deques are roadmap) |
 | io / os | `std.io.{c, file}`, `std.fs`, `std.os`, `std.sync`, `std.atomic`, `std.thread` |
 | misc | `std.math`, `std.time`, `std.rand`, `std.json` |
 

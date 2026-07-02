@@ -1,7 +1,7 @@
 # Build plan — the pluggable actor runtime (Pony×Zig)
 
 > **Companion docs:** the design/spec this plan executes is [`actors-pony-zig.md`](actors-pony-zig.md);
-> the multi-threaded work-stealing scheduler that backs `Scheduler`/`WorkStealing` is detailed in
+> the planned multi-threaded work-stealing scheduler behind `Scheduler`/`WorkStealing` is detailed in
 > "[Future work: work-stealing scheduler](#future-work-work-stealing-scheduler-multi-threaded)" below
 > (full design archived at [`archive/parallel-scheduler-design.md`](archive/parallel-scheduler-design.md)).
 
@@ -15,7 +15,8 @@ Each increment: `make oracle` green + fixpoint byte-exact + adversarial.
 - `actor.zen`: a low-level i64 `Mailbox` (ring: buf/head/tail/cap, send/recv/pending) AND a generic
   `ActorState<M>` whose ring ops are **open-coded** in `ActorRef.send` and `ActorSystem.next_message`.
   Typed `Receiver<M>`, `Context<M>`, `ReplyRef<T>`, `ActorCell`/`ActorEngine`/`ActorHandle`.
-- `pool.zen`: concrete work-stealing pool + raw `pool_*` free functions (audit: should be `Pool` methods;
+- `pool.zen`: concrete multi-threaded pool (ONE mutex-guarded global run queue — not work-stealing) +
+  raw `pool_*` free functions (audit: should be `Pool` methods;
   `pool_actor_ref/unref` → `retain/release`; verb sprawl `post/flush/query/perform/destroy`).
 - `runtime.zen`: `Runtime` trait (`checkpoint -> Signal`), `Sync/AsyncArena`. **`checkpoint` to be removed.**
 - Sendability checker rules (move-on-send, Rc-not-sendable, no-local-ptr-in-msg) — DONE.
@@ -119,7 +120,7 @@ Three backings, all satisfying `Runtime` + `Allocator`; the body is identical:
 |--------------|-----------------------------|---------------------------------|-------------|
 | `SyncArena`  | `.Go` (no-op)               | inline `handle.run()`/`drain`   | 1 (caller)  |
 | `AsyncArena` | `checkpoint_current()`+`.Go`| `sched.run([Coro])` cooperative | 1           |
-| **`Pool`**   | `checkpoint_current()`+`.Go`| M-worker work-stealing pool     | M           |
+| **`Pool`**   | `checkpoint_current()`+`.Go`| M-worker global-run-queue pool  | M           |
 
 The capstone ("one body compiles and runs sync AND async") holds: Pool is a third backing over the same
 `spawn` + `send` surface. One honest caveat: the inline drivers (`handle.run()/drain/ask`) are the SYNC
