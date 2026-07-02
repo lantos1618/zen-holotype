@@ -1,0 +1,21 @@
+// .or_return() MID-CHAIN: `mk(ok).or_return().double()` hoists the propagation ahead of the
+// method call. Exit 23 = f(1) yields Ok(14) (Ok path continues the chain); f(0) early-returns
+// the Err (9), never reaching double().
+{ Result, IoError } = std.core.result
+mk = (ok: i32) Result<i32, IoError> { (ok == 1).match ({ true => .Ok(7), false => .Err(.NotFound) }) }
+double = (n: i32) i32 { n * 2 }
+f = (ok: i32) Result<i32, IoError> {
+    x := mk(ok).or_return().double()
+    .Ok(x)
+}
+main = () i32 {
+    a := f(1).match ({
+        .Ok(v)  => v,
+        .Err(e) => 0,
+    })    // 14
+    b := f(0).match ({
+        .Ok(v)  => 0,
+        .Err(e) => 9,
+    })    // 9 (Err propagated mid-chain)
+    a + b
+}
