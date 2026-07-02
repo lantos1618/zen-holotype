@@ -991,6 +991,49 @@ oracle_modules_run* = () i32 {
         should_pass: false,
         needle: "duplicate top-level definition",
     ), ModVerdictCase(
+        // the checker-path dup-fn diagnostic NAMES the colliding symbol (the resolver's rich
+        // fail_dup_user only covers imported-user-module vs imported-user-module; entry-vs-dep
+        // dups land here) and anchors file:line:col at the LATER definition in flat order — the
+        // dep module's copy (the entry body flattens first).
+        files: [ModFile(
+            name: "b.zen",
+            src: "helper* = (x: i32) i32 { x }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ helper } = b\nhelper = (x: i32) i32 { x + 1 }\nmain = () i32 { helper(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "duplicate top-level definition of `helper`",
+    ), ModVerdictCase(
+        // PRIVATE fns in different modules currently share the ONE flattened namespace (privates
+        // are not module-mangled at flatten), so an entry private colliding with a dep private is
+        // rejected — with the symbol named. If flatten ever learns to mangle privates, this case
+        // should flip to should_pass: true.
+        files: [ModFile(
+            name: "c1.zen",
+            src: "pubf* = (x: i32) i32 { privh(x) }\nprivh = (x: i32) i32 { x + 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ pubf } = c1\nprivh = (x: i32) i32 { x }\nmain = () i32 { pubf(privh(1)) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "duplicate top-level definition of `privh`",
+    ), ModVerdictCase(
+        // the dup-fn render carries a real source position: the caret line for the entry-vs-dep
+        // collision above points into the DEP module file (multi-module span mapping).
+        files: [ModFile(
+            name: "c1.zen",
+            src: "pubf* = (x: i32) i32 { privh(x) }\nprivh = (x: i32) i32 { x + 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ pubf } = c1\nprivh = (x: i32) i32 { x }\nmain = () i32 { pubf(privh(1)) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "c1.zen:2:1",
+    ), ModVerdictCase(
         files: [ModFile(
             name: "p.zen",
             src: "{ println } = std.text.fmt\n{ Rc } = std.mem.rc\nmain = () i32 { 0 }\n",
