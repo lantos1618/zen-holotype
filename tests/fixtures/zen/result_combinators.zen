@@ -1,0 +1,53 @@
+// Exercises the std.core.result combinators (UFCS, exit-code observable):
+//   Result: expect (Ok path) / or / or_else / map_err
+//   Opt:    expect_some (Some path) / some_or / some_or_else / ok_or
+// expect's PANIC path lives in result_expect_panics.zen (asserted via a ShellCase: exit 134 + stderr msg).
+{ Result, Opt, IoError, expect, or, or_else, map_err, expect_some, some_or, some_or_else, ok_or } = std.core.result
+{ to_exit } = std.core.bool
+result_side = () bool {
+    good: Result<i32, IoError> := .Ok(40)
+    bad: Result<i32, IoError> := .Err(.Denied)
+    a := good.expect("good is Ok by construction")
+    // `or`: Ok payload wins, Err takes the default.
+    b := good.or(9) + bad.or(2)
+    // `or_else`: the fallback closure sees the error value.
+    c := bad.or_else((e) {
+        e.match ({
+            .Denied => 3,
+            _       => 0,
+        })
+    })
+    // `map_err`: Err channel maps E -> F, Ok passes through untouched.
+    mb: Result<i32, str> := bad.map_err((e) { "denied" })
+    mg: Result<i32, str> := good.map_err((e) { "denied" })
+    d := mb.match ({
+        .Ok(v)  => 0,
+        .Err(s) => 4,
+    }) + mg.match ({
+        .Ok(v)  => v,
+        .Err(s) => 0,
+    })
+    a == 40 && b == 42 && c == 3 && d == 44
+}
+opt_side = () bool {
+    some: Opt<i32> := .Some(10)
+    none: Opt<i32> := .None
+    a := some.expect_some("some is Some by construction")
+    b := some.some_or(9) + none.some_or(2)
+    c := none.some_or_else(() { 3 })
+    // `ok_or`: the Opt -> Result bridge (map_err has no Opt mirror; no error channel to map).
+    rb: Result<i32, IoError> := none.ok_or(.Eof)
+    rg: Result<i32, IoError> := some.ok_or(.Eof)
+    d := rb.match ({
+        .Ok(v)  => 0,
+        .Err(e) => e.match ({
+            .Eof => 4,
+            _    => 0,
+        }),
+    }) + rg.match ({
+        .Ok(v)  => v,
+        .Err(e) => 0,
+    })
+    a == 10 && b == 12 && c == 3 && d == 14
+}
+main = () i32 { (result_side() && opt_side()).to_exit() }
