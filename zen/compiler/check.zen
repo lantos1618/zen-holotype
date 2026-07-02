@@ -1086,7 +1086,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
 // for the never-instantiated template itself — it stays the bare template name. This guard keeps
 // resolve_call idempotent across passes and unchanged for every non-recursive call.
 rec_dispatch = (env: Env, dn: str, fn: Func, args: [Expr], etargs: [Ty]) str {
-    (eq(fn.name, dn) && fn.params.len == args.len && fn.rc_is_rec_gen_f()).match ({ true => {
+    (eq(fn.name, dn) && fn.params.len == args.len && fn.no_inline_gen_f()).match ({ true => {
         m := env.a.mangle_str_in(dn, env.call_targs(fn, args, etargs))
         (env.didx.func_idx.get(m, 0 - 1) >= 0).match ({ true => m, false => dn })
     }, false => dn })
@@ -2501,7 +2501,7 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
         a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, tf.body, tf.params, ab.fargs, ab.env, tf.ret)))
     } })
 }
-maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> { idx.idx_template_call(decls, c.fn).match ({ true => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).rc_is_rec_gen_f()).match ({ true => a.recall(c, c.fn, cargs), false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({ true => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs), false => a.recall(c, c.fn, cargs) }) }), false => a.recall(c, c.fn, cargs) }) }
+maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> { idx.idx_template_call(decls, c.fn).match ({ true => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).no_inline_gen_f()).match ({ true => a.recall(c, c.fn, cargs), false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({ true => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs), false => a.recall(c, c.fn, cargs) }) }), false => a.recall(c, c.fn, cargs) }) }
 // A recursive generic fn cannot be inlined (the splice never terminates); leave the call as a
 // bare call to the template name. compiler.check's mono_rec emits one concrete C instance per
 // (template, concrete-targs) and resolve_call rewrites the call to it. (is_inlining is the same
@@ -3016,6 +3016,104 @@ rc_calls_body* = (body: [Stmt], nm: str) bool {
 }
 // a recursive generic = type-param generic (NOT FnT-splice) with a body that calls itself directly.
 rc_is_rec_gen_f* = (f: Func) bool { (f.tparams.len > 0 && f.params.has_fnt_param() == false).match ({ true => f.body.rc_calls_body(f.name), false => false }) }
+// ── HIDDEN early returns × inlining ──────────────────────────────────────────────────────────
+// resolve_orx lowers a CONDITIONAL-position `or_return` (a match/cond arm value, a `&&`/`||` rhs, a
+// while condition) into a value block whose Err-guard is a raw `return` INSIDE an expression. The
+// inliner's early-return lift (needs_early_lift → cps_value) sees only top-level .Return statements
+// and returns in .If branches — a return buried in an expression (Block/Match/Cond/…) or anywhere in
+// a While/Loop body is invisible to it, and a return inside a loop can't be lifted to `?:` at all.
+// Splicing such a body into a caller's GCC statement-expression would leave a raw C `return` that
+// exits the CALLER — the callee's early return escapes (silent wrong control flow), or the generated
+// C fails to compile when the return types differ. A generic fn whose body holds such a HIDDEN
+// return must therefore never be inlined: no_inline_gen_f routes it through the recursive-generic
+// monomorphization path (mono_rec) instead, where it becomes a real C function and its `return` is
+// an honest function return. Statement-level returns (top level / If branches) stay inlinable — the
+// existing lift handles those (or_return_expr_generic_inline relies on it). FnT-param generics can't
+// monomorphize (their lambda args must splice), so they are out of scope here, as before.
+orx_hidden_es = (xs: [Expr]) bool {
+    f := false
+    xs.loop((h, i, x) {
+        f = f.match ({ true => true, false => x.addr().orx_hidden_e() })
+    })
+    f
+}
+orx_hidden_inits = (inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = f.match ({ true => true, false => fi.value.orx_hidden_e() })
+    })
+    f
+}
+orx_hidden_arms = (arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = f.match ({ true => true, false => ar.body.orx_hidden_e() })
+    })
+    f
+}
+// does this EXPRESSION contain a `return` anywhere inside it? Every return in expression position is
+// hidden: it would lower to a raw C return inside the spliced statement-expression.
+orx_hidden_e = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)       => c.args.orx_hidden_es(),
+        .Bin(b)        => b.lhs.orx_hidden_e() || b.rhs.orx_hidden_e(),
+        .Cond(d)       => d.c.orx_hidden_e() || d.t.orx_hidden_e() || d.e.orx_hidden_e(),
+        .Member(m)     => m.obj.orx_hidden_e(),
+        .Arrow(ar)     => ar.obj.orx_hidden_e(),
+        .MakeEnum(mk)  => mk.payload.orx_hidden_e(),
+        .MakeStruct(s) => s.inits.orx_hidden_inits(),
+        .Match(m)      => m.subj.orx_hidden_e() || m.arms.orx_hidden_arms(),
+        .Index(ix)     => ix.seq.orx_hidden_e() || ix.idx.orx_hidden_e(),
+        .SliceLit(sd)  => sd.items.orx_hidden_es(),
+        .Loop(l)       => l.seq.orx_hidden_e() || l.body.orx_any_ret_body(),
+        .Block(bl)     => bl.stmts.orx_any_ret_body(),
+        .Lambda(la)    => la.body.orx_any_ret_body(),
+        _              => false,
+    })
+}
+// any return at ANY depth — used inside expression blocks and While/Loop bodies, where every return
+// (even a statement-level one) is beyond the lift's reach.
+orx_any_ret_stmt = (st: Stmt) bool {
+    st.match ({
+        .Return(r)   => true,
+        .Let(l)      => l.value.orx_hidden_e(),
+        .Assign(x)   => x.target.orx_hidden_e() || x.value.orx_hidden_e(),
+        .ExprStmt(e) => e.orx_hidden_e(),
+        .If(f)       => f.c.orx_hidden_e() || f.then.orx_any_ret_body() || f.els.orx_any_ret_body(),
+        .While(w)    => w.c.orx_hidden_e() || w.body.orx_any_ret_body(),
+        .IndexSet(x) => x.seq.orx_hidden_e() || x.idx.orx_hidden_e() || x.value.orx_hidden_e(),
+    })
+}
+orx_any_ret_body = (body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = f.match ({ true => true, false => st.orx_any_ret_stmt() })
+    })
+    f
+}
+// a return the early-return lift CANNOT see: statement-level returns (top level and through If
+// branches) are liftable and excluded; anything buried in an expression or a While body is hidden.
+orx_hidden_stmt = (st: Stmt) bool {
+    st.match ({
+        .Return(r)   => r.orx_hidden_e(),
+        .Let(l)      => l.value.orx_hidden_e(),
+        .Assign(x)   => x.target.orx_hidden_e() || x.value.orx_hidden_e(),
+        .ExprStmt(e) => e.orx_hidden_e(),
+        .If(f)       => f.c.orx_hidden_e() || f.then.orx_hidden_body() || f.els.orx_hidden_body(),
+        .While(w)    => w.c.orx_hidden_e() || w.body.orx_any_ret_body(),
+        .IndexSet(x) => x.seq.orx_hidden_e() || x.idx.orx_hidden_e() || x.value.orx_hidden_e(),
+    })
+}
+orx_hidden_body = (body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = f.match ({ true => true, false => st.orx_hidden_stmt() })
+    })
+    f
+}
+// the single no-inline predicate every gate shares (maybe_template, rc_col_call, rec_dispatch):
+// recursive generics AND generics with hidden returns both take the mono_rec instance path.
+no_inline_gen_f* = (f: Func) bool { f.rc_is_rec_gen_f().match ({ true => true, false => (f.tparams.len > 0 && f.params.has_fnt_param() == false).match ({ true => f.body.orx_hidden_body(), false => false }) }) }
 // instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
 rc_gbuf = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
 rc_has = (buf: [GenericData], cnt: i32, m: str) bool {
@@ -3103,7 +3201,7 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
     c2 := env.rc_col_es(buf, cnt, c.args)
     dn := env.dispatch_name(c)
     f := env.env_func(dn)
-    (eq(f.name, dn) && f.params.len == c.args.len && f.rc_is_rec_gen_f()).match ({ true => {
+    (eq(f.name, dn) && f.params.len == c.args.len && f.no_inline_gen_f()).match ({ true => {
         targs := env.call_targs(f, c.args, c.targs)
         m := env.a.mangle_str_in(dn, targs)
         buf.rc_has(c2, m).match ({ true => c2, false => buf.rc_add(c2, GenericData(

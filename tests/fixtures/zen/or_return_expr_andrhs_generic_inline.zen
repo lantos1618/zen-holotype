@@ -1,0 +1,18 @@
+// .or_return() as a `&&` RIGHT operand inside a GENERIC fn. The rhs is conditionally evaluated, so
+// resolve_orx wraps it in place — a hidden return the inliner cannot lift → the generic must
+// monomorphize. caller(1,1): rhs runs, Ok(5)==5 → true → 3. caller(1,0): rhs runs, Err propagates
+// out of both — caller RECOVERS to 7. caller(0,0): lhs false → rhs (and its Err) must NOT evaluate
+// → false → 4. Exit 57 = 3 + 7*2 + 4*10.
+{ Result, IoError } = std.core.result
+gk = (ok: i32) Result<i32, IoError> { (ok == 1).match ({ true => .Ok(5), false => .Err(.NotFound) }) }
+both<T> = (sel: i32, ok: i32, d: T) Result<i32, IoError> {
+    b := (sel == 1) && (gk(ok).or_return() == 5)
+    b.match ({ true => .Ok(3), false => .Ok(4) })
+}
+caller = (sel: i32, ok: i32) i32 {
+    both(sel, ok, 9).match ({
+        .Ok(v)  => v,
+        .Err(e) => 7,
+    })
+}
+main = () i32 { caller(1, 1) + caller(1, 0) * 2 + caller(0, 0) * 10 }
