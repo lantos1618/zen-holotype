@@ -531,10 +531,15 @@ pointee_of = (t: Ty) Ty {
 }
 // Generic calls infer type args from arguments, then use the expected return type
 // for params that only appear in the result.
-targ_of = (env: Env, params: [Param], args: [Expr], tp: str) Ty {
+// Binding strength: an untyped numeric LITERAL is the WEAKEST source — a typed arg (receiver,
+// annotated local) or the expected return type must not be overridden by a literal's default
+// width. `lits` selects which pass this scan is: false = typed args only, true = literals only
+// (the last resort, so `m.put(a, 42, v)` pins K from `m`, and 42 COERCES to it like it would
+// in a non-generic context).
+targ_of = (env: Env, params: [Param], args: [Expr], tp: str, lits: bool) Ty {
     found := tvoid()
     params.loop((h, i, p) {
-        found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => env.unify_arg(p.ty, args[i].addr(), tp), false => found }), false => found })
+        found = found.is_void_ty().match ({ true => (i < args.len && args[i].addr().is_lit_numeric() == lits).match ({ true => env.unify_arg(p.ty, args[i].addr(), tp), false => found }), false => found })
     })
     found
 }
@@ -554,8 +559,9 @@ lam_ret_unify = (pty: Ty, lm: LambdaData, tp: str) Ty {
 }
 ret_targ_of = (env: Env, ret: Ty, tp: str) Ty { env.exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(env.exp, tp) }) }
 call_targ* = (env: Env, f: Func, args: [Expr], tp: str) Ty {
-    arg := env.targ_of(f.params, args, tp)
-    arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
+    arg := env.targ_of(f.params, args, tp, false)
+    arg = arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
+    arg.is_void_ty().match ({ true => env.targ_of(f.params, args, tp, true), false => arg })
 }
 // etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
 // overriding inference; an absent one (i past etargs) falls back to inferring from the value args.
@@ -2097,11 +2103,16 @@ arg_local_name = (a: MutPtr<Malloc>, name: str, env: Ptr<VList>, idx: i64) str {
 // which would mis-dispatch (a prior attempt regressed 37 cases this way). Using light_ty makes the
 // binding type-TRANSPARENT — the body sees exactly the type splicing the arg would have produced. The
 // temp Let carries a void type → genc emits `__auto_type`, the exact concrete C type.
-bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>) ArgBind {
+// `pins[i]` (void = none) is the targ-substituted param type a LITERAL arg must ADOPT: splicing a
+// raw literal into the body would let every INNER generic call re-infer its tparam from the
+// literal's default width (i32) — the outer instantiation's binding (e.g. K=i64 from the HMap
+// receiver) silently lost, wrong monos emitted (i64 keys hashed with impl_Hash_i32_hash). A pinned
+// literal is bound to a TYPED temp local instead, so in-body uses carry the instantiated type.
+bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>, pins: [Ty]) ArgBind {
     nf := a.cebuf(cargs.len)
     nb := 0
     cargs.loop((h, i, ce) {
-        (i < params.len && ce.arg_needs_bind()).match ({ true => {
+        (i < params.len && (ce.arg_needs_bind() || pins[i].is_void_ty() == false)).match ({ true => {
             nb = nb + 1
         }, false => { } })
     })
@@ -2109,10 +2120,10 @@ bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], 
     e2 := env
     j := 0
     cargs.loop((h, i, ce) {
-        (i < params.len && ce.arg_needs_bind()).match ({ true => {
+        (i < params.len && (ce.arg_needs_bind() || pins[i].is_void_ty() == false)).match ({ true => {
             nm := a.arg_local_name(params[i].name, env, i)
-            bb[j] = slett(nm, tvoid(), cargs[i].addr())
-            e2 = a.vcons(nm, cargs[i].addr().light_ty(a, env, decls, idx), e2)
+            bb[j] = slett(nm, pins[i], cargs[i].addr())
+            e2 = a.vcons(nm, pins[i].is_void_ty().match ({ true => cargs[i].addr().light_ty(a, env, decls, idx), false => pins[i] }), e2)
             nf[i] = vref(nm)
             j = j + 1
         }, false => {
@@ -2124,6 +2135,29 @@ bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], 
         binds: bb,
         env: e2,
     )
+}
+// pins for a NON-generic inline (and lambda inlines): none.
+no_pins = (a: MutPtr<Malloc>, n: i64) [Ty] {
+    buf := a.tbuf(n)
+    buf.loop((h, i, t) {
+        buf[i] = tvoid()
+    })
+    buf
+}
+// The pin for each arg of a GENERIC inline: literal-typed args whose param type mentions a tparam
+// adopt the (fully concrete) targ-substituted param type; everything else is unpinned.
+lit_pins = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr]) [Ty] {
+    buf := a.tbuf(params.len)
+    params.loop((h, i, p) {
+        buf[i] = tvoid()
+        (i < cargs.len && cargs[i].addr().is_lit_numeric() && p.ty.ty_mentions_any(tparams)).match ({ true => {
+            t := a.subst_ty_in(tparams, targs, p.ty)
+            (t.is_void_ty() || t.ty_mentions_any(tparams)).match ({ true => { }, false => {
+                buf[i] = t
+            } })
+        }, false => { } })
+    })
+    buf
 }
 // the C name a substituted arg carries: a Var holds the (renamed) local it stands for, so an
 // indirect call `f()` through a renamed local let recovers `f`'s renamed C name. Falls back to the
@@ -2287,7 +2321,7 @@ inline_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, c
         .Lambda(lm) => {
             // spliced lambda body: its `return`s are the LAMBDA's, so bind its own (possibly void)
             // return type over the caller's.
-            ab := a.bind_args(decls, idx, lm.params, cargs, a.bind_fnret(env, lm.ret))
+            ab := a.bind_args(decls, idx, lm.params, cargs, a.bind_fnret(env, lm.ret), a.no_pins(lm.params.len))
             a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, lm.body, lm.params, ab.fargs, ab.env, tvoid())))
         },
         .Var(v)     => a.var_call(v, cargs),
@@ -2300,17 +2334,20 @@ lty_node = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.tnode(t) }
 light_sl_elem = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty { (items.len == 0).match ({ true => tvoid(), false => items[0].addr().light_ty(a, env, decls, idx) }) }
 light_slice = (a: MutPtr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty { sd.elem.is_void_ty().match ({ true => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls, idx))), false => tslice(a.lty_node(sd.elem)) }) }
 // Light call type mirrors infer_call for template-splice inference.
-light_one = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+// `lits` mirrors targ_of: false scans only typed (non-literal) args, true only literals — the
+// weakest binding source, consulted after the expected return type (see call_targ).
+light_one = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex, lits: bool) Ty {
     found := tvoid()
     params.loop((h, i, p) {
-        found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls, idx), tp), false => found }), false => found })
+        found = found.is_void_ty().match ({ true => (i < args.len && args[i].addr().is_lit_numeric() == lits).match ({ true => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls, idx), tp), false => found }), false => found })
     })
     found
 }
 light_ret_one = (ret: Ty, exp: Ty, tp: str) Ty { exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(exp, tp) }) }
 light_targ = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    arg := f.params.light_one(a, args, tp, env, decls, idx)
-    arg.is_void_ty().match ({ true => f.ret.light_ret_one(exp, tp), false => arg })
+    arg := f.params.light_one(a, args, tp, env, decls, idx, false)
+    arg = arg.is_void_ty().match ({ true => f.ret.light_ret_one(exp, tp), false => arg })
+    arg.is_void_ty().match ({ true => f.params.light_one(a, args, tp, env, decls, idx, true), false => arg })
 }
 light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
     buf := a.tbuf(f.tparams.len)
@@ -2320,10 +2357,12 @@ light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList
     a.deep_targs(f.tparams, buf, f.params, args, env, decls, idx)
 }
 light_call_ty = (decls: [Decl], idx: DeclIndex, a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
-    eq(c.fn, "cstr").match ({ true => tcstr(), false => {
+    // conversion/size intrinsics (not in the decl index) mirror infer_call, so e.g. `to_i64(0)`
+    // as a generic-call arg PINS that tparam instead of light-typing to void (need-annotation).
+    eq(c.fn, "cstr").match ({ true => tcstr(), false => eq(c.fn, "to_i32").match ({ true => ti32(), false => eq(c.fn, "to_i64").match ({ true => ti64(), false => eq(c.fn, "to_u8").match ({ true => tu8(), false => eq(c.fn, "to_f64").match ({ true => tf64(), false => eq(c.fn, "sizeof").match ({ true => ti64(), false => {
         f := idx.idx_func(decls, c.fn)
         (f.tparams.len > 0).match ({ true => a.subst_ty_in(f.tparams, f.light_targs(a, c.args, tvoid(), env, decls, idx), f.ret), false => f.ret })
-    } })
+    } }) }) }) }) }) })
 }
 light_last_stmt_ty = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     stmts[stmts.len - 1].match ({
@@ -2488,10 +2527,11 @@ lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: str) Ty {
         _        => tvoid(),
     })
 }
-infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+// `lits` mirrors targ_of: literal args are the weakest binding source (see call_targ).
+infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex, lits: bool) Ty {
     found := tvoid()
     params.loop((h, i, p) {
-        found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => a.unify_carg(decls, idx, p.ty, cargs[i].addr(), tp, env), false => found }), false => found })
+        found = found.is_void_ty().match ({ true => (i < cargs.len && cargs[i].addr().is_lit_numeric() == lits).match ({ true => a.unify_carg(decls, idx, p.ty, cargs[i].addr(), tp, env), false => found }), false => found })
     })
     found
 }
@@ -2504,8 +2544,9 @@ unify_carg = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, pty: Ty, carg: P
     })
 }
 infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    arg := params.infer_one(a, cargs, tp, env, decls, idx)
-    arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
+    arg := params.infer_one(a, cargs, tp, env, decls, idx, false)
+    arg = arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
+    arg.is_void_ty().match ({ true => params.infer_one(a, cargs, tp, env, decls, idx, true), false => arg })
 }
 // ── deep tparam fallbacks: two LAST-RESORT inference sources for a tparam that neither the value
 //    args nor the expected type could bind (it would otherwise silently default to void → a
@@ -2753,10 +2794,10 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: str, 
     (tf.tparams.len > 0).match ({ true => {
         targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, etargs)
         rsub := a.subst_ty_in(tf.tparams, targs, tf.ret)
-        ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, rsub))
+        ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, rsub), a.lit_pins(tf.tparams, targs, tf.params, cargs))
         a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, rsub)))
     }, false => {
-        ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, tf.ret))
+        ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, tf.ret), a.no_pins(tf.params.len))
         a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, tf.body, tf.params, ab.fargs, ab.env, tf.ret)))
     } })
 }
