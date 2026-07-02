@@ -1,0 +1,52 @@
+// Closure-return tparam inference: UNANNOTATED map_err lambdas, chained combinators
+// (map_err→expect, map_err→map_err→expect), value-verified on both Ok and Err paths.
+// The annotated LAMBDA-RETURN form `(e) str { … }` is guarded by the infer_lambda_ret_annot
+// ShellCase in oracle_build — zenc fmt drops that annotation (formatter gap), so the
+// fmt-gated tree cannot hold it.
+{ Result, IoError, expect, map_err, or, or_else } = std.core.result
+main = () i32 {
+    // (a) unannotated lambda in a chain — must run AND map the value correctly
+    good: Result<i32, IoError> := .Ok(42)
+    v := good.map_err((e) { "boom" }).expect("mapped ok")
+    // Err path: verify the lambda body actually runs and the mapped payload is right
+    bad: Result<i32, IoError> := .Err(.Eof)
+    m := bad.map_err((e) { "boom" })
+    mv := m.match ({
+        .Ok(x)  => 0,
+        .Err(s) => (s == "boom").match ({ true => 1, false => 0 - 1 }),
+    })
+    // (b) annotated BINDING with unannotated lambda (the pre-fix workaround, regression guard).
+    // The annotated LAMBDA-RETURN form `(e) str { … }` is guarded by the infer_lambda_ret_annot
+    // ShellCase in oracle_build — zenc fmt drops that annotation (formatter gap), so the fmt-gated
+    // tree cannot hold it.
+    mb: Result<i32, str> := good.map_err((e) { "nope" })
+    bv := mb.or(0 - 7)
+    // param-DEPENDENT bodies: the lambda param must get its (co-targ-substituted) declared type
+    r1 := bad.map_err((e) { e }).match ({
+        .Ok(x)  => 0 - 1,
+        .Err(e) => e.match ({
+            .Eof => 7,
+            _    => 0 - 2,
+        }),
+    })
+    r2 := bad.map_err((e) {
+        e.match ({
+            .Eof => 3,
+            _    => 0,
+        })
+    }).match ({
+        .Ok(x)  => 0 - 1,
+        .Err(n) => n + 10,
+    })
+    // (d) two chained combinators, all unannotated
+    dv := good.map_err((e) { 5 }).map_err((n) { "deep" }).expect("deep ok")
+    // Err path through the double chain: both lambdas must actually compose
+    de := bad.map_err((e) { 5 }).map_err((n) { n + 1 }).match ({
+        .Ok(x)  => 0 - 1,
+        .Err(n) => n,
+    })
+    // (e) or / or_else unchanged
+    ov := bad.or(9)
+    oe := bad.or_else((e) { 11 })
+    (v == 42 && mv == 1 && bv == 42 && dv == 42 && de == 6 && ov == 9 && oe == 11 && r1 == 7 && r2 == 13).match ({ true => 0, false => 1 })
+}
