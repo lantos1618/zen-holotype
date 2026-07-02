@@ -911,6 +911,12 @@ oracle_value_run* = () i32 {
         src: "R: Ok(bool) | Err(i32)\ngk = (ok: i32) R { (ok == 1).match ({ true => R.Ok(true), false => R.Err(9) }) }\nf = (flag: bool, ok: i32) R {\n    b := flag && gk(ok).or_return()\n    R.Ok(b)\n}\ntest* = () i32 { f(true, 1).match ({ .Ok(v) => v.match ({ true => 5, false => 2 }), .Err(e) => 0, }) }",
         want: "5",
     ), VCase(
+        src: "Cfg: {\n    port: i32,\n    on: bool,\n}\nRC: Ok(Cfg) | Err(i32)\nRI: Ok(i32) | Err(i32)\nfetch = (ok: i32) RC { (ok >= 1).match ({ true => RC.Ok(Cfg(port: 8000, on: true)), false => RC.Err(30) }) }\nhalf = (c: Cfg, ok: i32) RI { (ok >= 2).match ({ true => RI.Ok(c.port / 1000), false => RI.Err(20) }) }\nserve = (ok: i32) RI {\n    cfg := fetch(ok).or_return()\n    n := half(fetch(ok).or_return(), ok).or_return() + fetch(ok).or_return().port / 4000\n    RI.Ok(n + cfg.on.match ({ true => 0, false => 100 }))\n}\ntest* = () i32 {\n    a := serve(2).match ({ .Ok(v) => v, .Err(e) => 0 - 1 })\n    b := serve(1).match ({ .Ok(v) => 0 - 1, .Err(e) => e })\n    c := serve(0).match ({ .Ok(v) => 0 - 1, .Err(e) => e })\n    a + b + c\n}",
+        want: "60",
+    ), VCase(
+        src: "RB: Ok(bool) | Err(i32)\nRI: Ok(i32) | Err(i32)\ngk = (ok: i32) RB { (ok == 1).match ({ true => RB.Ok(true), false => RB.Err(5) }) }\nf = (flag: bool, ok: i32) RI {\n    b := gk(ok).or_return() && flag\n    RI.Ok(b.match ({ true => 7, false => 3 }))\n}\ntest* = () i32 {\n    a := f(true, 1).match ({ .Ok(v) => v, .Err(e) => 0 - 1 })\n    b := f(true, 0).match ({ .Ok(v) => 0 - 1, .Err(e) => e })\n    a + b\n}",
+        want: "12",
+    ), VCase(
         src: "Res: Okv(i32) | Nov\ntest* = () i32 {\n    x := Res /* continuation\n    comment */ .Okv(42)\n    x.match ({ .Okv(v) => v, .Nov => 9, })\n}",
         want: "42",
     ), VCase(
@@ -989,7 +995,15 @@ oracle_value_run* = () i32 {
 // Guards the emit-layer name-dispatch agreeing with the checker's shadow semantics.
 // or_return in a CONDITIONAL position (&& rhs) with the receiver's FULL Result type matching
 // the enclosing fn's — must stay accepted AND run (guards the Ok-payload check's leniency
-// gate: same Ok + same Err = legal, only a mismatched Ok side rejects). = 5.
+// gate: same Ok + same Err = legal there; a mismatched Ok side rejects ONLY in conditional
+// positions). = 5.
+// or_return MULTI-TYPE PIPELINE — receivers whose Ok payloads DIFFER from the enclosing fn's
+// (RC=Result<Cfg,i32> steps inside an RI=Result<i32,i32> fn) in let position, arg position, and
+// mid-chain (`.or_return().port`), same E throughout. The lowering REBUILDS the Err return as the
+// fn's own Result (fresh tag constant + Err payload), so both Err paths must carry their value:
+// Ok path 10 + half-err 20 + load-err 30 = 60.
+// or_return as a `&&` LEFT operand (unconditionally evaluated → hoists) with a differing Ok
+// payload: accepted and running, unlike the strict && RIGHT operand. 7 (Ok) + 5 (Err) = 12.
 // {}-template interpolation core (mirrors std.text.fmt.format's scanner standalone, since
 // the value runner links no stdlib): a `{}` placeholder, `{{`/`}}` brace escapes, and the
 // skip-the-2nd-byte advance must all be detected. "a={} b={{}} c={} d=}}" has 2 placeholders
