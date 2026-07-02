@@ -1,6 +1,6 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -2750,8 +2750,11 @@ check_module_arg_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], sr
 KORRETURN = () i32 { 27 }    // `.or_return()` in a function whose return type is not a matching Result
 ko_is_or_call = (c: CallData) bool { eq(c.fn, "or_return") && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { eq(mc.method, "or_return") && mc.args.len == 0 }
-// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
-// A tparam-typed / unknown side defers (concrete only after monomorphization).
+// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree — and
+// so must the `Ok` payloads: the lowering returns the RECEIVER verbatim on Err, so the receiver's
+// whole Result type must be the enclosing fn's (a `Result<bool, E>` receiver in a `Result<i32, E>`
+// fn emits `return <Result_bool_E>` and dies at cc in conditional positions the return-fit scan
+// never reaches). A tparam-typed / unknown side defers (concrete only after monomorphization).
 ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, pos: i32) i32 {
     (tps.ty_mentions_tparam(want) || env.unknown_ty(want)).match ({ true => 0, false => {
         fE := env.subj_variant_payload(want, "Err")
@@ -2759,10 +2762,17 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, pos: i32) i32 {
             rt := env.infer_expr(recv)
             (rt.is_void_ty() || env.unknown_ty(rt) || tps.ty_mentions_tparam(rt)).match ({ true => 0, false => {
                 rE := env.subj_variant_payload(rt, "Err")
-                (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({ true => 0, false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({ true => 0, false => KORRETURN().kv_at(pos) }) })
+                (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({ true => 0, false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({ true => env.ko_ok_at(tps, want, rt, pos), false => KORRETURN().kv_at(pos) }) })
             } })
         } })
     } })
+}
+// the Ok side of the same judgment, entered only once both Err payloads are known and agree.
+// Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
+ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
+    fO := env.subj_variant_payload(want, "Ok")
+    rO := env.subj_variant_payload(rt, "Ok")
+    (fO.is_void_ty() || rO.is_void_ty() || env.unknown_ty(fO) || env.unknown_ty(rO) || tps.ty_mentions_tparam(fO) || tps.ty_mentions_tparam(rO)).match ({ true => 0, false => (fO.ty_eq(rO) || rO.ty_eq(fO)).match ({ true => 0, false => KORRETURN().kv_at(pos) }) })
 }
 ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData) i32 {
     own := ko_is_or_call(c).match ({ true => env.ko_at(tps, want, c.args[0].addr(), c.pos), false => 0 })
@@ -2842,13 +2852,29 @@ ko_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     )
     a.ko_body_kind(env, f.tparams, f.ret, f.body)
 }
+// `.or_return()` in a GLOBAL initializer has NO enclosing function to return the Err to: the lowered
+// early-return would silently abort `zen__init_globals` mid-way, leaving every later global
+// zero-initialized (no diagnostic, wrong exit values). Walk the initializer with a non-Result `want`
+// (i32) so ANY or_return inside it reports KORRETURN at its own position — the same "no matching
+// Result to propagate into" judgment the fn-body walk makes, with nothing lenient to defer to.
+ko_global_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
+    env := Env(
+        vars: a.params_env(empty_params()),
+        decls: decls,
+        didx: idx,
+        exp: tvoid(),
+        a: a,
+    )
+    is_expr_null(g.init).match ({ true => 0, false => env.ko_expr_kind(empty_params(), ti32(), g.init) })
+}
 check_module_or_return_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.ko_func_kind(decls, idx, f),
-            _         => 0,
+            .DFunc(f)   => a.ko_func_kind(decls, idx, f),
+            .DGlobal(g) => a.ko_global_kind(decls, idx, g),
+            _           => 0,
         }))
     })
     acc
