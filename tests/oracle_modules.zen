@@ -1287,6 +1287,64 @@ oracle_modules_run* = () i32 {
         entry: "p.zen",
         should_pass: true,
         needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ hidden } = vv\nmain = () i32 { hidden(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "m = vv\nmain = () i32 { m.hidden(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "Secret: { v: i32 }\nshown* = (x: i32) i32 { x + 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "m = vv\nmain = () i32 {\n  s := m.Secret(v: 1)\n  s.v\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ shown } = vv\nm = vv\nmain = () i32 { shown(1) + m.shown(2) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "shown* = (x: i32) i32 { x + 1 }\n",
+        ), ModFile(
+            name: "mid.zen",
+            src: "{ shown } = vv\nwrap* = (x: i32) i32 { shown(x) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ shown } = mid\nmain = () i32 { shown(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
     )])
     // the checker-path dup-fn diagnostic NAMES the colliding symbol (the resolver's rich
     // fail_dup_user only covers imported-user-module vs imported-user-module; entry-vs-dep
@@ -1300,6 +1358,10 @@ oracle_modules_run* = () i32 {
     // collision above points into the DEP module file (multi-module span mapping).
     // ── UFCS through module aliases: AMBIGUITY rejects positioned, naming both candidates ─────
     // two aliases provide `bump(Pt, i32)` → `p.bump(2)` rejects; the qualified `x.bump(p, 2)` accepts.
+    // ── visibility: `*` is ENFORCED — error[private-name] ────────────────────────────────────
+    // flat `{ hidden } = vv`, qualified `m.hidden(…)`, and a qualified private TYPE all reject;
+    // exported names accept via both forms; a name the module itself imports stays importable
+    // (transitive re-export — visibility is decided at the defining module).
     // ── the net is NOT hollow: cross-module calls are arity/arg-type checked (test_modules_oracle) ──
     // ── transitive / clash rejections (test_resolver_oracle) ─────────────────────────────────
     // ── namespace-bound diagnostics keep the USER source span (test_user_imports) ────────────
