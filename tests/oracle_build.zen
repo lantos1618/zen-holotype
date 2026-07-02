@@ -1137,7 +1137,40 @@ oracle_build_run* = () i32 {
         src: "main = () i32 { x: i32 := \"nope\"  0 }\n",
         should_pass: false,
         kind: "assign-fit",
+    ), VerdictCase(
+        src: "sizeof = (x: i64) i64 { x + 1 }\nmain = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "reserved-name",
+    ), VerdictCase(
+        src: "atomic_add_i64 = (x: i64) i64 { x + 1 }\nmain = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "reserved-name",
+    ), VerdictCase(
+        src: "to_i32 = (x: i64) i64 { x + 1 }\nmain = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "reserved-name",
+    ), VerdictCase(
+        src: "malloc = (n: i64) i64 { n }\nmain = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "reserved-name",
+    ), VerdictCase(
+        src: "loader = (x: i64) i64 { x + 1 }\nload2 = (x: i64) i64 { x + 2 }\nmy_load = (x: i64) i64 { x + 3 }\nmain = () i32 { to_i32(loader(1) + load2(1) + my_load(1) - 9) }\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "main = () i32 {\n    load := (x: i64) i64 { x + 1 }\n    to_i32(load(41) - 42)\n}\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Cell: {\n    v: i64,\n    load = (c: Cell) i64 { c.v + 1 }\n}\nmain = () i32 { c := Cell(v: 41)  to_i32(c.load() - 42) }\n",
+        should_pass: true,
+        kind: "",
     )])
+    // a top-level fn named after an intrinsic is a MISCOMPILE if accepted: calls dispatch on the
+    // name in genc, so they'd hit the intrinsic (deref/segfault/cc error), never the user fn.
+    // NEAR-MISS names are ordinary fns — the reject is exact-name only.
+    // a LOCAL fn value may shadow an intrinsic name (#370/#377 route its calls soundly).
+    // a STRUCT METHOD named like an intrinsic is hoisted under a mangled `impl_…` name — allowed.
     // ── (g) POSITIONED diagnostics: kind + file:line:col + caret + message + hint ─────────────────
     dg := run_diags("build diagnostics", [DiagCase(
         src: "// entry\nmain = (rt: i32) i32 {\n    return 0\n}\n",
@@ -1241,7 +1274,14 @@ oracle_build_run* = () i32 {
     ), DiagCase(
         src: "main = () i32 { x := 5 }\n",
         wants: [":1:17: error[return-fit]: function body falls through with no value; add a trailing expression of the declared return type", "  main = () i32 { x := 5 }", "                  ^"],
+    ), DiagCase(
+        src: "load = (x: i64) i64 { x + 1 }\nmain = () i32 { to_i32(load(41)) }\n",
+        wants: ["error[reserved-name]: `load` is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function", "hint: rename — `load` is a compiler intrinsic"],
+    ), DiagCase(
+        src: "// entry\nstore = (p: i64, v: i64) i64 { p + v }\nmain = () i32 { to_i32(store(1, 2)) }\n",
+        wants: [":2:1: error[reserved-name]: `store` is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function", "  store = (p: i64, v: i64) i64 { p + v }", "  ^~~~~", "hint: rename — `store` is a compiler intrinsic"],
     )])
+    // the original intrinsic-collision repro (fn at byte 0 → position-less, message still exact).
     // R2: a NESTED field write through a read-only `Ptr<T>` is positioned on the write target.
     // R3: an index-set into a slice field of a read-only `Ptr<T>`.
     // R6: exhaustiveness on a LOCAL-binding subject is now positioned on the subject (was position-less).
