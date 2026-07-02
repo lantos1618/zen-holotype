@@ -547,7 +547,7 @@ inits_has = (inits: [FieldInit], name: str) bool {
 field_missing_nonnull_ptr = (fields: [Field], inits: [FieldInit]) i32 {
     acc := 0
     fields.loop((h, i, fl) {
-        acc = acc + (fl.ty.is_nonnull_ptr_ty() && (inits.inits_has(fl.name) == false)).match ({ true => 1, false => 0 })
+        acc = acc + (fl.ty.is_nonnull_ptr_ty() && inits.inits_has(fl.name) == false).match ({ true => 1, false => 0 })
     })
     acc
 }
@@ -563,7 +563,15 @@ dup_init_errs = (inits: [FieldInit]) i32 {
     })
     acc
 }
-makestruct_err = (env: Env, m: MakeStructData) i32 { (m.targs.len > 0).match ({ true => env.decls.cv_is_gen_struct(m.ty).match ({ true => { gf := env.decls.gen_struct_fields(m.ty)  env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs() }, false => 0 }), false => env.env_is_struct(m.ty).match ({ true => { sf := env.env_struct_fields(m.ty)  env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs() }, false => 0 }) }) }    // a generic literal: check concrete fields
+makestruct_err = (env: Env, m: MakeStructData) i32 {
+    (m.targs.len > 0).match ({ true => env.decls.cv_is_gen_struct(m.ty).match ({ true => {
+        gf := env.decls.gen_struct_fields(m.ty)
+        env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+    }, false => 0 }), false => env.env_is_struct(m.ty).match ({ true => {
+        sf := env.env_struct_fields(m.ty)
+        env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+    }, false => 0 }) })
+}    // a generic literal: check concrete fields
 gen_base_of = (t: Ty) str {
     t.match ({
         .Generic(g) => g.name,    // unknown gen-struct (template residue) -> lenient
@@ -1926,17 +1934,12 @@ denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) str {
     })
     s.gstr_finish(a)
 }
-denrich_member_noty = (a: MutPtr<Malloc>, field: str, objty: Ty) str {
-    a.gstr_string(64).gstr_append(a, "type `").gstr_append(a, a.zty(objty)).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "`").gstr_finish(a)
-}
+denrich_member_noty = (a: MutPtr<Malloc>, field: str, objty: Ty) str { a.gstr_string(64).gstr_append(a, "type `").gstr_append(a, a.zty(objty)).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "`").gstr_finish(a) }
 denrich_member_msg = (env: Env, field: str, objty: Ty) str {
     a := env.a
     objty.match ({
-        .Named(n) => env.env_is_struct(n).match ({
-            true  => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a),
-            false => a.denrich_member_noty(field, objty),
-        }),
-        _ => a.denrich_member_noty(field, objty),
+        .Named(n) => env.env_is_struct(n).match ({ true => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a), false => a.denrich_member_noty(field, objty) }),
+        _         => a.denrich_member_noty(field, objty),
     })
 }
 // the target name of a not-callable call resolves to a value (a local/global), not a function; name its type.
@@ -1967,14 +1970,11 @@ field_has = (fields: [Field], name: str) bool {
 }
 denrich_makestruct_msg = (env: Env, sd: MakeStructData) str {
     a := env.a
-    env.env_is_struct(sd.ty).match ({
-        true => {
-            fields := env.env_struct_fields(sd.ty)
-            bad := fields.denrich_bad_init(sd.inits)
-            is_empty(bad).match ({ true => "", false => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, sd.ty).gstr_append(a, "` has no field `").gstr_append(a, bad).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(fields)).gstr_append(a, ")").gstr_finish(a) })
-        },
-        false => "",
-    })
+    env.env_is_struct(sd.ty).match ({ true => {
+        fields := env.env_struct_fields(sd.ty)
+        bad := fields.denrich_bad_init(sd.inits)
+        is_empty(bad).match ({ true => "", false => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, sd.ty).gstr_append(a, "` has no field `").gstr_append(a, bad).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(fields)).gstr_append(a, ")").gstr_finish(a) })
+    }, false => "" })
 }
 denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) str {
     load(e).match ({
@@ -2049,7 +2049,7 @@ denrich_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, off: 
 }
 // the driver's entry: an enriched message for a struct-field/operand-type error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
-    (off <= 0 || (code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE())).match ({ true => {
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE()).match ({ true => {
         return ""
     } })
     idx := a.build_decl_index(decls)
@@ -2186,8 +2186,14 @@ pos_or = (p: i32, fallback: i32) i32 { (p <= 0).match ({ true => fallback, false
 kv_ret_kind = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos()) }
 kv_let_fit_kind = (env: Env, l: LetData) i32 { env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos()) }
 kv_let_needannot_kind = (env: Env, l: LetData) i32 { env.let_needannot_err(l).kv_one(KNEEDANNOT()).kv_at(load(l.value).expr_pos()) }
-kv_assign_kind = (env: Env, x: AssignData) i32 { ap := x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())  env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(ap).kv_kor(env.assign_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ap)) }
-kv_idxset_kind = (env: Env, x: IndexSetData) i32 { ip := x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())  env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(ip).kv_kor(env.idxset_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ip)) }
+kv_assign_kind = (env: Env, x: AssignData) i32 {
+    ap := x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())
+    env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(ap).kv_kor(env.assign_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ap))
+}
+kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
+    ip := x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())
+    env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(ip).kv_kor(env.idxset_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ip))
+}
 // mirrors check_stmt: the statement's sub-expressions, then its own fit check.
 kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
@@ -2215,9 +2221,9 @@ kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
         .ExprStmt(e) => env.kv_ret_kind(e),
         .Return(r)   => 0,
-        _            => KFALLTHROUGH().kv_at(st.stmt_pos()),    // a let/assign/loop tail: caret on that statement
+        _            => KFALLTHROUGH().kv_at(st.stmt_pos()),
     })
-}
+}    // a let/assign/loop tail: caret on that statement
 kv_trailing_kind = (env: Env, body: [Stmt]) i32 { env.exp.is_void_ty().match ({ true => 0, false => (body.len == 0).match ({ true => KFALLTHROUGH(), false => env.kv_last_stmt_kind(body[body.len - 1]) }) }) }
 kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env := Env(
@@ -2365,7 +2371,12 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
         } })
     }, false => 0 }), false => 0 })
 }
-is_lambda_arg = (e: Expr) bool { e.match ({ .Lambda(lm) => true, _ => false }) }
+is_lambda_arg = (e: Expr) bool {
+    e.match ({
+        .Lambda(lm) => true,
+        _           => false,
+    })
+}
 // args whose CONCRETE type is fixed by context, not by standalone inference: a lambda (FnT, checked
 // separately), and a BARE enum constructor / tag `.Variant(…)` — its enum is chosen by the expected
 // param type during mono (e.g. `.Num(7)` may be `Tok` or `Expr`), so inferring it here mis-rejects.

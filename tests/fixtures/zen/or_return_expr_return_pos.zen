@@ -1,13 +1,17 @@
-// .or_return() in RETURN and TRAILING-EXPRESSION position. Exit 50 = 6 + 1 + 42 + 1:
-// retpos(1)=Ok(6), retpos(0)=Err, trailing(1)=Ok(42), trailing(0)=Err.
+// .or_return() in RETURN and TRAILING-EXPRESSION position. Exit 52 = 6 + 1 + 42 + 1 + 2:
+// retpos(1)=Ok(6), retpos(0)=Err, trailing(1)=Ok(42), trailing(0)=Err, early(0)=Err→Ok(2).
 { Result, IoError } = std.core.result
 g = (ok: i32) Result<i32, IoError> { (ok == 1).match ({ true => .Ok(4), false => .Err(.NotFound) }) }
 wrap = (n: i32) Result<i32, IoError> { .Ok(n + 2) }
-retpos = (ok: i32) Result<i32, IoError> {
-    return wrap(g(ok).or_return())
-}
-trailing = (ok: i32) Result<i32, IoError> {
-    wrap(g(ok).or_return() * 10)
+retpos = (ok: i32) Result<i32, IoError> { wrap(g(ok).or_return()) }
+trailing = (ok: i32) Result<i32, IoError> { wrap(g(ok).or_return() * 10) }
+// an EARLY (non-trailing) `return f(x).or_return()`-style guard: the return keyword + or_return
+// argument together, off the trailing path.
+early = (ok: i32) Result<i32, IoError> {
+    (ok <= 1).match ({ true => {
+        return wrap(g(ok).or_return())
+    }, false => { } })
+    .Ok(99)
 }
 main = () i32 {
     a := retpos(1).match ({
@@ -26,5 +30,9 @@ main = () i32 {
         .Ok(v)  => 0,
         .Err(e) => 1,
     })    // 1
-    a + b + c + d
+    e := early(0).match ({
+        .Ok(v)  => 0,
+        .Err(e) => 2,
+    })    // 2 (Err propagated through the early return's argument)
+    a + b + c + d + e
 }
