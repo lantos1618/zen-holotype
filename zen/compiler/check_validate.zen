@@ -2327,7 +2327,14 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
 // inlines the call away before check_module runs), so its enrichment must walk raw. The raw
 // fallback is trait-bound-only: every other enrichable kind is reported off the resolved walk
 // and must enrich there.
-denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32) str { desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND()).match ({ true => a.denrich_module(raw, off, code), false => "" })) }
+// enrichment over BOTH decl views: resolved first (concrete receivers), then the RAW pre-inline
+// decls — a trait-bound error at a GENERIC call site only exists in the raw view (the resolver
+// inlines the call away before check_module runs), so its enrichment must walk raw; the raw
+// fallback is trait-bound-only. The kind-string guard keeps enrichment to the PACKED kind
+// channel: the custom channels REUSE numeric codes under their own kind strings (scope-escape
+// carries KESCAPE=16 == KTRAITBOUND, and its offset can land on an `s.acquire(…)` call that
+// LOOKS like a trait-bound miss), so a code match alone would overwrite their hand-built messages.
+denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32, kind: str) str { eq(kind, code.diagnostic_kind_name()).match ({ true => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND()).match ({ true => a.denrich_module(raw, off, code), false => "" })), false => "" }) }
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
