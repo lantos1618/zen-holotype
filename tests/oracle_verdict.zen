@@ -1444,16 +1444,10 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "or-return",
     ), VerdictCase(
-        // Ok-payload mismatch in LET position (the Ok value is consumed locally, not returned):
-        // ACCEPTED — only the error type must match; the lowering rebuilds the Err return as the
-        // enclosing fn's Result. The headline multi-type-pipeline shape.
         src: "{ Result, IoError } = std.core.result\nCfg: {\n    port: i32,\n}\nfetch = (ok: i32) Result<Cfg, IoError> { (ok == 1).match ({ true => .Ok(Cfg(port: 8080)), false => .Err(.NotFound) }) }\nf = (ok: i32) Result<i32, IoError> {\n    cfg := fetch(ok).or_return()\n    .Ok(cfg.port)\n}\ntest* = () i32 { f(1).match ({ .Ok(v) => v, .Err(e) => 0, }) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // The DEGENERATE return-direct shape with a mismatched Ok payload: `return f().or_return()`
-        // unwraps bool then returns it bare from a Result<i32,E> fn — rejected by the post-lowering
-        // return-fit scan (not or-return: the propagation itself is fine, the leftover value isn't).
         src: "{ Result, IoError } = std.core.result\ngk = () Result<bool, IoError> { .Ok(true) }\nf = () Result<i32, IoError> { return gk().or_return() }\ntest* = () i32 { f().match ({ .Ok(v) => v, .Err(e) => 0 }) }",
         should_pass: false,
         kind: "return-fit",
@@ -1574,6 +1568,12 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // Ok-payload mismatch in LET position (the Ok value is consumed locally, not returned):
+    // ACCEPTED — only the error type must match; the lowering rebuilds the Err return as the
+    // enclosing fn's Result. The headline multi-type-pipeline shape.
+    // The DEGENERATE return-direct shape with a mismatched Ok payload: `return f().or_return()`
+    // unwraps bool then returns it bare from a Result<i32,E> fn — rejected by the post-lowering
+    // return-fit scan (not or-return: the propagation itself is fine, the leftover value isn't).
     // M1 slice 1 (rt-scoped-runtime, docs/rt-scoped-runtime.md): spawner scratch must not cross an
     // actor boundary. Rejects (error[scratch-escape]): a send whose enum payload carries a local
     // `a.acquire(…)` pointer; a send of a slice-literal-backed struct (stack storage); spawn state
