@@ -143,7 +143,7 @@ real threads make it unnecessary, and message-passing makes the colorless proper
 
 | Remove ❌ | Keep ✅ |
 |---|---|
-| `Runtime.checkpoint` / `Signal`-as-suspension | the work-stealing pool (real pthreads) |
+| `Runtime.checkpoint` / `Signal`-as-suspension | the global-run-queue pool (real pthreads) |
 | ucontext coroutine substrate (`coroutine.zen`) | actor mailboxes (now behind `Mailbox`) |
 | cooperative `sched.run` round-robin loop | atomics / `Mutex` / `CondVar` floor |
 | `request`/`ask` (the hidden blocking wait) | typed messages + `send` |
@@ -156,7 +156,8 @@ message; the actor handles it in a behavior. Deadlines become a timer actor that
 
 ## 6. Real vs. to-build, and the build order
 
-**Real today:** `Allocator` trait + `Heap`/`Arena`; `Rc`/`Arc`; the concrete work-stealing pool; the
+**Real today:** `Allocator` trait + `Heap`/`Arena`; `Rc`/`Arc`; the concrete multi-threaded pool
+(global run queue; work-stealing deques are roadmap); the
 concrete ring-buffer mailbox; typed `Receiver<Msg>` + `send`; atomics/`Mutex`/`CondVar`; the
 move/escape/UAF checker.
 

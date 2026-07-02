@@ -1,12 +1,16 @@
-// std.concurrent.pool — PARALLELISM Cut 1: a multi-threaded work-stealing scheduler that runs the
-// actor model across M real OS threads (genuine N-core parallelism), per docs/parallel-scheduler-design.md.
+// std.concurrent.pool — PARALLELISM Cut 1: a multi-threaded GLOBAL-RUN-QUEUE scheduler that runs the
+// actor model across M real OS threads (genuine N-core parallelism), per
+// docs/archive/parallel-scheduler-design.md.
 //
-// This is the FIRST cut from that design: a mutex-guarded GLOBAL run queue + M worker pthreads +
-// mutex-per-mailbox. The scheduled unit is an ACTOR (Pony model): an actor is runnable iff its
-// mailbox has a pending message AND it is not already scheduled/running. A worker pops a runnable
-// actor, runs its behavior over a bounded batch of messages, then reschedules (if more remain) or
-// deschedules (if empty). Genuinely parallel, correct, NO CAS — the contended global lock is the
-// known Cut-1 limitation (Cut 2 = per-worker deques; Cut 3 = lock-free Chase–Lev).
+// This is the FIRST cut from that design: ONE mutex-guarded GLOBAL run queue + M worker pthreads +
+// mutex-per-mailbox. It is NOT work-stealing — there are no per-worker deques and nothing is stolen;
+// every worker pops the single shared queue. The scheduled unit is an ACTOR (Pony model): an actor is
+// runnable iff its mailbox has a pending message AND it is not already scheduled/running. A worker
+// pops a runnable actor, runs its behavior over a bounded batch of messages, then reschedules (if
+// more remain) or deschedules (if empty). Genuinely parallel, correct, NO CAS — the contended global
+// lock is the known Cut-1 limitation (Cut 2 = per-worker deques + work-stealing; Cut 3 = lock-free
+// Chase–Lev). The run queue GROWS on overflow (doubling under the queue mutex), so scheduling more
+// concurrently-runnable actors than the initial rqcap is never an abort.
 //
 // ── THE CENTRAL RACE-FREEDOM INVARIANT (design §3.3) ────────────────────────────────────────────
 // An actor is present in at most one run queue AND executing on at most one worker at any instant,
@@ -44,7 +48,6 @@
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
 { spawn, join, JoinHandle } = std.thread
 { is_null } = std.core.ptr
-{ panic } = std.core.result
 { Ring } = std.concurrent.ring
 QUANTUM := 64    // max messages an actor runs per turn before yielding the worker (fairness)
 // ── PoolActor: a type-erased runnable actor ─────────────────────────────────────────────────────
@@ -139,7 +142,7 @@ Pool: {
 pool_view* = (raw: RawPtr<u8>) MutPtr<Pool> { raw.slice(1)[0].addr() }    // guards rq + live + stop
 pool_raw* = (p: MutPtr<Pool>) RawPtr<u8> { p.selfraw }    // idle workers park here; `send` signals it when work arrives
 rq_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) void {
-    (p.rqtail - p.rqhead >= p.rqcap).match ({ true => panic("pool: run-queue overflow (rqcap too small for scheduled actors)"), false => { } })    // the owner thread waits here for quiescence (live == 0)
+    (p.rqtail - p.rqhead >= p.rqcap).match ({ true => rq_grow(p), false => { } })    // the owner thread waits here for quiescence (live == 0)
     // # of scheduled actors (runnable or running); 0 = quiescent (under mu)
     // shutdown flag: 1 = workers should exit when no work (under mu)
     // i64[nworkers]: messages processed per worker (proof of distribution)
@@ -150,11 +153,34 @@ rq_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) void {
     // body that received the raw pointer through its `arg`).
     // the pool's own backing-block address — pass this through a thread `arg` to reconstruct the pool view.
     // run-queue primitives — caller MUST hold `p.mu`.
-    // The ring holds (rqtail - rqhead) live slots; it MUST NOT exceed rqcap or a push would overwrite a
-    // still-queued actor (heap corruption / UAF). The pool is sized so rqcap >= the max # of concurrently
-    // scheduled actors; if that invariant is ever violated we panic LOUDLY rather than silently corrupt.
+    // The ring holds (rqtail - rqhead) live slots; a push into a FULL ring would overwrite a still-queued
+    // actor (heap corruption / UAF), so a full ring GROWS first (rq_grow) — enqueueing more concurrently-
+    // runnable actors than the initial rqcap is handled by reallocation, never an abort.
     p.rqbuf.offset(p.rqtail % p.rqcap * 8).store_i64(actor)
     p.rqtail = p.rqtail + 1
+}
+// double the run queue's capacity: allocate a fresh ring, copy the (rqtail - rqhead) live slots to the
+// front in FIFO order, swap the buffers, free the old one. Caller MUST hold `p.mu` — the queue is ONE
+// mutex-guarded structure, so growth is a plain critical-section reallocation (no reader/writer can
+// observe the swap mid-flight). Ownership is unchanged: the pool owns rqbuf (malloc'd in new_pool),
+// and the current buffer — original or grown — is the one pool_close frees.
+rq_grow = (p: MutPtr<Pool>) void {
+    newcap := p.rqcap * 2
+    nbuf := malloc(newcap * 8)
+    n := p.rqtail - p.rqhead
+    rq_copy(p, nbuf, 0, n)
+    free(p.rqbuf)
+    p.rqbuf = nbuf
+    p.rqhead = 0
+    p.rqtail = n
+    p.rqcap = newcap
+}
+// copy live slot i (FIFO order from the old ring's head) into the new buffer's slot i.
+rq_copy = (p: MutPtr<Pool>, nbuf: RawPtr<u8>, i: i64, n: i64) void {
+    (i < n).match ({ true => {
+        nbuf.offset(i * 8).store_i64(p.rqbuf.offset((p.rqhead + i) % p.rqcap * 8).load_i64())
+        rq_copy(p, nbuf, i + 1, n)
+    }, false => { } })
 }
 rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
     a := p.rqbuf.offset(p.rqhead % p.rqcap * 8).load_i64().offset(0)
