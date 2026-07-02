@@ -447,6 +447,66 @@ match_arm_result_errs = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     })
     acc
 }
+// ── value-consumed match/cond arms must each yield a value ──────────────────────────────
+// A match/cond CONSUMED AS A VALUE (let/assign RHS, return operand, call argument, index-set
+// value) must get a value from every arm that doesn't diverge. The arm typing above treats a
+// void arm as contributing NO constraint — that leniency exists for DIVERGING arms (a `return`
+// tail leaves the fn, so it legitimately yields nothing) and for template residue — but the
+// emitter assigns EVERY arm into the value slot (`_out = <arm>` / `c ? a : b`), so a genuinely
+// valueless arm reaches cc as `char* _out = (done = true)` — a cc-stage error on a checked
+// program — or WORSE compiles silently wrong (`c ? "s" : bool` is only a warning under -w).
+// Reject it here (KARMVOID, positioned at the offending arm). Two deliberate scope limits:
+//   * only POSITIVE no-value shapes fire — a block ending in a non-expression statement or
+//     empty, a `.loop`, a call to a fn DECLARED void — never inference fallbacks (an
+//     unresolvable template call also infers void and must stay lenient);
+//   * only CONSUMED positions fire — a discarded match (e.g. the tail of a void fn) keeps its
+//     mixed side-effect arms, which emit fine as `(c ? f() : ({ }))`.
+known_void_call = (env: Env, c: CallData) bool {
+    f := env.env_func(c.fn)
+    eq(f.name, c.fn).match ({ true => f.tparams.len == 0 && f.ret.is_void_ty(), false => false })
+}
+novalue_arm_leaf = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b) => env.novalue_block_tail(b.stmts),
+        .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+        .Match(m) => env.novalue_match_arms(m),
+        .Loop(l)  => 1,    // `.loop` never yields a value
+        .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
+        _         => 0,
+    })
+}
+novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
+    (stmts.len == 0).match ({ true => 1, false => stmts[stmts.len - 1].match ({
+        .Return(r)   => 0,    // diverging arm: the one legitimate valueless tail
+        .ExprStmt(e) => env.novalue_arm_leaf(e),
+        _            => 1,    // a Let/Assign/If/While/IndexSet tail is a statement, never a value
+    }) })
+}
+novalue_match_arms = (env: Env, m: MatchData) i32 {
+    acc := 0
+    m.arms.loop((h, i, ar) {
+        acc = acc + env.novalue_arm_leaf(ar.body)
+    })
+    acc
+}
+value_void_arm_err = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
+    (want.is_void_ty() || env.unknown_ty(want)).match ({ true => 0, false => load(e).match ({
+        .Match(m) => env.novalue_match_arms(m),
+        .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+        _         => 0,
+    }) })
+}
+// argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
+call_void_arm_errs = (env: Env, c: CallData) i32 {
+    f := env.env_func(c.fn)
+    acc := 0
+    eq(f.name, c.fn).match ({ true => {
+        c.args.loop((h, i, ar) {
+            acc = acc + (i < f.params.len).match ({ true => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({ true => 0, false => env.value_void_arm_err(f.params[i].ty, ar.addr()) }), false => 0 })
+        })
+    }, false => { } })
+    acc
+}
 // Early returns inside value-position block arms would be dropped by expression emission.
 early_returns = (stmts: [Stmt]) bool {
     found := false
