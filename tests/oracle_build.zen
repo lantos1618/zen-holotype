@@ -410,6 +410,11 @@ oracle_build_run* = () i32 {
         want_out: "1.5\n0.25\n-3.0\n0.001\n2.0\n2.0\n0.0\n0.3\n1.0e-7\n",
         check_out: true,
     ), FixtureCase(
+        path: "tests/fixtures/zen/print_f32.zen",
+        want_exit: "0",
+        want_out: "1.5\n0.251.5\n100.0\n",
+        check_out: true,
+    ), FixtureCase(
         path: "tests/fixtures/zen/print_float_precision.zen",
         want_exit: "0",
         want_out: "0.123456789\n2.718281828459\n65536.0\n1234567890.0\n123456.789\n0.0009765625\n",
@@ -1097,6 +1102,12 @@ oracle_build_run* = () i32 {
     )])
     // ── (g) POSITIONED diagnostics: kind + file:line:col + caret + message + hint ─────────────────
     dg := run_diags("build diagnostics", [DiagCase(
+        src: "// entry\nmain = (rt: i32) i32 {\n    return 0\n}\n",
+        wants: [":2:1: error[main-signature]: `main` takes no parameters (yet)", "  main = (rt: i32) i32 {", "  ^~~~", "hint: declare it `main = () i32 { … }` and bind capabilities inside the body; read CLI args with `std.os.arg(i)`/`argc()`"],
+    ), DiagCase(
+        src: "{ help } = util.helpers\nmain = () i32 { help() }\n",
+        wants: ["error: no module 'util.helpers'", "local imports name a single sibling file: `{ f } = helper` loads helper.zen next to", "only std/compiler modules use dotted paths, e.g. `std.text.fmt`"],
+    ), DiagCase(
         src: "add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { add(1) }\n",
         wants: [":2:17: error[arity]: wrong number of arguments", "  main = () i32 { add(1) }", "                  ^~~", "hint: check the callee signature and pass exactly the declared parameters"],
     ), DiagCase(
@@ -1310,6 +1321,12 @@ oracle_build_run* = () i32 {
     )])
     // ── (j) procedural tests (project mode, fmt idempotency, help/version, bad-file, sibling, emit-eq) ─
     sh := run_shells("build shell", [ShellCase(
+        name: "run_forwards_args",
+        cmd: "./zenc run tests/fixtures/zen/echo_args.zen alpha beta 'g z' > $ZT/zargs.txt 2>/dev/null && printf '3\\nalpha\\nbeta\\ng z\\n' | cmp -s - $ZT/zargs.txt",
+    ), ShellCase(
+        name: "run_no_args_still_works",
+        cmd: "./zenc run tests/fixtures/zen/echo_args.zen > $ZT/zargs0.txt 2>/dev/null && printf '0\\n' | cmp -s - $ZT/zargs0.txt",
+    ), ShellCase(
         name: "result_expect_panics",
         cmd: "./zenc build tests/fixtures/zen/result_expect_panics.zen -o $ZT/zrep 2>/dev/null && { $ZT/zrep >/dev/null 2>$ZT/zrep_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: config must load\" $ZT/zrep_e.txt",
     ), ShellCase(
