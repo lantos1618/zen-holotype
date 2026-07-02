@@ -1,15 +1,34 @@
-{ to_exit } = std.core.bool
-{ expect } = std.core.result
+{ Result, IoError, map_err, expect } = std.core.result
+{ Context, Receiver } = std.concurrent.actor
 heap = std.mem.heap
 actor = std.concurrent.actor
-Msg*: Inc
-Counter*: { n: i32 }
-Counter.impl(actor.Receiver<Msg>, {
-    receive = (c: MutPtr<Counter>, ctx: actor.Context<Msg>) void { c.n = c.n + 1 }
+Msg*: Inc | Add(i32)
+Counter*: {
+    n: i32,
+}
+Counter.impl(Receiver, {
+    receive = (c: MutPtr<Counter>, ctx: Context<Msg>) void {
+        ctx.msg.match ({
+            .Inc    => {
+                c.n = c.n + 1
+            },
+            .Add(k) => {
+                c.n = c.n + k
+            },
+        })
+    }
 })
 main = () i32 {
+    // statement-position discarded map_err with unannotated lambda (was an ICE)
+    bad: Result<i32, IoError> := .Err(.Eof)
+    bad.map_err((e) { "boom" })
+    // (c) the blessed idiom, fully unannotated — then actually drive the actor and verify state
     h := heap.gpa()
     counter := actor.spawn(h.addr(), 8, Counter(n: 0)).expect("spawn counter")
+    counter.send(.Inc)
+    counter.send(.Add(4))
+    counter.run()
+    got := counter.actor().n
     counter.free(h.addr())
-    true.to_exit()
+    (got == 5).match ({ true => 0, false => 1 })
 }

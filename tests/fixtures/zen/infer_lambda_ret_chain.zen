@@ -1,7 +1,27 @@
-{ Result, IoError, expect, map_err } = std.core.result
-{ to_exit } = std.core.bool
+{ Result, IoError, expect, map_err, or, or_else } = std.core.result
 main = () i32 {
+    // (a) unannotated lambda in a chain — must run AND map the value correctly
     good: Result<i32, IoError> := .Ok(42)
-    v := good.map_err((e) { "boom" }).expect("mapped")
-    (v == 42).to_exit()
+    v := good.map_err((e) { "boom" }).expect("mapped ok")
+    // Err path: verify the lambda body actually runs and the mapped payload is right
+    bad: Result<i32, IoError> := .Err(.Eof)
+    m := bad.map_err((e) { "boom" })
+    mv := m.match ({
+        .Ok(x)  => 0,
+        .Err(s) => (s == "boom").match ({ true => 1, false => 0 - 1 }),
+    })
+    // (b) annotated lambda return (regression guard)
+    mb: Result<i32, str> := good.map_err((e) { "nope" })
+    bv := mb.or(0 - 7)
+    // (d) two chained combinators, all unannotated
+    dv := good.map_err((e) { 5 }).map_err((n) { "deep" }).expect("deep ok")
+    // Err path through the double chain: both lambdas must actually compose
+    de := bad.map_err((e) { 5 }).map_err((n) { n + 1 }).match ({
+        .Ok(x)  => 0 - 1,
+        .Err(n) => n,
+    })
+    // (e) or / or_else unchanged
+    ov := bad.or(9)
+    oe := bad.or_else((e) { 11 })
+    (v == 42 && mv == 1 && bv == 42 && dv == 42 && de == 6 && ov == 9 && oe == 11).match ({ true => 0, false => 1 })
 }
