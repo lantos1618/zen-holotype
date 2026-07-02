@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (216)", [VerdictCase(
+    a := run_verdicts("verdict (220)", [VerdictCase(
         src: "test* = () i32 { a: u8 := 300  to_i32(a) }",
         should_pass: false,
         kind: "",
@@ -804,6 +804,22 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { b := Blob(v: 3)  draw(b) }",
+        should_pass: false,
+        kind: "trait-bound",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { c := Circle(r: 2)  draw(c) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nBlob*: { v: i32 }\ntest* = () i32 { b := Blob(v: 3)  b.render() }",
+        should_pass: false,
+        kind: "trait-bound",
+    ), VerdictCase(
+        src: "Blob*: { v: i32 }\ndraw<A: Renderable> = (a: A) i32 { 0 }\ntest* = () i32 { b := Blob(v: 3)  draw(b) }",
+        should_pass: false,
+        kind: "trait-bound",
+    ), VerdictCase(
         src: "Counter*: { n: i32 }\ndo_bump* = (c: MutPtr<Counter>) void { c.n = c.n + 1 }\ntest* = () i32 { c := Counter(n: 0)  p: Ptr<Counter> := c.addr()  do_bump(p)  c.n }",
         should_pass: false,
         kind: "",
@@ -872,6 +888,12 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "parse",
     )])
+    // a bounded generic `draw<A: Show>` called with a type that has NO Show impl: rejected at
+    // the CALL SITE as trait-bound (the kvb raw-decls pass), never as undefined-name/arity.
+    // the SAME bounded call with the satisfying type stays green.
+    // a trait method with ZERO impls in the module: the call is a trait-bound gap on the
+    // receiver type, NOT an undefined name (the trait declaration alone makes it a method).
+    // a bound naming a NONEXISTENT trait can never be satisfied: trait-bound at the call site.
     // SHADOWING accept: an FnT param NAMED AFTER AN INTRINSIC (`store_i64: (i64) i64`) is a
     // genuine function-valued shadow — checked via the indirect-call path, never intrinsic arity.
     // glue-fix reject: `x := Res` ⏎ `.Okv(1)` is TWO statements (no silent glue into
