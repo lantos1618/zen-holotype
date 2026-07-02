@@ -1,7 +1,7 @@
 // compiler.genc_emit — C emission over the shared genc AST. Pipeline: genc -> mono -> genc_emit.
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, blk_diverges, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
@@ -62,7 +62,10 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         .Block(b)       => s.gen_blockexpr(alloc, b),
     })
 }
-// GCC statement-expression; trailing return becomes the result expression.
+// GCC statement-expression; the trailing ExprStmt is the result expression. A trailing `return` is a
+// USER return (arm/loop blocks never get an implicit trailing return; the inliner strips its own tail
+// returns before splicing — see blk_diverges) and emits as a REAL `return`, leaving the enclosing C
+// function. Such a block diverges: its emitters (gen_switch_body / gen_cond) never use its value.
 gen_blockexpr = (s: String, alloc: MutPtr<Malloc>, b: BlockData) String {
     out := s.gstr_append(alloc, "({ ")
     b.stmts.loop((h, i, st) {
@@ -72,7 +75,6 @@ gen_blockexpr = (s: String, alloc: MutPtr<Malloc>, b: BlockData) String {
 }
 gen_block_one = (s: String, alloc: MutPtr<Malloc>, st: Stmt, last: bool) String {
     last.match ({ true => st.match ({
-        .Return(e)   => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
         .ExprStmt(e) => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
         _            => s.gen_stmt(alloc, st),
     }), false => s.gen_stmt(alloc, st) })
@@ -320,7 +322,14 @@ gen_lam_sexpr = (s: String, alloc: MutPtr<Malloc>, lm: LambdaData) String {
     })
     out.gstr_append(alloc, ")")
 }
-gen_cond = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { s.gstr_append(alloc, "(").gen_expr(alloc, d.c).gstr_append(alloc, " ? ").gen_expr(alloc, d.t).gstr_append(alloc, " : ").gen_expr(alloc, d.e).gstr_append(alloc, ")") }
+gen_cond = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { (blk_diverges(d.t) || blk_diverges(d.e)).match ({ true => s.gen_cond_div(alloc, d), false => s.gstr_append(alloc, "(").gen_expr(alloc, d.c).gstr_append(alloc, " ? ").gen_expr(alloc, d.t).gstr_append(alloc, " : ").gen_expr(alloc, d.e).gstr_append(alloc, ")") }) }
+// A value cond with a DIVERGING branch (its block ends in `return`) cannot be a `?:` — a void arm in
+// a conditional expression is invalid C, and the return must actually fire. Emit a statement-expr:
+// the non-diverging branch assigns `_out` (typed from it, unevaluated via __typeof__); the diverging
+// branch runs as statements and leaves the function. Both diverging → `_out` is a dead int.
+gen_cond_branch_div = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String { blk_diverges(e).match ({ true => s.gstr_append(alloc, "{ ").gen_expr(alloc, e).gstr_append(alloc, "; }"), false => s.gstr_append(alloc, "{ _out = ").gen_expr(alloc, e).gstr_append(alloc, "; }") }) }
+gen_cond_div_ty = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { blk_diverges(d.t).match ({ true => blk_diverges(d.e).match ({ true => s.gstr_append(alloc, "0"), false => s.gen_expr(alloc, d.e) }), false => s.gen_expr(alloc, d.t) }) }
+gen_cond_div = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { s.gstr_append(alloc, "({ __typeof__(").gen_cond_div_ty(alloc, d).gstr_append(alloc, ") _out; if (").gen_expr(alloc, d.c).gstr_append(alloc, ") ").gen_cond_branch_div(alloc, d.t).gstr_append(alloc, " else ").gen_cond_branch_div(alloc, d.e).gstr_append(alloc, " _out; })") }
 // escape one byte for a C string literal: " -> \" , \ -> \\ , newline -> \n , else itself
 gen_escape_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.gstr_append(alloc, "\\\""), false => (b == '\\').match ({ true => s.gstr_append(alloc, "\\\\"), false => (b == '\n').match ({ true => s.gstr_append(alloc, "\\n"), false => s.gstr_push(alloc, b) }) }) }) }
 // a C string literal: `"` + each byte escaped + `"`
@@ -346,10 +355,18 @@ gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
 gen_armbind = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, a: ArmData) String { s.gstr_append(alloc, "({ __auto_type ").gstr_append(alloc, a.bind).gstr_append(alloc, " = ").gstr_append(alloc, subj).gstr_append(alloc, sep).gstr_append(alloc, "u.").gstr_append(alloc, a.variant).gstr_append(alloc, "; ").gen_expr(alloc, a.body).gstr_append(alloc, "; })") }
 gen_armbody = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, a: ArmData) String { is_empty(a.bind).match ({ true => s.gstr_append(alloc, "(").gen_expr(alloc, a.body).gstr_append(alloc, ")"), false => s.gen_armbind(alloc, subj, sep, a) }) }
 // Type every arm through C's conditional operator so array arms decay, numeric arms widen, and exact
-// struct/scalar arms keep their type. __typeof__ evaluates none of these arm expressions.
-gen_match_type_expr = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, arms: [ArmData], i: i64) String { (i >= arms.len).match ({ true => s.gstr_append(alloc, "0"), false => (i == arms.len - 1).match ({ true => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[i]).gstr_append(alloc, " : ").gen_armbody(alloc, subj, sep, arms[i]).gstr_append(alloc, ")"), false => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[i]).gstr_append(alloc, " : ").gen_match_type_expr(alloc, subj, sep, arms, i + 1).gstr_append(alloc, ")") }) }) }
+// struct/scalar arms keep their type. __typeof__ evaluates none of these arm expressions. DIVERGING
+// arms (body ends in `return`) yield no value: they are skipped here (their block would type void and
+// poison the chain) and emitted as statements in gen_switch_body. All arms diverging → dead int _out.
+next_live_arm = (arms: [ArmData], i: i64) i64 { (i >= arms.len).match ({ true => arms.len, false => arms[i].body.blk_diverges().match ({ true => arms.next_live_arm(i + 1), false => i }) }) }
+gen_match_type_expr = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, arms: [ArmData], i: i64) String {
+    j := arms.next_live_arm(i)
+    (j >= arms.len).match ({ true => s.gstr_append(alloc, "0"), false => (arms.next_live_arm(j + 1) >= arms.len).match ({ true => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, " : ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, ")"), false => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, " : ").gen_match_type_expr(alloc, subj, sep, arms, j + 1).gstr_append(alloc, ")") }) })
+}
 gen_match_out_decl = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, arms: [ArmData]) String { s.gstr_append(alloc, "__typeof__(").gen_match_type_expr(alloc, subj, sep, arms, 0).gstr_append(alloc, ") _out; ") }
-gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, a: ArmData) String { s.gstr_append(alloc, "{ _out = ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } ") }
+// a diverging arm's body runs for CONTROL FLOW only (its trailing `return` leaves the function) —
+// no `_out` assignment (its statement-expr would be void).
+gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, a: ArmData) String { a.body.blk_diverges().match ({ true => s.gen_switch_stmt_body(alloc, subj, sep, a), false => s.gstr_append(alloc, "{ _out = ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } ") }) }
 gen_switch_stmt_body = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, a: ArmData) String { s.gstr_append(alloc, "{ ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } ") }
 gen_switch_case = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, ename: str, a: ArmData) String { s.gstr_append(alloc, "case ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant).gstr_append(alloc, ": ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_default = (s: String, alloc: MutPtr<Malloc>, subj: str, sep: str, a: ArmData) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
