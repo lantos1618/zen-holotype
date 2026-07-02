@@ -386,7 +386,16 @@ ff_loop = (s: String, a: MutPtr<Malloc>, l: LoopData, ind: i32) String {
     head := s.ff_recv(a, l.seq, ind).ff_append(a, ".loop((").ff_append(a, l.h).ff_append(a, ", ").ff_append(a, l.idx).ff_append(a, ", ").ff_append(a, l.elem).ff_append(a, ") ")
     head.ff_block(a, l.body, ind, false).ff_append(a, ")")
 }
-ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String { s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ").ff_block(a, lm.body, ind, true) }
+// the declared return type `(x) U {…}` is printed back when the source wrote one. lm.ret is Void when
+// unannotated, so a written `(x) void {…}` formats to the equivalent bare `(x) {…}`.
+ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
+    sig := s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ")
+    ret := lm.ret.match ({
+        .Void => sig,
+        _     => sig.ff_ty(a, lm.ret).ff_append(a, " "),
+    })
+    ret.ff_block(a, lm.body, ind, true)
+}
 // ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
 arm_pat_len = (ar: ArmData) i32 { eq(ar.variant, "_").match ({ true => 1, false => is_empty(ar.bind).match ({ true => 1 + to_i32(view(ar.variant).len), false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len) }) }) }
 arms_max_pat = (arms: [ArmData]) i32 {
@@ -557,14 +566,17 @@ ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     })
     out
 }
-// lambda params: the parser DISCARDS each `: Type` annotation (LambdaData keeps only names; the FnT
-// context supplies the real types when the lambda is spliced), so print bare NAMES — `(x)`, never
-// `(x: void)` which would mis-reparse as a void-typed param.
+// lambda params: a param's ty is its declared `: Type` annotation (Void when the source wrote none —
+// the FnT context supplies the real types when the lambda is spliced). Print the annotation back when
+// present; an unannotated param prints as its bare NAME — `(x)`, never `(x: void)`.
 ff_lparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
-        out = out.ff_append(a, p.name)
+        out = p.ty.match ({
+            .Void => out.ff_append(a, p.name),
+            _     => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+        })
     })
     out
 }
@@ -713,10 +725,13 @@ ff_genstruct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: Ge
     })
     body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).ff_append(a, "}")
 }
+// the impl head prints im.trty — the trait reference AS WRITTEN (qualifier + type args, e.g.
+// `actor.Receiver<Msg>`) — never the bare im.trname mangle key, which drops the `.Receiver<Msg>` part
+// of a qualified reference and would silently change the code's meaning.
 ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
     ctp := decls.ff_type_tparams(im.ty)
-    (im.methods.len == 0).match ({ true => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", { })"), false => {
-        open := s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_append(a, im.trname).ff_append(a, ", {\n")
+    (im.methods.len == 0).match ({ true => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_ty(a, im.trty).ff_append(a, ", { })"), false => {
+        open := s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_ty(a, im.trty).ff_append(a, ", {\n")
         open.ff_methods(a, decls, im, ctp, 1).ff_append(a, "})")
     } })
 }

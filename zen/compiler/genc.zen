@@ -126,9 +126,11 @@ LoopData*: {
     body: [Stmt],
     h: str,
 }    // h = the handler name; `h.break`/`h.continue` in the body are the loop controls
-// a lambda value `(a, x) { body }` — params are NAMES only (their types come from the FnT it is
-// passed to, so the Param tys are Void placeholders). Lambda values are only ever arguments to a
-// template's FnT parameter, and are inlined at the call site so their bodies read captured locals.
+// a lambda value `(a, x) { body }` — a param's ty is its DECLARED `: Type` annotation when the source
+// wrote one, Void otherwise. The annotation is kept ONLY so the formatter round-trips it: type checking
+// still takes the real param types from the FnT the lambda is passed to. Lambda values are only ever
+// arguments to a template's FnT parameter, and are inlined at the call site so their bodies read
+// captured locals.
 LambdaData*: {
     params: [Param],
     body: [Stmt],
@@ -263,9 +265,12 @@ GenEnumDecl*: {
 ImplData*: {
     ty: str,
     trname: str,
+    trty: Ty,
     methods: [Param],
     pos: i32,
-}
+}    // trty = the trait reference AS WRITTEN (qualifier + type args, e.g. `actor.Receiver<Msg>`) so the
+// formatter round-trips it; trname stays the single-token mangle key (`actor`/`Receiver`) the impl's
+// hoisted DFunc names were built from — checker/codegen lookups key on trname, never trty.
 // DForeign is a function DECLARATION with no body — a foreign binding like `malloc = (n: i64) …`.
 // It's emitted as a C prototype `ret name(params);` (the definition comes from libc / another TU),
 // so genModule emits its signature but no body, and the checker knows its full signature.
@@ -1052,14 +1057,16 @@ dimpl* = (ty: str, trname: str, methods: [Param]) Decl {
     .DImpl(ImplData(
         ty: ty,
         trname: trname,
+        trty: tnamed(trname),
         methods: methods,
         pos: 0,
     ))
 }
-dimpl_at* = (ty: str, trname: str, methods: [Param], pos: i32) Decl {
+dimpl_at* = (ty: str, trname: str, trty: Ty, methods: [Param], pos: i32) Decl {
     .DImpl(ImplData(
         ty: ty,
         trname: trname,
+        trty: trty,
         methods: methods,
         pos: pos,
     ))

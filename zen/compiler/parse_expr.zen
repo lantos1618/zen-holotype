@@ -1234,8 +1234,9 @@ lam_after_name = (a: MutPtr<Malloc>, src: str, pos: i32) bool {
 }    // skip `: Type`
 // After a param (and its optional type): a ',' starts another param, a ')' ends the list.
 lam_after_sep = (a: MutPtr<Malloc>, src: str, sep: Scan) bool { src.is_comma(sep.tok).match ({ true => a.lam_params_ok(src, sep.next), false => src.is_rparen(sep.tok).match ({ true => a.lam_ret_brace(src, sep.next), false => false }) }) }
-// Lambda params accept an optional `: Type` each; the type is discarded (FnT context supplies the real
-// types when the lambda is inline-spliced), so the body still binds the names as before.
+// Lambda params accept an optional `: Type` each; the type is KEPT on the Param so the formatter
+// round-trips it (Void when unannotated). It stays inert otherwise — FnT context supplies the real
+// types when the lambda is inline-spliced, so the body still binds the names as before.
 fill_lnames = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => PEnd(
@@ -1253,9 +1254,13 @@ fill_lname = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd 
         )
     } })
     nt := src.scan(pos)
-    buf[i] = param(a.lexeme(src, nt.tok), tvoid())
     sep0 := src.scan(nt.next)
-    sep := src.is_op(sep0.tok, ':').match ({ true => src.scan(a.parse_ty(src, sep0.next).next), false => sep0 })    // optional `: Type` — discard the type
+    te := src.is_op(sep0.tok, ':').match ({ true => a.parse_ty(src, sep0.next), false => TyEnd(
+        ty: tvoid(),
+        next: nt.next,
+    ) })    // optional `: Type` — kept for round-trip (Void when absent)
+    buf[i] = param(a.lexeme(src, nt.tok), te.ty)
+    sep := src.scan(te.next)
     src.is_comma(sep.tok).match ({ true => a.fill_lnames(src, sep.next, buf, i + 1), false => PEnd(
         count: i + 1,
         next: sep.next,
