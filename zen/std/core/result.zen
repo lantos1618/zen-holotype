@@ -42,18 +42,21 @@ or*<T, E> = (r: Result<T, E>, default: T) T {
         .Err(e) => default,
     })
 }
-// Ok payload, or `f(err)` — lazy fallback that can inspect the error.
-or_else*<T, E> = (r: Result<T, E>, f: (E) T) T {
+// Ok payload, or `on_err(err)` — lazy fallback that can inspect the error.
+// (Closure params here are NOT named `f`: result.zen flattens into nearly every program, and inside
+// an uninstantiated generic body a call through a closure param resolves against any same-named
+// top-level fn of the host program — `f` is far too common a user name to risk the arity clash.)
+or_else*<T, E> = (r: Result<T, E>, on_err: (E) T) T {
     r.match ({
         .Ok(v)  => v,
-        .Err(e) => f(e),
+        .Err(e) => on_err(e),
     })
 }
 // Map the error channel, leaving Ok untouched: Result<T, E> → Result<T, F>.
-map_err*<T, E, F> = (r: Result<T, E>, f: (E) F) Result<T, F> {
+map_err*<T, E, F> = (r: Result<T, E>, on_err: (E) F) Result<T, F> {
     r.match ({
         .Ok(v)  => .Ok(v),
-        .Err(e) => .Err(f(e)),
+        .Err(e) => .Err(on_err(e)),
     })
 }
 // ── Opt mirrors (flat namespace has no overloading, so the names carry the type) ─────────────────
@@ -75,11 +78,11 @@ some_or*<T> = (o: Opt<T>, default: T) T {
         .None    => default,
     })
 }
-// Some payload, or `f()` — lazy fallback (no error payload to pass, unlike or_else).
-some_or_else*<T> = (o: Opt<T>, f: () T) T {
+// Some payload, or `fallback()` — lazy fallback (no error payload to pass, unlike or_else).
+some_or_else*<T> = (o: Opt<T>, fallback: () T) T {
     o.match ({
         .Some(v) => v,
-        .None    => f(),
+        .None    => fallback(),
     })
 }
 // map_err has no Opt mirror: Opt carries no error channel to map. The bridge is ok_or:
