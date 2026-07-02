@@ -1,0 +1,40 @@
+// End-to-end wordfreq over HMap<str, i64>: count a word list with get_or + put, query, delete a
+// word, iterate with each. `empty` pins K/V with the two-step annotation (its type params live
+// only in the return type — a one-line .expect chain can't reach them).
+hm = std.collections.hmap
+{ HMap } = std.collections.hmap
+{ Result, IoError } = std.core.result
+{ println } = std.text.fmt
+halloc = std.mem.heap
+bump<AllocT> = (alloc: MutPtr<AllocT>, m: hm.HMap<str, i64>, w: str) hm.HMap<str, i64> { m.put(alloc, w, m.get_or(w, 0) + 1).expect("put") }
+main = () i32 {
+    alloc := halloc.gpa()
+    a := alloc.addr()
+    r: Result<HMap<str, i64>, IoError> := hm.empty(a)
+    m := r.expect("empty")
+    words: [str] := ["the", "cat", "sat", "on", "the", "mat", "the", "cat"]
+    words.loop((h, i, w) {
+        m = a.bump(m, w)
+    })
+    println(m.len())    // 5 distinct words
+    println(m.get_or("the", 0))    // 3
+    println(m.get_or("cat", 0))    // 2
+    println(m.get_or("dog", 0 - 1))    // -1 (absent)
+    println(m.has("mat").match ({ true => 1, false => 0 }))    // 1
+    // total occurrences via each = words.len
+    tot: i64 := 0
+    m.each((k, v) { tot = tot + v })
+    println(tot)    // 8
+    // delete "the": gone from lookups, len and each-total shrink accordingly
+    m = m.delete("the")
+    m.get("the").match ({
+        .Some(v) => println(v),
+        .None    => println("none"),
+    })    // none
+    println(m.len())    // 4
+    tot = 0
+    m.each((k, v) { tot = tot + v })
+    println(tot)    // 5
+    m.free(a)
+    0
+}
