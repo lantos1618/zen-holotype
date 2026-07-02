@@ -244,6 +244,31 @@ is_trait_method = (decls: [Decl], fn: str) bool {
     })
     found
 }
+// the trait (a struct whose FnT fields are the method signatures) that DECLARES method `m`; ""
+// if none. Distinct from is_trait_method, which only sees methods some IMPL provides: with ZERO
+// impls in the module a required trait method fell through to undefined-name, hiding the real
+// story (the receiver type lacks an impl). Used only to pick the KIND and message of an already-
+// rejected call — it never flips accept/reject.
+fields_declare_method = (fields: [Field], m: str) bool {
+    found := false
+    fields.loop((h, i, f) {
+        found = eq(f.name, m).match ({ true => f.ty.match ({
+            .FnT(fd) => true,
+            _        => found,
+        }), false => found })
+    })
+    found
+}
+trait_declaring = (decls: [Decl], m: str) str {
+    found := ""
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DStruct(sd) => (is_empty(found) && sd.fields.fields_declare_method(m)).match ({ true => sd.name, false => found }),
+            _            => found,
+        })
+    })
+    found
+}
 // genc/runtime intrinsics with no Zen declaration.
 is_intrinsic = (fn: str) bool { eq(fn, "load").match ({ true => true, false => eq(fn, "store").match ({ true => true, false => eq(fn, "addr").match ({ true => true, false => eq(fn, "assert_nonnull").match ({ true => true, false => eq(fn, "offset").match ({ true => true, false => eq(fn, "cstr").match ({ true => true, false => eq(fn, "slice").match ({ true => true, false => eq(fn, "malloc").match ({ true => true, false => eq(fn, "sizeof").match ({ true => true, false => eq(fn, "load_i64").match ({ true => true, false => eq(fn, "store_i64").match ({ true => true, false => eq(fn, "atomic_add_i64").match ({ true => true, false => eq(fn, "atomic_load_i64").match ({ true => true, false => eq(fn, "atomic_store_i64").match ({ true => true, false => eq(fn, "atomic_cas_i64").match ({ true => true, false => eq(fn, "atomic_fence").match ({ true => true, false => eq(fn, "null_ptr").match ({ true => true, false => eq(fn, "__str_eq").match ({ true => true, false => eq(fn, "__str_ne").match ({ true => true, false => eq(fn, "to_i32").match ({ true => true, false => eq(fn, "to_i64").match ({ true => true, false => eq(fn, "to_u8").match ({ true => true, false => eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }    // Stage 3: panic-on-null guard, RawPtr<T> -> MutPtr<T>
 intrinsic_arity = (fn: str) i32 { eq(fn, "__str_eq").match ({ true => 2, false => eq(fn, "__str_ne").match ({ true => 2, false => eq(fn, "store").match ({ true => 2, false => eq(fn, "offset").match ({ true => 2, false => eq(fn, "slice").match ({ true => 2, false => eq(fn, "null_ptr").match ({ true => 0, false => eq(fn, "atomic_add_i64").match ({ true => 2, false => eq(fn, "atomic_store_i64").match ({ true => 2, false => eq(fn, "atomic_cas_i64").match ({ true => 3, false => eq(fn, "atomic_fence").match ({ true => 0, false => eq(fn, "store_i64").match ({ true => 2, false => 1 }) }) }) }) }) }) }) }) }) }) }) }    // lowered str content equality (resolve_bin)
@@ -2001,7 +2026,7 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({ true => f.is_imported_generic().match ({ true => 0, false => env.kv_arg_type_kind(f.tparams, ps, c.args) }), false => KARITY() })
 }
-kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
+kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({ true => KTRAITBOUND(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
@@ -2115,6 +2140,72 @@ denrich_notcallable_msg = (env: Env, name: str) str {
     a := env.a
     a.gstr_string(64).gstr_append(a, "value of type `").gstr_append(a, a.zty(env.var_or_global(name))).gstr_append(a, "` is not a function").gstr_finish(a)
 }
+// ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
+// the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
+impl_methods_of = (decls: [Decl], tn: str, tr: str) [Param] {
+    found := empty_params()
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im) => (eq(im.ty, tn) && eq(im.trname, tr)).match ({ true => im.methods, false => found }),
+            _          => found,
+        })
+    })
+    found
+}
+// the comma-list of methods trait `tr` requires that (tn, tr) does not provide: every FnT field of
+// the trait struct with neither an impl method nor a trait default body covering it.
+denrich_missing_list = (a: MutPtr<Malloc>, decls: [Decl], tn: str, tr: str) str {
+    provided := decls.impl_methods_of(tn, tr)
+    s := a.gstr_string(64)
+    n := 0
+    decls.struct_fields(tr).loop((h, i, f) {
+        miss := f.ty.match ({
+            .FnT(fd) => provided.has_method(f.name) == false && decls.trait_has_default(tr, f.name) == false,
+            _        => false,
+        })
+        s = miss.match ({ true => (n == 0).match ({ true => s.gstr_append(a, f.name), false => s.gstr_append(a, ", ").gstr_append(a, f.name) }), false => s })
+        n = miss.match ({ true => n + 1, false => n })
+    })
+    s.gstr_finish(a)
+}
+denrich_missing_tail = (a: MutPtr<Malloc>, decls: [Decl], tn: str, tr: str) str {
+    list := a.denrich_missing_list(decls, tn, tr)
+    is_empty(list).match ({ true => "", false => a.gstr_string(96).gstr_append(a, " — missing method(s): ").gstr_append(a, list).gstr_finish(a) })
+}
+// `draw(b)` where a bounded tparam `A: Show` binds to a type with no impl: name the type, the
+// bound, the requiring function, and the concretely missing methods. A bound naming NO declared
+// trait gets its own message (the generic one would send the user hunting for a phantom impl).
+denrich_bound_violation = (env: Env, f: Func, c: CallData, tp: Param) str {
+    (env.bound_err(f, c, tp) == 0).match ({ true => {
+        return ""
+    } })
+    a := env.a
+    tr := tp.tparam_bound()
+    tn := env.call_targ(f, c.args, tp.name).recv_name()
+    env.decls.is_struct(tr).match ({ true => a.gstr_string(160).gstr_append(a, "type `").gstr_append(a, tn).gstr_append(a, "` does not satisfy the bound `").gstr_append(a, tr).gstr_append(a, "` required by `").gstr_append(a, f.name).gstr_append(a, "`").gstr_append(a, a.denrich_missing_tail(env.decls, tn, tr)).gstr_finish(a), false => a.gstr_string(128).gstr_append(a, "the bound `").gstr_append(a, tr).gstr_append(a, "` required by `").gstr_append(a, f.name).gstr_append(a, "` names no declared trait").gstr_finish(a) })
+}
+denrich_bound_msg = (env: Env, f: Func, c: CallData) str {
+    res := ""
+    f.tparams.loop((h, i, tp) {
+        res = is_empty(res).match ({ true => env.denrich_bound_violation(f, c, tp), false => res })
+    })
+    res
+}
+// `b.render()` on a concrete receiver with no impl: name the receiver type, the trait that
+// declares the method, and what an impl must still provide.
+denrich_recv_msg = (env: Env, c: CallData) str {
+    (c.args.len == 0).match ({ true => {
+        return ""
+    } })
+    a := env.a
+    tn := env.infer_expr(c.args[0].addr()).recv_name()
+    tr := env.decls.trait_declaring(c.fn)
+    (is_empty(tn) || is_empty(tr)).match ({ true => "", false => a.gstr_string(160).gstr_append(a, "type `").gstr_append(a, tn).gstr_append(a, "` does not implement trait `").gstr_append(a, tr).gstr_append(a, "` (which declares `").gstr_append(a, c.fn).gstr_append(a, "`)").gstr_append(a, a.denrich_missing_tail(env.decls, tn, tr)).gstr_finish(a) })
+}
+// a trait-bound error at a call: a KNOWN local fn means a violated `A: Trait` bound at this call
+// site (the raw-decls walk — the resolver inlines the call away); otherwise it is a trait-method
+// call whose concrete receiver has no impl (the resolved-decls walk).
+denrich_traitbound_msg = (env: Env, c: CallData) str { env.decls.is_known_fn(c.fn).match ({ true => env.denrich_bound_msg(env.decls.the_func(c.fn), c), false => env.denrich_recv_msg(c) }) }
 denrich_operand_msg = (env: Env, b: BinData) str {
     a := env.a
     lt := env.infer_expr(b.lhs)
@@ -2150,7 +2241,7 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
         .Member(m)      => (code == KSTRUCTFIELD() && m.pos.pos_or(load(m.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(m.field, env.infer_expr(m.obj)), false => a.denrich_expr(env, m.obj, off, code) }),
         .Arrow(ar)      => (code == KSTRUCTFIELD() && ar.pos.pos_or(load(ar.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(ar.field, env.infer_expr(ar.obj)), false => a.denrich_expr(env, ar.obj, off, code) }),
         .MakeStruct(sd) => (code == KSTRUCTFIELD() && sd.pos.pos_or((sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() })) == off).match ({ true => env.denrich_makestruct_msg(sd), false => a.denrich_inits(env, sd.inits, off, code) }),
-        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => a.denrich_args(env, c.args, off, code) }),
+        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }),
         .SliceLit(sd)   => a.denrich_args(env, sd.items, off, code),
         .Index(ix)      => desc_or(a.denrich_expr(env, ix.seq, off, code), a.denrich_expr(env, ix.idx, off, code)),
         .Cond(d)        => desc_or(a.denrich_expr(env, d.c, off, code), desc_or(a.denrich_expr(env, d.t, off, code), a.denrich_expr(env, d.e, off, code))),
@@ -2215,9 +2306,10 @@ denrich_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, off: 
     )
     a.denrich_body(env, f.body, off, code)
 }
-// the driver's entry: an enriched message for a struct-field/operand-type error at `off`, else "".
+// the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound
+// error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE()).match ({ true => {
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND()).match ({ true => {
         return ""
     } })
     idx := a.build_decl_index(decls)
@@ -2230,6 +2322,12 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
     })
     res
 }
+// enrichment over BOTH decl views: resolved first (concrete receivers), then the RAW pre-inline
+// decls — a trait-bound error at a GENERIC call site only exists in the raw view (the resolver
+// inlines the call away before check_module runs), so its enrichment must walk raw. The raw
+// fallback is trait-bound-only: every other enrichable kind is reported off the resolved walk
+// and must enrich there.
+denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32) str { desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND()).match ({ true => a.denrich_module(raw, off, code), false => "" })) }
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
