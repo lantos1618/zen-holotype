@@ -1191,9 +1191,7 @@ alias_reach = (a: MutPtr<Malloc>, rest: Ptr<AliasList>, full: Ptr<AliasList>, na
 }
 // kill `name` AND its alias class: every class member joins the kill-set (its own fresh closure set,
 // so members already dead never mask the traversal).
-dead_kill = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, al: Ptr<AliasList>, name: str) Ptr<DeadList> {
-    a.dead_union(a.alias_reach(al, al, name, a.dead_cons(name, a.dead_nil())), seen)
-}
+dead_kill = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, al: Ptr<AliasList>, name: str) Ptr<DeadList> { a.dead_union(a.alias_reach(al, al, name, a.dead_cons(name, a.dead_nil())), seen) }
 owner_base = (t: Ty) str {
     t.match ({
         .Generic(g) => g.name,
@@ -1552,9 +1550,7 @@ loop_body_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
     net := a.own_dead_body(env, seen, al, body)
     a.count_loop_freed(net, seen, a.loop_lets(binds, body), a.dead_nil())
 }
-loop_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, l: LoopData) i32 {
-    a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil()))))
-}
+loop_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, l: LoopData) i32 { a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil())))) }
 own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) i32 {
     acc := 0
     e := env
@@ -1890,6 +1886,7 @@ stmt_pos = (st: Stmt) i32 {
         .IndexSet(x) => x.pos.pos_or(load(x.seq).expr_pos()),
     })
 }
+body_pos = (body: [Stmt]) i32 { (body.len == 0).match ({ true => 0, false => body[0].stmt_pos() }) }
 // Ownership kind pass mirrors the raw ownership count pass above.
 kv_own_args_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, args: [Expr]) i32 {
     acc := 0
@@ -1925,7 +1922,7 @@ kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
         .MakeEnum(mk)  => a.kv_own_expr_kind(env, seen, al, mk.payload),
         .MakeStruct(s) => a.kv_own_inits_kind(env, seen, al, s.inits),
         .SliceLit(sd)  => a.kv_own_args_kind(env, seen, al, sd.items),
-        .Loop(l)       => a.kv_own_expr_kind(env, seen, al, l.seq).kv_kor(a.kv_own_body_kind(env, seen, al, l.body)).kv_kor(a.loop_outer_frees(env, seen, al, l).kv_one(KOWNERSHIP()).kv_at(load(l.seq).expr_pos())),
+        .Loop(l)       => a.kv_own_expr_kind(env, seen, al, l.seq).kv_kor(a.kv_own_body_kind(env, seen, al, l.body)).kv_kor(a.loop_outer_frees(env, seen, al, l).kv_one(KOWNERSHIP()).kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
         .Block(b)      => a.kv_own_body_kind(env, seen, al, b.stmts),
         _              => 0,
     })
@@ -1937,7 +1934,7 @@ kv_own_stmt_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
         .Return(r)   => a.kv_own_expr_kind(env, seen, al, r),
         .ExprStmt(e) => a.kv_own_expr_kind(env, seen, al, e),
         .If(f)       => a.kv_own_expr_kind(env, seen, al, f.c).kv_kor(a.kv_own_body_kind(env, seen, al, f.then)).kv_kor(a.kv_own_body_kind(env, seen, al, f.els)),
-        .While(w)    => a.kv_own_expr_kind(env, seen, al, w.c).kv_kor(a.kv_own_body_kind(env, seen, al, w.body)).kv_kor(a.loop_body_outer_frees(env, seen, al, w.body, a.dead_nil()).kv_one(KOWNERSHIP()).kv_at(load(w.c).expr_pos())),
+        .While(w)    => a.kv_own_expr_kind(env, seen, al, w.c).kv_kor(a.kv_own_body_kind(env, seen, al, w.body)).kv_kor(a.loop_body_outer_frees(env, seen, al, w.body, a.dead_nil()).kv_one(KOWNERSHIP()).kv_at(load(w.c).expr_pos().pos_or(body_pos(w.body)))),
         .IndexSet(x) => a.kv_own_expr_kind(env, seen, al, x.seq).kv_kor(a.kv_own_expr_kind(env, seen, al, x.idx)).kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
     })
 }
