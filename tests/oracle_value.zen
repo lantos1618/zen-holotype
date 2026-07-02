@@ -26,31 +26,24 @@ oracle_value_run* = () i32 {
         src: "id<T> = (x: T) T { x }\ntest* = () i64 { id(sizeof(i64)) }",
         want: "8",
     ), VCase(
-        // turbofish: explicit type arg at the call site pins T (here inference would also work).
         src: "id<T> = (x: T) T { x }\ntest* = () i64 { id<i64>(5) }",
         want: "5",
     ), VCase(
-        // turbofish where inference CANNOT determine T (T appears only inside sizeof, no value arg).
         src: "sz<T> = () i64 { sizeof(T) }\ntest* = () i64 { sz<i64>() + sz<i32>() }",
         want: "12",
     ), VCase(
-        // turbofish with TWO type args, pinned positionally.
         src: "first<A, B> = (x: A, y: B) A { x }\ntest* = () i64 { first<i64, i64>(7, 9) }",
         want: "7",
     ), VCase(
-        // comparison canary: `<`/`>` must still parse as operators, not turbofish.
         src: "test* = () i64 {\n  a := 3\n  b := 4\n  ((a < b) && (b > a)).match ({ true => 1, false => 0 })\n}",
         want: "1",
     ), VCase(
-        // nested generic struct literal closed by `>>` in EXPRESSION position (P1 fix).
         src: "Box<T>: { v: T }\ntest* = () i32 { b := Box<Box<i32>>(v: Box<i32>(v: 7))  b.v.v }",
         want: "7",
     ), VCase(
-        // nested turbofish closed by `>>` in EXPRESSION position (P1 fix).
         src: "Box<T>: { v: T }\nid<T> = (x: T) T { x }\ntest* = () i32 { bx := Box<i32>(v: 4)  id<Box<i32>>(bx).v }",
         want: "4",
     ), VCase(
-        // shift canary: `>>` must still parse as the right-shift operator, not a generic close.
         src: "test* = () i32 {\n  a := 7\n  b := 2\n  (a > b).match ({ true => a >> b, false => 0 })\n}",
         want: "1",
     ), VCase(
@@ -84,7 +77,6 @@ oracle_value_run* = () i32 {
         src: "test* = () i64 { 5000000000 + 5000000000 }",
         want: "10000000000",
     ), VCase(
-        // untyped-literal OPERAND width: products/shifts whose RESULT exceeds i32 must compute at >=64-bit
         src: "test* = () i64 { 100000 * 100000 }",
         want: "10000000000",
     ), VCase(
@@ -97,11 +89,9 @@ oracle_value_run* = () i32 {
         src: "test* = () i64 { 1 << 40 }",
         want: "1099511627776",
     ), VCase(
-        // the widened comparison the bug used to get wrong (would be 0 at int width)
         src: "test* = () i32 { (100000 * 100000 > 5000000000).match ({ true => 1, false => 0 }) }",
         want: "1",
     ), VCase(
-        // small i32 math must stay unchanged
         src: "test* = () i32 { 2 + 3 }",
         want: "5",
     ), VCase(
@@ -360,20 +350,15 @@ oracle_value_run* = () i32 {
         src: "test* = () i32 {\n acc := 0\n [1, 2].loop((h, i, x) {\n  [10, 20, 30].loop((g, j, y) {\n   (y > 10).match ({ true => { g.break }, false => { acc = acc + y } })\n  })\n })\n acc\n}",
         want: "20",
     ), VCase(
-        // A typed `[i64]` literal: the bare-int elements adopt the declared i64 width, so an i64
-        // accumulator (`acc + x`) fits without error[assign-fit]. Regression for slice-literal-width.
         src: "test* = () i64 {\n xs: [i64] := [1, 2, 3]\n acc: i64 := 0\n xs.loop((h, i, x) { acc = acc + x })\n acc\n}",
         want: "6",
     ), VCase(
-        // A typed `[u8]` literal: elements adopt u8, summed into an i64 (u8 widens to fit).
         src: "test* = () i64 {\n bs: [u8] := [10, 20, 30]\n acc: i64 := 0\n bs.loop((h, i, b) { acc = acc + b })\n acc\n}",
         want: "60",
     ), VCase(
-        // i64 fold-style accumulation seeded by an i64 literal `0`, over an i64 slice literal.
         src: "fold = (xs: [i64], acc: i64) i64 { s := acc  xs.loop((h, i, x) { s = s + x })  s }\ntest* = () i64 { fold([100, 200, 300], 0) }",
         want: "600",
     ), VCase(
-        // BOUNDARY: a bare (unannotated) `[i32]` literal + i32 math stays i32 — width unchanged.
         src: "test* = () i32 {\n xs: [i32] := [4, 5, 6]\n acc: i32 := 0\n xs.loop((h, i, x) { acc = acc + x })\n acc\n}",
         want: "15",
     ), VCase(
@@ -863,112 +848,127 @@ oracle_value_run* = () i32 {
         src: "g: i64 := 1000\ntest* = () i64 { g + 7 }",
         want: "1007",
     ), VCase(
-        // M1 lambda-as-value: a NON-capturing lambda stored in a typed var, then called indirectly.
         src: "test* = () i64 { f: (i64) i64 := (x: i64) i64 { x + 1 }  f(41) }",
         want: "42",
     ), VCase(
-        // M1 lambda-as-value: RETURN a non-capturing lambda from a fn, bind it, call it.
         src: "mkinc = () (i64) i64 { (x: i64) i64 { x + 1 } }\ntest* = () i64 { f := mkinc()  f(41) }",
         want: "42",
     ), VCase(
-        // M1 lambda-as-value: a fn value stored in a STRUCT FIELD, then called through the field.
         src: "Box2*: { f: (i64) i64 }\ntest* = () i64 { b := Box2(f: (x: i64) i64 { x * 2 })  b.f(21) }",
         want: "42",
     ), VCase(
-        // M1 KEYSTONE: an ESCAPING CAPTURING closure. make_adder returns a lambda that captures its
-        // parameter `base` by value; it is bound to a local and called later — `make_adder(10)(5)` == 15.
         src: "make_adder = (base: i64) (i64) i64 { (x: i64) i64 { x + base } }\ntest* = () i64 { add := make_adder(10)  add(5) }",
         want: "15",
     ), VCase(
-        // M1 closure: MULTIPLE captured params, the closure called twice with different args.
         src: "make_lin = (m: i64, b: i64) (i64) i64 { (x: i64) i64 { m * x + b } }\ntest* = () i64 { f := make_lin(3, 7)  f(5) + f(0) }",
         want: "29",
     ), VCase(
-        // M1.1 DIRECT chained call `make_adder(10)(5)`: the callee is a call-result of closure type, so
-        // the chained-call suffix binds it to a temp and routes through the closure-local call path. Was
-        // a silent miscompile (dropped the capture → 5); must be 15.
         src: "make_adder = (base: i64) (i64) i64 { (x: i64) i64 { x + base } }\ntest* = () i64 { make_adder(10)(5) }",
         want: "15",
     ), VCase(
-        // M1.1 chained call in ARGUMENT position `dbl(make_adder(10)(5))`: `f(a)(b)` must parse anywhere
-        // an expression is valid, not only at statement position. (10+5)*2 = 30.
         src: "dbl = (n: i64) i64 { n * 2 }\nmake_adder = (base: i64) (i64) i64 { (x: i64) i64 { x + base } }\ntest* = () i64 { dbl(make_adder(10)(5)) }",
         want: "30",
     ), VCase(
-        // M1.1 DIRECT chained call over a MULTI-capture closure: make_lin(3, 7)(5) = 3*5 + 7 = 22.
         src: "make_lin = (m: i64, b: i64) (i64) i64 { (x: i64) i64 { m * x + b } }\ntest* = () i64 { make_lin(3, 7)(5) }",
         want: "22",
     ), VCase(
-        // M2 HOF — generic `fold` with an INLINE lambda. The accumulator closure is a first-class arg to
-        // a generic fn; 1+2+3 = 6. Locks the std.collections.iter.fold shape end to end.
         src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T { acc := init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  xs.fold(0, (a, x) { a + x }) }",
         want: "6",
     ), VCase(
-        // M2 HOF — same generic `fold` but the reducer is a STORED closure (`g`), not an inline lambda.
-        // Both call paths must yield 6: the stored-closure path is the M1 keystone non-inlined repr.
         src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T { acc := init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  g := (a: i32, x: i32) i32 { a + x }  xs.fold(0, g) }",
         want: "6",
     ), VCase(
-        // M2 HOF — allocating generic `map` (doubling). New slice of f(x); 2+4+6 = 12. The `out: [U] :=`
-        // annotation pins the element type off the raw allocator pointer (else a void-element miscompile).
         src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  d: [i32] := xs.map((x) { x * 2 })  d[0] + d[1] + d[2] }",
         want: "12",
     ), VCase(
-        // M2 HOF — generic `map` with DISTINCT element types T=i32 -> U=i64 (the <T,U> proof). f widens
-        // each i32 to i64 and scales past 2^31; d[2] = 3 * 1e9 = 3000000000 (would overflow i32).
         src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] := [1, 2, 3]  d: [i64] := xs.map((x) { to_i64(x) * 1000000000 })  d[2] }",
         want: "3000000000",
     ), VCase(
-        // M5 — generic `map` whose output element type `U` appears ONLY in the closure's RETURN position
-        // `(T) U` (never in an arg), with the result bound to an UNANNOTATED let. U is inferred from the
-        // lambda's DECLARED return type `i64` (regression: it used to default to void -> a `[void]` slice
-        // that silently summed to 23 instead of 50). [1,2,3,4]+10 = [11,12,13,14], sum = 50.
         src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i64] := [1, 2, 3, 4]  ys := xs.map((x: i64) i64 { x + 10 })  s := 0  ys.loop((h, i, v) { s = s + v })  s }",
         want: "50",
     ), VCase(
-        // M5 — same closure-return inference but DISTINCT element types T=i32 -> U=i64, the `<T,U>` proof,
-        // and the binding is STILL unannotated: U=i64 comes purely from the closure's declared return.
-        // d[2] = 3 * 1e9 = 3000000000 (overflows i32, so a void/i32 element would be wrong).
         src: "malloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out: [U] := slice(malloc(xs.len * sizeof(U)), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] := [1, 2, 3]  d := xs.map((x: i32) i64 { to_i64(x) * 1000000000 })  d[2] }",
         want: "3000000000",
     ), VCase(
-        // M2 HOF — allocating `filter` (evens of [1,2,3,4] = [2,4]). Packs kept elements; len*10 + sum of
-        // the two kept = 2*10 + 2 + 4 = 26. The predicate is a first-class closure arg.
         src: "malloc = (n: i64) RawPtr<u8>\nfilter<T> = (xs: [T], keep: (T) bool) [T] { buf: [T] := slice(malloc(xs.len * sizeof(T)), xs.len)  n := 0  xs.loop((h, i, x) { buf[n] = x  n = n + keep(x).match ({ true => 1, false => 0 }) })  slice(buf[0].addr(), n) }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  ev: [i32] := xs.filter((x) { x % 2 == 0 })  to_i32(ev.len) * 10 + ev[0] + ev[1] }",
         want: "26",
     ), VCase(
-        // M2 HOF — `each` with a closure that mutates a CAPTURED accumulator. No allocation; the captured
-        // `tot` must see every element: 1+2+3+4 = 10. Exercises capture-by-reference through the loop.
         src: "each<T> = (xs: [T], f: (T) void) void { xs.loop((h, i, x) { f(x) }) }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  tot := 0  xs.each((x) { tot = tot + x })  tot }",
         want: "10",
     ), VCase(
-        // M2 HOF — `find` first element > 2, reported as Opt<T>.Some; stops at the hit via h.break. = 3.
         src: "Opt<T>: Some(T) | None\nfind<T> = (xs: [T], pred: (T) bool) Opt<T> { out: Opt<T> := .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: [i32] := [1, 2, 3, 4]  xs.find((x) { x > 2 }).match ({ .Some(v) => v, .None => 99 }) }",
         want: "3",
     ), VCase(
-        // M2 HOF — `find` with no match returns Opt<T>.None (sentinel 99). Guards the empty-result arm.
         src: "Opt<T>: Some(T) | None\nfind<T> = (xs: [T], pred: (T) bool) Opt<T> { out: Opt<T> := .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: [i32] := [1, 2, 3]  xs.find((x) { x > 9 }).match ({ .Some(v) => v, .None => 99 }) }",
         want: "99",
     ), VCase(
-        // SHADOWING — a closure param named `f` shadows the same-named top-level fn inside the
-        // generic body: `f(x)` calls the LOCAL closure (5*2), while the top-level `f` stays callable
-        // outside (1+2). Guards runtime resolution, not just the checker verdict. = 13.
         src: "f = (a: i32, b: i32) i32 { a + b }\napply<T> = (x: T, f: (T) T) T { f(x) }\ntest* = () i32 { apply(5, (v: i32) i32 { v * 2 }) + f(1, 2) }",
         want: "13",
     ), VCase(
-        // SHADOWING — an FnT param named after an INTRINSIC (`store_i64`): the inliner substitutes
-        // the actual callee, so the call runs dbl(21)=42, NOT the store_i64 intrinsic expansion.
-        // Guards the emit-layer name-dispatch agreeing with the checker's shadow semantics.
         src: "dbl = (v: i64) i64 { v * 2 }\ng = (store_i64: (i64) i64) i64 { store_i64(21) }\ntest* = () i32 { to_i32(g(dbl)) }",
         want: "42",
     ), VCase(
-        // or_return in a CONDITIONAL position (&& rhs) with the receiver's FULL Result type matching
-        // the enclosing fn's — must stay accepted AND run (guards the Ok-payload check's leniency
-        // gate: same Ok + same Err = legal, only a mismatched Ok side rejects). = 5.
         src: "R: Ok(bool) | Err(i32)\ngk = (ok: i32) R { (ok == 1).match ({ true => R.Ok(true), false => R.Err(9) }) }\nf = (flag: bool, ok: i32) R {\n    b := flag && gk(ok).or_return()\n    R.Ok(b)\n}\ntest* = () i32 { f(true, 1).match ({ .Ok(v) => v.match ({ true => 5, false => 2 }), .Err(e) => 0, }) }",
         want: "5",
     )])
 }
+// turbofish: explicit type arg at the call site pins T (here inference would also work).
+// turbofish where inference CANNOT determine T (T appears only inside sizeof, no value arg).
+// turbofish with TWO type args, pinned positionally.
+// comparison canary: `<`/`>` must still parse as operators, not turbofish.
+// nested generic struct literal closed by `>>` in EXPRESSION position (P1 fix).
+// nested turbofish closed by `>>` in EXPRESSION position (P1 fix).
+// shift canary: `>>` must still parse as the right-shift operator, not a generic close.
+// untyped-literal OPERAND width: products/shifts whose RESULT exceeds i32 must compute at >=64-bit
+// the widened comparison the bug used to get wrong (would be 0 at int width)
+// small i32 math must stay unchanged
+// A typed `[i64]` literal: the bare-int elements adopt the declared i64 width, so an i64
+// accumulator (`acc + x`) fits without error[assign-fit]. Regression for slice-literal-width.
+// A typed `[u8]` literal: elements adopt u8, summed into an i64 (u8 widens to fit).
+// i64 fold-style accumulation seeded by an i64 literal `0`, over an i64 slice literal.
+// BOUNDARY: a bare (unannotated) `[i32]` literal + i32 math stays i32 — width unchanged.
+// M1 lambda-as-value: a NON-capturing lambda stored in a typed var, then called indirectly.
+// M1 lambda-as-value: RETURN a non-capturing lambda from a fn, bind it, call it.
+// M1 lambda-as-value: a fn value stored in a STRUCT FIELD, then called through the field.
+// M1 KEYSTONE: an ESCAPING CAPTURING closure. make_adder returns a lambda that captures its
+// parameter `base` by value; it is bound to a local and called later — `make_adder(10)(5)` == 15.
+// M1 closure: MULTIPLE captured params, the closure called twice with different args.
+// M1.1 DIRECT chained call `make_adder(10)(5)`: the callee is a call-result of closure type, so
+// the chained-call suffix binds it to a temp and routes through the closure-local call path. Was
+// a silent miscompile (dropped the capture → 5); must be 15.
+// M1.1 chained call in ARGUMENT position `dbl(make_adder(10)(5))`: `f(a)(b)` must parse anywhere
+// an expression is valid, not only at statement position. (10+5)*2 = 30.
+// M1.1 DIRECT chained call over a MULTI-capture closure: make_lin(3, 7)(5) = 3*5 + 7 = 22.
+// M2 HOF — generic `fold` with an INLINE lambda. The accumulator closure is a first-class arg to
+// a generic fn; 1+2+3 = 6. Locks the std.collections.iter.fold shape end to end.
+// M2 HOF — same generic `fold` but the reducer is a STORED closure (`g`), not an inline lambda.
+// Both call paths must yield 6: the stored-closure path is the M1 keystone non-inlined repr.
+// M2 HOF — allocating generic `map` (doubling). New slice of f(x); 2+4+6 = 12. The `out: [U] :=`
+// annotation pins the element type off the raw allocator pointer (else a void-element miscompile).
+// M2 HOF — generic `map` with DISTINCT element types T=i32 -> U=i64 (the <T,U> proof). f widens
+// each i32 to i64 and scales past 2^31; d[2] = 3 * 1e9 = 3000000000 (would overflow i32).
+// M5 — generic `map` whose output element type `U` appears ONLY in the closure's RETURN position
+// `(T) U` (never in an arg), with the result bound to an UNANNOTATED let. U is inferred from the
+// lambda's DECLARED return type `i64` (regression: it used to default to void -> a `[void]` slice
+// that silently summed to 23 instead of 50). [1,2,3,4]+10 = [11,12,13,14], sum = 50.
+// M5 — same closure-return inference but DISTINCT element types T=i32 -> U=i64, the `<T,U>` proof,
+// and the binding is STILL unannotated: U=i64 comes purely from the closure's declared return.
+// d[2] = 3 * 1e9 = 3000000000 (overflows i32, so a void/i32 element would be wrong).
+// M2 HOF — allocating `filter` (evens of [1,2,3,4] = [2,4]). Packs kept elements; len*10 + sum of
+// the two kept = 2*10 + 2 + 4 = 26. The predicate is a first-class closure arg.
+// M2 HOF — `each` with a closure that mutates a CAPTURED accumulator. No allocation; the captured
+// `tot` must see every element: 1+2+3+4 = 10. Exercises capture-by-reference through the loop.
+// M2 HOF — `find` first element > 2, reported as Opt<T>.Some; stops at the hit via h.break. = 3.
+// M2 HOF — `find` with no match returns Opt<T>.None (sentinel 99). Guards the empty-result arm.
+// SHADOWING — a closure param named `f` shadows the same-named top-level fn inside the
+// generic body: `f(x)` calls the LOCAL closure (5*2), while the top-level `f` stays callable
+// outside (1+2). Guards runtime resolution, not just the checker verdict. = 13.
+// SHADOWING — an FnT param named after an INTRINSIC (`store_i64`): the inliner substitutes
+// the actual callee, so the call runs dbl(21)=42, NOT the store_i64 intrinsic expansion.
+// Guards the emit-layer name-dispatch agreeing with the checker's shadow semantics.
+// or_return in a CONDITIONAL position (&& rhs) with the receiver's FULL Result type matching
+// the enclosing fn's — must stay accepted AND run (guards the Ok-payload check's leniency
+// gate: same Ok + same Err = legal, only a mismatched Ok side rejects). = 5.
 // {}-template interpolation core (mirrors std.text.fmt.format's scanner standalone, since
 // the value runner links no stdlib): a `{}` placeholder, `{{`/`}}` brace escapes, and the
 // skip-the-2nd-byte advance must all be detected. "a={} b={{}} c={} d=}}" has 2 placeholders

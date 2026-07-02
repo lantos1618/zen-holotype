@@ -36,7 +36,21 @@ jobs:
       - name: Oracle (full)
         run: make -f bootstrap/Makefile oracle
 
-      # 3. Seed fixpoint: zenc regenerates its own bootstrap C; the result must be
+      # 3. Formatting gate: every .zen in the tree must be zenc-fmt clean.
+      #    tests/fixtures/fmt/*_unformatted.zen are excluded — they are the fmt
+      #    oracle's INPUT fixtures and are intentionally unformatted.
+      - name: fmt --check (tree is zenc-fmt clean)
+        run: |
+          bad=0
+          for f in $(find zen tests examples driver.zen -name '*.zen' ! -path 'tests/fixtures/fmt/*_unformatted.zen' | sort); do
+            if ! ./zenc fmt --check "$f"; then
+              echo "::error file=$f::$f is not zenc-fmt clean — run './zenc fmt $f' and commit the result"
+              bad=1
+            fi
+          done
+          exit $bad
+
+      # 4. Seed fixpoint: zenc regenerates its own bootstrap C; the result must be
       #    byte-identical to the committed seed. Catches stale-seed commits (the #1
       #    historical footgun: committing source changes without regenerating the seed).
       - name: Seed fixpoint (self-build, committed seed must be byte-exact)
