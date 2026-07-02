@@ -1,34 +1,48 @@
 name: CI
 
+# The real merge gate, exactly as run locally before every merge. Zero Python:
+# the compiler is 100% self-hosted — cc compiles the committed C seed, the
+# freshly-built zenc runs the Zen-native oracle, then rebuilds its own seed to
+# prove the committed bootstrap/zenc.gen.c is at fixpoint with the .zen source.
+
 on:
   push:
     branches: [main]
   pull_request:
 
+# Cancel superseded runs on the same ref (force-pushes stop spamming failures).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dev dependencies
-        run: pip install -r requirements-dev.txt
-
+      # 1. Build the compiler: cc (gnu11, -fwrapv) on bootstrap/{zenc.gen.c,zenrt.c}.
+      #    No deps beyond a C compiler + make.
       - name: Build zenc
         run: make -f bootstrap/Makefile zenc
 
-      - name: Tests
-        run: pytest -q
+      # 2a. Fast-fail smoke subset of the oracle (~20s): value + verdict suites only.
+      - name: Oracle (fast subset)
+        run: make -f bootstrap/Makefile oracle-fast
 
-      - name: Regenerate bootstrap C
+      # 2b. The full Zen-native oracle (tests/oracle.zen) — the merge gate.
+      #     Exit code = failing-case count, so this step fails iff any case fails.
+      - name: Oracle (full)
+        run: make -f bootstrap/Makefile oracle
+
+      # 3. Seed fixpoint: zenc regenerates its own bootstrap C; the result must be
+      #    byte-identical to the committed seed. Catches stale-seed commits (the #1
+      #    historical footgun: committing source changes without regenerating the seed).
+      - name: Seed fixpoint (self-build, committed seed must be byte-exact)
         run: |
-          make -f bootstrap/Makefile regen
-          if ! git diff --quiet -- bootstrap/zenc.gen.c; then
-            echo "::error::bootstrap/zenc.gen.c is stale - run 'make -f bootstrap/Makefile regen' and commit"
-            git diff -- bootstrap/zenc.gen.c
+          ./zenc --build-self bootstrap/zenc.gen.c .
+          if ! git diff --exit-code -- bootstrap/zenc.gen.c; then
+            echo "::error::bootstrap/zenc.gen.c is stale — run 'make -f bootstrap/Makefile regen' and commit the regenerated seed"
             exit 1
           fi
