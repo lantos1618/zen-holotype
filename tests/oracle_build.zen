@@ -418,6 +418,11 @@ oracle_build_run* = () i32 {
         want_out: "name=Zen n=42\ns=hi i=7 f=3.14 b=true\nbraces {} and 9 done\nmissing 1  extra\nowned=world\n",
         check_out: true,
     ), FixtureCase(
+        path: "tests/fixtures/zen/error_display_name.zen",
+        want_exit: "0",
+        want_out: "NotFound\nread failed: NotFound\nTrailing\n",
+        check_out: true,
+    ), FixtureCase(
         path: "tests/fixtures/zen/str_ops_edges.zen",
         want_exit: "0",
         want_out: "6\n-1\n0\n1\n2\n0\n1\n1\n0\n1\n0\n0\n-7\n12\n0\n123456789012\n",
@@ -1484,11 +1489,21 @@ oracle_build_run* = () i32 {
     ), ShellCase(
         name: "cown_result_paths",
         cmd: "cp tests/fixtures/zen/cown_result_paths.zen $ZT/cown.zen && sed -i \"s#@@T@@#$ZT#g\" $ZT/cown.zen && printf \"\" > $ZT/zo_cown_input.txt && ./zenc build $ZT/cown.zen -o $ZT/cown_bin 2>/dev/null && { $ZT/cown_bin; test \"$?\" = 0; }",
+    ), ShellCase(
+        name: "stdin_echo_filter_pipe",
+        cmd: "./zenc build tests/fixtures/zen/stdin_echo_filter.zen -o $ZT/zo_stdin_filter 2>/dev/null && { printf 'hello\\nzen world\\nlast' | $ZT/zo_stdin_filter > $ZT/zo_stdin_out.txt; test \"$?\" -eq 3; } && printf '1: HELLO\\n2: ZEN WORLD\\n3: LAST\\n' | cmp -s - $ZT/zo_stdin_out.txt",
+    ), ShellCase(
+        name: "stdin_read_all_cat",
+        cmd: "printf 'halloc = std.mem.heap\\n{ read_all } = std.io.stdin\\n{ print } = std.text.fmt\\nmain = () i32 {\\n    heap := halloc.gpa()\\n    a := heap.addr()\\n    a.read_all().match ({\\n        .Ok(s)  => {\\n            print(s)\\n            0\\n        },\\n        .Err(e) => 1,\\n    })\\n}\\n' > $ZT/zo_cat.zen && ./zenc build $ZT/zo_cat.zen -o $ZT/zo_cat_bin 2>/dev/null && printf 'alpha\\nbeta 42\\n' > $ZT/zo_cat_in.txt && $ZT/zo_cat_bin < $ZT/zo_cat_in.txt > $ZT/zo_cat_out.txt && cmp -s $ZT/zo_cat_in.txt $ZT/zo_cat_out.txt && { printf '' | $ZT/zo_cat_bin > $ZT/zo_cat_empty.txt; test \"$?\" -eq 0; } && ! test -s $ZT/zo_cat_empty.txt",
     )])
     // io_file_result_paths: substitute this run's private scratch dir for the `@@T@@` placeholder, then
     // build+run; missing/denied/out paths now live under $ZT so concurrent runs never share scratch.
     // cown_result_paths: same substitution, and SEED the input file first so `cown.file_in` opens it
     // successfully and the allocator-wrap failure (LimitAlloc) is what yields the asserted .NotFound.
+    // stdin_echo_filter_pipe: std.io.stdin.lines as a real unix filter — input PIPED via printf,
+    // exit code = line count (3, incl. the unterminated final line), stdout cmp'd byte-exact.
+    // stdin_read_all_cat: std.io.stdin.read_all is `cat` — redirected-file stdin round-trips
+    // byte-exact, and empty stdin is Ok("") (exit 0, empty output), not an error.
     // ── (k) bootstrap-binary battery (ported from test_bootstrap.py + test_build_self.py): the committed
     // `./zenc` IS the cc-built bootstrap binary, so drive it directly — emit-compile-run real programs,
     // survive malformed input (no signal death), report missing files, and `--build-self` usage errors.
