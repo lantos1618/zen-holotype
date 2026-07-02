@@ -1,3 +1,8 @@
+// Closure-return tparam inference: UNANNOTATED map_err lambdas, chained combinators
+// (map_err→expect, map_err→map_err→expect), value-verified on both Ok and Err paths.
+// The annotated LAMBDA-RETURN form `(e) str { … }` is guarded by the infer_lambda_ret_annot
+// ShellCase in oracle_build — zenc fmt drops that annotation (formatter gap), so the
+// fmt-gated tree cannot hold it.
 { Result, IoError, expect, map_err, or, or_else } = std.core.result
 main = () i32 {
     // (a) unannotated lambda in a chain — must run AND map the value correctly
@@ -10,9 +15,11 @@ main = () i32 {
         .Ok(x)  => 0,
         .Err(s) => (s == "boom").match ({ true => 1, false => 0 - 1 }),
     })
-    // (b) annotated lambda return (regression guard). NOTE: hand-formatted — zenc fmt drops the
-    // load-bearing `str` annotation (known formatter gap), so keep fmt away from this line.
-    mb: Result<i32, str> := good.map_err((e) str { "nope" })
+    // (b) annotated BINDING with unannotated lambda (the pre-fix workaround, regression guard).
+    // The annotated LAMBDA-RETURN form `(e) str { … }` is guarded by the infer_lambda_ret_annot
+    // ShellCase in oracle_build — zenc fmt drops that annotation (formatter gap), so the fmt-gated
+    // tree cannot hold it.
+    mb: Result<i32, str> := good.map_err((e) { "nope" })
     bv := mb.or(0 - 7)
     // param-DEPENDENT bodies: the lambda param must get its (co-targ-substituted) declared type
     r1 := bad.map_err((e) { e }).match ({
