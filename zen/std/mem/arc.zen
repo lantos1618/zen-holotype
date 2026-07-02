@@ -9,7 +9,7 @@
 // (Arc is only USEFUL once threads exist — zenc has no thread spawn yet — but the atomic primitive
 // it is built on is the foundation every lock-free structure needs.)
 // `new_in` / `drop_in` use the caller's allocator.
-// `try_new_in` returns Result so allocation failure can stay in the value flow.
+// `new_in` returns Result so allocation failure stays in the value flow.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 Arc*<T>: {
@@ -24,15 +24,7 @@ Arc*<T>: {
     drop_in<A> = (r: Arc<T>, a: MutPtr<A>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match ({ true => a.release(r.base), false => { } }) }
 }    // -> [ count:i64 | value:T ]
 // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
-new_in*<A, T> = (a: MutPtr<A>, x: T) Arc<T> {
-    base := a.acquire(8 + sizeof(T))
-    store_i64(base, 1)
-    r := Arc<T>(base: base)
-    s := r.val()
-    s[0] = x
-    r
-}
-try_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError> {
+new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError> {
     ax := x
     a.try_acquire(8 + sizeof(T)).match ({
         .Ok(base) => {

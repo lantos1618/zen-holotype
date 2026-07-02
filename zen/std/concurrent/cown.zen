@@ -1,5 +1,5 @@
 // @self-hosted-only: allocator-owned buffers and Drop-owned C handles.
-{ Own, Drop, try_new_in } = std.mem.own
+{ Own, Drop, new_in } = std.mem.own
 { Allocator, try_acquire } = std.mem.alloc
 { O_RDONLY } = std.io.file
 { open, close } = std.c.libc
@@ -15,13 +15,8 @@ Buf*: {
         b.len = 0
     }
 }
-buf*<A> = (alloc: MutPtr<A>, n: i64) Buf {
-    Buf(
-        p: alloc.acquire(n),
-        len: n,
-    )
-}
-try_buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError> {
+// `buf` allocates through the caller's allocator, so it returns Result<Buf, IoError>.
+buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError> {
     (n <= 0).match ({ true => ok(Buf(
         p: null_ptr(),
         len: 0,
@@ -40,7 +35,7 @@ File*: {
 file_in*<A> = (alloc: MutPtr<A>, path: str) Result<Own<File>, IoError> {
     path.open(O_RDONLY, 0).ok_if().match ({
         .Ok(fd) => {
-            alloc.try_new_in(File(fd: fd)).match ({
+            alloc.new_in(File(fd: fd)).match ({
                 .Ok(o)  => ok(o),
                 .Err(e) => {
                     fd.close()

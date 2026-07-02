@@ -1,17 +1,18 @@
 // Heap-stable builders over compiler.genc's AST values.
 // Pointer and slice children are copied so returned ASTs do not dangle.
 { node_in, dupx_in, buf_in } = std.core.slice
+{ expect } = std.core.result
 { Expr, Stmt, Param, Field, Decl, Func, Ty, StructDecl, vref, lit, bin, call, member, mkstruct, finit, FieldInit, slet, sassign, sret, sexpr, param, field, dfunc, dstruct, tnamed, tptr, ti32, ti64, tu8, tbool, tstr, tvoid } = compiler.genc
 // Expressions
-var_in*<A> = (a: MutPtr<A>, name: str) Ptr<Expr> { a.node_in(vref(name)) }
-int_in*<A> = (a: MutPtr<A>, n: i32) Ptr<Expr> { a.node_in(lit(n)) }
-dot_in*<A> = (a: MutPtr<A>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.node_in(member(o, f)) }
-binop_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { a.node_in(bin(op, l, r)) }
+var_in*<A> = (a: MutPtr<A>, name: str) Ptr<Expr> { a.node_in(vref(name)).expect("std.internal.ast: AST allocation failed") }
+int_in*<A> = (a: MutPtr<A>, n: i32) Ptr<Expr> { a.node_in(lit(n)).expect("std.internal.ast: AST allocation failed") }
+dot_in*<A> = (a: MutPtr<A>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.node_in(member(o, f)).expect("std.internal.ast: AST allocation failed") }
+binop_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, op: str, r: Ptr<Expr>) Ptr<Expr> { a.node_in(bin(op, l, r)).expect("std.internal.ast: AST allocation failed") }
 add_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "+", r) }
 eqx_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "==", r) }
 and_in*<A> = (a: MutPtr<A>, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "&&", r) }
-callx_in*<A> = (a: MutPtr<A>, fn: str, args: [Expr]) Ptr<Expr> { a.node_in(call(fn, a.dupx_in(args))) }
-estruct_in*<A> = (a: MutPtr<A>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.node_in(mkstruct(ty, a.dupx_in(fi))) }
+callx_in*<A> = (a: MutPtr<A>, fn: str, args: [Expr]) Ptr<Expr> { a.node_in(call(fn, a.dupx_in(args).expect("std.internal.ast: AST allocation failed"))).expect("std.internal.ast: AST allocation failed") }
+estruct_in*<A> = (a: MutPtr<A>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.node_in(mkstruct(ty, a.dupx_in(fi).expect("std.internal.ast: AST allocation failed"))).expect("std.internal.ast: AST allocation failed") }
 var*<A> = (a: MutPtr<A>, name: str) Ptr<Expr> { a.var_in(name) }
 int*<A> = (a: MutPtr<A>, n: i32) Ptr<Expr> { a.int_in(n) }
 dot*<A> = (a: MutPtr<A>, o: Ptr<Expr>, f: str) Ptr<Expr> { a.dot_in(o, f) }
@@ -23,7 +24,7 @@ callx*<A> = (a: MutPtr<A>, fn: str, args: [Expr]) Ptr<Expr> { a.callx_in(fn, arg
 estruct*<A> = (a: MutPtr<A>, ty: str, fi: [FieldInit]) Ptr<Expr> { a.estruct_in(ty, fi) }
 // Types
 named* = (name: str) Ty { tnamed(name) }
-ptrto_in*<A> = (a: MutPtr<A>, inner: Ty) Ty { tptr(a.node_in(inner)) }
+ptrto_in*<A> = (a: MutPtr<A>, inner: Ty) Ty { tptr(a.node_in(inner).expect("std.internal.ast: AST allocation failed")) }
 ptrto*<A> = (a: MutPtr<A>, inner: Ty) Ty { a.ptrto_in(inner) }
 i32t* = () Ty { ti32() }
 // Statements
@@ -36,16 +37,16 @@ set*<A> = (a: MutPtr<A>, name: str, v: Ptr<Expr>) Stmt { a.set_in(name, v) }
 func_in*<A> = (a: MutPtr<A>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl {
     dfunc(Func(
         name: name,
-        params: a.dupx_in(ps),
+        params: a.dupx_in(ps).expect("std.internal.ast: AST allocation failed"),
         ret: ret,
-        body: a.dupx_in(body),
+        body: a.dupx_in(body).expect("std.internal.ast: AST allocation failed"),
     ))
 }
 func*<A> = (a: MutPtr<A>, name: str, ps: [Param], ret: Ty, body: [Stmt]) Decl { a.func_in(name, ps, ret, body) }
 struct_in*<A> = (a: MutPtr<A>, name: str, fs: [Field]) Decl {
     dstruct(StructDecl(
         name: name,
-        fields: a.dupx_in(fs),
+        fields: a.dupx_in(fs).expect("std.internal.ast: AST allocation failed"),
     ))
 }
 struct*<A> = (a: MutPtr<A>, name: str, fs: [Field]) Decl { a.struct_in(name, fs) }
@@ -61,7 +62,7 @@ decl_seed = () [Decl] {
         fields: empty_fields(),
     ))]
 }
-dbuf_in*<A> = (a: MutPtr<A>, n: i64) [Decl] { a.buf_in(n, decl_seed()) }
+dbuf_in*<A> = (a: MutPtr<A>, n: i64) [Decl] { a.buf_in(n, decl_seed()).expect("std.internal.ast: AST allocation failed") }
 fill_accessors_in<A> = (a: MutPtr<A>, buf: [Decl], sd: StructDecl) [Decl] {
     sd.fields.loop((h, i, f) {
         buf[i] = a.accessor_in(sd.name, f)
