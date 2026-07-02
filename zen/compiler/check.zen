@@ -545,12 +545,55 @@ call_targ* = (env: Env, f: Func, args: [Expr], tp: str) Ty {
 }
 // etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
 // overriding inference; an absent one (i past etargs) falls back to inferring from the value args.
+// After the per-tparam pass, still-void targs get the two deep fallbacks (see deep_targs): a lambda
+// arg's BODY type for a closure-return tparam, and a co-targ's generic-trait impl — the env-typed
+// mirror of the inliner's post-pass, so resolve (let typing, mono_rec instances) agrees with it.
 call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
     buf := env.a.tbuf(f.tparams.len)
     f.tparams.loop((h, i, tp) {
         buf[i] = (i < etargs.len).match ({ true => etargs[i], false => env.call_targ(f, args, tp.name) })
     })
+    env.deep_targs_env(f.tparams, buf, f.params, args)
+}
+// env-typed twin of deep_targs (the resolver types lambda bodies with the full Env, not light types).
+deep_targs_env = (env: Env, tparams: [Param], buf: [Ty], params: [Param], args: [Expr]) [Ty] {
+    tparams.loop((h, i, tp) {
+        buf[i] = buf[i].is_void_ty().match ({ true => env.lam_body_targ_env(tparams, buf, params, args, tp.name), false => buf[i] })
+    })
+    tparams.loop((h, i, tp) {
+        buf[i] = buf[i].is_void_ty().match ({ true => env.a.impl_trait_targ(env.decls, env.didx, tparams, buf, tp.name), false => buf[i] })
+    })
     buf
+}
+lam_body_targ_env = (env: Env, tparams: [Param], targs: [Ty], params: [Param], args: [Expr], tp: str) Ty {
+    found := tvoid()
+    params.loop((h, i, p) {
+        found = found.is_void_ty().match ({ true => (i < args.len).match ({ true => env.lam_body_one_env(tparams, targs, p.ty, args[i].addr(), tp), false => found }), false => found })
+    })
+    found
+}
+lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<Expr>, tp: str) Ty {
+    pty.match ({
+        .FnT(ft) => load(arg).match ({
+            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({ true => {
+                vars := env.vars
+                lm.params.loop((h, k, lp) {
+                    vars = env.a.vcons(lp.name, (k < ft.params.len).match ({ true => env.a.subst_ty_in(tparams, targs, ft.params[k]), false => tvoid() }), vars)
+                })
+                env2 := Env(
+                    vars: vars,
+                    decls: env.decls,
+                    didx: env.didx,
+                    exp: tvoid(),
+                    a: env.a,
+                )
+                bty := env2.block_ty_from(lm.body, 0)
+                (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({ true => tvoid(), false => load(ft.ret).unify_ty(bty, tp) })
+            }, false => tvoid() }),
+            _           => tvoid(),
+        }),
+        _        => tvoid(),
+    })
 }
 // UFCS trait dispatch: route `x.m()` to the receiver type's impl when one exists.
 method_in = (methods: [Param], fn: str) bool {
@@ -2194,7 +2237,7 @@ light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList
     f.tparams.loop((h, i, tp) {
         buf[i] = f.light_targ(a, args, exp, tp.name, env, decls, idx)
     })
-    buf
+    a.deep_targs(f.tparams, buf, f.params, args, env, decls, idx)
 }
 light_call_ty = (decls: [Decl], idx: DeclIndex, a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
     eq(c.fn, "cstr").match ({ true => tcstr(), false => {
@@ -2240,8 +2283,22 @@ light_ty = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl], idx
         .Member(m)     => a.light_member_ty(decls, idx, m.obj.light_ty(a, env, decls, idx), m.field),
         .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(a, env, decls, idx)),
         .Cond(d)       => d.t.light_ty(a, env, decls, idx),
+        .Match(m)      => a.light_match_ty(m, env, decls, idx),
         _              => tvoid(),
     })
+}
+// Forward inference through method chains: inlining a generic receiver leaves a Block whose tail is
+// a Match (`good.map_err(f)` → `({ … r.match({…}) })`), so the NEXT call in the chain
+// (`.expect(msg)`) must be able to light-type it or its tparams silently default to void. A checked
+// match's arms all agree on one type, so the first arm that light-types non-void is the match's type
+// (arm binds carry the subject's variant payload, exactly as xform_arms binds them).
+light_match_ty = (a: MutPtr<Malloc>, m: MatchData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    st := m.subj.light_ty(a, env, decls, idx)
+    found := tvoid()
+    m.arms.loop((h, i, ar) {
+        found = found.is_void_ty().match ({ true => ar.body.light_ty(a, a.xform_arm_env(decls, idx, st, m.ename, ar, env), decls, idx), false => found })
+    })
+    found
 }
 // Unify a param type against an arg type to infer one tparam.
 unify_ty = (pty: Ty, aty: Ty, tp: str) Ty {
@@ -2369,6 +2426,123 @@ infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [E
     arg := params.infer_one(a, cargs, tp, env, decls, idx)
     arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
 }
+// ── deep tparam fallbacks: two LAST-RESORT inference sources for a tparam that neither the value
+//    args nor the expected type could bind (it would otherwise silently default to void → a
+//    `Result<T,void>` mono whose union elides the member the ctor still writes → uncompilable C).
+//    They run as a POST-pass over the full targ buffer so each can consult the tparams that DID bind.
+// does `t` mention the type-param name `n` anywhere?
+ty_mentions = (t: Ty, n: str) bool {
+    t.match ({
+        .Named(x)   => eq(x, n),
+        .Generic(g) => g.args.tys_mention(n),
+        .Ptr(pd)    => load(pd.pointee).ty_mentions(n),
+        .Slice(e)   => load(e).ty_mentions(n),
+        .FnT(ft)    => ft.params.tys_mention(n) || load(ft.ret).ty_mentions(n),
+        _           => false,
+    })
+}
+tys_mention = (ts: [Ty], n: str) bool {
+    f := false
+    ts.loop((h, i, t) {
+        f = f || t.ty_mentions(n)
+    })
+    f
+}
+ty_mentions_any = (t: Ty, tparams: [Param]) bool {
+    f := false
+    tparams.loop((h, i, tp) {
+        f = f || t.ty_mentions(tp.name)
+    })
+    f
+}
+// FALLBACK 1 — closure-return inference: a tparam that appears in an FnT param's RETURN position
+// (`on_err: (E) F`) whose argument is an UNANNOTATED lambda binds from the lambda BODY's type: bind
+// the lambda params to their (already-inferred-targ-substituted) declared types, light-type the body,
+// and unify. Bails (void) if the body's type still mentions any tparam (nothing concrete was learned).
+lam_body_targ = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr], tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    found := tvoid()
+    params.loop((h, i, p) {
+        found = found.is_void_ty().match ({ true => (i < cargs.len).match ({ true => a.lam_body_one(tparams, targs, p.ty, cargs[i].addr(), tp, env, decls, idx), false => found }), false => found })
+    })
+    found
+}
+lam_body_one = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], pty: Ty, carg: Ptr<Expr>, tp: str, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    pty.match ({
+        .FnT(ft) => load(carg).match ({
+            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({ true => {
+                e2 := env
+                lm.params.loop((h, k, lp) {
+                    e2 = a.vcons(lp.name, (k < ft.params.len).match ({ true => a.subst_ty_in(tparams, targs, ft.params[k]), false => tvoid() }), e2)
+                })
+                bty := a.light_block_ty_from(lm.body, e2, decls, idx, 0)
+                (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({ true => tvoid(), false => load(ft.ret).unify_ty(bty, tp) })
+            }, false => tvoid() }),
+            _           => tvoid(),
+        }),
+        _        => tvoid(),
+    })
+}
+// FALLBACK 2 — trait-impl inference: a tparam that only names a generic TRAIT's type param
+// (`spawn<A, M, ActorT>` returning `ActorHandle<M, ActorT>`, where the Receiver<M> trait ties M to
+// the actor) binds from a CO-TARG's impl of that trait: ActorT bound Counter, and
+// `Counter.impl(Receiver<Msg>)` solves M=Msg by unifying the trait's method declarations against the
+// impl's concrete method signatures (the parser drops the written `<Msg>`, so the methods are the
+// only place the instantiation survives). Solves only traits whose tparam NAME matches `tp`.
+impl_trait_targ = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tparams: [Param], targs: [Ty], tp: str) Ty {
+    found := tvoid()
+    tparams.loop((h, i, x) {
+        found = found.is_void_ty().match ({ true => a.impl_trait_targ_of(decls, idx, targs[i].dispatch_recv_name(), tp), false => found })
+    })
+    found
+}
+impl_trait_targ_of = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tyname: str, tp: str) Ty {
+    is_empty(tyname).match ({ true => tvoid(), false => {
+        found := tvoid()
+        decls.loop((h, i, d) {
+            found = found.is_void_ty().match ({ true => d.match ({
+                .DImpl(im) => eq(im.ty, tyname).match ({ true => a.impl_trait_solve(decls, idx, im, tp), false => tvoid() }),
+                _          => tvoid(),
+            }), false => found })
+        })
+        found
+    } })
+}
+impl_trait_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, tp: str) Ty {
+    g := decls.gstruct_of(im.trname)
+    (is_empty(g.name) || g.tparams.has_tparam(tp) == false).match ({ true => tvoid(), false => {
+        found := tvoid()
+        g.fields.loop((h, i, f) {
+            found = found.is_void_ty().match ({ true => a.impl_method_solve(decls, idx, im, f, tp), false => found })
+        })
+        found
+    } })
+}
+impl_method_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, f: Field, tp: str) Ty {
+    f.ty.match ({
+        .FnT(ft) => {
+            mf := idx.idx_func(decls, a.impl_cname_in(im.trname, im.ty, f.name))
+            is_empty(mf.name).match ({ true => tvoid(), false => {
+                found := load(ft.ret).unify_ty(mf.ret, tp)
+                ft.params.loop((h, j, pt) {
+                    found = found.is_void_ty().match ({ true => (j < mf.params.len).match ({ true => pt.unify_ty(mf.params[j].ty, tp), false => found }), false => found })
+                })
+                found
+            } })
+        },
+        _        => tvoid(),
+    })
+}
+// The post-pass driver: fill any still-void targ from fallback 1 then fallback 2, in tparam order
+// (so a later fallback sees everything earlier ones bound).
+deep_targs = (a: MutPtr<Malloc>, tparams: [Param], buf: [Ty], params: [Param], cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
+    tparams.loop((h, i, tp) {
+        buf[i] = buf[i].is_void_ty().match ({ true => a.lam_body_targ(tparams, buf, params, cargs, tp.name, env, decls, idx), false => buf[i] })
+    })
+    tparams.loop((h, i, tp) {
+        buf[i] = buf[i].is_void_ty().match ({ true => a.impl_trait_targ(decls, idx, tparams, buf, tp.name), false => buf[i] })
+    })
+    buf
+}
 // etargs = explicit turbofish type args: a present one PINS the i-th tparam (overriding inference),
 // an absent one (i past etargs) is inferred from value args / expected type as before.
 infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex, etargs: [Ty]) [Ty] {
@@ -2376,7 +2550,7 @@ infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, ex
     tparams.loop((h, i, tp) {
         buf[i] = (i < etargs.len).match ({ true => etargs[i], false => params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls, idx) })
     })
-    buf
+    a.deep_targs(tparams, buf, params, cargs, env, decls, idx)
 }
 // Substitute tparams in type-bearing expression/statement nodes.
 subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
