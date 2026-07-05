@@ -3,7 +3,7 @@
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
-{ exports_get } = compiler.parse
+{ exports_get, alias_prefixes_get } = compiler.parse
 { panic, expect } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
 { String } = std.text.string
@@ -35,11 +35,24 @@ alias_sep_from = (name: str, p: i32, last: i32) i32 { (name.at(p) == 0).match ({
 alias_sep = (name: str) i32 { name.alias_sep_from(0, 0 - 1) }
 // the method tail after the separator (`put` of `m__put`) — a NUL-terminated suffix, no copy.
 alias_tail = (name: str, sep: i32) str { cstr(offset(name, to_i64(sep + 2))) }
-// register `name` under its tail iff it is alias-shaped: a NON-EMPTY prefix (skips compiler
-// internals like `__str_eq`/`__clos_1_call`, whose separator is at position 0).
+// does `name` begin with `pre` immediately followed by the `__` separator (`m` matches `m__put`)?
+alias_prefix_match_at = (name: str, pre: str, i: i32) bool { (pre.at(i) == 0).match ({ true => name.at(i) == '_' && name.at(i + 1) == '_', false => (name.at(i) == pre.at(i)).match ({ true => name.alias_prefix_match_at(pre, i + 1), false => false }) }) }
+// is `name`'s prefix an ACTUAL module-alias binding (from `m = std.x.y` / `m = sibling`)? Only then is
+// `name` a genuine `alias__method` decl. Guards against phantom UFCS methods: a plain user fn that
+// merely has `__` in its name (`foo__grow`) has no matching alias, so it is NOT alias-shaped.
+alias_is_real_prefix = (name: str) bool {
+    f := false
+    alias_prefixes_get().loop((h, i, p) {
+        f = name.alias_prefix_match_at(p.name, 0).match ({ true => true, false => f })
+    })
+    f
+}
+// register `name` under its tail iff it is alias-shaped: a NON-EMPTY prefix that is a REAL module alias
+// (skips compiler internals like `__str_eq`, whose separator is at position 0, and plain user fns like
+// `foo__grow` whose prefix is not an alias binding).
 alias_note = (m: Map<i64>, a: MutPtr<Malloc>, name: str, i: i64) Map<i64> {
     sep := name.alias_sep()
-    (sep > 0).match ({ true => m.put(a, name.alias_tail(sep), i).expect("check: decl-index alloc"), false => m })
+    (sep > 0 && name.alias_is_real_prefix()).match ({ true => m.put(a, name.alias_tail(sep), i).expect("check: decl-index alloc"), false => m })
 }
 build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
     seed: i64 := 0 - 1    // DEnum.name → index
@@ -673,12 +686,13 @@ dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: str, tyn
 }
 dispatch_name = (env: Env, c: CallData) str {
     (c.args.len > 0).match ({ true => {
-        tyname := env.infer_expr(c.args[0].addr()).dispatch_recv_name()
+        rty := env.infer_expr(c.args[0].addr())
+        tyname := rty.dispatch_recv_name()
         // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
         // impl scan entirely (the common case for primitive/struct receivers).
         dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({ true => c.fn, false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname) })
         eq(dn, c.fn).match ({ true => {
-            cs := env.alias_ufcs_candidates(c.fn, tyname)
+            cs := env.alias_ufcs_candidates(c.fn, rty)
             (cs.count == 1).match ({ true => cs.first, false => c.fn })
         }, false => dn })
     }, false => c.fn })
@@ -690,6 +704,18 @@ dispatch_recv_name = (t: Ty) str {
         _           => t.recv_name(),
     })
 }
+// A slice receiver (`[u8]`, possibly behind a pointer) has no head name but IS dispatchable — the
+// `fits`-based candidate scan keys on the element type instead.
+is_slice_recv = (t: Ty) bool {
+    t.match ({
+        .Slice(e) => true,
+        .Ptr(pd)  => load(pd.pointee).is_slice_recv(),
+        _         => false,
+    })
+}
+// Can this receiver drive UFCS-alias dispatch? Anything with a concrete head, plus slices (whose head
+// is empty). Bails on void/unknown/pre-inline-tparam receivers, exactly as before for non-slices.
+alias_recv_dispatchable = (t: Ty) bool { is_empty(t.dispatch_recv_name()).match ({ true => t.is_slice_recv(), false => true }) }
 // Compiler-level call intrinsics (typed in infer_call / lowered by genc). Lives here — not in
 // check_validate, which now imports it — so the alias-UFCS fallback below can refuse to shadow them.
 is_intrinsic* = (fn: str) bool { eq(fn, "load").match ({ true => true, false => eq(fn, "store").match ({ true => true, false => eq(fn, "addr").match ({ true => true, false => eq(fn, "assert_nonnull").match ({ true => true, false => eq(fn, "offset").match ({ true => true, false => eq(fn, "cstr").match ({ true => true, false => eq(fn, "slice").match ({ true => true, false => eq(fn, "malloc").match ({ true => true, false => eq(fn, "sizeof").match ({ true => true, false => eq(fn, "load_i64").match ({ true => true, false => eq(fn, "store_i64").match ({ true => true, false => eq(fn, "atomic_add_i64").match ({ true => true, false => eq(fn, "atomic_load_i64").match ({ true => true, false => eq(fn, "atomic_store_i64").match ({ true => true, false => eq(fn, "atomic_cas_i64").match ({ true => true, false => eq(fn, "atomic_fence").match ({ true => true, false => eq(fn, "null_ptr").match ({ true => true, false => eq(fn, "__str_eq").match ({ true => true, false => eq(fn, "__str_ne").match ({ true => true, false => eq(fn, "to_i32").match ({ true => true, false => eq(fn, "to_i64").match ({ true => true, false => eq(fn, "to_u8").match ({ true => true, false => eq(fn, "to_f64").match ({ true => true, false => false }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
@@ -736,25 +762,26 @@ alias_name_is_pub = (name: str) bool {
     })
     f
 }
-// is `f` an alias-prefixed candidate for method `fn` on receiver head `tyname`?
-alias_cand_matches = (f: Func, fn: str, tyname: str) bool {
+// is `f` an alias-prefixed candidate for method `fn` on receiver `rty`? Common gates: real alias
+// prefix (never a phantom `foo__grow`), tail == the method, `*`-exported, and first-param head is not
+// the fn's OWN tparam. `exact` selects param0-compat: exact head-string equality (pass 1) vs the same
+// receiver→param0 coercion the normal call path uses (`fits` — i32→i64, slice→slice, …) in pass 2.
+alias_cand_matches = (f: Func, fn: str, rty: Ty, exact: bool) bool {
     sep := f.name.alias_sep()
-    (sep > 0 && f.params.len > 0).match ({ true => eq(f.name.alias_tail(sep), fn).match ({ true => {
-        head := f.params[0].ty.dispatch_recv_name()
-        is_empty(head).match ({ true => false, false => eq(head, tyname) && f.tparams.tparam_names_have(head) == false && f.name.alias_name_is_pub() })
-    }, false => false }), false => false })
+    (sep > 0 && f.params.len > 0 && f.name.alias_is_real_prefix() && eq(f.name.alias_tail(sep), fn) && f.name.alias_name_is_pub()).match ({ true => {
+        p0 := f.params[0].ty
+        head := p0.dispatch_recv_name()
+        (f.tparams.tparam_names_have(head) == false).match ({ true => exact.match ({ true => is_empty(head).match ({ true => false, false => eq(head, rty.dispatch_recv_name()) }), false => rty.fits(p0) }), false => false })
+    }, false => false })
 }
-alias_ufcs_candidates* = (env: Env, fn: str, tyname: str) AliasCands {
-    (is_empty(tyname) || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).match ({ true => {
-        return alias_cands_none()
-    } })
+alias_cands_scan = (env: Env, fn: str, rty: Ty, exact: bool) AliasCands {
     cnt := 0
     first := ""
     second := ""
     env.decls.loop((h, i, d) {
         hit := d.match ({
-            .DFunc(f)    => f.alias_cand_matches(fn, tyname).match ({ true => f.name, false => "" }),
-            .DForeign(f) => f.alias_cand_matches(fn, tyname).match ({ true => f.name, false => "" }),
+            .DFunc(f)    => f.alias_cand_matches(fn, rty, exact).match ({ true => f.name, false => "" }),
+            .DForeign(f) => f.alias_cand_matches(fn, rty, exact).match ({ true => f.name, false => "" }),
             _            => "",
         })
         is_empty(hit).match ({ true => { }, false => {
@@ -768,6 +795,16 @@ alias_ufcs_candidates* = (env: Env, fn: str, tyname: str) AliasCands {
         first: first,
         second: second,
     )
+}
+// Two-pass for determinism: exact head-type matches first; only when ZERO exact matches exist do we
+// fall back to coercible receivers (i32→i64, slice receivers). The count==1-else-ambiguity rule holds
+// per pass, so an exact unique winner is never masked by a coercible one.
+alias_ufcs_candidates* = (env: Env, fn: str, rty: Ty) AliasCands {
+    (rty.alias_recv_dispatchable() == false || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).match ({ true => {
+        return alias_cands_none()
+    } })
+    exact := env.alias_cands_scan(fn, rty, true)
+    (exact.count > 0).match ({ true => exact, false => env.alias_cands_scan(fn, rty, false) })
 }
 fnt_ret = (t: Ty) Ty {
     t.match ({

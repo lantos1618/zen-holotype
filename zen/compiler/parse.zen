@@ -424,6 +424,33 @@ note_export = (name: str) void {
         exports_n = exports_n + 1
     }, false => { } })
 }
+// ── ALIAS-PREFIX registry (UFCS through module aliases) ──────────────────────────────────────────
+// std.internal.resolve flattens `m = sibling` by prefixing sibling's decls with `m__`. The checker's
+// alias-UFCS fallback must distinguish a REAL alias prefix (`m`) from a plain user fn that merely has
+// `__` in its name (`foo__grow`) — otherwise it invents phantom methods. resolve records each alias it
+// stamps here (reset at every resolve_program_data entry); check reads `alias_prefixes_get()` and only
+// treats a decl as alias-shaped when its prefix ∈ this set. Separate from exports_buf so parse_module's
+// exports_reset never clobbers it (resolve runs BEFORE parse of the flat source).
+alias_prefix_buf := no_exports()
+alias_prefix_n := 0
+alias_prefixes_reset* = (a: MutPtr<Malloc>) void {
+    alias_prefix_buf = slice(a.acquire(4096 * sizeof(Param)), 4096)
+    alias_prefix_n = 0
+}
+alias_prefixes_get* = () [Param] { slice(alias_prefix_buf.ptr, alias_prefix_n) }
+alias_prefix_seen = (name: str) bool {
+    f := false
+    alias_prefixes_get().loop((h, i, p) {
+        f = eq(p.name, name).match ({ true => true, false => f })
+    })
+    f
+}
+note_alias_prefix* = (name: str) void {
+    (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).match ({ true => {
+        alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
+        alias_prefix_n = alias_prefix_n + 1
+    }, false => { } })
+}
 // record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
 note_export_if_starred = (a: MutPtr<Malloc>, src: str, pos: i32) void {
     nt := src.scan(pos)
