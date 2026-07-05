@@ -635,6 +635,11 @@ oracle_build_run* = () i32 {
     // newline + `.Uppercase` ends the statement even after a bare Uppercase variable (the glue repro).
     // a qualified ctor `Res.Okv(41)` with the dot on the SAME line still parses as one expression.
     so2 := run_fixtures("build stdout 2", [FixtureCase(
+        path: "tests/fixtures/zen/deep_tail_recursion.zen",
+        want_exit: "0",
+        want_out: "1000000\n",
+        check_out: true,
+    ), FixtureCase(
         path: "tests/fixtures/zen/no_leading_paren_glue.zen",
         want_exit: "0",
         want_out: "7\n",
@@ -665,6 +670,10 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: true,
     )])
+    // deep_tail_recursion: the idiomatic `.match`+recursion loop — a self-tail-recursive count to depth
+    // 1,000,000 (well past the ~250k -O0 stack cliff), running only because the driver builds with
+    // `-O1 -foptimize-sibling-calls` so cc eliminates the tail frame. Prints the accumulated 1000000.
+    // (deep_nontail_recursion's stack-overflow panic is asserted in the `build shell` suite below.)
     // a `(` opening a NEW LINE is its own statement (no glue onto the previous `b := id`).
     // a statement-initial `.Okv(y)` after a call statement is the trailing expression, not a chain.
     // @addr/@load raw-memory intrinsics (the `@` spelling): @load(@addr(41)) + 1 = 42.
@@ -1456,6 +1465,9 @@ oracle_build_run* = () i32 {
     ), ShellCase(
         name: "result_expect_panics",
         cmd: "./zenc build tests/fixtures/zen/result_expect_panics.zen -o $ZT/zrep 2>/dev/null && { $ZT/zrep >/dev/null 2>$ZT/zrep_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: config must load\" $ZT/zrep_e.txt",
+    ), ShellCase(
+        name: "deep_nontail_recursion_panics",
+        cmd: "./zenc build tests/fixtures/zen/deep_nontail_recursion.zen -o $ZT/zsof 2>/dev/null && { $ZT/zsof >/dev/null 2>$ZT/zsof_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: stack overflow (recursion too deep)\" $ZT/zsof_e.txt",
     ), ShellCase(
         name: "infer_lambda_ret_annot",
         cmd: "printf '{ Result, IoError, expect, map_err } = std.core.result\\nmain = () i32 {\\n    good: Result<i32, IoError> := .Ok(42)\\n    v := good.map_err((e) str { \"boom\" }).expect(\"m\")\\n    v - 42\\n}\\n' > $ZT/zlam.zen && ./zenc build $ZT/zlam.zen -o $ZT/zlam_bin 2>/dev/null && $ZT/zlam_bin",
