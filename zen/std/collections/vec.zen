@@ -4,6 +4,7 @@
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, Opt } = std.core.result
+{ Shared } = std.mem.share
 Vec*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
@@ -65,6 +66,27 @@ Vec*<T>: {
         out
     }
     free<A> = (v: Vec<T>, a: MutPtr<A>) void { a.release(v.ptr) }
+    share<A> = (v: Vec<T>, a: MutPtr<A>) Shared<[T]> {
+        // rt M2 flagship (docs/rt-scoped-runtime.md §4): promote a scratch Vec across an actor boundary
+        // by DEEP-COPYING its live elements into shared (refcounted) memory, then FREEZING — the result
+        // is a read-only `Shared<[T]>` legal as a send/spawn payload. The copy makes the shared view
+        // independent of the original: mutating or freeing the source Vec afterward can't affect it.
+        //
+        // ONE block, laid out `[ count:i64 | slice-header:16 | elem[0..len] ]`, so `Shared.drop_in` frees
+        // the whole thing (no second allocation to leak). The slice header at offset 8 points at the
+        // element storage at offset 24, and IS the `[T]` value that `Shared<[T]>.view()/.get()` return.
+        n := v.len
+        base := a.acquire(8 + 16 + n * sizeof(T))
+        store_i64(base, 1)
+        dst: [T] := slice(base.offset(24), n)
+        src: [T] := v.view()
+        src.loop((h, i, x) {
+            dst[i] = x
+        })
+        hdr: [[T]] := slice(base.offset(8), 1)
+        hdr[0] = dst
+        Shared<[T]>(base: base)
+    }
     each = (v: Vec<T>, f: (T) void) void {
         // Higher-order helpers over the live elements (`view()`), backed by closures — inline lambdas and
         // stored closures both work. Spelled inline (over `view().loop`) rather than delegating to

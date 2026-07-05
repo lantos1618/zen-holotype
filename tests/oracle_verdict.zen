@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (223)", [VerdictCase(
+    a := run_verdicts("verdict (227)", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -1604,6 +1604,22 @@ oracle_verdict_run* = () i32 {
         src: "{ Result, IoError } = std.core.result\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Ping\nRoom*: {\n    n: i32,\n}\nRoom.impl(actor, {\n    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Ping => { },\n            _     => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.spawn(a, 4, Room(n: 7))\n    0\n}",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\n{ Shared } = std.mem.share\nshare = std.mem.share\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Inc(i32)\nCounter*: {\n    total: i64,\n    seen: Shared<RawPtr<u8>>,\n}\nCounter.impl(actor, {\n    receive = (c: MutPtr<Counter>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Inc(n) => {\n                c.total = c.total + to_i64(n)\n            },\n            _       => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    scratch := a.acquire(64)\n    r: Result<actor.ActorHandle<Msg, Counter>, IoError> := actor.spawn(a, 4, Counter(\n        total: 0,\n        seen: scratch.share(a),\n    ))\n    0\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Shared } = std.mem.share\nshare = std.mem.share\nhalloc = std.mem.heap\nPk*: { s: Shared<i64> }\nH*: { id: i32 }\nsend = (h: H, m: Pk) i64 { m.s.get() }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    v: i64 := 41\n    sh := v.share(a)\n    h := H(id: 1)\n    r := send(h, Pk(s: sh))\n    sh.drop_in(a)\n    to_i32(r)\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ give } = std.mem.share\nBlob*: { v: i32 }\nH*: { id: i32 }\nMsg*: Wrap(Blob)\nsend = (h: H, m: Msg) bool { true }\ntest* = () i32 {\n    b := Blob(v: 5)\n    h := H(id: 1)\n    h.send(.Wrap(give(b)))\n    0\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ give } = std.mem.share\nBlob*: { v: i32 }\nH*: { id: i32 }\nMsg*: Wrap(Blob)\nsend = (h: H, m: Msg) bool { true }\nsink = (x: Blob) i32 { x.v }\ntest* = () i32 {\n    b := Blob(v: 5)\n    h := H(id: 1)\n    h.send(.Wrap(give(b)))\n    sink(b)\n}",
+        should_pass: false,
+        kind: "ownership",
     )])
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,

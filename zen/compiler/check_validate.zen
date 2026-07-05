@@ -1315,16 +1315,37 @@ recv_var_name = (c: CallData) str {
         _       => "",
     }), false => "" })
 }
-// SENDABILITY — move-on-send. Passing an owned `Own<T>` into a `send(handle, msg)` transfers it to the
-// receiving actor, so the sender must not keep using it (otherwise both sides free it → race/double-free).
-// We mark the sent owner dead, reusing the use-after-free machinery. Catches the owner sent DIRECTLY or
-// wrapped one level in an enum message (`send(h, .Wrap(own))`). Value/str/Arc messages are untouched —
-// only `Own` is moved — so the ergonomic common case (value messages) sees zero new friction.
+// the bare-local name given away by an explicit `give(<local>)` / `<local>.give()` marker (rt M2 iso
+// move, docs/rt-scoped-runtime.md §4 shape 3), else "". `give` (std.mem.share) is identity at runtime;
+// its ONLY effect is to opt a value into the SAME move-kill machinery `Own` gets — the sender promises
+// not to touch the local again. UFCS may have desugared `x.give()` to the flat `give(x)` Call by this
+// stage; handle both, and the module-qualified `alias__give` flatten form.
+give_var = (e: Ptr<Expr>) str {
+    load(e).match ({
+        .Call(c)        => ((eq(c.fn, "give") || c.fn.ends_with("__give")) && c.args.len == 1).match ({ true => c.args[0].match ({
+            .Var(v) => v.name,
+            _       => "",
+        }), false => "" }),
+        .MethodCall(mc) => (eq(mc.method, "give") && mc.args.len == 0).match ({ true => load(mc.recv).match ({
+            .Var(v) => v.name,
+            _       => "",
+        }), false => "" }),
+        _               => "",
+    })
+}
+// SENDABILITY — move-on-send. Passing an owned `Own<T>` (or an explicit `give(<local>)`, rt M2) into a
+// `send(handle, msg)` transfers it to the receiving actor, so the sender must not keep using it
+// (otherwise both sides free it → race/double-free). We mark the moved local dead, reusing the
+// use-after-free machinery. Catches the value sent DIRECTLY or wrapped one level in an enum message
+// (`send(h, .Wrap(own))` / `send(h, .Wrap(give(v)))`). Plain value/str/Arc messages are untouched — only
+// `Own` and `give`-marked locals are moved — so the ergonomic common case sees zero new friction.
 send_own_var = (env: Env, e: Ptr<Expr>) str {
     load(e).match ({
-        .Var(v)       => eq(env.infer_expr(e).owner_base(), "Own").match ({ true => v.name, false => "" }),
-        .MakeEnum(mk) => env.send_own_var(mk.payload),
-        _             => "",
+        .Var(v)         => eq(env.infer_expr(e).owner_base(), "Own").match ({ true => v.name, false => "" }),
+        .MakeEnum(mk)   => env.send_own_var(mk.payload),
+        .Call(c)        => give_var(e),
+        .MethodCall(mc) => give_var(e),
+        _               => "",
     })
 }
 send_consume = (env: Env, c: CallData) str { (eq(c.fn, "send") && c.args.len >= 2).match ({ true => env.send_own_var(c.args[1].addr()), false => "" }) }
