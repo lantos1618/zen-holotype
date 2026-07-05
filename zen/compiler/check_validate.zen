@@ -1347,25 +1347,49 @@ ty_is_ptr_t = (t: Ty) bool {
 // pointer) that a receiver holding this payload could mutate through? A `val` must be DEEP: a readonly
 // `Ptr<T>` (kind 1 = `box`) is only sendable when T is ITSELF deeply-immutable — a `Ptr<Outer>` whose
 // Outer reachably holds a `MutPtr` field still lets the receiver reach mutable state one hop deeper
-// (the same cross-actor race). So this descends readonly `Ptr`/`RawPtr` views (kinds 0/1) and NAMED
-// (non-generic) struct fields, bounded by `depth`. It TERMINATES as immutable (false) at scalars, str,
-// slices, function types, and ALL generic/capability types — `Own<T>` (iso, moved), `Arc<T>` (shared),
-// `Rc<T>` (caught by the send-rc pass), `ReplyRef`/`ActorRef` (the reply capability, deliberately
-// RawPtr-backed): their interior aliasing is governed by their own capability, not by a `Ptr` alias.
-// CONSERVATIVE BOUND (documented follow-up): a `MutPtr` buried inside a generic type ARGUMENT
-// (`Box<MutPtr<X>>`), a slice element (`[MutPtr<X>]`), or a nested enum variant is NOT inspected here
-// and is conservatively ACCEPTED — closing that needs tparam substitution / enum-variant descent.
+// (the same cross-actor race). So this descends, bounded by `depth`:
+//   • readonly `Ptr`/`RawPtr` views (kinds 0/1) — one hop through the pointee;
+//   • NAMED struct fields AND non-generic enum variant payloads (a `.Named` is one or the other);
+//   • SLICE element types — `[MutPtr<X>]` reaches a mutable pointer per element;
+//   • GENERIC type ARGUMENTS — `Box<MutPtr<X>>` / `Vec<MutPtr<X>>` carry the mutable pointer as their
+//     element. We descend the ARGS (the semantic payload the container carries), NOT the container's
+//     internal representation, so a `Vec<i32>` whose private buffer happens to be a `MutPtr<i32>` is
+//     NOT wrongly rejected — only its element type `i32` is inspected.
+// It TERMINATES as immutable (false) at scalars, str, function types, and the OPAQUE CAPABILITY generics
+// `Own<T>` (iso, moved), `Arc<T>` (shared), `Rc<T>` (also caught by the send-rc pass), `ReplyRef`/
+// `ActorRef` (deliberately RawPtr-backed): their interior aliasing is governed by their own capability,
+// not by a structural alias, so we do NOT descend their args (descending `Arc<MutPtr<X>>` would wrongly
+// reject a legitimately-shared value). Bounded recursion (`depth`) terminates on recursive types.
 ty_reaches_mutptr = (decls: [Decl], t: Ty, depth: i32) bool {
     (depth <= 0).match ({ true => false, false => t.match ({
-        .Ptr(pd)  => (pd.kind == k_mut_ptr()).match ({ true => true, false => decls.ty_reaches_mutptr(load(pd.pointee), depth - 1) }),
-        .Named(n) => decls.fields_reach_mutptr(decls.struct_fields(n), depth - 1),
-        _         => false,
+        .Ptr(pd)    => (pd.kind == k_mut_ptr()).match ({ true => true, false => decls.ty_reaches_mutptr(load(pd.pointee), depth - 1) }),
+        .Named(n)   => decls.fields_reach_mutptr(decls.struct_fields(n), depth - 1) || decls.variants_reach_mutptr(decls.enum_variants(n), depth - 1),
+        .Slice(e)   => decls.ty_reaches_mutptr(load(e), depth - 1),
+        .Generic(g) => sm_is_opaque_cap(g.name).match ({ true => false, false => decls.tys_reach_mutptr(g.args, depth - 1) }),
+        _           => false,
     }) })
 }
+// the opaque capability generics: their type args must NOT be structurally descended (they mediate their
+// own interior aliasing — see the send-rc / owner-verb capability set: Own/Arc/Rc + the two actor caps).
+sm_is_opaque_cap = (name: str) bool { eq(name, "Own") || eq(name, "Arc") || eq(name, "Rc") || eq(name, "ReplyRef") || eq(name, "ActorRef") }
 fields_reach_mutptr = (decls: [Decl], fields: [Field], depth: i32) bool {
     f := false
     fields.loop((h, i, fl) {
         f = decls.ty_reaches_mutptr(fl.ty, depth).match ({ true => true, false => f })
+    })
+    f
+}
+variants_reach_mutptr = (decls: [Decl], variants: [VariantDef], depth: i32) bool {
+    f := false
+    variants.loop((h, i, v) {
+        f = decls.ty_reaches_mutptr(v.payload, depth).match ({ true => true, false => f })
+    })
+    f
+}
+tys_reach_mutptr = (decls: [Decl], tys: [Ty], depth: i32) bool {
+    f := false
+    tys.loop((h, i, ty) {
+        f = decls.ty_reaches_mutptr(ty, depth).match ({ true => true, false => f })
     })
     f
 }
