@@ -960,7 +960,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (160)", [VerdictCase(
+    b := run_verdicts("verdict-kind (165)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1604,6 +1604,22 @@ oracle_verdict_run* = () i32 {
         src: "{ Result, IoError } = std.core.result\nhalloc = std.mem.heap\nactor = std.concurrent.actor\nMsg*: Ping\nRoom*: {\n    n: i32,\n}\nRoom.impl(actor, {\n    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {\n        ctx.msg.match ({\n            .Ping => { },\n            _     => { },\n        })\n    }\n})\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.spawn(a, 4, Room(n: 7))\n    0\n}",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "Data*: {\n    n: i32,\n}\nMsg*: Ref(MutPtr<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, p: MutPtr<Data>) i32 {\n    h.send(.Ref(p))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "Inner*: {\n    p: MutPtr<i32>,\n}\nOuter*: {\n    inner: Inner,\n}\nMsg*: View(Ptr<Outer>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, o: Ptr<Outer>) i32 {\n    h.send(.View(o))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "Data*: {\n    n: i32,\n}\nMsg*: View(Ptr<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, p: Ptr<Data>) i32 {\n    h.send(.View(p))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Inner*: {\n    p: Ptr<i32>,\n}\nOuter*: {\n    inner: Inner,\n}\nMsg*: View(Ptr<Outer>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, o: Ptr<Outer>) i32 {\n    h.send(.View(o))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
     )])
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,
@@ -1627,6 +1643,12 @@ oracle_verdict_run* = () i32 {
     // Accepts (no over-rejection): plain-value sends, Arc-wrapped sends
     // (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
     // plain-value `Room(n: 7)` spawn state.
+    // M2 (rt-scoped-runtime §4): sendability is a TYPE capability. Rejects (error[sendable]): a send
+    // whose payload carries a `MutPtr<T>` (Pony `ref` — mutable + aliasable → cross-actor race), both
+    // DIRECTLY and DEEP (a readonly `Ptr<Outer>` whose Outer struct reachably holds a `MutPtr` field —
+    // `val` is deep). Accepts: a readonly `Ptr<T>` (`val`) payload, and a `Ptr<Outer>` whose reachable
+    // struct fields are all readonly `Ptr`/value (deeply immutable). (value = pointer-free, and iso =
+    // `Own<T>` move-on-send, are covered by the plain-value cases above + the ownership cases.)
     // or_return in a GLOBAL initializer: there is NO enclosing function to return the Err to —
     // the lowered early-return silently aborted zen__init_globals, leaving every later global
     // zero (H stayed 0, exit 0 instead of 7). Positioned or-return error at check time.
