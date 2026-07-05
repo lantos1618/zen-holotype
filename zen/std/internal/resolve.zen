@@ -2,7 +2,7 @@
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 { at, is_alpha, is_alnum } = std.text.bytes
 { Decl, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
-{ decl_span, parse_module, decl_is_impl } = compiler.parse
+{ decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset } = compiler.parse
 { check_linked, check_linked_kind } = compiler.check_validate
 // Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
 { Allocator, Malloc, try_acquire } = std.mem.alloc
@@ -1584,6 +1584,9 @@ alias_module_body = (a: MutPtr<Malloc>, src: str, graph: ModuleGraph, alias: Str
     names := graph.value_decl_names_in(a)
     hs := a.gstr_string(4096).strip_ns_into(a, src, 0, quals, qnames, strip_qnames, strip_all_quals, true)
     body := hs.gstr_finish(a)
+    // Record this alias prefix so the checker's UFCS-alias fallback treats only `alias__` decls as
+    // alias-shaped (never a plain user fn that merely has `__` in its name). Fresh NUL-terminated copy.
+    note_alias_prefix(a.gstr_string(16).rappend_string(a, alias).gstr_finish(a))
     a.gstr_string(4096).rewrite_alias_names(a, body, 0, names, alias)
 }
 line_name = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String { (i >= names.len || names.res_sbyte(i) == '\n').match ({ true => out, false => out.rpush(a, names.res_sbyte(i)).line_name(a, names, i + 1) }) }
@@ -1948,6 +1951,7 @@ enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
+    a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
     a.scan_dotted_imports(inpath, mainsrc)
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
