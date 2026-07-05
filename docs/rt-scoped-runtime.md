@@ -94,15 +94,29 @@ against Odin-style dynamic ambient (re-hides the effect; kills test injection).
   work-queue N-core scheduler (per-worker deques are Cut-2 roadmap; we don't claim
   work-stealing until they exist).
 
-## 4. Sends are spatial (escape ≠ isolation)
+## 4. Sends are spatial (escape ≠ isolation) — sendability is a TYPE capability, NOT a verb
 
 Escape analysis is temporal ("doesn't outlive"); Pony `iso` is spatial ("no aliases").
-A send payload must be exactly one of:
+**CORRECTION (2026-07-05, user):** sendability is a property the checker reads off the
+payload's TYPE — like Pony reference capabilities — NOT an explicit `share()`/`view()`
+stdlib verb. A message is a **plain type**; the receiver reads it as its normal type
+(`m.s` is an `i64`, never `Shared<i64>.get()`). No wrapper leaks into sender or receiver.
+The `share`/`view`/`Shared<T>` surface (PR #398, held unmerged) is REJECTED as Arc-cosplay.
 
-1. **value** — plain data, no pointers; copied/moved by value (most messages);
-2. **`Arc<T>` frozen** — shared immutable; aliasing safe because nobody writes;
-3. **`iso` move** — the move-on-send checker kills the sender's binding; use-after-send
-   is a check error.
+A send payload must be exactly one of (checker classifies from the type):
+
+1. **value** — plain data, no pointers; copied by value. The COMMON case; needs ZERO
+   ceremony (a struct/enum of scalars is trivially sendable — verify this already holds);
+2. **`val`** — deeply immutable data (all reachable state read-only); freely sendable +
+   aliasable. Built on the existing `Ptr<T>` (readonly, = Pony `box`) vs `MutPtr<T>`
+   (= `ref`) lattice, lifted to whole values. The compiler may refcount it internally,
+   but that is INVISIBLE — no user verb;
+3. **`iso`** — uniquely owned (`Own<T>`), sent by MOVE; the move-on-send checker kills the
+   sender's binding. NOTE (#398 finding): today the move checker only kills `Own<T>`, not
+   bare value locals — `iso` sends must fix that.
+
+Zen already has the bottom half of the cap lattice (`Ptr`/`MutPtr` = `box`/`ref`) + a
+move checker (`Own<T>` ≈ `iso`). M2 lifts these to send-classification; no new verbs.
 
 ## 5. The teaching checker (ship-list item 5)
 
