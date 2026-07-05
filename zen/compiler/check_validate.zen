@@ -1343,6 +1343,14 @@ ty_is_ptr_t = (t: Ty) bool {
         _        => false,
     })
 }
+// a `MutPtr<T>` (kind 2 = Pony `ref`): a mutable, aliasable pointer. `Ptr<T>` (kind 1 = `box`, val)
+// and `RawPtr<T>` (kind 0) are NOT MutPtr — only the mutable-reference kind reports true.
+ty_is_mut_ptr = (t: Ty) bool {
+    t.match ({
+        .Ptr(pd) => pd.kind == k_mut_ptr(),
+        _        => false,
+    })
+}
 // ALLOCATOR-CENTRIC free detection. The free surface is the `Allocator` trait, generic over every
 // allocator (built-in Heap/Malloc and user-defined) because conformance fixes the method names:
 //   a.release(p)     — frees ptr arg `p`        (receiver `a` is a MutPtr<_>, NOT an Own/Rc/Arc)
@@ -4308,6 +4316,128 @@ check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
         count: 1,
         message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
         hint: "use Arc<T> for a value shared between actors, or send a value/owned copy",
+    ) })
+}
+// ── SENDABILITY AS A TYPE CAPABILITY: `ref` (MutPtr<T>) is not sendable (rt-scoped-runtime.md §4) ──
+// The send-payload classifier, read off the payload's TYPE (Pony reference-capabilities, NOT a verb):
+//   value — no pointers, copied → sendable (zero ceremony);
+//   val   — readonly `Ptr<T>` (= Pony `box`, deeply immutable) → sendable + aliasable;
+//   iso   — `Own<T>` moved (move-on-send kills the binding, above) → sendable uniquely.
+// A `MutPtr<T>` (= Pony `ref`: a MUTABLE, aliasable pointer) is NONE of these: keeping the sender's
+// mutable alias while the receiver also mutates the pointee is a cross-actor data race. So a send whose
+// message carries a `MutPtr<T>` — directly, wrapped in an enum variant, or in a struct field — is
+// rejected. The receiver still reads a `Ptr<T>`/value payload AS ITS NORMAL TYPE (no wrapper); this
+// pass only refuses the mutable-reference kind. Same shape as the send-Rc pass (type-aware via
+// infer_expr, walks the same surfaces); runs AFTER scratch-escape so an addr-of-local (also a MutPtr)
+// gets the more specific lifetime remedy first.
+sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = env.sm_msg_mut(fi.value).match ({ true => true, false => f })
+    })
+    f
+}
+sm_msg_mut = (env: Env, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)        => env.infer_expr(e).ty_is_mut_ptr(),
+        .MakeEnum(mk)  => env.sm_msg_mut(mk.payload),
+        .MakeStruct(s) => env.sm_inits_mut(s.inits),
+        _              => false,
+    })
+}
+// a `send(_, msg)` whose message carries a MutPtr → the source offset of the call, else 0. `&&` short-
+// circuits, so `c.args[1]` is only touched when the arity check passed.
+sm_call_pos = (env: Env, c: CallData) i32 { (eq(c.fn, "send") && c.args.len >= 2 && env.sm_msg_mut(c.args[1].addr())).match ({ true => c.pos.pos_or(1), false => 0 }) }
+sm_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(a.sm_expr(env, ar.addr()))
+    })
+    acc
+}
+sm_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc.kv_kor(a.sm_expr(a.arm_env(env, subjty, ar), ar.body))
+    })
+    acc
+}
+sm_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(a.sm_expr(env, fi.value))
+    })
+    acc
+}
+sm_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)       => env.sm_call_pos(c).kv_kor(a.sm_args(env, c.args)),
+        .Bin(b)        => a.sm_expr(env, b.lhs).kv_kor(a.sm_expr(env, b.rhs)),
+        .Index(ix)     => a.sm_expr(env, ix.seq).kv_kor(a.sm_expr(env, ix.idx)),
+        .Cond(d)       => a.sm_expr(env, d.c).kv_kor(a.sm_expr(env, d.t)).kv_kor(a.sm_expr(env, d.e)),
+        .Member(m)     => a.sm_expr(env, m.obj),
+        .Arrow(ar)     => a.sm_expr(env, ar.obj),
+        .Match(m)      => a.sm_expr(env, m.subj).kv_kor(a.sm_arms(env, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)  => a.sm_expr(env, mk.payload),
+        .MakeStruct(s) => a.sm_inits(env, s.inits),
+        .SliceLit(sd)  => a.sm_args(env, sd.items),
+        .Loop(l)       => a.sm_expr(env, l.seq).kv_kor(a.sm_body(env, l.body)),
+        .Block(b)      => a.sm_body(env, b.stmts),
+        _              => 0,
+    })
+}
+sm_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.sm_expr(env, l.value),
+        .Assign(x)   => a.sm_expr(env, x.target).kv_kor(a.sm_expr(env, x.value)),
+        .Return(r)   => a.sm_expr(env, r),
+        .ExprStmt(e) => a.sm_expr(env, e),
+        .If(f)       => a.sm_expr(env, f.c).kv_kor(a.sm_body(env, f.then)).kv_kor(a.sm_body(env, f.els)),
+        .While(w)    => a.sm_expr(env, w.c).kv_kor(a.sm_body(env, w.body)),
+        .IndexSet(x) => a.sm_expr(env, x.seq).kv_kor(a.sm_expr(env, x.idx)).kv_kor(a.sm_expr(env, x.value)),
+    })
+}
+sm_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e := env
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.sm_stmt(e, st))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
+sm_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    a.sm_body(env, f.body)
+}
+check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) {
+        acc = acc.kv_kor(d.match ({
+            .DFunc(f) => a.sm_check_func(decls, idx, f),
+            _         => 0,
+        }))
+    })
+    acc
+}
+check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 }) }
+check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
+    pos := a.check_module_send_mut_kind(decls)
+    (pos == 0).match ({ true => check_diagnostic_none(), false => CheckDiagnostic(
+        code: KOWNERSHIP(),
+        kind: "sendable",
+        source_offset: pos,
+        span_width: src.diagnostic_span_width(pos),
+        count: 1,
+        message: "MutPtr<T> (a mutable reference) is not sendable across actors — it aliases mutable state the sender keeps, so the receiver mutating it is a data race",
+        hint: "send a readonly `Ptr<T>` (a `val`: deeply immutable, freely aliasable), move an `Own<T>` (an `iso`, sent by move), or send a value copy",
     ) })
 }
 // ── M1 slice 1 (rt-scoped-runtime): SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────
