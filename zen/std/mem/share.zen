@@ -1,0 +1,60 @@
+// @self-hosted-only — uses generic struct literals (`Shared<T>{…}`) and atomic intrinsics; validated
+// by an equivalent self-contained test (the oracle value + verdict suites).
+//
+// std.mem.share — the rt "freeze → Arc" send-shape (docs/rt-scoped-runtime.md §4 shape 2, M2 slice 1).
+//
+// A `Shared<T>` is a READ-ONLY, atomically ref-counted view of a value that has been PROMOTED out of
+// scratch memory into shared (Arc-tracked) memory. `share(v, alloc)` MOVES `v` into a fresh
+// refcounted heap block `[ count:i64 | value:T ]` (same layout as [[std.mem.arc]]) and hands back the
+// frozen view. The move CONSUMES `v` — after `v.share(a)` there is no writable handle to the contents
+// anywhere: `Shared<T>` exposes ONLY `.view() -> Ptr<T>` (a readonly pointer) and `.get() -> T` (a
+// by-value copy). No `MutPtr` accessor exists, so the aliasing that makes a value safe to cross an
+// actor boundary (spec §4: "shared immutable; aliasing safe because nobody writes") holds by
+// construction. `.clone()` bumps the atomic count for a cheap extra reader; `.drop_in(a)` decrements
+// and frees the block when the last reader goes away.
+//
+//   sh := scratch.share(a)                 // freeze: `scratch` is consumed, `sh` is Shared
+//   p: Ptr<T> := sh.view()                 // readonly borrow — no write path
+//   spawn(a, cap, Counter(seen: sh))       // legal send payload (scratch-escape checker accepts it)
+//
+// Allocation failure yields a null-based Shared (matching the non-fallible container constructors,
+// e.g. vec.empty / vec.map); use [[std.mem.arc]]'s `new_in` when you need the Result surface.
+{ Allocator } = std.mem.alloc
+Shared*<T>: {
+    base: RawPtr<u8>,
+    val = (s: Shared<T>) [T] {
+        // the value slot as a 1-element [T] (T from the receiver) — the bytes after the i64 count. Kept
+        // internal (no `*`): the only sanctioned reads are `.view()` / `.get()`, neither of which yields a
+        // writable handle to the contents.
+        slice(s.base.offset(8), 1)
+    }
+    view = (s: Shared<T>) Ptr<T> {
+        // a READONLY pointer to the shared value — the only borrow Shared hands out. `.addr()` yields a
+        // `Ptr<T>` (readonly), never a `MutPtr<T>`, so nobody can write through the frozen contents.
+        s.val()[0].addr()
+    }
+    get = (s: Shared<T>) T { s.val()[0] }
+    count = (s: Shared<T>) i64 { load_i64(s.base) }
+    clone = (s: Shared<T>) Shared<T> {
+        // a cheap extra reader: bump the atomic count and alias the same block (spec §4: aliasing is safe
+        // because nobody writes).
+        atomic_add_i64(s.base, 1)
+        Shared<T>(base: s.base)
+    }
+    drop_in<A> = (s: Shared<T>, a: MutPtr<A>) void {
+        // drop one reader; the thread whose decrement returns 0 owns the free.
+        (atomic_add_i64(s.base, 0 - 1) == 0).match ({ true => a.release(s.base), false => { } })
+    }
+}    // -> [ count:i64 | value:T ]
+// freeze `v` into shared memory: MOVE it into a refcounted block and return the readonly view. `v` is
+// CONSUMED (the scratch-escape / move checker treats a `.share`d value as promoted, not scratch).
+// UFCS: `v.share(a)`.
+share*<A, T> = (v: T, a: MutPtr<A>) Shared<T> {
+    sv := v
+    base := a.acquire(8 + sizeof(T))
+    store_i64(base, 1)
+    s := Shared<T>(base: base)
+    slot := s.val()
+    slot[0] = sv
+    s
+}
