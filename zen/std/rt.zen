@@ -1,0 +1,92 @@
+// std.rt — the ambient runtime capability (rt foundation slice; docs/rt-scoped-runtime.md §2b).
+//
+// `Rt` reifies "the scope you run in": for THIS slice it carries the allocator vtable (mem);
+// sched/gc land in M3/M4 (see the note on the `ready` field). The ambient rt is a THREAD-LOCAL
+// default singleton — trivial programs need ZERO setup (heap alloc), injectable at boundaries.
+//
+// Surface (import as `rt = std.rt`, then `rt.current()` / `rt.with(...)` / `rt.alloc(n)`):
+//   rt.current()         -> Rt      read the ambient thread-local rt (heap default when unset)
+//   rt.with(custom, body) -> R      save-set-restore the ambient rt around a lexical block
+//   rt.alloc(n)          -> RawPtr  allocate n bytes via the AMBIENT rt (no allocator threading)
+//   rt.resize(p, n)      -> RawPtr  grow/shrink via the ambient rt
+//   rt.release(p)                   free via the ambient rt
+//   rt.heap_rt()         -> Rt      the process-wide default (heap malloc/free), also for injection
+//
+// WHY thread-local, not a true global: the pool runs different actors on different OS workers
+// concurrently, so "current rt" must be per-worker — a shared mutable global would race and hand a
+// behavior the wrong actor's heap. The default init (`slot = heap_rt()`) runs once on the main
+// thread (in zen__init_globals). A FRESH worker thread sees a zero-initialized slot, so `ready == 0`
+// is the sentinel that means "nothing injected here" and `current()` falls back to `heap_rt()`.
+// M4 is the injection hook: the pool sets the ambient rt per-actor the same way it sets the
+// current-actor thread-local today.
+{ malloc, realloc, free } = std.mem.alloc
+// The runtime capability value. The three fn-pointer fields are the allocator vtable (Self erased
+// to RawPtr<u8> state, so any allocator plugs in without generic threading — the M3 trait-object
+// shape). `state` is the allocator instance data (null for heap). `ready` is the init sentinel:
+// 1 = a real Rt; 0 = a zero-init thread-local slot on a fresh worker => use the heap default.
+// sched/gc policy fields join here in M3/M4 (the `Rt` bundle grows; the surface below is stable).
+Rt*: {
+    mem_acquire: (RawPtr<u8>, i64) RawPtr<u8>,
+    mem_resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>,
+    mem_release: (RawPtr<u8>, RawPtr<u8>) void,
+    state: RawPtr<u8>,
+    ready: i64,
+}
+// The default heap vtable: state is unused; the calls fall through to libc malloc/realloc/free.
+// rt.zen IS the runtime's default heap-allocator floor (the analog of std.mem.alloc's own Heap
+// impl), so it sits on the raw-allocation allowlist alongside std.mem.{alloc,raw} / pool / thread.
+heap_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { (n <= 0).match ({ true => null_ptr(), false => malloc(n) }) }
+heap_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+heap_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
+// The process-wide default rt: heap-backed, no state. Cheap to build (just fills a struct), so
+// `current()` reconstructs it on demand when nothing is injected rather than storing it.
+heap_rt* = () Rt {
+    Rt(
+        mem_acquire: heap_acquire,
+        mem_resize: heap_resize,
+        mem_release: heap_release,
+        state: null_ptr(),
+        ready: 1,
+    )
+}
+// Build a custom rt from an allocator vtable (state = the allocator instance data). This is what
+// callers pass to `with(...)` to inject an arena, a pool allocator, or a test mock/failing allocator.
+mem_rt* = (acquire: (RawPtr<u8>, i64) RawPtr<u8>, resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>, release: (RawPtr<u8>, RawPtr<u8>) void, state: RawPtr<u8>) Rt {
+    Rt(
+        mem_acquire: acquire,
+        mem_resize: resize,
+        mem_release: release,
+        state: state,
+        ready: 1,
+    )
+}
+// The ambient current-rt, per OS thread. Init runs once on the main thread; fresh workers see a
+// zeroed slot (ready == 0) and fall back to the heap default via `current()`.
+slot := thread_local(heap_rt())
+// Read the ambient rt. Never returns a half-built value: a zeroed slot means "unset" => heap default.
+current* = () Rt { (slot.ready == 0).match ({ true => heap_rt(), false => slot }) }
+// Rebind the ambient rt for the dynamic extent of `body`, then restore — the injectable boundary
+// (arenas, and crucially test injection: a mock / failing allocator). Save-set-restore, and
+// exception-safe: behaviors are run-to-completion, so no unwinding can leak the saved slot.
+with*<R> = (custom: Rt, body: () R) R {
+    saved := slot
+    slot = custom
+    out := body()
+    slot = saved
+    out
+}
+// The ambient allocation path: read the current rt and dispatch through its vtable. This is the
+// single demonstrable proof that allocation reads the ambient rt with no allocator parameter. The
+// vtable fields are prefixed `mem_` so they never collide with these same-named public fns.
+alloc* = (n: i64) RawPtr<u8> {
+    r := current()
+    r.mem_acquire(r.state, n)
+}
+resize* = (p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    r := current()
+    r.mem_resize(r.state, p, n)
+}
+release* = (p: RawPtr<u8>) void {
+    r := current()
+    r.mem_release(r.state, p)
+}
