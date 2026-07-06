@@ -1,0 +1,104 @@
+// std.concurrent.pool_actor — TYPED actors that run on the work-stealing pool (rt M4, docs/rt-scoped-
+// runtime.md §3). This heals the typed-vs-parallel SPLIT-BRAIN: std.concurrent.actor's typed handles
+// drain INLINE on the caller thread (h.send + h.run, no scheduling), while std.concurrent.pool runs
+// only UNTYPED `(RawPtr<u8>, i64) void` behaviors in parallel. pool_actor adapts typed→untyped at the
+// boundary so a typed actor's `receive` runs on a pool worker, in parallel, exactly-once.
+//
+// It is the KEEP path: built purely on pool.zen + rt.zen, it carries no coroutine/inline-drain baggage
+// (std.concurrent.actor is on the retire list). Own lightweight Receiver/Context — no actor.zen dep.
+//
+// ── THE TRAMPOLINE (why the user writes a tiny concrete stub) ────────────────────────────────────
+// The pool stores a type-ERASED `behavior: (RawPtr<u8>, i64) void` fn-ptr. Bridging to a typed
+// `receive` needs a shim that reconstitutes the typed message + calls the typed receiver. That shim
+// MUST be a CONCRETE (non-generic) function: Zen INLINES generic fns (compiler.mono) — a generic fn
+// has no standalone C symbol, so its ADDRESS cannot be taken (a generic trampoline type-checks but
+// emits an undeclared-symbol C error). So per (M, ActorT) the user writes one short concrete stub —
+// the same shape they already write a concrete `behave` for the raw pool. Import this module under an
+// ALIAS (`pa = std.concurrent.pool_actor`) — that avoids flattening common names like `send`/`close`
+// into collisions — and build the Context with INFERRED type args (`pa.Context(msg: b[0])`, M inferred
+// from the field): the formatter cannot parse a qualified generic ctor with EXPLICIT args
+// (`pa.Context<Msg>(…)`), but the inferred form parses fine.
+//
+//   room_tramp = (user: RawPtr<u8>, msg: i64) void {
+//       a: [Room] := user.slice(1)                 // actor state = the pool user block
+//       b: [Msg]  := msg.offset(0).slice(1)        // msg (i64) is a POINTER to a heap-boxed M
+//       a[0].addr().receive(pa.Context(msg: b[0])) // typed trait dispatch (M inferred)
+//       pa.free_msg(msg)                           // reclaim the message box
+//   }
+//
+// Everything else — actor-state allocation, message boxing, pool registration, the rt wiring — is
+// generic stdlib (below). `spawn_actor` is named so (not `spawn`) so it never clashes with the flattened
+// `std.thread.spawn` that pool.zen pulls in. FUTURE ergonomic sugar (tracked, not v1): a compiler pass
+// emitting a standalone symbol for an address-taken generic instantiation would let the compiler
+// auto-generate this stub, removing the one-stub-per-actor-type cost.
+//
+// ── AMBIENT rt ──────────────────────────────────────────────────────────────────────────────────
+// `spawn` takes the actor's rt and hands it to pool_spawn_rt; the pool worker sets it as the current-rt
+// thread-local around each behavior run (pool.zen: rt.enter/leave), so `rt.current()` inside `receive`
+// resolves to THIS actor's own rt — Pony-style per-actor heap. For this slice actors typically pass
+// heap_rt(); a per-actor arena is a later slice.
+{ malloc, free } = std.mem.alloc
+{ Pool, pool_spawn_rt, pool_send, pool_actor_free } = std.concurrent.pool
+{ Rt, heap_rt } = std.rt
+// A typed message wrapper delivered to a receiver (mirrors the actor.zen shape, independently defined).
+Context*<M>: {
+    msg: M,
+}
+// The receiver trait: a concrete actor type impls `receive` over its message type M.
+Receiver*<M>: {
+    receive: (MutPtr<Self>, Context<M>) void,
+}
+// A typed pool-actor handle: `raw` is the pool actor (Arc base) opaque handle; `state` is the malloc'd
+// actor-state block (`[ActorT]`). Parameterised by the actor's state type `ActorT` so `actor_state`
+// / `close` / `send` recover it by inference from the handle (a non-generic handle would lose ActorT
+// and force annotation at every call). The message type M is transient — inferred from each `send` arg
+// and pinned in the user's concrete trampoline — so it is NOT a handle type param.
+PooledHandle*<ActorT>: {
+    raw: RawPtr<u8>,
+    state: RawPtr<u8>,
+}
+// spawn a typed actor onto the pool under ambient rt `art`. Allocates the actor-state block, copies the
+// actor in, registers it with the pool via `tramp` (the concrete per-(M,ActorT) trampoline — passed in
+// because Zen can't take the address of a generic fn). NOT yet runnable — the first `send` schedules it.
+spawn_actor*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) void, art: Rt) PooledHandle<ActorT> {
+    state := malloc(sizeof(ActorT))
+    slot: [ActorT] := state.slice(1)
+    slot[0] = actor
+    raw := pool_spawn_rt(state, cap, tramp, art)
+    PooledHandle<ActorT>(
+        raw: raw,
+        state: state,
+    )
+}
+// spawn a typed actor with the DEFAULT (heap) ambient rt — the trivial-setup path.
+spawn_actor_heap*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) void) PooledHandle<ActorT> { spawn_actor(cap, actor, tramp, heap_rt()) }
+// send a typed message to a pooled actor. The message must OUTLIVE the send (a worker consumes it
+// later, off-thread), so it is heap-BOXED (`[M]` block) and the box POINTER rides as the pool's i64
+// payload (to_i64 → the trampoline recovers it with `msg.offset(0).slice(1)` and frees it via free_msg).
+// Returns false + reclaims the box if the mailbox is full (back-pressure; nothing is corrupted/leaked).
+send*<M, ActorT> = (p: MutPtr<Pool>, h: PooledHandle<ActorT>, msg: M) bool {
+    box := malloc(sizeof(M))
+    slot: [M] := box.slice(1)
+    slot[0] = msg
+    sent := p.pool_send(h.raw, to_i64(box))
+    sent.match ({ true => true, false => {
+        free(box)
+        false
+    } })
+}
+// typed accessor for the actor's final state (read after quiescence, e.g. in tests/assertions).
+actor_state*<ActorT> = (h: PooledHandle<ActorT>) MutPtr<ActorT> {
+    slot: [ActorT] := h.state.slice(1)
+    slot[0].addr()
+}
+// close a typed handle: drop the pool actor's Arc reference (frees the pool block when it was the last)
+// then free the actor-state block. Call after pool_quiesce_stop, like the raw pool's pool_actor_free.
+// (Named `close`, not `free`, so it does not shadow the imported alloc `free` — Zen has no overloading.)
+close*<ActorT> = (h: PooledHandle<ActorT>) void {
+    pool_actor_free(h.raw)
+    free(h.state)
+}
+// reclaim a delivered message box — call from the trampoline AFTER `receive` returns. (The box was
+// malloc'd by `send`; the free happens on the worker, matching the malloc/free allocator pair, so the
+// actor's ambient rt is irrelevant to the transport box — it governs allocations inside `receive`.)
+free_msg* = (msg: i64) void { free(msg.offset(0)) }
