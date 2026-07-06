@@ -43,6 +43,7 @@
 // pool_close after the workers join, the same explicit-alloc floor as std.thread/std.sync. Only the
 // cross-thread-shared ACTOR state needed refcounting; the single-owner infrastructure does not.
 { malloc, free } = std.mem.alloc
+{ write, strlen } = std.c.libc
 { Rt, default, enter, leave, mark_spawned } = std.rt
 { Arc, new_in } = std.mem.arc
 { Malloc } = std.mem.alloc
@@ -52,6 +53,16 @@
 { expect } = std.core.result
 { Ring } = std.concurrent.ring
 QUANTUM := 64    // max messages an actor runs per turn before yielding the worker (fairness)
+STDERR_FD := 2    // fd 2 for the "actor marked dead" note (mirrors std.core.result's panic framing)
+// PER-ACTOR PANIC ISOLATION (bootstrap/zenrt.c). Run `behavior(user, msg)` under a thread-local setjmp
+// catch installed for the duration of THIS call only; returns 0 if it returned normally, 1 if it panicked
+// (div0/OOB/null/explicit — genc's zen__panic longjmp'd back). A panic OUTSIDE a pool worker (main, the
+// inline sync drain) installs no catch, so zen__panic aborts as it always has: the non-actor path is
+// byte-identical. Bodyless FFI decl (like std.c.libc) — genc emits the prototype; the symbol is zenrt.c's.
+// KNOWN v1 LIMIT: a longjmp abandons the crashed frame, so memory the behavior malloc'd before the panic
+// (e.g. a typed message box) leaks — a dead actor's leak beats a dead process; the deferred real fix is a
+// per-actor arena rt reset on death. No lock is held across the call (behavior runs outside the mailbox lock).
+__zen_actor_call = (behavior: (RawPtr<u8>, i64) void, user: RawPtr<u8>, msg: i64) i64
 // ── PoolActor: a type-erased runnable actor ─────────────────────────────────────────────────────
 // `behavior(user, msg)` runs the actor's reaction to one i64 message. The mailbox is a fixed-cap ring
 // of i64 messages (a pointer payload rides as an i64 too). `mbmu` guards head/tail/buf AND `sched`.
@@ -65,6 +76,7 @@ PoolActor: {
     sched: i64,
     behavior: (RawPtr<u8>, i64) void,
     art: Rt,
+    dead: i64,
 }    // user actor state (opaque to the pool)
 // (`art` = this actor's ambient rt; the worker sets it as the current-rt slot around each behavior run,
 // so `rt.current()` inside the behavior resolves to the actor's own rt — the M4 injection hook, §2b.
@@ -99,6 +111,7 @@ pool_spawn_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void
         sched: 0,
         behavior: behavior,
         art: art,
+        dead: 0,
     )).expect("pool: actor block allocation failed")
     arc.base
 }
@@ -237,10 +250,20 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
         }, false => 0 })
         a.mbmu.unlock()
         has.match ({ true => {
-            saved := enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
-            a.behavior(a.user, msg)
-            leave(saved)    // restore the worker's prior slot (run-to-completion, no leak).
-            drain_batch(a, count + 1)
+            // A dead actor (an earlier message in THIS turn panicked) drains-and-discards the rest of its
+            // mailbox WITHOUT running the behavior, so the pool reaches quiescence and the actor deschedules.
+            (a.dead != 0).match ({ true => drain_batch(a, count + 1), false => {
+                saved := enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
+                crashed := __zen_actor_call(a.behavior, a.user, msg)    // run under the panic catch (isolation)
+                leave(saved)    // restore the worker's prior slot — runs even on a caught panic (trampoline returns normally)
+                (crashed != 0).match ({ true => {
+                    a.dead = 1    // the actor panicked (zen__panic already printed the reason); mark it dead
+                    note := "zen: actor marked dead, pool continues\n"    // follow-up to zen__panic's reason line
+                    nn := note.strlen()
+                    STDERR_FD.write(note.slice(nn).ptr, nn)
+                }, false => { } })
+                drain_batch(a, count + 1)
+            } })
         }, false => count })
     } })
 }

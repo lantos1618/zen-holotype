@@ -1,0 +1,59 @@
+// PER-ACTOR PANIC ISOLATION proof (bootstrap/zenrt.c + std.concurrent.pool). Spawn 3 raw pool actors on
+// 3 workers; the MIDDLE actor gets a single POISON message (0) that makes its behavior divide by zero, the
+// other two each get PERMSG live messages that atomically bump a shared accumulator. WITHOUT isolation the
+// div-by-zero would abort() the whole process (exit 134) and no survivor would finish. WITH isolation the
+// panic is caught on the worker, that ONE actor is marked dead, and the pool keeps draining — so both
+// survivors complete their full PERMSG and the program exits 0. (Raw i64 messages → no per-message heap box,
+// so the documented longjmp leak does not apply here.) The panic's `zen: panic:` line + the `actor marked
+// dead` note are asserted on stderr by the oracle's `pool_actor_panic_isolation` shell case.
+{ pool_open, pool_spawn, pool_send, pool_quiesce_stop, pool_close, pool_actor_free, Pool } = std.concurrent.pool
+NACT := 3
+PERMSG := 2000
+WORKERS := 3
+acc := malloc(8)
+actors := malloc(NACT * 8)
+// One behavior for every actor: `100 / msg` panics (integer divide by zero) on the poison msg (0) and is a
+// harmless 100 on a live msg (1); a live message then bumps the shared accumulator by 1.
+behave = (user: RawPtr<u8>, msg: i64) void {
+    guard := 100 / msg    // msg==0 (poison) → panic HERE, isolating this actor; msg==1 → 100
+    (guard > 0).match ({ true => {
+        atomic_add_i64(user, 1)
+    }, false => { } })
+}
+send_n = (p: MutPtr<Pool>, a: RawPtr<u8>, i: i64, n: i64) void {
+    (i < n).match ({ true => {
+        p.pool_send(a, 1)
+        send_n(p, a, i + 1, n)
+    }, false => { } })
+}
+spawn_all = (i: i64) void {
+    (i < NACT).match ({ true => {
+        actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))
+        spawn_all(i + 1)
+    }, false => { } })
+}
+free_all = (i: i64) void {
+    (i < NACT).match ({ true => {
+        pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
+        free_all(i + 1)
+    }, false => { } })
+}
+main = () i32 {
+    store_i64(acc, 0)
+    spawn_all(0)
+    p := pool_open(WORKERS, NACT + 8)
+    // actors 0 and 2 are survivors: PERMSG live messages each. actor 1 gets ONE poison message and dies.
+    send_n(p, actors.offset(0 * 8).load_i64().offset(0), 0, PERMSG)
+    p.pool_send(actors.offset(1 * 8).load_i64().offset(0), 0)
+    send_n(p, actors.offset(2 * 8).load_i64().offset(0), 0, PERMSG)
+    p.pool_quiesce_stop()
+    total := load_i64(acc)
+    free_all(0)
+    p.pool_close()
+    free(actors)
+    free(acc)
+    // exit 0 IFF both survivors processed their full load (the dead actor contributed nothing). Without
+    // isolation the process aborts (134) long before here, so exit 0 is itself proof the pool survived.
+    expected := 2 * PERMSG
+    (total == expected).match ({ true => 0, false => 1 })
+}
