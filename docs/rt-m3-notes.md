@@ -1,9 +1,24 @@
-# rt M3 — process-wide default runtime (phase-1 findings)
+# rt M3 — process-wide default runtime
 
-Implements docs/rt-scoped-runtime.md **§2b** ("`build.zen` `exe.runtime(...)` sets the process-wide
-DEFAULT (M3)") — but see THE MURK: the literal `exe.runtime → main(rt)` spelling cannot be built
-as-is, so this note establishes what "set the default rt" realistically means and recommends the
-smallest real surface. **Phase 1 = investigate + propose; no code yet.**
+**Status: SHIPPED (option a).** Implements docs/rt-scoped-runtime.md **§2b** ("`build.zen`
+`exe.runtime(...)` sets the process-wide DEFAULT (M3)") — but see THE MURK: the literal
+`exe.runtime → main(rt)` spelling cannot be built as-is, so this note establishes what "set the
+default rt" realistically means, picks the smallest real surface, and records what shipped. The
+phase-1 investigation that led here is preserved below.
+
+## What shipped
+
+- `zen/std/rt.zen`: process global `default_rt := heap_rt()` + guard `spawned := 0`;
+  `default()` (accessor), `set_default(custom)` (writes global + main slot; **PANICS if called after
+  the first spawn**), `mark_spawned()` (latched by the pool).
+- Repointed the two hardcoded `heap_rt()` defaults to `default()`: `current()`'s unset fallback
+  (rt.zen), `pool_spawn` (pool.zen), `spawn_actor_heap` (pool_actor.zen). `pool_spawn_rt` calls
+  `mark_spawned()` (the single spawn choke point).
+- Proofs: `tests/fixtures/zen/rt_m3_default_reaches_worker.zen` (exit 40 — the process default set via
+  `set_default` reaches a POOL WORKER via `spawn_actor_heap`, which `with`/`enter` cannot do) +
+  `rt_m3_set_default_after_spawn_panics.zen` (exit 134 + the teaching message; oracle_build.zen "build
+  shell" suite). `default()==heap_rt()` when unset → every existing fixture byte-identical.
+- Deferred exactly as recommended: build.zen `exe.runtime`, `Rt` sched/gc fields, `arena_rt`.
 
 ## The murk, confirmed against the tree
 
