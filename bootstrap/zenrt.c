@@ -3,6 +3,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <setjmp.h>
 /* U1.3: the runtime primitives below are also defined in Zen by resolvable std modules.
  * Built programs emit their own strong definitions when they import those modules; these weak
  * fallbacks keep the bootstrap compiler and import-free programs linkable. String allocation is
@@ -68,6 +69,41 @@ static void __zen_install_sigsegv_handler(void){
     sa.sa_flags = SA_ONSTACK;
     sigaction(SIGSEGV, &sa, 0);
 }
+
+/* ── per-actor panic isolation ─────────────────────────────────────────────────────────────────────
+ * A behavior panic (div0 / OOB / null / explicit) must kill only THAT actor, not the whole process, so
+ * a pool worker can keep running the other actors. All those panics funnel through genc's `zen__panic`
+ * (it prints the `zen: panic:` line, then — now — calls `__zen_panic_unwind` before `abort()`).
+ *
+ * The catch is a thread-local setjmp target installed ONLY around a pool worker's behavior call
+ * (std.concurrent.pool `drain_batch` calls `__zen_actor_call`). When no target is installed — a panic
+ * in `main`, in an inline sync drain, anywhere off the pool worker path — `__zen_panic_unwind` returns
+ * and `zen__panic`'s `abort()` runs exactly as before: the non-actor path is byte-identical (proven by
+ * the negative fixture). `__zen_panic_jmp` is _Thread_local so each worker has its own target and workers
+ * never race on it. `__zen_actor_call` SAVES and RESTORES the previous target, so even a (currently
+ * non-existent) nested re-entry — a behavior that synchronously ran another behavior under the same
+ * worker — uses its own distinct `jmp_buf` and cannot clobber the outer one.
+ *
+ * KNOWN v1 LIMIT: a longjmp abandons the crashed behavior's C frame, so anything it malloc'd before the
+ * panic (e.g. a typed message box) LEAKS — leaking one dead actor's memory beats aborting the whole
+ * process. The real fix (DEFERRED) is a per-actor arena rt that is reset when the actor dies, reclaiming
+ * everything the behavior allocated in one shot. No lock is held across the catch (the pool runs the
+ * behavior OUTSIDE the mailbox lock), so the longjmp cannot strand a lock. */
+static _Thread_local jmp_buf* __zen_panic_jmp = 0;   /* per-worker catch target; 0 = "no catch installed" */
+/* run behavior(user, msg) under a setjmp catch. Returns 0 if it returned normally, 1 if it panicked
+ * (zen__panic longjmp'd back here). Save/restore of `prev` keeps re-entrancy safe. */
+int64_t __zen_actor_call(void (*behavior)(uint8_t*, int64_t), uint8_t* user, int64_t msg){
+    jmp_buf jb;
+    jmp_buf* volatile prev = __zen_panic_jmp;   /* volatile: read after longjmp must not be a clobbered reg */
+    if(setjmp(jb) != 0){ __zen_panic_jmp = prev; return 1; }
+    __zen_panic_jmp = &jb;
+    behavior(user, msg);
+    __zen_panic_jmp = prev;
+    return 0;
+}
+/* called by genc's zen__panic AFTER it prints its line: unwind to the installed worker catch, else return
+ * (and let zen__panic abort() — the unchanged non-actor path). */
+void __zen_panic_unwind(void){ if(__zen_panic_jmp){ longjmp(*__zen_panic_jmp, 1); } }
 
 ZWEAK int main(int argc, char** argv){
     __zen_argc = (int32_t)argc;
