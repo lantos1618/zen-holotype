@@ -87,18 +87,29 @@ true global**: the pool runs different actors on different workers concurrently,
 rt" must be per-worker (a shared mutable global would race + hand a behavior the wrong
 actor's heap). So: a thread-local current-rt with a process-wide default.
 
-Surface: `Rt.current()` reads the ambient rt (fns that allocate read it — NO rt param
-threading). Injection/override at boundaries:
+Surface (`rt = std.rt`): `rt.current()` reads the ambient rt (fns that allocate read it — NO
+rt param threading). Spelled `rt.current()` / `rt.with(...)` — NOT `Rt.current()` / `Rt.with()`:
+Zen has no static/associated-method call syntax (`Type.func()` does not resolve), so the
+ambient surface is module-qualified free functions with `rt` as the module alias — same
+reading, idiomatic Zen. Injection/override at boundaries:
 - `build.zen` `exe.runtime(...)` sets the process-wide DEFAULT (M3).
 - `rt.spawn(actor)` gives each actor its OWN rt, set as the ambient during its behaviors →
   per-actor heap, Pony-style (M4). **M4 IS the injection mechanism**: the pool already sets
-  a thread-local current-actor when running a behavior; the same hook sets current-rt.
-- `Rt.with(custom) { … }` rebinds the thread-local for a lexical scope (arenas + crucially
-  TEST injection: a mock / failing allocator). Save-set-restore around the block.
+  a thread-local current-actor when running a behavior; the same hook sets current-rt (writes
+  the `slot` thread-local in the behavior trampoline — the foundation's `ready==0` zeroed-worker
+  fallback already makes an unset worker safe, so M4 is a pure write, no rework).
+- `rt.with(custom, body)` rebinds the thread-local for the dynamic extent of `body`, then
+  restores it (arenas + crucially TEST injection: a mock / failing allocator). Save-set-restore
+  around the block; `body` is a niladic callback fn (Zen has no trailing-block syntax), mirroring
+  std.scope's `with_sync`/`with_pool` combinators. Restore runs even when `body` early-returns.
 
 This is the judge-panel's "ambient within a statically-known lexical/actor region, explicit
 at the region edge" + a default so trivial code needs no ceremony. It is NOT spooky-dynamic
-Odin scope (test injection is preserved via `Rt.with`; overrides are lexical/actor-bounded).
+Odin scope (test injection is preserved via `rt.with`; overrides are lexical/actor-bounded).
+
+The foundation slice (§2b, shipped) is `zen/std/rt.zen`: `Rt` (allocator vtable + state + `ready`
+sentinel), `rt.current()`, `rt.with(custom, body)`, `rt.alloc/resize/release`, `rt.heap_rt()`,
+`rt.mem_rt(...)`. See `docs/rt-foundation-notes.md` for the mechanism + the M4 hook.
 
 ## 3. Concurrency: pure Pony, no multisync
 

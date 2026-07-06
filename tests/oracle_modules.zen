@@ -758,7 +758,41 @@ oracle_modules_run* = () i32 {
         )],
         entry: "p.zen",
         want: 6,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "rt = std.rt\nmain = () i32 {\n  p := rt.alloc(8)\n  p.store_i64(1234)\n  v := p.load_i64()\n  rt.release(p)\n  (v == 1234).match ({ true => 3, false => 1 })\n}\n",
+        )],
+        entry: "p.zen",
+        want: 3,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "rt = std.rt\n{ malloc, free } = std.mem.alloc\ncnt_acq = (s: RawPtr<u8>, n: i64) RawPtr<u8> {\n  s.store_i64(s.load_i64() + 1)\n  malloc(n)\n}\ncnt_rel = (s: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }\ncnt_rsz = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { p }\nthree = () i32 {\n  a := rt.alloc(8)\n  b := rt.alloc(8)\n  c := rt.alloc(8)\n  rt.release(a)\n  rt.release(b)\n  rt.release(c)\n  0\n}\nmain = () i32 {\n  counter := malloc(8)\n  counter.store_i64(0)\n  crt := rt.mem_rt(cnt_acq, cnt_rsz, cnt_rel, counter)\n  rt.with(crt, three)\n  v := counter.load_i64()\n  free(counter)\n  to_i32(v)\n}\n",
+        )],
+        entry: "p.zen",
+        want: 3,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "rt = std.rt\nfail_acq = (s: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\nfail_rel = (s: RawPtr<u8>, p: RawPtr<u8>) void { }\nfail_rsz = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\nprobe = () i32 {\n  p := rt.alloc(8)\n  (p == null_ptr()).match ({ true => 1, false => 0 })\n}\nmain = () i32 {\n  frt := rt.mem_rt(fail_acq, fail_rsz, fail_rel, null_ptr())\n  rt.with(frt, probe)\n}\n",
+        )],
+        entry: "p.zen",
+        want: 1,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "rt = std.rt\nfail_acq = (s: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\nfail_rel = (s: RawPtr<u8>, p: RawPtr<u8>) void { }\nfail_rsz = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\nearly = () i32 {\n  x := rt.alloc(8)\n  (x == null_ptr()).match ({ true => return 7, false => { } })\n  999\n}\nmain = () i32 {\n  frt := rt.mem_rt(fail_acq, fail_rsz, fail_rel, null_ptr())\n  r := rt.with(frt, early)\n  p := rt.alloc(8)\n  ok := (p == null_ptr()).match ({ true => 0, false => 1 })\n  rt.release(p)\n  (r == 7).match ({ true => (ok == 1).match ({ true => 5, false => 2 }), false => 3 })\n}\n",
+        )],
+        entry: "p.zen",
+        want: 5,
     )])
+    // std.rt (A) ambient default, ZERO setup: rt.alloc/rt.release serve from the heap default.
+    // std.rt (B) with-INJECT: rt.with(counting_rt) makes 3 ambient allocs bump the counter to 3.
+    // std.rt (C) TEST-inject: rt.with(failing_rt) makes an ambient alloc return null, observed inside.
+    // std.rt (D) EARLY-RETURN restore (the save-set-restore trap): body early-returns 7 inside
+    // with(failing_rt); AFTER the block the ambient is restored to the default, so an alloc there
+    // SUCCEEDS (non-null). Exit 5 iff both hold — proves restore ran even on the early-return path.
     // ── UFCS through module aliases: x.f(a) resolves to alias__f by receiver type ────────────
     // `g = geo` + `g.Point(…).scale(2).norm1()` — the method chain resolves without flat imports.
     // `s = std.text.str` + `name.eq(…)` / `name.len()` — std fns as methods through the alias.
