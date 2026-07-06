@@ -1890,7 +1890,11 @@ KFALLTHROUGH = () i32 { 25 }    // a non-void function body that ends in a no-va
 KVBREAK = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
 KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
-KPRIVATENAME = () i32 { 32 }    // a cross-module use of a name whose declaration has no `*` export marker. RESERVED: std.internal.resolve raises this kind directly (render_diagnostic) at load time — the packed-kind channel never produces it, since imports are stripped before the checker runs.
+// Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
+// KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
+// never route through the diag_info() ladder. They still occupy globally-unique numbers in the
+// 6-bit (0-63) code space so `code` alone identifies a kind — see diag_info below. (Private-name
+// has NO code: std.internal.resolve renders `error[private-name]` directly at load time.)
 SourceSpan*: {
     start: i32,
     width: i32,
@@ -1953,9 +1957,151 @@ diagnostic_span_width = (src: str, pos: i32) i32 {
         (n < 1).match ({ true => 1, false => n })
     } }) })
 }
-diagnostic_kind_name = (code: i32) str { (code == 1).match ({ true => "arity", false => (code == 2).match ({ true => "arg-type", false => (code == 3).match ({ true => "undefined-name", false => (code == 4).match ({ true => "struct-field", false => (code == 5).match ({ true => "exhaustiveness", false => (code == 6).match ({ true => "dup-variant", false => (code == 7).match ({ true => "operand-type", false => (code == 8).match ({ true => "index", false => (code == 9).match ({ true => "return-fit", false => (code == 10).match ({ true => "assign-fit", false => (code == 11).match ({ true => "conformance", false => (code == 12).match ({ true => "dup-fn", false => (code == 13).match ({ true => "value-pos-return", false => (code == 14).match ({ true => "parse", false => (code == 15).match ({ true => "ownership", false => (code == 16).match ({ true => "trait-bound", false => (code == 17).match ({ true => "unknown-type", false => (code == 18).match ({ true => "lambda-value", false => (code == 19).match ({ true => "must-use", false => (code == 20).match ({ true => "need-annotation", false => (code == 21).match ({ true => "ptr-write", false => (code == 22).match ({ true => "infinite-type", false => (code == 23).match ({ true => "null-deref", false => (code == 24).match ({ true => "not-callable", false => (code == 25).match ({ true => "return-fit", false => (code == 26).match ({ true => "no-type-args", false => (code == 27).match ({ true => "or-return", false => (code == 28).match ({ true => "recursive-hof", false => (code == 29).match ({ true => "parse", false => (code == 30).match ({ true => "main-signature", false => (code == 31).match ({ true => "arm-value", false => (code == 32).match ({ true => "private-name", false => "type" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
-diagnostic_message = (code: i32) str { (code == 1).match ({ true => "wrong number of arguments", false => (code == 2).match ({ true => "argument type does not fit the parameter", false => (code == 3).match ({ true => "undefined name", false => (code == 4).match ({ true => "unknown struct field or invalid field access", false => (code == 5).match ({ true => "match does not cover every variant", false => (code == 6).match ({ true => "duplicate match arm variant", false => (code == 7).match ({ true => "operator cannot be applied to these operand types", false => (code == 8).match ({ true => "invalid index operation", false => (code == 9).match ({ true => "returned value does not fit the declared return type", false => (code == 10).match ({ true => "assigned value does not fit the variable's type", false => (code == 11).match ({ true => "impl does not satisfy the trait", false => (code == 12).match ({ true => "duplicate top-level definition", false => (code == 13).match ({ true => "early `return` in a value-position match arm", false => (code == 14).match ({ true => "syntax error: unparseable top-level input", false => (code == 15).match ({ true => "use of an owner after release/drop", false => (code == 16).match ({ true => "type argument does not satisfy the trait bound", false => (code == 17).match ({ true => "unknown type name", false => (code == 18).match ({ true => "a lambda can only be used directly as a call argument", false => (code == 19).match ({ true => "result of a self-mutating container method is discarded; the receiver is invalid after this call", false => (code == 20).match ({ true => "cannot infer the type parameter of this binding", false => (code == 21).match ({ true => "cannot write through a read-only `Ptr<T>`", false => (code == 22).match ({ true => "type contains itself by value, so it has infinite size", false => (code == 23).match ({ true => "`RawPtr<T>` may be null; deref requires a null-check first", false => (code == 24).match ({ true => "value is not a function", false => (code == 25).match ({ true => "function body falls through with no value; add a trailing expression of the declared return type", false => (code == 26).match ({ true => "this function takes no type arguments", false => (code == 27).match ({ true => "`.or_return()` requires the enclosing function to return a `Result` carrying the receiver's error type", false => (code == 28).match ({ true => "recursive function with a function-typed parameter — its body is inlined per call site, so the recursive call has no emitted function to land on", false => (code == 29).match ({ true => "syntax error: a newline before `.Variant` starts a new statement", false => (code == 30).match ({ true => "`main` takes no parameters (yet) — the OS entry calls it with none, so declared parameters would read garbage", false => (code == 31).match ({ true => "match arm yields no value, but the match result is used as a value", false => (code == 32).match ({ true => "cross-module use of a private name (its declaration has no `*` export)", false => "type error" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
-diagnostic_hint = (code: i32) str { (code == 1).match ({ true => "check the callee signature and pass exactly the declared parameters", false => (code == 2).match ({ true => "check the argument type or add an explicit conversion at the call site", false => (code == 3).match ({ true => "declare the name, import it, or qualify the intended module binding", false => (code == 4).match ({ true => "check the struct literal or field access against the declared fields", false => (code == 5).match ({ true => "add arms for every variant, or add an explicit `_` arm", false => (code == 6).match ({ true => "remove the repeated match arm for this variant", false => (code == 7).match ({ true => "use an operator supported by both operand types", false => (code == 8).match ({ true => "index only slice-like values with an integer index", false => (code == 9).match ({ true => "make the returned value fit the function's declared return type", false => (code == 10).match ({ true => "make the assigned value fit the target's type", false => (code == 11).match ({ true => "define every required trait method with the exact receiver, parameter, and return types", false => (code == 12).match ({ true => "rename one definition or move it behind a real module namespace", false => (code == 13).match ({ true => "return a value from the arm instead of using early `return` in value position", false => (code == 14).match ({ true => "check the syntax around this top-level declaration", false => (code == 15).match ({ true => "after release/drop, bind a fresh owner instead of reusing the consumed local", false => (code == 16).match ({ true => "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound", false => (code == 17).match ({ true => "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)", false => (code == 18).match ({ true => "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)", false => (code == 19).match ({ true => "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle", false => (code == 20).match ({ true => "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`", false => (code == 21).match ({ true => "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it", false => (code == 22).match ({ true => "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value", false => (code == 23).match ({ true => "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref", false => (code == 24).match ({ true => "call a function, or store a function value in this name before calling it", false => (code == 26).match ({ true => "remove the `<…>` type arguments, or call a generic function", false => (code == 27).match ({ true => "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x := recv.or_return()`), or handle the `Result` with `.match`", false => (code == 28).match ({ true => "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function", false => (code == 29).match ({ true => "keep the qualified constructor's `.` on the same line as its type (`Type.Variant(…)`)", false => (code == 30).match ({ true => "declare it `main = () i32 { … }` and bind capabilities inside the body; read CLI args with `std.os.arg(i)`/`argc()`", false => (code == 31).match ({ true => "end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm", false => (code == 32).match ({ true => "export it with `name*` in the defining module, or use the module's public surface", false => "" }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }
+// ── ONE diagnostic table ──────────────────────────────────────────────────────────────────────
+// Every packed-channel diagnostic's (kind, message, hint) lives in a SINGLE `diag_info` ladder keyed
+// by `code`; the three accessors below just project one field. This is the sole source of truth for
+// the ladder-rendered kinds — no more three parallel 32-branch ladders drifting out of sync. (The
+// custom channels — scope-escape/escape/scratch-escape/reserved-name, codes 33-36 — build their own
+// struct and are deliberately NOT in this table; their messages interpolate a runtime subject.)
+DiagInfo: {
+    kind: str,
+    message: str,
+    hint: str,
+}
+diag_info = (code: i32) DiagInfo {
+    (code == 1).match ({ true => DiagInfo(
+        kind: "arity",
+        message: "wrong number of arguments",
+        hint: "check the callee signature and pass exactly the declared parameters",
+    ), false => (code == 2).match ({ true => DiagInfo(
+        kind: "arg-type",
+        message: "argument type does not fit the parameter",
+        hint: "check the argument type or add an explicit conversion at the call site",
+    ), false => (code == 3).match ({ true => DiagInfo(
+        kind: "undefined-name",
+        message: "undefined name",
+        hint: "declare the name, import it, or qualify the intended module binding",
+    ), false => (code == 4).match ({ true => DiagInfo(
+        kind: "struct-field",
+        message: "unknown struct field or invalid field access",
+        hint: "check the struct literal or field access against the declared fields",
+    ), false => (code == 5).match ({ true => DiagInfo(
+        kind: "exhaustiveness",
+        message: "match does not cover every variant",
+        hint: "add arms for every variant, or add an explicit `_` arm",
+    ), false => (code == 6).match ({ true => DiagInfo(
+        kind: "dup-variant",
+        message: "duplicate match arm variant",
+        hint: "remove the repeated match arm for this variant",
+    ), false => (code == 7).match ({ true => DiagInfo(
+        kind: "operand-type",
+        message: "operator cannot be applied to these operand types",
+        hint: "use an operator supported by both operand types",
+    ), false => (code == 8).match ({ true => DiagInfo(
+        kind: "index",
+        message: "invalid index operation",
+        hint: "index only slice-like values with an integer index",
+    ), false => (code == 9).match ({ true => DiagInfo(
+        kind: "return-fit",
+        message: "returned value does not fit the declared return type",
+        hint: "make the returned value fit the function's declared return type",
+    ), false => (code == 10).match ({ true => DiagInfo(
+        kind: "assign-fit",
+        message: "assigned value does not fit the variable's type",
+        hint: "make the assigned value fit the target's type",
+    ), false => (code == 11).match ({ true => DiagInfo(
+        kind: "conformance",
+        message: "impl does not satisfy the trait",
+        hint: "define every required trait method with the exact receiver, parameter, and return types",
+    ), false => (code == 12).match ({ true => DiagInfo(
+        kind: "dup-fn",
+        message: "duplicate top-level definition",
+        hint: "rename one definition or move it behind a real module namespace",
+    ), false => (code == 13).match ({ true => DiagInfo(
+        kind: "value-pos-return",
+        message: "early `return` in a value-position match arm",
+        hint: "return a value from the arm instead of using early `return` in value position",
+    ), false => (code == 14).match ({ true => DiagInfo(
+        kind: "parse",
+        message: "syntax error: unparseable top-level input",
+        hint: "check the syntax around this top-level declaration",
+    ), false => (code == 15).match ({ true => DiagInfo(
+        kind: "ownership",
+        message: "use of an owner after release/drop",
+        hint: "after release/drop, bind a fresh owner instead of reusing the consumed local",
+    ), false => (code == 16).match ({ true => DiagInfo(
+        kind: "trait-bound",
+        message: "type argument does not satisfy the trait bound",
+        hint: "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
+    ), false => (code == 17).match ({ true => DiagInfo(
+        kind: "unknown-type",
+        message: "unknown type name",
+        hint: "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
+    ), false => (code == 18).match ({ true => DiagInfo(
+        kind: "lambda-value",
+        message: "a lambda can only be used directly as a call argument",
+        hint: "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
+    ), false => (code == 19).match ({ true => DiagInfo(
+        kind: "must-use",
+        message: "result of a self-mutating container method is discarded; the receiver is invalid after this call",
+        hint: "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
+    ), false => (code == 20).match ({ true => DiagInfo(
+        kind: "need-annotation",
+        message: "cannot infer the type parameter of this binding",
+        hint: "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
+    ), false => (code == 21).match ({ true => DiagInfo(
+        kind: "ptr-write",
+        message: "cannot write through a read-only `Ptr<T>`",
+        hint: "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
+    ), false => (code == 22).match ({ true => DiagInfo(
+        kind: "infinite-type",
+        message: "type contains itself by value, so it has infinite size",
+        hint: "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value",
+    ), false => (code == 23).match ({ true => DiagInfo(
+        kind: "null-deref",
+        message: "`RawPtr<T>` may be null; deref requires a null-check first",
+        hint: "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
+    ), false => (code == 24).match ({ true => DiagInfo(
+        kind: "not-callable",
+        message: "value is not a function",
+        hint: "call a function, or store a function value in this name before calling it",
+    ), false => (code == 25).match ({ true => DiagInfo(
+        kind: "return-fit",
+        message: "function body falls through with no value; add a trailing expression of the declared return type",
+        hint: "",
+    ), false => (code == 26).match ({ true => DiagInfo(
+        kind: "no-type-args",
+        message: "this function takes no type arguments",
+        hint: "remove the `<…>` type arguments, or call a generic function",
+    ), false => (code == 27).match ({ true => DiagInfo(
+        kind: "or-return",
+        message: "`.or_return()` requires the enclosing function to return a `Result` carrying the receiver's error type",
+        hint: "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x := recv.or_return()`), or handle the `Result` with `.match`",
+    ), false => (code == 28).match ({ true => DiagInfo(
+        kind: "recursive-hof",
+        message: "recursive function with a function-typed parameter — its body is inlined per call site, so the recursive call has no emitted function to land on",
+        hint: "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function",
+    ), false => (code == 29).match ({ true => DiagInfo(
+        kind: "parse",
+        message: "syntax error: a newline before `.Variant` starts a new statement",
+        hint: "keep the qualified constructor's `.` on the same line as its type (`Type.Variant(…)`)",
+    ), false => (code == 30).match ({ true => DiagInfo(
+        kind: "main-signature",
+        message: "`main` takes no parameters (yet) — the OS entry calls it with none, so declared parameters would read garbage",
+        hint: "declare it `main = () i32 { … }` and bind capabilities inside the body; read CLI args with `std.os.arg(i)`/`argc()`",
+    ), false => (code == 31).match ({ true => DiagInfo(
+        kind: "arm-value",
+        message: "match arm yields no value, but the match result is used as a value",
+        hint: "end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm",
+    ), false => DiagInfo(
+        kind: "type",
+        message: "type error",
+        hint: "",
+    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+}
+diagnostic_kind_name = (code: i32) str { code.diag_info().kind }
+diagnostic_message = (code: i32) str { code.diag_info().message }
+diagnostic_hint = (code: i32) str { code.diag_info().hint }
 check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
     (packed == 0).match ({ true => check_diagnostic_none(), false => {
         code := packed & 63
@@ -2511,9 +2657,9 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
 // decls — a trait-bound error at a GENERIC call site only exists in the raw view (the resolver
 // inlines the call away before check_module runs), so its enrichment must walk raw; the raw
 // fallback is trait-bound-only. The kind-string guard keeps enrichment to the PACKED kind
-// channel: the custom channels REUSE numeric codes under their own kind strings (scope-escape
-// carries KESCAPE=16 == KTRAITBOUND, and its offset can land on an `s.acquire(…)` call that
-// LOOKS like a trait-bound miss), so a code match alone would overwrite their hand-built messages.
+// channel: the custom channels (scope-escape/escape/scratch-escape/reserved-name) carry their own
+// unique codes AND their own hand-built kind strings, so matching on the kind name confines
+// enrichment to ladder-rendered diagnostics and never overwrites a custom channel's message.
 denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32, kind: str) str { eq(kind, code.diagnostic_kind_name()).match ({ true => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND()).match ({ true => a.denrich_module(raw, off, code), false => "" })), false => "" }) }
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
@@ -3410,7 +3556,7 @@ check_module_main_diagnostic_from_source* = (decls: [Decl], src: str) CheckDiagn
 // hoisted under mangled `impl_…` names, and FOREIGN decls stay allowed (std.mem.alloc re-declares
 // `malloc`/`free` as bodyless prototypes) — so the reject is scoped to BODIED top-level DFuncs,
 // the one shape whose calls are unwinnably captured by the intrinsic.
-KRESERVEDNAME = () i32 { 31 }    // a top-level fn named after a compiler intrinsic (its calls would hit the intrinsic)
+KRESERVEDNAME = () i32 { 36 }    // a top-level fn named after a compiler intrinsic (its calls would hit the intrinsic). CUSTOM channel (own struct), NOT the diag_info ladder — unique code, was 31 (collided with KARMVOID)
 reserved_name_kind = (decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
@@ -3773,7 +3919,7 @@ check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
 // `return <that>` / a trailing `<that>` where `<that>` is such a local OR a direct `s.acquire(…)`.
 // The direct form deliberately excludes Scope's own `s.alloc.acquire(n)` accessor (its receiver is the
 // `.alloc` field, not the scope var), so std.scope's primitives are never false-rejected.
-KESCAPE = () i32 { 16 }    // (own field code, NOT 4-bit packed: reported via its own diagnostic, never kv_at)
+KESCAPE = () i32 { 33 }    // CUSTOM channel: reported via its own diagnostic (own kind/message/hint), never kv_at, never the diag_info ladder. Unique code, was 16 (collided with KTRAITBOUND)
 is_scope_param_ty = (t: Ty) bool {
     t.match ({
         .Ptr(pd) => load(pd.pointee).match ({
@@ -4500,8 +4646,8 @@ check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl
 // a rebind to anything clean REVIVES the name. Only the blatant textbook shapes reject.
 // Arity guards keep unrelated `spawn`s out: std.thread's `spawn(fn, arg)` is a 2-arg Call and the
 // coroutine `h.spawn(fn)` a 1-arg MethodCall — neither matches the 3-arg actor `spawn` surface.
-KSCRATCHSEND = () i32 { 29 }    // a send payload carries spawner-local scratch
-KSCRATCHSTATE = () i32 { 30 }    // spawn's initial actor state embeds spawner-local scratch
+KSCRATCHSEND = () i32 { 34 }    // a send payload carries spawner-local scratch. CUSTOM channel (own struct + sx_message), NOT the diag_info ladder — unique code, was 29 (collided with KVBREAK)
+KSCRATCHSTATE = () i32 { 35 }    // spawn's initial actor state embeds spawner-local scratch. CUSTOM channel — unique code, was 30 (collided with KMAINPARAMS)
 // a scratch-SOURCE expression: memory whose lifetime is the spawner's frame/allocator, in either
 // surface form (flat `acquire(a, n)` or UFCS `a.acquire(n)` — this pass runs pre-desugar).
 sx_is_acquire = (e: Ptr<Expr>) bool {
