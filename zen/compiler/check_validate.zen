@@ -2421,6 +2421,35 @@ zty* = (a: MutPtr<Malloc>, t: Ty) str {
     })
 }
 desc_or* = (x: str, y: str) str { is_empty(x).match ({ true => y, false => x }) }
+// ── fit-mismatch enrichment: name the TWO types the checker already had in hand ────────────────
+// `expected `<want>`, got `<got>``, both rendered in USER spelling via zty. Reused by arg-type /
+// assign-fit / return-fit so a mismatch says what fits and what was supplied, not just "does not fit".
+denrich_fit_msg = (a: MutPtr<Malloc>, want: Ty, got: Ty) str { a.gstr_string(48).gstr_append(a, "expected `").gstr_append(a, a.zty(want)).gstr_append(a, "`, got `").gstr_append(a, a.zty(got)).gstr_append(a, "`").gstr_finish(a) }
+// The message for a value `v` that must fit `want`, or "" when it actually fits / is a literal-slot
+// decision / involves an unknown/fn type (mirrors the *_err detectors' skips so it only speaks up on
+// a genuine concrete type-vs-type mismatch — the exact case the generic message was hiding).
+denrich_valfit = (env: Env, want: Ty, v: Ptr<Expr>) str {
+    vt := env.infer_expr(v)
+    (env.unknown_ty(want) || env.unknown_ty(vt) || want.is_fnt() || v.lit_slot_verdict(want) >= 0 || fits(vt, want)).match ({ true => "", false => env.a.denrich_fit_msg(want, vt) })
+}
+// A call arg at `off` whose parameter type is concrete (not a callee tparam) and that the arg does
+// not fit: name the parameter type vs the arg's inferred type. tparam-typed slots are skipped just
+// as arg_err_at skips them (the checker defers those to monomorphization).
+denrich_argfit_msg = (env: Env, c: CallData, off: i32) str {
+    (env.env_known_fn(c.fn) == false).match ({ true => {
+        return ""
+    } })
+    f := env.env_func(c.fn)
+    ps := env.env_params(c.fn)
+    (ps.len != c.args.len).match ({ true => {
+        return ""
+    } })
+    res := ""
+    c.args.loop((h, i, ar) {
+        res = (is_empty(res) && ar.expr_pos() == off && i < ps.len).match ({ true => f.tparams.ty_mentions_tparam(ps[i].ty).match ({ true => "", false => env.denrich_valfit(ps[i].ty, ar.addr()) }), false => res })
+    })
+    res
+}
 denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) str {
     s := a.gstr_string(64)
     fields.loop((h, i, f) {
@@ -2568,7 +2597,7 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
         .Member(m)      => (code == KSTRUCTFIELD() && m.pos.pos_or(load(m.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(m.field, env.infer_expr(m.obj)), false => a.denrich_expr(env, m.obj, off, code) }),
         .Arrow(ar)      => (code == KSTRUCTFIELD() && ar.pos.pos_or(load(ar.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(ar.field, env.infer_expr(ar.obj)), false => a.denrich_expr(env, ar.obj, off, code) }),
         .MakeStruct(sd) => (code == KSTRUCTFIELD() && sd.pos.pos_or((sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() })) == off).match ({ true => env.denrich_makestruct_msg(sd), false => a.denrich_inits(env, sd.inits, off, code) }),
-        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KUNDEFINED() && c.pos == off).match ({ true => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }) }),
+        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KUNDEFINED() && c.pos == off).match ({ true => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KARGTYPE()).match ({ true => desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }) }) }),
         .SliceLit(sd)   => a.denrich_args(env, sd.items, off, code),
         .Index(ix)      => desc_or(a.denrich_expr(env, ix.seq, off, code), a.denrich_expr(env, ix.idx, off, code)),
         .Cond(d)        => desc_or(a.denrich_expr(env, d.c, off, code), desc_or(a.denrich_expr(env, d.t, off, code), a.denrich_expr(env, d.e, off, code))),
@@ -2605,13 +2634,19 @@ denrich_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], off: i
 }
 denrich_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, off: i32, code: i32) str {
     st.match ({
-        .Let(l)      => a.denrich_expr(env, l.value, off, code),
-        .Assign(x)   => desc_or(a.denrich_expr(env, x.target, off, code), a.denrich_expr(env, x.value, off, code)),
-        .Return(r)   => a.denrich_expr(env, r, off, code),
-        .ExprStmt(e) => a.denrich_expr(env, e, off, code),
+        .Let(l)      => desc_or((code == KASSIGNFIT() && load(l.value).expr_pos() == off).match ({ true => env.denrich_valfit(l.ty, l.value), false => "" }), a.denrich_expr(env, l.value, off, code)),
+        .Assign(x)   => {
+            ap := x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())
+            desc_or((code == KASSIGNFIT() && ap == off).match ({ true => env.denrich_valfit(env.infer_expr(x.target), x.value), false => "" }), desc_or(a.denrich_expr(env, x.target, off, code), a.denrich_expr(env, x.value, off, code)))
+        },
+        .Return(r)   => desc_or((code == KRETURNFIT() && load(r).expr_pos() == off).match ({ true => env.denrich_valfit(env.exp, r), false => "" }), a.denrich_expr(env, r, off, code)),
+        .ExprStmt(e) => desc_or((code == KRETURNFIT() && load(e).expr_pos() == off).match ({ true => env.denrich_valfit(env.exp, e), false => "" }), a.denrich_expr(env, e, off, code)),
         .If(f)       => desc_or(a.denrich_expr(env, f.c, off, code), desc_or(a.denrich_body(env, f.then, off, code), a.denrich_body(env, f.els, off, code))),
         .While(w)    => desc_or(a.denrich_expr(env, w.c, off, code), a.denrich_body(env, w.body, off, code)),
-        .IndexSet(x) => desc_or(a.denrich_expr(env, x.seq, off, code), desc_or(a.denrich_expr(env, x.idx, off, code), a.denrich_expr(env, x.value, off, code))),
+        .IndexSet(x) => {
+            ip := x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())
+            desc_or((code == KASSIGNFIT() && ip == off).match ({ true => env.denrich_valfit(x.elem, x.value), false => "" }), desc_or(a.denrich_expr(env, x.seq, off, code), desc_or(a.denrich_expr(env, x.idx, off, code), a.denrich_expr(env, x.value, off, code))))
+        },
     })
 }
 denrich_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], off: i32, code: i32) str {
@@ -2648,7 +2683,7 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) str {
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
 // dup-fn/undefined-name error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED()).match ({ true => {
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED() && code != KARGTYPE() && code != KRETURNFIT() && code != KASSIGNFIT()).match ({ true => {
         return ""
     } })
     (code == KDUPFN()).match ({ true => {
