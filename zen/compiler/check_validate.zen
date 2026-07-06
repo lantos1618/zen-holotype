@@ -4525,17 +4525,31 @@ sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
     })
     f
 }
+// Classify a send-payload expression by the TYPE it reaches (Pony reference-capabilities), NOT its AST
+// shape. A constructor node (MakeEnum / MakeStruct) is descended into the SPECIFIC payload/fields actually
+// constructed — never inferred as a whole, so a `.Inc(3)` of an enum that ALSO has a `.Poke(MutPtr)` variant
+// is not wrongly rejected. EVERY OTHER leaf (Var, Call, MethodCall, Member, Arrow, Index, …) is classified
+// by `ty_reaches_mutptr(infer_expr(e))`: this is what makes the check SOUND THROUGH A CALL/MEMBER/FIELD —
+// `send(.Poke(o.ptr()))` (a method returning MutPtr) and `send(.Poke(launder(b.addr())))` (a MutPtr threaded
+// through an identity fn) both infer a MutPtr-reaching type and reject, closing the `.Var`-only hole where
+// they fell to `false`. A call returning a deeply-immutable `Ptr<T>` (`val`) still infers clean (not
+// rejected) — the precision comes from the type predicate, not the syntax.
 sm_msg_mut = (env: Env, e: Ptr<Expr>) bool {
     load(e).match ({
-        .Var(v)        => env.decls.ty_reaches_mutptr(env.infer_expr(e), 16),
         .MakeEnum(mk)  => env.sm_msg_mut(mk.payload),
         .MakeStruct(s) => env.sm_inits_mut(s.inits),
-        _              => false,
+        _              => env.decls.ty_reaches_mutptr(env.infer_expr(e), 16),
     })
 }
-// a `send(_, msg)` whose message carries a MutPtr → the source offset of the call, else 0. `&&` short-
-// circuits, so `c.args[1]` is only touched when the arity check passed.
-sm_call_pos = (env: Env, c: CallData) i32 { (eq(c.fn, "send") && c.args.len >= 2 && env.sm_msg_mut(c.args[1].addr())).match ({ true => c.pos.pos_or(1), false => 0 }) }
+// The actor-send surfaces (name-based, arity-guarded — mirrors the scratch pass's `sx_call_kind`): the
+// MESSAGE is the LAST argument, NOT a hardcoded `args[1]`. That covers the 3-arg PARALLEL primitive
+// `send(p, h, msg)` (from `p.send(h, msg)` / std.concurrent.pool_actor.send, flattened to `…__send`) whose
+// message is `args[2]` — the path where cross-actor races ACTUALLY happen — as well as the 2-arg inline
+// `send(h, msg)`. `sx_named` accepts the bare name and the flattener's `…__send` / `…__pool_send` suffix.
+sm_call_pos = (env: Env, c: CallData) i32 { (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({ true => env.sm_msg_mut(c.args[c.args.len - 1].addr()).match ({ true => c.pos.pos_or(1), false => 0 }), false => 0 }) }
+// the UFCS form as it may survive pre-desugar (`h.send(m)` / `p.send(h, m)` / `p.pool_send(h, m)`): the
+// message is again the LAST method argument (the receiver is carried separately).
+sm_mcall_pos = (env: Env, mc: MethodCallData) i32 { (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => env.sm_msg_mut(mc.args[mc.args.len - 1].addr()).match ({ true => mc.pos.pos_or(1), false => 0 }), false => 0 }) }
 sm_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
@@ -4560,6 +4574,7 @@ sm_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) i32 {
 sm_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)       => env.sm_call_pos(c).kv_kor(a.sm_args(env, c.args)),
+        .MethodCall(mc) => env.sm_mcall_pos(mc).kv_kor(a.sm_expr(env, mc.recv)).kv_kor(a.sm_args(env, mc.args)),
         .Bin(b)        => a.sm_expr(env, b.lhs).kv_kor(a.sm_expr(env, b.rhs)),
         .Index(ix)     => a.sm_expr(env, ix.seq).kv_kor(a.sm_expr(env, ix.idx)),
         .Cond(d)       => a.sm_expr(env, d.c).kv_kor(a.sm_expr(env, d.t)).kv_kor(a.sm_expr(env, d.e)),

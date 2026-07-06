@@ -1648,6 +1648,26 @@ oracle_verdict_run* = () i32 {
         src: "Data*: {\n    n: i32,\n}\nArc*<T>: {\n    base: RawPtr<u8>,\n}\nMsg*: Hold(Arc<MutPtr<Data>>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, r: Arc<MutPtr<Data>>) i32 {\n    h.send(.Hold(r))\n    0\n}\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "Data*: {\n    n: i32,\n}\nBox*: {\n    d: MutPtr<Data>,\n}\nptr = (b: Box) MutPtr<Data> { b.d }\nMsg*: Poke(MutPtr<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, b: Box) i32 {\n    h.send(.Poke(b.ptr()))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "Data*: {\n    n: i32,\n}\nlaunder = (p: MutPtr<Data>) MutPtr<Data> { p }\nMsg*: Poke(MutPtr<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H) i32 {\n    d := Data(n: 1)\n    h.send(.Poke(launder(d.addr())))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "Data*: {\n    n: i32,\n}\nMsg*: Poke(MutPtr<Data>)\nP*: {\n    id: i32,\n}\nH*: {\n    id: i32,\n}\nsend = (p: P, h: H, m: Msg) bool { true }\nfwd = (p: P, h: H, mp: MutPtr<Data>) i32 {\n    p.send(h, .Poke(mp))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "Data*: {\n    n: i32,\n}\nBox*: {\n    d: Ptr<Data>,\n}\nvptr = (b: Box) Ptr<Data> { b.d }\nMsg*: View(Ptr<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, b: Box) i32 {\n    h.send(.View(b.vptr()))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Msg*: Inc(i32)\nP*: {\n    id: i32,\n}\nH*: {\n    id: i32,\n}\nsend = (p: P, h: H, m: Msg) bool { true }\nfwd = (p: P, h: H) i32 {\n    p.send(h, .Inc(3))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
     )])
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,
@@ -1677,6 +1697,13 @@ oracle_verdict_run* = () i32 {
     // `val` is deep). Accepts: a readonly `Ptr<T>` (`val`) payload, and a `Ptr<Outer>` whose reachable
     // struct fields are all readonly `Ptr`/value (deeply immutable). (value = pointer-free, and iso =
     // `Own<T>` move-on-send, are covered by the plain-value cases above + the ownership cases.)
+    // M2 SOUNDNESS THROUGH A CALL/MEMBER + THE PARALLEL SEND PATH (close the exit-123 race): the payload
+    // is classified by the TYPE it reaches (infer_expr), so a MutPtr threaded through a METHOD RETURN
+    // (`h.send(.Poke(b.ptr()))`) or an IDENTITY FN (`h.send(.Poke(launder(d.addr())))`) is rejected, not
+    // just a bare `.Var` — closing the `_ => false` leak. And the message of the 3-ARG parallel send
+    // (`p.send(h, .Poke(mp))` — std.concurrent.pool_actor.send, message = LAST arg, not `args[1]`) is now
+    // inspected, so the guarantee fires where races actually happen. Precision preserved (no over-reject):
+    // a method RETURNING a readonly `Ptr<T>` (`val`) stays accepted, and a plain-value 3-arg send is clean.
     // or_return in a GLOBAL initializer: there is NO enclosing function to return the Err to —
     // the lowered early-return silently aborted zen__init_globals, leaving every later global
     // zero (H stayed 0, exit 0 instead of 7). Positioned or-return error at check time.
