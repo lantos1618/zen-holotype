@@ -1668,6 +1668,14 @@ oracle_verdict_run* = () i32 {
         src: "Msg*: Inc(i32)\nP*: {\n    id: i32,\n}\nH*: {\n    id: i32,\n}\nsend = (p: P, h: H, m: Msg) bool { true }\nfwd = (p: P, h: H) i32 {\n    p.send(h, .Inc(3))\n    0\n}\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "{ Own, new_in, Drop } = std.mem.own\n{ Result, IoError, expect } = std.core.result\nhalloc = std.mem.heap\nBlob*: {\n    v: i64,\n}\nBlob.impl(Drop, {\n    drop = (b: MutPtr<Blob>) void { }\n})\nlaunder = (o: Own<Blob>) Own<Blob> { o }\nMsg*: Give(Own<Blob>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    r: Result<Own<Blob>, IoError> := a.new_in(Blob(v: 1))\n    o := r.expect(\"own\")\n    h := H(id: 1)\n    h.send(.Give(launder(o)))\n    o.release_in(a)\n    0\n}",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "{ Own, new_in, Drop } = std.mem.own\n{ Result, IoError, expect } = std.core.result\nhalloc = std.mem.heap\nBlob*: {\n    v: i64,\n}\nBlob.impl(Drop, {\n    drop = (b: MutPtr<Blob>) void { }\n})\nmkblob<A> = (a: MutPtr<A>) Own<Blob> {\n    r: Result<Own<Blob>, IoError> := a.new_in(Blob(v: 1))\n    r.expect(\"own\")\n}\nMsg*: Give(Own<Blob>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    h := H(id: 1)\n    h.send(.Give(mkblob(a)))\n    0\n}",
+        should_pass: true,
+        kind: "",
     )])
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,
@@ -1704,6 +1712,10 @@ oracle_verdict_run* = () i32 {
     // (`p.send(h, .Poke(mp))` — std.concurrent.pool_actor.send, message = LAST arg, not `args[1]`) is now
     // inspected, so the guarantee fires where races actually happen. Precision preserved (no over-reject):
     // a method RETURNING a readonly `Ptr<T>` (`val`) stays accepted, and a plain-value 3-arg send is clean.
+    // ISO/MOVE LAUNDER: an `Own<T>` sent through a single-Own-arg identity fn (`send(.Give(launder(o)))`)
+    // still move-kills the sender's binding, so a later `o.release_in(a)` is error[ownership] use-after-move
+    // (else sender + actor both free `o`). A FRESH owner from a call with no Own arg (`send(.Give(mkblob(a)))`)
+    // kills nothing — correctly still legal.
     // or_return in a GLOBAL initializer: there is NO enclosing function to return the Err to —
     // the lowered early-return silently aborted zen__init_globals, leaving every later global
     // zero (H stayed 0, exit 0 instead of 7). Positioned or-return error at check time.
