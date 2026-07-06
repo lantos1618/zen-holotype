@@ -26,37 +26,32 @@ Compact roadmap from the current codebase. Each goal names the gap and the check
    - Gap: the C CLI still runs parse/check through `resolve_program(...).flat`; graph-linked checking currently covers the root module's direct import signatures, but full validation has not yet switched to a symbol-table/module-world resolver for every module body.
    - Done when: imports resolve through a module graph/symbol table, resolver tests pass, and positions still point to original files.
 
-6. **JS Backend Decision**
-   - Status: `compiler.genjs` is documented as an experimental computational-subset backend in [JS_BACKEND.md](JS_BACKEND.md); raw pointer/memory operations emit explicit `unsupported-in-js` markers, and tests run supported programs through Node.
-   - Gap: JS is not first-class: there is no `zenc js` CLI, package/module linking story, or complete runtime/memory model.
-   - Done when: docs mark JS first-class or experimental, unsupported constructs are explicit, and tests match that scope.
-
-7. **Result/Error Policy**
+6. **Result/Error Policy**
    - Status: [ERROR_POLICY.md](ERROR_POLICY.md) documents the current fast/fallible naming rules and the `std.mem`, `std.core.slice`, `std.text`, `std.collections`, `std.concurrent.actor`, `std.concurrent.coroutine/sched`, `std.concurrent.cown`, and `std.io` surfaces. Tests cover allocator null lifting, arena backing allocation, namespaced ownership `try_new_in`, trace `try_tracked_in` plus `try_root_in`/`try_collect_in`, ownership/trace allocator paths, slice buffer/copy/node/concat result paths, text/string result paths, strict `try_parse_int` `Ok`/`NoDigits`/`Trailing`/`Overflow` result paths, Vec and Map fallible growth, iter map/filter result paths, actor cell/reply allocation cleanup, stateful actor `spawn` cleanup, coroutine spawn allocation cleanup, scheduler flag allocation failure, cown buffer/file wrapper allocation failure, and file I/O result paths.
    - Gap: the policy is still convention plus tests; effects/ownership are not checker-enforced.
    - Done when: `std.mem`, `std.text`, `std.collections`, and `std.io` document fallible vs fail-fast APIs and test both paths.
 
-8. **Memory Safety Rules**
+7. **Memory Safety Rules**
    - Status: [MEMORY_MODEL.md](MEMORY_MODEL.md) documents the current model; allocator-threaded tests cover arena backing storage, fallible ownership constructors, and internal AST declaration buffers; `zenc check` rejects same-body local use after `Own<T>.release_in(...)`, `Rc<T>.drop_in(...)`, or `Arc<T>.drop_in(...)` with precise ownership diagnostics.
    - Gap: no full branch-sensitive ownership, lifetime, pointer-direction, or nullability checker yet.
    - Done when: the model grows from the current local consume rule into the full pointer/ownership safety policy and tests cover representative invalid lifetime patterns.
 
-9. **Package Manifest**
+8. **Package Manifest**
    - Status: `zenc check/build/run <project-dir>` reads `zen.toml` with `package`, `root`, `main`, optional `out`, and `ccflags` build options. A committed fixture project under `tests/fixtures/project/manifest_demo` proves `check`, `run`, and `build` against a real manifest tree.
    - Gap: no dependency graph, package registry, build profiles, or richer option model yet.
    - Done when: `zen.toml` declares package roots/options, fixture projects build from it, and package-level options/dependencies are tested.
 
-10. **Tooling**
+9. **Tooling**
     - Status: `zenc fmt` exists; `zenc doc <std.mod|file.zen>` lists public declaration heads and adjacent `//` docs. Tests now assert docs for formatter, actor/concurrency, memory, collections, strict text parsing, file I/O `Result` APIs, and local source files.
     - Gap: no LSP, package tooling, or rich docs generator yet; formatter/doc output are still first-pass tools.
     - Done when: `zenc fmt` and `zenc doc` are covered by tests, and public std declarations can be listed with useful types/docs.
 
-11. **Language Spec**
+10. **Language Spec**
     - Status: `SPEC.md` covers current syntax, declarations, traits, generics, imports, memory, errors, concurrency, backends, tooling, and links each area to tests.
     - Gap: the spec is current-state documentation, not yet a rigorous versioned language standard with grammar and normative acceptance/rejection language.
     - Done when: spec covers syntax, declarations, traits, generics, imports, memory, errors, concurrency, and links to tests.
 
-12. **Actor Demo Polish**
+11. **Actor Demo Polish**
    - Status: `ActorEngine<M>` hides the raw system state, `ActorCell<M>` remains the lower-level wrapper for `tell`, `request`, `ask`, `await_reply`, and `free`, and `ActorHandle<M, ActorT>` now owns allocator-backed actor state plus its queue with receiver-scoped `tell`, `run`, `request`, `ask`, and `free` methods. `actor_demo.zen` uses namespace-bound `alloc.default()` and `actor = std.concurrent.actor`, builds a generic `ChatRoomHandle<A>` with `actor.spawn(...)`, stores the allocator pointer once in that handle, sends typed chat operations through `room.join(...)` / `room.say(...)`, and asks for `ChatStats` with `room.stats()` through `ReplyRef<ChatStats>` rather than exposing reply construction or drain/await ordering. The demo asks once after Alice joins and again after Bob joins/posts, proving actor state persists across multiple drains and that generic replies can carry a structured value instead of an actor-specific integer wrapper. Actor draining checkpoints through `std.concurrent.runtime`, keeping the raw coroutine primitive inside the runtime/coroutine substrate, and `ActorHandle.request` / `ask` now release reply storage through `ReplyRef.await` instead of duplicating raw reply-buffer reads. Setup no longer needs a type-witness message, visible raw `ActorSystem`, imported `actor_*` helpers, standalone reply construction, named request shims, wrapper refs, direct `cell` constructor imports, or allocator threading through every room operation in `main`. Actor allocation is `Result`-shaped — `actor.cell`, `cell.reply`, and stateful `actor.spawn` return `Result` value paths for recoverable setup failure (no separate `try_*` doubling) — and namespace regression tests prove `actor.cell` / `ActorCell.request` can coexist with another module exporting `cell`, while `actor.spawn` can coexist with the coroutine substrate's own names.
    - Gap: broader actor spawning/scheduling ergonomics can still improve.
    - Done when: the demo remains runnable, hides queue plumbing, and no longer needs type-witness seed ceremony, manual reply allocation, or repeated allocator arguments in `main`.

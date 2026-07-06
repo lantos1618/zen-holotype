@@ -163,10 +163,6 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   monomorphization. `If`/`While` here are backend/internal structured target forms; the Zen
   source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
   not a demo.
-- **`compiler.genjs` — a second backend over that same AST**, emitting JavaScript for the
-  computational subset. It is documented as experimental in [JS_BACKEND.md](JS_BACKEND.md):
-  value programs run under Node in tests, while raw pointer/memory constructs emit explicit
-  `unsupported-in-js` markers instead of being faked.
 - **`compiler.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
   kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (a `str` is a `const char*`),
   tokens are spans (allocation-free), and it handles idents, ints, strings (with escapes), multi-char
@@ -254,8 +250,6 @@ Plain emit mode skips the std-import loader and validator and writes C for one f
   package/module system beyond that std-import closure is still future work.
 - The self-hosted checker covers a real but **partial** slice of the language; growing it to
   full parity with what `zenlang` describes is the active arc.
-- The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`
-  (the `map_into`/`filter_into` forms are already generic).
-- Two backends (`compiler.genc` for C, `compiler.genjs` for experimental JS — the latter the computational subset).
-  An LLVM backend and the one-structure surface syntax from [VISION](VISION.md) are the
-  *direction*, not the current state.
+- The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`.
+- One backend (`compiler.genc` for C). An LLVM backend and the one-structure surface syntax from
+  [VISION](VISION.md) are the *direction*, not the current state.
