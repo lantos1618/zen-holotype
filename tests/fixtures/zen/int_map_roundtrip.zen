@@ -4,12 +4,16 @@
 // `Hash` impl for i64 that std.collections.hmap ships; `get_or` is the with-default lookup.
 halloc = std.mem.heap
 hmaps = std.collections.hmap
-{ expect } = std.core.result
+{ HMap } = std.collections.hmap
+{ Result, IoError } = std.core.result
 { println } = std.text.fmt
 main = () i32 {
     alloc := halloc.gpa()
     a := alloc.addr()
-    m: hmaps.HMap<i64, i32> := hmaps.empty(a).expect("empty")
+    // `empty` pins K/V only through the return type, so annotate the Result then .expect (a one-line
+    // .expect chain off `empty(a)` can't reach the type params — see the hmap header GOTCHA).
+    r: Result<HMap<i64, i32>, IoError> := hmaps.empty(a)
+    m := r.expect("empty")
     m = m.put(a, 1, 10).expect("put")
     m = m.put(a, 2, 20).expect("put")
     m = m.put(a, 1000000, 99).expect("put")
@@ -21,10 +25,11 @@ main = () i32 {
     println(m.get_or(1, 0 - 1))    // 11
     println(m.has(2).match ({ true => 1, false => 0 }))    // 1
     println(m.has(7).match ({ true => 1, false => 0 }))    // 0
-    // cross several resizes: insert keys 0..63 with value k*100 (starts small -> many grows)
-    n := 0
+    // cross several resizes: insert keys 0..63 with value k*100 (starts small -> many grows). Keys are
+    // TYPED i64 (an untyped literal at a generic call site would pin K to i32 — see the hmap GOTCHA).
+    n: i64 := 0
     @while (n < 64) {
-        m = m.put(a, n, n * 100).expect("put")
+        m = m.put(a, n, to_i32(n * 100)).expect("put")
         n = n + 1
     }
     println(m.get_or(0, 0 - 1))    // 0
