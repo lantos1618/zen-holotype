@@ -192,8 +192,7 @@ resolves references, infers each body, and runs `fits(given, want)` at each call
 relation behind name resolution, numeric widening, structural type equality, pointer
 direction/nullability, and trait-bound satisfaction. Checked structure lowers directly to C;
 pointers erase to plain C pointers. Fed its **own** sources, `zenc` re-emits the committed
-`bootstrap/zenc.gen.c` byte-for-byte. A partial JavaScript backend (`compiler.genjs`) walks
-the same AST.
+`bootstrap/zenc.gen.c` byte-for-byte.
 
 ## Caveats
 
@@ -216,7 +215,6 @@ This is rough around the edges. Known limits worth flagging up front:
 | `zen/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
 | `zen/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
 | `zen/compiler/genfmt.zen` | the `zenc fmt` formatter over the same AST |
-| `zen/compiler/genjs.zen` | an experimental JavaScript backend over the same AST |
 | `zen/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
 | `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` + `Makefile` |
@@ -230,7 +228,6 @@ This is rough around the edges. Known limits worth flagging up front:
 **[MEMORY_MODEL.md](MEMORY_MODEL.md)** (ownership / allocator rules) ·
 **[ERROR_POLICY.md](ERROR_POLICY.md)** (Result/error contract) ·
 **[ARCHITECTURE.md](ARCHITECTURE.md)** (compiler structure) ·
-**[JS_BACKEND.md](JS_BACKEND.md)** (experimental JS backend) ·
 **[VISION.md](VISION.md)** (the why) · **[CHANGELOG.md](CHANGELOG.md)** (history).
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight into typed

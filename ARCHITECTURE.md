@@ -29,10 +29,8 @@ emitted C to `cc`.
 ```
 
 `compiler.genc`'s `Expr`/`Stmt`/`Decl` are the **one AST** the parser builds, the checker
-annotates, and a backend walks. `compiler.genjs` is a second, experimental backend over
-that same AST; [JS_BACKEND.md](JS_BACKEND.md) documents the supported computational subset
-and unsupported memory markers. It demonstrates AST reuse without making the whole IR
-backend-neutral yet.
+annotates, and a backend walks. C is currently the only backend; the AST is deliberately
+backend-neutral so a second walk (LLVM, JS, …) is a new emitter, not a new IR.
 
 Checked CLI modes reject on any type error before linking.
 The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one
@@ -119,7 +117,6 @@ a walk over it:
 | backend | module | target |
 |---|---|---|
 | `genc` | `zen/compiler/genc_emit.zen` | C, the bootstrap/intermediate target |
-| `genjs` | `zen/compiler/genjs.zen` | JavaScript (experimental computational subset) |
 
 A new backend is a new walk; it never re-checks, because the checker already proved the
 structure fits. Source branching is `.match` only, but a backend can choose target-native
@@ -144,5 +141,5 @@ function over data.
   (the checker covers a real but partial slice today).
 - A broader package/module system beyond the std-import closure that `check`/`build`/`run`
   resolve today; plain emit remains a flat-module C emitter.
-- More backends (`gen.llvm`, a richer `gen.js`), and the one-structure surface syntax from
+- More backends (`gen.llvm`, `gen.js`), and the one-structure surface syntax from
   [VISION](VISION.md).

@@ -14,7 +14,6 @@ The strongest executable references are:
   language behavior through the binary oracle.
 - [tests/test_resolver_oracle.py](tests/test_resolver_oracle.py) and
   [tests/test_user_imports.py](tests/test_user_imports.py) for import resolution.
-- [tests/test_genjs.py](tests/test_genjs.py) for the JavaScript backend subset.
 - [tests/test_primitive_boundaries.py](tests/test_primitive_boundaries.py) for
   raw primitive boundaries.
 
@@ -446,14 +445,7 @@ allocation before returning `.Err`; there are no separate `try_*` variants.
 ## Backends
 
 The C backend is the shipping/bootstrap backend. It lowers the checked AST to C
-and invokes `cc` for `build`/`run`.
-
-`compiler.genjs` is experimental; its scope is documented in
-[JS_BACKEND.md](JS_BACKEND.md). It emits JavaScript for the computational
-subset: arithmetic, calls, conditionals, structs as JS objects, enums as tagged
-objects, slices, index, loops, recursion, block expressions, lambdas after
-template lowering, and imperative statements. Raw pointer/memory primitives are
-emitted as explicit `unsupported-in-js` markers rather than faked.
+and invokes `cc` for `build`/`run`. It is currently the only backend.
 
 ## Tooling
 
@@ -477,6 +469,5 @@ docs. It is a first-pass docs command, not a rich documentation generator.
 | Traits and impl conformance | [tests/test_traits.py](tests/test_traits.py) |
 | Imports and resolver behavior | [tests/test_user_imports.py](tests/test_user_imports.py), [tests/test_resolver_oracle.py](tests/test_resolver_oracle.py) |
 | Std module import coverage | [tests/test_modules_oracle.py](tests/test_modules_oracle.py) |
-| JS backend subset | [tests/test_genjs.py](tests/test_genjs.py) |
 | Raw primitive boundaries | [tests/test_primitive_boundaries.py](tests/test_primitive_boundaries.py) |
 | Formatter and docs commands | [tests/test_build.py](tests/test_build.py) |

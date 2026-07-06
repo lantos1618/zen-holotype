@@ -1,36 +1,41 @@
-// Proof that std.collections.map.IntMap<V> (i64 keys) round-trips: put (1->10),(2->20),(1000000->99),
+// Proof that an i64-keyed HMap<i64, i32> round-trips: put (1->10),(2->20),(1000000->99),
 // get them back, a missing key returns the default, overwrite an existing key, and enough entries to
-// cross a resize (cap starts at 1, so 64 inserts force several grows). The existing str-keyed Map<i32>
-// program (map_wordfreq.zen et al.) is exercised separately by oracle_build; this fixture is IntMap-only.
+// cross a resize (cap starts small, so 64 inserts force several grows). i64 keys dispatch through the
+// `Hash` impl for i64 that std.collections.hmap ships; `get_or` is the with-default lookup.
 halloc = std.mem.heap
-maps = std.collections.map
-{ expect } = std.core.result
+hmaps = std.collections.hmap
+{ HMap } = std.collections.hmap
+{ Result, IoError } = std.core.result
 { println } = std.text.fmt
 main = () i32 {
     alloc := halloc.gpa()
     a := alloc.addr()
-    m: maps.IntMap<i32> := maps.int_empty(a)
+    // `empty` pins K/V only through the return type, so annotate the Result then .expect (a one-line
+    // .expect chain off `empty(a)` can't reach the type params — see the hmap header GOTCHA).
+    r: Result<HMap<i64, i32>, IoError> := hmaps.empty(a)
+    m := r.expect("empty")
     m = m.put(a, 1, 10).expect("put")
     m = m.put(a, 2, 20).expect("put")
     m = m.put(a, 1000000, 99).expect("put")
-    println(m.get(1, 0 - 1))    // 10
-    println(m.get(2, 0 - 1))    // 20
-    println(m.get(1000000, 0 - 1))    // 99
-    println(m.get(7, 0 - 1))    // -1 (missing -> default)
+    println(m.get_or(1, 0 - 1))    // 10
+    println(m.get_or(2, 0 - 1))    // 20
+    println(m.get_or(1000000, 0 - 1))    // 99
+    println(m.get_or(7, 0 - 1))    // -1 (missing -> default)
     m = m.put(a, 1, 11).expect("put")    // overwrite
-    println(m.get(1, 0 - 1))    // 11
+    println(m.get_or(1, 0 - 1))    // 11
     println(m.has(2).match ({ true => 1, false => 0 }))    // 1
     println(m.has(7).match ({ true => 1, false => 0 }))    // 0
-    // cross several resizes: insert keys 0..63 with value k*100 (cap starts at 1 -> many grows)
-    n := 0
+    // cross several resizes: insert keys 0..63 with value k*100 (starts small -> many grows). Keys are
+    // TYPED i64 (an untyped literal at a generic call site would pin K to i32 — see the hmap GOTCHA).
+    n: i64 := 0
     @while (n < 64) {
-        m = m.put(a, n, n * 100).expect("put")
+        m = m.put(a, n, to_i32(n * 100)).expect("put")
         n = n + 1
     }
-    println(m.get(0, 0 - 1))    // 0
-    println(m.get(50, 0 - 1))    // 5000
-    println(m.get(63, 0 - 1))    // 6300
-    println(m.get(64, 0 - 1))    // -1 (never inserted)
+    println(m.get_or(0, 0 - 1))    // 0
+    println(m.get_or(50, 0 - 1))    // 5000
+    println(m.get_or(63, 0 - 1))    // 6300
+    println(m.get_or(64, 0 - 1))    // -1 (never inserted)
     println(m.len())    // 65: {1,2,1000000} + {0..63}, the {1,2} overlap overwrites in place
     m.free(a)
     0
