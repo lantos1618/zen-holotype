@@ -43,6 +43,7 @@
 // pool_close after the workers join, the same explicit-alloc floor as std.thread/std.sync. Only the
 // cross-thread-shared ACTOR state needed refcounting; the single-owner infrastructure does not.
 { malloc, free } = std.mem.alloc
+{ Rt, heap_rt, enter, leave } = std.rt
 { Arc, new_in } = std.mem.arc
 { Malloc } = std.mem.alloc
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
@@ -63,7 +64,11 @@ PoolActor: {
     mbmu: Mutex,
     sched: i64,
     behavior: (RawPtr<u8>, i64) void,
+    art: Rt,
 }    // user actor state (opaque to the pool)
+// (`art` = this actor's ambient rt; the worker sets it as the current-rt slot around each behavior run,
+// so `rt.current()` inside the behavior resolves to the actor's own rt — the M4 injection hook, §2b.
+// Untyped pool actors default `art = heap_rt()`, which is observationally the unset default.)
 actor_view = (raw: RawPtr<u8>) MutPtr<PoolActor> { raw.offset(8).slice(1)[0].addr() }    // mailbox ring buffer (i64 slots)
 actor_mb = (a: MutPtr<PoolActor>) Ring<i64> {
     Ring<i64>(
@@ -73,21 +78,15 @@ actor_mb = (a: MutPtr<PoolActor>) Ring<i64> {
         cap: a.cap,
     )
 }    // consumer index (the running worker)
-pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> {
-    ma := Malloc(_: 0)    // producer index (any sender)
-    // ring capacity (slots)
-    // guards head/tail/buf + sched (MPSC mailbox lock)
-    // scheduled flag: 0 = idle, 1 = queued-or-running (under mbmu)
-    // the actor's per-message reaction (non-capturing)
-    // A handle is an `Arc<PoolActor>` base pointer: [ count:i64 | PoolActor ]. The PoolActor value lives 8
-    // bytes past the base (past the refcount header), matching std.mem.arc's layout.
-    // the actor's mailbox as a Ring<i64> VALUE (the single shared ring, std.concurrent.ring): read the
-    // {mbuf,head,tail,cap} fields out of the actor and operate on the value, writing head/tail back. The
-    // ring methods slice the value's buf — no MutPtr arrow access is fed to .slice(). Messages ride as i64
-    // (a pointer payload too); the value-load idiom keeps head/tail mutation exactly where the locks want it.
-    // build a runnable actor: Arc-allocate its block (refcount = 1, owned by the caller) + a mailbox ring.
-    // NOT enqueued — the first `send` makes it runnable (design: an actor is runnable iff it has a pending
-    // message). Returns the Arc base pointer as the opaque handle; the caller owns the initial reference.
+// spawn an actor whose behaviors run under `art` as the ambient rt (the M4 injection hook, §2b): the
+// worker writes `art` into the current-rt thread-local around each behavior run, so `rt.current()`
+// inside the behavior is this actor's own rt (Pony per-actor heap). Everything else is exactly
+// `pool_spawn`. A handle is an `Arc<PoolActor>` base pointer: [ count:i64 | PoolActor ]; the PoolActor
+// value lives 8 bytes past the base (past the refcount header), matching std.mem.arc's layout. Build a
+// runnable actor (refcount = 1, owned by the caller) + a mailbox ring; NOT enqueued — the first `send`
+// makes it runnable. Returns the Arc base pointer as the opaque handle.
+pool_spawn_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void, art: Rt) RawPtr<u8> {
+    ma := Malloc(_: 0)
     mbuf := malloc(mbcap * 8)
     arc := new_in(ma.addr(), PoolActor(
         user: user,
@@ -98,9 +97,15 @@ pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) R
         mbmu: new_mutex(),
         sched: 0,
         behavior: behavior,
+        art: art,
     )).expect("pool: actor block allocation failed")
     arc.base
 }
+// spawn an untyped pool actor with the DEFAULT ambient rt (heap). Delegates to pool_spawn_rt with
+// `heap_rt()` — setting the slot to the heap default is observationally the unset default, so every
+// existing pool fixture stays byte-identical. The typed pool-actor path (std.concurrent.pool_actor)
+// calls pool_spawn_rt directly to give each actor its own rt.
+pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> { pool_spawn_rt(user, mbcap, behavior, heap_rt()) }
 // clone a handle: bump the Arc refcount (atomic +1) and return the same base. Any party that shares the
 // actor across threads — a sender that wants to outlive the spawner, the run-queue's "scheduled" ref —
 // holds a clone, so the block cannot be freed while that party still references it.
@@ -231,7 +236,9 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
         }, false => 0 })
         a.mbmu.unlock()
         has.match ({ true => {
+            saved := enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
             a.behavior(a.user, msg)
+            leave(saved)    // restore the worker's prior slot (run-to-completion, no leak).
             drain_batch(a, count + 1)
         }, false => count })
     } })
@@ -408,7 +415,9 @@ drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
     cur.nonempty().match ({ true => {
         m := cur.peek()
         a.head = cur.advance().head
+        saved := enter(a.art)    // same ambient-rt wiring on the inline driver (identical to the pool path)
         a.behavior(a.user, m)
+        leave(saved)
         drain_inline_loop(a, count + 1)
     }, false => count })
 }

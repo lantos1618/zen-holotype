@@ -1,0 +1,81 @@
+// rt M4 PROOF (docs/rt-scoped-runtime.md §3): TYPED actors run on the POOL, in parallel, exactly-once
+// — no caller-thread inline drain. NACT typed actors each receive PERMSG typed `Inc(1)` messages; each
+// `receive` atomically adds 1 to a SHARED accumulator. Sends go through the pool (pool_send via the
+// monomorphized trampoline), drained by WORKERS workers. Assert (a) the total is EXACT (no lost/dup work
+// → exactly-once across the mailbox MPSC + scheduled-flag transitions) AND (b) >= 2 workers processed
+// messages (work demonstrably fanned across cores — proving it is NOT the old inline single-thread drain).
+// This is the typed analogue of pool_parallel_actors; the actor's `receive` is the pool behavior now.
+{ pool_open, pool_quiesce_stop, pool_close, workers_busy, Pool } = std.concurrent.pool
+{ malloc, free } = std.mem.alloc
+pa = std.concurrent.pool_actor
+NACT := 8
+PERMSG := 5000
+WORKERS := 4
+PH_SIZE := 16    // sizeof(PooledHandle<Worker>) = 2 RawPtr; sizeof-of-a-generic-instance does not parse
+acc := malloc(8)
+handles := malloc(NACT * PH_SIZE)
+Msg*: Inc(i64)
+Worker*: {
+    acc: RawPtr<u8>,
+}
+Worker.impl(pa.Receiver, {
+    receive = (w: MutPtr<Worker>, ctx: pa.Context<Msg>) void {
+        ctx.msg.match ({
+            .Inc(n) => {
+                atomic_add_i64(w.acc, n)
+            },
+        })
+    }
+})
+// the concrete per-(Msg, Worker) trampoline: decode the actor state + the boxed message, dispatch to the
+// typed receiver, reclaim the box. Concrete (Zen has no address for a generic fn), one per actor type.
+// `pa.Context(msg: b[0])` infers M from the field (the formatter rejects an explicit `pa.Context<Msg>(…)`).
+tramp = (user: RawPtr<u8>, msg: i64) void {
+    a: [Worker] := user.slice(1)
+    b: [Msg] := msg.offset(0).slice(1)
+    a[0].addr().receive(pa.Context(msg: b[0]))
+    pa.free_msg(msg)
+}
+hslot = () [pa.PooledHandle<Worker>] { handles.slice(NACT) }
+spawn_all = (i: i64) void {
+    (i < NACT).match ({ true => {
+        hs := hslot()
+        hs[i] = pa.spawn_actor_heap(PERMSG + 16, Worker(acc: acc), tramp)
+        spawn_all(i + 1)
+    }, false => { } })
+}
+send_n = (p: MutPtr<Pool>, h: pa.PooledHandle<Worker>, k: i64) void {
+    (k < PERMSG).match ({ true => {
+        p.send(h, Msg.Inc(1))
+        send_n(p, h, k + 1)
+    }, false => { } })
+}
+blast = (p: MutPtr<Pool>, i: i64) void {
+    (i < NACT).match ({ true => {
+        hs := hslot()
+        send_n(p, hs[i], 0)
+        blast(p, i + 1)
+    }, false => { } })
+}
+close_all = (i: i64) void {
+    (i < NACT).match ({ true => {
+        hs := hslot()
+        pa.close(hs[i])
+        close_all(i + 1)
+    }, false => { } })
+}
+main = () i32 {
+    store_i64(acc, 0)
+    spawn_all(0)
+    p := pool_open(WORKERS, NACT + 8)
+    blast(p, 0)
+    p.pool_quiesce_stop()
+    busy := p.workers_busy()
+    total := load_i64(acc)
+    close_all(0)
+    p.pool_close()
+    free(handles)
+    free(acc)
+    expected := NACT * PERMSG
+    (total == expected).match ({ true => (busy >= 2).match ({ true => 7, false => 3 }), false => 1 })
+}

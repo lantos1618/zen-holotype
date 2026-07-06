@@ -75,6 +75,19 @@ with*<R> = (custom: Rt, body: () R) R {
     slot = saved
     out
 }
+// M4 hook (docs/rt-scoped-runtime.md §2b): explicit save-set-restore on the ambient slot, WITHOUT a
+// closure. `with` above takes a niladic callback, but the pool calls an actor's behavior through a raw
+// `(RawPtr<u8>, i64) void` fn-ptr in a hot worker loop — there is no closure to hand it. So the pool
+// does `saved := rt.enter(a.rt); a.behavior(a.user, msg); rt.leave(saved)` around each behavior run,
+// making `rt.current()` inside the behavior resolve to that actor's own rt (Pony per-actor heap). A
+// fresh worker's zeroed slot (ready == 0) already falls back to the heap default, so this is a pure
+// write; and behaviors are run-to-completion (no unwinding), so the saved slot can never leak.
+enter* = (custom: Rt) Rt {
+    saved := slot
+    slot = custom
+    saved
+}
+leave* = (saved: Rt) void { slot = saved }
 // The ambient allocation path: read the current rt and dispatch through its vtable. This is the
 // single demonstrable proof that allocation reads the ambient rt with no allocator parameter. The
 // vtable fields are prefixed `mem_` so they never collide with these same-named public fns.
