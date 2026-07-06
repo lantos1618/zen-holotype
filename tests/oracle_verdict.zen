@@ -960,7 +960,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (170)", [VerdictCase(
+    b := run_verdicts("verdict-kind (174)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1696,6 +1696,22 @@ oracle_verdict_run* = () i32 {
         src: "f = () i32 { 7 }\nmain* = () i32 { f() }\n",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "Status*: | Ok | Err\nmain* = () i32 { 0 }\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Status*: | | Ok\nmain* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "parse",
+    ), VerdictCase(
+        src: "Status*: 5 | Ok\nmain* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "parse",
+    ), VerdictCase(
+        src: "Status*: Ok | | Err\nmain* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "parse",
     )])
     // bad-binding REJECT: a single-`=` top-level scalar binding is neither a module alias (ident
     // RHS) nor a function (`(` RHS). It used to fall to fill_func and SILENTLY swallow the next
@@ -1705,6 +1721,12 @@ oracle_verdict_run* = () i32 {
     // ACCEPT: an ident-RHS module alias (`m = std.math`) — the working form — is untouched.
     // ACCEPT: a `:=` value global (the correct spelling of `k = 5`) still checks.
     // ACCEPT: a normal `(`-RHS function decl (the other single-`=` form) still checks.
+    // #34 enum-variant-swallow (sibling of the bad-binding swallow, through fill_enum):
+    // ACCEPT: a leading `|` before the first variant (`Status*: | Ok | Err`) is idiomatic layout
+    //   — it parses as {Ok, Err} and `main` SURVIVES (before: `check` said "ok" with main swallowed).
+    // REJECT (error[parse], no swallow): a double bar `| |` = an empty variant; a non-ident variant
+    //   name (`5`); a mid-list empty `Ok | | Err`. fill_variant now requires an identifier name, so a
+    //   stray `|`/literal in name position is a clean caretted parse error, not a silent decl-swallow.
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,
     // for the bool-subject ternary, compile SILENTLY WRONG (`c ? "x" : bool` under -w).

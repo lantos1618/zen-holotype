@@ -301,6 +301,17 @@ fill_variant = (a: MutPtr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32
             next: nt.next,
         )
     } })
+    // A variant NAME must be an identifier. Without this guard `lexeme` happily reads whatever
+    // token sits here (a stray `|`, a literal, a mid-list empty `| |`) as a bogus variant name,
+    // desyncing the parse and SILENTLY swallowing the following top-level decl (task #34, sibling
+    // of #411). Mirror the .Eof branch: flag a positioned parse error and stop.
+    is_ident_tok(nt.tok).match ({ false => {
+        perr_set_at(nt.tok.start)
+        return PEnd(
+            count: i,
+            next: nt.next,
+        )
+    } })
     nm := a.lexeme(src, nt.tok)
     pk := src.scan(nt.next)
     vd := a.variant_after(src, nm, nt, pk)
@@ -334,11 +345,18 @@ skip_to_colon = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_colon(sc.tok).match ({ true => sc.next, false => src.skip_to_colon(sc.next) })
 }
+// A single OPTIONAL leading `|` right after the enum colon is idiomatic alignment layout
+// (`Status*: | Ok | Err`, or one-variant-per-line with a leading bar). Skip exactly one — a
+// SECOND bar is a genuine empty variant that the fill_variant identifier guard rejects.
+skip_leading_bar = (src: str, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_bar(sc.tok).match ({ true => sc.next, false => pos })
+}
 parse_enum_at = (a: MutPtr<Malloc>, src: str, pos: i32) EnumEnd {
     nt := src.scan(pos)
     name := a.lexeme(src, nt.tok)
     tp := a.parse_tparams(src, src.skip_name_star(pos))
-    cpos := src.skip_to_colon(tp.next)    // start PAST the tparam list — a `<T: Bound>` colon must not be mistaken for the enum's `:`
+    cpos := src.skip_leading_bar(src.skip_to_colon(tp.next))    // start PAST the tparam list — a `<T: Bound>` colon must not be mistaken for the enum's `:`
     buf := a.variant_buf()
     ve := a.fill_variants(src, cpos, buf, 0)
     EnumEnd(
