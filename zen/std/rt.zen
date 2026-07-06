@@ -20,6 +20,7 @@
 // M4 is the injection hook: the pool sets the ambient rt per-actor the same way it sets the
 // current-actor thread-local today.
 { malloc, realloc, free } = std.mem.alloc
+{ panic } = std.core.result
 // The runtime capability value. The three fn-pointer fields are the allocator vtable (Self erased
 // to RawPtr<u8> state, so any allocator plugs in without generic threading — the M3 trait-object
 // shape). `state` is the allocator instance data (null for heap). `ready` is the init sentinel:
@@ -60,11 +61,44 @@ mem_rt* = (acquire: (RawPtr<u8>, i64) RawPtr<u8>, resize: (RawPtr<u8>, RawPtr<u8
         ready: 1,
     )
 }
+// ── M3: the process-wide DEFAULT rt (docs/rt-m3-notes.md) ─────────────────────────────────────────
+// `default_rt` is a PROCESS global (NOT thread-local): it is the runtime a program picks ONCE, at the
+// top of `main`, and every unset thread — the main thread AND every pool worker — honors it. Heap by
+// default, so a program that never opts in is byte-identical. It replaces the two hardcoded `heap_rt()`
+// call sites (this file's `current()` fallback + pool.zen/pool_actor.zen's default-spawn art), so a
+// whole PARALLEL program — pool actors included — can be run under an arena / custom allocator, which
+// `with`/`enter` (current-thread-only) cannot achieve.
+default_rt := heap_rt()
+// The startup-contract guard: set to 1 by `mark_spawned` on the FIRST pool spawn. `set_default` PANICS
+// if called after this, turning the shared-mutable-global race (a worker reading `default_rt` while
+// main rewrites it) into a teaching error. The write is monotonic 0->1, so even a nested-spawn write
+// from a worker can only make the guard fire MORE, never falsely pass. Main-thread startup logic.
+spawned := 0
+// Read the process default (the configurable "trivial default"). Used by `current()`'s unset fallback
+// and by the default-spawn paths in pool.zen / pool_actor.zen.
+default* = () Rt { default_rt }
+// Configure the process-wide default rt — call ONCE, at the top of `main`, BEFORE spawning any actor.
+// Writes the process global (honored by pool workers via their zeroed-slot fallback) AND the main
+// thread's own slot (so main-thread ambient allocation honors it immediately). PANICS if called after
+// the first spawn: `default_rt` is read by worker threads with no lock, so it is only safe to write
+// during single-threaded startup; a later call would race.
+set_default* = (custom: Rt) void {
+    (spawned == 0).match ({
+        true => {
+            default_rt = custom
+            slot = custom
+        },
+        false => panic("rt.set_default must be called before spawning any actor"),
+    })
+}
+// Called by the pool's single spawn choke point (pool_spawn_rt) on every spawn: latches the guard so a
+// subsequent `set_default` is rejected. Idempotent (monotonic 0->1).
+mark_spawned* = () void { spawned = 1 }
 // The ambient current-rt, per OS thread. Init runs once on the main thread; fresh workers see a
-// zeroed slot (ready == 0) and fall back to the heap default via `current()`.
+// zeroed slot (ready == 0) and fall back to the process default via `current()`.
 slot := thread_local(heap_rt())
-// Read the ambient rt. Never returns a half-built value: a zeroed slot means "unset" => heap default.
-current* = () Rt { (slot.ready == 0).match ({ true => heap_rt(), false => slot }) }
+// Read the ambient rt. Never returns a half-built value: a zeroed slot means "unset" => process default.
+current* = () Rt { (slot.ready == 0).match ({ true => default(), false => slot }) }
 // Rebind the ambient rt for the dynamic extent of `body`, then restore — the injectable boundary
 // (arenas, and crucially test injection: a mock / failing allocator). Save-set-restore, and
 // exception-safe: behaviors are run-to-completion, so no unwinding can leak the saved slot.

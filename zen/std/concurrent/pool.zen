@@ -43,7 +43,7 @@
 // pool_close after the workers join, the same explicit-alloc floor as std.thread/std.sync. Only the
 // cross-thread-shared ACTOR state needed refcounting; the single-owner infrastructure does not.
 { malloc, free } = std.mem.alloc
-{ Rt, heap_rt, enter, leave } = std.rt
+{ Rt, default, enter, leave, mark_spawned } = std.rt
 { Arc, new_in } = std.mem.arc
 { Malloc } = std.mem.alloc
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
@@ -68,7 +68,7 @@ PoolActor: {
 }    // user actor state (opaque to the pool)
 // (`art` = this actor's ambient rt; the worker sets it as the current-rt slot around each behavior run,
 // so `rt.current()` inside the behavior resolves to the actor's own rt — the M4 injection hook, §2b.
-// Untyped pool actors default `art = heap_rt()`, which is observationally the unset default.)
+// Untyped pool actors default `art = default()` (the process default rt; heap unless a program opts in).)
 actor_view = (raw: RawPtr<u8>) MutPtr<PoolActor> { raw.offset(8).slice(1)[0].addr() }    // mailbox ring buffer (i64 slots)
 actor_mb = (a: MutPtr<PoolActor>) Ring<i64> {
     Ring<i64>(
@@ -86,6 +86,7 @@ actor_mb = (a: MutPtr<PoolActor>) Ring<i64> {
 // runnable actor (refcount = 1, owned by the caller) + a mailbox ring; NOT enqueued — the first `send`
 // makes it runnable. Returns the Arc base pointer as the opaque handle.
 pool_spawn_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void, art: Rt) RawPtr<u8> {
+    mark_spawned()    // latch the rt.set_default guard: the process default is now frozen (workers read it)
     ma := Malloc(_: 0)
     mbuf := malloc(mbcap * 8)
     arc := new_in(ma.addr(), PoolActor(
@@ -101,11 +102,11 @@ pool_spawn_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void
     )).expect("pool: actor block allocation failed")
     arc.base
 }
-// spawn an untyped pool actor with the DEFAULT ambient rt (heap). Delegates to pool_spawn_rt with
-// `heap_rt()` — setting the slot to the heap default is observationally the unset default, so every
-// existing pool fixture stays byte-identical. The typed pool-actor path (std.concurrent.pool_actor)
-// calls pool_spawn_rt directly to give each actor its own rt.
-pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> { pool_spawn_rt(user, mbcap, behavior, heap_rt()) }
+// spawn an untyped pool actor with the process DEFAULT ambient rt (heap unless the program called
+// `rt.set_default`). Delegates to pool_spawn_rt with `default()` — heap-when-unset is observationally
+// the unset default, so every existing pool fixture stays byte-identical. The typed pool-actor path
+// (std.concurrent.pool_actor) calls pool_spawn_rt directly to give each actor its own rt.
+pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> { pool_spawn_rt(user, mbcap, behavior, default()) }
 // clone a handle: bump the Arc refcount (atomic +1) and return the same base. Any party that shares the
 // actor across threads — a sender that wants to outlive the spawner, the run-queue's "scheduled" ref —
 // holds a clone, so the block cannot be freed while that party still references it.
