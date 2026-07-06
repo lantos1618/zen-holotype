@@ -1860,7 +1860,7 @@ check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         acc = acc + d.match ({
             .DFunc(f)   => a.check_func(decls, idx, f),
             .DImpl(im)  => a.impl_errs(decls, im),
-            .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => 1, false => 0 }),
+            .DGlobal(g) => (eq(g.name, "__syntax_error") || eq(g.name, "__bad_binding")).match ({ true => 1, false => 0 }),
             _           => 0,
         })
     })
@@ -1906,6 +1906,7 @@ KFALLTHROUGH = () i32 { 25 }    // a non-void function body that ends in a no-va
 KVBREAK = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
 KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
+KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -2109,11 +2110,15 @@ diag_info = (code: i32) DiagInfo {
         kind: "arm-value",
         message: "match arm yields no value, but the match result is used as a value",
         hint: "end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm",
+    ), false => (code == 32).match ({ true => DiagInfo(
+        kind: "bad-binding",
+        message: "top-level `=` binding is neither a module alias nor a function",
+        hint: "use `:=` for a value global (`k := 5`); a single `=` at top level is only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
     ), false => DiagInfo(
         kind: "type",
         message: "type error",
         hint: "",
-    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
 }
 diagnostic_kind_name = (code: i32) str { code.diag_info().kind }
 diagnostic_message = (code: i32) str { code.diag_info().message }
@@ -3849,7 +3854,7 @@ check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         acc = acc.kv_kor(d.match ({
             .DFunc(f)   => a.kv_check_func_kind(decls, idx, f),
             .DImpl(im)  => a.kv_impl_kind(decls, im),
-            .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => g.init.kparse_kind(), false => 0 }),
+            .DGlobal(g) => parse_sentinel_kind(g.name, g.init),
             _           => 0,
         }))
     })
@@ -3862,7 +3867,7 @@ check_module_parse_kind* = (decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DGlobal(g) => eq(g.name, "__syntax_error").match ({ true => g.init.kparse_kind(), false => 0 }),
+            .DGlobal(g) => parse_sentinel_kind(g.name, g.init),
             _           => 0,
         }))
     })
@@ -3886,6 +3891,10 @@ kparse_kind = (init: Ptr<Expr>) i32 {
     off := init.kparse_off()
     (off < 0).match ({ true => KVBREAK().kv_at(0 - off), false => KPARSE().kv_at(off) })
 }
+// the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
+kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
+// packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
+parse_sentinel_kind = (nm: str, init: Ptr<Expr>) i32 { eq(nm, "__syntax_error").match ({ true => init.kparse_kind(), false => eq(nm, "__bad_binding").match ({ true => init.kbadbind_kind(), false => 0 }) }) }
 check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({ true => check_diagnostic_none(), false => check_diagnostic_from_packed(packed, a.check_module(decls)) })

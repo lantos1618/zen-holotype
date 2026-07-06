@@ -1,4 +1,4 @@
-# Repro: single-`=` top-level binding silently swallows the next decl (+ its `*` export)
+# Fix: single-`=` top-level binding silently swallowed the next decl (+ its `*` export)
 
 Task #27 (M4 actor work) reported: a bare module-alias import `x = std.mod` mishandled —
 breaks resolution of `x.thing` and corrupts the NEXT declaration's `*` export visibility.
@@ -6,33 +6,36 @@ breaks resolution of `x.thing` and corrupts the NEXT declaration's `*` export vi
 ## Finding
 
 The exact form `x = std.mod` (ident/path RHS) is classified correctly and WORKS on
-current origin/main (check/run/fmt/cross-module visibility all pass — see below). It was
-almost certainly fixed by #394/#395 (UFCS through module aliases + enforce `*` visibility).
+origin/main (check/run/fmt/cross-module visibility all pass). It was fixed earlier by
+#394/#395 (UFCS through module aliases + enforce `*` visibility).
 
 The REAL, still-live bug with the reported symptoms: a top-level single-`=` binding whose
-RHS is NOT an ident-led module path (`k = 5`, `x = 3 + 4`, `CONST* = 5`) is classified by
-neither `decl_is_module_alias` (needs an ident RHS) nor `decl_is_global` (needs `:=`), so it
-falls through parse.zen `fill_decl` to the catch-all `fill_func`, which mis-parses `= <expr>`
-and SILENTLY consumes the following declaration — dropping its name and its `*` export marker.
-`zenc check` then reports "ok" on a corrupted program (silent miscompile).
+RHS is NOT an ident-led module path (`k = 5`, `x = 3 + 4`) is classified by neither
+`decl_is_module_alias` (needs an ident RHS) nor `decl_is_global` (needs `:=`), so it fell
+through parse.zen `fill_decl` to the catch-all `fill_func`, which mis-parsed `= <expr>` and
+SILENTLY consumed the following declaration — dropping its name and its `*` export marker.
+`zenc check` then reported "ok" on a corrupted program (silent miscompile).
 
-## Broken (origin/main)
+## The flip
 
-    $ printf 'k = 5\nmain* = () i32 { 0 }\n' | ...
-    # zenc fmt --stdout  =>  `k = () i32 { 0 }`   (main swallowed; k stole main's body)
-    # zenc check         =>  "ok"                 (SILENT: main is gone)
+    k = 5
+    main* = () i32 { 0 }
 
-    $ printf 'x = 3 + 4\nwanted* = () i32 { 7 }\nmain* = () i32 { wanted() }\n' | ...
-    # zenc fmt --stdout  =>  `x = () i32 { 7 }` then main  (wanted + its `*` swallowed)
-    # zenc check         =>  error: undefined name `wanted`  (its decl was eaten)
+- BEFORE: `zenc fmt` -> `k = () i32 { 0 }` (main swallowed); `zenc check` -> **"ok"** (silent).
+- AFTER:  `zenc check` -> clean `error[bad-binding]` caretting the RHS, hint "use `:=` for a
+  value global"; `main` is no longer swallowed.
 
-## Works (control — the exact form the task named)
+## Fix
 
-    $ printf 'm = std.math\nwanted* = (v: i64) i64 { m.abs(v) }\nmain* = () i32 { to_i32(wanted(0 - 5)) }\n' | ...
-    # check ok; run => 5; cross-module `{ wanted } = a` imports fine; `{ priv } = a` correctly rejected.
+parse.zen: a new `decl_is_bad_binding` predicate (single `=`, RHS not `(` = not a function,
+and — since the alias path is peeled first — not an ident = not a module alias) routes such a
+decl to `fill_bad_binding`, which flags a `bad-binding` parse error and parses the RHS purely
+to resume at the NEXT declaration (no swallow). The sentinel machinery (parse_type.zen
+`perr_set_bad_at` + a `__bad_binding` sentinel name) surfaces it as the new `KBADBIND`
+diagnostic (check_validate.zen). The working ident-RHS alias path is untouched.
 
-## Fix direction
+## Regression coverage
 
-Single-`=` top-level bindings are ONLY valid as module aliases (ident/path RHS); value
-globals must use `:=`. When a `name = <non-alias RHS>` decl is seen, emit a clean
-`error[...]` at that line instead of silently falling to `fill_func`. No silent corruption.
+tests/oracle_verdict.zen `verdict-kind` suite: `k = 5` and `x = 3 + 4` reject with
+`error[bad-binding]`; `m = std.math` alias, `k := 5` global, and `f = () i32 {…}` function
+all still accept.
