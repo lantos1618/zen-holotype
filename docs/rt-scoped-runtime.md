@@ -79,6 +79,27 @@ against Odin-style dynamic ambient (re-hides the effect; kills test injection).
 - Attenuation: `rt.mem`, `rt.sched` are derived, smaller capabilities (AmbientAuth →
   TCPAuth pattern) — hand code only what it uses.
 
+### 2b. The ambient Rt: default singleton + injection (user-directed 2026-07-06)
+
+The ambient rt is a **default singleton so trivial programs need ZERO setup** — `main`,
+plain fns, hello-world use it (heap alloc, default sched). But it is **THREAD-LOCAL, not a
+true global**: the pool runs different actors on different workers concurrently, so "current
+rt" must be per-worker (a shared mutable global would race + hand a behavior the wrong
+actor's heap). So: a thread-local current-rt with a process-wide default.
+
+Surface: `Rt.current()` reads the ambient rt (fns that allocate read it — NO rt param
+threading). Injection/override at boundaries:
+- `build.zen` `exe.runtime(...)` sets the process-wide DEFAULT (M3).
+- `rt.spawn(actor)` gives each actor its OWN rt, set as the ambient during its behaviors →
+  per-actor heap, Pony-style (M4). **M4 IS the injection mechanism**: the pool already sets
+  a thread-local current-actor when running a behavior; the same hook sets current-rt.
+- `Rt.with(custom) { … }` rebinds the thread-local for a lexical scope (arenas + crucially
+  TEST injection: a mock / failing allocator). Save-set-restore around the block.
+
+This is the judge-panel's "ambient within a statically-known lexical/actor region, explicit
+at the region edge" + a default so trivial code needs no ceremony. It is NOT spooky-dynamic
+Odin scope (test injection is preserved via `Rt.with`; overrides are lexical/actor-bounded).
+
 ## 3. Concurrency: pure Pony, no multisync
 
 - Actors = `T.impl(Actor, { receive = (self: MutPtr<T>, m: Msg) void { m.match(…) } })`.
