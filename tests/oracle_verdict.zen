@@ -960,7 +960,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (165)", [VerdictCase(
+    b := run_verdicts("verdict-kind (170)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1676,7 +1676,35 @@ oracle_verdict_run* = () i32 {
         src: "{ Own, new_in, Drop } = std.mem.own\n{ Result, IoError, expect } = std.core.result\nhalloc = std.mem.heap\nBlob*: {\n    v: i64,\n}\nBlob.impl(Drop, {\n    drop = (b: MutPtr<Blob>) void { }\n})\nmkblob<A> = (a: MutPtr<A>) Own<Blob> {\n    r: Result<Own<Blob>, IoError> := a.new_in(Blob(v: 1))\n    r.expect(\"own\")\n}\nMsg*: Give(Own<Blob>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    h := H(id: 1)\n    h.send(.Give(mkblob(a)))\n    0\n}",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "k = 5\nmain* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "bad-binding",
+    ), VerdictCase(
+        src: "x = 3 + 4\nwanted* = () i32 { 7 }\nmain* = () i32 { wanted() }\n",
+        should_pass: false,
+        kind: "bad-binding",
+    ), VerdictCase(
+        src: "m = std.math\nmain* = () i32 { to_i32(m.abs(0 - 5)) }\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "k := 5\nmain* = () i32 { to_i32(k) }\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "f = () i32 { 7 }\nmain* = () i32 { f() }\n",
+        should_pass: true,
+        kind: "",
     )])
+    // bad-binding REJECT: a single-`=` top-level scalar binding is neither a module alias (ident
+    // RHS) nor a function (`(` RHS). It used to fall to fill_func and SILENTLY swallow the next
+    // decl (`main` here), and `check` said "ok"; now it is a clean error[bad-binding].
+    // bad-binding REJECT + no-swallow PROOF: the FIRST error is bad-binding (at `x`), NOT
+    // `undefined-name` for `wanted` — i.e. `wanted*` and its `*` survive the malformed line.
+    // ACCEPT: an ident-RHS module alias (`m = std.math`) — the working form — is untouched.
+    // ACCEPT: a `:=` value global (the correct spelling of `k = 5`) still checks.
+    // ACCEPT: a normal `(`-RHS function decl (the other single-`=` form) still checks.
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,
     // for the bool-subject ternary, compile SILENTLY WRONG (`c ? "x" : bool` under -w).

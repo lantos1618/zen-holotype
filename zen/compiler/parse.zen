@@ -7,7 +7,7 @@
 { Malloc } = std.mem.alloc
 { parse_or, parse_bxor, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
-{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_set_at, perr_reset, perr_get, perr_off_get, pdepth_reset, delim_reset, vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
+{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_set_at, perr_set_bad_at, perr_reset, perr_get, perr_off_get, perr_kind_get, pdepth_reset, delim_reset, vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
 // `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: {
     func: Func,
@@ -403,6 +403,15 @@ decl_is_module_alias = (src: str, pos: i32) bool {
     m := src.decl_marker(pos)
     src.is_eq_tok(m.tok).match ({ true => is_ident_tok(src.scan(m.next).tok), false => false })
 }
+// a MALFORMED single-`=` top-level binding: marker `=` whose RHS is NEITHER an ident (a module alias,
+// `raw = std.mem.raw`) NOR `(` (a function literal, `f = () i32 {…}`). Reached only after the alias
+// path is peeled, so this is a value global written with `=` (`k = 5`) — which must use `:=`. Left to
+// `fill_func` it silently mis-parses `= <expr>` and swallows the FOLLOWING declaration (and its `*`
+// export marker); this predicate routes it to a clean `error[bad-binding]` instead.
+decl_is_bad_binding = (src: str, pos: i32) bool {
+    m := src.decl_marker(pos)
+    src.is_eq_tok(m.tok).match ({ true => src.is_lparen(src.scan(m.next).tok).match ({ true => false, false => true }), false => false })
+}
 decl_buf = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── EXPORT markers (the `*` after a top-level decl name) ─────────────────────────────────────────
@@ -527,7 +536,7 @@ decl_is_impl* = (src: str, pos: i32) bool {
 }
 fill_decl = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     a.note_export_if_starred(src, pos)
-    src.decl_is_impl(pos).match ({ true => a.fill_impl(src, pos, buf, i), false => (src.decl_is_global(pos) || src.decl_is_module_alias(pos)).match ({ true => a.fill_global(src, pos, buf, i), false => a.decl_is_typed_global(src, pos).match ({ true => a.fill_typed_global(src, pos, buf, i), false => src.decl_is_struct(pos).match ({ true => a.fill_struct(src, pos, buf, i), false => src.decl_is_enum(pos).match ({ true => a.fill_enum(src, pos, buf, i), false => a.fill_func(src, pos, buf, i) }) }) }) }) })
+    src.decl_is_impl(pos).match ({ true => a.fill_impl(src, pos, buf, i), false => (src.decl_is_global(pos) || src.decl_is_module_alias(pos)).match ({ true => a.fill_global(src, pos, buf, i), false => a.decl_is_typed_global(src, pos).match ({ true => a.fill_typed_global(src, pos, buf, i), false => src.decl_is_struct(pos).match ({ true => a.fill_struct(src, pos, buf, i), false => src.decl_is_enum(pos).match ({ true => a.fill_enum(src, pos, buf, i), false => src.decl_is_bad_binding(pos).match ({ true => a.fill_bad_binding(src, pos, buf, i), false => a.fill_func(src, pos, buf, i) }) }) }) }) }) })
 }
 // A module global whose init is `thread_local(x)` becomes a thread-local global with init `x`.
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
@@ -549,6 +558,16 @@ fill_global = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     pe := a.parse_or(src, mk.next)
     buf[i] = a.global_decl(nm, pe.expr, alias, nt.tok.start)
     a.fill_decls(src, pe.next, buf, i + 1)
+}
+// A malformed `name = <expr>` binding (see decl_is_bad_binding): flag a bad-binding parse error caret
+// at the RHS, then parse the RHS as an expression PURELY to find where it ends — so we resume at the
+// next declaration instead of letting fill_func swallow it. No decl is planted for this line (the
+// module is rejected via the sentinel parse_module plants); the next decl fills this slot.
+fill_bad_binding = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
+    mk := src.decl_marker(pos)
+    perr_set_bad_at(src.scan(mk.next).tok.start)
+    pe := a.parse_or(src, mk.next)
+    a.fill_decls(src, pe.next, buf, i)
 }
 // `name : Type := expr` — a typed value global (always a value global, never a module alias — those
 // carry no annotation — so alias = false). The type annotation is parsed then discarded (re-inferred).
@@ -1015,7 +1034,10 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
         }
         off := (perr_off_get() == 0).match ({ true => lerr_off_get(), false => perr_off_get() })
         voff := (off == vbreak_get() && off != 0).match ({ true => 0 - off, false => off })    // vbreak dot → KVBREAK
-        buf[0] = dglobal("__syntax_error", tvoid(), a.enode(lit(voff)))
+        // a bad-binding error plants its OWN sentinel name so the checker reports `error[bad-binding]`
+        // (with the `use :=` hint) instead of a generic KPARSE; its offset is always a real caret pos.
+        nm := (perr_kind_get() == 1).match ({ true => "__bad_binding", false => "__syntax_error" })
+        buf[0] = dglobal(nm, tvoid(), a.enode(lit(voff)))
         buf.take_decls(n + 1)
     } })
 }
