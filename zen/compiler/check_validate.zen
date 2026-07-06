@@ -4430,65 +4430,74 @@ sd_msg_rc = (env: Env, e: Ptr<Expr>) bool {
 // a `send(_, msg)` whose message carries an Rc → the source offset of the call, else 0. `&&` short-
 // circuits, so `c.args[1]` is only touched when the arity check passed.
 sd_call_pos = (env: Env, c: CallData) i32 { (eq(c.fn, "send") && c.args.len >= 2 && env.sd_msg_rc(c.args[1].addr())).match ({ true => c.pos.pos_or(1), false => 0 }) }
-sd_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) i32 {
+// ── UNIFIED send-payload walk (replaces the near-identical sd_*/sm_* traversal skeletons). ────────
+// ONE tree-fold parameterized by `mode`: 0 = send-Rc (sd_* leaves), 1 = send-MutPtr (sm_* leaves).
+// Returns a packed kind+pos (kv_kor keeps the first nonzero); both sendability passes now share ONE
+// traversal and only the per-node CLASSIFIER (which send surfaces, which payload type) differs by mode.
+// mode 0 has NO `.MethodCall` arm — send-Rc classifies plain `send(...)` calls only — so the
+// `mode==0 => 0` branch preserves that exactly (no descent into method-call children); the walk is
+// byte-for-byte the behavior of the two hand-cloned families it replaces.
+sv_call_pos = (env: Env, c: CallData, mode: i32) i32 { (mode == 0).match ({ true => env.sd_call_pos(c), false => env.sm_call_pos(c) }) }
+sv_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], mode: i32) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sd_expr(env, ar.addr()))
+        acc = acc.kv_kor(a.sv_expr(env, ar.addr(), mode))
     })
     acc
 }
-sd_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData]) i32 {
+sv_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], mode: i32) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sd_expr(a.arm_env(env, subjty, ar), ar.body))
+        acc = acc.kv_kor(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode))
     })
     acc
 }
-sd_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) i32 {
+sv_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], mode: i32) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(a.sd_expr(env, fi.value))
+        acc = acc.kv_kor(a.sv_expr(env, fi.value, mode))
     })
     acc
 }
-sd_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
+sv_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, mode: i32) i32 {
     load(e).match ({
-        .Call(c)       => env.sd_call_pos(c).kv_kor(a.sd_args(env, c.args)),
-        .Bin(b)        => a.sd_expr(env, b.lhs).kv_kor(a.sd_expr(env, b.rhs)),
-        .Index(ix)     => a.sd_expr(env, ix.seq).kv_kor(a.sd_expr(env, ix.idx)),
-        .Cond(d)       => a.sd_expr(env, d.c).kv_kor(a.sd_expr(env, d.t)).kv_kor(a.sd_expr(env, d.e)),
-        .Member(m)     => a.sd_expr(env, m.obj),
-        .Arrow(ar)     => a.sd_expr(env, ar.obj),
-        .Match(m)      => a.sd_expr(env, m.subj).kv_kor(a.sd_arms(env, env.infer_expr(m.subj), m.arms)),
-        .MakeEnum(mk)  => a.sd_expr(env, mk.payload),
-        .MakeStruct(s) => a.sd_inits(env, s.inits),
-        .SliceLit(sd)  => a.sd_args(env, sd.items),
-        .Loop(l)       => a.sd_expr(env, l.seq).kv_kor(a.sd_body(env, l.body)),
-        .Block(b)      => a.sd_body(env, b.stmts),
-        _              => 0,
+        .Call(c)        => env.sv_call_pos(c, mode).kv_kor(a.sv_args(env, c.args, mode)),
+        .MethodCall(mc) => (mode == 0).match ({ true => 0, false => env.sm_mcall_pos(mc).kv_kor(a.sv_expr(env, mc.recv, mode)).kv_kor(a.sv_args(env, mc.args, mode)) }),
+        .Bin(b)         => a.sv_expr(env, b.lhs, mode).kv_kor(a.sv_expr(env, b.rhs, mode)),
+        .Index(ix)      => a.sv_expr(env, ix.seq, mode).kv_kor(a.sv_expr(env, ix.idx, mode)),
+        .Cond(d)        => a.sv_expr(env, d.c, mode).kv_kor(a.sv_expr(env, d.t, mode)).kv_kor(a.sv_expr(env, d.e, mode)),
+        .Member(m)      => a.sv_expr(env, m.obj, mode),
+        .Arrow(ar)      => a.sv_expr(env, ar.obj, mode),
+        .Match(m)       => a.sv_expr(env, m.subj, mode).kv_kor(a.sv_arms(env, env.infer_expr(m.subj), m.arms, mode)),
+        .MakeEnum(mk)   => a.sv_expr(env, mk.payload, mode),
+        .MakeStruct(s)  => a.sv_inits(env, s.inits, mode),
+        .SliceLit(sd)   => a.sv_args(env, sd.items, mode),
+        .Loop(l)        => a.sv_expr(env, l.seq, mode).kv_kor(a.sv_body(env, l.body, mode)),
+        .Block(b)       => a.sv_body(env, b.stmts, mode),
+        _               => 0,
     })
 }
-sd_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
     st.match ({
-        .Let(l)      => a.sd_expr(env, l.value),
-        .Assign(x)   => a.sd_expr(env, x.target).kv_kor(a.sd_expr(env, x.value)),
-        .Return(r)   => a.sd_expr(env, r),
-        .ExprStmt(e) => a.sd_expr(env, e),
-        .If(f)       => a.sd_expr(env, f.c).kv_kor(a.sd_body(env, f.then)).kv_kor(a.sd_body(env, f.els)),
-        .While(w)    => a.sd_expr(env, w.c).kv_kor(a.sd_body(env, w.body)),
-        .IndexSet(x) => a.sd_expr(env, x.seq).kv_kor(a.sd_expr(env, x.idx)).kv_kor(a.sd_expr(env, x.value)),
+        .Let(l)      => a.sv_expr(env, l.value, mode),
+        .Assign(x)   => a.sv_expr(env, x.target, mode).kv_kor(a.sv_expr(env, x.value, mode)),
+        .Return(r)   => a.sv_expr(env, r, mode),
+        .ExprStmt(e) => a.sv_expr(env, e, mode),
+        .If(f)       => a.sv_expr(env, f.c, mode).kv_kor(a.sv_body(env, f.then, mode)).kv_kor(a.sv_body(env, f.els, mode)),
+        .While(w)    => a.sv_expr(env, w.c, mode).kv_kor(a.sv_body(env, w.body, mode)),
+        .IndexSet(x) => a.sv_expr(env, x.seq, mode).kv_kor(a.sv_expr(env, x.idx, mode)).kv_kor(a.sv_expr(env, x.value, mode)),
     })
 }
-sd_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+sv_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], mode: i32) i32 {
     acc := 0
     e := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.sd_stmt(e, st))
+        acc = acc.kv_kor(a.sv_stmt(e, st, mode))
         e = a.extend_env(e, st)
     })
     acc
 }
-sd_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+sv_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, mode: i32) i32 {
     env := Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -4496,19 +4505,20 @@ sd_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
         exp: f.ret,
         a: a,
     )
-    a.sd_body(env, f.body)
+    a.sv_body(env, f.body, mode)
 }
-check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+check_module_send_kind = (a: MutPtr<Malloc>, decls: [Decl], mode: i32) i32 {
     acc := 0
     idx := a.build_decl_index(decls)
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.sd_check_func(decls, idx, f),
+            .DFunc(f) => a.sv_check_func(decls, idx, f, mode),
             _         => 0,
         }))
     })
     acc
 }
+check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_send_kind(decls, 0) }
 check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_rc_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     pos := a.check_module_send_rc_kind(decls)
@@ -4566,86 +4576,7 @@ sm_call_pos = (env: Env, c: CallData) i32 { (c.fn.sx_named("send", "__send") && 
 // the UFCS form as it may survive pre-desugar (`h.send(m)` / `p.send(h, m)` / `p.pool_send(h, m)`): the
 // message is again the LAST method argument (the receiver is carried separately).
 sm_mcall_pos = (env: Env, mc: MethodCallData) i32 { (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => env.sm_msg_mut(mc.args[mc.args.len - 1].addr()).match ({ true => mc.pos.pos_or(1), false => 0 }), false => 0 }) }
-sm_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sm_expr(env, ar.addr()))
-    })
-    acc
-}
-sm_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData]) i32 {
-    acc := 0
-    arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sm_expr(a.arm_env(env, subjty, ar), ar.body))
-    })
-    acc
-}
-sm_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) i32 {
-    acc := 0
-    inits.loop((h, i, fi) {
-        acc = acc.kv_kor(a.sm_expr(env, fi.value))
-    })
-    acc
-}
-sm_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Call(c)        => env.sm_call_pos(c).kv_kor(a.sm_args(env, c.args)),
-        .MethodCall(mc) => env.sm_mcall_pos(mc).kv_kor(a.sm_expr(env, mc.recv)).kv_kor(a.sm_args(env, mc.args)),
-        .Bin(b)         => a.sm_expr(env, b.lhs).kv_kor(a.sm_expr(env, b.rhs)),
-        .Index(ix)      => a.sm_expr(env, ix.seq).kv_kor(a.sm_expr(env, ix.idx)),
-        .Cond(d)        => a.sm_expr(env, d.c).kv_kor(a.sm_expr(env, d.t)).kv_kor(a.sm_expr(env, d.e)),
-        .Member(m)      => a.sm_expr(env, m.obj),
-        .Arrow(ar)      => a.sm_expr(env, ar.obj),
-        .Match(m)       => a.sm_expr(env, m.subj).kv_kor(a.sm_arms(env, env.infer_expr(m.subj), m.arms)),
-        .MakeEnum(mk)   => a.sm_expr(env, mk.payload),
-        .MakeStruct(s)  => a.sm_inits(env, s.inits),
-        .SliceLit(sd)   => a.sm_args(env, sd.items),
-        .Loop(l)        => a.sm_expr(env, l.seq).kv_kor(a.sm_body(env, l.body)),
-        .Block(b)       => a.sm_body(env, b.stmts),
-        _               => 0,
-    })
-}
-sm_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
-    st.match ({
-        .Let(l)      => a.sm_expr(env, l.value),
-        .Assign(x)   => a.sm_expr(env, x.target).kv_kor(a.sm_expr(env, x.value)),
-        .Return(r)   => a.sm_expr(env, r),
-        .ExprStmt(e) => a.sm_expr(env, e),
-        .If(f)       => a.sm_expr(env, f.c).kv_kor(a.sm_body(env, f.then)).kv_kor(a.sm_body(env, f.els)),
-        .While(w)    => a.sm_expr(env, w.c).kv_kor(a.sm_body(env, w.body)),
-        .IndexSet(x) => a.sm_expr(env, x.seq).kv_kor(a.sm_expr(env, x.idx)).kv_kor(a.sm_expr(env, x.value)),
-    })
-}
-sm_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
-    acc := 0
-    e := env
-    body.loop((h, i, st) {
-        acc = acc.kv_kor(a.sm_stmt(e, st))
-        e = a.extend_env(e, st)
-    })
-    acc
-}
-sm_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
-        vars: a.params_env(f.params),
-        decls: decls,
-        didx: idx,
-        exp: f.ret,
-        a: a,
-    )
-    a.sm_body(env, f.body)
-}
-check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc := 0
-    idx := a.build_decl_index(decls)
-    decls.loop((h, i, d) {
-        acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.sm_check_func(decls, idx, f),
-            _         => 0,
-        }))
-    })
-    acc
-}
+check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_send_kind(decls, 1) }
 check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     pos := a.check_module_send_mut_kind(decls)
