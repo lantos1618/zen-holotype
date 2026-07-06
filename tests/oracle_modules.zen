@@ -1541,7 +1541,89 @@ oracle_modules_run* = () i32 {
     )])
     // a sibling import from STDIN has no directory to resolve from → clean error, no half-emitted C.
     // import-free source stays the classic source→C filter (Zen main emitted as zen_main).
-    v + d + e + dc + sd
+    // ── deep-loader PUBLIC API: resolve_program_data / resolve_parsed_program / check_parsed_program ──
+    // These drive the loader's INTERNAL structures (the module_table, per-module ParsedProgram AST
+    // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
+    // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
+    // because the oracle runs `./zenc` from the repo root, so std resolves relative to the cwd.
+    dl := run_mod_values("modules value (deep loader API: resolve_program_data / parsed_program / check)", [ModValCase(
+        files: [ModFile(
+            name: "helper.zen",
+            src: "value* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "left.zen",
+            src: "helper = helper\nthing* = () i32 { helper.value() }\n",
+        ), ModFile(
+            name: "right.zen",
+            src: "thing* = () i32 { 20 }\n",
+        ), ModFile(
+            name: "plain.zen",
+            src: "plain* = () i32 { 5 }\n",
+        ), ModFile(
+            name: "driver.zen",
+            src: mp.deep_src_table(),
+        )],
+        entry: "driver.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "helper.zen",
+            src: "value* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "left.zen",
+            src: "helper = helper\nthing* = () i32 { helper.value() }\n",
+        ), ModFile(
+            name: "right.zen",
+            src: "thing* = () i32 { 20 }\n",
+        ), ModFile(
+            name: "plain.zen",
+            src: "plain* = () i32 { 5 }\n",
+        ), ModFile(
+            name: "driver.zen",
+            src: mp.deep_src_parsed(),
+        )],
+        entry: "driver.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "left.zen",
+            src: "thing* = (a: i32, b: i32) i32 { a + b }\n",
+        ), ModFile(
+            name: "plain.zen",
+            src: "plain* = (a: i32) i32 { a }\n",
+        ), ModFile(
+            name: "driver.zen",
+            src: mp.deep_src_check(),
+        )],
+        entry: "driver.zen",
+        want: 0,
+    )])
+    // resolve_program_data: the ResolvedProgram.table holds every transitively-loaded namespace module
+    //   (u/left,u/right,u/plain,u/helper) with per-module graphs, and the flat body is namespace-stripped.
+    // resolve_parsed_program: the ParsedProgram keeps a per-module decls/body AST boundary (root + deps).
+    // check_parsed_program + root_link_decls: the graph-linked cross-module check accepts a well-typed
+    //   program (0) and rejects both a namespace-qualified and a plain wrong-arity call (> 0); the root
+    //   link set is exactly the 2 direct imports.
+    v + d + e + dc + sd + dl
+}
+// ── deep-loader driver builders (paths injected at runtime) ──────────────────────────────────────
+// Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and
+// the entry inpath (mod_dir already ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
+// root is "." (the oracle's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
+deep_src_table = (mp: MutPtr<Malloc>) str {
+    z: str := ""
+    dir := mp.mod_dir()
+    mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_program_data } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    resolved := a.addr().resolve_program_data(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    table := resolved.table\n    left := table.module(\"u/left\")\n    helper := table.module(\"u/helper\")\n    ok := (table.count() == 5)\n        && table.has(\"u/left\") && table.has(\"u/right\") && table.has(\"u/plain\") && table.has(\"u/helper\")\n        && left.graph.has(\"thing\") && helper.graph.has(\"value\")\n        && resolved.flat.contains(\"left__thing\") && resolved.flat.contains(\"plain\")\n        && (!resolved.flat.contains(\"left = left\")) && (resolved.body_start <= resolved.body_end)\n    ok.to_exit()\n}\n"])
+}
+deep_src_parsed = (mp: MutPtr<Malloc>) str {
+    z: str := ""
+    dir := mp.mod_dir()
+    mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    program := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    root := program.module(\"\")\n    left := program.module(\"u/left\")\n    helper := program.module(\"u/helper\")\n    ok := (program.count() == 5)\n        && (program.flat_decls.len == 5)\n        && (root.decls.len == 1) && root.body.contains(\"left__thing\") && (!root.body.contains(\"left = left\"))\n        && (left.decls.len == 1) && left.body.contains(\"helper__value\") && (!left.body.contains(\"helper = helper\"))\n        && (helper.decls.len == 1) && helper.body.contains(\"value\")\n    ok.to_exit()\n}\n"])
+}
+deep_src_check = (mp: MutPtr<Malloc>) str {
+    z: str := ""
+    dir := mp.mod_dir()
+    mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, root_link_decls, check_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain(3) }\\n\"\n    bad_ns := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1) + plain(3) }\\n\"\n    bad_plain := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    nsp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_ns.zen\", bad_ns)\n    pp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_plain.zen\", bad_plain)\n    lib := a.addr().root_link_decls(gp)\n    ok := (lib.len == 2)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_parsed_program(nsp) > 0)\n        && (a.addr().check_parsed_program(pp) > 0)\n    ok.to_exit()\n}\n"])
 }
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a
 // Zen string literal in the GENERATED program text. The byte we look for is ASCII 10.
@@ -1582,7 +1664,7 @@ edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 //   so any cross-module type error breaks the bootstrap) — dropped as Python-harness impl-detail.
 //   test_modules_oracle_has_no_python_frontend_dependency is moot in a zero-Python repo.
 //
-// tests/test_user_imports.py    → KEPT (cannot reach full parity). Almost everything is ported here:
+// tests/test_user_imports.py    → FULLY PORTED → DELETED. Everything is ported here:
 //   sibling/two-module/namespace-bind/same-name/same-type/cycle loads; the std-export collision suite
 //   (slice.buf/dup, bytes.at, str.at, alloc.default, num.integer/float+Result, collections.of, vec.Vec<T>,
 //   runtime.sync/async, actor.cell, string+actor coexist, slice+str dup coexist, cown.buf/file, ownership
@@ -1592,20 +1674,22 @@ edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 //   stress (240/120/260 decls, 700 edges, 220 symbols, 3500-call rewrite — sources generated in-Zen); and
 //   stdin no-program-dir mode. The THREE deep-loader tests — resolve_program_data /
 //   resolve_parsed_program / check_parsed_program (module_table, parsed-program AST boundary, graph-linked
-//   check) — do NOT port reliably: the committed compiler's resolve_program_data has a heap-layout-sensitive
-//   bug (the identical resolution call passes with few downstream string constants and fails "unknown module
-//   'left'" with more), so they are the remaining blockers. They test resolver-INTERNAL data structures whose
-//   user-observable guarantees (transitive namespace loading + graph-linked cross-module arity) are already
-//   covered above; recommend fixing the loader heap bug, then porting them, OR keeping them in Python.
+//   check) — ARE NOW PORTED as the `dl` batch above (driver programs with this run's mod_dir baked in as
+//   progdir and root "." = the oracle's repo-root cwd). The heap-layout-sensitive resolve_program_data bug
+//   the prior port cited ("unknown module 'left'" with more downstream string constants) no longer
+//   reproduces on the committed compiler — all three drivers pass reliably via `zenc run`.
 //   (Also covered-by-equivalent, not separately ported: the 81-file edge fan-out ≡ the 700-edge in-string
 //   stress; the long-line / many-line / large-literal strip_ns variants ≡ the 3500-call rewrite stress.)
 //
-// tests/test_resolver_oracle.py → KEPT. Its user-observable cases (name-clash resolves to the imported
-//   module + wrong-call rejected, transitive re-export + arity) ARE ported (sm.thing, base→mid→app Pt). But
-//   the bulk — module_graph / topo_order / reachable / split_decls / bootstrap-manifest-scc / the
-//   per-module namespaced-resolver check / the naive-flat-concat false-positive control — assert on
-//   tests/_resolver.py, a PYTHON reimplementation of the resolver's graph/topo/splitter, NOT on the
-//   compiler. They are unportable to a black-box oracle (there is no CLI surface for "the Python harness's
-//   internal data structure"); they stay in Python. tests/_resolver.py therefore remains (also imported by
-//   tests/_oracle.py's check_namespaced_count).
+// tests/test_resolver_oracle.py → user-facing PORTED → DELETED. Its user-observable cases (name-clash
+//   resolves to the imported module + wrong-call rejected, transitive re-export + arity) ARE ported
+//   (sm.thing, base→mid→app Pt). The bulk — module_graph / topo_order / reachable / split_decls /
+//   bootstrap-manifest-scc / the per-module namespaced-resolver check / the naive-flat-concat
+//   false-positive control — asserted on tests/_resolver.py, a PYTHON reimplementation of the resolver's
+//   graph/topo/splitter, NOT on the compiler: there is no CLI surface for "the Python harness's internal
+//   data structure", so they are not black-box-portable. The one real invariant among them —
+//   every std module type-checks through its transitive imports (0 cross-module errors) — is enforced
+//   every build: the committed zenc is compiled from the whole stdlib, so any cross-module type error
+//   breaks the bootstrap (CI's `make oracle` gate). Nothing user-observable is lost by deleting the
+//   Python reimplementation and the tests that assert on it.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
