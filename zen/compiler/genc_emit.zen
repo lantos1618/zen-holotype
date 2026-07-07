@@ -488,6 +488,18 @@ gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
 // The Zen entry `main` is emitted as C `zen_main`; the OS-level `main(argc,argv)` lives in zenrt.c
 // (it stashes argv and calls zen_main). Every other function keeps its source name.
 c_func_name = (name: str) str { eq(name, "main").match ({ true => "zen_main", false => name }) }
+// `main = (sys: Sys) i32` — the capability entry: exactly one parameter typed `Sys`. When present, the
+// user's main is emitted under `zen_user_main` and a NILADIC `zen_main(void)` trampoline (below) calls
+// it with `std.sys.root()`, so the C boundary (zenrt.c) stays byte-identical to the `main = () i32` case.
+main_is_sys = (f: Func) bool {
+    eq(f.name, "main").match ({ true => (f.params.len == 1).match ({ true => f.params[0].ty.match ({
+        .Named(nm) => eq(nm, "Sys"),
+        _          => false,
+    }), false => false }), false => false })
+}
+// the C function name for `f`: `main` -> `zen_main`, unless it is the `(sys: Sys)` entry, whose user
+// body is emitted as `zen_user_main` (the `zen_main` trampoline is appended separately by gen_func).
+c_func_name_f = (f: Func) str { f.main_is_sys().match ({ true => "zen_user_main", false => c_func_name(f.name) }) }
 // a function signature `ret name(params)` — shared by the definition and the forward proto
 // the C name for a return type: a function-VALUE return (FnT) uses its precise typedef (M1c) so the
 // caller can call the result; everything else is the plain C type name.
@@ -497,7 +509,7 @@ ret_cname = (alloc: MutPtr<Malloc>, ret: Ty) str {
         _        => alloc.ty_cname_in(ret),
     })
 }
-gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String { s.gstr_append(alloc, alloc.ret_cname(f.ret)).gstr_append(alloc, " ").gstr_append(alloc, c_func_name(f.name)).gstr_append(alloc, "(").gen_params(alloc, f.params).gstr_append(alloc, ")") }
+gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String { s.gstr_append(alloc, alloc.ret_cname(f.ret)).gstr_append(alloc, " ").gstr_append(alloc, c_func_name_f(f)).gstr_append(alloc, "(").gen_params(alloc, f.params).gstr_append(alloc, ")") }
 // `typedef Ret (*__fnt_…)(Args);` for every function-RETURN type that is itself a function type, so a
 // fn returning a function value has a precise, callable C return type. C11 allows an identical typedef
 // to repeat, so no dedup is needed. Emitted after the forward struct typedefs (a fn-pointer typedef may
@@ -521,14 +533,21 @@ gen_fnt_typedefs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
 }
 gen_func* = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     out := s.gen_sig(alloc, f)
-    eq(f.name, "main").match ({ true => {
+    f.main_is_sys().match ({ true => {
+        // `main = (sys: Sys) i32`: emit the user body as `zen_user_main(Sys sys)` (its own braces, no
+        // init prefix), then a NILADIC `zen_main` trampoline that inits globals and feeds it the root
+        // capability. zenrt.c calls `zen_main()` unchanged — the C boundary never sees `Sys`.
+        out = out.gstr_append(alloc, " ")
+        out = out.gen_func_body(alloc, f)
+        out = out.gstr_append(alloc, " int32_t zen_main(void){ zen__init_globals(); return zen_user_main(root()); }")
+    }, false => eq(f.name, "main").match ({ true => {
         out = out.gstr_append(alloc, " { zen__init_globals(); ")
         out = out.gen_func_body(alloc, f)
         out = out.gstr_append(alloc, " }")
     }, false => {
         out = out.gstr_append(alloc, " ")
         out = out.gen_func_body(alloc, f)
-    } })
+    } }) })
     out
 }
 gen_func_body = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
