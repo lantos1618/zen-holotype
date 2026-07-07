@@ -25,22 +25,46 @@
 { gpa } = std.mem.heap
 { write } = std.c.libc
 { view } = std.text.str
-{ Result, IoError } = std.core.result
+{ Result, IoError, name, panic } = std.core.result
 { argc, arg, getEnv } = std.os
 { mono_ns, wall_s } = std.time
 { contents, save } = std.io.file
 STDOUT_FD := 1
 STDERR_FD := 2
+// write-all retry loop over a raw fd: emit `[ptr, ptr+len)` in full, threading the running total in
+// `done`. write(2) returning < 0 → `.Err(.Errno(rc))`; a 0-byte return on a non-empty buffer means no
+// progress, so we stop with `.Err(.Eof)` rather than spin forever; a short write advances the pointer
+// and recurses until `len` hits 0, then yields `.Ok(total)`.
+write_all = (fd: i32, ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
+    (len <= 0).match ({ true => .Ok(done), false => {
+        w := fd.write(ptr, len)
+        (w < 0).match ({ true => .Err(.Errno(to_i32(w))), false => (w == 0).match ({ true => .Err(.Eof), false => write_all(fd, ptr.offset(w), len - w, done + w) }) })
+    } })
+}
 // Writer — a byte sink over a POSIX descriptor (fd 1 = stdout, fd 2 = stderr). The narrowest output
 // capability: hand a library a `Writer` and it can emit bytes, nothing else. `write` takes a str (no
-// trailing NUL assumed); `write_bytes` a length-tracked slice. Both return the byte count the OS took.
+// trailing NUL assumed); `write_bytes` a length-tracked slice. Both do a write-all loop and surface
+// failure as a value: `Result<i64, IoError>` (`.Ok(bytes_written)` or `.Err`) — so a broken pipe
+// (EPIPE), full disk (ENOSPC), or closed fd is a value you can `.or_return()`/`.match`, never swallowed.
 Writer*: {
     fd: i32,
-    write = (w: Writer, s: str) i64 {
+    write = (w: Writer, s: str) Result<i64, IoError> {
         v := s.view()
-        w.fd.write(v.ptr, v.len)
+        write_all(w.fd, v.ptr, v.len, 0)
     }
-    write_bytes = (w: Writer, b: [u8]) i64 { w.fd.write(b.ptr, b.len) }
+    write_bytes = (w: Writer, b: [u8]) Result<i64, IoError> { write_all(w.fd, b.ptr, b.len, 0) }
+    write_or_panic = (w: Writer, s: str) i64 {
+        // Convenience for the "I want to know, but won't thread a Result" case: write, and on failure
+        // PANIC loudly naming the IoError (framed `zen: panic: <err>`, then abort). One call, no `.match`,
+        // no Result plumbing — the honest-but-fatal sink for scripts. Returns the byte count on success.
+        w.write(s).match ({
+            .Ok(n)  => n,
+            .Err(e) => {
+                panic(e.name())
+                0
+            },
+        })
+    }
 }
 stdout_writer* = () Writer { Writer(fd: STDOUT_FD) }
 stderr_writer* = () Writer { Writer(fd: STDERR_FD) }
