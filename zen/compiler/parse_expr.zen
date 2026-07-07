@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam_r, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
+{ Expr, Stmt, Ty, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, mkenumg, mktagg, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam_r, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, ttext, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix, is_bin_prefix, is_oct_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -461,11 +461,59 @@ parse_qual_struct_lit = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, fl
         next: fe.next,
     )
 }
+// A namespace-qualified GENERIC type head `subj.Name<TyArgs>` — returns the position just past the
+// closing `>` (or -1 if not a well-formed generic head). Like is_qual_struct_lit, only the faithful
+// (fmt) parser reaches here: the flatten pipeline strips the `subj.` alias before the compiler parse,
+// leaving the bare `Name<TyArgs>…` forms that parse_ident handles.
+qual_generic_after = (src: str, base: PExpr, name: str, fld: Scan) i32 {
+    nx := src.scan(fld.next)
+    (subj_name(base.expr).at(0) != 0 && name.at(0).is_upper_byte() && src.is_langle(nx.tok)).match ({ true => src.tyargs_end(nx.next, 1), false => 0 - 1 })
+}
+// `subj.Name<TyArgs>(field: val, …)` — a qualified generic struct literal.
+is_qual_generic_struct_lit = (src: str, base: PExpr, name: str, fld: Scan) bool {
+    after := src.qual_generic_after(base, name, fld)
+    (after < 0).match ({ true => false, false => {
+        sc := src.scan(after)
+        src.is_lparen(sc.tok) && src.nl_between(after, sc.tok.start).match ({ true => false, false => true }) && src.paren_is_struct(sc.next)
+    } })
+}
+// `subj.Name<TyArgs>.Variant(args)` (or nullary `subj.Name<TyArgs>.None`) — a qualified generic ctor.
+is_qual_generic_ctor = (src: str, base: PExpr, name: str, fld: Scan) bool {
+    after := src.qual_generic_after(base, name, fld)
+    (after < 0).match ({ true => false, false => {
+        dot := src.scan(after)
+        src.is_dot(dot.tok).match ({ true => {
+            vt := src.scan(dot.next)
+            is_ident_tok(vt.tok) && a_lex_upper(src, vt.tok)
+        }, false => false })
+    } })
+}
+parse_qual_generic_struct_lit = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, fld: Scan) PExpr {
+    qn := a.dotted_name_in(subj_name(base.expr), name)
+    lt := src.scan(fld.next)    // '<'
+    ta := a.parse_tyargs(src, lt.next)
+    open := src.scan(ta.next)    // '('
+    buf := a.finit_buf()
+    fe := a.fill_pinits(src, open.next, buf, 0)
+    PExpr(
+        expr: a.enode(mkstructg_at(qn, a.mangle_str_in(qn, ta.args), ta.args, buf.take_inits(fe.count), fld.tok.start)),
+        next: fe.next,
+    )
+}
+parse_qual_generic_ctor = (a: MutPtr<Malloc>, src: str, base: PExpr, name: str, fld: Scan) PExpr {
+    qn := a.dotted_name_in(subj_name(base.expr), name)
+    lt := src.scan(fld.next)    // '<'
+    ta := a.parse_tyargs(src, lt.next)
+    dot := src.scan(ta.next)    // '.'
+    vs := src.scan(dot.next)    // the variant name
+    vn := a.lexeme(src, vs.tok)
+    a.finish_generic_ctor(src, qn, a.mangle_str_in(qn, ta.args), ta.args, vn, vs)
+}
 parse_field = (a: MutPtr<Malloc>, src: str, base: PExpr) PExpr {
     dot := src.scan(base.next)
     fld := src.scan(dot.next)
     name := a.lexeme(src, fld.tok)
-    is_qual_struct_lit(src, base, name, fld).match ({ true => a.parse_postfix(src, a.parse_qual_struct_lit(src, base, name, fld)), false => is_qual_ctor(base, name).match ({ true => a.parse_postfix(src, a.parse_qual_ctor(src, subj_name(base.expr), name, fld)), false => a.parse_field_plain(src, base, name, fld) }) })
+    is_qual_generic_struct_lit(src, base, name, fld).match ({ true => a.parse_postfix(src, a.parse_qual_generic_struct_lit(src, base, name, fld)), false => is_qual_generic_ctor(src, base, name, fld).match ({ true => a.parse_postfix(src, a.parse_qual_generic_ctor(src, base, name, fld)), false => is_qual_struct_lit(src, base, name, fld).match ({ true => a.parse_postfix(src, a.parse_qual_struct_lit(src, base, name, fld)), false => is_qual_ctor(base, name).match ({ true => a.parse_postfix(src, a.parse_qual_ctor(src, subj_name(base.expr), name, fld)), false => a.parse_field_plain(src, base, name, fld) }) }) }) })
 }
 // SAME-LINE GATE (mirrors parse_qual_ctor / parse_ident): the method-call `(` must sit on the same line
 // as the `.field` — a NEWLINE before it makes `base.field` a plain member access and the `(` a new
@@ -873,13 +921,55 @@ parse_ident = (a: MutPtr<Malloc>, src: str, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
-    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => src.looks_turbofish(nx.next).match ({ true => a.parse_turbofish_call(src, name, nx.next, sc.tok.start), false => PExpr(
+    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => src.looks_turbofish(nx.next).match ({ true => a.parse_turbofish_call(src, name, nx.next, sc.tok.start), false => src.looks_generic_ctor(nx.next).match ({ true => a.parse_generic_ctor(src, name, nx.next), false => PExpr(
         expr: a.enode(vref_at(name, sc.tok.start)),
         next: sc.next,
-    ) }) }), false => PExpr(
+    ) }) }) }), false => PExpr(
         expr: a.enode(vref_at(name, sc.tok.start)),
         next: sc.next,
     ) }) })
+}
+// A generic enum constructor with EXPLICIT type args: `Name<TyArgs>.Variant(args)` (or nullary
+// `Name<TyArgs>.None`). Distinguished from turbofish/generic-struct-lit (which want a `(` after the
+// `>`) by an Uppercase `.Variant` following the closing `>`. If the shape isn't exact, `<` stays the
+// comparison operator (so `a < b > c` is intact).
+looks_generic_ctor = (src: str, pos: i32) bool {
+    after := src.tyargs_end(pos, 1)
+    (after < 0).match ({ true => false, false => {
+        dot := src.scan(after)
+        src.is_dot(dot.tok).match ({ true => {
+            vt := src.scan(dot.next)
+            is_ident_tok(vt.tok) && a_lex_upper(src, vt.tok)
+        }, false => false })
+    } })
+}
+// First byte of a token span is Uppercase (a variant/type name, not a lowercase field/method).
+a_lex_upper = (src: str, t: Token) bool { src.at(t.start).is_upper_byte() }
+parse_generic_ctor = (a: MutPtr<Malloc>, src: str, name: str, pos: i32) PExpr {
+    ta := a.parse_tyargs(src, pos)    // pos just past '<'
+    dot := src.scan(ta.next)    // the '.'
+    vs := src.scan(dot.next)    // the variant name
+    vn := a.lexeme(src, vs.tok)
+    a.finish_generic_ctor(src, name, a.mangle_str_in(name, ta.args), ta.args, vn, vs)
+}
+// Shared tail for unqualified/qualified generic enum ctors: SAME-LINE payload gate (mirrors
+// parse_qual_ctor) — a NEWLINE before `(` makes `Type<T>.Variant` a nullary tag and `(` a new
+// statement. Empty `()` → nullary tag; `(a, …)` → payload enum; no `(` → nullary tag.
+finish_generic_ctor = (a: MutPtr<Malloc>, src: str, ty: str, mty: str, targs: [Ty], vn: str, vs: Scan) PExpr {
+    nx := src.scan(vs.next)
+    (src.is_lparen(nx.tok) && src.nl_between(vs.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.is_rparen(src.scan(nx.next).tok).match ({ true => PExpr(
+        expr: a.enode(mktagg(ty, mty, targs, vn)),
+        next: src.scan(nx.next).next,
+    ), false => {
+        pl := a.parse_payload_args(src, nx)
+        PExpr(
+            expr: a.enode(mkenumg(ty, mty, targs, vn, pl.expr)),
+            next: pl.next,
+        )
+    } }), false => PExpr(
+        expr: a.enode(mktagg(ty, mty, targs, vn)),
+        next: vs.next,
+    ) })
 }
 // Turbofish: `name<Type, …>(args)` — an explicit-type-arg CALL (positional args, NOT a struct lit).
 // Disambiguates from comparison: require a well-formed `<Type…>` (parse_type tokens, matching `>`)
