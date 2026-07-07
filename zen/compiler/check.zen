@@ -866,7 +866,17 @@ infer_field = (env: Env, oty: Ty, field: str) Ty {
 infer_member = (env: Env, m: MemberData) Ty { env.infer_field(env.infer_expr(m.obj), m.field) }
 infer_arrow = (env: Env, ar: ArrowData) Ty { env.infer_field(env.infer_expr(ar.obj), ar.field) }
 infer_arm_ty = (env: Env, subjty: Ty, ar: ArmData) Ty { env.a.arm_env(env, subjty, ar).infer_expr(ar.body) }
-common_ty = (a: Ty, b: Ty) Ty { a.is_void_ty().match ({ true => b, false => b.is_void_ty().match ({ true => a, false => (a.ty_rank() >= 0 && b.ty_rank() >= 0).match ({ true => (a.ty_rank() == 0).match ({ true => b, false => (a.ty_rank() == 1).match ({ true => (b.ty_rank() > 1).match ({ true => b, false => a }), false => a }) }), false => a.ty_eq(b).match ({ true => a, false => tvoid() }) }) }) }) }
+// `str`, `Cstr`, and `text` all lower to `const char*`, but ty_eq treats them as an ASYMMETRIC
+// lifetime lattice: immortal `text` fits the mortal `str`/`Cstr` slots but NOT the reverse (a mortal
+// value must never satisfy a declared-immortal slot). A string LITERAL infers as `text` while a
+// `.Ok(s)`/match payload infers as `str`, so a match mixing the two used to fall to void — because
+// ty_eq(a,b) only tested ONE direction — and a void binding then dispatched `println` on void, emitting
+// an undefined `fmt_println` (link error). Fix: when a doesn't fit b, try the OTHER direction — if b
+// fits a, the common type is b (the family subtype, e.g. `text` for a str/text mix). The subtype is
+// the family bottom (it fits every string slot), so this exactly preserves the old acceptance set
+// while replacing the void with a real, dispatchable type. Symmetric ty_eq pairs are unaffected (they
+// took the `true` arm); only the asymmetric string family reaches the second test.
+common_ty = (a: Ty, b: Ty) Ty { a.is_void_ty().match ({ true => b, false => b.is_void_ty().match ({ true => a, false => (a.ty_rank() >= 0 && b.ty_rank() >= 0).match ({ true => (a.ty_rank() == 0).match ({ true => b, false => (a.ty_rank() == 1).match ({ true => (b.ty_rank() > 1).match ({ true => b, false => a }), false => a }) }), false => a.ty_eq(b).match ({ true => a, false => b.ty_eq(a).match ({ true => b, false => tvoid() }) }) }) }) }) }
 infer_match_common_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
     out := tvoid()
     arms.loop((h, i, ar) {
