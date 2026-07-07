@@ -1,0 +1,226 @@
+// std.net — minimal BLOCKING TCP over the raw POSIX socket calls.
+//
+// The census gap for concurrent servers was "no sockets". This is the floor: IPv4, blocking,
+// no TLS, no async. Concurrency comes from ACTORS running these blocking calls on their own
+// workers — a socket wrapper does not need its own event loop.
+//
+// The syscalls (`socket`/`bind`/`listen`/`accept`/`connect`/`setsockopt`/`getsockname`) are declared
+// foreign right here — a bodyless `name = (params) Ret` decl IS the foreign-binding mechanism (genc
+// lowers it to a bare C prototype, libc's headers define the symbol). They keep their C names, so the
+// PUBLIC surface uses distinct verbs (`serve`/`accept_conn`/`dial`/`recv`/`send`/`close_conn`) — the
+// same foreign-name-vs-wrapper split std.fs uses (`make_dir` over `mkdir`). `read`/`write`/`close` are
+// reused from std.c.libc; they are the file-descriptor floor a socket rides on too.
+//
+// A file descriptor is the raw floor. `TcpListener`/`TcpConn` are one-field `{ fd: i32 }` handles;
+// every fallible op returns `Result<_, IoError>` (a negative libc return -> `.Err(.Errno(rc))`), the
+// same shape std.io.file / std.fs use. No allocator is threaded except by `recv`, which owns the
+// buffer it fills.
+//
+//   l := serve("127.0.0.1", 0).expect("listen")   // 0 = kernel-chosen ephemeral port
+//   p := l.local_port()                            // discover it
+//   c := dial("127.0.0.1", p).expect("connect")
+//   c.send_str("ping").expect("send")
+//   msg := l.accept_conn().expect("accept").recv(&a, 64).expect("recv")   // "ping"
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError, ok, err } = std.core.result
+{ zeroed, release } = std.mem.raw
+{ eq, view } = std.text.str
+{ read, write, close } = std.c.libc
+// ── foreign POSIX socket calls (C names, module-private) ──────────────────────────────────────────
+// `int socket(int domain, int type, int protocol)` — a new endpoint; returns an fd or -1.
+socket = (domain: i32, ty: i32, protocol: i32) i32
+// `int bind(int fd, const struct sockaddr *addr, socklen_t addrlen)` — name the local address.
+bind = (fd: i32, addr: RawPtr<u8>, addrlen: i32) i32
+// `int listen(int fd, int backlog)` — mark `fd` passive, `backlog` deep accept queue.
+listen = (fd: i32, backlog: i32) i32
+// `int accept(int fd, struct sockaddr *addr, socklen_t *addrlen)` — pull the next queued connection.
+// We pass null/null for addr/addrlen (the peer address is not surfaced yet).
+accept = (fd: i32, addr: RawPtr<u8>, addrlen: RawPtr<u8>) i32
+// `int connect(int fd, const struct sockaddr *addr, socklen_t addrlen)` — open an active connection.
+connect = (fd: i32, addr: RawPtr<u8>, addrlen: i32) i32
+// `int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)` — SO_REUSEADDR.
+setsockopt = (fd: i32, level: i32, optname: i32, optval: RawPtr<u8>, optlen: i32) i32
+// `int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)` — read back the bound address,
+// so a listener created on port 0 can report the ephemeral port the kernel actually assigned.
+getsockname = (fd: i32, addr: RawPtr<u8>, addrlen: RawPtr<u8>) i32
+// ── Linux x86-64 constants ─────────────────────────────────────────────────────────────────────────
+AF_INET := 2    // IPv4 address family
+SOCK_STREAM := 1    // reliable byte stream (TCP)
+IPPROTO := 0    // 0 lets the kernel pick TCP for a SOCK_STREAM socket
+SOL_SOCKET := 1    // socket-level option level
+SO_REUSEADDR := 2    // reuse a local address still in TIME_WAIT
+SOCKADDR_LEN := 16    // sizeof(struct sockaddr_in) on this ABI
+BACKLOG := 128    // pending-connection queue depth
+// ── handles: a file descriptor is the raw floor ─────────────────────────────────────────────────────
+TcpListener*: {
+    fd: i32,
+}
+TcpConn*: {
+    fd: i32,
+}
+// ── sockaddr_in construction (built byte-for-byte, so byte order is explicit, no htons/htonl) ─────────
+// `struct sockaddr_in` (16 bytes): sin_family (u16, HOST order) at +0, sin_port (u16, NETWORK/big-endian)
+// at +2, sin_addr (4 bytes, NETWORK order) at +4, 8 zero pad bytes at +8. We hand a zeroed 16-byte cell
+// and stamp each field: family low byte at [0] (2 = AF_INET, the high byte stays 0 on little-endian),
+// the port as big-endian [hi, lo], and the four address octets in order.
+digit_val = (b: u8) i64 { to_i64(b - '0') }
+// recursively consume `v[i..]`, folding decimal digits into `octet` and stamping each completed octet
+// into cell[4 + count]; returns the final octet count (4 on a well-formed quad) or -1 on any malformed
+// input. A dotted-quad host is short and bounded, so recursion (not iteration) is safe here — unlike
+// std.fs's unbounded directory walk. `seen` guards against empty octets ("1..2", ".1", "1.").
+parse_octets = (v: [u8], i: i64, cell: RawPtr<u8>, octet: i64, count: i64, seen: bool) i64 {
+    (i >= v.len).match ({ true => (seen && count == 3 && octet <= 255).match ({ true => {
+        cell.offset(4 + count).store(to_u8(octet))
+        count + 1
+    }, false => 0 - 1 }), false => {
+        b := v[i]
+        (b == '.').match ({ true => (seen && count < 3 && octet <= 255).match ({ true => {
+            cell.offset(4 + count).store(to_u8(octet))
+            v.parse_octets(i + 1, cell, 0, count + 1, false)
+        }, false => 0 - 1 }), false => (b >= '0' && b <= '9').match ({ true => {
+            v.parse_octets(i + 1, cell, octet * 10 + digit_val(b), count, true)
+        }, false => 0 - 1 }) })
+    } })
+}
+// parse `host` (a dotted-quad "a.b.c.d" or the literal "localhost") into the four sin_addr octets at
+// cell[4..8]; return false on a malformed address. "0.0.0.0" (INADDR_ANY) binds all interfaces.
+fill_ipv4 = (host: str, cell: RawPtr<u8>) bool {
+    eq(host, "localhost").match ({ true => {
+        cell.offset(4).store(127)
+        cell.offset(5).store(0)
+        cell.offset(6).store(0)
+        cell.offset(7).store(1)
+        true
+    }, false => host.view().parse_octets(0, cell, 0, 0, false) == 4 })
+}
+// stamp family + port + address into a zeroed 16-byte cell; false if `host` is unparseable.
+fill_sockaddr = (cell: RawPtr<u8>, host: str, port: i32) bool {
+    cell.store(to_u8(AF_INET))    // sin_family low byte (host order; high byte stays 0)
+    cell.offset(2).store(to_u8(port >> 8 & 255))    // sin_port high byte (network order)
+    cell.offset(3).store(to_u8(port & 255))    // sin_port low byte
+    // sin_addr at +4
+    fill_ipv4(host, cell)
+}
+// ── listener ─────────────────────────────────────────────────────────────────────────────────────────
+// set SO_REUSEADDR so a restarted server can rebind a port still lingering in TIME_WAIT.
+set_reuse = (fd: i32) void {
+    one := zeroed(4)
+    one.store(1)    // a 4-byte int with value 1 (little-endian: [1,0,0,0])
+    fd.setsockopt(SOL_SOCKET, SO_REUSEADDR, one, 4)
+    one.release()
+}
+// open a listening TCP socket bound to `host:port` (port 0 => kernel-chosen ephemeral). `host` is an
+// IPv4 dotted-quad or "localhost"; "0.0.0.0" binds every interface. Returns a ready `TcpListener` whose
+// accept queue is `BACKLOG` deep, or the first failing step's errno.
+serve* = (host: str, port: i32) Result<TcpListener, IoError> {
+    fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
+    out: Result<TcpListener, IoError> := (fd < 0).match ({ true => err(IoError.Errno(fd)), false => {
+        fd.set_reuse()
+        cell := zeroed(SOCKADDR_LEN)
+        res: Result<TcpListener, IoError> := fill_sockaddr(cell, host, port).match ({ true => {
+            b := fd.bind(cell, to_i32(SOCKADDR_LEN))
+            cell.release()
+            (b < 0).match ({ true => {
+                fd.close()
+                err(IoError.Errno(b))
+            }, false => {
+                lr := fd.listen(BACKLOG)
+                (lr < 0).match ({ true => {
+                    fd.close()
+                    err(IoError.Errno(lr))
+                }, false => ok(TcpListener(fd: fd)) })
+            } })
+        }, false => {
+            cell.release()
+            fd.close()
+            err(IoError.NotFound)
+        } })
+        res
+    } })
+    out
+}
+// the ephemeral (or fixed) port the listener is bound to, read back via getsockname; 0 on failure.
+local_port* = (l: TcpListener) i32 {
+    cell := zeroed(SOCKADDR_LEN)
+    lenc := zeroed(8)
+    store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
+    r := l.fd.getsockname(cell, lenc)
+    p := (r < 0).match ({ true => 0, false => {
+        hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
+        lo := to_i64(cell.offset(3).load())
+        to_i32(hi * 256 + lo)
+    } })
+    cell.release()
+    lenc.release()
+    p
+}
+// block until the next client connects; returns its `TcpConn` or the accept errno.
+accept_conn* = (l: TcpListener) Result<TcpConn, IoError> {
+    fd := l.fd.accept(null_ptr(), null_ptr())
+    (fd < 0).match ({ true => err(IoError.Errno(fd)), false => ok(TcpConn(fd: fd)) })
+}
+// stop listening (close the passive socket).
+close_listener* = (l: TcpListener) void { l.fd.close() }
+// ── connection ─────────────────────────────────────────────────────────────────────────────────────────
+// open an active TCP connection to `host:port` ("localhost"/dotted-quad). Returns a live `TcpConn`
+// or the failing step's errno. Blocking: connect returns once the handshake completes.
+dial* = (host: str, port: i32) Result<TcpConn, IoError> {
+    fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
+    out: Result<TcpConn, IoError> := (fd < 0).match ({ true => err(IoError.Errno(fd)), false => {
+        cell := zeroed(SOCKADDR_LEN)
+        res: Result<TcpConn, IoError> := fill_sockaddr(cell, host, port).match ({ true => {
+            r := fd.connect(cell, to_i32(SOCKADDR_LEN))
+            cell.release()
+            (r < 0).match ({ true => {
+                fd.close()
+                err(IoError.Errno(r))
+            }, false => ok(TcpConn(fd: fd)) })
+        }, false => {
+            cell.release()
+            fd.close()
+            err(IoError.NotFound)
+        } })
+        res
+    } })
+    out
+}
+// read up to `n` bytes into the caller-owned `buf`; returns the count (0 = peer closed) or errno. The
+// low-level read — no allocation, the caller sizes the buffer.
+recv_into* = (c: TcpConn, buf: RawPtr<u8>, n: i64) Result<i64, IoError> {
+    r := c.fd.read(buf, n)
+    (r < 0).match ({ true => err(IoError.Errno(to_i32(r))), false => ok(r) })
+}
+// read up to `n` bytes into a fresh allocator-owned NUL-terminated buffer, returning it as a `str`
+// of the bytes actually read (a single read() — one TCP segment; loop with recv_into for a full stream).
+recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<str, IoError> {
+    a.try_acquire(n + 1).match ({
+        .Ok(buf) => {
+            r := c.fd.read(buf, n)
+            out: Result<str, IoError> := (r < 0).match ({ true => {
+                a.release(buf)
+                err(IoError.Errno(to_i32(r)))
+            }, false => {
+                buf.offset(r).store(0)
+                ok(cstr(buf))
+            } })
+            out
+        },
+        .Err(e)  => err(e),
+    })
+}
+// write ALL of `off..n` from `buf`, following short writes; returns the offset reached (== n on success).
+write_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
+    (off >= n).match ({ true => n, false => {
+        w := fd.write(buf.offset(off), n - off)
+        (w <= 0).match ({ true => off, false => fd.write_all(buf, off + w, n) })
+    } })
+}
+// write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write.
+send* = (c: TcpConn, bytes: [u8]) Result<i64, IoError> {
+    w := c.fd.write_all(bytes.ptr, 0, bytes.len)
+    (w == bytes.len).match ({ true => ok(w), false => err(IoError.Eof) })
+}
+// convenience: send a `str`'s bytes (no trailing NUL).
+send_str* = (c: TcpConn, s: str) Result<i64, IoError> { c.send(s.view()) }
+// close the connection.
+close_conn* = (c: TcpConn) void { c.fd.close() }
