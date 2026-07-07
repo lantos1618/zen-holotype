@@ -1,0 +1,33 @@
+// args() OOM path: a failing allocator (acquire always null) must make args() return `.Err` as a
+// VALUE — never write the argv strings through a null backbone (the old crash). Driven by the
+// `os_args_oom_result` ShellCase in oracle_build.zen: the process exits cleanly (no SIGABRT/SIGSEGV)
+// and prints `oom-err`, proving the failure stayed in the value flow.
+{ Allocator } = std.mem.alloc
+{ args } = std.os
+{ Result, IoError } = std.core.result
+{ println } = std.text.fmt
+// Always-fail allocator: acquire yields null (simulated OOM) without any backing store.
+LimitAlloc: {
+    _: i32,
+}
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { }
+})
+main = () i32 {
+    lim := LimitAlloc(_: 0)
+    r: Result<[str], IoError> := lim.addr().args()
+    r.match ({
+        // OOM surfaced as a value — no null-deref, no crash.
+        .Err(e) => {
+            println("oom-err")
+            0
+        },
+        // A null backbone would have crashed before here; reaching Ok means OOM was mishandled.
+        .Ok(av) => {
+            println("oom-unexpected-ok")
+            1
+        },
+    })
+}
