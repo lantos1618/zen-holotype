@@ -1,5 +1,9 @@
 # Build plan — the pluggable actor runtime (Pony×Zig)
 
+> **SUPERSEDED (2026-07): ambient rt reversed → explicit Sys. See [runtime-design.md](runtime-design.md).**
+> Kept for history. The Pony actor + sendability semantics here survive, but the ambient-runtime
+> delivery is replaced by explicit `Sys` capabilities.
+
 > **Companion docs:** the design/spec this plan executes is [`actors-pony-zig.md`](actors-pony-zig.md);
 > the planned multi-threaded work-stealing scheduler behind `Scheduler`/`WorkStealing` is detailed in
 > "[Future work: work-stealing scheduler](#future-work-work-stealing-scheduler-multi-threaded)" below

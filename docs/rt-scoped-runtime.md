@@ -1,5 +1,9 @@
 # rt — the scoped runtime (design spec, v2)
 
+> **SUPERSEDED (2026-07): ambient rt reversed → explicit Sys. See [runtime-design.md](runtime-design.md).**
+> Kept for history. The ambient/thread-local "current rt" delivery in this doc is NOT the current
+> design; capabilities are now threaded explicitly via `main(sys: Sys)`.
+
 **Status:** approved direction (judge panels 2026-07: design 7.9/10 "nicer than Pony and
 Zig", after fatal-hole revision from the 5.9 draft). This is the spec we build against.
 Rulings: `rt-design-judge-ruling-2026-07.md`, `three-things-ruling-2026-07.md`.

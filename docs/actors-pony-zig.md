@@ -1,5 +1,10 @@
 # Concurrency model — Pony semantics, Zig-pluggable mechanisms, statically-safe sends
 
+> **SUPERSEDED (2026-07): ambient rt reversed → explicit Sys. See [runtime-design.md](runtime-design.md).**
+> Kept for history. The Pony actor semantics + static sendability here remain the design and are
+> carried forward in runtime-design.md; the ambient-runtime *delivery/assembly* is replaced by
+> explicit `Sys` capabilities.
+
 **Status:** canonical design. Supersedes the `checkpoint`/coroutine "colorless via `Runtime.suspend`"
 thesis in [`scope-runtime-goal.md`](scope-runtime-goal.md) (§"What dies", below).
 **Build plan:** the staged, oracle-gated execution of this spec is [`pluggable-runtime-plan.md`](pluggable-runtime-plan.md).

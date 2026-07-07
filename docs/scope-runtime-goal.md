@@ -1,5 +1,9 @@
 # GOAL — Scope / Runtime / Capability surface (colorless, no-keyword)
 
+> **SUPERSEDED (2026-07): ambient rt reversed → explicit Sys. See [runtime-design.md](runtime-design.md).**
+> Kept for history. The ambient/scope-threaded capability surface here is replaced by explicit
+> `main(sys: Sys)` + narrow capabilities.
+
 > **Note (status):** the *concurrency* half of this thesis — colorless sync/async via a
 > `Runtime.checkpoint` cooperative-yield — is **superseded** by the Pony×Zig actor model in
 > [`actors-pony-zig.md`](actors-pony-zig.md) (run-to-completion behaviors on real threads; `checkpoint`
