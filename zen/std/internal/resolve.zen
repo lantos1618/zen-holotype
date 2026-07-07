@@ -1933,6 +1933,97 @@ enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 
     })
     0
 }
+// ── user-name shadow rename ────────────────────────────────────────────────────────────────────
+// THE #1 newcomer bounce: a user's top-level helper (`len`/`split`/`map`/…) collides with a
+// same-named PUBLIC decl pulled in TRANSITIVELY by an import the user never named (e.g. `std.io.file`
+// drags in `std.text.str`, which exports `len*`). In the flat single-symbol namespace both decls
+// survive → dup-fn (and a real C redefinition). Dropping the std decl is UNSAFE — std internals call
+// it (`str.trim_prefix` itself calls `prefix.len()`), so the user's `len` would hijack std's. Instead
+// we give the USER's colliding decl a distinct identity: rename it (and its in-body refs, bare + UFCS)
+// to `zshadow__name`, exactly like a namespace-qualified decl — the whole std closure stays byte-for-byte
+// untouched, the user's module simply shadows the unimported export. The `zshadow__`-prefix form is what
+// diagnostic.zen's alias-`__`-removal inverse already un-mangles, so errors still render the user's name.
+// Only fires for USER programs (never internal sources → seed unchanged) and only when it is provably
+// safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
+shadow_alias_of = (a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, "zshadow") }
+shadow_mangled = (a: MutPtr<Malloc>, name: String) String { a.gstr_string(name.len + 10).gstr_append(a, "zshadow__").rappend_string(a, name) }
+// Names the user imported BY NAME (`{ len } = std.text.str`): a same-named local is a GENUINE conflict —
+// keep the dup-fn error, never auto-rename it away.
+imported_value_names = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64) String {
+    cur := set
+    symbols.loop((h, idx, sym) {
+        (idx < i).match ({ true => { }, false => (sym.imported && sym.is_type.match ({ true => false, false => true })).match ({ true => {
+            cur = a.madd_name(cur, sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed"))
+        }, false => { } }) })
+    })
+    cur
+}
+// The set of user-body value-decl names to rename. A name qualifies iff it is a value decl (not a type,
+// not an import binding) defined EXACTLY ONCE in the user body [lo,hi) (a name defined twice is a real
+// user-vs-user dup → keep the error), whose name ALSO exists as a non-imported value decl OUTSIDE the
+// body (the transitive/std export), that the user did NOT import by name, and whose mangled form is not
+// already taken (else fall back to the dup-fn error rather than silently rebind).
+shadow_rename_set = (a: MutPtr<Malloc>, flat: str, mainsrc: str, lo: i64, hi: i64) String {
+    syms := a.module_graph(flat).symbols
+    imported := a.imported_value_names(a.gstr_string(64), a.module_graph(mainsrc).symbols, 0)
+    allnames := a.value_symbol_names_into_in(a.gstr_string(256), syms, 0)
+    mainseen := a.gstr_string(128)
+    maindup := a.gstr_string(64)
+    nonmain := a.gstr_string(256)
+    syms.loop((h, i, s) {
+        (s.imported || s.foreign || s.is_type).match ({ true => { }, false => {
+            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+            (s.decl_start >= lo && s.decl_start < hi).match ({ true => mainseen.seen_name(key).match ({ true => {
+                maindup = a.madd_name(maindup, key)
+            }, false => {
+                mainseen = a.madd_name(mainseen, key)
+            } }), false => nonmain.seen_name(key).match ({ true => { }, false => {
+                nonmain = a.madd_name(nonmain, key)
+            } }) })
+        } })
+    })
+    out := a.gstr_string(64)
+    syms.loop((h, i, s) {
+        (s.imported || s.foreign || s.is_type).match ({ true => { }, false => {
+            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+            inmain := s.decl_start >= lo && s.decl_start < hi
+            once := mainseen.seen_name(key) && maindup.seen_name(key).match ({ true => false, false => true })
+            unimported := imported.seen_name(key).match ({ true => false, false => true })
+            free := allnames.seen_name(a.shadow_mangled(key)).match ({ true => false, false => true })
+            fresh := out.seen_name(key).match ({ true => false, false => true })
+            (inmain && once && nonmain.seen_name(key) && unimported && free && fresh).match ({ true => {
+                out = a.madd_name(out, key)
+            }, false => { } })
+        } })
+    })
+    out
+}
+ShadowFlat*: {
+    flat: str,
+    bodyend: i64,
+}
+// Given the pre-dedup flat, rename the user's colliding decls in the body region [lo,hi) and return the
+// rewritten flat plus the shifted body end. `enable` is false for internal sources (byte-identical no-op).
+shadow_flat = (a: MutPtr<Malloc>, pre: str, mainsrc: str, lo: i64, hi: i64, enable: bool) ShadowFlat {
+    enable.match ({ true => {
+        names := a.shadow_rename_set(pre, mainsrc, lo, hi)
+        (names.len == 0).match ({ true => ShadowFlat(
+            flat: pre,
+            bodyend: hi,
+        ), false => {
+            main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
+            rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
+            nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
+            ShadowFlat(
+                flat: nf,
+                bodyend: lo + rewS.len,
+            )
+        } })
+    }, false => ShadowFlat(
+        flat: pre,
+        bodyend: hi,
+    ) })
+}
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
@@ -1949,12 +2040,14 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str
         out: body,
         useen: ns.c.useen,
     ))
-    flat := a.dedup_impls(a.dedup_decls_mode(cN.out.gstr_finish(a), nsl, body.len, inpath.internal_source_path()))
+    internal := inpath.internal_source_path()
+    sf := a.shadow_flat(cN.out.gstr_finish(a), mainsrc, nsl, body.len, internal.match ({ true => false, false => true }))
+    flat := a.dedup_impls(a.dedup_decls_mode(sf.flat, nsl, sf.bodyend, internal))
     ResolvedProgram(
         table: table,
         flat: flat,
         body_start: nsl,
-        body_end: body.len,
+        body_end: sf.bodyend,
     )
 }
 resolve_program* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) str { a.resolve_program_data(root, progdir, inpath, mainsrc).flat }
