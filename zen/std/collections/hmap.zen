@@ -56,6 +56,8 @@
 { Result, IoError, Opt } = std.core.result
 { Allocator, try_acquire } = std.mem.alloc
 { eq, view } = std.text.str
+{ Rt, current } = std.rt    // ambient runtime capability — the AMBIENT-FORM surface below draws from it
+{ RtAlloc } = std.collections.vec    // the stored-rt → Allocator bridge (shared with vec/set)
 Hash*: {
     hash: (Self) i64,
     heq: (Self, Self) bool,
@@ -434,4 +436,76 @@ of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoErr
             err
         },
     })
+}
+// ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
+// The allocator-free twin of `HMap<K, V>`, in the exact `AVec<T>` mold (see std.collections.vec for the
+// full rationale). `AHMap<K, V>` STORES the ambient rt captured at construction and draws every later
+// allocation (grow, free) from THAT rt via an `RtAlloc` bridge — it never re-reads `current()` per op, so
+// an AHMap is safe to outlive the scope it was born in (re-reading would cross-allocator-free on grow).
+// Everything above (the explicit `HMap<K, V>` + `of(a, …)`/`m.put(a, k, v)`/`m.free(a)` forms) is
+// UNCHANGED; this section only adds new names on a new type. This is ALSO the user-facing ambient MAP:
+// `AHMap<str, V>` is the generic equivalent of the str-keyed `Map<T>` (which stays compiler-internal).
+//
+//   m := hmap.from("the", 1)           // seed one pair; K/V inferred → AHMap<str, i32>, chains
+//   m  = m.put("cat", 2)               // no allocator — bytes from the stored rt
+//   m  = m.put("the", 9)               // upsert
+//   m.get("the")                       // Opt<i32>: .Some(9)
+//   m.get_or("dog", 0)                 // 0
+//   m  = m.delete("the")
+//   m.each((k, v){ ... })   n := m.len()
+//   m.free()
+//
+//   e: hmap.AHMap<str, i64> := hmap.new()   // empty; K/V from the annotation (nothing to infer)
+//
+// Ambient ops are FAIL-FAST on OOM (`.expect`); the explicit `HMap` API keeps allocation failure as a
+// `Result<_, IoError>` value.
+AHMap*<K, V>: {
+    inner: HMap<K, V>,
+    rt: Rt,
+    len = (w: AHMap<K, V>) i64 { w.inner.len() }
+    has = (w: AHMap<K, V>, k: K) bool { w.inner.has(k) }
+    get = (w: AHMap<K, V>, k: K) Opt<V> { w.inner.get(k) }
+    get_or = (w: AHMap<K, V>, k: K, dflt: V) V { w.inner.get_or(k, dflt) }
+    each = (w: AHMap<K, V>, f: (K, V) void) void { w.inner.each(f) }
+    put = (w: AHMap<K, V>, k: K, v: V) AHMap<K, V> {
+        ra := RtAlloc(r: w.rt)
+        AHMap<K, V>(
+            inner: w.inner.put(ra.addr(), k, v).expect("hmap.put: out of memory"),
+            rt: w.rt,
+        )
+    }
+    delete = (w: AHMap<K, V>, k: K) AHMap<K, V> {
+        AHMap<K, V>(
+            inner: w.inner.delete(k),
+            rt: w.rt,
+        )
+    }
+    free = (w: AHMap<K, V>) void {
+        ra := RtAlloc(r: w.rt)
+        w.inner.free(ra.addr())
+    }
+}
+// a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
+// annotation: `e: AHMap<str, i64> := hmap.new()`. The ambient rt is captured HERE and stored.
+new*<K, V> = () AHMap<K, V> {
+    r := current()
+    ra := RtAlloc(r: r)
+    ir: Result<HMap<K, V>, IoError> := empty(ra.addr())
+    AHMap<K, V>(
+        inner: ir.expect("hmap.new: out of memory"),
+        rt: r,
+    )
+}
+// an ambient `AHMap<K, V>` seeded with one pair (mirrors `HMap.of`'s shape — there is no pair-slice
+// literal, so `from` takes the pair directly). K/V are inferred from the seed, so this CHAINS:
+// `m := hmap.from(k, v)`. Fail-fast on OOM. (Named `from`, not `of`, since module `of` is the explicit
+// allocator-threaded seed constructor.)
+from*<K, V> = (k: K, v: V) AHMap<K, V> {
+    r := current()
+    ra := RtAlloc(r: r)
+    ih: HMap<K, V> := of(ra.addr(), k, v).expect("hmap.from: out of memory")
+    AHMap<K, V>(
+        inner: ih,
+        rt: r,
+    )
 }
