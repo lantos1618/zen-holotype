@@ -1,7 +1,15 @@
 // actor_demo.zen - typed chat-room actor with a one-shot reply channel.
+//
 //   $ zenc run examples/actor_demo.zen
+//   after alice joined:   online=1 posted=0
+//   after bob + a message: online=2 posted=1
+//   ok
+//
+// Spawn an actor holding ChatRoom state, `send` it Join/Say messages, and `request`
+// its stats back over a one-shot ReplyRef — then print what came back.
 { to_exit } = std.core.bool
 { Result, IoError, expect } = std.core.result
+{ formatln, arg_int, println } = std.text.fmt
 alloc = std.mem.heap
 actor = std.concurrent.actor
 SayArgs*: {
@@ -73,9 +81,13 @@ main = () i32 {
     room := a.chat_room()
     room.join("alice")
     first := room.stats()
+    // formatln is non-generic, so it sidesteps the #40 generic-println hole.
+    formatln("after alice joined:   online={} posted={}", [arg_int(to_i64(first.online)), arg_int(to_i64(first.posted))])
     room.simulate_chat()
     second := room.stats()
+    formatln("after bob + a message: online={} posted={}", [arg_int(to_i64(second.online)), arg_int(to_i64(second.posted))])
     room.free()
     ok := first.online == 1 && first.posted == 0 && second.online == 2 && second.posted == 1
+    ok.match ({ true => println("ok"), false => println("MISMATCH") })
     ok.to_exit()
 }
