@@ -166,10 +166,10 @@ EXPECTED: += supported, or a clear in-body 'unknown operator +=' message.
 **Repro:** `./zenc --help` lists no `js`; genjs.zen absent from bootstrap/sources.txt; `grep -c genModuleJs bootstrap/zenc.gen.c` → 0. Only live refs: tests/oracle_misc.zen corpus + tests/test_genjs.py.
 **Fix-sketch:** Delete genjs.zen + test_genjs.py, drop from oracle_misc.zen corpus lists. If JS is a real goal, move to a branch.
 
-### L9. Int-format/string-escape/byte-fetch helper families copy-pasted across genc_emit/genfmt/genjs/diagnostic
+### L9. Int-format/string-escape/byte-fetch helper families copy-pasted across genc_emit/pretty/genjs/diagnostic
 **dim:** redundancy · sev/value medium/low · compiler-core (multiple gen files)
-**Repro:** `byte = (v,i) { load(offset(v,i)) }` verbatim 4× (sbyte/dsbyte/ffbyte/jsbyte); `digit` 4×; gen_int/gen_int_neg/gen_int_nat byte-identical to ff_int* except prefix+append-method; genfmt's ff_append/ff_push are pass-through wrappers over genc's gstr_append/gstr_push on the SAME String type.
-**Fix-sketch:** Promote sbyte/digit/gen_int*/gen_strlit/gen_escape* to public in genc; genfmt imports them, delete ff_* copies; diagnostic reuses too. (genjs copies vanish with L8.) Do AFTER L8.
+**Repro:** `byte = (v,i) { load(offset(v,i)) }` verbatim 4× (sbyte/dsbyte/ffbyte/jsbyte); `digit` 4×; gen_int/gen_int_neg/gen_int_nat byte-identical to ff_int* except prefix+append-method; pretty's ff_append/ff_push are pass-through wrappers over genc's gstr_append/gstr_push on the SAME String type.
+**Fix-sketch:** Promote sbyte/digit/gen_int*/gen_strlit/gen_escape* to public in genc; pretty imports them, delete ff_* copies; diagnostic reuses too. (genjs copies vanish with L8.) Do AFTER L8.
 
 ### L10. `zenc run` prints the entire generated C source (~58KB one line) to stderr on any cc error
 **dim:** codegen · sev/value low/medium · parallel-safe (driver.zen)
@@ -214,4 +214,4 @@ EXPECTED: += supported, or a clear in-body 'unknown operator +=' message.
 ## Needs verification
 *(All 30 findings were tagged `confidence: verified` by the scouts; none are speculative or unverified, so this list is empty.)* The only forward-looking/unproven claims embedded in otherwise-verified findings, flagged for confirmation before acting:
 - **#7 / scout-ergo #25 deep fix:** the stdlib comment's claim that true variadic `{}` interpolation is blocked on cross-module generic+struct-param dispatch — verify whether a `{}` special-case can ship without that compiler work (the interim `fmt2/fmt3` path needs no verification).
-- **L9 redundancy collapse:** verify genfmt's ff_append/ff_push truly share genc's exact `String` type at link time (scout asserts they do) before deleting the ff_* triad — a one-shot `make` + fixpoint check gates this.
+- **L9 redundancy collapse:** verify pretty's ff_append/ff_push truly share genc's exact `String` type at link time (scout asserts they do) before deleting the ff_* triad — a one-shot `make` + fixpoint check gates this.

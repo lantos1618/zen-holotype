@@ -217,7 +217,7 @@ This is rough around the edges. Known limits worth flagging up front:
 | `zen/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
 | `zen/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
 | `zen/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
-| `zen/compiler/genfmt.zen` | the `zenc fmt` formatter over the same AST |
+| `zen/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
 | `zen/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
 | `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` + `Makefile` |

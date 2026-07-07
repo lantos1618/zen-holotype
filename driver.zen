@@ -14,7 +14,7 @@
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, denrich_check, desc_or } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
-{ genfmt_module_in, genfmt_set_comments } = compiler.genfmt
+{ pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists } = std.internal.resolve
 say = (s: str) i64 {
@@ -494,7 +494,7 @@ doc_cmd = (mp: MutPtr<Malloc>, root: str, modarg: str) i32 {
         },
     }) })
 }
-// ── THE formatter: the AST pretty-printer (compiler.genfmt) with source comments woven back in. ──────
+// ── THE formatter: the AST pretty-printer (compiler.pretty) with source comments woven back in. ──────
 // (The old line-reindenter — fmt_source/fmt_lines/fmt_scan/fmt_indent — has been RETIRED: it only
 //  reindented + trimmed, never reflowed multi-arm matches, and overflowed the stack on big files. The
 //  AST pretty-printer below is now the single formatter behind `zenc fmt`.)
@@ -524,8 +524,8 @@ fmt_render = (mp: MutPtr<Malloc>, src: str) FmtResult {
         ok: false,
     ), false => {
         exps := exports_get()    // the `*` export markers parse_module recorded
-        genfmt_set_comments(src, mp.collect_comments(src))    // weave source comments back in
-        o := mp.genfmt_module_in(decls, exps)
+        pretty_set_comments(src, mp.collect_comments(src))    // weave source comments back in
+        o := mp.pretty_module_in(decls, exps)
         FmtResult(
             text: o.gstr_finish(mp),
             len: o.len,
@@ -537,13 +537,25 @@ fmt_parse_err = (mp: MutPtr<Malloc>) i32 {
     derr("zenc: fmt: cannot format (syntax error — a faithful formatter refuses a file it cannot represent)\n")
     1
 }
+// THE single source of truth for "would apply rewrite this file?" — a file is dirty iff the formatted
+// text differs from the source byte-for-byte. BOTH the `--check` and apply branches of `fmt_file` gate
+// on this, so `fmt --check X` reports dirty iff `fmt X` would rewrite X — the two can never drift apart.
+// The two length gates kill the strcmp/NUL blind spot: `src` is the file bytes (NUL-free) and `r.len` is
+// the formatter's true byte count, so `strlen(src) != r.len` OR `strlen(r.text) != r.len` (an embedded
+// NUL shortening the C string) both flag dirty; once all three lengths agree the content is NUL-free and
+// equal-length, so `eq` (strcmp) then compares every one of the r.len bytes — a full byte-for-byte match.
+fmt_dirty = (src: str, r: FmtResult) bool {
+    sv := src.view()
+    rv := r.text.view()
+    (sv.len != r.len).match ({ true => true, false => (rv.len != r.len).match ({ true => true, false => eq(src, r.text).match ({ true => false, false => true }) }) })
+}
 // `zenc fmt [--check] <file>`: format IN PLACE (or, with --check, exit 1 when the file is not already
 // formatted, writing nothing). Idempotent — formatting an already-formatted file is a no-op.
 fmt_file = (mp: MutPtr<Malloc>, path: str, check: bool) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
             r := mp.fmt_render(src)
-            r.ok.match ({ true => eq(src, r.text).match ({ true => 0, false => check.match ({ true => {
+            r.ok.match ({ true => fmt_dirty(src, r).match ({ true => check.match ({ true => {
                 derr("zenc: ")
                 derr(path)
                 derr(": needs formatting\n")
@@ -551,7 +563,7 @@ fmt_file = (mp: MutPtr<Malloc>, path: str, check: bool) i32 {
             }, false => save(path, r.text, r.len).match ({
                 .Ok(n)  => 0,
                 .Err(e) => 1,
-            }) }) }), false => mp.fmt_parse_err() })
+            }) }), false => 0 }), false => mp.fmt_parse_err() })
         },
         .Err(e)  => {
             derr("zenc: fmt: cannot open input\n")

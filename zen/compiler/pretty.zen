@@ -1,6 +1,6 @@
-// compiler.genfmt — an AST pretty-printer (canonical Zen text) over the shared genc AST.  @self-hosted-only
+// compiler.pretty — an AST pretty-printer (canonical Zen text) over the shared genc AST.  @self-hosted-only
 //
-// Unlike genc_emit/genjs (which consume the LOWERED AST), genfmt consumes the FAITHFUL parse_module
+// Unlike genc_emit/genjs (which consume the LOWERED AST), pretty consumes the FAITHFUL parse_module
 // output — the parser keeps `recv.method(args)` as a `MethodCall` node, so the formatter prints it back
 // as `recv.method(args)` with the UFCS surface syntax PRESERVED (the whole point: `s.len()` formats as
 // `s.len()`, never the flattened `len(s)`).
@@ -30,10 +30,10 @@ gf_cmts := gf_no_cmts()
 gf_idx := 0
 // the source offset where the current top-level decl ENDS (= the next decl's position). Used as the
 // drain boundary for a body's LAST statement, so its interior comments drain up to the decl end but NEVER
-// past it into the following decl. Set per top-level decl in genfmt_module_in; 0 = the final decl.
+// past it into the following decl. Set per top-level decl in pretty_module_in; 0 = the final decl.
 gf_block_end := 0
-genfmt_set_block_end* = (e: i32) void { gf_block_end = e }
-genfmt_set_comments* = (src: str, cmts: [Comment]) void {
+pretty_set_block_end* = (e: i32) void { gf_block_end = e }
+pretty_set_comments* = (src: str, cmts: [Comment]) void {
     gf_src = src
     gf_cmts = cmts
     gf_idx = 0
@@ -779,12 +779,12 @@ ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
 }
 // ── module: each decl on its own line; hoisted methods + inherent-impl markers are skipped (their
 // bodies print inside the owning struct / trait impl instead). ───────────────────────────────────
-genfmt_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
+pretty_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
     s := a.ff_string(8192)
     out := s
     decls.loop((h, i, d) {
         nb := gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
-        genfmt_set_block_end(nb)    // bound this decl's body last-stmt drain to the decl end
+        pretty_set_block_end(nb)    // bound this decl's body last-stmt drain to the decl end
         d.match ({
             .DFunc(f)  => a.ff_is_hoisted(decls, f.name).match ({ false => {
                 out = a.ff_top_decl(out, exp, decls, d, nb)
@@ -817,7 +817,7 @@ ff_top_decl = (a: MutPtr<Malloc>, s: String, exp: [Param], decls: [Decl], d: Dec
     withc.ff_append(a, "\n")
 }    // comments between decls are LEADING for the next decl
 // compatibility shim (default heap allocator, no export markers)
-genfmt_module* = (decls: [Decl]) String {
+pretty_module* = (decls: [Decl]) String {
     a := Malloc(_: 0)
-    a.addr().genfmt_module_in(decls, ff_no_params())
+    a.addr().pretty_module_in(decls, ff_no_params())
 }

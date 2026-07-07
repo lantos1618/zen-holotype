@@ -12,7 +12,7 @@ they are a **fiction**. All three parse to a single `Ty.Ptr` AST node
 distinction exists only in the programmer's head and in naming convention. The most
 dangerous consequence: **`zenc fmt` silently rewrites every `MutPtr<T>` and `RawPtr<T>`
 to `Ptr<T>`** (verified below), because the formatter's `ff_ty` arm has no kind to
-preserve (`zen/compiler/genfmt.zen:223`). Running the formatter erases mutability and
+preserve (`zen/compiler/pretty.zen:223`). Running the formatter erases mutability and
 nullability intent across the whole tree. This doc designs making the three kinds
 **distinct, carried through the AST, preserved by the formatter, and (progressively)
 enforced by the checker** — a frontend-only change that leaves the emitted C and the
@@ -56,7 +56,7 @@ Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text
 (`:385`).
 
 ### 2.3 Formatter — always prints `Ptr`
-`zen/compiler/genfmt.zen:223`:
+`zen/compiler/pretty.zen:223`:
 ```
 .Ptr(p) => s.ff_append(a, "Ptr<").ff_ty(a, load(p)).ff_append(a, ">"),
 ```
@@ -90,8 +90,8 @@ migrates source spellings; those re-format but still emit identical C.)
 - Intrinsic arities/recognition for `load`/`store`/`addr`/`offset` live in
   `zen/compiler/check_validate.zen:235-270`.
 
-`Ty.Ptr` is matched in ~25–30 arms across genc / genfmt / check / check_validate /
-resolve / ast. (Full grep list: genc.zen 278/289/305/457/474/485/508; genfmt.zen 223;
+`Ty.Ptr` is matched in ~25–30 arms across genc / pretty / check / check_validate /
+resolve / ast. (Full grep list: genc.zen 278/289/305/457/474/485/508; pretty.zen 223;
 check.zen 158/162/163/186/333/398/1591/2583/2591/2592/568; check_validate.zen 33/61/186;
 plus std/internal/ast.zen, resolve.zen mirror copies.) This count drives the AST-shape
 decision in §4.
@@ -127,7 +127,7 @@ Two options:
 
 **(A) Three variants** — `Ty: … | Ptr(Ptr<Ty>) | MutPtr(Ptr<Ty>) | RawPtr(Ptr<Ty>) | …`.
 Rejected: every one of the ~25–30 `.Ptr(p)` match arms becomes three arms (or risks
-non-exhaustive match → checker error), across genc mangling, cname, gen_ty, genfmt,
+non-exhaustive match → checker error), across genc mangling, cname, gen_ty, pretty,
 unify, ty_eq, pointee_of, etc. Maximally invasive; touches codegen we want to leave inert.
 
 **(B) Kind tag on the existing variant — RECOMMENDED.**
@@ -144,7 +144,7 @@ ptr_pointee* = (pd: PtrData) Ptr<Ty> { pd.pointee }
 ```
 Then every existing `.Ptr(p) => … load(p) …` arm becomes `.Ptr(pd) => … load(pd.pointee) …`
 — a **mechanical, structure-preserving rename** at each site, the match shape is
-unchanged, and codegen ignores `pd.kind` entirely. Only `genfmt` and the new checker
+unchanged, and codegen ignores `pd.kind` entirely. Only `pretty` and the new checker
 rules read `pd.kind`.
 
 Parser change (`parse_ptr_ty`, `parse_type.zen:326-331`): pass the keyword through.
@@ -158,7 +158,7 @@ is_ptr_kw stays, but parse_ptr_ty learns which keyword fired:
 (Mechanically: `parse_ty` at `:143-144` currently discards `tt.tok` for the ptr case; it
 must hand the head token to `parse_ptr_ty` so the keyword is classifiable.)
 
-Formatter change (`genfmt.zen:223`):
+Formatter change (`pretty.zen:223`):
 ```
 .Ptr(pd) => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a,"<").ff_ty(a, load(pd.pointee)).ff_append(a,">"),
 where ptr_kw(kRawPtr)="RawPtr"  ptr_kw(kPtr)="Ptr"  ptr_kw(kMutPtr)="MutPtr"
@@ -282,11 +282,11 @@ is_nullable_ptr(t) bool     // kind == kRawPtr
 ### Stage 0 — AST + constructors (no behavior change)
 Add `PtrData{pointee,kind}`, `kRawPtr/kPtr/kMutPtr`, `tptr`/`tptr_k`; mechanically rename
 ~25–30 `.Ptr(p)` arms to `.Ptr(pd) … pd.pointee`. Parser still tags everything `kMutPtr`
-(or whatever `tptr` defaults to). genfmt still prints `Ptr<`. **Seed byte-identical;
+(or whatever `tptr` defaults to). pretty still prints `Ptr<`. **Seed byte-identical;
 oracle green.** Pure refactor.
 
 ### Stage 1 — preserve the kinds (THE high-value fix)
-Parser reads the keyword → correct `kind`. genfmt prints `ptr_kw(kind)`. **No checking yet
+Parser reads the keyword → correct `kind`. pretty prints `ptr_kw(kind)`. **No checking yet
 — kinds remain fully interchangeable in `fits`/`ty_eq`.** Plus: fix the formatter
 comment-relocation bug (see §10 / OQ-2 — repro needed) in the same formatter pass.
 Result: **`zenc fmt` stops erasing `MutPtr`/`RawPtr`.** Re-format the whole tree once; the
@@ -343,7 +343,7 @@ allocator is mutated through `acquire`). Driven by Stage 2/3 diagnostics, not a 
    mutability story. Tolerable now (Zen doesn't track `let` vs `mut` immutability for
    pointers yet); note it as a known limitation, not a Stage-1–3 blocker.
 5. **Seed/regen discipline** (per the seed-commit-order rule): re-format the tree only
-   AFTER the new genfmt is in the seed, then regen + commit the seed last. A commit-then-
+   AFTER the new pretty is in the seed, then regen + commit the seed last. A commit-then-
    regen ships a stale seed that still erases kinds.
 
 ## 11. OPEN QUESTIONS for the user
