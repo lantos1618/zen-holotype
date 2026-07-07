@@ -313,6 +313,11 @@ oracle_modules_run* = () i32 {
     dedup260 := mp.join2(mp.gen_decls(260), "v0* = () i32 { 777 }\n")    // 260 + a dup v0 (final-dedup stress)
     mid700 := mp.gen_repeat("right = right\n", 700)
     edges700 := mp.joinv([z, "first = first\n", mid700, "{ last } = last\nmain = () i32 { 0 }\n"])
+    // Cross-module USER-DEFINED GENERIC fn/type resolution (#48): a generic type/fn/enum defined in one
+    // module and instantiated at a concrete type in another must resolve + monomorphize across the file
+    // boundary exactly as single-file. Pinned below via the g/base+mid/opt/bx projects: flat generic
+    // fn+type import, a TRANSITIVE generic threaded through two boundaries, a generic enum matched through
+    // its def module's generic unwrap, and a qualified-alias `bx.mk<i32>()` + inherent generic method.
     v := run_mod_values("modules value (import resolution / value)", [ModValCase(
         files: [ModFile(
             name: "b.zen",
@@ -411,6 +416,49 @@ oracle_modules_run* = () i32 {
         )],
         entry: "p.zen",
         want: 16,
+    ), ModValCase(
+        files: [ModFile(
+            name: "g.zen",
+            src: "Box*<T>: { v: T }\nwrap*<T> = (x: T) Box<T> { Box<T>(v: x) }\nunbox*<T> = (b: Box<T>) T { b.v }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ Box, wrap, unbox } = g\nmain = () i32 { b := wrap<i32>(20)\n  b.v + unbox(wrap<i32>(22)) }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "base.zen",
+            src: "Box*<T>: { v: T }\nmk*<T> = (x: T) Box<T> { Box<T>(v: x) }\n",
+        ), ModFile(
+            name: "mid.zen",
+            src: "{ Box, mk } = base\nrewrap*<T> = (x: T) Box<T> { mk<T>(x) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ rewrap } = mid\nmain = () i32 { rewrap<i32>(42).v }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "opt.zen",
+            src: "May*<T>: Jus(T) | Non\nunwrap*<T> = (m: May<T>, d: T) T { m.match({ .Jus(x) => x, .Non => d }) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ May, unwrap } = opt\nmain = () i32 { m: May<i32> := .Jus(42)\n  unwrap(m, 0) }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "bx.zen",
+            src: "Box*<T>: {\n    v: T,\n    get = (b: Box<T>) T { b.v }\n}\nmk*<T> = (x: T) Box<T> { Box<T>(v: x) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "bx = bx\nmain = () i32 { b := bx.mk<i32>(42)\n  b.get() }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
     ), ModValCase(
         files: [ModFile(
             name: "helper.zen",
