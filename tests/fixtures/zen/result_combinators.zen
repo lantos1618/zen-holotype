@@ -1,8 +1,12 @@
 // Exercises the std.core.result combinators (UFCS, exit-code observable):
-//   Result: expect (Ok path) / or / or_else / map_err
-//   Opt:    expect_some (Some path) / some_or / some_or_else / ok_or
+//   Result: expect (Ok path) / or / or_else / map_err / map / and_then / map_or
+//   Opt:    expect_some (Some path) / some_or / some_or_else / ok_or / map_some / and_then_some / map_or_some
+// Each Ok-channel combinator is hit on BOTH the Ok/Some and Err/None path.
 // expect's PANIC path lives in result_expect_panics.zen (asserted via a ShellCase: exit 134 + stderr msg).
-{ Result, Opt, IoError, expect, or, or_else, map_err, expect_some, some_or, some_or_else, ok_or } = std.core.result
+// Note (checker limitation): map_or's bare-U return does not back-infer U through a comparison,
+// so its closure is fully annotated `(v: i32) i32 { … }` to pin the type locally. map/and_then bind
+// to their concrete Result type, which pins U without closure annotation.
+{ Result, Opt, IoError, expect, or, or_else, map_err, map, and_then, map_or, expect_some, some_or, some_or_else, ok_or, map_some, and_then_some, map_or_some } = std.core.result
 { to_exit } = std.core.bool
 result_side = () bool {
     good: Result<i32, IoError> := .Ok(40)
@@ -27,7 +31,18 @@ result_side = () bool {
         .Ok(v)  => v,
         .Err(s) => 0,
     })
-    a == 40 && b == 42 && c == 3 && d == 44
+    // `map`: Ok channel maps T -> U, Err passes through untouched.
+    pg: Result<i32, IoError> := good.map((v) { v + 2 })
+    pb: Result<i32, IoError> := bad.map((v) { v + 2 })
+    e := pg.or(0) + pb.or(7)    // 42 + 7 = 49
+    // `and_then`: Ok chains into another Result, Err short-circuits.
+    cg: Result<i32, IoError> := good.and_then((v) { .Ok(v / 2) })
+    cb: Result<i32, IoError> := bad.and_then((v) { .Ok(v / 2) })
+    f := cg.or(0) + cb.or(3)    // 20 + 3 = 23
+    // `map_or`: collapses to a plain U — Ok maps, Err takes the default.
+    g := good.map_or(9, (v: i32) i32 { v + 1 })    // 41
+    h := bad.map_or(5, (v: i32) i32 { v + 1 })    // 5
+    a == 40 && b == 42 && c == 3 && d == 44 && e == 49 && f == 23 && g == 41 && h == 5
 }
 opt_side = () bool {
     some: Opt<i32> := .Some(10)
@@ -48,6 +63,17 @@ opt_side = () bool {
         .Ok(v)  => v,
         .Err(e) => 0,
     })
-    a == 10 && b == 12 && c == 3 && d == 14
+    // `map_some`: Some channel maps, None passes through.
+    ps: Opt<i32> := some.map_some((v) { v * 2 })    // Some(20)
+    pn: Opt<i32> := none.map_some((v) { v * 2 })    // None
+    e := ps.some_or(0) + pn.some_or(7)    // 27
+    // `and_then_some`: Some chains into another Opt, None short-circuits.
+    ds: Opt<i32> := some.and_then_some((v) { .Some(v + 1) })    // Some(11)
+    dn: Opt<i32> := none.and_then_some((v) { .Some(v + 1) })    // None
+    f := ds.some_or(0) + dn.some_or(3)    // 14
+    // `map_or_some`: collapses to a plain U — Some maps, None takes the default.
+    g := some.map_or_some(9, (v: i32) i32 { v + 5 })    // 15
+    h := none.map_or_some(4, (v: i32) i32 { v + 5 })    // 4
+    a == 10 && b == 12 && c == 3 && d == 14 && e == 27 && f == 14 && g == 15 && h == 4
 }
 main = () i32 { (result_side() && opt_side()).to_exit() }
