@@ -1,0 +1,100 @@
+// std.testing — a tiny VALUE-BASED unit-test surface for Zen USER code.
+//
+// WHY VALUE-RETURNING, NOT PANIC-BASED. Zen's `panic` ABORTS the process, and user code
+// cannot catch it (the only unwind is the actor scheduler's internal setjmp, not exposed to
+// programs). A panicking `assert` would therefore kill the whole test run on the first failure
+// and never reach the summary. So every assertion here RETURNS a `TestResult` — `.Pass` or
+// `.Fail(msg)` — that a `Suite` accumulates. Nothing in this module ever panics.
+//
+// SHAPE. Build a `Suite`, feed each test's result through `run` (which prints one PASS/FAIL
+// line and tallies), then return `s.exit_code()` from `main` — it is the failing-test count, so
+// the process exits nonzero iff something failed (the usual unix test convention).
+//
+//   { suite, assert_eq, assert_true } = std.testing
+//   main = () i32 {
+//       s := suite()
+//       s = s.run("adds",   assert_eq(2 + 2, 4, "2+2 should be 4"))
+//       s = s.run("truthy", assert_true(1 < 2, "1 < 2"))
+//       s.done()                 // prints "ok: N passed, M failed"
+//       s.exit_code()            // 0 if all passed, else M (>0)
+//   }
+//
+// The `assert_eq<T>` bound is the `Eq` trait below; impls for i64/i32/u8/bool/str ship here, so
+// scalars and strings compare out of the box. A struct becomes comparable with one impl:
+//
+//   Pt: { x: i64, y: i64 }
+//   Pt.impl(Eq, { eq = (a: Pt, b: Pt) bool { a.x == b.x && a.y == b.y } })
+{ formatln, arg_str, arg_int } = std.text.fmt
+strm = std.text.str    // qualified so the str byte-eq below never shadows our own `eq` trait method
+// A single assertion's outcome. `.Fail` carries the human message printed on the FAIL line.
+TestResult*: Pass | Fail(str)
+// Value equality for assert_eq. Any type that impls `eq` (below) can be asserted-equal.
+Eq*: {
+    eq: (Self, Self) bool,
+}
+i64.impl(Eq, {
+    eq = (a: i64, b: i64) bool { a == b }
+})
+i32.impl(Eq, {
+    eq = (a: i32, b: i32) bool { a == b }
+})
+u8.impl(Eq, {
+    eq = (a: u8, b: u8) bool { a == b }
+})
+// bool equality via match (no reliance on `==` over bool).
+bool.impl(Eq, {
+    eq = (a: bool, b: bool) bool { a.match ({ true => b, false => b.match ({ true => false, false => true }) }) }
+})
+// str compares BYTE-WISE (str `==` compares pointers) — delegate to std.text.str.eq.
+str.impl(Eq, {
+    eq = (a: str, b: str) bool { strm.eq(a, b) }
+})
+// ── assertions: each returns a TestResult, never panics ──────────────────────
+// Core assertion: `cond` holds → Pass; otherwise Fail carrying `msg`.
+assert* = (cond: bool, msg: str) TestResult { cond.match ({ true => .Pass, false => .Fail(msg) }) }
+// `cond` must be true.
+assert_true* = (cond: bool, msg: str) TestResult { assert(cond, msg) }
+// `cond` must be false.
+assert_false* = (cond: bool, msg: str) TestResult { assert(cond.match ({ true => false, false => true }), msg) }
+// `got` must equal `want` under the `Eq` trait.
+assert_eq*<T: Eq> = (got: T, want: T, msg: str) TestResult { assert(got.eq(want), msg) }
+// ── the suite: accumulate counts, print PASS/FAIL per test, report an exit code ─
+Suite*: {
+    passed: i64,
+    failed: i64,
+    run = (s: Suite, name: str, r: TestResult) Suite {
+        // Run one named test result: print `PASS <name>` or `FAIL <name>: <msg>`, tally, and
+        // return the updated suite (value-mold — rebind: `s = s.run(...)`).
+        r.match ({
+            .Pass      => {
+                formatln("PASS {}", [arg_str(name)])
+                Suite(
+                    passed: s.passed + 1,
+                    failed: s.failed,
+                )
+            },
+            .Fail(msg) => {
+                formatln("FAIL {}: {}", [arg_str(name), arg_str(msg)])
+                Suite(
+                    passed: s.passed,
+                    failed: s.failed + 1,
+                )
+            },
+        })
+    }
+    done = (s: Suite) i64 {
+        // Print a one-line summary: `ok: <passed> passed, <failed> failed`.
+        formatln("ok: {} passed, {} failed", [arg_int(s.passed), arg_int(s.failed)])
+    }
+    exit_code = (s: Suite) i32 {
+        // The process exit code: the failing-test count (0 iff every test passed).
+        to_i32(s.failed)
+    }
+}
+// A fresh, empty suite.
+suite* = () Suite {
+    Suite(
+        passed: 0,
+        failed: 0,
+    )
+}
