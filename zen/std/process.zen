@@ -1,0 +1,107 @@
+// std.process — run a subprocess and CAPTURE its stdout + exit code.
+//
+// std.io.file.shell(cmd) is the thin floor: it forwards to system(3) and hands back only the raw
+// wait status — no output, no decoded exit code. std.process is the capturing layer on top:
+//
+//   { run, run_ok, Output } = std.process
+//   a.run("printf hello")   // Result<Output, IoError> — Output{ stdout: "hello", exit: 0 }
+//   a.run_ok("mkdir -p x")  // Result<str, IoError>     — the stdout, or .Err on a nonzero exit
+//
+// MECHANISM: popen(cmd, "r") launches `cmd` via /bin/sh with its stdout wired to a pipe we read; a
+// recursive fgets loop drains the pipe into an allocator-owned std.text.string.String (the same
+// grow-on-demand builder std.io.stdin.read_all uses — recursion, not `@while`, keeps process.zen out
+// of the compiler's `@while` allowlist). pclose closes the pipe and reaps the child, returning its
+// wait status; `decode_exit` unpacks that into a plain exit code (WEXITSTATUS, or 128+signal when the
+// child was killed). Every failure — popen returning NULL, an allocation shortfall mid-read, or
+// pclose's -1 — comes back as a Result value; nothing here panics.
+//
+// The captured stdout is a NUL-terminated str, so output containing embedded NUL bytes truncates at
+// the first one (the `str` floor, exactly as std.io.stdin.read_all documents). fgets preserves the
+// stream's own newlines. stderr is left on the parent's stderr — this captures stdout only, the
+// minimal-viable shape; a stderr-capturing variant would need fork+exec+pipe rather than popen.
+{ popen, pclose, fgets } = std.c.libc
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError, ok, err } = std.core.result
+{ String, init, append_in, finish_in } = std.text.string
+// fgets reads at most CHUNK-1 bytes per call (stopping at a newline), NUL-terminating the buffer; the
+// recursive loop reassembles the full stream across calls, so this is a throughput knob, not a cap.
+CHUNK := 4096
+// A finished subprocess: its captured stdout and decoded exit code.
+Output*: {
+    stdout: str,
+    exit: i64,
+}
+// Decode a pclose/waitpid status into a plain exit code: WEXITSTATUS (`status >> 8 & 0xff`) for a
+// normal exit, or 128 + signal number when the child was terminated by a signal (the low 7 bits).
+decode_exit = (status: i64) i64 {
+    sig := status & 127
+    (sig == 0).match ({ true => status >> 8 & 255, false => 128 + sig })
+}
+// Drain the pipe `f` into builder `s`, one fgets chunk at a time (recursive — no `@while`). fgets
+// returns NULL at end-of-stream; each non-NULL chunk is a NUL-terminated str appended onto `s`.
+drain<A> = (a: MutPtr<A>, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
+    got := chunk.fgets(to_i32(CHUNK), f)
+    (got == null_ptr()).match ({ true => ok(s), false => a.append_in(s, cstr(chunk)).match ({
+        .Ok(ns) => a.drain(f, chunk, ns),
+        .Err(e) => err(e),
+    }) })
+}
+// Read the whole pipe into an owned str, close/reap the child, and pair the stdout with its exit code.
+// Split out of `run` so the popen NULL-guard stays a one-liner.
+capture<A> = (a: MutPtr<A>, f: RawPtr<u8>) Result<Output, IoError> {
+    a.try_acquire(CHUNK).match ({
+        .Err(e)    => {
+            f.pclose()
+            err(e)
+        },
+        .Ok(chunk) => a.init(CHUNK).match ({
+            .Err(e) => {
+                a.release(chunk)
+                f.pclose()
+                err(e)
+            },
+            .Ok(s0) => {
+                out: Result<Output, IoError> := a.drain(f, chunk, s0).match ({
+                    .Err(e) => {
+                        a.release(chunk)
+                        f.pclose()
+                        err(e)
+                    },
+                    .Ok(s)  => a.finish_in(s).match ({
+                        .Err(e)   => {
+                            a.release(chunk)
+                            f.pclose()
+                            err(e)
+                        },
+                        .Ok(text) => {
+                            a.release(chunk)
+                            status := to_i64(f.pclose())
+                            (status < 0).match ({ true => err(IoError.Errno(0 - 1)), false => ok(Output(
+                                stdout: text,
+                                exit: status.decode_exit(),
+                            )) })
+                        },
+                    }),
+                })
+                out
+            },
+        }),
+    })
+}
+// Run `cmd` (via /bin/sh), capturing its stdout and exit code into an Output. `.Err(.NotFound)` when
+// the pipe can't be opened; `.Err(.Errno(-1))` when pclose fails to reap the child. The returned
+// `stdout` is allocator-owned — release it via `a.release(out.stdout.view().ptr)` (or let an arena
+// reclaim it). A nonzero exit is NOT an error here: it rides back in `Output.exit` for the caller to
+// inspect (use `run_ok` when a nonzero exit should be an error).
+run*<A> = (a: MutPtr<A>, cmd: str) Result<Output, IoError> {
+    f := cmd.popen("r")
+    (f == null_ptr()).match ({ true => err(IoError.NotFound), false => a.capture(f) })
+}
+// Convenience: run `cmd` and return its stdout, treating a nonzero exit as `.Err(.Errno(code))`. For
+// commands run purely for their output, where a failure should short-circuit the Result chain.
+run_ok*<A> = (a: MutPtr<A>, cmd: str) Result<str, IoError> {
+    a.run(cmd).match ({
+        .Err(e) => err(e),
+        .Ok(o)  => (o.exit == 0).match ({ true => ok(o.stdout), false => err(IoError.Errno(to_i32(o.exit))) }),
+    })
+}
