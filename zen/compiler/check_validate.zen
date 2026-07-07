@@ -3890,6 +3890,76 @@ check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
+// ── BATCH diagnostics (report ALL type errors, not just the first) ──────────────────────────────
+// The kind layer above folds to the FIRST error via kv_kor; batch mode instead APPENDS each unit's
+// first error into a fixed-cap packed buffer, recovering at natural boundaries — one error per
+// top-level statement inside a function, then per decl across the module. The inner recursion is
+// unchanged (still first-error within a statement / expression), so a single root cause never
+// cascades: after a statement errs we resume at the next statement, after a decl at the next decl.
+// Consumers unpack each entry with the same `& 63` / `>> 6` scheme (check_diagnostic_from_source).
+KDIAG_CAP = () i32 { 512 }
+kdiag_buf = (a: MutPtr<Malloc>) [i32] { slice(a.acquire(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP()) }
+// already collected? (dedup: two channels can position the same packed kind at one site)
+kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
+    found := false
+    buf.loop((h, i, e) {
+        found = (i < cnt).match ({ true => (e == packed).match ({ true => true, false => found }), false => found })
+    })
+    found
+}
+// append `packed` unless it is 0 (no error), a duplicate, or the buffer is full; return the new count.
+kdiag_add = (buf: [i32], cnt: i32, packed: i32) i32 {
+    (packed == 0 || cnt >= buf.len || buf.kdiag_seen(cnt, packed)).match ({ true => cnt, false => {
+        buf[cnt] = packed
+        cnt + 1
+    } })
+}
+// one function's errors, per top-level statement (mirrors kv_check_func_kind but appends each stmt's
+// first error rather than folding to the first). The trailing-value check is anchored on the fn name.
+kv_check_func_kind_all = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, buf: [i32], cnt: i32) i32 {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    c := cnt
+    e := env
+    f.body.loop((h, i, st) {
+        c = buf.kdiag_add(c, a.kv_check_stmt_kind(e, st))
+        e = a.extend_env(e, st)
+    })
+    buf.kdiag_add(c, env.kv_trailing_kind(f.body).kv_at(f.pos))
+}
+// every main-channel error in the module, in traversal order: dup-fn names, then each decl (per
+// statement for functions, one each for impls / parse sentinels). `cnt` seeds the running count.
+check_module_kind_all = (a: MutPtr<Malloc>, decls: [Decl], buf: [i32], cnt: i32) i32 {
+    idx := a.build_decl_index(decls)
+    c := buf.kdiag_add(cnt, decls.kv_dup_name_kind())
+    decls.loop((h, i, d) {
+        c = d.match ({
+            .DFunc(f)   => a.kv_check_func_kind_all(decls, idx, f, buf, c),
+            .DImpl(im)  => buf.kdiag_add(c, a.kv_impl_kind(decls, im)),
+            .DGlobal(g) => buf.kdiag_add(c, parse_sentinel_kind(g.name, g.init)),
+            _           => c,
+        })
+    })
+    c
+}
+// the batch as source-positioned CheckDiagnostics (count 1 each — the "(+K more)" trailer is the
+// driver's, printed once after the cap). An empty slice means the main channel is clean.
+check_module_batch* = (a: MutPtr<Malloc>, decls: [Decl], src: str) [CheckDiagnostic] {
+    buf := a.kdiag_buf()
+    cnt := a.check_module_kind_all(decls, buf, 0)
+    out := slice(a.acquire(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
+    buf.loop((h, i, p) {
+        (i < to_i64(cnt)).match ({ true => {
+            out[i] = src.check_diagnostic_from_source(p, 1)
+        } })
+    })
+    out
+}
 // the parse-sentinel diagnostic ALONE (KPARSE/KVBREAK from __syntax_error; none if the module
 // parsed cleanly): the driver reports it FIRST — a syntax error precedes (and usually CAUSES) any
 // downstream type error in the same module, so it must not be shadowed by one.

@@ -12,7 +12,7 @@
 { perr_get } = compiler.parse_type
 { lerr_get, collect_comments } = compiler.lex
 { resolve_module } = compiler.check
-{ CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, denrich_check, desc_or } = compiler.check_validate
+{ CheckDiagnostic, check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, check_module_batch, denrich_check, desc_or } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
@@ -30,7 +30,13 @@ derr = (s: str) i64 {
 // precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
 // free, so running them all is harmless; the reported diagnostic is still the first failure in order.
 cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic { (a.code == 0).match ({ true => b, false => a }) }
-check_diag = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDiagnostic { mp.check_module_parse_diagnostic_from_source(decls, flat).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_diagnostic_from_source(decls, flat)) }    // scope-derived value escapes
+// the SPECIALIZED channels only (parse / ownership / escape / sendability / bound / … — every check
+// EXCEPT the main type channel). If one fires it is the ROOT of the rejection: reported alone, so a
+// downstream cascade of type errors from the same cause is suppressed. The main channel (names /
+// types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
+// INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
+// batch (the flat sentinels would otherwise spray bogus type errors).
+check_diag_no_main = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDiagnostic { mp.check_module_parse_diagnostic_from_source(decls, flat).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)) }    // scope-derived value escapes
 RenderTarget*: {
     path: str,
     src: str,
@@ -61,15 +67,43 @@ pick_render = (rp: ResolvedProgram, off: i32, w: i32, rpath: str, rsrc: str) Ren
         src: rsrc,
     ) })
 }
-// 0 if clean; else render the diagnostic (file:line:col + caret) to stderr and return the error count.
+// render ONE diagnostic (file:line:col + caret + hint) to stderr, mapping its flat offset to the
+// module its error actually lives in. cd.count>1 appends the legacy inline "(+K more)" suffix — used
+// only on the specialized-channel path, where a single root error stands in for a whole cascade.
+emit_one = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram, path: str, user: str, cd: CheckDiagnostic) i64 {
+    rt := pick_render(rp, cd.source_offset, cd.span_width, path, user)
+    sp := diag_user_span(rp.flat, rt.src, cd.source_offset, cd.span_width)
+    msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
+    derr(mp.render_diagnostic(rt.path, rt.src, sp.line, sp.col, sp.end_col, cd.kind, msg, cd.hint, cd.count))
+}
+// how many main-channel diagnostics we print before collapsing the rest into a single trailer line.
+DIAG_CAP = () i32 { 20 }
+// after the cap, one line naming the K un-rendered errors (so the tail is never silently dropped).
+emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
+    s := mp.gstr_string(48).gstr_append(mp, "zenc: (+").push_int(mp, to_i64(k)).gstr_append(mp, " more error")
+    s2 := (k == 1).match ({ true => s.gstr_push(mp, ')'), false => s.gstr_push(mp, 's').gstr_push(mp, ')') })
+    derr(s2.gstr_push(mp, '\n').gstr_finish(mp))
+}
+// 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
 report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram, path: str, user: str) i32 {
-    cd := mp.check_diag(raw, decls, rp.flat)
-    (cd.code == 0).match ({ true => 0, false => {
-        rt := pick_render(rp, cd.source_offset, cd.span_width, path, user)
-        sp := diag_user_span(rp.flat, rt.src, cd.source_offset, cd.span_width)
-        msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
-        derr(mp.render_diagnostic(rt.path, rt.src, sp.line, sp.col, sp.end_col, cd.kind, msg, cd.hint, cd.count))
-        cd.count
+    // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
+    spec := mp.check_diag_no_main(raw, decls, rp.flat)
+    (spec.code != 0).match ({ true => {
+        mp.emit_one(raw, decls, rp, path, user, spec)
+        spec.count
+    }, false => {
+        // pure main-channel type errors: report them ALL (per-statement / per-decl recovery).
+        ds := mp.check_module_batch(decls, rp.flat)
+        n := to_i32(ds.len)
+        ds.loop((h, i, cd) {
+            (to_i32(i) < DIAG_CAP()).match ({ true => {
+                mp.emit_one(raw, decls, rp, path, user, cd)
+            } })
+        })
+        (n > DIAG_CAP()).match ({ true => {
+            mp.emit_more_trailer(n - DIAG_CAP())
+        } })
+        n
     } })
 }
 // run/build temp.c swaps the emitted HEAD typedef for the zenrt.h include; the PROG variant also
