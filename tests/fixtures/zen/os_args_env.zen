@@ -1,0 +1,22 @@
+// Exercises the std.os additions end to end: args() as an owned [str], has_flag / flag_str over argv,
+// and a set_env → getEnv → unset_env round-trip (deterministic — no argv needed for the env half).
+halloc = std.mem.heap
+{ args, has_flag, flag_str, set_env, unset_env, getEnv } = std.os
+{ eq } = std.text.str
+{ println } = std.text.fmt
+main = () i32 {
+    heap := halloc.gpa()
+    // args() = the whole command line as one owned slice; argv[0] is the program, argc = .len.
+    av := heap.addr().args()
+    println(av.len)
+    // has_flag / flag_str are the minimal flag reader over argv.
+    println(has_flag("--verbose").match ({ true => "verbose-on", false => "verbose-off" }))
+    // flag_str returns "" when the key is absent (this fixture is run without it).
+    println(flag_str("--out").eq("").match ({ true => "out-empty", false => "out-set" }))
+    // env round-trip: set → read → unset → read (deterministic).
+    set_env("ZEN_OS_TEST", "hi")
+    println(getEnv("ZEN_OS_TEST"))
+    unset_env("ZEN_OS_TEST")
+    println(getEnv("ZEN_OS_TEST").eq("").match ({ true => "unset-ok", false => "unset-bad" }))
+    0
+}

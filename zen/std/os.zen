@@ -2,14 +2,58 @@
 //
 // argv reaches Zen through zenrt.c: the OS `main(argc,argv)` (in zenrt) stashes them into globals,
 // and `zen_argc`/`zen_argv_at` (also in zenrt) expose them here. Explicit calls, never ambient —
-// `main` chooses to read them. (Owned `args(a) [str]` + typed `parse(a, T)` come in a later wave.)
+// `main` chooses to read them.
+//
+// Two ways to read argv: point reads (`argc()` / `arg(i)`) for a quick scan, or `args(a)` for the
+// whole vector as one allocator-owned `[str]` you can index/iterate. The `has_flag` / `flag_str`
+// helpers are the minimal flag reader: exact-token match on argv, no allocation, no parser state —
+// the caller passes the full token (`os.has_flag("--verbose")`, `os.flag_str("--out")`). A typed
+// `parse(a, T)` / positional collector is a later wave (see the tail of this file).
 { getenv } = std.c.libc
+{ nbuf, eq } = std.text.str
 // bound to zenrt.c (bodyless = foreign).
 zen_argc* = () i32
 zen_argv_at* = (i: i32) str
+// libc environment mutators (POSIX). getenv still funnels through std.c.libc; setenv/unsetenv are
+// declared foreign here, alongside argv's zenrt hooks. Both return 0 on success, -1 on failure —
+// `int setenv(const char *name, const char *value, int overwrite)`, `int unsetenv(const char *name)`.
+setenv* = (name: str, value: str, overwrite: i32) i32
+unsetenv* = (name: str) i32
 argc* = () i32 { zen_argc() }    // os.argc()  — number of CLI args (incl. argv[0])
 arg* = (i: i32) str { zen_argv_at(i) }    // os.arg(i)  — the i-th arg ("" if out of range)
 getEnv* = (name: str) str {
     p := getenv(name)
     (p == null_ptr()).match ({ true => "", false => cstr(p) })
 }    // "" if unset
+// set_env(name, value): create/overwrite the variable. unset_env(name): remove it. Both return
+// true on success (a clean bool over libc's 0/-1, the getEnv-style wrapping). The env owns the copy,
+// so `value` need not outlive the call.
+set_env* = (name: str, value: str) bool { (setenv(name, value, 1) == 0).match ({ true => true, false => false }) }
+unset_env* = (name: str) bool { (unsetenv(name) == 0).match ({ true => true, false => false }) }
+// copy each argv slot into `out[i..]` (the strings are argv-backed, stable for the process lifetime,
+// so this borrows them — no per-string copy, only the backbone is owned).
+fill_argv = (out: [str], i: i32, n: i32) void {
+    (i < n).match ({ true => {
+        out[to_i64(i)] = zen_argv_at(i)
+        fill_argv(out, i + 1, n)
+    }, false => { } })
+}
+// args(a) — the whole command line as an allocator-owned `[str]` (argv[0] = the program), so a caller
+// indexes/iterates instead of threading argc()/arg(i) by hand. The backbone is `a`-owned; the strings
+// borrow argv (process-lifetime stable).
+args*<A> = (a: MutPtr<A>) [str] {
+    n := zen_argc()
+    buf: [str] := a.nbuf("", to_i64(n))
+    fill_argv(buf, 0, n)
+    buf
+}
+// has_flag(tok): is the exact token `tok` present anywhere in argv? (e.g. os.has_flag("--verbose"))
+flag_at = (tok: str, i: i32) bool { (i >= zen_argc()).match ({ true => false, false => eq(zen_argv_at(i), tok).match ({ true => true, false => flag_at(tok, i + 1) }) }) }
+has_flag* = (tok: str) bool { flag_at(tok, 0) }
+// flag_str(key): the argv token that follows the first exact `key` (the `--key value` shape), or ""
+// when `key` is absent or is the last token (no value follows). (e.g. os.flag_str("--out"))
+flag_str_at = (key: str, i: i32) str { (i + 1 >= zen_argc()).match ({ true => "", false => eq(zen_argv_at(i), key).match ({ true => zen_argv_at(i + 1), false => flag_str_at(key, i + 1) }) }) }
+flag_str* = (key: str) str { flag_str_at(key, 0) }
+// FOLLOW-UP (later wave): `--key=value` splitting, a positional collector (`positionals(a) [str]`),
+// and a typed `parse(a, T)` that fills a struct of flags. Kept out here to stay small — has_flag /
+// flag_str + args() cover `--flag`, `--key value`, and raw positionals via indexing today.
