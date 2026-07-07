@@ -45,28 +45,65 @@ ZWEAK int32_t zen_main(void){ return 0; }
  * panic exit code (134 = what abort() yields), so a deep recursion teaches instead of crashing.
  *
  * The handler MUST run on a DEDICATED alternate stack (sigaltstack + SA_ONSTACK) — when the fault is a
- * stack overflow the normal stack has no room left to run a handler on. write()/_exit() are async-
- * signal-safe; the message is a fixed literal, so the handler touches no heap and no shared state.
+ * stack overflow the normal stack has no room left to run a handler on. write()/_exit()/siglongjmp() are
+ * async-signal-safe; the message is a fixed literal, so the handler touches no heap and no shared state.
  * We deliberately report every SIGSEGV as a stack overflow: in a language whose sole unbounded-stack
- * construct is recursion (raw null derefs already panic via genc's AssertNonnull), that is the cause. */
-static char __zen_sigstack[65536];   /* SIGSTKSZ can be a few KB; 64K is ample for write()+_exit */
+ * construct is recursion (raw null derefs already panic via genc's AssertNonnull), that is the cause.
+ *
+ * ── PER-THREAD ALT STACK (worker pools) ───────────────────────────────────────────────────────────
+ * `sigaltstack` is a PER-THREAD setting, but `sa_flags`/the handler are process-wide. A pool worker
+ * pthread that registers no alt stack of its own would have a stack-overflow SIGSEGV delivered onto its
+ * already-exhausted stack → raw process kill (exit 139), killing the WHOLE pool. So each thread that can
+ * run Zen recursion must call `__zen_thread_init()` first to register its OWN alt stack. The buffer is
+ * `_Thread_local` — one instance per pthread (a single static is unshareable), self-freed at thread
+ * exit (no malloc/free bookkeeping, no leak). The main thread registers via the same call from
+ * `__zen_install_sigsegv_handler`; pool workers call it as the first line of their trampoline. */
+static _Thread_local char __zen_sigstack[65536];   /* SIGSTKSZ can be a few KB; 64K is ample; per-thread */
+/* per-worker catch target, defined just below for the isolation path; declared here so the handler can
+ * route an actor's overflow into it (siglongjmp) instead of killing the process. */
+static _Thread_local sigjmp_buf* __zen_panic_jmp;
 static void __zen_on_sigsegv(int sig){
     (void)sig;
     static const char m[] = "zen: panic: stack overflow (recursion too deep)\n";
     (void)!write(2, m, sizeof(m) - 1);
+    /* If a per-worker catch is installed (a pool behavior is running under __zen_actor_call), unwind into
+     * it like the div0/OOB/null panics do — that ONE actor dies, the worker + pool live on (#410 isolation
+     * now covers stack overflow too). Off the pool path (main, inline drain) no catch is installed, so exit
+     * cleanly with the panic code exactly as before.
+     *
+     * The catch uses sigsetjmp with savesigs=0 (cheap — no per-message sigprocmask syscall on the behavior
+     * hot path, see __zen_actor_call), so siglongjmp does NOT restore the mask. On handler entry the kernel
+     * blocks SIGSEGV for the handler's duration; unwinding out with it still blocked would make the NEXT
+     * overflow on this worker undeliverable (raw kill). So we UNBLOCK SIGSEGV here, right before the jump —
+     * one sigprocmask, only on an actual (rare) overflow, keeping the hot path syscall-free. sigprocmask is
+     * async-signal-safe and on Linux affects only the calling (this worker) thread. */
+    if(__zen_panic_jmp){
+        sigset_t only_segv;
+        sigemptyset(&only_segv);
+        sigaddset(&only_segv, SIGSEGV);
+        sigprocmask(SIG_UNBLOCK, &only_segv, 0);
+        siglongjmp(*__zen_panic_jmp, 1);
+    }
     _exit(134);   /* the panic exit code — genc's zen__panic aborts (128 + SIGABRT = 134) */
 }
-static void __zen_install_sigsegv_handler(void){
+/* register the calling thread's per-thread sigaltstack (idempotent-safe to call once per thread). Every
+ * thread that can run Zen recursion — the main thread and every pool worker — must call this before it
+ * recurses, or a stack-overflow SIGSEGV has nowhere to run the handler. Best-effort: on failure the
+ * default behaviour is left in place. */
+void __zen_thread_init(void){
     stack_t ss;
     ss.ss_sp = __zen_sigstack;
     ss.ss_size = sizeof(__zen_sigstack);
     ss.ss_flags = 0;
-    if(sigaltstack(&ss, 0) != 0){ return; }   /* best-effort: leave the default behaviour if it fails */
+    (void)!sigaltstack(&ss, 0);
+}
+static void __zen_install_sigsegv_handler(void){
+    __zen_thread_init();   /* main thread's own alt stack */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = __zen_on_sigsegv;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_ONSTACK;
+    sa.sa_flags = SA_ONSTACK;   /* process-wide handler; runs on whichever thread's alt stack faulted */
     sigaction(SIGSEGV, &sa, 0);
 }
 
@@ -89,21 +126,32 @@ static void __zen_install_sigsegv_handler(void){
  * process. The real fix (DEFERRED) is a per-actor arena rt that is reset when the actor dies, reclaiming
  * everything the behavior allocated in one shot. No lock is held across the catch (the pool runs the
  * behavior OUTSIDE the mailbox lock), so the longjmp cannot strand a lock. */
-static _Thread_local jmp_buf* __zen_panic_jmp = 0;   /* per-worker catch target; 0 = "no catch installed" */
-/* run behavior(user, msg) under a setjmp catch. Returns 0 if it returned normally, 1 if it panicked
- * (zen__panic longjmp'd back here). Save/restore of `prev` keeps re-entrancy safe. */
+/* __zen_panic_jmp (the per-worker catch target; 0 = "no catch installed") is declared above, next to the
+ * SIGSEGV handler, because BOTH the ordinary panics (via __zen_panic_unwind) AND a worker's stack-overflow
+ * SIGSEGV route into it. It is a `sigjmp_buf` (not `jmp_buf`) so the SIGSEGV handler can siglongjmp out of
+ * a signal context safely. The mask handling is the crux: on handler entry the kernel blocks SIGSEGV, and
+ * a plain longjmp would NOT clear that — SIGSEGV would stay blocked after the unwind and the NEXT overflow
+ * on that worker would be undeliverable (raw kill). We use the CHEAP variant: sigsetjmp with savesigs=0
+ * here (no per-message sigprocmask syscall on the behavior hot path — a heavy pool stress regressed ~60%
+ * with savesigs=1), and the handler UNBLOCKS SIGSEGV itself right before siglongjmp, so the one syscall
+ * happens only on an actual (rare) overflow. The div0/OOB/null path reaches this same buffer via
+ * __zen_panic_unwind's siglongjmp; on that (non-signal) path SIGSEGV is not blocked, so no unblock is
+ * needed and savesigs=0 is exactly right. */
+/* run behavior(user, msg) under a sigsetjmp catch. Returns 0 if it returned normally, 1 if it panicked
+ * (zen__panic siglongjmp'd back here, or a worker stack-overflow SIGSEGV did). Save/restore of `prev`
+ * keeps re-entrancy safe. */
 int64_t __zen_actor_call(void (*behavior)(uint8_t*, int64_t), uint8_t* user, int64_t msg){
-    jmp_buf jb;
-    jmp_buf* volatile prev = __zen_panic_jmp;   /* volatile: read after longjmp must not be a clobbered reg */
-    if(setjmp(jb) != 0){ __zen_panic_jmp = prev; return 1; }
+    sigjmp_buf jb;
+    sigjmp_buf* volatile prev = __zen_panic_jmp;   /* volatile: read after longjmp must not be a clobbered reg */
+    if(sigsetjmp(jb, 0) != 0){ __zen_panic_jmp = prev; return 1; }   /* savesigs=0: cheap (no syscall); handler unblocks SIGSEGV */
     __zen_panic_jmp = &jb;
     behavior(user, msg);
     __zen_panic_jmp = prev;
     return 0;
 }
 /* called by genc's zen__panic AFTER it prints its line: unwind to the installed worker catch, else return
- * (and let zen__panic abort() — the unchanged non-actor path). */
-void __zen_panic_unwind(void){ if(__zen_panic_jmp){ longjmp(*__zen_panic_jmp, 1); } }
+ * (and let zen__panic abort() — the unchanged non-actor path). siglongjmp pairs with the sigsetjmp above. */
+void __zen_panic_unwind(void){ if(__zen_panic_jmp){ siglongjmp(*__zen_panic_jmp, 1); } }
 
 ZWEAK int main(int argc, char** argv){
     __zen_argc = (int32_t)argc;
