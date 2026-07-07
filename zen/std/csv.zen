@@ -1,0 +1,214 @@
+// std.csv — an RFC4180-ish CSV reader/writer built on the existing stdlib (the std.text.string
+// builder for field bytes, plus module-local growable buffers for the field/row backbones).
+//
+// SHAPE. A parsed document is `[[str]]` — a slice of rows, each a slice of NUL-terminated field
+// strings. `parse` decodes text into that shape; `write_rows` renders it back to a single CSV `str`.
+//
+//   heap = std.mem.heap
+//   a := heap.gpa()
+//   csv.parse(a.addr(), "a,b,c\n1,\"x,y\",3").match ({
+//       .Ok(rows) => { ... [["a","b","c"],["1","x,y","3"]] ... },
+//       .Err(e)   => ...            // .Eof == an unterminated quoted field
+//   })
+//   text := csv.write_rows(a.addr(), rows).expect("oom")   // "a,b,c\n1,\"x,y\",3\n"
+//
+// QUOTING (RFC4180). A field may be wrapped in double quotes; inside a quoted field a literal
+// double quote is written as two ("" -> "), and commas / CR / LF are taken verbatim (so quoted
+// fields may embed the delimiter and span lines). `parse` decodes all of that; `write_rows` quotes any
+// field that contains a comma, a double quote, CR, or LF, doubling embedded quotes.
+//
+// LINE ENDINGS. Rows are separated by LF; a lone CR outside quotes is dropped, so both LF and CRLF
+// input parse identically. A trailing newline does NOT yield a spurious empty final row, and blank
+// lines between records are skipped (an empty record has no fields to carry).
+//
+// ALLOCATOR. parse/write_rows are generic over the allocator: every allocating entry takes `a: MutPtr<A>`
+// for any `A: Allocator` (heap, arena, fixed-buffer, test), threaded exactly like std.json / std.text.
+// Parsed field strings and the row/field backbones are allocator-owned; nothing here frees — parse,
+// consume, and drop (or back it with an arena and reset).
+//
+// ERRORS. The only structural error is an unterminated quoted field (a `"` opened but never closed
+// before EOF), surfaced as `.Err(.Eof)`. Allocation failure is fatal by policy (the same choice
+// std.json makes) and is unwrapped at the module boundary via the `c*` helpers below.
+{ Result, IoError, expect } = std.core.result
+{ String, new_in, push_in, append_in, finish_in } = std.text.string
+{ view } = std.text.str
+// ── OOM policy ────────────────────────────────────────────────────────────────
+// The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
+// threads the caller's allocator whose exhaustion is fatal by policy, so those Results are unwrapped
+// here — parse/write_rows keep their observable behavior and reserve their own Err channel for real
+// structural faults (an unterminated quoted field).
+cok = (r: Result<String, IoError>) String { r.expect("std.csv: allocation failed") }
+cfin = (r: Result<str, IoError>) str { r.expect("std.csv: allocation failed") }
+cnew*<A> = (a: MutPtr<A>) String { a.new_in().expect("std.csv: allocation failed") }
+// ── element sizes (sizeof, routed through a generic param) ────────────────────
+// `sizeof(str)` / `sizeof([str])` on the bare type TOKEN emit invalid C — `str` is not a nameable C
+// type (the same limit std.json and std.collections.map hit). `sizeof(T)` on a generic PARAM does
+// monomorphize correctly (as std.text.str's `nbuf` relies on), so route both element sizes through a
+// seed value: str_sz() = sizeof of a field pointer, row_sz() = sizeof of a `[str]` slice header.
+sizeof_of<T> = (x: T) i64 { sizeof(T) }
+str_sz = () i64 { sizeof_of("") }
+row_sz = () i64 {
+    r: [str] := slice(null_ptr(), 0)
+    sizeof_of(r)
+}
+// ── module-local growable buffers (hand-rolled Vecs) ──────────────────────────
+// The field/row backbones are built here (not through std.collections.vec, whose `Vec<str>` hits the
+// same non-nameable-`str`-element limit). FBuf accumulates one row's fields ([str]); RBuf accumulates
+// rows ([[str]]).
+FBuf: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+}    // a growable [str]
+RBuf: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+}    // a growable [[str]]
+fbuf_new<A> = (a: MutPtr<A>) FBuf {
+    FBuf(
+        ptr: a.acquire(str_sz()),
+        len: 0,
+        cap: 1,
+    )
+}
+fbuf_push<A> = (a: MutPtr<A>, fb: FBuf, x: str) FBuf {
+    x := x
+    r := (fb.len < fb.cap).match ({ true => fb, false => FBuf(
+        ptr: a.resize(fb.ptr, (fb.cap * 2 + 1) * str_sz()),
+        len: fb.len,
+        cap: fb.cap * 2 + 1,
+    ) })
+    s: [str] := slice(r.ptr, r.cap)
+    s[r.len] = x
+    FBuf(
+        ptr: r.ptr,
+        len: r.len + 1,
+        cap: r.cap,
+    )
+}
+fbuf_slice = (fb: FBuf) [str] { slice(fb.ptr, fb.len) }
+rbuf_new<A> = (a: MutPtr<A>) RBuf {
+    RBuf(
+        ptr: a.acquire(row_sz()),
+        len: 0,
+        cap: 1,
+    )
+}
+rbuf_push<A> = (a: MutPtr<A>, rb: RBuf, x: [str]) RBuf {
+    x := x
+    r := (rb.len < rb.cap).match ({ true => rb, false => RBuf(
+        ptr: a.resize(rb.ptr, (rb.cap * 2 + 1) * row_sz()),
+        len: rb.len,
+        cap: rb.cap * 2 + 1,
+    ) })
+    s: [[str]] := slice(r.ptr, r.cap)
+    s[r.len] = x
+    RBuf(
+        ptr: r.ptr,
+        len: r.len + 1,
+        cap: r.cap,
+    )
+}
+rbuf_slice = (rb: RBuf) [[str]] { slice(rb.ptr, rb.len) }
+// ── parse ─────────────────────────────────────────────────────────────────────
+// Decode CSV `text` into rows of fields. A single left-to-right pass over the bytes drives a small
+// state machine: `in_quotes` tracks whether we are inside a quoted field, `active` marks an
+// in-progress record that must be flushed (so trailing newlines / blank lines add no empty row),
+// and `resume` lets a two-byte token ("" or a CRLF pair) skip its second byte. Field bytes
+// accumulate in the `sb` String builder; a completed field joins `fields`, a completed record joins
+// `rows`. Returns `.Err(.Eof)` if a quoted field is never closed.
+parse*<A> = (a: MutPtr<A>, text: str) Result<[[str]], IoError> {
+    sv: [u8] := text.view()
+    rows: RBuf := a.rbuf_new()
+    fields: FBuf := a.fbuf_new()
+    sb: String := a.cnew()
+    in_quotes := false
+    active := false
+    resume: i64 := 0
+    sv.loop((h, i, b) {
+        (i < resume).match ({ true => { }, false => in_quotes.match ({ true => (b == '"').match ({ true => (i + 1 < sv.len && sv[i + 1] == '"').match ({ true => {
+            sb = sb.push_in(a, '"').cok()    // "" inside a quoted field -> one literal quote
+            resume = i + 2
+        }, false => {
+            in_quotes = false    // a lone quote closes the field
+            resume = i + 1
+        } }), false => {
+            sb = sb.push_in(a, b).cok()    // commas / CR / LF are literal while quoted
+            resume = i + 1
+        } }), false => (b == '"').match ({ true => {
+            in_quotes = true
+            active = true
+            resume = i + 1
+        }, false => (b == ',').match ({ true => {
+            fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field
+            sb = a.cnew()
+            active = true
+            resume = i + 1
+        }, false => (b == '\n').match ({ true => {
+            active.match ({ true => {
+                fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
+                rows = a.rbuf_push(rows, fields.fbuf_slice())
+                fields = a.fbuf_new()
+                sb = a.cnew()
+                active = false
+            } })    // an inactive newline (blank line / trailing LF) adds no row
+            resume = i + 1
+        }, false => (b == '\r').match ({ true => {
+            resume = i + 1
+        }, false => {
+            sb = sb.push_in(a, b).cok()    // any other byte -> literal field content
+            active = true
+            resume = i + 1
+        } }) }) }) }) }) })
+    })
+    out: Result<[[str]], IoError> := in_quotes.match ({ true => .Err(.Eof), false => {
+        active.match ({ true => {
+            fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
+            rows = a.rbuf_push(rows, fields.fbuf_slice())
+        } })
+        .Ok(rows.rbuf_slice())
+    } })
+    out
+}
+// ── write_rows ─────────────────────────────────────────────────────────────────────
+// does `s` need quoting? (contains a delimiter, a quote, or a line break)
+field_needs_quote = (s: str) bool {
+    sv: [u8] := s.view()
+    need := false
+    sv.loop((h, i, b) {
+        (b == ',' || b == '"' || b == '\n' || b == '\r').match ({ true => {
+            need = true
+            h.break
+        }, false => { } })
+    })
+    need
+}
+// append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
+write_field<A> = (a: MutPtr<A>, sb: String, s: str) String {
+    sv: [u8] := s.view()
+    s.field_needs_quote().match ({ true => {
+        out: String := sb.push_in(a, '"').cok()
+        sv.loop((h, i, b) {
+            out = (b == '"').match ({ true => out.push_in(a, '"').cok().push_in(a, '"').cok(), false => out.push_in(a, b).cok() })
+        })
+        out.push_in(a, '"').cok()
+    }, false => sb.append_in(a, s).cok() })
+}
+// Render `rows` to a single CSV `str`: fields joined by commas, records terminated by LF (including
+// a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
+// failure is fatal by policy); the Result signature mirrors parse and the rest of std.
+write_rows*<A> = (a: MutPtr<A>, rows: [[str]]) Result<str, IoError> {
+    out: String := a.cnew()
+    rows.loop((h, i, row) {
+        r: [str] := row
+        r.loop((h2, j, f) {
+            (j > 0).match ({ true => {
+                out = out.push_in(a, ',').cok()
+            } })
+            out = a.write_field(out, f)
+        })
+        out = out.push_in(a, '\n').cok()
+    })
+    .Ok(out.finish_in(a).cfin())
+}
