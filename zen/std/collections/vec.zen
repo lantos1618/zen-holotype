@@ -4,6 +4,7 @@
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, Opt } = std.core.result
+{ Rt, current } = std.rt    // ambient runtime capability — the AMBIENT-FORM surface below draws from it
 Vec*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
@@ -165,4 +166,98 @@ of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError> {
             },
         })
     } })
+}
+// ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
+// An ADDITIVE surface that removes allocator threading: `v := vec.new()` then `v.push(x)` — no `a`
+// argument anywhere. Everything above (the explicit `Vec<T>` + `of(a, …)` / `v.push(a, x)` forms) is
+// UNCHANGED and remains the precise-control API; this section only adds new names on new types.
+//
+//   v: AVec<i32> := vec.new()          // T comes from the annotation (nothing to infer it from)
+//   v  = v.push(1)                     // no allocator — bytes come from the ambient rt
+//   v  = v.push(2)
+//   n  := v.len()                      // 2
+//   x  := v.get(0)                     // 1
+//   v.each((y){ ... })                 // iterate the live elements
+//   v.free()                           // hand storage back to the SAME rt that made it
+//
+//   w := vec.from([10, 20, 30])        // seed from a slice; T inferred from the elements
+//
+// STORE-NOT-REREAD (why AVec carries the rt). The ambient rt is captured ONCE, at construction, and
+// stored in the header — every later op (grow, free) allocates through that SAME rt. It is NOT re-read
+// from `current()` per op. Re-reading would be a correctness bug: if the container is created under one
+// rt (e.g. an actor's per-actor heap, or an arena scope via `rt.with`) and then an op runs after the
+// ambient rt has changed, `grow` would allocate the new buffer from rt B while the old buffer came from
+// rt A — and then free the old buffer through rt B: a cross-allocator free (corruption). Storing the rt
+// makes an AVec self-contained and safe to outlive the scope it was born in (Pony per-actor semantics).
+//
+// The ambient ops are FAIL-FAST on allocation failure (`.expect`, which panics) — the trivial-program
+// ergonomic path. Callers who need allocation failure as a value keep using the explicit `Vec<T>` API,
+// whose ops return `Result<Vec<T>, IoError>`.
+// RtAlloc bridges a stored `Rt` to the `Allocator` trait, so the ambient wrappers can REUSE every
+// existing explicit `Vec<T>` op verbatim (pass `ra.addr()` where an `a: MutPtr<A>` is expected). The
+// three methods dispatch straight through the stored rt's vtable — the same path `rt.alloc/resize/release`
+// take, but bound to THIS captured rt rather than `current()`.
+RtAlloc*: {
+    r: Rt,
+}
+RtAlloc.impl(Allocator, {
+    acquire = (s: MutPtr<RtAlloc>, n: i64) RawPtr<u8> {
+        rr := s.load().r
+        rr.mem_acquire(rr.state, n)
+    }
+    resize = (s: MutPtr<RtAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+        rr := s.load().r
+        rr.mem_resize(rr.state, p, n)
+    }
+    release = (s: MutPtr<RtAlloc>, p: RawPtr<u8>) void {
+        rr := s.load().r
+        rr.mem_release(rr.state, p)
+    }
+})
+// AVec<T> = an explicit `Vec<T>` plus the rt it was born under. All ops delegate to the `Vec<T>` methods
+// through an `RtAlloc` materialized from the stored rt, so there is ZERO duplicated container logic.
+AVec*<T>: {
+    inner: Vec<T>,
+    rt: Rt,
+    len = (w: AVec<T>) i64 { w.inner.len() }
+    get = (w: AVec<T>, i: i64) T { w.inner.get(i) }
+    view = (w: AVec<T>) [T] { w.inner.view() }
+    each = (w: AVec<T>, f: (T) void) void { w.inner.each(f) }
+    fold = (w: AVec<T>, init: T, f: (T, T) T) T { w.inner.fold(init, f) }
+    find = (w: AVec<T>, pred: (T) bool) Opt<T> { w.inner.find(pred) }
+    push = (w: AVec<T>, x: T) AVec<T> {
+        ra := RtAlloc(r: w.rt)
+        AVec<T>(
+            inner: w.inner.push(ra.addr(), x).expect("vec.push: out of memory"),
+            rt: w.rt,
+        )
+    }
+    free = (w: AVec<T>) void {
+        ra := RtAlloc(r: w.rt)
+        w.inner.free(ra.addr())
+    }
+}
+// a zero-element ambient `AVec<T>` (capacity for one, like `empty`). T can't be inferred from an
+// argument, so it comes from the LHS annotation: `v: AVec<i32> := vec.new()`. The ambient rt is
+// captured HERE and stored for the life of the vec.
+new*<T> = () AVec<T> {
+    r := current()
+    ra := RtAlloc(r: r)
+    // `empty`'s T lives only in its return type; pin it via the annotation (nested-return inference
+    // can't reach it through the struct-literal field), exactly as `v: Vec<i32> := vecs.empty(a)` does.
+    iv: Vec<T> := empty(ra.addr())
+    AVec<T>(
+        inner: iv,
+        rt: r,
+    )
+}
+// an ambient `AVec<T>` seeded from a slice (copies `xs`). T inferred from the elements. Fail-fast on OOM.
+from*<T> = (xs: [T]) AVec<T> {
+    r := current()
+    ra := RtAlloc(r: r)
+    iv: Vec<T> := of(ra.addr(), xs).expect("vec.from: out of memory")
+    AVec<T>(
+        inner: iv,
+        rt: r,
+    )
 }
