@@ -2,9 +2,14 @@
 
 > The compiler today (structs, enums, traits, generics, `fits()`, a self-hosted front end +
 > C/JS backends, metaprogramming as AST values) proves *"structure is the constraint."* C is
-> the intentional bootstrap/intermediate target in that backend row, not a defect. This document
-> is where Zen is headed: take the structure idea to the end, until there are no keywords —
-> because there is only **one** kind of thing. A `{ }`. Everything else is how you read it.
+> the intentional bootstrap/intermediate target in that backend row, not a defect. Four pillars
+> are already real, not aspirational: **self-hosted** (the compiler is Zen, reproducing its own C
+> byte-for-byte), **explicit capabilities** (allocators threaded through signatures, a `Sys` at
+> the entry — not ambient globals), **actor-safe** concurrency (statically-checked move-on-send +
+> per-actor panic isolation), and **two backends over one checked AST** — C (`compiler.genc`) and
+> JS (`compiler.genjs`, the browser/Node target). This document is where Zen is headed on top of
+> that: take the structure idea to the end, until there are no keywords — because there is only
+> **one** kind of thing. A `{ }`. Everything else is how you read it.
 
 ## The one rule
 

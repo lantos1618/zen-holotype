@@ -6,6 +6,41 @@ All notable changes to **zen**. The format loosely follows
 
 ## Unreleased
 
+**Recent arc — capabilities, a second backend, and a broader stdlib** (factual summary):
+
+- **JS backend (`compiler.genjs`)** — a second backend walking the *same* post-monomorphization
+  `[Decl]` AST the C backend consumes, emitting JavaScript for Node/browser over a linear-memory
+  floor (`bootstrap/zenrt.js`). Driven by `zenc emit-js <file>` and `zenc build --target js
+  <file> [-o out]`. Covers the computational subset; full i64/64-bit bitwise and scalar aliasing
+  through `MutPtr<i32>` are deferred. `std.web.dom` exposes the browser DOM as typed Zen.
+- **Sys phase 1 — the capability entry.** `main = (sys: Sys) i32` is accepted alongside
+  `main = () i32`; the compiler renames the body to `zen_user_main` and emits a niladic `zen_main`
+  trampoline that feeds it `std.sys.root()`, keeping the `zenrt.c` boundary byte-identical.
+  `std.sys` bundles narrow capabilities — `Writer` (stdout/stderr), the process `Allocator`,
+  `Env`, `Clock`, `Fs` — for attenuation. (`Writer.write` still returns `i64`; the `Result`-shaped
+  print spine is Sys phase 2.)
+- **Actor safety made static.** The checker's SENDABILITY pass enforces move-on-send (an `Own<T>`
+  passed into a `send` kills the sender's binding), deep-immutability for sending `Ptr<T>`, and a
+  scratch-escape pass; at runtime, a `panic` inside one actor is isolated to that actor
+  (per-worker catch in `zenrt.c`), and a work-stealing thread pool runs actors across N OS cores.
+- **Namespace hygiene.** Namespace binds (`alias = std.X`) prefix a module's direct exports, so
+  two modules can both export `thing`/`Box`/`of`/`default` and be used as `left.thing()` /
+  `right.thing()` without a short-name collision; `zenc emit` runs the same resolver as
+  `build`/`run`. Std public surfaces were renamed to natural namespace-friendly names
+  (`alloc.default`, `vec.of`, `maps.of`, `raw.of`, `file.contents`, `num.integer`, …).
+- **Broader stdlib.** Added a usable systems surface — `std.os`, `std.time`, `std.math`,
+  `std.rand`, `std.path`, `std.fs`, `std.io.stdin`, `std.process`, `std.net`, `std.json`,
+  `std.csv`, `std.encoding`, `std.log`, `std.testing`, `std.state.store` — plus generic
+  `HMap<K, V>` / `Set<T>` collections and real OS threads/locks (`std.thread`, `std.sync`).
+- **Errors as values, tightened.** `panic` is abort-only; recoverable failures are `Result`/`Opt`
+  threaded with `.or_return()`/`.match`. Runtime safety guards make div/mod-zero, slice OOB, and
+  stack overflow deterministic message-bearing panics (see [ERROR_POLICY.md](ERROR_POLICY.md) and
+  `docs/runtime-design.md`). String provenance types `Cstr`/`Text` landed as backend `Ty`
+  variants (Phase 1 of [STRING_TYPES.md](STRING_TYPES.md)); `f64` + float literals are supported.
+- **Note on the runtime direction.** The ambient runtime (`std.rt`, `std.scope`) is an experiment,
+  not the shipped model; the direction is explicit capabilities, with the rt rework tracked as
+  "ambient-within-scope, explicit-at-boundary" (`docs/runtime-design.md`).
+
 **Documentation alignment for current compiler decisions**:
 
 - **C is the intentional intermediate/bootstrap target** — not a defect or fallback. The

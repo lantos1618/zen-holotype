@@ -1,9 +1,13 @@
 # Explicit string types — `text` / `view` / `String` / `Cstr`
 
-Status: Phase 1 DONE (Cstr + text + enforcement + tests). Phase 2 (view + migration) pending. Motivation: today `str` (= C `const char*`) is overloaded across three
-roles with **incompatible lifetimes**, and the type can't tell them apart — so a pointer into a
-heap `String` can escape and dangle with no diagnostic. The fix is to make the bytes' *provenance*
-a type, so a signature documents the lifetime contract (enforceable even without a borrow checker).
+Status: Phase 1 DONE — `Cstr` and `Text` are real backend `Ty` variants (both lower to
+`const char*`), the checker rejects the dangle conversions below, and tests cover it. `str`
+remains the **unified surface spelling and display type**; the provenance variants sit under it.
+Phase 2 (`view` + migrating the ~946 borrowed `str` params) is pending. Motivation: today `str`
+(= C `const char*`) is overloaded across three roles with **incompatible lifetimes**, and the
+type can't tell them apart — so a pointer into a heap `String` can escape and dangle with no
+diagnostic. The fix is to make the bytes' *provenance* a type, so a signature documents the
+lifetime contract (enforceable even without a borrow checker).
 
 ## The four types
 

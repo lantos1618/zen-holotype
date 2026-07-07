@@ -14,7 +14,18 @@ Opt<T>: Some(T) | None
 ```
 
 The caller handles the value with `.match`. There are no exceptions and no
-unwinding. `panic` is reserved for invariants that cannot sensibly continue.
+unwinding. **`panic` is abort-only** — it is reserved for invariants that cannot
+sensibly continue (it prints `zen: panic: <msg>` and aborts; it is not a
+recoverable control-flow path). Everything the caller can reasonably recover from
+is a `Result`/`Opt` value, propagated with `.or_return()` and branched with
+`.match`.
+
+The current runtime/capability source of truth is
+[`docs/runtime-design.md`](docs/runtime-design.md), which also names the loudest
+open "errors are values" gap: the print/IO spine (`println`/`print`/`Writer.write`)
+still returns `i64` and swallows `write(2)` errors (EPIPE/ENOSPC/EBADF). Making it
+return `Result` behind a `Writer` capability is Sys phase 2 — roadmap, not yet
+shipped.
 
 ## Runtime safety (trustworthy execution)
 

@@ -3,6 +3,31 @@
 This is the current memory model implemented by this repository. It is not the
 final pointer/borrow/lifetime design.
 
+## The model: explicit capabilities, threaded allocators
+
+Zen's memory model is **explicit**, not ambient. Memory comes from an `Allocator`
+that a function receives as a parameter, so allocation is visible in the
+signature — never a hidden global heap. The outside world enters through a
+**capability**: the entry `main = (sys: Sys) i32` receives a `Sys`
+(`std.sys`) and hands out narrow capabilities, notably `sys.heap()` (the process
+`Allocator`) and `sys.stdout()`/`sys.stderr()` (`Writer`s). Libraries take the
+narrowest capability they need (an `Allocator`, a `Writer`), which is the same
+discipline one level up from threading `MutPtr<A>` allocators through container
+and ownership APIs.
+
+> **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt`
+> capability with `rt.alloc`/`rt.with`) and `std.scope` exist as an experiment
+> toward scoped runtimes, but the shipped, documented model is the explicit one
+> above. A design review flagged the "ambient rt on every allocating function"
+> shape as unsound/noisy (`docs/runtime-design.md`); the direction
+> is "ambient-within-scope, explicit-at-boundary", which is roadmap, not the
+> current rule. Read allocation as explicit unless a signature says otherwise.
+
+String bytes carry their own provenance discipline — immortal `text`, borrowed
+`view`/`Cstr`, and the heap-owned `String` (freed through the allocator that owns
+its buffer). See [STRING_TYPES.md](STRING_TYPES.md) (`Cstr`/`Text` are Phase-1
+backend types today).
+
 ## Current Rules
 
 Allocation is explicit. User-facing containers, ownership types, and runtime APIs
@@ -66,7 +91,20 @@ The short default-heap forms are intentionally absent for ownership containers.
 Use `new_in`/`try_new_in` plus `release_in`/`drop_in` so the allocator that owns
 the block is explicit at both construction and release.
 
-The checker now enforces one local ownership rule before generic inlining erases
+## Sendability (move-on-send)
+
+Actor sends have a second enforced rule. When an owned `Own<T>` is passed into a
+`send(handle, msg)`, ownership transfers to the receiving actor, so the checker
+kills the sender's binding — a later use is `error[ownership]`. This stops the
+double-free where both actors free the same block. A `Ptr<T>` is sendable only
+when `T` is deeply immutable; `Arc<T>` is the shared-sendable path; a companion
+scratch-escape pass keeps actor-local scratch from escaping across a send. At
+runtime, a `panic` inside one actor is isolated to that actor (per-worker catch in
+`zenrt.c`) rather than killing the process.
+
+## Local ownership rule
+
+The checker enforces one local ownership rule before generic inlining erases
 method calls into raw pointer operations:
 
 ```zen
@@ -107,7 +145,8 @@ These are still open design/compiler work:
 - pointer lifetimes and borrow scopes;
 - `Ptr` / `MutPtr` / `RawPtr` capability enforcement;
 - non-null `Ptr<T>` versus nullable option/raw pointer discipline;
-- thread-safety traits for sending `Rc`, `Arc`, actor refs, and raw pointers;
+- full thread-safety traits (the move-on-send and deep-immutability send rules
+  above are enforced; a general `Send`/`Sync`-style capability layer is not);
 - guaranteed destructor coverage for every owning type.
 
 The current rule is intentionally narrow but real: it rejects a concrete
