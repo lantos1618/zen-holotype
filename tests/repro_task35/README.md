@@ -22,13 +22,19 @@ therefore never arg-type checked. Impact: every stdlib API threads `MutPtr<A>`
 so it is generic — arg-type safety is off stdlib-wide.
 
 ## CRITICAL 1 — generic forwarder launders a MutPtr past the #407 send-mut check
-- `c1_direct.zen` — `h.send(.Poke(p))` with `p:MutPtr<i32>` — correctly `error[sendable]`.
-- `c1_fwd.zen`    — `fwd<T>=(h,payload:T){ h.send(.Poke(payload)) }` — BUG: `check` says ok.
+- `c1_direct.zen`   — `h.send(.Poke(p))` with `p:MutPtr<i32>` — correctly `error[sendable]` (baseline).
+- `c1_fwd.zen`      — `fwd<T>=(h,payload:T){ h.send(.Poke(payload)) }` — BUG (pre-fix): `check` said ok.
+- `c1_fwd_call.zen` — the forwarder + a call site binding `T=MutPtr<i32>`.
 
-Root cause: the `sm_msg_mut` send-mut pass runs on RAW pre-monomorphization decls,
-so the payload leaf infers as `.Named("T")`; `ty_reaches_mutptr`'s `.Named` arm
-only inspects struct/enum decls — a bare tparam has neither → false → send passes.
-With a call site binding T=MutPtr, `zenc run` exits 99 (cross-actor race).
+Root cause: the `sm_msg_mut` send-mut pass classifies the payload EXPRESSION's type;
+in the forwarder that expression is the bare tparam `T` (reaches no MutPtr → passes).
+But the message `.Poke(payload)` builds a `Msg` whose `Poke` variant is DECLARED
+`Poke(MutPtr<i32>)` — the receiver gets a mutable alias regardless of what `T` is.
+
+Fix: also check the constructed variant's DECLARED payload type (via the same
+`ty_reaches_mutptr`), with the enum pinned by the send TARGET's handle type
+(`h: ActorRef<Msg>` → M=Msg). A sibling `.Inc(3)` on the same enum stays legal
+(Inc's field is i32). Post-fix: `c1_fwd`, `c1_fwd_call` both `error[sendable]`.
 
 ## MAJOR 6 — enum member-access has no arm → "compiler bug" on the #1 newcomer trap
 - `m6.zen` — `r.len` on `Result<i32,i32>` — BUG: `check` says ok, then `build`

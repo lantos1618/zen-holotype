@@ -4611,9 +4611,20 @@ check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
 sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = env.sm_msg_mut(fi.value).match ({ true => true, false => f })
+        f = env.sm_msg_mut(tvoid(), fi.value).match ({ true => true, false => f })
     })
     f
+}
+// the message/element type carried by an actor handle: `ActorRef<M>` / `ActorCell<M>` / `ActorHandle<M,_>`
+// / `ReplyRef<M>` (possibly behind a pointer) → M (its first type arg). tvoid when the target has no
+// concrete generic head (a pre-inline tparam handle) — the caller then falls back to the payload
+// expression's own inferred type, so nothing is over-rejected.
+first_gen_arg = (t: Ty) Ty {
+    t.match ({
+        .Generic(g) => (g.args.len > 0).match ({ true => g.args[0], false => tvoid() }),
+        .Ptr(pd)    => load(pd.pointee).first_gen_arg(),
+        _           => tvoid(),
+    })
 }
 // Classify a send-payload expression by the TYPE it reaches (Pony reference-capabilities), NOT its AST
 // shape. A constructor node (MakeEnum / MakeStruct) is descended into the SPECIFIC payload/fields actually
@@ -4624,9 +4635,24 @@ sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
 // through an identity fn) both infer a MutPtr-reaching type and reject, closing the `.Var`-only hole where
 // they fell to `false`. A call returning a deeply-immutable `Ptr<T>` (`val`) still infers clean (not
 // rejected) — the precision comes from the type predicate, not the syntax.
-sm_msg_mut = (env: Env, e: Ptr<Expr>) bool {
+// The DECLARED payload type of the constructed variant reaches a MutPtr — e.g. `.Poke(x)` where the
+// enum's `Poke` variant is declared `Poke(MutPtr<i32>)`. This is what closes the generic-FORWARDER hole
+// (#407 launder): `fwd<T>(h, payload: T){ h.send(.Poke(payload)) }` infers its payload EXPRESSION as the
+// bare tparam `T` (reaches no MutPtr), but the message it constructs is a `.Poke`, whose DECLARED field
+// is a MutPtr regardless of what `T` is bound to — so the receiver still gets a mutable alias. Reading
+// the SPECIFIC constructed variant's declared field (not the whole enum) keeps a sibling `.Inc(3)` on
+// the same enum legal (Inc's field is an i32, reaches no MutPtr). The enum is pinned by the constructor
+// node's own `ty` when set, else by `mty` — the message type M carried by the send TARGET's handle
+// (`send(h, .Poke(x))` → h: ActorRef<M> → M): a bare `.Poke` inside a generic forwarder leaves `mk.ty`
+// empty, so M from the (concretely-typed) handle is what resolves the variant. Lenient when NEITHER
+// pins the enum (both void) — the payload-expression descent still applies, so nothing over-rejects.
+sm_variant_decl_mut = (env: Env, mty: Ty, mk: MakeEnumData) bool {
+    ety := is_empty(mk.ty).match ({ true => mty, false => tnamed(mk.ty) })
+    env.decls.ty_reaches_mutptr(env.subj_variant_payload(ety, mk.variant), 16)
+}
+sm_msg_mut = (env: Env, mty: Ty, e: Ptr<Expr>) bool {
     load(e).match ({
-        .MakeEnum(mk)  => env.sm_msg_mut(mk.payload),
+        .MakeEnum(mk)  => env.sm_variant_decl_mut(mty, mk).match ({ true => true, false => env.sm_msg_mut(tvoid(), mk.payload) }),
         .MakeStruct(s) => env.sm_inits_mut(s.inits),
         _              => env.decls.ty_reaches_mutptr(env.infer_expr(e), 16),
     })
@@ -4636,10 +4662,16 @@ sm_msg_mut = (env: Env, e: Ptr<Expr>) bool {
 // `send(p, h, msg)` (from `p.send(h, msg)` / std.concurrent.pool_actor.send, flattened to `…__send`) whose
 // message is `args[2]` — the path where cross-actor races ACTUALLY happen — as well as the 2-arg inline
 // `send(h, msg)`. `sx_named` accepts the bare name and the flattener's `…__send` / `…__pool_send` suffix.
-sm_call_pos = (env: Env, c: CallData) i32 { (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({ true => env.sm_msg_mut(c.args[c.args.len - 1].addr()).match ({ true => c.pos.pos_or(1), false => 0 }), false => 0 }) }
+// the handle is the argument immediately BEFORE the message in every flattened send shape — `send(h,
+// msg)` and the 3-arg parallel `send(p, h, msg)` / `pool_send(p, h, msg)` — so `args[len-2]` yields the
+// handle whose type arg is the message type M, used to resolve a bare `.Variant` message against M's decl.
+sm_call_pos = (env: Env, c: CallData) i32 { (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({ true => env.sm_msg_mut(env.infer_expr(c.args[c.args.len - 2].addr()).first_gen_arg(), c.args[c.args.len - 1].addr()).match ({ true => c.pos.pos_or(1), false => 0 }), false => 0 }) }
 // the UFCS form as it may survive pre-desugar (`h.send(m)` / `p.send(h, m)` / `p.pool_send(h, m)`): the
 // message is again the LAST method argument (the receiver is carried separately).
-sm_mcall_pos = (env: Env, mc: MethodCallData) i32 { (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => env.sm_msg_mut(mc.args[mc.args.len - 1].addr()).match ({ true => mc.pos.pos_or(1), false => 0 }), false => 0 }) }
+// pre-desugar UFCS form (`h.send(m)` / `p.pool_send(h, m)`): the message is the last method arg; the
+// handle carrying M is the RECEIVER for `h.send(m)` (its first type arg is M). For `p.pool_send(h, m)`
+// the receiver is the pool (M unresolved → tvoid), which falls back to the payload-expression descent.
+sm_mcall_pos = (env: Env, mc: MethodCallData) i32 { (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => env.sm_msg_mut(env.infer_expr(mc.recv).first_gen_arg(), mc.args[mc.args.len - 1].addr()).match ({ true => mc.pos.pos_or(1), false => 0 }), false => 0 }) }
 check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_send_kind(decls, 1) }
 check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
