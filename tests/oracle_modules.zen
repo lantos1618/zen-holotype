@@ -150,10 +150,10 @@ run_mod_value* = (mc: ModValCase) bool {
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd))
-    // `shell` returns the raw waitpid status; for a normal exit the program's exit code is the high
-    // byte (WEXITSTATUS), i.e. status / 256. A build/loader failure surfaces as rc != 0.
-    rc / 256 == mc.want
+    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
+    // `shell` now returns the DECODED exit code (WEXITSTATUS, or 128 + signal). A build/loader failure
+    // surfaces as rc != 0.
+    rc == mc.want
 }
 // VERDICT: build the project, `zenc check <entry>`. should_pass => rc 0; else rc != 0 and (if `needle`
 // non-empty) the captured diagnostic must contain `needle`.
@@ -163,7 +163,7 @@ run_mod_verdict* = (mc: ModVerdictCase) bool {
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd))
+    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
     mc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(mc.needle).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_mods_chk.txt")).match ({
         .Ok(txt) => txt.contains(mc.needle),
         .Err(e)  => false,
@@ -177,7 +177,7 @@ run_mod_emit* = (mc: ModEmitCase) bool {
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd))
+    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
     (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
         .Err(e)  => false,
         .Ok(txt) => {
@@ -201,7 +201,7 @@ run_mod_doc* = (mc: ModDocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     cmd := mp.join3("./zenc doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd))
+    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
     (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
         .Err(e)  => false,
         .Ok(txt) => {
@@ -221,7 +221,7 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_mods_stdin.zen"), mc.src, len(mc.src))
-    rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1"))
+    rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("oracle: shell")
     ok_rc := mc.should_succeed.match ({ true => rc == 0, false => rc != 0 })
     ok_rc.match ({ true => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
         .Err(e)  => false,
