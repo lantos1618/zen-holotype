@@ -1,0 +1,23 @@
+// Deep NON-tail recursion INSIDE a pool-actor behavior on a worker pthread.
+// Currently: SIGSEGV delivered on the worker's (exhausted) stack with no per-thread
+// altstack → raw process kill (exit 139), diagnostic never prints, whole pool dies.
+{ pool_open, pool_spawn, pool_send, pool_quiesce_stop, pool_close, pool_actor_free, Pool } = std.concurrent.pool
+depth = (n: i64) i64 {
+    (n == 0).match ({ true => 0, false => {
+        r := depth(n - 1)
+        (r < n).match ({ true => r + 1, false => n })
+    } })
+}
+behave = (user: RawPtr<u8>, msg: i64) void {
+    x := depth(100000000)
+    (x < 0).match ({ true => { }, false => { } })
+}
+main = () i32 {
+    a := pool_spawn(null_ptr(), 16, behave)
+    p := pool_open(2, 8)
+    p.pool_send(a, 1)
+    p.pool_quiesce_stop()
+    pool_actor_free(a)
+    p.pool_close()
+    0
+}
