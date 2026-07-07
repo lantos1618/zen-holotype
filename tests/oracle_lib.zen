@@ -81,7 +81,7 @@ zo_cmd* = (mp: MutPtr<Malloc>, body: str) str {
 zo_ensure* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    shell(mp.zo_cmd("true"))
+    shell(mp.zo_cmd("true")).expect("oracle: shell")
 }
 // remove the private scratch dir; call once at oracle teardown.
 zo_cleanup* = () i32 {
@@ -90,7 +90,7 @@ zo_cleanup* = () i32 {
     s := mp.new_in().expect("oracle: oom")
     s = s.append_in(mp, "rm -rf ").expect("oracle: oom")
     s = s.append_in(mp, mp.zo_dir()).expect("oracle: oom")
-    shell(mp.finish_in(s).expect("oracle: oom"))
+    shell(mp.finish_in(s).expect("oracle: oom")).expect("oracle: shell")
 }
 // a VALUE case: `src` defines `test* = () iNN { … }`; the emitted program must compute (print) `want`.
 VCase*: {
@@ -140,7 +140,7 @@ run_verdict* = (vc: VerdictCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1"))
+    rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("oracle: shell")
     vc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(vc.kind).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
         .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
         .Err(e)  => false,
@@ -152,7 +152,7 @@ run_diag* = (dc: DiagCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1"))
+    rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("oracle: shell")
     (rc == 0).match ({ true => false, false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
         .Ok(txt) => {
             all := true
@@ -172,7 +172,7 @@ fixpoint_ok* = () bool {
     m := Malloc(_: 0)
     mp := m.addr()
     shell(mp.zo_cmd("./zenc --build-self $ZT/zo_gen_after.c . 2>/dev/null"))
-    same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c"))
+    same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("oracle: shell")
     same == 0
 }
 // REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. Use when a caller

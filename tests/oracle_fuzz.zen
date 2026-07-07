@@ -36,8 +36,9 @@ FZ_EMIT := "timeout 60 ./zenc emit  $ZT/zo_fuzz.zen > /dev/null 2>&1"
 // a real (well-formed) program; the truncation generator feeds prefixes of it (off-by-token garbage).
 FZ_FULL := "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
 // ── crash decision ──────────────────────────────────────────────────────────────
-// true iff the wait status indicates a signal (segfault/abort) or a timeout/hang — i.e. a real bug.
-fz_crash = (status: i32) bool { status & 127 != 0 || status >> 8 & 255 >= 124 }
+// true iff the DECODED exit status (shell's `$?` convention) indicates a signal (segfault/abort → 128 +
+// signal) or a timeout/hang (`timeout` exits 124) — i.e. a real bug. Any code >= 124 is one of those.
+fz_crash = (status: i32) bool { status >= 124 }
 // ── small builders (the value harness can't reach these; we build Zen source strings by hand) ─────
 // append a decimal integer VALUE (no leading zeros) — for generated type-cycle names.
 fz_app_int = (mp: MutPtr<Malloc>, s: String, n: i64) String {
@@ -99,8 +100,8 @@ fz_run_one = (mp: MutPtr<Malloc>, src: str) i32 {
     // polymorphic-recursive type
     // off-by-token truncation
     // ── run one input through both probes; print '.'/crash report, return the crash count (0..2) ──────
-    cc := shell(mp.zo_cmd(FZ_CHECK))
-    ec := shell(mp.zo_cmd(FZ_EMIT))
+    cc := shell(mp.zo_cmd(FZ_CHECK)).expect("oracle: shell")
+    ec := shell(mp.zo_cmd(FZ_EMIT)).expect("oracle: shell")
     crashes := 0
     fz_crash(cc).match ({ true => {
         crashes = crashes + 1

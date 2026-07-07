@@ -203,7 +203,7 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
 }
 om_acid_ok = (mp: MutPtr<Malloc>, path: str) bool {
     save(mp.zo_path("zo_misc_acid.c"), "", 0)
-    rc := shell(mp.zo_cmd(mp.om_cat3("./zenc emit ", path, " > $ZT/zo_misc_acid.c 2>/dev/null")))
+    rc := shell(mp.zo_cmd(mp.om_cat3("./zenc emit ", path, " > $ZT/zo_misc_acid.c 2>/dev/null"))).expect("oracle: shell")
     txt := mp.om_read_file(mp.zo_path("zo_misc_acid.c"))
     src := mp.om_read_file(path)
     (rc == 0).match ({ true => txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false }), false => false })
@@ -361,19 +361,19 @@ om_do_emit = (mp: MutPtr<Malloc>, src: str) str {
     mp.om_read_file(mp.zo_path("zo_misc_em.c"))
 }
 // `zenc run` a source string, returning the program's exit code (a value-returning main's value).
-// `shell` is libc gpa(): it returns the wait status with the exit code in the high byte, so
-// `/ 256` recovers the code a normally-terminating program returned.
+// `shell` already DECODES the wait status (WEXITSTATUS, or 128 + signal), so its `.Ok` is the exit code
+// a normally-terminating program returned.
 om_run_rc = (src: str) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_run.zen"), src, len(src))
-    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_run.zen > /dev/null 2>&1")) / 256
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_run.zen > /dev/null 2>&1")).expect("oracle: shell")
 }
 // fmt --ast a source, then run the FORMATTED output; returns its exit code.
 om_fmt_then_run = (mp: MutPtr<Malloc>, src: str) i32 {
     save(mp.zo_path("zo_misc_ftr.zen"), src, len(src))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_ftr.zen > $ZT/zo_misc_ftr_f.zen 2>/dev/null"))
-    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")) / 256
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("oracle: shell")
 }
 // fmt(fmt src) == fmt(src) on a source string.
 om_fmt_idem = (src: str) bool {
@@ -382,13 +382,13 @@ om_fmt_idem = (src: str) bool {
     save(mp.zo_path("zo_misc_id.zen"), src, len(src))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null"))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")) == 0
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("oracle: shell") == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
 om_corpus_idem = (mp: MutPtr<Malloc>, rel: str) bool {
     shell(mp.zo_cmd(mp.om_cat3("./zenc fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null")))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")) == 0
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")).expect("oracle: shell") == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
@@ -397,7 +397,7 @@ om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: str) bool {
     shell(mp.zo_cmd(mp.om_cat3("cp ", rel, " $ZT/zo_misc_co.zen")))
     shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null"))
     shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")) == 0
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")).expect("oracle: shell") == 0
 }
 oracle_misc_faithful = () i32 {
     m := Malloc(_: 0)
@@ -468,6 +468,27 @@ oracle_misc_vbreak = () i32 {
     o_valnone := mp.om_do_fmt(s_valnone)
     run_suite("variant-break fmt round-trip", [om_run_rc(s_cmt) == 42, mp.om_fmt_then_run(s_cmt) == 42, om_run_rc(s_arm) == 42, mp.om_fmt_then_run(s_arm) == 42, om_run_rc(s_paren) == 42, mp.om_fmt_then_run(s_paren) == 42, om_run_rc(s_slice) == 42, mp.om_fmt_then_run(s_slice) == 42, om_fmt_idem(s_cmt), om_fmt_idem(s_arm), om_fmt_idem(s_paren), om_fmt_idem(s_slice), om_run_rc(s_valnone) == 5, mp.om_fmt_then_run(s_valnone) == 5, om_fmt_idem(s_valnone), o_valnone.contains(":= .None"), om_not(o_valnone.contains(".None("))])
 }
+// errors-as-values fixes in std.io.file, asserted directly:
+//  - save() now checks close() and STILL returns .Ok(bytes) on a normal path (the close guard didn't
+//    break the happy path — the close-FAILURE path can't be provoked without an NFS/ENOSPC mount).
+//  - shell() returns Result<i32, IoError> whose .Ok is the DECODED exit status (the shell `$?`
+//    convention): WEXITSTATUS for a normal exit, 127 for a command sh can't run, 128 + signal for a
+//    signal death. Before the fix it handed back the raw wait status with these folded together.
+om_shell_code = (cmd: str) i32 {
+    shell(cmd).match ({
+        .Ok(c)  => c,
+        .Err(e) => 0 - 1,
+    })
+}
+oracle_misc_iofile = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    saved := save(mp.zo_path("zo_misc_save.txt"), "hello", 5).match ({
+        .Ok(n)  => n == 5,
+        .Err(e) => false,
+    })
+    run_suite("io.file (save close-check + shell decoded status)", [saved, om_shell_code("exit 0") == 0, om_shell_code("exit 3") == 3, om_shell_code("exit 42") == 42, om_shell_code("this_is_not_a_real_command_zqx 2>/dev/null") == 127, om_shell_code("kill -9 $$") == 137])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 oracle_misc_run* = () i32 {
     fails := 0
@@ -478,5 +499,6 @@ oracle_misc_run* = () i32 {
     fails = fails + oracle_misc_differential()
     fails = fails + oracle_misc_faithful()
     fails = fails + oracle_misc_vbreak()
+    fails = fails + oracle_misc_iofile()
     fails
 }
