@@ -460,7 +460,13 @@ oracle_misc_vbreak = () i32 {
     s_arm := "Res: Okv(i32) | Nov\npick = (c: bool) Res {\n    c.match ({\n        true => Res\n        .Okv(1),\n        false => Res.Nov,\n    })\n}\nmain = () i32 { pick(true).match ({ .Okv(v) => v + 41, .Nov => 9, }) }\n"
     s_paren := "Res: Okv(i32) | Nov\nmain = () i32 {\n    x := (Res\n    .Okv(2))\n    x.match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
     s_slice := "Res: Okv(i32) | Nov\nmain = () i32 {\n    xs: [Res] := [Res.Okv(1), Res\n    .Okv(2)]\n    xs[1].match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
-    run_suite("variant-break fmt round-trip", [om_run_rc(s_cmt) == 42, mp.om_fmt_then_run(s_cmt) == 42, om_run_rc(s_arm) == 42, mp.om_fmt_then_run(s_arm) == 42, om_run_rc(s_paren) == 42, mp.om_fmt_then_run(s_paren) == 42, om_run_rc(s_slice) == 42, mp.om_fmt_then_run(s_slice) == 42, om_fmt_idem(s_cmt), om_fmt_idem(s_arm), om_fmt_idem(s_paren), om_fmt_idem(s_slice)])
+    // #53: a VALUE-position bare ctor `.None` (RHS of `:=`) directly before a parenthesized statement
+    // must NOT fuse into a call `.None(cond)…` — the `(` starts a NEW statement. The same-line gate in
+    // parse_ctor_named keeps `.None` a bare tag; the formatted source must run to the SAME value (5) and
+    // the formatter output must never emit the glued `.None(` call.
+    s_valnone := "Opt<T>: Some(T) | None\nf = (cond: bool) i32 {\n    out: Opt<i32> := .None\n    (cond).match ({ true => { out = .Some(5) }, false => {} })\n    out.match ({ .Some(v) => v, .None => 0 })\n}\nmain = () i32 { f(true) }\n"
+    o_valnone := mp.om_do_fmt(s_valnone)
+    run_suite("variant-break fmt round-trip", [om_run_rc(s_cmt) == 42, mp.om_fmt_then_run(s_cmt) == 42, om_run_rc(s_arm) == 42, mp.om_fmt_then_run(s_arm) == 42, om_run_rc(s_paren) == 42, mp.om_fmt_then_run(s_paren) == 42, om_run_rc(s_slice) == 42, mp.om_fmt_then_run(s_slice) == 42, om_fmt_idem(s_cmt), om_fmt_idem(s_arm), om_fmt_idem(s_paren), om_fmt_idem(s_slice), om_run_rc(s_valnone) == 5, mp.om_fmt_then_run(s_valnone) == 5, om_fmt_idem(s_valnone), o_valnone.contains(":= .None"), om_not(o_valnone.contains(".None("))])
 }
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 oracle_misc_run* = () i32 {
