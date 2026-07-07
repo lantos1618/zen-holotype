@@ -1,0 +1,262 @@
+// compiler.genjs — a JavaScript backend, sibling to genc_emit. Pipeline: genc -> mono -> genjs.
+//
+// It walks the SAME post-monomorphization `[Decl]` AST the C backend consumes and emits JavaScript
+// (Node/browser) instead of C. Where genc_emit maps Zen onto C's type system + memory, genjs maps
+// it onto JS's dynamic values plus a small linear-memory floor (bootstrap/zenrt.js, the JS analog of
+// zenrt.c). The two backends share genc.zen's AST + String builder; only the emission differs.
+//
+// ── VALUE MODEL (the lowering map, in one place) ──────────────────────────────────────────────────
+//   • str / RawPtr / all pointers → an INTEGER offset into a shared Uint8Array (`__zr.MEM`). A string
+//     literal is interned as NUL-terminated UTF-8 (`__zr.str("hi")` -> offset), so `strlen`, `load`,
+//     `offset`, `store`, `cstr`, `slice`, `write` all operate uniformly over MEM — exactly as C does
+//     over its flat address space. (A struct POINTER `MutPtr<T>` is just the JS object; JS objects are
+//     references, so `addr`/`load`/`->` are the identity — see js_call/js_arrow. Aliasing a *scalar*
+//     through MutPtr<i32> is the one thing this can't express; that needs boxed refs — DEFERRED.)
+//   • int / i64  → JS `number` (f64). Exact to 2^53; full i64 + 64-bit bitwise need BigInt — DEFERRED.
+//   • f64        → JS number (float literals pass through verbatim).
+//   • struct     → a plain object `{field: value, …}`.
+//   • enum       → a tagged object `{tag: "Variant", Variant: payload}`; match switches on `.tag`.
+//   • slice [T]  → a fat pointer `{ptr, len}` (ptr = MEM offset for byte/str views, or a JS array for a
+//     user slice literal). match/loop/index read `.ptr`/`.len`.
+//   • fn         → a JS function; UFCS is already desugared to flat calls by the checker.
+//   • panic      → `__zr.panic(msg)` throws.
+// The floor (`__zr`) provides the intrinsics + libc leaves (write/strlen/malloc/memcpy/…). Traits,
+// impls, templates, generic decls, imports and DRaw (verbatim C) emit NOTHING — same as genc skips them.
+{ String } = std.text.string
+{ view, is_empty, eq } = std.text.str
+{ Expr, Stmt, Decl, Func, Param, FieldInit, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, TagData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, WhileData, LetData, AssignData, IndexSetData, GlobalData, StructDecl, is_template, is_trait, gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
+{ monomorphize } = compiler.mono
+{ Malloc } = std.mem.alloc
+// ── small integer renderer (byte-only, self-hosting) ──────────────────────────────────────────────
+jdigit = (d: i64) u8 { load(offset("0123456789", d)) }
+jint_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({ true => s.gstr_push(a, jdigit(n)), false => {
+        hs := s.jint_nat(a, n / 10)
+        hs.gstr_push(a, jdigit(n % 10))
+    } })
+}
+jint = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({ true => s.gstr_append(a, "-").jint_neg(a, n), false => s.jint_nat(a, n) }) }
+// walk negatives directly so INT64_MIN doesn't overflow on `0 - n`
+jint_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n > 0 - 10).match ({ true => s.gstr_push(a, jdigit(0 - n)), false => {
+        hs := s.jint_neg(a, n / 10)
+        hs.gstr_push(a, jdigit(0 - n % 10))
+    } })
+}
+// ── JS identifier safety: a Zen name that is a JS reserved word gets a `$` suffix (so a Zen fn named
+//    `default`/`new`/`class`/… is a legal JS name). Field/property names are NOT mangled (any string is
+//    a valid object key). Kept small — only the words that actually collide with Zen's identifier space.
+js_is_reserved = (n: str) bool { eq(n, "default") || eq(n, "new") || eq(n, "class") || eq(n, "function") || eq(n, "var") || eq(n, "let") || eq(n, "const") || eq(n, "this") || eq(n, "null") || eq(n, "delete") || eq(n, "in") || eq(n, "instanceof") || eq(n, "typeof") || eq(n, "void") || eq(n, "with") || eq(n, "super") || eq(n, "enum") || eq(n, "export") || eq(n, "import") || eq(n, "extends") || eq(n, "switch") || eq(n, "case") || eq(n, "yield") || eq(n, "await") || eq(n, "debugger") || eq(n, "finally") }
+jname = (s: String, a: MutPtr<Malloc>, n: str) String { js_is_reserved(n).match ({ true => s.gstr_append(a, n).gstr_append(a, "$"), false => s.gstr_append(a, n) }) }
+// ── JS string-literal escaping (byte by byte to the NUL) ──────────────────────────────────────────
+jbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+jesc_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.gstr_append(a, "\\\""), false => (b == '\\').match ({ true => s.gstr_append(a, "\\\\"), false => (b == '\n').match ({ true => s.gstr_append(a, "\\n"), false => (b == '\r').match ({ true => s.gstr_append(a, "\\r"), false => (b == '\t').match ({ true => s.gstr_append(a, "\\t"), false => s.gstr_push(a, b) }) }) }) }) }) }
+jesc_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String { (jbyte(v, i) == 0).match ({ true => s, false => s.jesc_byte(a, jbyte(v, i)).jesc_from(a, v, i + 1) }) }
+jstrlit = (s: String, a: MutPtr<Malloc>, v: str) String { s.gstr_append(a, "__zr.str(\"").jesc_from(a, v, 0).gstr_append(a, "\")") }
+// ── expressions ───────────────────────────────────────────────────────────────────────────────────
+js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
+    e.match ({
+        .Int(n)         => s.jint(a, n),
+        .Byte(n)        => s.jint(a, n),
+        .FloatLit(ft)   => s.gstr_append(a, ft),
+        .Var(v)         => s.jname(a, v.name),
+        .Bin(b)         => s.js_bin(a, b),
+        .Call(c)        => s.js_call(a, c),
+        .MethodCall(mc) => s.gstr_append(a, "__zr.undesugared_method_call"),
+        .Cond(d)        => s.gstr_append(a, "(").js_expr(a, d.c).gstr_append(a, " ? ").js_expr(a, d.t).gstr_append(a, " : ").js_expr(a, d.e).gstr_append(a, ")"),
+        .Member(m)      => s.js_member(a, m),
+        .Arrow(ar)      => s.js_expr(a, ar.obj).gstr_append(a, ".").gstr_append(a, ar.field),
+        .MakeEnum(m)    => s.gstr_append(a, "({ tag: \"").gstr_append(a, m.variant).gstr_append(a, "\", ").gstr_append(a, m.variant).gstr_append(a, ": ").js_expr(a, m.payload).gstr_append(a, " })"),
+        .MakeStruct(m)  => s.js_mkstruct(a, m),
+        .Tag(t)         => s.gstr_append(a, "({ tag: \"").gstr_append(a, t.variant).gstr_append(a, "\" })"),
+        .Match(m)       => s.js_match_expr(a, m),
+        .StrLit(sl)     => s.jstrlit(a, sl.value),
+        .SliceLit(sd)   => s.gstr_append(a, "({ ptr: [").js_args(a, sd.items).gstr_append(a, "], len: ").jint(a, js_slice_count(sd.items)).gstr_append(a, " })"),
+        .Index(ix)      => s.gstr_append(a, "(").js_expr(a, ix.seq).gstr_append(a, ").ptr[").js_expr(a, ix.idx).gstr_append(a, "]"),
+        .Loop(l)        => s.js_loop(a, l),
+        .Lambda(lm)     => s.gstr_append(a, "__zr.unlowered_lambda"),
+        .Block(b)       => s.js_block_expr(a, b),
+    })
+}
+js_slice_count = (items: [Expr]) i32 {
+    n := 0
+    items.loop((h, i, it) {
+        n = n + 1
+    })
+    n
+}
+// loop-handler controls `h.break`/`h.continue` -> JS break/continue; else `obj.field`.
+js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String { eq(m.field, "break_zk").match ({ true => s.gstr_append(a, "break"), false => eq(m.field, "continue_zk").match ({ true => s.gstr_append(a, "continue"), false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field) }) }) }
+// `==`/`!=` -> strict; `/` and `%` route through the guarded floor helpers; all else `(lhs op rhs)`.
+js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String { eq(b.op, "/").match ({ true => s.gstr_append(a, "__zr.div(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => eq(b.op, "%").match ({ true => s.gstr_append(a, "__zr.mod(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " ").gstr_append(a, js_op(b.op)).gstr_append(a, " ").js_expr(a, b.rhs).gstr_append(a, ")") }) }) }
+js_op = (op: str) str { eq(op, "==").match ({ true => "===", false => eq(op, "!=").match ({ true => "!==", false => op }) }) }
+js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
+    out := s.gstr_append(a, "({ ")
+    m.inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.gstr_append(a, ", ") })
+        out = out.gstr_append(a, fi.name).gstr_append(a, ": ").js_expr(a, fi.value)
+    })
+    out.gstr_append(a, " })")
+}
+// a call's comma-separated args (each Expr value -> a Ptr<Expr> child).
+js_args = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
+    out := s
+    args.loop((h, i, arg) {
+        out = (i == 0).match ({ true => out, false => out.gstr_append(a, ", ") })
+        out = out.js_expr(a, arg.addr())
+    })
+    out
+}
+js_arg_at = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String { (i < c.args.len).match ({ true => s.js_expr(a, c.args[i].addr()), false => s.gstr_append(a, "0") }) }
+// intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)`.
+js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "__str_eq").match ({ true => s.gstr_append(a, "__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "__str_ne").match ({ true => s.gstr_append(a, "(!__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, "))"), false => eq(c.fn, "load").match ({ true => s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "store").match ({ true => s.gstr_append(a, "__zr.store(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "offset").match ({ true => s.gstr_append(a, "__zr.offset(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "slice").match ({ true => s.gstr_append(a, "__zr.slice(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "cstr").match ({ true => s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "null_ptr").match ({ true => s.gstr_append(a, "0"), false => eq(c.fn, "addr").match ({ true => s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "assert_nonnull").match ({ true => s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => s.js_call_intr2(a, c) }) }) }) }) }) }) }) }) }) }) }
+// second tier of intrinsics (kept split so no single match nests too deep for the parser).
+js_call_intr2 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "to_i32").match ({ true => s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "to_i64").match ({ true => s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "to_u8").match ({ true => s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)"), false => eq(c.fn, "to_f64").match ({ true => s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))"), false => eq(c.fn, "load_i64").match ({ true => s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "store_i64").match ({ true => s.gstr_append(a, "__zr.store_i64(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "sizeof").match ({ true => s.js_sizeof(a, c), false => s.js_call_default(a, c) }) }) }) }) }) }) }) }
+js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    (c.args.len > 0).match ({ true => c.args[0].addr().match ({
+        .Var(v) => s.gstr_append(a, "__zr.sizeof(\"").gstr_append(a, v.name).gstr_append(a, "\")"),
+        _       => s.gstr_append(a, "8"),
+    }), false => s.gstr_append(a, "8") })
+}
+js_call_default = (s: String, a: MutPtr<Malloc>, c: CallData) String { s.jname(a, c.fn).gstr_append(a, "(").js_args(a, c.args).gstr_append(a, ")") }
+// ── match: value position -> an IIFE returning an arm value; statement position -> a real `switch` (so
+//    an arm's early `return` leaves the enclosing function, not just the IIFE). Enum tag is the variant
+//    NAME string; a payload binds `_subj.<Variant>`. The last arm (or a `_`) is `default`. ────────────
+js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String { is_empty(ar.bind).match ({ true => s.js_expr(a, ar.body), false => s.gstr_append(a, "(() => { const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; return ").js_expr(a, ar.body).gstr_append(a, "; })()") }) }
+js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
+    eq(ar.variant, "_").match ({ true => s.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "), false => {
+        out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": return ").js_arm_body_expr(a, ar).gstr_append(a, "; ")
+        last.match ({ true => out.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "), false => out })
+    } })
+}
+js_switch_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
+    (i >= arms.len).match ({ true => s, false => {
+        out := s.js_switch_case(a, arms[i], i == arms.len - 1)
+        eq(arms[i].variant, "_").match ({ true => out, false => out.js_switch_cases(a, arms, i + 1) })
+    } })
+}
+js_match_expr = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "(() => { const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_cases(a, m.arms, 0).gstr_append(a, "} })()") }
+// statement-position match: arms run as statements so a diverging arm's `return` propagates.
+js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData) String { is_empty(ar.bind).match ({ true => s.js_arm_stmt_body(a, ar.body), false => s.gstr_append(a, "{ const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; ").js_arm_stmt_body(a, ar.body).gstr_append(a, " }") }) }
+// a braced value-position body is a Block: splice its statements; otherwise it's a bare expr statement.
+js_arm_stmt_body = (s: String, a: MutPtr<Malloc>, body: Ptr<Expr>) String {
+    load(body).match ({
+        .Block(b) => s.js_block_stmts(a, b),
+        _         => s.js_expr(a, body).gstr_append(a, ";"),
+    })
+}
+js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
+    eq(ar.variant, "_").match ({ true => s.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "), false => {
+        out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": ").js_arm_stmt(a, ar).gstr_append(a, " break; ")
+        last.match ({ true => out.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "), false => out })
+    } })
+}
+js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
+    (i >= arms.len).match ({ true => s, false => {
+        out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
+        eq(arms[i].variant, "_").match ({ true => out, false => out.js_switch_stmt_cases(a, arms, i + 1) })
+    } })
+}
+js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "{ const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_stmt_cases(a, m.arms, 0).gstr_append(a, "} }") }
+// a foreach loop -> an IIFE with a JS for-loop over the fat pointer's array/offset backing.
+js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
+    out := s.gstr_append(a, "(() => { const _seq = ").js_expr(a, l.seq).gstr_append(a, "; for (let ").jname(a, l.idx).gstr_append(a, " = 0; ").jname(a, l.idx).gstr_append(a, " < _seq.len; ").jname(a, l.idx).gstr_append(a, "++) { const ").jname(a, l.elem).gstr_append(a, " = _seq.ptr[").jname(a, l.idx).gstr_append(a, "]; ")
+    out = out.js_stmts(a, l.body)
+    out.gstr_append(a, " } return 0; })()")
+}
+js_block_expr = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
+    out := s.gstr_append(a, "(() => { ")
+    b.stmts.loop((h, i, st) {
+        one := (i == b.stmts.len - 1).match ({ true => out.js_block_last(a, st), false => out.js_stmt(a, st) })
+        out = one.gstr_append(a, " ")
+    })
+    out.gstr_append(a, "})()")
+}
+// the LAST statement of a block-expr yields the block's value: a bare expr becomes `return expr;`.
+js_block_last = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
+    st.match ({
+        .ExprStmt(e) => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
+        _            => s.js_stmt(a, st),
+    })
+}
+js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
+    out := s
+    b.stmts.loop((h, i, st) {
+        out = out.js_stmt(a, st).gstr_append(a, " ")
+    })
+    out
+}
+// ── statements ────────────────────────────────────────────────────────────────────────────────────
+js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
+    st.match ({
+        .Let(l)      => s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ").js_expr(a, l.value).gstr_append(a, ";"),
+        .Assign(x)   => s.js_expr(a, x.target).gstr_append(a, " = ").js_expr(a, x.value).gstr_append(a, ";"),
+        .Return(e)   => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
+        .ExprStmt(e) => s.js_expr_stmt(a, e),
+        .If(f)       => s.gstr_append(a, "if (").js_expr(a, f.c).gstr_append(a, ") { ").js_stmts(a, f.then).gstr_append(a, "} else { ").js_stmts(a, f.els).gstr_append(a, "}"),
+        .While(w)    => s.gstr_append(a, "while (").js_expr(a, w.c).gstr_append(a, ") { ").js_stmts(a, w.body).gstr_append(a, "}"),
+        .IndexSet(x) => s.gstr_append(a, "(").js_expr(a, x.seq).gstr_append(a, ").ptr[").js_expr(a, x.idx).gstr_append(a, "] = ").js_expr(a, x.value).gstr_append(a, ";"),
+    })
+}
+// a bare expression statement; a match here becomes a real `switch` (so arm returns fire).
+js_expr_stmt = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
+    load(e).match ({
+        .Match(m) => s.js_match_stmt(a, m),
+        _         => s.js_expr(a, e).gstr_append(a, ";"),
+    })
+}
+js_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt]) String {
+    out := s
+    body.loop((h, i, st) {
+        out = out.js_stmt(a, st).gstr_append(a, " ")
+    })
+    out
+}
+// ── declarations ──────────────────────────────────────────────────────────────────────────────────
+// a function; every param is a bare JS name (types erased). `main` becomes `zen_main`.
+js_func_name = (s: String, a: MutPtr<Malloc>, name: str) String { eq(name, "main").match ({ true => s.gstr_append(a, "zen_main"), false => s.jname(a, name) }) }
+js_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.gstr_append(a, ", ") })
+        out = out.jname(a, p.name)
+    })
+    out
+}
+js_func = (s: String, a: MutPtr<Malloc>, f: Func) String { s.gstr_append(a, "function ").js_func_name(a, f.name).gstr_append(a, "(").js_params(a, f.params).gstr_append(a, ") { ").js_stmts(a, f.body).gstr_append(a, "}\n") }
+// a module-level global `name := init` -> `let name = init;` (mutable; some are scheduler/runtime state).
+js_global = (s: String, a: MutPtr<Malloc>, g: GlobalData) String { s.gstr_append(a, "let ").jname(a, g.name).gstr_append(a, " = ").js_expr(a, g.init).gstr_append(a, ";\n") }
+// does the module define a `main`? then the emitted JS invokes it.
+js_has_main = (decls: [Decl]) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DFunc(f) => eq(f.name, "main").match ({ true => true, false => found }),
+            _         => found,
+        })
+    })
+    found
+}
+// whole translation unit -> JS. Globals first (const-init, mirrors genc), then functions (hoisted in
+// JS, so order is free), then the `zen_main()` invocation. The `__zr` floor is prepended by the driver.
+genJsModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
+    decls := a.monomorphize(raw)
+    s := a.gstr_string(4096).gstr_append(a, "\"use strict\";\n")
+    decls.loop((h, i, d) {
+        s = d.match ({
+            .DGlobal(g) => s.js_global(a, g),
+            _           => s,
+        })
+    })
+    decls.loop((h, i, d) {
+        s = s.js_decl_fn(a, d)
+    })
+    decls.js_has_main().match ({ true => s.gstr_append(a, "\nzen_main();\n"), false => s })
+}
+// functions only (globals already emitted first, so a global's init never forward-refs a fn body at TDZ).
+js_decl_fn = (s: String, a: MutPtr<Malloc>, d: Decl) String {
+    d.is_template().match ({ true => s, false => d.is_trait().match ({ true => s, false => d.match ({
+        .DFunc(f) => s.js_func(a, f),
+        _         => s,
+    }) }) })
+}

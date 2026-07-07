@@ -14,6 +14,7 @@
 { resolve_module } = compiler.check
 { CheckDiagnostic, check_module_diagnostic_from_source, check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, denrich_check, desc_or } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
+{ genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists } = std.internal.resolve
@@ -178,6 +179,75 @@ emit_checked = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
         },
     })
 }
+// ── genjs backend (task #46): Zen AST -> JavaScript. `emit-js` checks then emits the floor
+// (bootstrap/zenrt.js) + the module JS; `build --target js` writes the same to a .js file. Additive:
+// it reuses the exact resolve/parse/check pipeline, only swapping genModuleIn for genJsModuleIn. ──
+js_floor = (mp: MutPtr<Malloc>, root: str) str {
+    contents_in(mp, mp.bs_join(root, "bootstrap/zenrt.js")).match ({
+        .Ok(src) => src,
+        .Err(e)  => {
+            derr("zenc: emit-js: cannot open bootstrap/zenrt.js floor\n")
+            ""
+        },
+    })
+}
+// emit floor + module JS to stdout (checked): a type-broken program never produces JS.
+emit_js = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => {
+            rp := mp.resolve_prog(root, path, src)
+            raw := mp.parse_module(rp.flat)
+            decls := mp.resolve_module(raw)
+            (mp.report_check(raw, decls, rp, path, src) == 0).match ({ true => {
+                out(mp.js_floor(root))
+                out("\n")
+                out_bytes(mp.genJsModuleIn(decls).bytes())
+                0
+            }, false => 1 })
+        },
+        .Err(e)  => {
+            derr("zenc: emit-js: cannot read input\n")
+            1
+        },
+    })
+}
+// `zenc build --target js <file> [-o out.js]` -> write floor + module JS to `out` (default a.js).
+build_js = (mp: MutPtr<Malloc>, root: str, path: str, out_path: str) i32 {
+    contents_in(mp, path).match ({
+        .Ok(src) => {
+            rp := mp.resolve_prog(root, path, src)
+            raw := mp.parse_module(rp.flat)
+            decls := mp.resolve_module(raw)
+            (mp.report_check(raw, decls, rp, path, src) == 0).match ({ true => {
+                js := mp.gstr_string(8192).gstr_append(mp, mp.js_floor(root)).gstr_append(mp, "\n")
+                mod := mp.genJsModuleIn(decls)
+                full := js.gstr_append(mp, mod.finish_cstr(mp))
+                save(out_path, full.finish_cstr(mp), full.len).match ({
+                    .Ok(n)  => {
+                        derr("zenc: wrote ")
+                        derr(out_path)
+                        derr("\n")
+                        0
+                    },
+                    .Err(e) => 1,
+                })
+            }, false => 1 })
+        },
+        .Err(e)  => {
+            derr("zenc: build --target js: cannot read input\n")
+            1
+        },
+    })
+}
+finish_cstr = (s: String, mp: MutPtr<Malloc>) str { cstr(s.ptr) }
+// `zenc build --target js <file> [-o out]` -> genjs; otherwise the ordinary C `build`. Args:
+// arg(2)=--target arg(3)=js arg(4)=<file> arg(5)=-o arg(6)=<out>.
+build_target = (mp: MutPtr<Malloc>, root: str) i32 {
+    (eq(arg(2), "--target") && eq(arg(3), "js")).match ({ true => {
+        out := eq(arg(5), "-o").match ({ true => arg(6), false => "a.js" })
+        mp.build_js(root, arg(4), out)
+    }, false => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)) })
+}
 // check/build/run operate on a Spec (a single file, or a zen.toml project). spec.source is the
 // entry; spec.ccflags/links/out come from a project's manifest (empty for a single file).
 check_spec = (mp: MutPtr<Malloc>, root: str, spec: Spec) i32 { spec.ok.match ({ true => mp.check_spec_ok(root, spec), false => 1 }) }    // resolve_spec already reported why
@@ -279,7 +349,7 @@ main = () i32 {
     }, false => eq(cmd, "--build-self").match ({ true => eq(arg(2), "").match ({ true => {
         derr("usage: zenc --build-self <out.c> <srcroot>\n")
         2
-    }, false => mp.build_self(arg(3), arg(2)) }), false => eq(cmd, "emit").match ({ true => mp.emit_file(root, arg(2), arg(3)), false => eq(cmd, "check").match ({ true => mp.check_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "run").match ({ true => mp.run_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "build").match ({ true => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)), false => eq(cmd, "fmt").match ({ true => mp.fmt_cmd(arg(2), arg(3)), false => eq(cmd, "doc").match ({ true => mp.doc_cmd(root, arg(2)), false => mp.default_emit(cmd) }) }) }) }) }) }) }) }) })
+    }, false => mp.build_self(arg(3), arg(2)) }), false => eq(cmd, "emit").match ({ true => mp.emit_file(root, arg(2), arg(3)), false => eq(cmd, "emit-js").match ({ true => mp.emit_js(root, arg(2)), false => eq(cmd, "check").match ({ true => mp.check_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "run").match ({ true => mp.run_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "build").match ({ true => mp.build_target(root), false => eq(cmd, "fmt").match ({ true => mp.fmt_cmd(arg(2), arg(3)), false => eq(cmd, "doc").match ({ true => mp.doc_cmd(root, arg(2)), false => mp.default_emit(cmd) }) }) }) }) }) }) }) }) }) })
 }    // --build-self <out.c> <srcroot>
 build_out = (flag: str, out: str) str { eq(flag, "-o").match ({ true => out, false => "a.out" }) }    // `zenc <file>` (or stdin) -> raw C on stdout, the oracle filter
 // build output path: `build <file> -o <out>` -> <out>, else "a.out".
