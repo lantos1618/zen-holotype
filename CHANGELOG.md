@@ -48,7 +48,7 @@ imports no compiler code) remains, and it is being ported to a Zen-native oracle
 - **Enum variants are `|`-separated** (was `,`): `Opt*<T>: None | Some(T)`. A sum type is a
   *choice*, so `|` ("or") — visually distinct from the `{a, b}` *record* (comma = "and").
 
-CI (`.github/workflows/ci.yml`) builds `zenc` and runs the pytest oracle on every push and PR.
+CI (`.github/workflows/ci.yml`) builds `zenc` and runs the Zen-native oracle on every push and PR.
 
 ## History — the self-hosting / bootstrap path (now complete)
 

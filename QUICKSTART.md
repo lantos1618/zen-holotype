@@ -7,7 +7,7 @@ monomorphized generics, traits with UFCS — compiled to C.
 
 ```sh
 git clone <this repo> && cd zenc
-make -f bootstrap/Makefile zenc     # cc compiles the committed C seed → ./zenc  (~1s)
+make                                 # cc compiles the committed C seed → ./zenc  (~1s)
 ./zenc --version
 ```
 
@@ -107,12 +107,14 @@ sum = (xs: [i32]) i32 {
     acc
 }
 
-// collections take an EXPLICIT allocator — nothing hides a malloc.
-// alloc = std.mem.alloc
-// vec = std.collections.vec
-// heap := alloc.default()
-// v := vec.of(heap.addr(), [1, 2, 3])      // Vec<i32> backed by heap
-// v = v.push(heap.addr(), 4)
+// collections take an EXPLICIT allocator — nothing hides a malloc. Fallible ops
+// (of/push) return a Result, so unwrap with .expect(...).
+// heap = std.mem.heap
+// vec  = std.collections.vec
+// { expect } = std.core.result
+// h := heap.gpa()                                    // the system heap allocator
+// v := vec.of(h.addr(), [1, 2, 3]).expect("of")      // Vec<i32> backed by heap
+// v = v.push(h.addr(), 4).expect("push")
 ```
 
 ## A real program
@@ -129,6 +131,6 @@ rc, arena, coroutine, …). Errors print as `file: error: <message>`; line/colum
 ## Run the test suite
 
 ```sh
-python3 -m pytest tests/ -q          # the binary-only oracle (~650 cases)
-make -f bootstrap/Makefile regen     # regenerate the C seed; must be byte-identical (self-host gate)
+make oracle                          # the Zen-native oracle (tests/oracle.zen); exit code = failing-case count
+make regen                           # regenerate the C seed; must be byte-identical (self-host gate)
 ```

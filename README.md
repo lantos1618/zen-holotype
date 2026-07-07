@@ -119,8 +119,11 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 The compiler is the `zenc` binary; `cc` builds it from committed C, nothing else needed.
 
 ```sh
-make -f bootstrap/Makefile zenc        # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zenc
+make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zenc
 ```
+
+(The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zenc`
+works too and is what CI invokes.)
 
 CLI surface (`zenc --help`):
 
@@ -160,11 +163,11 @@ make -f bootstrap/Makefile regen       # zenc --build-self bootstrap/zenc.gen.c 
 git diff --quiet bootstrap/zenc.gen.c  # the fixpoint: regenerated C must be byte-identical
 ```
 
-**Tests.** Two harnesses:
+**Tests.** The Zen-native oracle (no Python — the repo has zero `.py` files):
 
 ```sh
-make -f bootstrap/Makefile oracle      # the Zen-native oracle (tests/oracle.zen); exit code = failing-case count
-pip install -r requirements-dev.txt && pytest tests/   # pytest drives ./zenc as a subprocess (imports zero compiler code)
+make oracle            # the Zen-native oracle (tests/oracle.zen); exit code = failing-case count
+make oracle-fast       # value + verdict smoke subset (~20s) for the inner loop
 ```
 
 ## Diagnostics
@@ -219,7 +222,7 @@ This is rough around the edges. Known limits worth flagging up front:
 | `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` + `Makefile` |
 | `examples/` | runnable single-file programs |
-| `tests/` | the Zen-native oracle (`oracle.zen`) + the pytest runner |
+| `tests/` | the Zen-native oracle (`oracle.zen`) + fixtures |
 
 ## More docs
 
