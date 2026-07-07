@@ -63,6 +63,12 @@ STDERR_FD := 2    // fd 2 for the "actor marked dead" note (mirrors std.core.res
 // (e.g. a typed message box) leaks — a dead actor's leak beats a dead process; the deferred real fix is a
 // per-actor arena rt reset on death. No lock is held across the call (behavior runs outside the mailbox lock).
 __zen_actor_call = (behavior: (RawPtr<u8>, i64) void, user: RawPtr<u8>, msg: i64) i64
+// Register THIS worker pthread's own per-thread sigaltstack (bootstrap/zenrt.c). A stack-overflow SIGSEGV
+// is delivered on the alt stack (SA_ONSTACK), but sigaltstack is a PER-THREAD setting — a worker that
+// never registered one would take the overflow on its already-exhausted stack → raw process kill (exit
+// 139), killing the whole pool. Every worker calls this FIRST so an actor's runaway recursion (Zen's only
+// loop) is caught and routed into the per-actor panic catch (__zen_actor_call) instead of crashing raw.
+__zen_thread_init = () void
 // ── PoolActor: a type-erased runnable actor ─────────────────────────────────────────────────────
 // `behavior(user, msg)` runs the actor's reaction to one i64 message. The mailbox is a fixed-cap ring
 // of i64 messages (a pointer payload rides as an i64 too). `mbmu` guards head/tail/buf AND `sched`.
@@ -320,6 +326,7 @@ worker_loop = (p: MutPtr<Pool>, wid: i64) void {
 }
 // non-capturing pthread body: arg → [pool_block_ptr, worker_id]; rebuild the pool view and run the loop.
 worker_body = (arg: RawPtr<u8>) RawPtr<u8> {
+    __zen_thread_init()    // register this worker's per-thread sigaltstack BEFORE it runs any behavior (recursion → SIGSEGV)
     pool_raw := load_i64(arg).offset(0)
     wid := load_i64(arg.offset(8))
     p := pool_view(pool_raw)
