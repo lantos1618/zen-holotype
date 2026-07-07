@@ -213,7 +213,7 @@ parse_variant_payload* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
 }
 fill_payload_tys = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -223,7 +223,7 @@ fill_payload_tys = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32)
     buf[i] = field(a.payload_fname(i), te.ty)
     after := src.scan(te.next)
     src.is_comma(after.tok).match ({ true => a.fill_payload_tys(src, after.next, buf, i + 1), false => {
-        src.is_rparen(after.tok).match ({ false => perr_set() })
+        src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -234,7 +234,7 @@ fill_anon_fields = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32)
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             PEnd(
                 count: i,
                 next: sc.next,
@@ -249,7 +249,7 @@ fill_anon_fields = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32)
 fill_anon_field = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -340,7 +340,7 @@ parse_tyargs* = (a: MutPtr<Malloc>, src: str, pos: i32) TyArgs {
 }
 fill_tyargs = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -377,7 +377,7 @@ fill_tys = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
 fill_ty = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -389,7 +389,7 @@ fill_ty = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Ty], i: i32) PEnd {
     src.is_comma(after.tok).match ({ true => a.fill_tys(src, after.next, buf, i + 1), false => {
         // A function-type param list `(A, B) R` must close on ')'; a missing ')' is a parse error, not a
         // silent terminator (mirrors fill_payload_tys).
-        src.is_rparen(after.tok).match ({ false => perr_set() })
+        src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -442,7 +442,7 @@ skip_to_lparen* = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()    // stop at EOF (scan returns next==pos there)
+            perr_set_at(pos)    // stop at EOF (scan returns next==pos there)
             sc.next
         },    // no `(` before EOF: a truncated decl — flag, don't recurse forever
         _    => src.is_lparen(sc.tok).match ({ true => sc.next, false => src.skip_to_lparen(sc.next) }),
@@ -454,7 +454,7 @@ fill_params* = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEn
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             PEnd(
                 count: i,
                 next: sc.next,
@@ -483,7 +483,7 @@ ellipsis_skip = (src: str, pos: i32) i32 {
 fill_one = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -510,7 +510,7 @@ fill_variadic = (a: MutPtr<Malloc>, src: str, nm: str, dotpos: i32, buf: [Param]
     buf[i] = pvariadic(nm, tslice(a.tynode(te.ty)))    // body sees `[T]`
     after := src.scan(te.next)    // must be ')'
     src.is_comma(after.tok).match ({ true => {
-        perr_set()
+        perr_set_at(after.tok.start)
         PEnd(
             count: i + 1,
             next: after.next,
@@ -529,7 +529,7 @@ skip_block_d = (src: str, pos: i32, depth: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             pos
         },    // an opened `{` never closed: flag, terminate
         _    => src.is_lbrace(sc.tok).match ({ true => src.skip_block_d(sc.next, depth + 1), false => src.is_rbrace(sc.tok).match ({ true => (depth == 1).match ({ true => sc.next, false => src.skip_block_d(sc.next, depth - 1) }), false => src.skip_block_d(sc.next, depth) }) }),
