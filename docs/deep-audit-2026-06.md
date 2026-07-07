@@ -1,6 +1,6 @@
 # Deep audit — 2026-06-26 (7-probe Monte-Carlo)
 
-Read-only deep inspection: 7 parallel probes (parser, checker, codegen, driver/resolve/genfmt,
+Read-only deep inspection: 7 parallel probes (parser, checker, codegen, driver/resolve/pretty,
 data/mem, concurrency, runtime/FFI), each verified with repros against a live `./zenc`. Status:
 🔧 = fix in flight · ⏳ = queued · 🎨 = needs design/taste call · ✅ = fixed/merged.
 
@@ -18,7 +18,7 @@ data/mem, concurrency, runtime/FFI), each verified with repros against a live `.
 - ⏳ **C2 type identity diverges by import path** (mangler) — same type via qualified-alias vs unqualified →
   different C name → won't compile. Breaks qualified `str` import AND actor `Context`/`Receiver` API.
   Fix: mangle on canonical identity (defining module + name + args), not import path.
-- 🎨 **C3 `zenc fmt` corrupts every file** (genfmt) — (a) rewrites `RawPtr`/`MutPtr`→`Ptr` (genfmt:223; all
+- 🎨 **C3 `zenc fmt` corrupts every file** (pretty) — (a) rewrites `RawPtr`/`MutPtr`→`Ptr` (pretty:223; all
   3 parse to one `Ty.Ptr`), (b) relocates comments (gf_decl_pos=0 for body-less decls). Can't run on its
   own codebase. NOTE: (a) ties to the safety-goal-D pointer-kind distinction — design call.
 - ⏳ **C4 `--build-self`/`emit --force` skip `check_validate`** (driver:421) — the structural root of all
