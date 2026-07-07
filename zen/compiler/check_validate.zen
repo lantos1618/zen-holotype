@@ -3099,12 +3099,27 @@ ka_lambda_at = (env: Env, ftparams: [Param], targs: [Ty], params: [Param], i: i3
 // bindings, so a contradicting value arg is a real error). A purely-inferred generic call leaves arg
 // typing to monomorphization (a bare `.Variant` / cross-enum residue resolves only there). The closure
 // arity/return check (R5) runs regardless, since HOF closures rarely carry turbofish.
-ka_args_check = (env: Env, tparams: [Param], f: Func, args: [Expr], etargs: [Ty], pos: i32) i32 {
+// A right-arity LOCAL generic call is INLINED during resolve_module, so the post-inline call check
+// (call_errs → arg_err_at) never sees it — arg-type safety of its CONCRETE (non-tparam) slots was
+// therefore off for EVERY generic callee (and the whole stdlib threads `MutPtr<A>`, so it is
+// generic). Re-arm it HERE, on the pre-inline call site, reusing the SAME arg_err_at the accepted
+// non-generic path uses: it skips tparam-mentioning slots (deferred to mono) and checks only the
+// concrete ones (`n:i32`, `sep:u8`) via lit_slot_verdict + fit_err — with fit_err's unknown-arg
+// leniency intact, so unresolved generic residue never over-rejects. Gated to `tparams.len > 0`:
+// a non-generic callee's call survives to the post-inline pass, which already checks it. Gated to
+// `authoritative` (fn is NOT also a trait/impl method): `the_func(fn)` returns THE top-level free
+// function by name, and UFCS binds its receiver to param 0 (positional), so its concrete slots check
+// soundly. But a name that ALSO has an impl method (e.g. `String.impl.append_in(s, a, t)` alongside
+// the free `append_in(a, s, t)`) may UFCS-dispatch to the impl by receiver type — then the free-fn
+// signature `the_func` returns is the WRONG yardstick, and a positional check would mis-reject a legit
+// `s.append_in(mp, t)`. Such dispatched names defer (under-catch), so the check never over-rejects.
+ka_concrete_arg_err = (env: Env, authoritative: bool, f: Func, i: i32, ar: Expr, pos: i32) i32 { (authoritative && f.tparams.len > 0).match ({ true => env.arg_err_at(f.tparams, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)), false => 0 }) }
+ka_args_check = (env: Env, tparams: [Param], authoritative: bool, f: Func, args: [Expr], etargs: [Ty], pos: i32) i32 {
     targs := env.ka_targs(f, args, etargs)
     tf := etargs.len > 0
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(tf.match ({ true => env.ka_mismatch_at(f.tparams, targs, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)), false => 0 })).kv_kor(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos))
+        acc = acc.kv_kor(tf.match ({ true => env.ka_mismatch_at(f.tparams, targs, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)), false => 0 })).kv_kor(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos)).kv_kor(env.ka_concrete_arg_err(authoritative, f, i, ar, pos))
     })
     acc
 }
@@ -3116,10 +3131,15 @@ ka_args_check = (env: Env, tparams: [Param], f: Func, args: [Expr], etargs: [Ty]
 ka_call_core = (env: Env, tparams: [Param], fn: str, args: [Expr], etargs: [Ty], pos: i32) i32 {
     (env.decls.is_known_fn(fn) && env.is_local(fn) == false).match ({ true => {
         f := env.decls.the_func(fn)
+        // `the_func(fn)`'s signature is the authoritative callee only when `fn` is not ALSO a trait/impl
+        // method — otherwise UFCS may dispatch to the impl by receiver type, and the free-fn signature
+        // is the wrong yardstick for the concrete-arg check (which then defers). (Zen has no free-fn
+        // overloading, so a name with no impl method resolves uniquely to this decl.)
+        authoritative := env.decls.is_trait_method(fn) == false
         tf := (etargs.len == 0).match ({ true => 0, false => (f.tparams.len == 0).match ({ true => KNOTYPEARGS().kv_at(pos), false => env.ut_unknown_tys(tparams, etargs).kv_one(KUNKNOWNTYPE()).kv_at(pos) }) })
         // a fully-pinned turbofish (or inferred bindings) feeds the arg-mismatch + closure checks; an
         // unknown turbofish type short-circuits (the unknown-type error already fired).
-        tf.kv_kor(env.ka_args_check(tparams, f, args, etargs, pos))
+        tf.kv_kor(env.ka_args_check(tparams, authoritative, f, args, etargs, pos))
     }, false => 0 })
 }
 ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
@@ -4591,9 +4611,20 @@ check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
 sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = env.sm_msg_mut(fi.value).match ({ true => true, false => f })
+        f = env.sm_msg_mut(tvoid(), fi.value).match ({ true => true, false => f })
     })
     f
+}
+// the message/element type carried by an actor handle: `ActorRef<M>` / `ActorCell<M>` / `ActorHandle<M,_>`
+// / `ReplyRef<M>` (possibly behind a pointer) → M (its first type arg). tvoid when the target has no
+// concrete generic head (a pre-inline tparam handle) — the caller then falls back to the payload
+// expression's own inferred type, so nothing is over-rejected.
+first_gen_arg = (t: Ty) Ty {
+    t.match ({
+        .Generic(g) => (g.args.len > 0).match ({ true => g.args[0], false => tvoid() }),
+        .Ptr(pd)    => load(pd.pointee).first_gen_arg(),
+        _           => tvoid(),
+    })
 }
 // Classify a send-payload expression by the TYPE it reaches (Pony reference-capabilities), NOT its AST
 // shape. A constructor node (MakeEnum / MakeStruct) is descended into the SPECIFIC payload/fields actually
@@ -4604,9 +4635,24 @@ sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
 // through an identity fn) both infer a MutPtr-reaching type and reject, closing the `.Var`-only hole where
 // they fell to `false`. A call returning a deeply-immutable `Ptr<T>` (`val`) still infers clean (not
 // rejected) — the precision comes from the type predicate, not the syntax.
-sm_msg_mut = (env: Env, e: Ptr<Expr>) bool {
+// The DECLARED payload type of the constructed variant reaches a MutPtr — e.g. `.Poke(x)` where the
+// enum's `Poke` variant is declared `Poke(MutPtr<i32>)`. This is what closes the generic-FORWARDER hole
+// (#407 launder): `fwd<T>(h, payload: T){ h.send(.Poke(payload)) }` infers its payload EXPRESSION as the
+// bare tparam `T` (reaches no MutPtr), but the message it constructs is a `.Poke`, whose DECLARED field
+// is a MutPtr regardless of what `T` is bound to — so the receiver still gets a mutable alias. Reading
+// the SPECIFIC constructed variant's declared field (not the whole enum) keeps a sibling `.Inc(3)` on
+// the same enum legal (Inc's field is an i32, reaches no MutPtr). The enum is pinned by the constructor
+// node's own `ty` when set, else by `mty` — the message type M carried by the send TARGET's handle
+// (`send(h, .Poke(x))` → h: ActorRef<M> → M): a bare `.Poke` inside a generic forwarder leaves `mk.ty`
+// empty, so M from the (concretely-typed) handle is what resolves the variant. Lenient when NEITHER
+// pins the enum (both void) — the payload-expression descent still applies, so nothing over-rejects.
+sm_variant_decl_mut = (env: Env, mty: Ty, mk: MakeEnumData) bool {
+    ety := is_empty(mk.ty).match ({ true => mty, false => tnamed(mk.ty) })
+    env.decls.ty_reaches_mutptr(env.subj_variant_payload(ety, mk.variant), 16)
+}
+sm_msg_mut = (env: Env, mty: Ty, e: Ptr<Expr>) bool {
     load(e).match ({
-        .MakeEnum(mk)  => env.sm_msg_mut(mk.payload),
+        .MakeEnum(mk)  => env.sm_variant_decl_mut(mty, mk).match ({ true => true, false => env.sm_msg_mut(tvoid(), mk.payload) }),
         .MakeStruct(s) => env.sm_inits_mut(s.inits),
         _              => env.decls.ty_reaches_mutptr(env.infer_expr(e), 16),
     })
@@ -4616,10 +4662,16 @@ sm_msg_mut = (env: Env, e: Ptr<Expr>) bool {
 // `send(p, h, msg)` (from `p.send(h, msg)` / std.concurrent.pool_actor.send, flattened to `…__send`) whose
 // message is `args[2]` — the path where cross-actor races ACTUALLY happen — as well as the 2-arg inline
 // `send(h, msg)`. `sx_named` accepts the bare name and the flattener's `…__send` / `…__pool_send` suffix.
-sm_call_pos = (env: Env, c: CallData) i32 { (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({ true => env.sm_msg_mut(c.args[c.args.len - 1].addr()).match ({ true => c.pos.pos_or(1), false => 0 }), false => 0 }) }
+// the handle is the argument immediately BEFORE the message in every flattened send shape — `send(h,
+// msg)` and the 3-arg parallel `send(p, h, msg)` / `pool_send(p, h, msg)` — so `args[len-2]` yields the
+// handle whose type arg is the message type M, used to resolve a bare `.Variant` message against M's decl.
+sm_call_pos = (env: Env, c: CallData) i32 { (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({ true => env.sm_msg_mut(env.infer_expr(c.args[c.args.len - 2].addr()).first_gen_arg(), c.args[c.args.len - 1].addr()).match ({ true => c.pos.pos_or(1), false => 0 }), false => 0 }) }
 // the UFCS form as it may survive pre-desugar (`h.send(m)` / `p.send(h, m)` / `p.pool_send(h, m)`): the
 // message is again the LAST method argument (the receiver is carried separately).
-sm_mcall_pos = (env: Env, mc: MethodCallData) i32 { (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => env.sm_msg_mut(mc.args[mc.args.len - 1].addr()).match ({ true => mc.pos.pos_or(1), false => 0 }), false => 0 }) }
+// pre-desugar UFCS form (`h.send(m)` / `p.pool_send(h, m)`): the message is the last method arg; the
+// handle carrying M is the RECEIVER for `h.send(m)` (its first type arg is M). For `p.pool_send(h, m)`
+// the receiver is the pool (M unresolved → tvoid), which falls back to the payload-expression descent.
+sm_mcall_pos = (env: Env, mc: MethodCallData) i32 { (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({ true => env.sm_msg_mut(env.infer_expr(mc.recv).first_gen_arg(), mc.args[mc.args.len - 1].addr()).match ({ true => mc.pos.pos_or(1), false => 0 }), false => 0 }) }
 check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_send_kind(decls, 1) }
 check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {

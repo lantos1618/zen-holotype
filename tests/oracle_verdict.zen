@@ -899,7 +899,19 @@ oracle_verdict_run* = () i32 {
         src: "Res: Okv(i32) | Nov\nS := Res.Okv(1)\nG := S\n.Okv(2)\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "parse",
+    ), VerdictCase(
+        src: "gen<T> = (n: i32, x: T) i32 { n }\ntest* = () i32 { gen(5, \"anything\")  0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "gen<T> = (n: i32, s: str) i32 { n }\ntest* = () i32 { gen(5, \"ok\")  0 }",
+        should_pass: true,
+        kind: "",
     )])
+    // C2 (task #35): a CONCRETE param of a GENERIC callee is now arg-checked (was off since the
+    // right-arity call inlines away before the post-inline check). Accept: a correctly-typed
+    // concrete arg + a tparam-typed slot that still DEFERS to monomorphization.
+    // C2 accept: an all-concrete generic callee with correctly-typed args (no over-rejection).
     // #392 accepts (the value-consumed void-arm rule must NOT over-fire):
     // a DISCARDED match (void-fn tail) keeps mixed side-effect arms — no consumer, no error.
     // a DIVERGING arm (block ending in `return`) legitimately yields no value (#386 exemption).
@@ -960,7 +972,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (174)", [VerdictCase(
+    b := run_verdicts("verdict-kind (180)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1677,6 +1689,22 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "{ ActorRef } = std.concurrent.actor\nMsg*: Poke(MutPtr<i32>)\nfwd<T> = (h: ActorRef<Msg>, payload: T) void { h.send(.Poke(payload)) }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "{ ActorRef } = std.concurrent.actor\nMsg*: Poke(MutPtr<i32>) | Inc(i32)\nfwd<T> = (h: ActorRef<Msg>, payload: T) void { h.send(.Poke(payload)) }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "{ ActorRef } = std.concurrent.actor\nMsg*: Poke(i32)\nfwd<T> = (h: ActorRef<Msg>, payload: T) void { h.send(.Poke(payload)) }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ ActorRef } = std.concurrent.actor\nMsg*: Poke(MutPtr<i32>) | Inc(i32)\nfwd<T> = (h: ActorRef<Msg>, payload: T) void { h.send(.Inc(payload)) }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "k = 5\nmain* = () i32 { 0 }\n",
         should_pass: false,
         kind: "bad-binding",
@@ -1720,7 +1748,30 @@ oracle_verdict_run* = () i32 {
         src: "Status*: Ok | | Err\nmain* = () i32 { 0 }\n",
         should_pass: false,
         kind: "parse",
+    ), VerdictCase(
+        src: "gen<T> = (n: i32, x: T) i32 { n }\ntest* = () i32 { gen(\"s\", 5)  0 }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "gen<T> = (n: i8, x: T) i32 { 0 }\ntest* = () i32 { gen(200, 5) }",
+        should_pass: false,
+        kind: "arg-type",
     )])
+    // C1 (task #35) REJECT: a GENERIC forwarder launders a MutPtr past the send-mut check — its
+    // payload EXPRESSION is the bare tparam `T` (reaches no MutPtr), but the `.Poke` message it
+    // builds has a DECLARED MutPtr field, so the receiver still gets a mutable alias. Caught at the
+    // forwarder's definition — the handle `h: ActorRef<Msg>` pins the message type M=Msg, so the
+    // constructed variant's declared payload is resolved even though the payload value is untyped.
+    // C1 REJECT: the SAME launder through a MIXED enum, sending the MutPtr-carrying variant.
+    // C1 ACCEPT (no over-rejection): a generic forwarder sending a VALUE-carrying variant — the
+    // declared payload is an i32, reaches no MutPtr.
+    // C1 ACCEPT: a generic forwarder over a MIXED enum sending the sibling VALUE variant (Inc) —
+    // the MutPtr-carrying sibling (Poke) must NOT taint the safe variant.
+    // C2 (task #35) REJECT: a str flowing into a CONCRETE `i32` slot of a GENERIC callee — the
+    // identical non-generic call already errored; the generic one used to compile (silent
+    // miscompile: a str pointer through an i32 slot).
+    // C2 REJECT: a literal that overflows a CONCRETE `i8` slot of a generic callee (the
+    // literal-range check was dead for generic callees too).
     // bad-binding REJECT: a single-`=` top-level scalar binding is neither a module alias (ident
     // RHS) nor a function (`(` RHS). It used to fall to fill_func and SILENTLY swallow the next
     // decl (`main` here), and `check` said "ok"; now it is a clean error[bad-binding].
