@@ -90,9 +90,9 @@ reproduction; codegen is deterministic, so the byte-exact match is the parity gu
 
 ## Correctness: the binary-only oracle
 
-The test suite (`tests/`, run with `pytest`) is the **sole correctness reference**, and it
-is Python-*free* in the sense that matters: it imports **no compiler code**. It builds two
-artifacts from the committed bootstrap C with `cc` only —
+The test suite (`tests/`, run with `make oracle`) is the **sole correctness reference**, and it
+is Python-*free*: the oracle is itself a Zen program (`tests/oracle.zen`) and the repo has zero
+`.py` files. It builds two artifacts from the committed bootstrap C with `cc` only —
 
 - an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,driver.c}`): Zen source → C on stdout;
 - a **CHECK** binary (the same gen.c plus `check_validate.zen`, linked with a tiny
