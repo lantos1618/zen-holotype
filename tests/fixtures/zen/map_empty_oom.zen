@@ -1,0 +1,56 @@
+// OOM is a value: maps.empty and Map.clone return .Err instead of handing back a null-backed map.
+{ Allocator, malloc, free } = std.mem.alloc
+{ Result, IoError } = std.core.result
+maps = std.collections.map
+// hands out at most `left` live buffers, then returns null (→ try_acquire yields .Err).
+LimitAlloc: {
+    left: i32,
+}
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {
+        (a.left > 0).match ({ true => {
+            a.left = a.left - 1
+            malloc(n)
+        }, false => null_ptr() })
+    }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { free(p) }
+})
+// empty needs 3 acquires (keys, vals, idx); with only 2 available the 3rd fails → .Err.
+empty_oom = () i32 {
+    lim := LimitAlloc(left: 2)
+    a := lim.addr()
+    r: Result<maps.Map<i32>, IoError> := maps.empty(a)
+    r.match ({
+        .Ok(m)  => {
+            m.free(a)
+            0 - 1
+        },
+        .Err(e) => 7,
+    })
+}
+// empty succeeds (3 acquires), clone needs 3 more but 0 remain → clone's first acquire fails → .Err.
+clone_oom = () i32 {
+    lim := LimitAlloc(left: 3)
+    a := lim.addr()
+    r: Result<maps.Map<i32>, IoError> := maps.empty(a)
+    r.match ({
+        .Ok(m)  => {
+            cr: Result<maps.Map<i32>, IoError> := m.clone(a)
+            out := cr.match ({
+                .Ok(c)  => {
+                    c.free(a)
+                    0 - 1
+                },
+                .Err(e) => 5,
+            })
+            m.free(a)
+            out
+        },
+        .Err(e) => 0 - 2,
+    })
+}
+main = () i32 {
+    n := empty_oom() + clone_oom()    // 7 + 5
+    (n == 12).match ({ true => 0, false => n })
+}

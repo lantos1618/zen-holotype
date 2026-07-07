@@ -1,0 +1,38 @@
+halloc = std.mem.heap
+maps = std.collections.map
+{ Result, IoError, expect } = std.core.result
+{ println } = std.text.fmt
+// empty()/put() thread OOM out of a Result-returning (allocator-generic) body via or_return.
+build<A> = (a: MutPtr<A>) Result<maps.Map<i32>, IoError> {
+    m := maps.empty(a).or_return()
+    m = m.put(a, "the", 5).or_return()
+    m = m.put(a, "cat", 0).or_return()    // stored value equals the common default 0
+    done: Result<maps.Map<i32>, IoError> := .Ok(m)
+    done
+}
+main = () i32 {
+    alloc := halloc.gpa()
+    a := alloc.addr()
+    m := build(a).expect("build")
+    println(m.get("the", 0 - 1))    // 5 (normal get)
+    m.get_opt("the").match ({
+        .Some(v) => println(v),
+        .None    => println(0 - 1),
+    })    // 5  present
+    m.get_opt("cat").match ({
+        .Some(v) => println(v),
+        .None    => println(0 - 1),
+    })    // 0  present (== default, still .Some)
+    m.get_opt("dog").match ({
+        .Some(v) => println(v),
+        .None    => println(0 - 1),
+    })    // -1 absent (.None)
+    c := m.clone(a).expect("clone")
+    c.get_opt("cat").match ({
+        .Some(v) => println(v),
+        .None    => println(0 - 1),
+    })    // 0  present in independent clone
+    m.free(a)
+    c.free(a)
+    0
+}
