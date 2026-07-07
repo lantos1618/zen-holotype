@@ -2104,8 +2104,8 @@ diag_info = (code: i32) DiagInfo {
         hint: "keep the qualified constructor's `.` on the same line as its type (`Type.Variant(…)`)",
     ), false => (code == 30).match ({ true => DiagInfo(
         kind: "main-signature",
-        message: "`main` takes no parameters (yet) — the OS entry calls it with none, so declared parameters would read garbage",
-        hint: "declare it `main = () i32 { … }` and bind capabilities inside the body; read CLI args with `std.os.arg(i)`/`argc()`",
+        message: "`main` must be `() i32` or `(sys: Sys) i32` — any other parameter shape would read garbage (the OS entry passes at most the `Sys` capability)",
+        hint: "declare it `main = () i32 { … }`, or take the root capability `main = (sys: Sys) i32 { … }` (import `{ Sys } = std.sys`) and thread narrow caps like `sys.stdout()` / `sys.heap()`",
     ), false => (code == 31).match ({ true => DiagInfo(
         kind: "arm-value",
         message: "match arm yields no value, but the match result is used as a value",
@@ -3604,16 +3604,26 @@ check_module_infinite_type_diagnostic_from_source* = (decls: [Decl], src: str) C
     packed := decls.check_module_infinite_type_kind()
     (packed == 0).match ({ true => check_diagnostic_none(), false => src.check_diagnostic_from_source(packed, 1) })
 }
-// ── main signature: `main` must take zero parameters (KMAINPARAMS) ────────────────────────────────
-// The OS entry (zenrt.c) calls the emitted `zen_main()` with NO arguments, so a parameterized
-// `main = (rt: Rt) i32 { … }` compiled clean and then read GARBAGE for every parameter — undefined
-// behavior behind a green build. Until capability-passing `main(rt)` is really wired, reject it at
-// check time; programs read the command line via std.os.arg(i)/argc().
+// ── main signature: `main` is `() i32` OR `(sys: Sys) i32` (KMAINPARAMS) ──────────────────────────
+// The OS entry (zenrt.c) calls the emitted `zen_main()` with NO arguments. Two legal shapes:
+//   `main = () i32`         — niladic; the C boundary calls it directly.
+//   `main = (sys: Sys) i32` — the capability entry; genc_emit renames it and emits a niladic `zen_main`
+//                             trampoline that feeds it `std.sys.root()` (see genc_emit.gen_func). The C
+//                             boundary stays niladic, so no parameter ever reads garbage.
+// Any OTHER parameter shape (2+ params, or a single non-`Sys` param) still compiled clean and then read
+// GARBAGE for the declared parameters — undefined behavior behind a green build — so it stays rejected.
+// The accepted `(sys: Sys)` form must carry exactly one parameter whose type is the record `Sys`.
+main_param_is_sys = (f: Func) bool {
+    (f.params.len == 1).match ({ true => f.params[0].ty.match ({
+        .Named(nm) => eq(nm, "Sys"),
+        _          => false,
+    }), false => false })
+}
 main_params_kind = (decls: [Decl]) i32 {
     k := 0
     decls.loop((h, i, d) {
         k = (k == 0).match ({ true => d.match ({
-            .DFunc(f) => (eq(f.name, "main") && f.params.len > 0).match ({ true => KMAINPARAMS().kv_at(f.pos), false => 0 }),
+            .DFunc(f) => (eq(f.name, "main") && f.params.len > 0).match ({ true => f.main_param_is_sys().match ({ true => 0, false => KMAINPARAMS().kv_at(f.pos) }), false => 0 }),
             _         => 0,
         }), false => k })
     })

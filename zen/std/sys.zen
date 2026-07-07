@@ -1,0 +1,95 @@
+// std.sys — the root capability. The runtime builds ONE `Sys` and hands it to `main = (sys: Sys) i32`.
+//
+// `Sys` is a plain record bundling NARROW capabilities — a `Writer` (stdout/stderr), the process-heap
+// `Allocator`, plus `Env` (argv + environment variables), `Clock` (monotonic + wall time), and `Fs`
+// (file read/write). The whole point is ATTENUATION: a library function should take the narrowest
+// capability it actually needs (a `Writer`, an `Allocator`), never the entire `Sys`.
+//
+//   main = (sys: Sys) i32 {
+//       sys.stderr().write("hi\n")           // needs only a Writer
+//       h := sys.heap()                      // the process heap Allocator
+//       p := h.addr().acquire(64)
+//       h.addr().release(p)
+//       0
+//   }
+//   greet = (w: Writer) void { w.write("hello\n") }      // narrowest — a Writer, not the world
+//
+// This coexists with `main = () i32` (the niladic entry): the compiler emits a niladic `zen_main`
+// trampoline that calls the user's main with `std.sys.root()` when the param is present, so the C
+// boundary (zenrt.c) stays byte-identical. See docs/sys-migration-plan.md §2.
+//
+// NOTE: imports are brace-name only (no `alias = std.mod` namespace lines) — the module resolver's
+// symbol scanner mis-aligns when a namespace-alias line follows the brace-import block, dropping the
+// first record's export. Importing every dependency by name sidesteps that.
+{ Heap } = std.mem.alloc
+{ gpa } = std.mem.heap
+{ write } = std.c.libc
+{ view } = std.text.str
+{ Result, IoError } = std.core.result
+{ argc, arg, getEnv } = std.os
+{ mono_ns, wall_s } = std.time
+{ contents, save } = std.io.file
+STDOUT_FD := 1
+STDERR_FD := 2
+// Writer — a byte sink over a POSIX descriptor (fd 1 = stdout, fd 2 = stderr). The narrowest output
+// capability: hand a library a `Writer` and it can emit bytes, nothing else. `write` takes a str (no
+// trailing NUL assumed); `write_bytes` a length-tracked slice. Both return the byte count the OS took.
+Writer*: {
+    fd: i32,
+    write = (w: Writer, s: str) i64 {
+        v := s.view()
+        w.fd.write(v.ptr, v.len)
+    }
+    write_bytes = (w: Writer, b: [u8]) i64 { w.fd.write(b.ptr, b.len) }
+}
+stdout_writer* = () Writer { Writer(fd: STDOUT_FD) }
+stderr_writer* = () Writer { Writer(fd: STDERR_FD) }
+// Env — argv + environment variables (wraps std.os): `argc()` counts CLI args (incl. argv[0]), `arg(i)`
+// reads the i-th ("" if out of range), `get(name)` reads an env var ("" if unset).
+Env*: {
+    _: i32,
+    argc = (e: Env) i32 { argc() }
+    arg = (e: Env, i: i32) str { arg(i) }
+    get = (e: Env, name: str) str { getEnv(name) }
+}
+// Clock — monotonic + wall time (wraps std.time): `mono_ns()` is a steadily-rising counter (for
+// durations), `wall_s()` is seconds since the Unix epoch.
+Clock*: {
+    _: i32,
+    mono_ns = (c: Clock) i64 { mono_ns() }
+    wall_s = (c: Clock) i64 { wall_s() }
+}
+// Fs — file read/write (wraps std.io.file): `read(a, path)` slurps a file into an `a`-owned
+// NUL-terminated buffer; `save(path, data, n)` writes the first `n` bytes, creating/truncating.
+Fs*: {
+    _: i32,
+    read = (fs: Fs, a: MutPtr<Heap>, path: str) Result<str, IoError> { a.contents(path) }
+    save = (fs: Fs, path: str, data: str, n: i64) Result<i64, IoError> { path.save(data, n) }
+}
+// Sys — the root capability bundle, built by `root()` and passed to `main = (sys: Sys) i32`. Its methods
+// hand out narrow capabilities: `heap()` the process heap Allocator, `stdout()`/`stderr()` the fd-1/fd-2
+// Writers, `env()`/`clock()`/`fs()` the OS wrappers.
+Sys*: {
+    _out: Writer,
+    _err: Writer,
+    _env: Env,
+    _clock: Clock,
+    _fs: Fs,
+    heap = (s: Sys) Heap { gpa() }
+    stdout = (s: Sys) Writer { s._out }
+    stderr = (s: Sys) Writer { s._err }
+    env = (s: Sys) Env { s._env }
+    clock = (s: Sys) Clock { s._clock }
+    fs = (s: Sys) Fs { s._fs }
+}
+// root() — assemble the default `Sys`: heap allocator, real stdout/stderr, env/clock/fs over the OS.
+// Pure Zen — the compiler's niladic `zen_main` trampoline calls this to feed `main = (sys: Sys) i32`.
+root* = () Sys {
+    Sys(
+        _out: stdout_writer(),
+        _err: stderr_writer(),
+        _env: Env(_: 0),
+        _clock: Clock(_: 0),
+        _fs: Fs(_: 0),
+    )
+}
