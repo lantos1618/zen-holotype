@@ -1,5 +1,12 @@
 # Zen Goals
 
+North star: a **self-hosted** language with **explicit capabilities** (threaded allocators and a
+`Sys` at the entry, not ambient globals), **actor-safe** concurrency (statically-checked sends +
+per-actor panic isolation), and **two backends over one checked AST** — C (bootstrap) and JS
+(browser/Node). The ambient-runtime experiment (`std.rt`) is *not* the direction; capabilities
+are explicit, and the rt rework is "ambient-within-scope, explicit-at-boundary"
+(`docs/runtime-design.md`).
+
 Compact roadmap from the current codebase. Each goal names the gap and the check that proves it is done.
 
 1. **Namespaces**
@@ -56,4 +63,25 @@ Compact roadmap from the current codebase. Each goal names the gap and the check
    - Gap: broader actor spawning/scheduling ergonomics can still improve.
    - Done when: the demo remains runnable, hides queue plumbing, and no longer needs type-witness seed ceremony, manual reply allocation, or repeated allocator arguments in `main`.
 
-Priority: generic inference, namespaces, formatter, actor demo, AST imports, Result policy, diagnostics, memory rules, manifest, tooling, spec, JS decision.
+12. **Capability entry (Sys) & explicit runtime**
+   - Status: `main = (sys: Sys) i32` is accepted alongside `main = () i32`; the compiler emits a
+     niladic `zen_main` trampoline that feeds the user body `std.sys.root()`, so the C boundary is
+     byte-identical. `std.sys` bundles narrow capabilities (`Writer`, process `Allocator`, `Env`,
+     `Clock`, `Fs`) built for attenuation. This is the explicit-capability alternative to the
+     ambient runtime (`std.rt`), which is being reworked rather than adopted.
+   - Gap: `Writer.write` still returns `i64` and swallows `write(2)` errors; the print/IO spine is
+     not yet `Result`-shaped (Sys phase 2, design in `docs/runtime-design.md`). The
+     ambient-rt rework (ambient-within-scope, two-memory scratch/shared split) is unresolved.
+   - Done when: the print spine returns `Result` behind a `Writer` capability, and the runtime
+     story is settled as explicit-at-boundary with the escape checker enforcing scope lifetimes.
+
+13. **Second backend / browser (JS)**
+   - Status: `compiler.genjs` walks the same post-mono AST and emits JavaScript over
+     `bootstrap/zenrt.js`; driven by `zenc emit-js` and `zenc build --target js`. `std.web.dom`
+     exposes the browser DOM as typed Zen. Proves one checked AST, many emitters.
+   - Gap: the JS backend covers the computational subset — full i64 / 64-bit bitwise (BigInt) and
+     scalar aliasing through `MutPtr<i32>` (boxed refs) are deferred; no LLVM backend yet.
+   - Done when: the JS target runs the example corpus and the deferred i64/aliasing cases are
+     closed or explicitly scoped out.
+
+Priority: generic inference, namespaces, formatter, actor demo, AST imports, Result policy, diagnostics, memory rules, manifest, tooling, spec, capability entry / explicit runtime (Sys phase 2), JS/browser backend polish.

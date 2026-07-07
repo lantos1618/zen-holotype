@@ -10,9 +10,15 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
 [VISION](VISION.md).)
 
 ## Type system
-- **Primitives:** `i32`, `i64`, `u8`, `bool`, `void`, `str` (a C string; compile-time literals,
+- **Primitives:** `i32`, `i64`, `u8`, `f64`, `bool`, `void`, `str` (a C string; compile-time literals,
   or built at runtime via `cstr` — see Foreign bindings below). **Char literals** `'a'` are sugar
-  for the byte value (reuse the integer path, so `b == ':'` not `b == 58`).
+  for the byte value (reuse the integer path, so `b == ':'` not `b == 58`). **Float literals**
+  (`1.5`) carry their source lexeme verbatim and are typed `f64`.
+- **String provenance types:** the backend `Ty` also carries `Cstr` (a borrowed C pointer into a
+  live `String` buffer) and `Text` (an immortal rodata literal) as distinct variants of the `str`
+  family — both emit `const char*`, so a signature can document a string's lifetime. `str` stays the
+  unified surface spelling and display type; the full split is tracked in
+  [STRING_TYPES.md](STRING_TYPES.md) (Phase 1 landed).
 - **Products** — structs: `Point: { x: i32, y: i32 }`.
 - **Sums** — enums with optional payloads, variants `|`-separated (a sum is a *choice*):
   `Shape: Circle(i32) | Square(i32) | Dot`
@@ -110,6 +116,52 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   that, an explicit allocator, a `Vec`, and a self-hosted lexer + parser + checker + C/JS
   backends (the compiler itself; see stdlib below).
 
+## Capability entry — `main = (sys: Sys) i32` (Sys phase 1)
+The outside world enters through an **explicit capability**, not ambient globals. Two entry
+shapes coexist:
+- `main = () i32` — the niladic entry.
+- `main = (sys: Sys) i32` — the **capability entry**. The compiler renames the user body to
+  `zen_user_main` and emits a niladic `zen_main` trampoline that feeds it `std.sys.root()`, so
+  the C boundary (`zenrt.c`) stays byte-identical either way.
+- **`Sys` (`std.sys`)** bundles narrow capabilities: `heap()` the process-heap `Allocator`,
+  `stdout()`/`stderr()` fd-1/fd-2 `Writer`s, `env()` (argv + env vars), `clock()` (mono + wall
+  time), `fs()` (file read/write). The design point is **attenuation** — a library function takes
+  the narrowest capability it actually needs (`greet = (w: Writer) void`), never the whole `Sys`.
+- **Roadmap, not shipped:** `Writer.write` still returns `i64` (swallows `write(2)` errors);
+  making the print spine return `Result` is Sys phase 2 (design only; see the runtime source of
+  truth `docs/runtime-design.md`). Threading `Sys`/allocators explicitly is the model; the ambient-runtime
+  experiment (`std.rt`, `std.scope`) is being reworked toward ambient-within-scope, not adopted
+  as the model — see [MEMORY_MODEL.md](MEMORY_MODEL.md).
+
+## Actors & concurrency safety
+- **Actors** (`std.concurrent.actor`) — typed message enums, a `Receiver<M>` implemented via
+  `Type.impl(Receiver<M>, { receive = … })`, and `ActorRef<M>` / `ReplyRef<T>` / `ActorHandle<M, ActorT>`
+  wrappers. Sends are `send(handle, msg)` / fire-and-forget `tell`; request/reply threads a
+  `ReplyRef<T>`. Allocating constructors (`spawn`, `cell`, `engine`, `reply`) return `Result`.
+- **Real parallelism** — a work-stealing thread pool (`std.concurrent.pool`) runs actors across N
+  OS cores on real pthreads + atomics; `std.thread`/`std.sync` are the OS-thread + locking floor.
+- **Sendability is statically checked** (`compiler.check_validate`, the SENDABILITY pass):
+  **move-on-send** — passing an owned `Own<T>` into a send transfers it, so the sender's binding
+  is killed (a later use is `error`), which stops the double-free where both actors free the same
+  block. A `Ptr<T>` is only sendable when `T` is deeply immutable; `Arc<T>` is the shared-sendable
+  path. A companion **scratch-escape** pass keeps actor-local scratch from escaping across a send.
+- **Panic isolation** (`zenrt.c`, per-worker) — a `panic` inside one actor's behavior (div-zero,
+  OOB, null deref, or stack overflow) unwinds into a per-worker catch and kills **that one actor**;
+  the worker and the rest of the pool live on.
+
+## Backends — two, over one checked AST
+- **C backend (`compiler.genc` / `genc_emit`)** — the shipping and bootstrap backend. Lowers the
+  checked, monomorphized AST to C and invokes `cc` for `build`/`run`. C is the intentional
+  intermediate/bootstrap target; `zenc` reproduces its own committed C byte-for-byte.
+- **JS backend (`compiler.genjs`)** — a second backend over the **same** post-mono `[Decl]` AST,
+  emitting JavaScript for Node/browser (the computational subset) on a small linear-memory floor
+  (`bootstrap/zenrt.js`, the JS analog of `zenrt.c`). Driven by `zenc emit-js <file>` and
+  `zenc build --target js <file> [-o out]`. Known deferrals: full i64/64-bit bitwise (needs
+  BigInt) and aliasing a scalar through `MutPtr<i32>` (needs boxed refs). This is the browser
+  direction, made real — new target = new walk over the checked AST, no re-checking.
+- An LLVM backend and the one-structure surface syntax from [VISION](VISION.md) remain the
+  *direction*, not the current state.
+
 ## Standard library (`std.*`)
 - Ordinary runtime Zen, importable with `{ … } = std.X` from any file, **checked and lowered
   like your code** — including the compiler's own modules (`lex`/`parse*`/`check`/`genc*`).
@@ -153,7 +205,20 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
   `Result`-shaped allocation failure (no `try_*` doubling).
 - **`std.collections.map`** — a str-keyed `Map<T>` with the same allocator-visible
   shape: namespace-bound `maps.of(a, "k", 1)` (returns `Result`), with receiver
-  methods `m.put` (returns `Result`), `m.get`, `m.has`, `m.len`, and `m.free`.
+  methods `m.put` (returns `Result`), `m.get`, `m.has`, `m.len`, and `m.free`. The
+  collections also include a **fully generic `HMap<K, V>`** (`std.collections.hmap`, any hashable
+  key), a generic `Set<T>` (`std.collections.set`), and an integer-keyed `IntMap`.
+- **Broader stdlib breadth** — beyond the memory/collections/text core above, the tree ships a
+  usable systems surface, all ordinary allocator-explicit Zen: **`std.os`** (argv/env),
+  **`std.time`** (monotonic + wall clock), **`std.math`** (int + f64 math), **`std.rand`** (a
+  deterministic xorshift PRNG), **`std.path`** (POSIX path ops), **`std.fs`** / **`std.io.file`**
+  (filesystem read/write), **`std.io.stdin`** (line-oriented input for filters/REPLs),
+  **`std.process`** (spawn a subprocess + capture stdout/exit), **`std.net`** (blocking TCP over
+  raw sockets), **`std.json`** (a value type + recursive-descent parser + serializer),
+  **`std.csv`**, **`std.encoding`** (base64 + hex), **`std.log`** (leveled logging to an explicit
+  `Writer`/fd, no ambient state), **`std.testing`** (a value-based unit-test surface),
+  **`std.state.store`** (a Redux-style state + reducer + dispatch), and **`std.web.dom`** (the
+  browser DOM as typed Zen declarations — the JS-backend target surface).
 - **`compiler.genc` (+ `mono` / `genc_emit`) — shared AST + monomorphization, then the C backend, in Zen, AND the compiler's own
   codegen.** It defines the **one AST** the whole pipeline shares — expressions
   `Int`/`Var`/`Bin`/`Call`/`Cond`/`Member`/`Arrow`/`MakeEnum`/`Tag`/`Match`/`StrLit`, statements
@@ -251,5 +316,15 @@ Plain emit mode skips the std-import loader and validator and writes C for one f
 - The self-hosted checker covers a real but **partial** slice of the language; growing it to
   full parity with what `zenlang` describes is the active arc.
 - The allocating `map`/`filter` are `[i32]`-only; a generic version needs type-parameter `sizeof`.
-- One backend (`compiler.genc` for C). An LLVM backend and the one-structure surface syntax from
-  [VISION](VISION.md) are the *direction*, not the current state.
+- Two shipping backends (C + JS); the JS backend is the **computational subset** (i64/64-bit
+  bitwise and scalar-through-`MutPtr` aliasing are deferred). An LLVM backend and the
+  one-structure surface syntax from [VISION](VISION.md) are the *direction*, not the current state.
+- **`Writer.write` returns `i64`, not `Result`** — the print/IO spine still swallows `write(2)`
+  errors; making it honest is Sys phase 2 (roadmap, `docs/runtime-design.md`).
+- **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt` capability) and
+  `std.scope` exist as an experiment, but the shipped direction is **explicit** capabilities —
+  threaded allocators and a `Sys` at the entry. Reworking the ambient rt toward
+  "ambient-within-scope, explicit-at-boundary" (and the two-memory scratch/shared split) is
+  roadmap, not shipped (the current runtime source of truth is `docs/runtime-design.md`).
+- String provenance is Phase 1: `Cstr`/`Text` are real backend `Ty` variants, but the full
+  `view`/`String` taxonomy migration ([STRING_TYPES.md](STRING_TYPES.md) Phase 2) is pending.

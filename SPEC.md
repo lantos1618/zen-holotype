@@ -27,10 +27,12 @@ truncating valid source.
 Checked user commands are:
 
 ```sh
-zenc check <file.zen|project-dir>
-zenc build <file.zen|project-dir> [-o out]
-zenc run   <file.zen|project-dir>
-zenc emit  <file.zen>
+zenc check   <file.zen|project-dir>
+zenc build   <file.zen|project-dir> [-o out]        # C backend (default)
+zenc build   <file.zen> --target js [-o out.js]     # JS backend (compiler.genjs)
+zenc run     <file.zen|project-dir>
+zenc emit    <file.zen>                              # checked C
+zenc emit-js <file.zen>                              # checked JS floor + module
 ```
 
 `zenc emit <file.zen>` resolves imports and namespace binds before writing C, so
@@ -63,6 +65,22 @@ arms are rejected because they would be dropped by expression emission.
 Bodyless functions are foreign declarations. The backend emits C prototypes and
 the system linker supplies the body.
 
+The program entry point is `main`, in one of two shapes:
+
+```zen
+main = () i32 { ... }            // niladic entry
+main = (sys: Sys) i32 { ... }    // capability entry (std.sys)
+```
+
+For the capability entry, the compiler renames the user body to `zen_user_main`
+and emits a niladic `zen_main` trampoline that calls it with `std.sys.root()`, so
+the C boundary (`zenrt.c`) is byte-identical to the niladic case. `Sys`
+(`std.sys`) bundles narrow capabilities — `heap()` (the process `Allocator`),
+`stdout()`/`stderr()` (`Writer`s), `env()`, `clock()`, `fs()` — and the intended
+style is attenuation: a function takes the narrowest capability it needs (a
+`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` currently
+returns `i64`; a `Result`-returning print spine is a roadmap item.
+
 ## Types
 
 Implemented scalar and structural types:
@@ -76,8 +94,14 @@ Name
 Name<T, U>
 ```
 
-`str` is a C string pointer. `[T]` is a fat slice with a pointer and length.
-Function types are parameter types for inline templates and closure arguments.
+`str` is a C string pointer and the unified surface spelling/display type for
+strings. The backend `Ty` additionally carries `Cstr` (a borrowed pointer into a
+live `String` buffer) and `Text` (an immortal rodata literal) as provenance
+variants of the `str` family — both lower to `const char*`. This is Phase 1 of
+the string-lifetime split ([STRING_TYPES.md](STRING_TYPES.md)); the full
+`view`/`String` migration is pending. `[T]` is a fat slice with a pointer and
+length. Function types are parameter types for inline templates and closure
+arguments.
 
 Current pointer status: the parser accepts `Ptr<T>`, `MutPtr<T>`, and
 `RawPtr<T>`, but the checker/backend currently collapse them to one pointer
@@ -409,13 +433,35 @@ Concurrency support is stdlib-level today:
   `ReplyRef<T>`, `ActorEngine<M>`, `ActorCell<M>`, and
   `ActorHandle<M, ActorT>`;
 - `std.concurrent.cown`: owned FFI-handle examples, with namespace-bound
-  `cown.buf` / `cown.try_buf` / `cown.file` / `cown.file_in` spellings.
+  `cown.buf` / `cown.try_buf` / `cown.file` / `cown.file_in` spellings;
+- `std.concurrent.pool`: a work-stealing thread pool that runs actors across N OS
+  cores on real pthreads + atomics; `std.thread` / `std.sync` are the OS-thread
+  and locking floor beneath it.
 
 Public code should call runtime/actor APIs rather than raw coroutine checkpoint
 primitives. Actor draining checkpoints internally, while allocator parameters
 only own actor queues and reply storage. Actor messages are typed enums and
 receivers implement `Receiver<M>` through
 `Type.impl(Receiver<M>, { receive = ... })`.
+
+Two concurrency safety guarantees are enforced, not just documented:
+
+- **Sendability (move-on-send).** The checker's SENDABILITY pass
+  (`compiler.check_validate`) kills the sender's binding when an owned `Own<T>` is
+  passed into a `send`, so the sender cannot keep using memory the receiving actor
+  now owns (a later use is `error[ownership]`). A `Ptr<T>` is sendable only when
+  `T` is deeply immutable; `Arc<T>` is the shared-sendable path. A companion
+  scratch-escape pass keeps actor-local scratch from escaping across a send.
+- **Panic isolation.** A `panic` inside one actor's behavior (div-zero, OOB, null
+  deref, or stack overflow) unwinds into a per-worker catch in `zenrt.c` and kills
+  that one actor; the worker and the rest of the pool continue.
+
+Note: `std.concurrent.runtime`'s colorless `checkpoint` and the ambient runtime
+(`std.rt`, `std.scope`) are an experiment, not the shipped model. The current
+direction threads capabilities explicitly (allocators, and a `Sys` at the entry);
+reworking the ambient runtime toward "ambient-within-scope, explicit-at-boundary"
+is a roadmap item; the current runtime source of truth is
+`docs/runtime-design.md`.
 
 `ActorEngine<M>` owns the internal queue state. `ActorCell<M>` is the
 lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,
@@ -444,8 +490,16 @@ allocation before returning `.Err`; there are no separate `try_*` variants.
 
 ## Backends
 
-The C backend is the shipping/bootstrap backend. It lowers the checked AST to C
-and invokes `cc` for `build`/`run`. It is currently the only backend.
+The C backend (`compiler.genc` / `genc_emit`) is the shipping/bootstrap backend. It lowers the
+checked, monomorphized AST to C and invokes `cc` for `build`/`run`. C is the intentional
+intermediate/bootstrap target.
+
+A second backend, `compiler.genjs`, walks the **same** post-monomorphization `[Decl]` AST and
+emits JavaScript (Node/browser) over a small linear-memory floor (`bootstrap/zenrt.js`). It is
+driven by `zenc emit-js <file>` and `zenc build --target js <file> [-o out]`, and covers the
+computational subset — full i64 / 64-bit bitwise (needs BigInt) and scalar aliasing through
+`MutPtr<i32>` (needs boxed refs) are deferred. New target = new walk over the checked AST; the
+kernel does not re-check.
 
 ## Tooling
 
