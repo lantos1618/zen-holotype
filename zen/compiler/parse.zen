@@ -96,7 +96,7 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: str, pos: i32) TParamEnd {
 record_tparam = (a: MutPtr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(sc.tok.start)
         return PEnd(
             count: i,
             next: sc.next,
@@ -117,7 +117,7 @@ fill_tparams = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEn
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             PEnd(
                 count: i,
                 next: sc.next,
@@ -150,7 +150,7 @@ fill_fields = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             FieldsEnd(
                 count: i,
                 ndef: dn,
@@ -176,7 +176,7 @@ fill_field_default = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i3
 fill_field = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     // Guard both field and default-method buffers.
     (i >= buf.len || dn >= dbuf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return FieldsEnd(
             count: i,
             ndef: dn,
@@ -190,11 +190,16 @@ fill_field = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Field], i: i32, dbuf:
         te := a.parse_ty(src, mk.next)
         buf[i] = field(nm, te.ty)
         after := src.scan(te.next)
-        src.is_comma(after.tok).match ({ true => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn), false => is_ident_tok(after.tok).match ({ true => a.fill_fields(src, te.next, buf, i + 1, dbuf, dn), false => FieldsEnd(
-            count: i + 1,
-            ndef: dn,
-            next: after.next,
-        ) }) })
+        src.is_comma(after.tok).match ({ true => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn), false => is_ident_tok(after.tok).match ({ true => a.fill_fields(src, te.next, buf, i + 1, dbuf, dn), false => {
+            // A no-trailing-comma field list closes on `}`; anything else (a stray token, or EOF on an
+            // unterminated `{ …`) is a positioned parse error, not a silent close (task: unclosed `{`).
+            src.is_rbrace(after.tok).match ({ false => perr_set_at(after.tok.start) })
+            FieldsEnd(
+                count: i + 1,
+                ndef: dn,
+                next: after.next,
+            )
+        } }) })
     } })
 }
 parse_struct_at = (a: MutPtr<Malloc>, src: str, pos: i32) StructEnd {
@@ -283,7 +288,7 @@ fill_variants = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i3
     nt := src.scan(pos)
     nt.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             PEnd(
                 count: i,
                 next: nt.next,
@@ -295,7 +300,7 @@ fill_variants = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [VariantDef], i: i3
 fill_variant = (a: MutPtr<Malloc>, src: str, nt: Scan, buf: [VariantDef], i: i32) PEnd {
     // Guard the variant buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(nt.tok.start)
         return PEnd(
             count: i,
             next: nt.next,
@@ -517,7 +522,7 @@ ImportEnd*: {
 record_name = (a: MutPtr<Malloc>, src: str, sc: Scan, buf: [Param], i: i32) ImportEnd {
     // Guard the import-name buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(sc.tok.start)
         return ImportEnd(
             count: i,
             next: sc.next,
@@ -530,7 +535,7 @@ fill_import_names = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             ImportEnd(
                 count: i,
                 next: sc.next,
@@ -545,7 +550,7 @@ fill_import_names = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32
 fill_decls = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32) i32 {
     // Leave one slot for the syntax-error sentinel.
     (i >= buf.len - 1).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
         return i + 1
     } })
@@ -647,7 +652,7 @@ fill_impl_methods = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32,
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             ImplEnd(
                 decls: i,
                 methods: m,
@@ -664,7 +669,7 @@ fill_impl_methods = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32,
 fill_impl_one = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: str, trname: str) ImplEnd {
     // Impl methods fill both decl and method-name buffers.
     (i >= buf.len - 1 || m >= mbuf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return ImplEnd(
             decls: i,
             methods: m,

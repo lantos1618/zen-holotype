@@ -246,7 +246,7 @@ parse_payload_args = (a: MutPtr<Malloc>, src: str, lp: Scan) PExpr {
 }    // single payload: the arg itself
 fill_payload_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -256,7 +256,7 @@ fill_payload_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i:
     buf[i] = finit(a.payload_fname(i), v.expr)
     after := src.scan(v.next)
     src.is_comma(after.tok).match ({ true => a.fill_payload_args(src, after.next, buf, i + 1), false => {
-        src.is_rparen(after.tok).match ({ false => perr_set() })
+        src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -539,7 +539,7 @@ parse_arm_block = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
 skip_rparen = (src: str, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({ true => sc.next, false => {
-        perr_set()
+        perr_set_at(sc.tok.start)
         pos
     } })
 }
@@ -555,7 +555,7 @@ parse_match = (a: MutPtr<Malloc>, src: str, subj: PExpr) PExpr {
     lp := src.scan(kw.next)
     open := src.scan(lp.next)
     (src.is_lparen(lp.tok) && src.is_lbrace(open.tok)).match ({ true => src.close_match(a.parse_match_arms(src, subj, open)), false => {
-        perr_set()
+        perr_set_at(lp.tok.start)
         a.reject_match(open.next)
     } })
 }
@@ -577,7 +577,7 @@ reject_match = (a: MutPtr<Malloc>, next: i32) PExpr {
 arm_rhs = (a: MutPtr<Malloc>, src: str, pos: i32, bare_ok: bool) PExpr {
     nx := src.scan(pos)
     src.is_fat_arrow(nx.tok).match ({ true => a.parse_arm_body(src, nx.next), false => {
-        bare_ok.match ({ false => perr_set() })
+        bare_ok.match ({ false => perr_set_at(nx.tok.start) })
         PExpr(
             expr: a.enode(block(a.no_arm_stmts())),
             next: pos,
@@ -661,14 +661,14 @@ parse_lit_arms = (a: MutPtr<Malloc>, src: str, subj: PExpr, pos: i32) PExpr {
 parse_lit_after = (a: MutPtr<Malloc>, src: str, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
     after.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(after.tok.start)
             a.reject_match(after.next)
         },
         _    => src.is_rbrace(after.tok).match ({ true => arm.wild.match ({ true => PExpr(
             expr: arm.body,
             next: after.next,
         ), false => a.reject_match(after.next) }), false => src.is_comma(after.tok).match ({ true => a.lit_arm_more(src, subj, arm, after), false => {
-            perr_set()
+            perr_set_at(after.tok.start)
             a.reject_match(after.next)
         } }) }),
     })
@@ -735,7 +735,7 @@ NameSlot: {
 bind_buf = (a: MutPtr<Malloc>) [str] { slice(a.acquire(64 * sizeof(NameSlot)), 64) }
 fill_binds = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [str], i: i32) BindList {
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return BindList(
             names: buf,
             count: i,
@@ -744,11 +744,11 @@ fill_binds = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [str], i: i32) BindLis
     } })
     bt := src.scan(pos)
     // Each binder must be an identifier (or `_`); a literal like `.Some(123)` is garbage.
-    is_ident_tok(bt.tok).match ({ false => perr_set() })
+    is_ident_tok(bt.tok).match ({ false => perr_set_at(bt.tok.start) })
     buf[i] = a.lexeme(src, bt.tok)
     nx := src.scan(bt.next)
     src.is_comma(nx.tok).match ({ true => a.fill_binds(src, nx.next, buf, i + 1), false => {
-        src.is_rparen(nx.tok).match ({ false => perr_set() })
+        src.is_rparen(nx.tok).match ({ false => perr_set_at(nx.tok.start) })
         BindList(
             names: buf,
             count: i + 1,
@@ -777,7 +777,7 @@ fill_arms = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             PEnd(
                 count: i,
                 next: sc.next,
@@ -793,7 +793,7 @@ fill_arms = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
 fill_marm = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     // Guard fixed-size arm buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -830,7 +830,7 @@ no_arm_stmts = (a: MutPtr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
 // Wildcard arm or terminal bare `_`; non-wild labels here are parse errors.
 fill_wild = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     us := src.scan(pos)
-    src.is_wild_label(us.tok).match ({ false => perr_set() })
+    src.is_wild_label(us.tok).match ({ false => perr_set_at(us.tok.start) })
     rhs := a.arm_rhs(src, us.next, true)
     buf[i] = arm_at("_", "", rhs.expr, us.tok.start)
     a.arm_tail(src, rhs.next, buf, i)
@@ -839,7 +839,7 @@ fill_wild = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd
 arm_tail = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [ArmData], i: i32) PEnd {
     after := src.scan(pos)
     src.is_comma(after.tok).match ({ true => a.fill_arms(src, after.next, buf, i + 1), false => {
-        src.is_rbrace(after.tok).match ({ false => perr_set() })
+        src.is_rbrace(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -997,7 +997,7 @@ fill_ainits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) 
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set()
+            perr_set_at(pos)
             PEnd(
                 count: i,
                 next: sc.next,
@@ -1011,7 +1011,7 @@ fill_ainits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) 
 }
 fill_ainit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -1049,7 +1049,7 @@ fill_pinits = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) 
 fill_pinit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) PEnd {
     // Guard fixed-size field-init buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -1064,7 +1064,7 @@ fill_pinit = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [FieldInit], i: i32) P
     src.is_comma(after.tok).match ({ true => a.fill_pinits(src, after.next, buf, i + 1), false => {
         // A struct-construction `Name(f: v, …)` must close on ')'; a missing ')' is a parse error, not a
         // silent terminator (mirrors fill_payload_args).
-        src.is_rparen(after.tok).match ({ false => perr_set() })
+        src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -1096,7 +1096,7 @@ parse_raw_call = (a: MutPtr<Malloc>, src: str, at: Scan) PExpr {
                     next: ae.next,
                 )
             }, false => {
-                perr_set()
+                perr_set_at(lp.tok.start)
                 PExpr(
                     expr: a.enode(lit(0)),
                     next: nm.next,
@@ -1104,7 +1104,7 @@ parse_raw_call = (a: MutPtr<Malloc>, src: str, at: Scan) PExpr {
             } })
         },
         _      => {
-            perr_set()
+            perr_set_at(nm.tok.start)
             PExpr(
                 expr: a.enode(lit(0)),
                 next: at.next,
@@ -1122,7 +1122,7 @@ fill_args = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
 fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size arg buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -1134,7 +1134,7 @@ fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     src.is_comma(after.tok).match ({ true => a.fill_args(src, after.next, buf, i + 1), false => {
         // The arg list must close on ')'. Anything else (a missing ')', e.g. `id(1 }`) is a parse error —
         // flag it instead of silently treating the stray token as a terminator and swallowing what follows.
-        src.is_rparen(after.tok).match ({ false => perr_set() })
+        src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -1148,7 +1148,7 @@ parse_paren = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
         expr: inner.expr,
         next: close.next,
     ), false => {
-        perr_set()
+        perr_set_at(close.tok.start)
         PExpr(
             expr: inner.expr,
             next: inner.next,
@@ -1188,7 +1188,7 @@ fill_sitems = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd 
 fill_sitem = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size slice item buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
@@ -1199,7 +1199,7 @@ fill_sitem = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
     after := src.scan(it.next)
     src.is_comma(after.tok).match ({ true => a.fill_sitems(src, after.next, buf, i + 1), false => {
         // A slice literal `[a, b, …]` must close on ']'; a missing ']' is a parse error, not a silent end.
-        src.is_rbracket(after.tok).match ({ false => perr_set() })
+        src.is_rbracket(after.tok).match ({ false => perr_set_at(after.tok.start) })
         PEnd(
             count: i + 1,
             next: after.next,
@@ -1247,7 +1247,7 @@ fill_lnames = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd
 fill_lname = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Param], i: i32) PEnd {
     // Guard fixed-size lambda-param buffer.
     (i >= buf.len).match ({ true => {
-        perr_set()
+        perr_set_at(pos)
         return PEnd(
             count: i,
             next: pos,
