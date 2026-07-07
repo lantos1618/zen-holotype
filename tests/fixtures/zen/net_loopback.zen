@@ -1,0 +1,24 @@
+// net_loopback — single-process TCP loopback round-trip over std.net.
+//
+// serve on 127.0.0.1:0 (kernel-chosen ephemeral port) -> read the port back -> dial it -> the client
+// sends "ping" -> the server accepts and reads it back. Deterministic and thread-free: with a listen
+// backlog the kernel completes the handshake, so connect() returns before accept() is called, and the
+// queued connection is then dequeued in the same thread. Exit 0 iff the server reads exactly "ping".
+{ Result, IoError, expect } = std.core.result
+{ eq } = std.text.str
+{ gpa } = std.mem.heap
+{ serve, dial, accept_conn, local_port, recv, send_str, close_conn, close_listener } = std.net
+main = () i32 {
+    h := gpa()
+    a := h.addr()
+    l := serve("127.0.0.1", 0).expect("net: listen failed")
+    port := l.local_port()
+    c := dial("127.0.0.1", port).expect("net: connect failed")
+    c.send_str("ping").expect("net: send failed")
+    conn := l.accept_conn().expect("net: accept failed")
+    msg := a.recv(conn, 64).expect("net: recv failed")
+    conn.close_conn()
+    c.close_conn()
+    l.close_listener()
+    eq(msg, "ping").match ({ true => 0, false => 1 })
+}
