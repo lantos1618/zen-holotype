@@ -77,6 +77,29 @@ map_err*<T, E, F> = (r: Result<T, E>, on_err: (E) F) Result<T, F> {
         .Err(e) => .Err(on_err(e)),
     })
 }
+// Map the Ok channel, leaving Err untouched: Result<T, E> → Result<U, E>.
+map*<T, E, U> = (r: Result<T, E>, f: (T) U) Result<U, E> {
+    r.match ({
+        .Ok(v)  => .Ok(f(v)),
+        .Err(e) => .Err(e),
+    })
+}
+// Monadic bind: chain a fallible step on the Ok channel. Ok(v) → f(v) (itself a Result),
+// Err passes through. E is shared across the chain, so the steps agree on their error type.
+and_then*<T, E, U> = (r: Result<T, E>, f: (T) Result<U, E>) Result<U, E> {
+    r.match ({
+        .Ok(v)  => f(v),
+        .Err(e) => .Err(e),
+    })
+}
+// Map the Ok payload to U, or fall back to `default` on Err. Collapses to a plain U
+// (no Result wrapper) — the eager cousin of `map` then `or`.
+map_or*<T, E, U> = (r: Result<T, E>, default: U, f: (T) U) U {
+    r.match ({
+        .Ok(v)  => f(v),
+        .Err(e) => default,
+    })
+}
 // ── Opt mirrors (flat namespace has no overloading, so the names carry the type) ─────────────────
 // Some payload, or PANIC with `msg` (same contract as expect; no bare unwrap here either).
 expect_some*<T> = (o: Opt<T>, msg: str) T {
@@ -109,5 +132,26 @@ ok_or*<T, E> = (o: Opt<T>, e: E) Result<T, E> {
     o.match ({
         .Some(v) => .Ok(v),
         .None    => .Err(e),
+    })
+}
+// Map the Some channel, leaving None untouched: Opt<T> → Opt<U>.
+map_some*<T, U> = (o: Opt<T>, f: (T) U) Opt<U> {
+    o.match ({
+        .Some(v) => .Some(f(v)),
+        .None    => .None,
+    })
+}
+// Monadic bind for Opt: Some(v) → f(v) (itself an Opt), None passes through.
+and_then_some*<T, U> = (o: Opt<T>, f: (T) Opt<U>) Opt<U> {
+    o.match ({
+        .Some(v) => f(v),
+        .None    => .None,
+    })
+}
+// Map the Some payload to U, or fall back to `default` on None (eager `map_some` then `some_or`).
+map_or_some*<T, U> = (o: Opt<T>, default: U, f: (T) U) U {
+    o.match ({
+        .Some(v) => f(v),
+        .None    => default,
     })
 }
