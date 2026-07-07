@@ -414,12 +414,31 @@ typed_global_end = (a: MutPtr<Malloc>, src: str, pos: i32) i32 {
     te := a.parse_ty(src, m.next)
     a.parse_or(src, src.scan(te.next).next).next
 }
-// a MODULE-ALIAS binding `name = std.mem.raw` / `name = sibling` — a `name = <ident…>` whose RHS is NOT a
-// function literal (`= (params)…`). The faithful parser would otherwise mis-read it as a function decl and
-// swallow the following decls. Routed to fill_global so the RHS parses as an ordinary (Member-chain) expr.
+// a MODULE-ALIAS binding `name = std.mem.raw` / `name = sibling` — a `name = <module-path>` whose RHS is a
+// bare or dotted module PATH (idents joined by `.`) that TERMINATES at the declaration boundary. The
+// faithful parser would otherwise mis-read it as a function decl and swallow the following decls; routed to
+// fill_global so the RHS parses as an ordinary (Member-chain) expr.
+// NARROW: only a path that ends at a decl boundary is an alias. If a value-expression token (`(`, `[`, `<`,
+// an operator, …) follows the leading ident or the dotted path, the RHS is a VALUE, not a module path —
+// e.g. `K = Ctor(...)`, `K = compute()`, `K = a + b`. Those fall through to decl_is_bad_binding, which
+// emits `error[bad-binding]` ("use `:=` for a value global") instead of planting a void `dglobal_alias`
+// that ICEs codegen (void ORIGIN) or silently tolerates `=` as a second spelling of `:=`.
 decl_is_module_alias = (src: str, pos: i32) bool {
     m := src.decl_marker(pos)
-    src.is_eq_tok(m.tok).match ({ true => is_ident_tok(src.scan(m.next).tok), false => false })
+    src.is_eq_tok(m.tok).match ({ true => is_ident_tok(src.scan(m.next).tok).match ({ true => {
+        end := src.skip_path(m.next)    // walk the bare/dotted path; land past its last ident
+        src.decl_path_at_boundary(src.scan(end).tok)
+    }, false => false }), false => false })
+}    // followed by a decl boundary, not a value-expr token
+// The token after a module-alias path must be a declaration boundary: the next top-level decl name
+// (`.Ident`), an import (`{`), or end of file (`.Eof`). Anything else — `(` (call), `[` (index), `<`
+// (generic), or any operator (`+`, `*`, …) — means the RHS is a value expression, not a module path.
+decl_path_at_boundary = (src: str, t: Token) bool {
+    t.kind.match ({
+        .Ident => true,
+        .Eof   => true,
+        _      => src.is_lbrace(t),
+    })
 }
 // a MALFORMED single-`=` top-level binding: marker `=` whose RHS is NEITHER an ident (a module alias,
 // `raw = std.mem.raw`) NOR `(` (a function literal, `f = () i32 {…}`). Reached only after the alias

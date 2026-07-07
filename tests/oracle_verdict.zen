@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (230)", [VerdictCase(
+    a := run_verdicts("verdict (232)", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -1685,6 +1685,14 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "bad-binding",
     ), VerdictCase(
+        src: "K = Ctor(1, 2)\nmain* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "bad-binding",
+    ), VerdictCase(
+        src: "K = compute()\nmain* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "bad-binding",
+    ), VerdictCase(
         src: "m = std.math\nmain* = () i32 { to_i32(m.abs(0 - 5)) }\n",
         should_pass: true,
         kind: "",
@@ -1718,7 +1726,11 @@ oracle_verdict_run* = () i32 {
     // decl (`main` here), and `check` said "ok"; now it is a clean error[bad-binding].
     // bad-binding REJECT + no-swallow PROOF: the FIRST error is bad-binding (at `x`), NOT
     // `undefined-name` for `wanted` — i.e. `wanted*` and its `*` survive the malformed line.
-    // ACCEPT: an ident-RHS module alias (`m = std.math`) — the working form — is untouched.
+    // bad-binding REJECT (ident-HEADED value RHS): `K = Ctor(1, 2)` / `K = compute()` — an ident
+    //   followed by `(` is a VALUE call, not a module path, so decl_is_module_alias no longer claims
+    //   it. It used to plant a void `dglobal_alias` that ICEd codegen (`Ctor`) or was silently
+    //   accepted as a second spelling of `:=` (`compute`); now both are a clean error[bad-binding].
+    // ACCEPT: an ident-RHS module alias (`m = std.math`) — the working (module-PATH) form — is untouched.
     // ACCEPT: a `:=` value global (the correct spelling of `k = 5`) still checks.
     // ACCEPT: a normal `(`-RHS function decl (the other single-`=` form) still checks.
     // #34 enum-variant-swallow (sibling of the bad-binding swallow, through fill_enum):
