@@ -3,7 +3,7 @@
 // value: `.expect("…")` at fail-fast roots, `.or_return()` inside Result-returning fns.
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
 { Allocator, try_acquire, try_resize } = std.mem.alloc
-{ Result, IoError, Opt } = std.core.result
+{ Result, IoError, Opt, panic } = std.core.result
 { Rt, current } = std.rt    // ambient runtime capability — the AMBIENT-FORM surface below draws from it
 Vec*<T>: {
     ptr: RawPtr<u8>,
@@ -16,7 +16,27 @@ Vec*<T>: {
         slice(v.ptr, v.len)
     }
     len = (v: Vec<T>) i64 { v.len }
-    get = (v: Vec<T>, i: i64) T { v.buf()[i] }
+    get = (v: Vec<T>, i: i64) T {
+        // Bounds-checked read against `len` (the LIVE element count), NOT `cap`: an index in [len, cap)
+        // would otherwise return uninitialized junk from the spare capacity. Out-of-range PANICS (same
+        // give-up contract as the compiler's OOB guard) rather than returning garbage. Signature stays
+        // `T` — every existing caller with a valid index is unchanged. Need a recoverable read? `get_opt`.
+        (i < 0 || i >= v.len).match ({ true => {
+            panic("vec.get: index out of bounds")
+            // unreachable — panic aborts; the recursion only satisfies the arm's type.
+            v.get(i)
+        }, false => v.buf()[i] })
+    }
+    get_opt = (v: Vec<T>, i: i64) Opt<T> {
+        // Recoverable bounds-checked read: `.Some(x)` for i in [0, len), `.None` past the live end.
+        (i < 0 || i >= v.len).match ({ true => {
+            none: Opt<T> := .None
+            none
+        }, false => {
+            some: Opt<T> := .Some(v.buf()[i])
+            some
+        } })
+    }
     grow<A> = (v: Vec<T>, a: MutPtr<A>) Result<Vec<T>, IoError> {
         ncap := v.cap * 2 + 1
         a.try_resize(v.ptr, ncap * sizeof(T)).match ({
@@ -221,6 +241,7 @@ AVec*<T>: {
     rt: Rt,
     len = (w: AVec<T>) i64 { w.inner.len() }
     get = (w: AVec<T>, i: i64) T { w.inner.get(i) }
+    get_opt = (w: AVec<T>, i: i64) Opt<T> { w.inner.get_opt(i) }
     view = (w: AVec<T>) [T] { w.inner.view() }
     each = (w: AVec<T>, f: (T) void) void { w.inner.each(f) }
     fold = (w: AVec<T>, init: T, f: (T, T) T) T { w.inner.fold(init, f) }
