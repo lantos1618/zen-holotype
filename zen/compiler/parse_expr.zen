@@ -208,10 +208,16 @@ parse_ctor = (a: MutPtr<Malloc>, src: str, dot: Scan) PExpr {
         _      => a.reject_match(vt.next),
     })
 }
+// SAME-LINE GATE (mirrors parse_ident / parse_qual_ctor / parse_method): a bare leading-dot ctor
+// `.Variant(payload)` binds its `(payload)` ONLY when the `(` sits on the SAME line as the variant
+// name. A NEWLINE before the `(` means `.Variant` is a bare tag VALUE (`out := .None`) and the `(`
+// begins a NEW statement (`(cond).match(…)`) — never a bogus call `.None(cond)` glued across the
+// break. Without this gate a value-position `.None` before a parenthesized statement fused into a
+// call, silently changing program meaning (surfaced by the formatter round-trip; #53).
 parse_ctor_named = (a: MutPtr<Malloc>, src: str, vt: Scan) PExpr {
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)
-    src.is_lparen(nx.tok).match ({ true => src.is_rparen(src.scan(nx.next).tok).match ({ true => a.parse_ctor_empty(src, vn, nx), false => a.parse_ctor_payload(src, vn, nx) }), false => PExpr(
+    (src.is_lparen(nx.tok) && src.nl_between(vt.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.is_rparen(src.scan(nx.next).tok).match ({ true => a.parse_ctor_empty(src, vn, nx), false => a.parse_ctor_payload(src, vn, nx) }), false => PExpr(
         expr: a.enode(mktag("", vn)),
         next: vt.next,
     ) })
