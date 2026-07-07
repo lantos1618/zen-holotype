@@ -10,7 +10,9 @@
 // the caller passes the full token (`os.has_flag("--verbose")`, `os.flag_str("--out")`). A typed
 // `parse(a, T)` / positional collector is a later wave (see the tail of this file).
 { getenv } = std.c.libc
-{ nbuf, eq } = std.text.str
+{ eq } = std.text.str
+{ try_acquire } = std.mem.alloc
+{ Result, IoError } = std.core.result
 // bound to zenrt.c (bodyless = foreign).
 zen_argc* = () i32
 zen_argv_at* = (i: i32) str
@@ -38,14 +40,22 @@ fill_argv = (out: [str], i: i32, n: i32) void {
         fill_argv(out, i + 1, n)
     }, false => { } })
 }
-// args(a) — the whole command line as an allocator-owned `[str]` (argv[0] = the program), so a caller
-// indexes/iterates instead of threading argc()/arg(i) by hand. The backbone is `a`-owned; the strings
-// borrow argv (process-lifetime stable).
-args*<A> = (a: MutPtr<A>) [str] {
+// args(a) — the whole command line as an allocator-owned `Result<[str], IoError>` (argv[0] = the
+// program), so a caller indexes/iterates instead of threading argc()/arg(i) by hand. Allocation failure
+// stays in the value flow: `try_acquire` fails as `.Err(.NotFound)` rather than handing back a null
+// backbone that `fill_argv` would then write through (a write-to-null crash). On success the backbone is
+// `a`-owned; the strings borrow argv (process-lifetime stable). Fail-fast roots close with
+// `.expect("…")`; robust callers `.match` the `.Err`.
+args*<A> = (a: MutPtr<A>) Result<[str], IoError> {
     n := zen_argc()
-    buf: [str] := a.nbuf("", to_i64(n))
-    fill_argv(buf, 0, n)
-    buf
+    a.try_acquire(to_i64(n) * sizeof(str)).match ({
+        .Ok(p)  => {
+            buf: [str] := slice(p, to_i64(n))
+            fill_argv(buf, 0, n)
+            .Ok(buf)
+        },
+        .Err(e) => .Err(e),
+    })
 }
 // has_flag(tok): is the exact token `tok` present anywhere in argv? (e.g. os.has_flag("--verbose"))
 flag_at = (tok: str, i: i32) bool { (i >= zen_argc()).match ({ true => false, false => eq(zen_argv_at(i), tok).match ({ true => true, false => flag_at(tok, i + 1) }) }) }
