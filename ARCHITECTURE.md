@@ -7,8 +7,9 @@ How the **self-hosted** compiler is shaped. For the current language behavior se
 The compiler is written entirely in Zen (`zen/compiler/`) and compiles itself, with runtime
 and user-facing library modules in `zen/std/`. There is no Python frontend and no tree-sitter —
 `cc` builds a `zenc` binary from committed C, and `zenc` regenerates that C. C is the intentional
-intermediate/bootstrap target for the self-hosted compiler. The only Python left in the repo is the **test runner**
-(`tests/`), which drives the `zenc` binary as a subprocess and imports no compiler code.
+intermediate/bootstrap target for the self-hosted compiler; a **second backend emits JavaScript**
+(`genjs`) over the same checked AST. The repo has **zero `.py` files**: even the test oracle is a
+Zen program (`tests/oracle.zen`) that drives the `zenc` binary as a subprocess.
 
 ## The pipeline
 
@@ -24,15 +25,18 @@ emitted C to `cc`.
   → parse      (recursive-descent → compiler.genc Expr/Stmt/Decl)  zen/compiler/parse{,_expr,_stmt,_type}.zen
   → check      (resolve refs, infer types, fits() each call)      zen/compiler/check.zen + check_validate.zen
   → mono       (specialize generics for every concrete use)       zen/compiler/mono.zen
-  → emit C     (lower the specialized AST to C text)              zen/compiler/genc.zen + genc_emit.zen
-  → cc         (the system C compiler)
+  → emit       ┬─ C  (lower the specialized AST to C text)        zen/compiler/genc.zen + genc_emit.zen  → cc
+               └─ JS (the same AST → JavaScript)                  zen/compiler/genjs.zen                → node
 ```
 
 `compiler.genc`'s `Expr`/`Stmt`/`Decl` are the **one AST** the parser builds, the checker
-annotates, and a backend walks. C is currently the only backend; the AST is deliberately
-backend-neutral so a second walk (LLVM, JS, …) is a new emitter, not a new IR.
+annotates, and a backend walks. There are **two backends today** — C (default) and JavaScript;
+the AST is deliberately backend-neutral, so a further walk (LLVM, …) is a new emitter, not a new
+IR. Both emitters walk the *already-checked* AST and never re-check.
 
-Checked CLI modes reject on any type error before linking.
+Checked CLI modes reject on any type error before linking. `zenc emit-js <file>` and
+`zenc build --target js <file>` run the identical resolve/parse/check pipeline and only swap
+`genc`'s `genModule` for `genjs`'s `genJsModule` — a type-broken program never produces JS.
 The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one
 already-flat module, skips `std.internal.resolve`/`check_validate`, and writes C to stdout.
 
@@ -69,14 +73,18 @@ See [README → Modules & imports](README.md#modules--imports).
 
 | file | what it is |
 |---|---|
-| `zenc.gen.c` | the compiler's `.zen` sources, already compiled to C (committed, the bootstrap seed) |
-| `zenrt.c` / `zenrt.h` | a ~30-line runtime: the growable `String`, `eq`/`is_empty`, `heap` |
-| `driver.c` | the CLI entry — plain emit, `check`/`build`/`run`, plus `--build-self` regen |
+| `zenc.gen.c` | the compiler's `.zen` sources (including `driver.zen`, the CLI entry, lowered to a `zen_main`), already compiled to C — committed, the bootstrap seed |
+| `zenrt.c` / `zenrt.h` | the 161-line C runtime floor: the growable `String`, `eq`/`is_empty`, `heap`, and the thin OS shims the emitted C calls |
+| `zenrt.js` | the ~70-line JavaScript runtime floor, prepended to `genjs` output so a program runs under `node` |
 | `sources.txt` | the graph/SCC-checked manifest of Zen sources used to regenerate `zenc.gen.c` |
 | `Makefile` | `zenc:` builds the binary; `regen:` regenerates `zenc.gen.c` with it |
 
+There is **no `driver.c`** — the CLI is `driver.zen`, an ordinary Zen module compiled into the
+seed. The whole `zenc` binary is `cc bootstrap/{zenc.gen.c,zenrt.c}`; the only hand-written C is
+the runtime floor.
+
 ```
-make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c,driver.c} -o zenc
+make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c} -o zenc
 make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self bootstrap/zenc.gen.c .
 ```
 
@@ -84,29 +92,27 @@ make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self boo
 module import lines, concatenates them in the graph-derived SCC order checked by the resolver oracle,
 and emits C. Fed its **own** sources,
 `zenc` emits **byte-for-byte** the committed `zenc.gen.c` — the compiler reproduces itself.
-`tests/test_bootstrap.py` builds the binary from the committed C and checks the
+The oracle's `fixpoint` suite builds the binary from the committed C and checks the
 reproduction; codegen is deterministic, so the byte-exact match is the parity guarantee
 (no separate "compare two compilers" oracle is needed).
 
-## Correctness: the binary-only oracle
+## Correctness: the Zen-native oracle
 
 The test suite (`tests/`, run with `make oracle`) is the **sole correctness reference**, and it
-is Python-*free*: the oracle is itself a Zen program (`tests/oracle.zen`) and the repo has zero
-`.py` files. It builds two artifacts from the committed bootstrap C with `cc` only —
+is Python-*free*: the oracle is itself a Zen program (`tests/oracle.zen` plus the `oracle_*.zen`
+suites) and the repo has zero `.py` files. It is built with the freshly-made `zenc` and drives
+that same shipping binary as a subprocess:
 
-- an **EMIT** binary (`bootstrap/{zenc.gen.c,zenrt.c,driver.c}`): Zen source → C on stdout;
-- a **CHECK** binary (the same gen.c plus `check_validate.zen`, linked with a tiny
-  `check_main.c`): exit code = the number of type errors —
+- **value cases** — `emit_value(src, want)` runs `zenc emit`, `#include`s the emitted C body into
+  `tests/oracle_runner.c`, compiles and runs it, and asserts the printed result (a silent-miscompile
+  guard);
+- **verdict cases** — `verdict(src)` runs the shipping `zenc check`/`build` and asserts accept vs.
+  reject (a reject-parity guard);
+- **command / module / build / fuzz / fixpoint** suites drive the real `zenc check`, `zenc build`,
+  and `zenc run` paths end to end, including std-import resolution and the self-host fixpoint.
 
-then drives them as subprocesses: `emit_value(src, want)` compiles and runs emitted C and
-asserts the result (a silent-miscompile guard); `verdict(src)` asserts accept/reject
-(a reject-parity guard). Command-level tests also drive the shipping `zenc check`,
-`zenc build`, and `zenc run` paths, including std-import resolution. The harness is being
-ported to a Zen-native oracle; until then this is the reference.
-
-The checker is told about a small **runtime prelude** the loader would otherwise supply —
-`heap`, `putchar` — prepended as bodyless `DForeign` decls so a checked program treats them
-as known imported signatures (`tests/_oracle.py`'s `_PRELUDE`).
+`make oracle-fast` runs just the quick value + verdict subset for the inner loop; `make oracle`
+(the full suite) is the merge gate. Its exit code is the failing-case count.
 
 ## One AST, many emitters
 
@@ -116,7 +122,8 @@ a walk over it:
 
 | backend | module | target |
 |---|---|---|
-| `genc` | `zen/compiler/genc_emit.zen` | C, the bootstrap/intermediate target |
+| `genc` | `zen/compiler/genc.zen` + `genc_emit.zen` | C, the default + bootstrap/intermediate target |
+| `genjs` | `zen/compiler/genjs.zen` | JavaScript, run under `node` (floor: `bootstrap/zenrt.js`) |
 
 A new backend is a new walk; it never re-checks, because the checker already proved the
 structure fits. Source branching is `.match` only, but a backend can choose target-native
@@ -141,5 +148,5 @@ function over data.
   (the checker covers a real but partial slice today).
 - A broader package/module system beyond the std-import closure that `check`/`build`/`run`
   resolve today; plain emit remains a flat-module C emitter.
-- More backends (`gen.llvm`, `gen.js`), and the one-structure surface syntax from
-  [VISION](VISION.md).
+- Further backends (e.g. `gen.llvm`) beyond the C and JavaScript emitters that ship today, and
+  the one-structure surface syntax from [VISION](VISION.md).
