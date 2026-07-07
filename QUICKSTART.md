@@ -1,7 +1,7 @@
 # Zen in 5 minutes
 
 Zen is a small, self-hosted systems language: explicit allocators, `.match`-only control flow,
-monomorphized generics, traits with UFCS — compiled to C.
+monomorphized generics, traits with UFCS — compiled to **C** (default) or **JavaScript**.
 
 ## Build the compiler
 
@@ -30,6 +30,29 @@ EOF
 
 `zenc run` type-checks, compiles via cc, and runs. `zenc build hello.zen -o hello` makes a binary;
 `zenc check` type-checks only.
+
+The **same source** also targets JavaScript — `emit-js` prints it, `| node` runs it:
+
+```sh
+./zenc emit-js hello.zen | node          # -> hello, zen / 42
+```
+
+### The entry point can ask for capabilities
+
+`main = () i32` is the niladic form. To do I/O through an explicit capability instead of an
+ambient global, take the root `Sys` and hand yourself the narrow capability you need:
+
+```sh
+cat > cap.zen <<'EOF'
+{ Sys } = std.sys
+
+main = (sys: Sys) i32 {
+    sys.stdout().write("hello from Sys\n")   // a Writer, not the whole world
+    0
+}
+EOF
+./zenc run cap.zen                        # -> hello from Sys
+```
 
 ## Multiple files
 
@@ -67,8 +90,9 @@ next to main.zen)`), not a linker failure.
 x := 41
 x = x + 1
 
-// floats are f64 (C double). A float literal is digits '.' digits (no exponent form — write
-// 0.001). STRICT: no implicit int<->float mixing, even for literals — `1.5 + 1` and
+// floats are f64 (C double). A float literal is digits '.' digits, with optional e-notation
+// (6.022e23) and digit separators (1_000_000). STRICT: no implicit int<->float mixing, even
+// for literals — `1.5 + 1` and
 // `x: f64 := 1` are type errors; cross explicitly with to_f64 / to_i64 / to_i32 (C truncation).
 // f64 supports + - * / and comparisons; % / bitwise / shifts reject. Matching on a float
 // literal works but is just an `==` chain — use with care. std.text.fmt prints them (%g-style:
@@ -109,12 +133,34 @@ sum = (xs: [i32]) i32 {
 
 // collections take an EXPLICIT allocator — nothing hides a malloc. Fallible ops
 // (of/push) return a Result, so unwrap with .expect(...).
-// heap = std.mem.heap
-// vec  = std.collections.vec
-// { expect } = std.core.result
-// h := heap.gpa()                                    // the system heap allocator
-// v := vec.of(h.addr(), [1, 2, 3]).expect("of")      // Vec<i32> backed by heap
-// v = v.push(h.addr(), 4).expect("push")
+//   heap = std.mem.heap
+//   vec  = std.collections.vec
+//   h := heap.gpa()                                  // the system heap allocator
+//   v := vec.of(h.addr(), [1, 2, 3]).expect("of")    // Vec<i32> backed by heap
+//   v = v.push(h.addr(), 4).expect("push")           // -> [1, 2, 3, 4]
+```
+
+Here is that collections snippet as a complete, runnable program:
+
+```sh
+cat > vecdemo.zen <<'EOF'
+{ println } = std.text.fmt
+heap = std.mem.heap
+vec  = std.collections.vec
+{ expect } = std.core.result
+
+sum_from = (v: vec.Vec<i32>, i: i64) i32 {
+    (i >= v.len()).match ({ true => 0, false => v.get(i) + v.sum_from(i + 1) })
+}
+main = () i32 {
+    h := heap.gpa()                                  // the system heap allocator
+    v := vec.of(h.addr(), [1, 2, 3]).expect("of")    // Vec<i32> backed by heap
+    v = v.push(h.addr(), 4).expect("push")           // -> [1, 2, 3, 4]
+    println(v.sum_from(0))                            // prints 10
+    0
+}
+EOF
+./zenc run vecdemo.zen           # prints 10
 ```
 
 ## A real program
@@ -123,10 +169,30 @@ sum = (xs: [i32]) i32 {
 
 ```sh
 ./zenc run examples/stats.zen
+# sum:
+# 39
+# max:
+# 9
+# evens:
+# 3
 ```
 
-Browse `examples/` for more, and `zen/std/` for the stdlib (fmt, vec, str, string, result, io,
-rc, arena, coroutine, …). Errors print as `file: error: <message>`; line/column info is in progress.
+`examples/wordfreq.zen` is the classic stdin filter — read all of stdin, split on whitespace,
+count each word in an `HMap<str, i64>`, print each distinct word with its count:
+
+```sh
+printf 'the cat sat on the mat the cat\n' | ./zenc run examples/wordfreq.zen
+# the: 3
+# cat: 2
+# sat: 1
+# on: 1
+# mat: 1
+# 5 distinct words
+```
+
+Browse `examples/` for more (including `stdin_echo`), and `zen/std/` for the stdlib (fmt, vec,
+hmap, str, string, result, io, rc, arena, …). Checked-mode errors carry `file:line:col`, a
+stable error kind, and a source-line caret.
 
 ## Run the test suite
 

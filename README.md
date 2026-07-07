@@ -1,10 +1,12 @@
 # zen
 
 **zen** is a small, **self-hosted** compiler for a [Zen](https://github.com/lantos1618/zenlang)-flavoured
-language. The compiler is written in Zen, compiles itself, and emits C (the intentional
-bootstrap target — not a host-language fallback). There is **no Python and no tree-sitter**
-in the build path: `cc` builds the `zenc` binary from committed C, and `zenc` re-emits that
-C byte-for-byte (a deterministic **fixpoint**).
+language. The compiler is written in Zen, compiles itself, and has **two backends** over one
+shared AST: **C** (`genc`, the default and the intentional bootstrap target — not a
+host-language fallback) and **JavaScript** (`genjs`, run under `node`). There is **no Python
+and no tree-sitter** in the build path: `cc` builds the `zenc` binary from committed C — a
+161-line hand-written runtime floor (`bootstrap/zenrt.c`) is the only C not emitted by the
+compiler — and `zenc` re-emits that C byte-for-byte (a deterministic **fixpoint**).
 
 It is a real-but-rough compiler: the core (self-hosting, FFI, generics, traits, a memory
 model, a multicore actor runtime) is well ahead of the user-facing surface and stdlib
@@ -30,6 +32,15 @@ main = () i32 {
 
 ```sh
 $ zenc run examples/hello.zen
+hello, zen
+42
+```
+
+The **same program** emits JavaScript and runs under `node` — the two backends share the
+checked AST, so a program that type-checks lowers to either target:
+
+```sh
+$ zenc emit-js examples/hello.zen | node
 hello, zen
 42
 ```
@@ -68,7 +79,8 @@ half_of = (n: i32) Result<i32, IoError> {
 ```
 
 See **[`examples/`](examples/)** (`hello`, `tour`, `shapes`, `stats`, `str_ops_demo`,
-`json_demo`, `store_demo`, `actor_demo`) — every one runs with `zenc run examples/<name>.zen`.
+`json_demo`, `store_demo`, `actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
+every one runs with `zenc run examples/<name>.zen`.
 
 ## The language
 
@@ -94,6 +106,12 @@ See **[`examples/`](examples/)** (`hello`, `tour`, `shapes`, `stats`, `str_ops_d
   let-bindings; slices `[T]`; the full operator set (`+ - * / %  == < > <= >=  && || !`).
 - **Literals.** Decimal, hex `0x`, binary `0b`, octal `0o`, digit separators
   `1_000_000`, and floats with e-notation `6.022e23`.
+- **Capabilities at the entry point.** `main` can take the root capability explicitly —
+  `main = (sys: Sys) i32` — and hand out *narrow* capabilities from it: `sys.stdout()` /
+  `sys.stderr()` yield a `Writer`, `sys.heap()` an `Allocator`, plus `env`/`clock`/`fs`. A
+  library takes the narrowest capability it needs (a `Writer`, not the world). The niladic
+  `main = () i32` still works — the compiler feeds it `std.sys.root()` through a trampoline,
+  so the C boundary is unchanged. There is no ambient global runtime.
 - **Memory is explicit and allocator-threaded.** Heap-backed `String`/`Vec` take an
   allocator from program setup (`m := halloc.gpa()`); there is no hidden heap. The checker
   rejects use-after-`release`/`drop` for `Own`/`Rc`/`Arc`. See **[MEMORY_MODEL.md](MEMORY_MODEL.md)**.
@@ -106,13 +124,15 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 
 | area | modules |
 |---|---|
-| core | `std.core.{result, ptr, slice, bool}` |
-| collections | `std.collections.{vec, map, set, iter}` |
+| core | `std.core.{result, ptr, slice, bool}`; `std.sys` (the root capability) |
+| collections | `std.collections.{vec, map, hmap, set, iter}` |
 | text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
 | memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
 | concurrent | `std.concurrent.{actor, pool, sched, runtime, coroutine, cown, ring}` — actors on a multi-threaded pool (one global run queue; work-stealing deques are roadmap) |
-| io / os | `std.io.{c, file}`, `std.fs`, `std.os`, `std.sync`, `std.atomic`, `std.thread` |
-| misc | `std.math`, `std.time`, `std.rand`, `std.json` |
+| io / os | `std.io.{c, file, stdin}`, `std.fs`, `std.os` (argv/env), `std.process`, `std.sync`, `std.atomic`, `std.thread` |
+| data / encoding | `std.json`, `std.csv`, `std.encoding` (base64/hex), `std.path` |
+| net / web | `std.net` (sockets), `std.web.dom` |
+| misc | `std.math`, `std.time`, `std.rand`, `std.log`, `std.testing` |
 
 ## Build & run
 
@@ -125,20 +145,23 @@ make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./
 (The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zenc`
 works too and is what CI invokes.)
 
-CLI surface (`zenc --help`):
+CLI surface:
 
 ```sh
-zenc run prog.zen          # resolve std imports, type-check, emit C, link, run
-zenc build prog.zen -o p   # same, but stop at the linked binary
-zenc check prog.zen        # resolve + type-check only, no binary (accepts library modules)
-zenc emit prog.zen         # print the generated C
-zenc doc std.text.fmt      # render a module's doc surface
-zenc fmt prog.zen          # format a source file in place
-zenc --version             # zenc 0.2.0-dev (self-hosted; zen driver)
-cat prog.zen | zenc        # low-level filter: one already-flat module -> C on stdout
+zenc run prog.zen              # resolve std imports, type-check, emit C, link, run
+zenc build prog.zen -o p       # same, but stop at the linked binary
+zenc build --target js prog.zen -o p.js   # JS backend: write the JS floor + module to p.js
+zenc emit-js prog.zen          # JS backend: print the JS to stdout (`| node` to run)
+zenc check prog.zen            # resolve + type-check only, no binary (accepts library modules)
+zenc emit prog.zen             # print the generated C
+zenc doc std.text.fmt          # render a module's doc surface
+zenc fmt prog.zen              # format a source file in place
+zenc --version                 # zenc 0.2.0-dev (self-hosted; zen driver)
+cat prog.zen | zenc            # low-level filter: one already-flat module -> C on stdout
 ```
 
-`run`/`build` require `main = () i32 { ... }`; `check` accepts modules without `main`. The
+`run`/`build`/`emit-js` require `main` (either `main = () i32` or `main = (sys: Sys) i32`);
+`check` accepts modules without `main`. The
 checked modes (`run`/`build`/`check`/`emit`) run the self-hosted module loader
 (`zen/std/internal/resolve.zen`) first, so `{ ... } = std.X` imports resolve from disk and
 the program is flattened before parsing. The bare-filter form (`cat file.zen | zenc`)
@@ -186,16 +209,19 @@ hint: check the callee signature and pass exactly the declared parameters
 ## How it works
 
 ```
- lex.zen ─tokens─► parse_*.zen ─► genc AST ─► check.zen ─► genc_emit.zen ─► C ─► cc
+                                                    ┌─ genc_emit.zen ─► C  ─► cc   (default)
+ lex.zen ─tokens─► parse_*.zen ─► genc AST ─► check.zen ─┤
+                                                    └─ genjs.zen     ─► JS ─► node
  (every compiler stage is ordinary Zen, in zen/compiler/)
 ```
 
 The loader inserts every declaration at its path into one namespace, then the checker
 resolves references, infers each body, and runs `fits(given, want)` at each call — the one
 relation behind name resolution, numeric widening, structural type equality, pointer
-direction/nullability, and trait-bound satisfaction. Checked structure lowers directly to C;
-pointers erase to plain C pointers. Fed its **own** sources, `zenc` re-emits the committed
-`bootstrap/zenc.gen.c` byte-for-byte.
+direction/nullability, and trait-bound satisfaction. Checked structure then lowers to a
+backend: C (pointers erase to plain C pointers) or JavaScript — the two are walks over the
+*same* checked AST, so neither re-checks. Fed its **own** sources, `zenc` re-emits the
+committed `bootstrap/zenc.gen.c` byte-for-byte.
 
 ## Caveats
 
@@ -217,10 +243,11 @@ This is rough around the edges. Known limits worth flagging up front:
 | `zen/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
 | `zen/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
 | `zen/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
+| `zen/compiler/genjs.zen` | the JavaScript backend — a second walk over the same checked AST |
 | `zen/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
 | `zen/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
 | `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
-| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` + `Makefile` |
+| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (161-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
 | `examples/` | runnable single-file programs |
 | `tests/` | the Zen-native oracle (`oracle.zen`) + fixtures |
 
