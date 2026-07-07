@@ -368,33 +368,27 @@ of*<T, A> = (a: MutPtr<A>, first: T) Result<Set<T>, IoError> {
     })
 }
 // add `e` to `r` only when `keep` — the Result-valued conditional-insert helper the folds below use.
-// Returns `r` unchanged when `keep` is false. (Errors are threaded by explicit `match` + annotated `.Err`
-// locals, NOT `or_return`: in a generic body whose Result OK-type carries `T`, or_return's synthesized
-// `.Err` doesn't get `T` substituted at codegen — the same reason HMap threads OOM explicitly.)
+// Returns `r` unchanged when `keep` is false.
 add_if<T, A> = (a: MutPtr<A>, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> {
     keep.match ({ true => r.add(a, e), false => {
         same: Result<Set<T>, IoError> := .Ok(r)
         same
     } })
 }
-// fold y's live elements into `r` (add-all), recursively; a per-element OOM threads out as .Err.
+// fold y's live elements into `r` (add-all), recursively; a per-element OOM threads out as .Err via
+// or_return (works inside this generic Result<Set<T>, …> body since #54 substitutes T in the Err guard).
 union_fold<T, A> = (a: MutPtr<A>, r: Set<T>, y: Set<T>, i: i64) Result<Set<T>, IoError> {
     (i >= y.len).match ({ true => {
         done: Result<Set<T>, IoError> := .Ok(r)
         done
     }, false => {
         sl := y.slots()
-        r.add(a, sl[i]).match ({
-            .Ok(nr) => a.union_fold(nr, y, i + 1),
-            .Err(e) => {
-                err: Result<Set<T>, IoError> := .Err(e)
-                err
-            },
-        })
+        nr := r.add(a, sl[i]).or_return()
+        a.union_fold(nr, y, i + 1)
     } })
 }
 // fold x's live elements into `r`, adding each only when `y.has(e) == keep_when` (true for intersect,
-// false for difference); a per-element OOM threads out as .Err.
+// false for difference); a per-element OOM threads out as .Err via or_return (#54).
 sift_fold<T, A> = (a: MutPtr<A>, r: Set<T>, x: Set<T>, y: Set<T>, i: i64, keep_when: bool) Result<Set<T>, IoError> {
     (i >= x.len).match ({ true => {
         done: Result<Set<T>, IoError> := .Ok(r)
@@ -403,13 +397,8 @@ sift_fold<T, A> = (a: MutPtr<A>, r: Set<T>, x: Set<T>, y: Set<T>, i: i64, keep_w
         sl := x.slots()
         e := sl[i]
         keep := y.has(e) == keep_when
-        a.add_if(r, e, keep).match ({
-            .Ok(nr)  => a.sift_fold(nr, x, y, i + 1, keep_when),
-            .Err(er) => {
-                err: Result<Set<T>, IoError> := .Err(er)
-                err
-            },
-        })
+        nr := a.add_if(r, e, keep).or_return()
+        a.sift_fold(nr, x, y, i + 1, keep_when)
     } })
 }
 // {x} ∪ {y}: a fresh set (buffers from `a`) holding every element of x and y. Starts as a clone of x, then

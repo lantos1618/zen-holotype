@@ -1673,13 +1673,24 @@ orret_err_value = (a: MutPtr<Malloc>, env: Env, t: Ty, tmp: str, ptr: bool) Ptr<
         (wE.is_void_ty() || rE.is_void_ty() || wE.ty_eq(rE) == false).match ({ true => a.cenode(vref(tmp)), false => a.orret_mkerr(want, a.subj_payload(a.cenode(vref(tmp)), "Err", ptr), tmp) })
     } })
 }
+// The Err-guard's tag constant, built as a re-manglable Tag node whose `.tag` genc folds to the bare
+// `<mty>_<variant>` identifier — byte-identical to the old baked `tag_const` vref for a concrete
+// receiver. Riding on a Tag (not a raw string) is what lets subst_expr rewrite T→concrete when this
+// generic body is inlined at a concrete T, so or_return works in a generic Result-returning fn whose
+// Ok type carries T (#54). A pointer/opaque receiver falls back to the verbatim baked constant.
+or_err_tag = (a: MutPtr<Malloc>, t: Ty, variant: str) Ptr<Expr> {
+    t.match ({
+        .Named(n)   => a.subj_tag(a.cenode(mktag(n, variant)), false),
+        .Generic(g) => a.subj_tag(a.cenode(mktagg(g.name, eq(g.mangled, "").match ({ true => a.mangle_str_in(g.name, g.args), false => g.mangled }), g.args, variant)), false),
+        _           => a.cenode(vref(a.tag_const(t.enum_name(), variant))),
+    })
+}
 lower_or_return_let = (a: MutPtr<Malloc>, env: Env, l: LetData) [Stmt] {
     recv2 := a.resolve_expr(env.clr_exp(), a.or_return_recv(l.value))
     t := env.infer_expr(recv2)
-    en := t.enum_name()
     ptr := t.ty_is_ptr()
     tmp := a.or_temp_name(l.name)
-    cnd := a.cenode(bin("==", a.subj_tag(a.cenode(vref(tmp)), ptr), a.cenode(vref(a.tag_const(en, "Err")))))
+    cnd := a.cenode(bin("==", a.subj_tag(a.cenode(vref(tmp)), ptr), a.or_err_tag(t, "Err")))
     buf := a.sbuf(3)
     buf[0] = slett(tmp, t, recv2)
     buf[1] = sif(cnd, a.one_stmt(sret(a.orret_err_value(env, t, tmp, ptr))), no_stmts())

@@ -946,8 +946,19 @@ oracle_value_run* = () i32 {
     ), VCase(
         src: "Sz*: { size: () i32 }\nOpt*<T: Sz>: Some(T) | None\ntest* = () i32 { 42 }",
         want: "42",
+    ), VCase(
+        src: "R<T, E>: Ok(T) | Err(E)\nmk<T> = (x: T) R<T, i32> { .Ok(x) }\nwrap<T> = (x: T) R<T, i32> {\n  v := mk(x).or_return()\n  .Ok(v)\n}\ntest* = () i32 { wrap(41).match ({ .Ok(n) => n, .Err(e) => 0 - 1 }) }",
+        want: "41",
+    ), VCase(
+        src: "R<T, E>: Ok(T) | Err(E)\nmk<T> = (x: T) R<T, i32> { .Ok(x) }\ninc<T> = (x: T) R<T, i32> {\n  .Ok(mk(x).or_return())\n}\ntest* = () i32 { inc(9).match ({ .Ok(n) => n, .Err(e) => 0 - 1 }) }",
+        want: "9",
     )])
 }
+// GENERIC or_return (#54): the Err-guard's synthesized tag const must be monomorphized with the
+// caller's concrete T. Statement position: `v := mk(x).or_return()` in a `R<T, i32>`-returning
+// generic fn once emitted `R_T_i32_Err` (unsubstituted T → C wouldn't compile).
+// GENERIC or_return in EXPRESSION position (hoisted): `.Ok(mk(x).or_return())` in a generic
+// `R<T, i32>`-returning fn — same synthesized-tag-substitution path.
 // #50: control bytes in a string literal must round-trip through the emitted C literal. The CR
 // (0x0D) used to be written raw, breaking the C line; \t and non-printables (\x01) too. Read the
 // bytes back at fixed indices: s[1]=13(CR), s[3]=9(TAB), s[7]=1  ->  13*10000+9*100+1 = 130901.
