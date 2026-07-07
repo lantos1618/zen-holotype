@@ -1,0 +1,86 @@
+// std.log — minimal leveled logging to an EXPLICIT target (fd/Writer), no ambient state.
+//
+// A logger is a plain value: a target file descriptor plus a minimum level. It is the
+// direction of an explicit capability — nothing is written unless the caller handed the
+// logger a place to write to. There is no async, no rotation, no global logger; you pass
+// the `Logger` you want, exactly like you pass an Allocator.
+//
+//   lg := stderr_logger(.Info)        // log Info and above to fd 2 (stderr)
+//   lg.info("server started")         // [INFO] server started
+//   lg.debug("verbose trace")         // dropped — Debug < Info, nothing written
+//   lg.warn("disk almost full")       // [WARN] disk almost full
+//   lg.error("connection refused")    // [ERROR] connection refused
+//
+// A record is written as `[LEVEL] msg\n` in one best-effort pass of raw `write(2)` calls —
+// no allocation, no owned temporary. The write is BEST-EFFORT (returns the byte count,
+// matching std.io.file.out / std.text.fmt); a partial or failed write is not raised as a
+// value, exactly as the streaming stdout writers don't. Callers who need durable delivery
+// should wrap their own fd in a Result-returning Writer.
+{ view } = std.text.str
+{ write } = std.c.libc
+// Severity, ordered least→most severe. Only records whose level is >= a logger's `min`
+// level are emitted; the rest are dropped before any byte is written.
+Level*: Debug | Info | Warn | Error
+// Ordinal used for the `level >= min` comparison. Least severe = smallest.
+rank = (l: Level) i64 {
+    l.match ({
+        .Debug => 0,
+        .Info  => 1,
+        .Warn  => 2,
+        .Error => 3,
+    })
+}
+// The bracketed tag printed for each level: `[DEBUG]`, `[INFO]`, `[WARN]`, `[ERROR]`.
+tag = (l: Level) str {
+    l.match ({
+        .Debug => "DEBUG",
+        .Info  => "INFO",
+        .Warn  => "WARN",
+        .Error => "ERROR",
+    })
+}
+// Write a str's bytes to a descriptor (no trailing NUL); returns the count actually written.
+wr = (fd: i32, s: str) i64 {
+    v := s.view()
+    fd.write(v.ptr, v.len)
+}
+// Emit one `[LEVEL] msg\n` record to the descriptor as a run of best-effort writes; returns
+// the total bytes written across the pieces.
+emit = (fd: i32, l: Level, msg: str) i64 {
+    n := fd.wr("[")
+    n = n + fd.wr(l.tag())
+    n = n + fd.wr("] ")
+    n = n + fd.wr(msg)
+    n + fd.wr("\n")
+}
+// A logger: an explicit target descriptor plus the minimum level it will emit. Constructed
+// with `logger(fd, min)` / `stderr_logger(min)`, or the plain `Logger(fd:, min:)` literal.
+// The level methods are namespaced under the struct (like std.text.fmt's Printer ops) so
+// short names like `info`/`warn`/`error` never collide on an importer's flat namespace.
+Logger*: {
+    fd: i32,
+    min: Level,
+    log = (lg: Logger, lvl: Level, msg: str) i64 {
+        // Emit `msg` at `lvl` iff `lvl >= min`; returns bytes written (0 when dropped).
+        (lvl.rank() >= lg.min.rank()).match ({ true => lg.fd.emit(lvl, msg), false => 0 })
+    }
+    debug = (lg: Logger, msg: str) i64 { lg.log(.Debug, msg) }
+    info = (lg: Logger, msg: str) i64 { lg.log(.Info, msg) }
+    warn = (lg: Logger, msg: str) i64 { lg.log(.Warn, msg) }
+    error = (lg: Logger, msg: str) i64 { lg.log(.Error, msg) }
+}
+STDERR := 2
+// Build a logger writing to an explicit descriptor, dropping records below `min`.
+logger* = (fd: i32, min: Level) Logger {
+    Logger(
+        fd: fd,
+        min: min,
+    )
+}
+// Convenience: a logger targeting fd 2 (stderr) at the given minimum level.
+stderr_logger* = (min: Level) Logger {
+    Logger(
+        fd: STDERR,
+        min: min,
+    )
+}
