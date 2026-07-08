@@ -893,7 +893,29 @@ oracle_modules_run* = () i32 {
     // 220-symbol provided_symbols + module_graph + decl_names stress (self-generating program).
     // 3500-call namespace rewriter (strip_ns_into) stack-growth stress (self-generating program).
     // 260-decl final-dedup (with a duplicate v0) handled without a recursive walk.
+    // #66a: the day-one import-collision wall. Aliasing `std.text.string` (a module whose type's methods
+    // shadow its own top-level fns) alongside `std.text.fmt` (which imports that type unqualified) USED to
+    // surface a bare `type String does not implement Allocator` error deep inside fmt.zen with zero
+    // attribution — it must now be rejected AT THE USER'S IMPORT LINE (first case). The second case is the
+    // zero-over-rejection control: aliasing a NON-split module (`std.text.str`, plain UFCS free fns) with
+    // the same fmt import must still compile — the check fires only on the split-name + bare-import pair.
     d := run_mod_verdicts("modules verdict (cross-module check / loader errors)", [ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "string = std.text.string\n{ println } = std.text.fmt\n{ Malloc } = std.mem.alloc\nmain = () i32 {\n  m := Malloc(_: 0)\n  s := string.init(m.addr(), 16).expect(\"oom\")\n  println(\"ok\")\n  0\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[import-collision]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "s = std.text.str\n{ println } = std.text.fmt\nmain = () i32 { println(\"hi\") 0 }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
         files: [ModFile(
             name: "x.zen",
             src: "f* = (a: i32, b: i32) i32 { a + b }\n",
