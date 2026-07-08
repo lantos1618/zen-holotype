@@ -1,0 +1,35 @@
+// tests/oracle_argparse.zen — the std.argparse category of the Zen-native oracle. Each case is a
+// self-contained Zen PROGRAM that imports std.argparse, drives `ap_parse` over a hand-written `[str]`
+// of arguments, asserts the parsed results (and the error cases), and exits 0 iff every assertion held
+// (`.to_exit()`). The runner writes the program and runs `zenc run <entry>`; a non-zero exit — a failed
+// assertion OR a miscompile — fails the case. Reuses oracle_modules' `ModValCase` / `run_mod_value`.
+//
+// Coverage: `--name value`, `--name=value`, `-f`, bundled shorts `-abc`, attached short value `-ovalue`,
+// `--` end-of-options, positionals; plus the errors-as-Result cases — unknown flag, missing option value,
+// missing required option, missing required positional, `--flag=value` on a boolean flag, and `--help`.
+{ ModValCase, ModFile, run_mod_value } = oracle_modules
+{ out } = std.io.file
+// one program whose exit code must be 0 (every embedded assertion passed).
+ap_case = (src: str) ModValCase {
+    ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: src,
+        )],
+        entry: "p.zen",
+        want: 0,
+    )
+}
+oracle_argparse_run* = () i32 {
+    cases := [ap_case("{ to_exit } = std.core.bool\n{ eq } = std.text.str\nap = std.argparse\nhalloc = std.mem.heap\nmain = () i32 {\n  h := halloc.gpa()\n  a := h.addr()\n  p := ap.ap_new(\"t\").flag(a, \"verbose\", 'v', \"\").flag(a, \"all\", 'a', \"\").option(a, \"output\", 'o', \"\").option_req(a, \"mode\", 'm', \"\").positional_req(a, \"input\", \"\").positional(a, \"extra\", \"\")\n  o1 := p.parse(a, [\"--verbose\", \"--mode\", \"fast\", \"in.zen\"]).match ({ .Ok(r) => r.get_flag(\"verbose\") && (!r.get_flag(\"all\")) && r.get_opt(\"mode\").match ({ .Some(v) => eq(v, \"fast\"), .None => false }) && (r.positionals().len == 1) && eq(r.positionals()[0], \"in.zen\"), .Err(e) => false })\n  o2 := p.parse(a, [\"--output=log.txt\", \"--mode=slow\", \"in\"]).match ({ .Ok(r) => r.get_opt(\"output\").match ({ .Some(v) => eq(v, \"log.txt\"), .None => false }) && r.get_opt(\"mode\").match ({ .Some(v) => eq(v, \"slow\"), .None => false }), .Err(e) => false })\n  o3 := p.parse(a, [\"-va\", \"-m\", \"x\", \"f\"]).match ({ .Ok(r) => r.get_flag(\"verbose\") && r.get_flag(\"all\") && r.get_opt(\"mode\").match ({ .Some(v) => eq(v, \"x\"), .None => false }) && eq(r.positionals()[0], \"f\"), .Err(e) => false })\n  o4 := p.parse(a, [\"-ofile.out\", \"-mfast\", \"src\"]).match ({ .Ok(r) => r.get_opt(\"output\").match ({ .Some(v) => eq(v, \"file.out\"), .None => false }) && r.get_opt(\"mode\").match ({ .Some(v) => eq(v, \"fast\"), .None => false }) && eq(r.positionals()[0], \"src\"), .Err(e) => false })\n  o5 := p.parse(a, [\"-m\", \"z\", \"--\", \"--verbose\", \"-x\"]).match ({ .Ok(r) => (!r.get_flag(\"verbose\")) && (r.positionals().len == 2) && eq(r.positionals()[0], \"--verbose\") && eq(r.positionals()[1], \"-x\"), .Err(e) => false })\n  (o1 && o2 && o3 && o4 && o5).to_exit()\n}\n"), ap_case("{ to_exit } = std.core.bool\n{ eq } = std.text.str\nap = std.argparse\nhalloc = std.mem.heap\nmain = () i32 {\n  h := halloc.gpa()\n  a := h.addr()\n  p := ap.ap_new(\"t\").flag(a, \"verbose\", 'v', \"\").option(a, \"output\", 'o', \"\").option_req(a, \"mode\", 'm', \"\").positional_req(a, \"input\", \"\")\n  e1 := p.parse(a, [\"in\"]).match ({ .Ok(r) => false, .Err(e) => e.match ({ .MissingRequired(n) => eq(n, \"mode\"), .UnknownFlag(n) => false, .MissingValue(n) => false, .NoValueAllowed(n) => false }) })\n  e2 := p.parse(a, [\"--nope\", \"-m\", \"z\", \"in\"]).match ({ .Ok(r) => false, .Err(e) => e.match ({ .UnknownFlag(n) => eq(n, \"--nope\"), .MissingRequired(n) => false, .MissingValue(n) => false, .NoValueAllowed(n) => false }) })\n  e3 := p.parse(a, [\"-m\", \"z\", \"in\", \"--output\"]).match ({ .Ok(r) => false, .Err(e) => e.match ({ .MissingValue(n) => eq(n, \"output\"), .UnknownFlag(n) => false, .MissingRequired(n) => false, .NoValueAllowed(n) => false }) })\n  e4 := p.parse(a, [\"-m\", \"z\"]).match ({ .Ok(r) => false, .Err(e) => e.match ({ .MissingRequired(n) => eq(n, \"input\"), .UnknownFlag(n) => false, .MissingValue(n) => false, .NoValueAllowed(n) => false }) })\n  e5 := p.parse(a, [\"--verbose=1\", \"-m\", \"z\", \"in\"]).match ({ .Ok(r) => false, .Err(e) => e.match ({ .NoValueAllowed(n) => eq(n, \"--verbose=1\"), .UnknownFlag(n) => false, .MissingValue(n) => false, .MissingRequired(n) => false }) })\n  e6 := p.parse(a, [\"--help\"]).match ({ .Ok(r) => r.help_requested(), .Err(e) => false })\n  (e1 && e2 && e3 && e4 && e5 && e6).to_exit()\n}\n")]
+    out("argparse value (parse shapes + errors as Result)\n")
+    fails := 0
+    cases.loop((h, i, c) {
+        run_mod_value(c).match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
+    })
+    out("\n")
+    fails
+}
