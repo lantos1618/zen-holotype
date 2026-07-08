@@ -1,0 +1,66 @@
+// Phase-3 slice proof: the ambient container constructors (`vec.new`/`from`, `set.new`/`from`,
+// `hmap.new`/`from`) are now THIN shims over the explicit-rt real path (`*_in(r)`), and that explicit
+// path draws ZERO ambient rt. This fixture exercises BOTH surfaces end-to-end: the ambient forms (which
+// draw `rt.current()` once at construction) AND the explicit `new_in`/`from_in(r, …)` forms (which take
+// a caller-supplied `Rt` and never touch the thread-local). Both must produce identical container
+// behavior — construction, mutation, query, free — proving the shim delegation is behavior-preserving.
+{ println } = std.text.fmt
+vec = std.collections.vec
+set = std.collections.set
+hmap = std.collections.hmap
+{ AVec } = std.collections.vec
+{ ASet } = std.collections.set
+{ AHMap } = std.collections.hmap
+{ Rt, heap_rt } = std.rt
+main = () i32 {
+    // ── ambient forms (shims over new_in / from_in) ──
+    v: AVec<i32> := vec.new()
+    v = v.push(1)
+    v = v.push(2)
+    println(v.len())    // 2
+    println(v.get(1))    // 2
+    w := vec.from([10, 20, 30])
+    println(w.len())    // 3
+    s: ASet<i64> := set.new()
+    s = s.add(5)
+    s = s.add(5)
+    println(s.len())    // 1
+    t := set.from([1, 2, 2, 3])
+    println(t.len())    // 3
+    m := hmap.from("the", 1)
+    m = m.put("cat", 2)
+    println(m.get_or("the", 0))    // 1
+    e: AHMap<str, i64> := hmap.new()
+    e = e.put("x", 9)
+    println(e.get_or("x", 0))    // 9
+    // ── explicit-rt path (NO ambient draw) — the real construction path ──
+    r: Rt := heap_rt()
+    ev: AVec<i32> := vec.new_in(r)
+    ev = ev.push(7)
+    println(ev.get(0))    // 7
+    fv := vec.from_in(r, [100, 200])
+    println(fv.len())    // 2
+    es: ASet<i64> := set.new_in(r)
+    es = es.add(42)
+    println(es.has(42).match ({ true => 1, false => 0 }))    // 1
+    fs := set.from_in(r, [9, 9, 8])
+    println(fs.len())    // 2
+    em: AHMap<str, i64> := hmap.new_in(r)
+    em = em.put("k", 3)
+    println(em.get_or("k", 0))    // 3
+    fm := hmap.from_in(r, "seed", 55)
+    println(fm.get_or("seed", 0))    // 55
+    v.free()
+    w.free()
+    s.free()
+    t.free()
+    m.free()
+    e.free()
+    ev.free()
+    fv.free()
+    es.free()
+    fs.free()
+    em.free()
+    fm.free()
+    0
+}

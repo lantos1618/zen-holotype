@@ -476,10 +476,11 @@ ASet*<T>: {
         w.inner.free(ra.addr())
     }
 }
-// a zero-element ambient `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
-// `s: ASet<i64> := set.new()`. The ambient rt is captured HERE and stored for the life of the set.
-new*<T> = () ASet<T> {
-    r := current()
+// EXPLICIT-rt constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `ASet<T>` bound to a
+// caller-supplied `Rt`, with NO ambient draw (docs/runtime-design.md: explicit capability threading is
+// the model). The ambient `new()` below is a one-line shim — the single `current()` read on the set
+// construction path.
+new_in*<T> = (r: Rt) ASet<T> {
     ra := RtAlloc(r: r)
     sr: Result<Set<T>, IoError> := empty(ra.addr())
     ASet<T>(
@@ -487,9 +488,15 @@ new*<T> = () ASet<T> {
         rt: r,
     )
 }
-// an ambient `ASet<T>` seeded from a slice (dedups via `add`). T inferred from the elements.
-from*<T> = (xs: [T]) ASet<T> {
-    r := current()
+// a zero-element ambient `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
+// `s: ASet<i64> := set.new()`. The ambient rt is drawn ONCE here and stored for the life of the set.
+new*<T> = () ASet<T> {
+    s: ASet<T> := new_in(current())
+    s
+}
+// EXPLICIT-rt seed constructor: an `ASet<T>` bound to `r`, seeded from a slice (dedups via `add`). No
+// ambient draw. T inferred from the elements.
+from_in*<T> = (r: Rt, xs: [T]) ASet<T> {
     ra := RtAlloc(r: r)
     sr: Result<Set<T>, IoError> := empty(ra.addr())
     st := sr.expect("set.from: out of memory")
@@ -501,3 +508,5 @@ from*<T> = (xs: [T]) ASet<T> {
         rt: r,
     )
 }
+// an ambient `ASet<T>` seeded from a slice. Thin shim: draw the current rt once, delegate.
+from*<T> = (xs: [T]) ASet<T> { from_in(current(), xs) }
