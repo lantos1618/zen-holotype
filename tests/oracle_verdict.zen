@@ -907,7 +907,27 @@ oracle_verdict_run* = () i32 {
         src: "gen<T> = (n: i32, s: str) i32 { n }\ntest* = () i32 { gen(5, \"ok\")  0 }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Val(9)) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) if v > 10 => 1, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
+        should_pass: false,
+        kind: "exhaustiveness",
+    ), VerdictCase(
+        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) if v => 1, .Val(v) => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
+        should_pass: false,
+        kind: "guard-type",
+    ), VerdictCase(
+        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) => 1, .Val(v) if v > 0 => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
+        should_pass: false,
+        kind: "dup-variant",
     )])
+    // MATCH GUARD accept: a guarded `.Val` arm plus an UNGUARDED `.Val` arm covers the variant.
+    // GUARD exhaustiveness: `.Val` covered ONLY by a guarded arm (guard may fail) → not exhaustive.
+    // GUARD type: the `if` guard must be a bool (here `v` is i32).
+    // GUARD does NOT weaken the duplicate-arm rule: a later `.Val` AFTER an UNGUARDED `.Val` is dead.
     // C2 (task #35): a CONCRETE param of a GENERIC callee is now arg-checked (was off since the
     // right-arity call inlines away before the post-inline check). Accept: a correctly-typed
     // concrete arg + a tparam-typed slot that still DEFERS to monomorphization.

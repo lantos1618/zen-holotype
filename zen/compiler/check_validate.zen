@@ -403,10 +403,17 @@ check_args = (env: Env, args: [Expr]) i32 {
     })
     acc
 }
+// A guarded arm's guard is checked in the arm's env (its pattern binding is in scope) and must be bool.
+guard_count = (env: Env, subjty: Ty, ar: ArmData) i32 {
+    is_expr_null(ar.guard).match ({ true => 0, false => {
+        aenv := env.a.arm_env(env, subjty, ar)
+        aenv.check_expr(ar.guard) + aenv.non_bool(ar.guard).match ({ true => 1, false => 0 })
+    } })
+}
 check_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc + env.a.arm_env(env, subjty, ar).check_expr(ar.body)
+        acc = acc + env.a.arm_env(env, subjty, ar).check_expr(ar.body) + env.guard_count(subjty, ar)
     })
     acc
 }
@@ -722,17 +729,21 @@ enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     })
     found
 }
+// A GUARDED arm does NOT complete coverage: its guard may fail, so control can fall through to the next
+// arm. Exhaustiveness therefore ignores guarded arms — a variant covered ONLY by guarded arms is still
+// "missing", and a guarded `_` is not the catch-all. So a guarded-only match without an unguarded
+// fallback (`_`, bind-all, or all-variants-unguarded) is rejected non-exhaustive, as before.
 has_wildcard = (arms: [ArmData]) bool {
     f := false
     arms.loop((h, i, a) {
-        f = eq(a.variant, "_").match ({ true => true, false => f })
+        f = (eq(a.variant, "_") && is_expr_null(a.guard)).match ({ true => true, false => f })
     })
     f
 }
 arm_covers = (arms: [ArmData], vname: str) bool {
     f := false
     arms.loop((h, i, a) {
-        f = eq(a.variant, vname).match ({ true => true, false => f })
+        f = (eq(a.variant, vname) && is_expr_null(a.guard)).match ({ true => true, false => f })
     })
     f
 }
@@ -747,10 +758,13 @@ exhaustive_err = (env: Env, m: MatchData) i32 {
     vs := env.decls.enum_variants(m.ename)
     (vs.len == 0).match ({ true => 0, false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }) })
 }
+// A later same-variant arm is a duplicate only when an EARLIER arm of that variant is UNGUARDED — an
+// unguarded arm already covers the variant, so anything after it is dead. Two guarded `.Some` arms (or a
+// guarded `.Some` followed by an unguarded `.Some`) are legitimate: the earlier guard may fall through.
 dup_before = (arms: [ArmData], vname: str, upto: i32) bool {
     f := false
     arms.loop((h, i, a) {
-        f = (i < upto).match ({ true => eq(a.variant, vname).match ({ true => true, false => f }), false => f })
+        f = (i < upto && eq(a.variant, vname) && is_expr_null(a.guard)).match ({ true => true, false => f })
     })
     f
 }
@@ -1907,6 +1921,7 @@ KVBREAK = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase
 KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
 KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
+KGUARDTYPE = () i32 { 37 }    // a match-arm `if <guard>` whose guard expression is not a bool (33-36 are the custom channels, so 37 is the next free packed code)
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -2114,11 +2129,15 @@ diag_info = (code: i32) DiagInfo {
         kind: "bad-binding",
         message: "top-level `=` binding is neither a module alias nor a function",
         hint: "use `:=` for a value global (`k := 5`); a single `=` at top level is only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
+    ), false => (code == 37).match ({ true => DiagInfo(
+        kind: "guard-type",
+        message: "match arm guard must be a bool",
+        hint: "make the `if` guard a boolean expression (e.g. a comparison); the arm is taken only when its pattern matches AND the guard is true",
     ), false => DiagInfo(
         kind: "type",
         message: "type error",
         hint: "",
-    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
 }
 diagnostic_kind_name = (code: i32) str { code.diag_info().kind }
 diagnostic_message = (code: i32) str { code.diag_info().message }
@@ -3339,10 +3358,17 @@ ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool
 }
 // arm BODIES are always conditional (only the taken arm evaluates) — and a statement-position
 // match resolves its arms under a cleared expected type, so the rebuild can't fire there either.
+// positioned mirror of guard_count: a non-bool arm guard is a KGUARDTYPE error at the arm's pattern pos.
+ko_guard_kind = (env: Env, tps: [Param], subjty: Ty, ar: ArmData) i32 {
+    is_expr_null(ar.guard).match ({ true => 0, false => {
+        aenv := env.a.arm_env(env, subjty, ar)
+        aenv.ko_expr_kind(tps, tbool(), ar.guard, true).kv_kor(aenv.non_bool(ar.guard).match ({ true => KGUARDTYPE().kv_at(ar.pos), false => 0 }))
+    } })
+}
 ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
+        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true)).kv_kor(env.ko_guard_kind(tps, subjty, ar))
     })
     acc
 }
