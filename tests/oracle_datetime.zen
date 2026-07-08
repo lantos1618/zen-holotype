@@ -1,0 +1,34 @@
+// tests/oracle_datetime.zen — the DATETIME category for the Zen-native correctness oracle. It drives a
+// real program through `zenc run` (so std.datetime's imports resolve) and asserts its stdout against
+// KNOWN calendar vectors byte-for-byte — the same custom-runner shape as oracle_misc's num_parse /
+// hashing sub-suites (the value-case harness can't drive a std-module program: no module resolver).
+//
+// The gate is CORRECTNESS: the Unix-epoch anchor (0 → 1970-01-01), the canonical 1e9 vector
+// (1000000000 → 2001-09-09T01:46:40 UTC, a Sunday), exact to_unix inverses, leap-year + month-length
+// truth, weekday, ISO-8601 parse/format round-trips, and every DateError variant on bad input.
+//
+// Wired into tests/oracle.zen by importing `oracle_datetime_run` and adding it to the slow-suite sum.
+{ run_suite, zo_path, zo_cmd } = oracle_lib
+{ Malloc } = std.mem.alloc
+{ save, contents_in, shell } = std.io.file
+{ contains, len } = std.text.str
+// The program under test. Prints one labelled line per vector; the runner asserts each as a substring.
+//   epoch/vec  — from_unix at the epoch and the 1e9 anchor, rendered by format_iso, plus weekday.
+//   rt0/rt1    — to_unix round-trips (exact inverse).
+//   wd_vec     — weekday() recomputed from the date fields.
+//   leap/dim   — is_leap (2000✓ 1900✗ 2004✓ 2001✗) + days_in_month (Feb 2000/1900, Apr 2001).
+//   *_parse    — parse_iso: date-only + full round-trip; leap-day accepted; then each DateError variant
+//                (OutOfRange for 2001-02-29 & month 13, BadDigit, BadSeparator, BadLength).
+DT_PROG := "{ put } = std.text.fmt\n{ Malloc } = std.mem.alloc\n{ from_unix, to_unix, parse_iso, format_iso, is_leap, days_in_month, weekday, error_name } = std.datetime\nemit_parse = (mp: MutPtr<Malloc>, label: str, s: str) void {\n    parse_iso(s).match ({\n        .Ok(d)  => { put(label).s(\"=Ok:\").s(mp.format_iso(d).expect(\"oom\")).nl()  { } },\n        .Err(e) => { put(label).s(\"=Err:\").s(e.error_name()).nl()  { } },\n    })\n}\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    d0 := from_unix(0)\n    put(\"epoch=\").s(mp.format_iso(d0).expect(\"oom\")).s(\"|wd\").i(d0.weekday).nl()\n    d1 := from_unix(1000000000)\n    put(\"vec=\").s(mp.format_iso(d1).expect(\"oom\")).s(\"|wd\").i(d1.weekday).nl()\n    put(\"rt0=\").i(d0.to_unix()).nl()\n    put(\"rt1=\").i(d1.to_unix()).nl()\n    put(\"wd_vec=\").i(d1.weekday()).nl()\n    put(\"leap=\").b(is_leap(2000)).b(is_leap(1900)).b(is_leap(2004)).b(is_leap(2001)).nl()\n    put(\"dim=\").i(days_in_month(2000, 2)).s(\",\").i(days_in_month(1900, 2)).s(\",\").i(days_in_month(2001, 4)).nl()\n    emit_parse(mp, \"date_only\", \"2020-01-01\")\n    emit_parse(mp, \"full\", \"2001-09-09T01:46:40\")\n    emit_parse(mp, \"leapday\", \"2000-02-29\")\n    emit_parse(mp, \"notleap\", \"2001-02-29\")\n    emit_parse(mp, \"badmon\", \"2001-13-01\")\n    emit_parse(mp, \"badchar\", \"20x0-01-01\")\n    emit_parse(mp, \"badsep\", \"2001/09/09\")\n    emit_parse(mp, \"badlen\", \"2020\")\n    0\n}\n"
+oracle_datetime_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_dt.zen"), DT_PROG, len(DT_PROG))
+    save(mp.zo_path("zo_dt.out"), "", 0)
+    shell(mp.zo_cmd("./zenc run $ZT/zo_dt.zen > $ZT/zo_dt.out 2>/dev/null"))
+    txt := mp.contents_in(mp.zo_path("zo_dt.out")).match ({
+        .Ok(t)  => t,
+        .Err(e) => "",
+    })
+    run_suite("datetime (run)", [txt.contains("epoch=1970-01-01T00:00:00|wd4\n"), txt.contains("vec=2001-09-09T01:46:40|wd0\n"), txt.contains("rt0=0\n"), txt.contains("rt1=1000000000\n"), txt.contains("wd_vec=0\n"), txt.contains("leap=truefalsetruefalse\n"), txt.contains("dim=29,28,30\n"), txt.contains("date_only=Ok:2020-01-01T00:00:00\n"), txt.contains("full=Ok:2001-09-09T01:46:40\n"), txt.contains("leapday=Ok:2000-02-29T00:00:00\n"), txt.contains("notleap=Err:OutOfRange\n"), txt.contains("badmon=Err:OutOfRange\n"), txt.contains("badchar=Err:BadDigit\n"), txt.contains("badsep=Err:BadSeparator\n"), txt.contains("badlen=Err:BadLength\n")])
+}
