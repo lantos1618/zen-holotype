@@ -1509,6 +1509,125 @@ own_stmt_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr
         _            => seen,
     })
 }
+// ── STRUCT-FIELD / SLICE-ELEMENT CONSUME (re-census #63) ───────────────────────────────────────────
+// #56 closed owner-PARAM moves but explicitly left the IDIOMATIC case open: moving an `Own<T>` into a
+// struct-LITERAL field (`Box(o: o)`) or a slice element (`[o]`, `arr[i] = o`). A struct/slice copy does
+// NOT bump the owner's refcount, so the field and the source name the ONE allocation: freeing through the
+// field (`b.o.release_in(a)`) then using the source (`o.get()`) is a use-after-free, and the same owner
+// into two Own fields (`Two(a: o, b: o)`) is a double-move. We count the field/element init as a CONSUME
+// of the source binding, reusing the #56 kill machinery (dead_kill), so a later use of the source →
+// error[ownership]. ZERO over-reject: only an `Own<T>` bare-Var moved into an `Own<T>`-TYPED field
+// consumes — a BORROW field (`MutPtr<T>`/`Ptr<T>`, reached via `o.ptr()`, a Call not a Var), a value /
+// scalar field, and a `.clone()` init (a Call) do NOT. Only CONCRETE struct literals are analyzable; a
+// generic-struct literal has no concrete field types here, so it under-rejects (honest, safe).
+field_ty_by_name = (fields: [Field], name: str) Ty {
+    found := tvoid()
+    fields.loop((h, i, fl) {
+        found = eq(fl.name, name).match ({ true => fl.ty, false => found })
+    })
+    found
+}
+// the bare-Var name of an expr whose inferred type is `Own<T>` (else "") — the moved-owner shape shared
+// by every consume site (mirrors own_var_move / sm_own_arg_launder).
+own_moved_var = (env: Env, e: Ptr<Expr>) str {
+    load(e).match ({
+        .Var(v) => eq(env.infer_expr(e).owner_base(), "Own").match ({ true => v.name, false => "" }),
+        _       => "",
+    })
+}
+// the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
+// bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
+struct_field_move_src = (env: Env, fields: [Field], fi: FieldInit) str { eq(field_ty_by_name(fields, fi.name).owner_base(), "Own").match ({ true => env.own_moved_var(fi.value), false => "" }) }
+// kill every source owner moved into an Own field of a CONCRETE struct literal.
+mkstruct_field_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, s: MakeStructData) Ptr<DeadList> {
+    out := seen
+    env.env_is_struct(s.ty).match ({ true => {
+        fields := env.env_struct_fields(s.ty)
+        s.inits.loop((h, i, fi) {
+            nm := env.struct_field_move_src(fields, fi)
+            nm.is_empty().match ({ false => {
+                out = a.dead_kill(out, al, nm)
+            } })
+        })
+    }, false => { } })
+    out
+}
+// kill every source owner moved into a slice-literal element (`[o]`): a bare `Own<T>` item is moved into
+// the slice's element slot exactly like an Own field. A borrowed `[o.ptr()]` item is a Call, not a Var.
+slicelit_elem_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, items: [Expr]) Ptr<DeadList> {
+    out := seen
+    items.loop((h, i, it) {
+        nm := env.own_moved_var(it.addr())
+        nm.is_empty().match ({ false => {
+            out = a.dead_kill(out, al, nm)
+        } })
+    })
+    out
+}
+// kill the source owner stored into a slice slot by `arr[i] = o` (the value is a bare `Own<T>` Var).
+indexset_own_kill = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, v: Ptr<Expr>) Ptr<DeadList> {
+    out := seen
+    nm := env.own_moved_var(v)
+    nm.is_empty().match ({ false => {
+        out = a.dead_kill(out, al, nm)
+    } })
+    out
+}
+own_expr_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .MakeStruct(s) => a.mkstruct_field_kills(env, seen, al, s),
+        // slice element move: gated on the slice's DECLARED element type being `Own<T>`, so a non-Own
+        // slice never triggers the per-item `infer_expr`. This matters because this kill runs inside
+        // own_step's exponential branch re-analysis; an ungated infer there is prohibitively costly on the
+        // raw (pre-resolve) tree. A void elem (not yet inferred) skips → honest under-reject.
+        .SliceLit(sd)  => eq(sd.elem.owner_base(), "Own").match ({ true => a.slicelit_elem_kills(env, seen, al, sd.items), false => seen }),
+        _              => seen,
+    })
+}
+// dispatch struct/slice move-kills on the top-level value of a let/assign/expr statement (and the value
+// of `arr[i] = o`). Nested-deeper literals under-reject (same direct-value scope as own_stmt_call_kills).
+own_stmt_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)      => a.own_expr_struct_kills(env, seen, al, l.value),
+        .Assign(x)   => a.own_expr_struct_kills(env, seen, al, x.value),
+        .ExprStmt(e) => a.own_expr_struct_kills(env, seen, al, e),
+        // `arr[i] = o`: gated on the slot's DECLARED element type being `Own<T>` (same reason as SliceLit).
+        .IndexSet(x) => eq(x.elem.owner_base(), "Own").match ({ true => a.indexset_own_kill(env, seen, al, x.value), false => seen }),
+        _            => seen,
+    })
+}
+// the DOUBLE-MOVE error: the same owner moved into TWO Own fields of one struct literal (`Two(a: o, b: o)`)
+// — the second move is a use-after-consume. Threads a FRESH in-literal kill-set so it counts ONLY the
+// intra-literal duplicate (a binding already dead before the statement is caught by own_expr_err's .Var
+// arm; counting it here too would double-report).
+own_struct_dupmove_err = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i32 {
+    acc := 0
+    env.env_is_struct(s.ty).match ({ true => {
+        fields := env.env_struct_fields(s.ty)
+        d := a.dead_nil()
+        s.inits.loop((h, i, fi) {
+            nm := env.struct_field_move_src(fields, fi)
+            nm.is_empty().match ({ false => {
+                acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
+                d = a.dead_cons(nm, d)
+            } })
+        })
+    }, false => { } })
+    acc
+}
+// the same DOUBLE-MOVE for a slice literal (`[o, o]`).
+own_slice_dupmove_err = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
+    acc := 0
+    d := a.dead_nil()
+    items.loop((h, i, it) {
+        nm := env.own_moved_var(it.addr())
+        nm.is_empty().match ({ false => {
+            acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
+            d = a.dead_cons(nm, d)
+        } })
+    })
+    acc
+}
 // AFFINE COPY: `c := o` / `c = o` where `o` is `Own<T>` MOVES o — a bare struct copy does NOT bump the
 // refcount (only `.clone()` does), so both names free the ONE allocation → double-free. c becomes the
 // live owner; o's binding dies (later use of o → use-after-consume). `c := o.clone()` is a Call, not a
@@ -1706,8 +1825,8 @@ own_expr_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasL
         .Arrow(ar)     => a.own_expr_err(env, seen, al, ar.obj),
         .Match(m)      => a.own_expr_err(env, seen, al, m.subj) + a.own_arms_err(env, seen, al, env.infer_expr(m.subj), m.arms),
         .MakeEnum(mk)  => a.own_expr_err(env, seen, al, mk.payload),
-        .MakeStruct(s) => a.own_inits_err(env, seen, al, s.inits),
-        .SliceLit(sd)  => a.own_args_err(env, seen, al, sd.items),
+        .MakeStruct(s) => a.own_inits_err(env, seen, al, s.inits) + a.own_struct_dupmove_err(env, s),
+        .SliceLit(sd)  => a.own_args_err(env, seen, al, sd.items) + a.own_slice_dupmove_err(env, sd.items),
         .Loop(l)       => a.own_expr_err(env, seen, al, l.seq) + a.own_body_err(env, seen, al, l.body) + a.loop_outer_frees(env, seen, al, l),
         .Block(b)      => a.own_body_err(env, seen, al, b.stmts),
         _              => 0,
@@ -1835,6 +1954,9 @@ own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>
     // 2c. INTERPROCEDURAL consume (census #56): an `Own<T>` local moved into an owner-typed param whose
     //     callee CONSUMES it (release/drop/send, transitively) is dead after the call — later use → UAF.
     out = a.own_stmt_call_kills(env, out, al, st)
+    // 2c'. STRUCT-FIELD / SLICE-ELEMENT move (re-census #63): an `Own<T>` moved into an Own struct-literal
+    //      field / slice element is consumed here — later use of the source binding → UAF / double-free.
+    out = a.own_stmt_struct_kills(env, out, al, st)
     // 2d. AFFINE COPY: `c := o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
     mv := env.own_move_src(st)
     mv.is_empty().match ({ false => {
@@ -2431,6 +2553,35 @@ kv_own_arms_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
     })
     acc
 }
+// the DOUBLE-MOVE (re-census #63) in the kind pass: the same owner moved into two Own fields of one
+// struct literal reports KOWNERSHIP at the second-moved value's position (mirrors own_struct_dupmove_err).
+kv_own_struct_dupmove_kind = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i32 {
+    acc := 0
+    env.env_is_struct(s.ty).match ({ true => {
+        fields := env.env_struct_fields(s.ty)
+        d := a.dead_nil()
+        s.inits.loop((h, i, fi) {
+            nm := env.struct_field_move_src(fields, fi)
+            nm.is_empty().match ({ false => {
+                acc = acc.kv_kor(d.dead_has(nm).match ({ true => KOWNERSHIP().kv_at(load(fi.value).expr_pos()), false => 0 }))
+                d = a.dead_cons(nm, d)
+            } })
+        })
+    }, false => { } })
+    acc
+}
+kv_own_slice_dupmove_kind = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
+    acc := 0
+    d := a.dead_nil()
+    items.loop((h, i, it) {
+        nm := env.own_moved_var(it.addr())
+        nm.is_empty().match ({ false => {
+            acc = acc.kv_kor(d.dead_has(nm).match ({ true => KOWNERSHIP().kv_at(it.expr_pos()), false => 0 }))
+            d = a.dead_cons(nm, d)
+        } })
+    })
+    acc
+}
 kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v)        => seen.dead_has(v.name).match ({ true => KOWNERSHIP().kv_at(v.pos), false => 0 }),
@@ -2442,8 +2593,8 @@ kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
         .Arrow(ar)     => a.kv_own_expr_kind(env, seen, al, ar.obj),
         .Match(m)      => a.kv_own_expr_kind(env, seen, al, m.subj).kv_kor(a.kv_own_arms_kind(env, seen, al, env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)  => a.kv_own_expr_kind(env, seen, al, mk.payload),
-        .MakeStruct(s) => a.kv_own_inits_kind(env, seen, al, s.inits),
-        .SliceLit(sd)  => a.kv_own_args_kind(env, seen, al, sd.items),
+        .MakeStruct(s) => a.kv_own_inits_kind(env, seen, al, s.inits).kv_kor(a.kv_own_struct_dupmove_kind(env, s)),
+        .SliceLit(sd)  => a.kv_own_args_kind(env, seen, al, sd.items).kv_kor(a.kv_own_slice_dupmove_kind(env, sd.items)),
         .Loop(l)       => a.kv_own_expr_kind(env, seen, al, l.seq).kv_kor(a.kv_own_body_kind(env, seen, al, l.body)).kv_kor(a.loop_outer_frees(env, seen, al, l).kv_one(KOWNERSHIP()).kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
         .Block(b)      => a.kv_own_body_kind(env, seen, al, b.stmts),
         _              => 0,
