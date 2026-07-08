@@ -1,0 +1,787 @@
+// std.regex — a small, correct regular-expression engine (Thompson-NFA / Pike VM).
+//
+// This is a usable SUBSET, chosen for correctness over completeness. It compiles a pattern to a
+// linear NFA program and simulates it breadth-first, so there is NO catastrophic backtracking —
+// matching is O(len(text) * len(program)) in the worst case, never exponential.
+//
+// SUPPORTED SYNTAX
+//   literals            abc
+//   any byte            .            (matches any byte EXCEPT '\n')
+//   quantifiers         a*  a+  a?   (greedy)
+//   alternation         a|b
+//   groups              (ab)+        (grouping only — no capture)
+//   char classes        [abc] [a-z]  ranges, and negation [^...]
+//   anchors             ^  $         (start / end of the whole text)
+//   escapes             \d \w \s     digit / word / whitespace  (and \D \W \S for the negations)
+//                       \. \* \\ …   any punctuation escapes to its literal byte
+//                       \n \t \r     the usual control bytes
+//
+// SEMANTICS. `find` returns the LEFTMOST-LONGEST match (POSIX-style, deterministic): the earliest
+// start position that matches, and at that start the longest run reaching an accept state. So
+// `a|ab` on "ab" yields [0,2), not [0,1).
+//
+// ALLOCATOR. `compile` is generic over any `A: Allocator`: it takes `a: MutPtr<A>` and allocates
+// the program, class tables, and the match-time scratch buffers through it. Pass `heap.gpa().addr()`,
+// an arena, or any other allocator. `Regex.free(a)` hands every buffer back to the SAME allocator.
+// Errors are values: a malformed pattern is `.Err(RegexError)`, OOM is `.Err(.Oom)`.
+//
+//   regex = std.regex
+//   heap  = std.mem.heap
+//   a := heap.gpa()
+//   regex.compile(a.addr(), "\\d+").match ({
+//       .Ok(re)  => re.find("x42y").match ({ .Some(m) => …m.start…m.end…, .None => … }),
+//       .Err(e)  => … regex.error_name(e) …,
+//   })
+{ Result, Opt, IoError, ok, err } = std.core.result
+{ Allocator, try_acquire } = std.mem.alloc
+{ view } = std.text.str
+{ sub } = std.core.slice
+// ── public types ────────────────────────────────────────────────────────────────
+// A match is a half-open byte range [start, end) into the searched string.
+Match*: {
+    start: i64,
+    end: i64,
+}
+// Why a pattern failed to compile. Errors are values, never panics.
+RegexError*: UnbalancedParen | UnexpectedParen | TrailingBackslash | UnterminatedClass | BadRange | NothingToRepeat | Oom
+// A byte range [lo, hi] inside a character class.
+Range*: {
+    lo: u8,
+    hi: u8,
+}
+// A compiled character class: a contiguous span [start, start+count) into the shared ranges table,
+// optionally negated ([^...]).
+ClassRec*: {
+    neg: bool,
+    start: i64,
+    count: i64,
+}
+// One NFA instruction. `op` selects the fields that matter: CHAR uses `c`; CLASS uses `cls`;
+// SPLIT uses `x` and `y`; JMP uses `x`; ANY/BOL/EOL/MATCH use none.
+Inst*: {
+    op: i64,
+    c: u8,
+    x: i64,
+    y: i64,
+    cls: i64,
+}
+// A compiled regex: the program, its class tables, and reusable match-time scratch (clist/nlist are
+// the two thread frontiers, seen is the per-column visited stamp). Matching mutates the scratch
+// through the stored pointers, so it is NOT safe to match the same Regex from two threads at once.
+Regex*: {
+    insts: [Inst],
+    ninst: i64,
+    classes: [ClassRec],
+    ranges: [Range],
+    clist: [i64],
+    nlist: [i64],
+    seen: [i64],
+}
+// ── instruction opcodes ──────────────────────────────────────────────────────────
+OP_CHAR := 1
+OP_ANY := 2
+OP_CLASS := 3
+OP_SPLIT := 4
+OP_JMP := 5
+OP_MATCH := 6
+OP_BOL := 7
+OP_EOL := 8
+// ── AST node ops (parse builds a flat node array; children are indices, -1 for none) ──
+N_EMPTY := 0
+N_CHAR := 1
+N_ANY := 2
+N_CLASS := 3
+N_BOL := 4
+N_EOL := 5
+N_CAT := 6
+N_ALT := 7
+N_STAR := 8
+N_PLUS := 9
+N_QUEST := 10
+Node*: {
+    op: i64,
+    c: u8,
+    cls: i64,
+    a: i64,
+    b: i64,
+}
+// ── parse/compile error codes (internal; mapped to RegexError at the boundary) ──
+E_NONE := 0
+E_UNBALANCED := 1
+E_UNEXPECTED_RPAREN := 2
+E_TRAILING_BACKSLASH := 3
+E_UNTERMINATED_CLASS := 4
+E_BAD_RANGE := 5
+E_NOTHING_TO_REPEAT := 6
+// ── parser + compiler state ───────────────────────────────────────────────────────
+Cx*: {
+    pat: [u8],
+    pos: i64,
+    plen: i64,
+    nodes: [Node],
+    nc: i64,
+    ranges: [Range],
+    rc: i64,
+    classes: [ClassRec],
+    cc: i64,
+    insts: [Inst],
+    ic: i64,
+    err: i64,
+    errpos: i64,
+}
+// ── tiny scanner helpers over the pattern ───────────────────────────────────────
+peek = (cx: MutPtr<Cx>) u8 { (cx.pos < cx.plen).match ({ true => cx.pat[cx.pos], false => 0 }) }
+peek2 = (cx: MutPtr<Cx>) u8 { (cx.pos + 1 < cx.plen).match ({ true => cx.pat[cx.pos + 1], false => 0 }) }
+adv = (cx: MutPtr<Cx>) void { cx.pos = cx.pos + 1 }
+set_err = (cx: MutPtr<Cx>, code: i64) void {
+    (cx.err == E_NONE).match ({ true => {
+        cx.err = code
+        cx.errpos = cx.pos
+    }, false => { } })
+}
+// append an AST node, return its index.
+mk_node = (cx: MutPtr<Cx>, op: i64, c: u8, cls: i64, a: i64, b: i64) i64 {
+    idx := cx.nc
+    cx.nodes[idx] = Node(
+        op: op,
+        c: c,
+        cls: cls,
+        a: a,
+        b: b,
+    )
+    cx.nc = idx + 1
+    idx
+}
+// append a class range.
+add_range = (cx: MutPtr<Cx>, lo: u8, hi: u8) void {
+    cx.ranges[cx.rc] = Range(
+        lo: lo,
+        hi: hi,
+    )
+    cx.rc = cx.rc + 1
+}
+// append a class record, return its index.
+mk_class = (cx: MutPtr<Cx>, neg: bool, start: i64, count: i64) i64 {
+    idx := cx.cc
+    cx.classes[idx] = ClassRec(
+        neg: neg,
+        start: start,
+        count: count,
+    )
+    cx.cc = idx + 1
+    idx
+}
+// the literal byte a backslash-escape denotes: \n \t \r are the control bytes, anything else is itself.
+esc_byte = (e: u8) u8 { (e == 'n').match ({ true => '\n', false => (e == 't').match ({ true => '\t', false => (e == 'r').match ({ true => '\r', false => e }) }) }) }
+// add the ranges for a \d/\w/\s shorthand (the letter's case only picks negation elsewhere).
+add_shorthand_ranges = (cx: MutPtr<Cx>, e: u8) void {
+    (e == 'd' || e == 'D').match ({ true => {
+        cx.add_range('0', '9')
+    }, false => (e == 'w' || e == 'W').match ({ true => {
+        cx.add_range('a', 'z')
+        cx.add_range('A', 'Z')
+        cx.add_range('0', '9')
+        cx.add_range('_', '_')
+    }, false => {
+        cx.add_range(' ', ' ')
+        cx.add_range('\t', '\t')
+        cx.add_range('\n', '\n')
+        cx.add_range('\r', '\r')
+    } }) })
+}
+// ── recursive-descent parser: alt → concat → repeat → atom ──────────────────────
+// alt := concat ('|' concat)*   (tail recursion instead of a loop — match-only control flow)
+parse_alt = (cx: MutPtr<Cx>) i64 { cx.parse_alt_rest(cx.parse_concat()) }
+parse_alt_rest = (cx: MutPtr<Cx>, left: i64) i64 {
+    (cx.err == E_NONE && cx.peek() == '|').match ({ true => {
+        cx.adv()
+        right := cx.parse_concat()
+        cx.parse_alt_rest(cx.mk_node(N_ALT, 0, 0, left, right))
+    }, false => left })
+}
+// concat := repeat*   (stops at '|', ')', or end)
+concat_more = (cx: MutPtr<Cx>) bool {
+    b := cx.peek()
+    (b == 0 || b == '|' || b == ')').match ({ true => false, false => true })
+}
+parse_concat = (cx: MutPtr<Cx>) i64 { cx.parse_concat_rest(cx.mk_node(N_EMPTY, 0, 0, 0, 0), false) }
+parse_concat_rest = (cx: MutPtr<Cx>, acc: i64, has: bool) i64 {
+    (cx.err == E_NONE && cx.concat_more()).match ({ true => {
+        r := cx.parse_repeat()
+        cx.parse_concat_rest(has.match ({ true => cx.mk_node(N_CAT, 0, 0, acc, r), false => r }), true)
+    }, false => acc })
+}
+// repeat := atom ('*'|'+'|'?')*
+parse_repeat = (cx: MutPtr<Cx>) i64 {
+    a := cx.parse_atom()
+    cx.parse_quant(a)
+}
+parse_quant = (cx: MutPtr<Cx>, a: i64) i64 {
+    b := cx.peek()
+    (b == '*').match ({ true => {
+        cx.adv()
+        cx.parse_quant(cx.mk_node(N_STAR, 0, 0, a, 0))
+    }, false => (b == '+').match ({ true => {
+        cx.adv()
+        cx.parse_quant(cx.mk_node(N_PLUS, 0, 0, a, 0))
+    }, false => (b == '?').match ({ true => {
+        cx.adv()
+        cx.parse_quant(cx.mk_node(N_QUEST, 0, 0, a, 0))
+    }, false => a }) }) })
+}
+// atom := '(' alt ')' | '[' class ']' | '.' | '^' | '$' | '\' esc | literal
+parse_atom = (cx: MutPtr<Cx>) i64 {
+    b := cx.peek()
+    (b == '(').match ({ true => {
+        cx.adv()
+        inner := cx.parse_alt()
+        (cx.peek() == ')').match ({ true => {
+            cx.adv()
+        }, false => {
+            cx.set_err(E_UNBALANCED)
+        } })
+        inner
+    }, false => (b == '[').match ({ true => cx.parse_class(), false => (b == '.').match ({ true => {
+        cx.adv()
+        cx.mk_node(N_ANY, 0, 0, 0, 0)
+    }, false => (b == '^').match ({ true => {
+        cx.adv()
+        cx.mk_node(N_BOL, 0, 0, 0, 0)
+    }, false => (b == '$').match ({ true => {
+        cx.adv()
+        cx.mk_node(N_EOL, 0, 0, 0, 0)
+    }, false => (b == '\\').match ({ true => cx.parse_escape(), false => (b == ')').match ({ true => {
+        cx.set_err(E_UNEXPECTED_RPAREN)
+        cx.mk_node(N_EMPTY, 0, 0, 0, 0)
+    }, false => (b == '*' || b == '+' || b == '?').match ({ true => {
+        cx.set_err(E_NOTHING_TO_REPEAT)
+        cx.adv()
+        cx.mk_node(N_EMPTY, 0, 0, 0, 0)
+    }, false => {
+        cx.adv()
+        cx.mk_node(N_CHAR, b, 0, 0, 0)
+    } }) }) }) }) }) }) }) })
+}
+parse_escape = (cx: MutPtr<Cx>) i64 {
+    cx.adv()    // consume the backslash
+    e := cx.peek()
+    (e == 0).match ({ true => {
+        cx.set_err(E_TRAILING_BACKSLASH)
+        cx.mk_node(N_EMPTY, 0, 0, 0, 0)
+    }, false => {
+        cx.adv()
+        is_class := e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S'
+        is_class.match ({ true => {
+            neg := e == 'D' || e == 'W' || e == 'S'
+            start := cx.rc
+            cx.add_shorthand_ranges(e)
+            cls := cx.mk_class(neg, start, cx.rc - start)
+            cx.mk_node(N_CLASS, 0, cls, 0, 0)
+        }, false => cx.mk_node(N_CHAR, esc_byte(e), 0, 0, 0) })
+    } })
+}
+// class := '[' '^'? item* ']'
+parse_class = (cx: MutPtr<Cx>) i64 {
+    cx.adv()    // consume '['
+    neg := cx.peek() == '^'
+    neg.match ({ true => {
+        cx.adv()
+    }, false => { } })
+    start := cx.rc
+    cx.parse_class_items(true)
+    cls := cx.mk_class(neg, start, cx.rc - start)
+    cx.mk_node(N_CLASS, 0, cls, 0, 0)
+}
+// consume class items until the closing ']' (or end-of-pattern) — tail recursion, not a loop. `first`
+// lets a leading ']' be a literal ([]] / [^]]).
+parse_class_items = (cx: MutPtr<Cx>, first: bool) void {
+    (cx.err == E_NONE).match ({ true => {
+        b := cx.peek()
+        (b == 0).match ({ true => {
+            cx.set_err(E_UNTERMINATED_CLASS)
+        }, false => (b == ']' && first.match ({ true => false, false => true })).match ({ true => {
+            cx.adv()
+        }, false => {
+            cx.class_item()
+            cx.parse_class_items(false)
+        } }) })
+    }, false => { } })
+}
+class_item = (cx: MutPtr<Cx>) void {
+    b := cx.peek()
+    (b == '\\').match ({ true => {
+        cx.adv()
+        e := cx.peek()
+        (e == 0).match ({ true => {
+            cx.set_err(E_TRAILING_BACKSLASH)
+        }, false => {
+            cx.adv()
+            is_class := e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S'
+            is_class.match ({ true => {
+                cx.add_shorthand_ranges(e)
+            }, false => {
+                cx.class_range_or_single(esc_byte(e))
+            } })
+        } })
+    }, false => {
+        cx.adv()
+        cx.class_range_or_single(b)
+    } })
+}
+// having read `lo`, either read `lo-hi` as a range or add `lo` alone.
+class_range_or_single = (cx: MutPtr<Cx>, lo: u8) void {
+    (cx.peek() == '-' && cx.peek2() != ']' && cx.peek2() != 0).match ({ true => {
+        cx.adv()    // consume '-'
+        hi := (cx.peek() == '\\').match ({ true => {
+            cx.adv()
+            eb := cx.peek()
+            cx.adv()
+            esc_byte(eb)
+        }, false => {
+            hb := cx.peek()
+            cx.adv()
+            hb
+        } })
+        (lo > hi).match ({ true => {
+            cx.set_err(E_BAD_RANGE)
+        }, false => {
+            cx.add_range(lo, hi)
+        } })
+    }, false => {
+        cx.add_range(lo, lo)
+    } })
+}
+// ── AST → NFA program (fall-through layout, absolute split/jmp targets) ──────────
+emit = (cx: MutPtr<Cx>, op: i64, c: u8, x: i64, y: i64, cls: i64) i64 {
+    idx := cx.ic
+    cx.insts[idx] = Inst(
+        op: op,
+        c: c,
+        x: x,
+        y: y,
+        cls: cls,
+    )
+    cx.ic = idx + 1
+    idx
+}
+set_x = (cx: MutPtr<Cx>, idx: i64, v: i64) void {
+    t := cx.insts[idx]
+    t.x = v
+    cx.insts[idx] = t
+}
+set_y = (cx: MutPtr<Cx>, idx: i64, v: i64) void {
+    t := cx.insts[idx]
+    t.y = v
+    cx.insts[idx] = t
+}
+compile_node = (cx: MutPtr<Cx>, ni: i64) void {
+    n := cx.nodes[ni]
+    (n.op == N_CHAR).match ({ true => {
+        e := cx.emit(OP_CHAR, n.c, 0, 0, 0)
+    }, false => (n.op == N_ANY).match ({ true => {
+        e := cx.emit(OP_ANY, 0, 0, 0, 0)
+    }, false => (n.op == N_CLASS).match ({ true => {
+        e := cx.emit(OP_CLASS, 0, 0, 0, n.cls)
+    }, false => (n.op == N_BOL).match ({ true => {
+        e := cx.emit(OP_BOL, 0, 0, 0, 0)
+    }, false => (n.op == N_EOL).match ({ true => {
+        e := cx.emit(OP_EOL, 0, 0, 0, 0)
+    }, false => (n.op == N_EMPTY).match ({ true => { }, false => (n.op == N_CAT).match ({ true => {
+        cx.compile_node(n.a)
+        cx.compile_node(n.b)
+    }, false => (n.op == N_ALT).match ({ true => {
+        s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
+        cx.set_x(s, cx.ic)
+        cx.compile_node(n.a)
+        j := cx.emit(OP_JMP, 0, 0, 0, 0)
+        cx.set_y(s, cx.ic)
+        cx.compile_node(n.b)
+        cx.set_x(j, cx.ic)
+    }, false => (n.op == N_STAR).match ({ true => {
+        l1 := cx.ic
+        s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
+        cx.set_x(s, cx.ic)
+        cx.compile_node(n.a)
+        j := cx.emit(OP_JMP, 0, l1, 0, 0)
+        cx.set_y(s, cx.ic)
+    }, false => (n.op == N_PLUS).match ({ true => {
+        l1 := cx.ic
+        cx.compile_node(n.a)
+        s := cx.emit(OP_SPLIT, 0, l1, 0, 0)
+        cx.set_y(s, cx.ic)
+    }, false => (n.op == N_QUEST).match ({ true => {
+        s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
+        cx.set_x(s, cx.ic)
+        cx.compile_node(n.a)
+        cx.set_y(s, cx.ic)
+    }, false => { } }) }) }) }) }) }) }) }) }) }) })
+}
+map_err_code = (code: i64) RegexError { (code == E_UNBALANCED).match ({ true => .UnbalancedParen, false => (code == E_UNEXPECTED_RPAREN).match ({ true => .UnexpectedParen, false => (code == E_TRAILING_BACKSLASH).match ({ true => .TrailingBackslash, false => (code == E_UNTERMINATED_CLASS).match ({ true => .UnterminatedClass, false => (code == E_BAD_RANGE).match ({ true => .BadRange, false => (code == E_NOTHING_TO_REPEAT).match ({ true => .NothingToRepeat, false => .Oom }) }) }) }) }) }) }
+// human-readable name of a RegexError, for diagnostics.
+error_name* = (e: RegexError) str {
+    e.match ({
+        .UnbalancedParen   => "UnbalancedParen",
+        .UnexpectedParen   => "UnexpectedParen",
+        .TrailingBackslash => "TrailingBackslash",
+        .UnterminatedClass => "UnterminatedClass",
+        .BadRange          => "BadRange",
+        .NothingToRepeat   => "NothingToRepeat",
+        .Oom               => "Oom",
+    })
+}
+// ── compile ─────────────────────────────────────────────────────────────────────
+compile*<A> = (a: MutPtr<A>, pattern: str) Result<Regex, RegexError> {
+    sv := pattern.view()
+    plen := sv.len
+    nodes_cap := plen * 4 + 8
+    inst_cap := plen * 2 + 8
+    class_cap := plen + 2
+    range_cap := plen * 8 + 16
+    np := a.acquire(nodes_cap * sizeof(Node))
+    ip := a.acquire(inst_cap * sizeof(Inst))
+    cp := a.acquire(class_cap * sizeof(ClassRec))
+    rp := a.acquire(range_cap * sizeof(Range))
+    (np == null_ptr() || ip == null_ptr() || cp == null_ptr() || rp == null_ptr()).match ({ true => {
+        a.release(np)
+        a.release(ip)
+        a.release(cp)
+        a.release(rp)
+        oom: Result<Regex, RegexError> := .Err(.Oom)
+        oom
+    }, false => {
+        nodes0: [Node] := slice(np, nodes_cap)
+        insts0: [Inst] := slice(ip, inst_cap)
+        classes0: [ClassRec] := slice(cp, class_cap)
+        ranges0: [Range] := slice(rp, range_cap)
+        st := Cx(
+            pat: sv,
+            pos: 0,
+            plen: plen,
+            nodes: nodes0,
+            nc: 0,
+            ranges: ranges0,
+            rc: 0,
+            classes: classes0,
+            cc: 0,
+            insts: insts0,
+            ic: 0,
+            err: E_NONE,
+            errpos: 0,
+        )
+        cx := st.addr()
+        root := cx.parse_alt()
+        (cx.pos < cx.plen).match ({ true => {
+            cx.set_err(E_UNEXPECTED_RPAREN)
+        }, false => { } })
+        (cx.err == E_NONE).match ({ true => {
+            cx.compile_node(root)
+            m := cx.emit(OP_MATCH, 0, 0, 0, 0)
+            ninst := cx.ic
+            a.release(np)    // the AST is only needed during compilation
+            lp := a.acquire(ninst * sizeof(i64))
+            mp := a.acquire(ninst * sizeof(i64))
+            spp := a.acquire(ninst * sizeof(i64))
+            (lp == null_ptr() || mp == null_ptr() || spp == null_ptr()).match ({ true => {
+                a.release(lp)
+                a.release(mp)
+                a.release(spp)
+                a.release(ip)
+                a.release(cp)
+                a.release(rp)
+                oom: Result<Regex, RegexError> := .Err(.Oom)
+                oom
+            }, false => {
+                prog: [Inst] := slice(ip, ninst)
+                cls_tab: [ClassRec] := slice(cp, cx.cc)
+                rng_tab: [Range] := slice(rp, cx.rc)
+                cl: [i64] := slice(lp, ninst)
+                nl: [i64] := slice(mp, ninst)
+                sn: [i64] := slice(spp, ninst)
+                re := Regex(
+                    insts: prog,
+                    ninst: ninst,
+                    classes: cls_tab,
+                    ranges: rng_tab,
+                    clist: cl,
+                    nlist: nl,
+                    seen: sn,
+                )
+                good: Result<Regex, RegexError> := .Ok(re)
+                good
+            } })
+        }, false => {
+            a.release(np)
+            a.release(ip)
+            a.release(cp)
+            a.release(rp)
+            bad: Result<Regex, RegexError> := .Err(map_err_code(cx.err))
+            bad
+        } })
+    } })
+}
+// hand every buffer back to the same allocator that `compile` drew from.
+free*<A> = (re: Regex, a: MutPtr<A>) void {
+    a.release(re.insts.ptr)
+    a.release(re.classes.ptr)
+    a.release(re.ranges.ptr)
+    a.release(re.clist.ptr)
+    a.release(re.nlist.ptr)
+    a.release(re.seen.ptr)
+}
+// ── NFA simulation (Pike VM) ─────────────────────────────────────────────────────
+// does class `cls` accept byte `b`?
+class_match = (re: Regex, cls: i64, b: u8) bool {
+    cr := re.classes[cls]
+    found := false
+    re.ranges.sub(cr.start, cr.start + cr.count).loop((h, i, r) {
+        (b >= r.lo && b <= r.hi).match ({ true => {
+            found = true
+            h.break
+        }, false => { } })
+    })
+    cr.neg.match ({ true => found.match ({ true => false, false => true }), false => found })
+}
+// add `pc` to `list` (length `len`), taking the epsilon-closure through JMP/SPLIT and the zero-width
+// assertions BOL/EOL (evaluated at absolute offset `sp`). `seen[pc] == gen` deduplicates within this
+// column. Returns the new length.
+add_thread = (re: Regex, list: [i64], len: i64, pc: i64, sp: i64, n: i64, gen: i64) i64 {
+    sn := re.seen
+    (sn[pc] == gen).match ({ true => len, false => {
+        sn[pc] = gen
+        inst := re.insts[pc]
+        (inst.op == OP_JMP).match ({ true => re.add_thread(list, len, inst.x, sp, n, gen), false => (inst.op == OP_SPLIT).match ({ true => {
+            l2 := re.add_thread(list, len, inst.x, sp, n, gen)
+            re.add_thread(list, l2, inst.y, sp, n, gen)
+        }, false => (inst.op == OP_BOL).match ({ true => (sp == 0).match ({ true => re.add_thread(list, len, pc + 1, sp, n, gen), false => len }), false => (inst.op == OP_EOL).match ({ true => (sp == n).match ({ true => re.add_thread(list, len, pc + 1, sp, n, gen), false => len }), false => {
+            list[len] = pc
+            len + 1
+        } }) }) }) })
+    } })
+}
+// the end offset of the longest match ANCHORED at `start`, or -1 for none. `gen` is threaded so the
+// shared `seen` stamp never collides across calls (monotonic, never reset here).
+MatchRes*: {
+    end: i64,
+    gen: i64,
+}
+// is any thread in clist[0..clen) an accept (MATCH) state?
+has_match = (re: Regex, clen: i64) bool {
+    found := false
+    re.clist.sub(0, clen).loop((h, i, pc) {
+        (re.insts[pc].op == OP_MATCH).match ({ true => {
+            found = true
+            h.break
+        }, false => { } })
+    })
+    found
+}
+// consume byte `b` at column `sp`: advance every CHAR/ANY/CLASS thread in clist[0..clen) into nlist,
+// taking epsilon-closures at `sp+1`. Returns the new nlist length.
+build_next = (re: Regex, sv: [u8], clen: i64, sp: i64, n: i64, gen: i64, b: u8) i64 {
+    nlen: i64 := 0
+    re.clist.sub(0, clen).loop((h, i, pc) {
+        inst := re.insts[pc]
+        (inst.op == OP_CHAR).match ({ true => (b == inst.c).match ({ true => {
+            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+        }, false => { } }), false => (inst.op == OP_ANY).match ({ true => (b == '\n').match ({ true => { }, false => {
+            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+        } }), false => (inst.op == OP_CLASS).match ({ true => re.class_match(inst.cls, b).match ({ true => {
+            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+        }, false => { } }), false => { } }) }) })
+    })
+    nlen
+}
+// copy nlist[0..nlen) back into clist (the two frontiers, no pointer swap).
+copy_threads = (re: Regex, nlen: i64) void {
+    re.nlist.sub(0, nlen).loop((h, i, pc) {
+        re.clist[i] = pc
+    })
+}
+match_from = (re: Regex, sv: [u8], start: i64, n: i64, gen0: i64) MatchRes {
+    gen := gen0 + 1
+    clen := re.add_thread(re.clist, 0, 0, start, n, gen)
+    best: i64 := 0 - 1
+    // column at sp == start (before consuming anything)
+    re.has_match(clen).match ({ true => {
+        best = start
+    }, false => { } })
+    sv.sub(start, n).loop((h, idx, b) {
+        // consuming columns sp = start .. n-1 (iteration, never unbounded recursion). `.loop` over the
+        // remaining text bytes; each step advances the whole thread frontier by one byte.
+        (clen == 0).match ({ true => {
+            h.break
+        }, false => {
+            sp := start + idx
+            gen = gen + 1
+            nlen := re.build_next(sv, clen, sp, n, gen, b)
+            re.copy_threads(nlen)
+            clen = nlen
+            re.has_match(clen).match ({ true => {
+                best = sp + 1
+            }, false => { } })
+        } })
+    })
+    MatchRes(
+        end: best,
+        gen: gen,
+    )
+}
+// zero the `seen` stamps so a fresh scan can start from generation 1.
+zero_seen = (re: Regex) void {
+    re.seen.loop((h, i, x) {
+        re.seen[i] = 0
+    })
+}
+// the first (leftmost) match whose start is >= `from`. `has` is false when the tail has no match.
+Found*: {
+    has: bool,
+    start: i64,
+    end: i64,
+    gen: i64,
+}
+// try to anchor a match at `at`; fold the result into the running Found (only the FIRST hit sticks).
+try_at = (re: Regex, sv: [u8], at: i64, n: i64, acc: Found) Found {
+    acc.has.match ({ true => acc, false => {
+        mr := re.match_from(sv, at, n, acc.gen)
+        (mr.end >= 0).match ({ true => Found(
+            has: true,
+            start: at,
+            end: mr.end,
+            gen: mr.gen,
+        ), false => Found(
+            has: false,
+            start: 0,
+            end: 0,
+            gen: mr.gen,
+        ) })
+    } })
+}
+search_from = (re: Regex, sv: [u8], from: i64, n: i64, gen0: i64) Found {
+    acc := Found(
+        has: false,
+        start: 0,
+        end: 0,
+        gen: gen0,
+    )
+    sv.sub(from, n).loop((h, idx, b) {
+        // starts from .. n-1 (iteration over the text, never unbounded recursion)
+        acc.has.match ({ true => {
+            h.break
+        }, false => {
+            acc = re.try_at(sv, from + idx, n, acc)
+        } })
+    })
+    // the empty tail at start == n ($ / empty pattern), only if nothing matched earlier
+    re.try_at(sv, n, n, acc)
+}
+// ── public matching API ──────────────────────────────────────────────────────────
+// the leftmost-longest match anywhere in `s`, or `.None`.
+find* = (re: Regex, s: str) Opt<Match> {
+    sv := s.view()
+    n := sv.len
+    re.zero_seen()
+    f := re.search_from(sv, 0, n, 0)
+    f.has.match ({ true => {
+        r: Opt<Match> := .Some(Match(
+            start: f.start,
+            end: f.end,
+        ))
+        r
+    }, false => {
+        r: Opt<Match> := .None
+        r
+    } })
+}
+// does the pattern occur anywhere in `s`?
+matches* = (re: Regex, s: str) bool {
+    re.find(s).match ({
+        .Some(m) => true,
+        .None    => false,
+    })
+}
+// count the non-overlapping leftmost-longest matches (advancing past each, skipping one byte after an
+// empty match so the scan always makes progress).
+// There are at most n+1 non-overlapping matches over n bytes (each consumes >= 1 byte; an empty match
+// advances the cursor by 1). So iterating the n text slots plus ONE trailing slot bounds the scan
+// without an unbounded loop — `pos` (the next start) is threaded, jumping past each match.
+count_matches = (re: Regex, sv: [u8], n: i64) i64 {
+    re.zero_seen()
+    c: i64 := 0
+    pos: i64 := 0
+    g: i64 := 0
+    done := false
+    sv.loop((h, idx, b) {
+        (done || pos > n).match ({ true => {
+            h.break
+        }, false => {
+            f := re.search_from(sv, pos, n, g)
+            g = f.gen
+            f.has.match ({ true => {
+                c = c + 1
+                pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
+            }, false => {
+                done = true
+            } })
+        } })
+    })
+    (done || pos > n).match ({ true => c, false => {
+        f := re.search_from(sv, pos, n, g)
+        f.has.match ({ true => c + 1, false => c })
+    } })
+}
+fill_matches = (re: Regex, sv: [u8], n: i64, out: [Match]) void {
+    re.zero_seen()
+    idx: i64 := 0
+    pos: i64 := 0
+    g: i64 := 0
+    done := false
+    sv.loop((h, i, b) {
+        (done || pos > n).match ({ true => {
+            h.break
+        }, false => {
+            f := re.search_from(sv, pos, n, g)
+            g = f.gen
+            f.has.match ({ true => {
+                out[idx] = Match(
+                    start: f.start,
+                    end: f.end,
+                )
+                idx = idx + 1
+                pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
+            }, false => {
+                done = true
+            } })
+        } })
+    })
+    (done || pos > n).match ({ true => { }, false => {
+        f := re.search_from(sv, pos, n, g)
+        f.has.match ({ true => {
+            out[idx] = Match(
+                start: f.start,
+                end: f.end,
+            )
+        }, false => { } })
+    } })
+}
+// every non-overlapping match, allocated through `a`. Empty when there are none.
+find_all*<A> = (re: Regex, a: MutPtr<A>, s: str) Result<[Match], IoError> {
+    sv := s.view()
+    n := sv.len
+    cnt := re.count_matches(sv, n)
+    (cnt == 0).match ({ true => {
+        empty: [Match] := slice(null_ptr(), 0)
+        e: Result<[Match], IoError> := ok(empty)
+        e
+    }, false => a.try_acquire(cnt * sizeof(Match)).match ({
+        .Ok(p)  => {
+            out: [Match] := slice(p, cnt)
+            re.fill_matches(sv, n, out)
+            r: Result<[Match], IoError> := ok(out)
+            r
+        },
+        .Err(e) => {
+            r: Result<[Match], IoError> := err(e)
+            r
+        },
+    }) })
+}

@@ -1,0 +1,82 @@
+// Acceptance fixture for std.regex (Thompson-NFA matcher). Exercises literals, `.`, quantifiers,
+// alternation, groups, char classes (ranges + negation), anchors, escapes, `find` positions,
+// malformed-pattern errors, and `find_all`. `main` returns the number of failing cases, so the
+// oracle asserts exit == 0 (all pass). `find`/`free` are qualified (`regex.…`) to dodge the flat
+// namespace clash with std.text.str.find / std.mem.alloc.free.
+regex = std.regex
+heap = std.mem.heap
+{ Heap } = std.mem.alloc
+// matches(s) must equal `want`; compile must succeed.
+mt = (a: MutPtr<Heap>, pat: str, s: str, want: bool) i32 {
+    regex.compile(a, pat).match ({
+        .Ok(re) => (re.matches(s) == want).match ({ true => 0, false => 1 }),
+        .Err(e) => 1,
+    })
+}
+// find(s) must be Some([ws, we)); compile must succeed.
+fd = (a: MutPtr<Heap>, pat: str, s: str, ws: i64, we: i64) i32 {
+    regex.compile(a, pat).match ({
+        .Ok(re) => regex.find(re, s).match ({
+            .Some(m) => (m.start == ws && m.end == we).match ({ true => 0, false => 1 }),
+            .None    => 1,
+        }),
+        .Err(e) => 1,
+    })
+}
+// compile MUST reject this malformed pattern.
+bad = (a: MutPtr<Heap>, pat: str) i32 {
+    regex.compile(a, pat).match ({
+        .Ok(re) => 1,
+        .Err(e) => 0,
+    })
+}
+// find_all must return exactly `n` matches.
+cnt = (a: MutPtr<Heap>, pat: str, s: str, n: i64) i32 {
+    regex.compile(a, pat).match ({
+        .Ok(re) => regex.find_all(re, a, s).match ({
+            .Ok(xs) => (xs.len == n).match ({ true => 0, false => 1 }),
+            .Err(e) => 1,
+        }),
+        .Err(e) => 1,
+    })
+}
+main = () i32 {
+    h := heap.gpa()
+    a := h.addr()
+    f := 0
+    // 1. literals: match / non-match
+    f = f + a.mt("abc", "xabcy", true)
+    f = f + a.mt("abc", "abx", false)
+    // 2. '.' any byte, but not newline
+    f = f + a.mt("a.c", "a-c", true)
+    f = f + a.mt("a.c", "a\nc", false)
+    // 3. quantifiers *, +, ?
+    f = f + a.mt("ab*c", "ac", true)
+    f = f + a.mt("ab+c", "ac", false)
+    f = f + a.mt("colou?r", "color", true)
+    // 4. alternation
+    f = f + a.mt("cat|dog", "hotdog", true)
+    f = f + a.mt("cat|dog", "fish", false)
+    // 5. groups with a quantifier
+    f = f + a.mt("(ab)+$", "abab", true)
+    // 6. char class range + negation
+    f = f + a.mt("[a-z]+", "ABxy", true)
+    f = f + a.mt("[^0-9]+", "12345", false)
+    // 7. anchors
+    f = f + a.mt("^foo", "afoo", false)
+    f = f + a.mt("bar$", "foobar", true)
+    // 8. escapes \d \w \s and an escaped literal dot
+    f = f + a.mt("\\d\\d", "x42", true)
+    f = f + a.mt("a\\.b", "axb", false)
+    // 9. find returns leftmost-longest span
+    f = f + a.fd("\\d+", "ab123cd", 2, 5)
+    f = f + a.fd("a|ab", "xab", 1, 3)
+    f = f + a.fd("^", "abc", 0, 0)
+    // 10. malformed patterns are rejected (errors as values)
+    f = f + a.bad("(abc")
+    f = f + a.bad("a\\")
+    f = f + a.bad("*x")
+    // 11. find_all counts non-overlapping matches
+    f = f + a.cnt("\\d+", "a12b345c6", 3)
+    f
+}
