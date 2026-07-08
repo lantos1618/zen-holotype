@@ -81,6 +81,30 @@ const write = (fd, ptr, len) => __zr.write(fd, ptr, len);
 const strlen = (p) => __zr.strlen(p);
 const malloc = (n) => __zr.malloc(n);
 const memcpy = (dst, src, n) => { for (let i = 0; i < Number(n); i++) __zr.MEM[dst + i] = __zr.MEM[src + i]; return dst; };
-const realloc = (p, n) => { const q = __zr.malloc(n); return q; };
+// A bump allocator never frees, so the OLD block at `p` is still live: copy `n` bytes forward into the
+// fresh, larger block (the tail past the old length is spare capacity the caller overwrites). Without the
+// copy, growing a container — vec.push past cap → try_resize → realloc — silently dropped every existing
+// element (QUICKSTART's vecdemo printed 4 instead of 10). C's realloc preserves contents; so must this.
+const realloc = (p, n) => { const q = __zr.malloc(n); n = Number(n); for (let i = 0; i < n; i++) __zr.MEM[q + i] = __zr.MEM[p + i]; return q; };
 const free = (_p) => {};
 const abort = () => { throw new Error("abort"); };
+// read(2): pull up to `n` bytes from fd into MEM at `ptr`; return the count (0 at EOF, -1 on error). The
+// print path never calls it, but any stdin program (std.io.stdin → `read(STDIN, buf, 1)`) did before this
+// → ReferenceError. Node's only synchronous stdin read is fs.readSync; on a pipe/file it blocks until data
+// or EOF (the C contract). LIMITATION: a live TTY fd 0 can raise EAGAIN with no data ready; we retry (a
+// blocking emulation), which busy-waits — fine for the piped-filter use case, not for interactive TTYs.
+const fs = require("fs");
+const read = (fd, ptr, n) => {
+  fd = Number(fd); n = Number(n);
+  const buf = Buffer.allocUnsafe(n);
+  for (;;) {
+    let got;
+    try { got = fs.readSync(fd, buf, 0, n, null); }
+    catch (e) { if (e.code === "EAGAIN") { continue; } if (e.code === "EOF") { return 0; } return -1; }
+    // the destination backing mirrors __zr.idx/setidx: a slice-literal target (`cell := [0]`) carries a
+    // JS ARRAY, a malloc'd/str target a MEM offset. std.io.stdin's 1-byte `cell` is the array case.
+    if (Array.isArray(ptr)) { for (let i = 0; i < got; i++) ptr[i] = buf[i]; }
+    else { const p = Number(ptr); for (let i = 0; i < got; i++) __zr.MEM[p + i] = buf[i]; }
+    return got;
+  }
+};
