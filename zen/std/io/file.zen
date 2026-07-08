@@ -6,13 +6,27 @@
 { Result, IoError, ok, err } = std.core.result
 { open, read, write, close, lseek, system } = std.c.libc
 STDOUT := 1
-// Writes a str to stdout without the trailing NUL and returns the byte count.
-out* = (s: str) i64 {
-    v := s.view()
-    STDOUT.write(v.ptr, v.len)
+// write-all retry loop over a raw fd: emit `[ptr, ptr+len)` in full, threading the running total in
+// `done`. write(2) returning < 0 → `.Err(.Errno(rc))`; a 0-byte return on a non-empty buffer means no
+// progress, so we stop with `.Err(.Eof)` rather than spin forever; a short write advances the pointer
+// and recurses until `len` hits 0, then yields `.Ok(total)`. This is the low-level sink: it SURFACES a
+// write failure (broken pipe / EPIPE, full disk / ENOSPC) as a value instead of swallowing it. Callers
+// that want best-effort (println/print in std.text.fmt) discard the Result with `.or(0)`.
+out_write_all = (ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
+    out: Result<i64, IoError> := (len <= 0).match ({ true => ok(done), false => {
+        w := STDOUT.write(ptr, len)
+        (w < 0).match ({ true => err(IoError.Errno(to_i32(w))), false => (w == 0).match ({ true => err(IoError.Eof), false => out_write_all(ptr.offset(w), len - w, done + w) }) })
+    } })
+    out
 }
-// Writes length-tracked bytes to stdout without requiring a trailing NUL.
-out_bytes* = (bytes: [u8]) i64 { STDOUT.write(bytes.ptr, bytes.len) }
+// Writes a str to stdout without the trailing NUL. Returns `.Ok(byte count)` on success, or `.Err` on a
+// write failure — the root fd sink under fmt/io. println/print discard the Result to stay best-effort.
+out* = (s: str) Result<i64, IoError> {
+    v := s.view()
+    out_write_all(v.ptr, v.len, 0)
+}
+// Writes length-tracked bytes to stdout without requiring a trailing NUL. Same Result contract as `out`.
+out_bytes* = (bytes: [u8]) Result<i64, IoError> { out_write_all(bytes.ptr, bytes.len, 0) }
 // Linux x86-64 POSIX constants used by contents/save.
 O_RDONLY* := 0
 O_WRTRUNC* := 577
