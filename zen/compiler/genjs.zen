@@ -24,7 +24,7 @@
 // impls, templates, generic decls, imports and DRaw (verbatim C) emit NOTHING — same as genc skips them.
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, Ty, FieldInit, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, TagData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, WhileData, LetData, AssignData, IndexSetData, GlobalData, StructDecl, is_template, is_trait, gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, FieldInit, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, TagData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, WhileData, LetData, AssignData, IndexSetData, GlobalData, StructDecl, is_template, is_trait, param, tvoid, gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Malloc } = std.mem.alloc
 // ── small integer renderer (byte-only, self-hosting) ──────────────────────────────────────────────
@@ -241,10 +241,25 @@ js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
     out
 }
 // ── statements ────────────────────────────────────────────────────────────────────────────────────
+// a `let`: record the binding's declared width in the per-function table, then emit the initializer
+// coerced to that width (`x: u32 := a*b` → `let x = ((a*b) >>> 0);`; an unannotated let is width 0 → bare).
+js_let = (s: String, a: MutPtr<Malloc>, l: LetData) String {
+    vw_note(l.name, l.ty)
+    s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ").js_expr_w(a, l.value, int_width(l.ty)).gstr_append(a, ";")
+}
+// an assign: coerce the value to the TARGET variable's declared width (looked up in the per-function
+// table) so a mutating narrow accumulator wraps like C. A non-Var target (field/index) is width 0.
+js_assign = (s: String, a: MutPtr<Malloc>, x: AssignData) String { s.js_expr(a, x.target).gstr_append(a, " = ").js_expr_w(a, x.value, js_assign_width(load(x.target))).gstr_append(a, ";") }
+js_assign_width = (e: Expr) i32 {
+    e.match ({
+        .Var(v) => int_width(vw_lookup(v.name)),
+        _       => 0,
+    })
+}
 js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
     st.match ({
-        .Let(l)      => js_is_u8(l.ty).match ({ true => s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ((").js_expr(a, l.value).gstr_append(a, ") & 255);"), false => s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ").js_expr(a, l.value).gstr_append(a, ";") }),
-        .Assign(x)   => s.js_expr(a, x.target).gstr_append(a, " = ").js_expr(a, x.value).gstr_append(a, ";"),
+        .Let(l)      => s.js_let(a, l),
+        .Assign(x)   => s.js_assign(a, x),
         .Return(e)   => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
         .ExprStmt(e) => s.js_expr_stmt(a, e),
         .If(f)       => s.gstr_append(a, "if (").js_expr(a, f.c).gstr_append(a, ") { ").js_stmts(a, f.then).gstr_append(a, "} else { ").js_stmts(a, f.els).gstr_append(a, "}"),
@@ -277,34 +292,89 @@ js_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     })
     out
 }
-// Narrow-integer normalization at function entry, reproducing C's truncation-at-the-boundary that a JS
-// `number` doesn't do on its own:
-//   • u8  — C's uint8_t wraps mod 256 at every store/param/return; a u8 PARAMETER is masked `& 255`
-//     (the visible case: `println(x+y)` with x,y:u8 hits the u8 Display param, 260 -> 4). A u8-annotated
-//     LET masks its initializer (see js_stmt).
-//   • u64 — a JS `number` can't hold the top of the u64 range (a value >= 2^63 lives in the AST as a
-//     NEGATIVE i64); a u64 PARAMETER is reinterpreted UNSIGNED via `__zr.u64` (BigInt only when it no
-//     longer fits a number), so `println(u64max)` prints 18446744073709551615 instead of blank.
-js_is_u8 = (t: Ty) bool {
+// ── FIXED-WIDTH INTEGER WRAPPING (census #64) ──────────────────────────────────────────────────────
+// A JS `number` never wraps, so ordinary integer arithmetic on a fixed-width Zen type disagrees with C
+// (which truncates at the type's width via -fwrapv): `100000*100000` is 10000000000 in JS but 1410065408
+// in a C `uint32_t`, an FNV-1a hash returns garbage, etc. We reproduce C's truncation-at-the-boundary by
+// COERCING a value to its declared width at the three points C's type system does it: a function PARAMETER
+// (entry), a typed LET's initializer, and an ASSIGN to a typed variable. `int_width` maps a Ty to a width
+// code (0 = not a fixed-width int → no coercion; i64/int stay a native `number`, precise to 2^53); the
+// open/close pair wraps an emitted expression with the matching JS idiom:
+//   u8 `& 255`   u16 `& 0xffff`   u32 `>>> 0`   i32 `| 0`   i16 `<<16>>16`   i8 `<<24>>24`   u64 `__zr.u64`
+// (`<<n>>n` sign-extends the low n bits; `>>>0`/`__zr.u64` reinterpret unsigned; `|0` wraps to signed i32.)
+int_width = (t: Ty) i32 {
     t.match ({
-        .U8 => true,
-        _   => false,
+        .U8       => 1,
+        .I32      => 4,
+        .Named(n) => iw_named(n),
+        _         => 0,
     })
 }
-js_is_u64 = (t: Ty) bool {
-    t.match ({
-        .Named(n) => eq(n, "u64"),
-        _         => false,
+iw_named = (n: str) i32 { eq(n, "u16").match ({ true => 2, false => eq(n, "u32").match ({ true => 3, false => eq(n, "u64").match ({ true => 7, false => eq(n, "i16").match ({ true => 5, false => eq(n, "i8").match ({ true => 6, false => 0 }) }) }) }) }) }
+js_w_open = (s: String, a: MutPtr<Malloc>, w: i32) String { (w == 7).match ({ true => s.gstr_append(a, "__zr.u64(("), false => (w == 0).match ({ true => s, false => s.gstr_append(a, "((") }) }) }
+js_w_close = (s: String, a: MutPtr<Malloc>, w: i32) String { (w == 1).match ({ true => s.gstr_append(a, ") & 255)"), false => (w == 2).match ({ true => s.gstr_append(a, ") & 0xffff)"), false => (w == 3).match ({ true => s.gstr_append(a, ") >>> 0)"), false => (w == 4).match ({ true => s.gstr_append(a, ") | 0)"), false => (w == 5).match ({ true => s.gstr_append(a, ") << 16 >> 16)"), false => (w == 6).match ({ true => s.gstr_append(a, ") << 24 >> 24)"), false => (w == 7).match ({ true => s.gstr_append(a, "))"), false => s }) }) }) }) }) }) }) }
+// emit an expression coerced to width `w` (w == 0 emits the bare expression, byte-identical to before).
+// SPECIAL CASE — a 32-bit multiply: `a * b` at u32/i32 must use `Math.imul`, NOT `(a*b) & mask`. A JS
+// `number` is an f64, so a full-width 32×32 product (up to ~2^64) loses its low bits above 2^53 BEFORE
+// any mask can truncate — an FNV-1a step `hash * 16777619` (hash ~2^32, prime ~2^24 → ~2^56) came out
+// wrong. `Math.imul` is a true mod-2^32 multiply (both operands taken as int32, low 32 bits returned),
+// so it reproduces C's wrapping exactly. Only the OUTERMOST operator is rewritten; a multiply nested
+// under another operator whose own product exceeds 2^53 is a rarer edge (documented in bootstrap/zenrt.js
+// design notes). Narrower widths (≤16-bit) need no imul: their product never exceeds 2^32 < 2^53.
+js_expr_w = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, w: i32) String { js_is_mul32(load(e), w).match ({ true => s.js_mul32(a, load(e), w), false => s.js_w_open(a, w).js_expr(a, e).js_w_close(a, w) }) }
+js_is_mul32 = (e: Expr, w: i32) bool {
+    (w == 3 || w == 4).match ({ true => e.match ({
+        .Bin(b) => eq(b.op, "*"),
+        _       => false,
+    }), false => false })
+}
+js_mul32 = (s: String, a: MutPtr<Malloc>, e: Expr, w: i32) String {
+    e.match ({
+        .Bin(b) => (w == 3).match ({ true => s.gstr_append(a, "((Math.imul(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")) >>> 0)"), false => s.gstr_append(a, "Math.imul(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")") }),
+        _       => s,
     })
+}
+// ── per-function typed-variable table (name → declared Ty) ─────────────────────────────────────────
+// Populated as emission walks a function in lexical order: params at entry, then each typed LET. An
+// ASSIGN to a bare variable looks its target up here to coerce the assigned value to the variable's
+// width (the FNV-hash case: `hash = (hash ^ b) * 16777619` where `hash: u32` mutates in a loop). Mirrors
+// parse.zen's exports_buf pattern; reset at every function entry (Zen has no nested fns — lambdas are
+// inlined before genjs — so one flat table per function is exact).
+vw_buf := vw_none()
+vw_n := 0
+vw_none = () [Param] { slice(null_ptr(), 0) }
+vw_reset = (a: MutPtr<Malloc>) void {
+    vw_buf = slice(a.acquire(8192 * sizeof(Param)), 8192)
+    vw_n = 0
+}
+vw_get = () [Param] { slice(vw_buf.ptr, vw_n) }
+vw_note = (name: str, ty: Ty) void {
+    (vw_n < vw_buf.len).match ({ true => {
+        vw_buf[vw_n] = param(name, ty)
+        vw_n = vw_n + 1
+    }, false => { } })
+}
+// last matching entry wins (an inner-scope shadow declared later overrides an earlier sibling).
+vw_lookup = (name: str) Ty {
+    r := tvoid()
+    vw_get().loop((h, i, p) {
+        r = eq(p.name, name).match ({ true => p.ty, false => r })
+    })
+    r
 }
 js_param_norms = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
-        out = js_is_u8(p.ty).match ({ true => out.jname(a, p.name).gstr_append(a, " = (").jname(a, p.name).gstr_append(a, " & 255); "), false => js_is_u64(p.ty).match ({ true => out.jname(a, p.name).gstr_append(a, " = __zr.u64(").jname(a, p.name).gstr_append(a, "); "), false => out }) })
+        vw_note(p.name, p.ty)
+        w := int_width(p.ty)
+        out = (w == 0).match ({ true => out, false => out.jname(a, p.name).gstr_append(a, " = ").js_w_open(a, w).jname(a, p.name).js_w_close(a, w).gstr_append(a, "; ") })
     })
     out
 }
-js_func = (s: String, a: MutPtr<Malloc>, f: Func) String { s.gstr_append(a, "function ").js_func_name(a, f.name).gstr_append(a, "(").js_params(a, f.params).gstr_append(a, ") { ").js_param_norms(a, f.params).js_stmts(a, f.body).gstr_append(a, "}\n") }
+js_func = (s: String, a: MutPtr<Malloc>, f: Func) String {
+    vw_reset(a)
+    s.gstr_append(a, "function ").js_func_name(a, f.name).gstr_append(a, "(").js_params(a, f.params).gstr_append(a, ") { ").js_param_norms(a, f.params).js_stmts(a, f.body).gstr_append(a, "}\n")
+}
 // a module-level global `name := init` -> `let name = init;` (mutable; some are scheduler/runtime state).
 js_global = (s: String, a: MutPtr<Malloc>, g: GlobalData) String { s.gstr_append(a, "let ").jname(a, g.name).gstr_append(a, " = ").js_expr(a, g.init).gstr_append(a, ";\n") }
 // does the module define a `main`? then the emitted JS invokes it.
