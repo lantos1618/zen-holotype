@@ -1418,7 +1418,19 @@ oracle_build_run* = () i32 {
     ), DiagCase(
         src: "f = () i32 {\n    a := nope()\n    c: i32 := \"hi\"\n    \"s\"\n}\nmain = () i32 { f() }\n",
         wants: [":2:10: error[undefined-name]: undefined name", "      a := nope()", "           ^~~~", ":3:15: error[assign-fit]: expected `i32`, got `str`", "      c: i32 := \"hi\"", ":4:5: error[return-fit]: expected `i32`, got `str`", "      \"s\""],
+    ), DiagCase(
+        src: "{ println } = std.text.fmt\nPoint*: { x: i32 }\nmain = () i32 {\n    p := Point(x: 1)\n    println(p)\n    0\n}\n",
+        wants: [":5:5: error[trait-bound]: type `Point` does not implement trait `Display` (which declares `fmt_println`) — missing method(s): fmt_print, fmt_println", "      println(p)", "      ^~~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
+    ), DiagCase(
+        src: "{ print } = std.text.fmt\nQ*: { a: i32, b: i32 }\nmain = () i32 {\n    q := Q(a: 1, b: 2)\n    print(q)\n    0\n}\n",
+        wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
     )])
+    // census #59b: a type error raised while checking a GENERIC stdlib body (here `println*<T>`'s
+    // `x.fmt_println()`, instantiated for a type with no Display impl) must be attributed to the
+    // USER's CALL SITE — `zod_v.zen:5:5` — NOT the library-internal line inside `std/text/fmt.zen`.
+    // The `zod_v.zen:` prefix (via the leading `:`) is the whole point: before the fix this said
+    // `zen/std/text/fmt.zen:108`, a place the user never wrote.
+    // same attribution for `print*<T>`: the caret lands on the user's `print(q)`, not std.
     // BATCH diagnostics (#43): three INDEPENDENT main-channel errors in one function — an undefined
     // name, an assign-fit, and a return-fit — must ALL be reported (per-statement recovery), not
     // just the first. Each keeps its own file:line:col + caret; the run continues past each error.
