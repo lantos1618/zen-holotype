@@ -1141,6 +1141,22 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "struct-field",
     ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\ntest* = () i32 { r: Result<i32, IoError> := .Ok(5)  r.len }",
+        should_pass: false,
+        kind: "struct-field",
+    ), VerdictCase(
+        src: "C*: Red | Green\ntest* = () i32 { c: C := .Red  c.foo }",
+        should_pass: false,
+        kind: "struct-field",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\ntest* = () i32 { r: Result<i32, IoError> := .Ok(5)  r.match ({ .Ok(v) => v, .Err(e) => 0 }) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\ng* = () Result<i32, IoError> { .Ok(7) }\nwrap* = () Result<i32, IoError> {\n    v := g().or_return()\n    .Ok(v + 1)\n}\ntest* = () i32 { wrap().match ({ .Ok(v) => v, .Err(e) => 0 }) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "R*: Ok(i32) | Err\nf* = (r: R) i32 {\n r.match({ .Err => { return 9 } })\n 7\n}\ntest* = () i32 { f(.Ok(0)) }",
         should_pass: false,
         kind: "exhaustiveness",
@@ -1793,6 +1809,11 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "arg-type",
     )])
+    // census #58/#41: `.field` on a generic-enum instance (Result) has no C member — was check-ok
+    // then a codegen ICE ("has no member 'len'"); now a positioned struct-field reject.
+    // #58/#41: `.field` on a CONCRETE enum is likewise rejected (enums reach variants via .match).
+    // no over-rejection: `.match` on a Result (which lowers to `.tag`/`.u` accesses) still accepts.
+    // no over-rejection: `.or_return()` unwrap (its Err-guard lowering also builds `.tag`/`.u`) accepts.
     // C1 (task #35) REJECT: a GENERIC forwarder launders a MutPtr past the send-mut check — its
     // payload EXPRESSION is the bare tparam `T` (reaches no MutPtr), but the `.Poke` message it
     // builds has a DECLARED MutPtr field, so the receiver still gets a mutable alias. Caught at the
