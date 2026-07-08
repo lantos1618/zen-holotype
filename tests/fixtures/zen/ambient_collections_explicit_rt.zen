@@ -1,9 +1,11 @@
 // Phase-3 slice proof: the ambient container constructors (`vec.new`/`from`, `set.new`/`from`,
-// `hmap.new`/`from`) are now THIN shims over the explicit-rt real path (`*_in(r)`), and that explicit
-// path draws ZERO ambient rt. This fixture exercises BOTH surfaces end-to-end: the ambient forms (which
-// draw `rt.current()` once at construction) AND the explicit `new_in`/`from_in(r, …)` forms (which take
-// a caller-supplied `Rt` and never touch the thread-local). Both must produce identical container
-// behavior — construction, mutation, query, free — proving the shim delegation is behavior-preserving.
+// `hmap.new`/`from`) are now THIN shims over the explicit-allocator real path (`*_in(a)`), and that
+// explicit path draws ZERO ambient rt. This fixture exercises BOTH surfaces end-to-end: the ambient
+// forms (which narrow `rt.current()` to an allocator once at construction) AND the explicit
+// `new_in`/`from_in(a, …)` forms (which take a caller-supplied NARROW Allocator — a `DynAlloc` — and
+// never touch the thread-local, here the process heap via `dyn_heap()`). Both must produce identical
+// container behavior — construction, mutation, query, free — proving the shim delegation is
+// behavior-preserving AND that the container stores an Allocator, not an Rt.
 { println } = std.text.fmt
 vec = std.collections.vec
 set = std.collections.set
@@ -11,7 +13,7 @@ hmap = std.collections.hmap
 { AVec } = std.collections.vec
 { ASet } = std.collections.set
 { AHMap } = std.collections.hmap
-{ Rt, heap_rt } = std.rt
+{ DynAlloc, dyn_heap } = std.mem.alloc
 main = () i32 {
     // ── ambient forms (shims over new_in / from_in) ──
     v: AVec<i32> := vec.new()
@@ -33,22 +35,22 @@ main = () i32 {
     e: AHMap<str, i64> := hmap.new()
     e = e.put("x", 9)
     println(e.get_or("x", 0))    // 9
-    // ── explicit-rt path (NO ambient draw) — the real construction path ──
-    r: Rt := heap_rt()
-    ev: AVec<i32> := vec.new_in(r)
+    // ── explicit-allocator path (NO ambient draw) — the real construction path ──
+    a: DynAlloc := dyn_heap()
+    ev: AVec<i32> := vec.new_in(a)
     ev = ev.push(7)
     println(ev.get(0))    // 7
-    fv := vec.from_in(r, [100, 200])
+    fv := vec.from_in(a, [100, 200])
     println(fv.len())    // 2
-    es: ASet<i64> := set.new_in(r)
+    es: ASet<i64> := set.new_in(a)
     es = es.add(42)
     println(es.has(42).match ({ true => 1, false => 0 }))    // 1
-    fs := set.from_in(r, [9, 9, 8])
+    fs := set.from_in(a, [9, 9, 8])
     println(fs.len())    // 2
-    em: AHMap<str, i64> := hmap.new_in(r)
+    em: AHMap<str, i64> := hmap.new_in(a)
     em = em.put("k", 3)
     println(em.get_or("k", 0))    // 3
-    fm := hmap.from_in(r, "seed", 55)
+    fm := hmap.from_in(a, "seed", 55)
     println(fm.get_or("seed", 0))    // 55
     v.free()
     w.free()

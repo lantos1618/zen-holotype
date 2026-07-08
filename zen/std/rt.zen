@@ -27,7 +27,7 @@
 // is the sentinel that means "nothing injected here" and `current()` falls back to the process default.
 // M4 is the injection hook: the pool sets the ambient rt per-actor the same way it sets the
 // current-actor thread-local today.
-{ malloc, realloc, free } = std.mem.alloc
+{ malloc, realloc, free, DynAlloc, dyn_of } = std.mem.alloc
 { panic } = std.core.result
 // The runtime capability value. The three fn-pointer fields are the allocator vtable (Self erased
 // to RawPtr<u8> state, so any allocator plugs in without generic threading — the M3 trait-object
@@ -142,3 +142,12 @@ release* = (p: RawPtr<u8>) void {
     r := current()
     r.mem_release(r.state, p)
 }
+// Narrow an Rt to JUST its allocator capability (a `DynAlloc` value): keep acquire/resize/release +
+// state, drop sched/gc/ready. This is the bridge the ambient collections cross ONCE at construction —
+// they then store the narrow `DynAlloc`, not the whole `Rt` bundle (docs/runtime-design.md
+// attenuation: a container takes the narrowest capability it needs, an Allocator, never the world).
+dyn_of_rt* = (r: Rt) DynAlloc { dyn_of(r.mem_acquire, r.mem_resize, r.mem_release, r.state) }
+// The AMBIENT allocator, narrowed: read `current()` ONCE and hand back a `DynAlloc`. This is the single
+// ambient draw on the ambient-container construction path; every later container op allocates through
+// the stored `DynAlloc`, never re-reading the thread-local.
+dyn_current* = () DynAlloc { dyn_of_rt(current()) }

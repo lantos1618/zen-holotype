@@ -36,3 +36,45 @@ try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     (n <= 0).match ({ true => .Ok(null_ptr()), false => ok_ptr(a.acquire(n)) })
 }
 try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(a.resize(p, n)) }
+// DynAlloc — an `Allocator` captured as a plain VALUE: a type-erased three-method vtable + opaque
+// state. It lets a container STORE a narrow Allocator capability in one concrete field, with no
+// generic type parameter and WITHOUT depending on the wider `Rt` bundle (which also carries
+// sched/gc/ready). It IS the value form of the `Allocator` trait — the impl below dispatches
+// straight through the stored fn-pointers, the same shape `Rt`'s `mem_*` fields take. Build one from
+// the process heap (`dyn_heap()`) or any vtable (`dyn_of(...)`); std.rt narrows an ambient/explicit
+// `Rt` to one (`dyn_current()` / `dyn_of_rt(r)`). This is the seam the ambient collections thread.
+DynAlloc*: {
+    d_acquire: (RawPtr<u8>, i64) RawPtr<u8>,
+    d_resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>,
+    d_release: (RawPtr<u8>, RawPtr<u8>) void,
+    state: RawPtr<u8>,
+}
+DynAlloc.impl(Allocator, {
+    acquire = (s: MutPtr<DynAlloc>, n: i64) RawPtr<u8> {
+        d := s.load()
+        d.d_acquire(d.state, n)
+    }
+    resize = (s: MutPtr<DynAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+        d := s.load()
+        d.d_resize(d.state, p, n)
+    }
+    release = (s: MutPtr<DynAlloc>, p: RawPtr<u8>) void {
+        d := s.load()
+        d.d_release(d.state, p)
+    }
+})
+// Erase a raw allocator vtable + state into a DynAlloc value (the erasure constructor).
+dyn_of* = (acquire: (RawPtr<u8>, i64) RawPtr<u8>, resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>, release: (RawPtr<u8>, RawPtr<u8>) void, state: RawPtr<u8>) DynAlloc {
+    DynAlloc(
+        d_acquire: acquire,
+        d_resize: resize,
+        d_release: release,
+        state: state,
+    )
+}
+// The process-heap allocator as a DynAlloc value (malloc/realloc/free floor; state unused). The
+// narrow-capability analog of rt.heap_rt() — a container built from this touches NO ambient rt.
+dyn_heap_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { (n <= 0).match ({ true => null_ptr(), false => malloc(n) }) }
+dyn_heap_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+dyn_heap_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
+dyn_heap* = () DynAlloc { dyn_of(dyn_heap_acquire, dyn_heap_resize, dyn_heap_release, null_ptr()) }
