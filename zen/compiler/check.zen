@@ -3892,7 +3892,7 @@ lift_expr_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
     load(e).match ({
         .Var(v)        => lift_is_captured(decls, idx, bound, v.name),
         .Bin(b)        => a.lift_expr_cap(decls, idx, bound, b.lhs) || a.lift_expr_cap(decls, idx, bound, b.rhs),
-        .Call(c)       => a.lift_args_cap(decls, idx, bound, c.args),
+        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn) || a.lift_args_cap(decls, idx, bound, c.args),
         .Cond(d)       => a.lift_expr_cap(decls, idx, bound, d.c) || a.lift_expr_cap(decls, idx, bound, d.t) || a.lift_expr_cap(decls, idx, bound, d.e),
         .Member(m)     => a.lift_expr_cap(decls, idx, bound, m.obj),
         .Arrow(ar)     => a.lift_expr_cap(decls, idx, bound, ar.obj),
@@ -4107,7 +4107,7 @@ clos_bad_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
     load(e).match ({
         .Var(v)        => lift_is_captured(decls, idx, bound, v.name) && ps.clos_params_has(v.name) == false,
         .Bin(b)        => a.clos_bad_expr(decls, idx, bound, ps, b.lhs) || a.clos_bad_expr(decls, idx, bound, ps, b.rhs),
-        .Call(c)       => a.clos_bad_args(decls, idx, bound, ps, c.args),
+        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn) && ps.clos_params_has(c.fn) == false || a.clos_bad_args(decls, idx, bound, ps, c.args),
         .Cond(d)       => a.clos_bad_expr(decls, idx, bound, ps, d.c) || a.clos_bad_expr(decls, idx, bound, ps, d.t) || a.clos_bad_expr(decls, idx, bound, ps, d.e),
         .Member(m)     => a.clos_bad_expr(decls, idx, bound, ps, m.obj),
         .Arrow(ar)     => a.clos_bad_expr(decls, idx, bound, ps, ar.obj),
@@ -4126,6 +4126,19 @@ clos_bad_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
 // body. Captured-param names never collide with the lambda's own params (those are bound, not free), so
 // a flat name-keyed substitution is correct for the supported shape.
 clos_sub_var = (a: MutPtr<Malloc>, ps: [Param], v: VarData) Ptr<Expr> { ps.clos_params_has(v.name).match ({ true => a.cenode(member_at(a.cenode(vref("__clenv")), v.name, v.pos)), false => a.cenode(vref_at(v.name, v.pos)) }) }
+// A call whose callee NAMES a captured param `f` (a function VALUE now living in `__clenv.f`) becomes an
+// indirect call through that field: `f(args) -> ({ __zclos_recv := __clenv.f  __zclos_recv(args) })`.
+// Same shape as check.rewrite_fn_field_call (the proven local-fn-value genc path — C `__auto_type` +
+// native indirect call); the fixed temp name is block-scoped, so nested closure calls never collide.
+clos_sub_fncall = (a: MutPtr<Malloc>, ps: [Param], c: CallData) Ptr<Expr> {
+    rest := a.clos_sub_args(ps, c.args)
+    letst := slet("__zclos_recv", a.cenode(member(a.cenode(vref("__clenv")), c.fn)))
+    callx := a.cenode(call_at("__zclos_recv", rest, c.pos))
+    sbuf2 := a.sbuf(2)
+    sbuf2[0] = letst
+    sbuf2[1] = sexpr(callx)
+    a.cenode(block(sbuf2))
+}
 clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
     buf := a.cebuf(xs.len)
     xs.loop((h, i, x) {
@@ -4156,7 +4169,7 @@ clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
         .Cond(d)       => a.cenode(cond_oa(a.clos_sub_expr(ps, d.c), a.clos_sub_expr(ps, d.t), a.clos_sub_expr(ps, d.e), d.oa)),
         .Member(m)     => a.cenode(member_at(a.clos_sub_expr(ps, m.obj), m.field, m.pos)),
         .Arrow(ar)     => a.cenode(arrow_at(a.clos_sub_expr(ps, ar.obj), ar.field, ar.pos)),
-        .Call(c)       => a.recall(c, c.fn, a.clos_sub_args(ps, c.args)),
+        .Call(c)       => ps.clos_params_has(c.fn).match ({ true => a.clos_sub_fncall(ps, c), false => a.recall(c, c.fn, a.clos_sub_args(ps, c.args)) }),
         .MakeEnum(mk)  => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.clos_sub_expr(ps, mk.payload))),
         .Match(m)      => m.ptr.match ({ true => a.cenode(ematchp(a.clos_sub_expr(ps, m.subj), m.ename, a.clos_sub_arms(ps, m.arms))), false => a.cenode(ematch(a.clos_sub_expr(ps, m.subj), m.ename, a.clos_sub_arms(ps, m.arms))) }),
         .Index(ix)     => a.cenode(eindex(a.clos_sub_expr(ps, ix.seq), a.clos_sub_expr(ps, ix.idx), ix.elem)),
