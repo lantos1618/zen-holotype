@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, ptr_kind_fits, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -205,10 +205,27 @@ ty_mentions_tparam = (tps: [Param], t: Ty) bool {
         _           => false,
     })
 }
-// an argument check, given the callee's tparams: a slot typed by a tparam is skipped; a CONCRETE slot
-// of a generic fn is still checked (so `gen2(x: T, b: Box)` rejects a non-Box second arg).
+// A generic POINTER param — `MutPtr<T>` / `Ptr<T>` / `RawPtr<T>` whose pointee mentions a callee tparam
+// — has its pointee-TYPE deferred to mono (T binds from the argument), but its outer SHAPE is already
+// known: the argument must itself be a pointer of a compatible KIND. This mirrors `fits`' pointer branch
+// with pointee-equality (`ty_eq`) relaxed to "is any pointer", so a plain value where a pointer is wanted
+// (the census cc-ICE "invalid type argument of unary `*`") is rejected, a read-only `Ptr` can't launder
+// into a `MutPtr` slot, and the `RawPtr<u8>` floor (`null_ptr()`) still fits.
+gen_ptr_arg_fits = (g: Ty, w: Ty) bool { g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.is_ptr_ty_g() && g.ptr_kind_fits(w) }) }) }
+// Even a tparam-typed param has a checkable outer shape when it is a pointer (see gen_ptr_arg_fits).
+// Non-pointer generic params (`T`, `[T]`, `Vec<T>`) and args whose type is still unknown (residue in a
+// generic body) stay deferred to mono, exactly as before.
+tparam_shape_err = (env: Env, pty: Ty, ar: Expr) i32 {
+    pty.is_ptr_ty_g().match ({ true => {
+        argty := env.infer_expr(ar.addr())
+        env.unknown_ty(argty).match ({ true => 0, false => gen_ptr_arg_fits(argty, pty).match ({ true => 0, false => 1 }) })
+    }, false => 0 })
+}
+// an argument check, given the callee's tparams: a slot typed by a tparam is shape-checked when it is a
+// pointer (else skipped); a CONCRETE slot of a generic fn is still fully checked (so `gen2(x: T, b: Box)`
+// rejects a non-Box second arg).
 arg_err_at = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
-    (i < params.len).match ({ true => tps.ty_mentions_tparam(params[i].ty).match ({ true => 0, false => {
+    (i < params.len).match ({ true => tps.ty_mentions_tparam(params[i].ty).match ({ true => env.tparam_shape_err(params[i].ty, ar), false => {
         lv := ar.addr().lit_slot_verdict(params[i].ty)
         (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty) })
     } }), false => 0 })
@@ -2783,6 +2800,15 @@ denrich_valfit = (env: Env, want: Ty, v: Ptr<Expr>) str {
     vt := env.infer_expr(v)
     (env.unknown_ty(want) || env.unknown_ty(vt) || want.is_fnt() || v.lit_slot_verdict(want) >= 0 || fits(vt, want)).match ({ true => "", false => env.a.denrich_fit_msg(want, vt) })
 }
+// The shape-mismatch message for a tparam-typed POINTER param (mirrors tparam_shape_err): name the
+// pointer param vs the (non-pointer / wrong-kind) argument. Empty when the arg is a fitting pointer or
+// its type is unknown (deferred), so it only speaks up on the genuine value-where-pointer-wanted case.
+denrich_tparam_shape = (env: Env, pty: Ty, v: Ptr<Expr>) str {
+    pty.is_ptr_ty_g().match ({ true => {
+        vt := env.infer_expr(v)
+        (env.unknown_ty(vt) || gen_ptr_arg_fits(vt, pty)).match ({ true => "", false => env.a.denrich_fit_msg(pty, vt) })
+    }, false => "" })
+}
 // A call arg at `off` whose parameter type is concrete (not a callee tparam) and that the arg does
 // not fit: name the parameter type vs the arg's inferred type. tparam-typed slots are skipped just
 // as arg_err_at skips them (the checker defers those to monomorphization).
@@ -2797,7 +2823,7 @@ denrich_argfit_msg = (env: Env, c: CallData, off: i32) str {
     } })
     res := ""
     c.args.loop((h, i, ar) {
-        res = (is_empty(res) && ar.expr_pos() == off && i < ps.len).match ({ true => f.tparams.ty_mentions_tparam(ps[i].ty).match ({ true => "", false => env.denrich_valfit(ps[i].ty, ar.addr()) }), false => res })
+        res = (is_empty(res) && ar.expr_pos() == off && i < ps.len).match ({ true => f.tparams.ty_mentions_tparam(ps[i].ty).match ({ true => env.denrich_tparam_shape(ps[i].ty, ar.addr()), false => env.denrich_valfit(ps[i].ty, ar.addr()) }), false => res })
     })
     res
 }
@@ -3062,18 +3088,14 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
     res
 }
 // enrichment over BOTH decl views: resolved first (concrete receivers), then the RAW pre-inline
-// decls — a trait-bound error at a GENERIC call site only exists in the raw view (the resolver
-// inlines the call away before check_module runs), so its enrichment must walk raw. The raw
-// fallback is trait-bound-only: every other enrichable kind is reported off the resolved walk
-// and must enrich there.
-// enrichment over BOTH decl views: resolved first (concrete receivers), then the RAW pre-inline
-// decls — a trait-bound error at a GENERIC call site only exists in the raw view (the resolver
-// inlines the call away before check_module runs), so its enrichment must walk raw; the raw
-// fallback is trait-bound-only. The kind-string guard keeps enrichment to the PACKED kind
-// channel: the custom channels (scope-escape/escape/scratch-escape/reserved-name) carry their own
-// unique codes AND their own hand-built kind strings, so matching on the kind name confines
-// enrichment to ladder-rendered diagnostics and never overwrites a custom channel's message.
-denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32, kind: str) str { eq(kind, code.diagnostic_kind_name()).match ({ true => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND()).match ({ true => a.denrich_module(raw, off, code), false => "" })), false => "" }) }
+// decls — a trait-bound OR generic-pointer-shape arg error at a GENERIC call site only exists in the
+// raw view (the resolver inlines/monomorphizes the call away before check_module runs), so its
+// enrichment must walk raw; the raw fallback is for those two codes. The kind-string guard keeps
+// enrichment to the PACKED kind channel: the custom channels (scope-escape/escape/scratch-escape/
+// reserved-name) carry their own unique codes AND their own hand-built kind strings, so matching on
+// the kind name confines enrichment to ladder-rendered diagnostics and never overwrites a custom
+// channel's message.
+denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32, kind: str) str { eq(kind, code.diagnostic_kind_name()).match ({ true => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND() || code == KARGTYPE()).match ({ true => a.denrich_module(raw, off, code), false => "" })), false => "" }) }
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
