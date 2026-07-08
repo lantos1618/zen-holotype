@@ -871,7 +871,7 @@ non_bool = (env: Env, e: Ptr<Expr>) bool {
 }
 // f64 operators are strict: no implicit int<->float mixing.
 is_eq_op_v = (op: str) bool { eq(op, "==") || eq(op, "!=") }
-f64_op_ok = (op: str) bool { eq(op, "+") || eq(op, "-") || eq(op, "*") || eq(op, "/") || op.is_cmp_op_v() }
+f64_op_ok = (op: str) bool { eq(op, "+") || eq(op, "-") || eq(op, "*") || eq(op, "/") || eq(op, "/.") || op.is_cmp_op_v() }
 f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
 f64_operand_err = (env: Env, op: str, lt: Ty, rt: Ty) i32 { (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({ true => 0, false => 1 }) }
 // Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
@@ -2728,11 +2728,13 @@ denrich_recv_msg = (env: Env, c: CallData) str {
 // site (the raw-decls walk — the resolver inlines the call away); otherwise it is a trait-method
 // call whose concrete receiver has no impl (the resolved-decls walk).
 denrich_traitbound_msg = (env: Env, c: CallData) str { env.decls.is_known_fn(c.fn).match ({ true => env.denrich_bound_msg(env.decls.the_func(c.fn), c), false => env.denrich_recv_msg(c) }) }
+// `/.` is the checker's internal float-division marker; a diagnostic must show the SOURCE operator `/`.
+op_display = (op: str) str { eq(op, "/.").match ({ true => "/", false => op }) }
 denrich_operand_msg = (env: Env, b: BinData) str {
     a := env.a
     lt := env.infer_expr(b.lhs)
     rt := env.infer_expr(b.rhs)
-    a.gstr_string(96).gstr_append(a, "operator `").gstr_append(a, b.op).gstr_append(a, "` cannot be applied to `").gstr_append(a, a.zty(lt)).gstr_append(a, "` and `").gstr_append(a, a.zty(rt)).gstr_append(a, "`").gstr_finish(a)
+    a.gstr_string(96).gstr_append(a, "operator `").gstr_append(a, b.op.op_display()).gstr_append(a, "` cannot be applied to `").gstr_append(a, a.zty(lt)).gstr_append(a, "` and `").gstr_append(a, a.zty(rt)).gstr_append(a, "`").gstr_finish(a)
 }
 // first init field whose name is not a declared field (the unknown field a struct-literal error names)
 denrich_bad_init = (fields: [Field], inits: [FieldInit]) str {

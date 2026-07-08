@@ -1162,8 +1162,14 @@ resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     rhs := a.resolve_expr(env.clr_exp(), b.rhs)
     cmp := eq(b.op, "==") || eq(b.op, "!=")
     lty := env.infer_expr(lhs)
-    (cmp && lty.is_str_t() && env.infer_expr(rhs).is_str_t()).match ({ true => a.cenode(call(eq(b.op, "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))), false => (cmp && env.is_enum_ty(lty)).match ({ true => a.cenode(bin_at(b.op, a.subj_tag(lhs, lty.ty_is_ptr()), a.subj_tag(rhs, lty.ty_is_ptr()), b.pos)), false => a.resolve_f64_neg(env, b.op, lhs, rhs, b.pos) }) })
+    (cmp && lty.is_str_t() && env.infer_expr(rhs).is_str_t()).match ({ true => a.cenode(call(eq(b.op, "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))), false => (cmp && env.is_enum_ty(lty)).match ({ true => a.cenode(bin_at(b.op, a.subj_tag(lhs, lty.ty_is_ptr()), a.subj_tag(rhs, lty.ty_is_ptr()), b.pos)), false => a.resolve_arith(env, b.op, lty, lhs, rhs, b.pos) }) })
 }
+// FLOAT DIVISION is retagged `/.` so a backend can tell it from integer `/`: C already dispatches at
+// compile time via `_Generic` (IEEE for double, guarded for int), but the JS backend erases types, so
+// without this marker it would route `0.0/0.0` through the integer div-by-zero guard and spuriously
+// panic. `/.` says "IEEE division, no zero guard". Fires when either operand is f64 (a numeric literal
+// on the other side adapts to f64). All other arithmetic falls through to the `-f64` negation fixup.
+resolve_arith = (a: MutPtr<Malloc>, env: Env, op: str, lty: Ty, lhs: Ptr<Expr>, rhs: Ptr<Expr>, p: i32) Ptr<Expr> { (eq(op, "/") && (lty.is_f64_ty() || env.infer_expr(rhs).is_f64_ty())).match ({ true => a.cenode(bin_at("/.", lhs, rhs, p)), false => a.resolve_f64_neg(env, op, lhs, rhs, p) }) }
 // Prefix `-f64` parses as `0 - x`; rewrite that zero to `0.0`.
 is_int_zero = (e: Ptr<Expr>) bool {
     load(e).match ({

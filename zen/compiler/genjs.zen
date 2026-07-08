@@ -24,7 +24,7 @@
 // impls, templates, generic decls, imports and DRaw (verbatim C) emit NOTHING — same as genc skips them.
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, FieldInit, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, TagData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, WhileData, LetData, AssignData, IndexSetData, GlobalData, StructDecl, is_template, is_trait, gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, FieldInit, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, TagData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, WhileData, LetData, AssignData, IndexSetData, GlobalData, StructDecl, is_template, is_trait, gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Malloc } = std.mem.alloc
 // ── small integer renderer (byte-only, self-hosting) ──────────────────────────────────────────────
@@ -72,7 +72,7 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
         .Match(m)       => s.js_match_expr(a, m),
         .StrLit(sl)     => s.jstrlit(a, sl.value),
         .SliceLit(sd)   => s.gstr_append(a, "({ ptr: [").js_args(a, sd.items).gstr_append(a, "], len: ").jint(a, js_slice_count(sd.items)).gstr_append(a, " })"),
-        .Index(ix)      => s.gstr_append(a, "(").js_expr(a, ix.seq).gstr_append(a, ").ptr[").js_expr(a, ix.idx).gstr_append(a, "]"),
+        .Index(ix)      => s.gstr_append(a, "__zr.idx(").js_expr(a, ix.seq).gstr_append(a, ", ").js_expr(a, ix.idx).gstr_append(a, ")"),
         .Loop(l)        => s.js_loop(a, l),
         .Lambda(lm)     => s.gstr_append(a, "__zr.unlowered_lambda"),
         .Block(b)       => s.js_block_expr(a, b),
@@ -86,9 +86,15 @@ js_slice_count = (items: [Expr]) i32 {
     n
 }
 // loop-handler controls `h.break`/`h.continue` -> JS break/continue; else `obj.field`.
-js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String { eq(m.field, "break_zk").match ({ true => s.gstr_append(a, "break"), false => eq(m.field, "continue_zk").match ({ true => s.gstr_append(a, "continue"), false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field) }) }) }
+// `.u` is genc's union-payload access baked by the checker's or_return / match-payload lowering
+// (`subj.u.Variant`). The JS enum has NO `u` level — it's a flat `{ tag, Variant }` — so `.u` erases
+// to identity: `subj.u.Ok` emits as `subj.Ok`. (`break_zk`/`continue_zk` are the loop-handler verbs.)
+js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String { eq(m.field, "break_zk").match ({ true => s.gstr_append(a, "break"), false => eq(m.field, "continue_zk").match ({ true => s.gstr_append(a, "continue"), false => eq(m.field, "u").match ({ true => s.js_expr(a, m.obj), false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field) }) }) }) }
 // `==`/`!=` -> strict; `/` and `%` route through the guarded floor helpers; all else `(lhs op rhs)`.
-js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String { eq(b.op, "/").match ({ true => s.gstr_append(a, "__zr.div(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => eq(b.op, "%").match ({ true => s.gstr_append(a, "__zr.mod(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " ").gstr_append(a, js_op(b.op)).gstr_append(a, " ").js_expr(a, b.rhs).gstr_append(a, ")") }) }) }
+// `==`/`!=` -> strict; INTEGER `/` and `%` route through the guarded floor (div-by-zero panics); the
+// checker's float-division marker `/.` emits NATIVE `/` so f64 follows IEEE (`0.0/0.0` -> NaN, never a
+// panic); all else `(lhs op rhs)`.
+js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String { eq(b.op, "/.").match ({ true => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " / ").js_expr(a, b.rhs).gstr_append(a, ")"), false => eq(b.op, "/").match ({ true => s.gstr_append(a, "__zr.div(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => eq(b.op, "%").match ({ true => s.gstr_append(a, "__zr.mod(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " ").gstr_append(a, js_op(b.op)).gstr_append(a, " ").js_expr(a, b.rhs).gstr_append(a, ")") }) }) }) }
 js_op = (op: str) str { eq(op, "==").match ({ true => "===", false => eq(op, "!=").match ({ true => "!==", false => op }) }) }
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
     out := s.gstr_append(a, "({ ")
@@ -208,7 +214,7 @@ js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) S
 js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "{ const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_stmt_cases(a, m.arms, 0).gstr_append(a, "} }") }
 // a foreach loop -> an IIFE with a JS for-loop over the fat pointer's array/offset backing.
 js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
-    out := s.gstr_append(a, "(() => { const _seq = ").js_expr(a, l.seq).gstr_append(a, "; for (let ").jname(a, l.idx).gstr_append(a, " = 0; ").jname(a, l.idx).gstr_append(a, " < _seq.len; ").jname(a, l.idx).gstr_append(a, "++) { const ").jname(a, l.elem).gstr_append(a, " = _seq.ptr[").jname(a, l.idx).gstr_append(a, "]; ")
+    out := s.gstr_append(a, "(() => { const _seq = ").js_expr(a, l.seq).gstr_append(a, "; for (let ").jname(a, l.idx).gstr_append(a, " = 0; ").jname(a, l.idx).gstr_append(a, " < _seq.len; ").jname(a, l.idx).gstr_append(a, "++) { const ").jname(a, l.elem).gstr_append(a, " = __zr.idx(_seq, ").jname(a, l.idx).gstr_append(a, "); ")
     out = out.js_stmts(a, l.body)
     out.gstr_append(a, " } return 0; })()")
 }
@@ -237,13 +243,13 @@ js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
 // ── statements ────────────────────────────────────────────────────────────────────────────────────
 js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
     st.match ({
-        .Let(l)      => s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ").js_expr(a, l.value).gstr_append(a, ";"),
+        .Let(l)      => js_is_u8(l.ty).match ({ true => s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ((").js_expr(a, l.value).gstr_append(a, ") & 255);"), false => s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ").js_expr(a, l.value).gstr_append(a, ";") }),
         .Assign(x)   => s.js_expr(a, x.target).gstr_append(a, " = ").js_expr(a, x.value).gstr_append(a, ";"),
         .Return(e)   => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
         .ExprStmt(e) => s.js_expr_stmt(a, e),
         .If(f)       => s.gstr_append(a, "if (").js_expr(a, f.c).gstr_append(a, ") { ").js_stmts(a, f.then).gstr_append(a, "} else { ").js_stmts(a, f.els).gstr_append(a, "}"),
         .While(w)    => s.gstr_append(a, "while (").js_expr(a, w.c).gstr_append(a, ") { ").js_stmts(a, w.body).gstr_append(a, "}"),
-        .IndexSet(x) => s.gstr_append(a, "(").js_expr(a, x.seq).gstr_append(a, ").ptr[").js_expr(a, x.idx).gstr_append(a, "] = ").js_expr(a, x.value).gstr_append(a, ";"),
+        .IndexSet(x) => s.gstr_append(a, "__zr.setidx(").js_expr(a, x.seq).gstr_append(a, ", ").js_expr(a, x.idx).gstr_append(a, ", ").js_expr(a, x.value).gstr_append(a, ");"),
     })
 }
 // a bare expression statement; a match here becomes a real `switch` (so arm returns fire).
@@ -271,7 +277,34 @@ js_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     })
     out
 }
-js_func = (s: String, a: MutPtr<Malloc>, f: Func) String { s.gstr_append(a, "function ").js_func_name(a, f.name).gstr_append(a, "(").js_params(a, f.params).gstr_append(a, ") { ").js_stmts(a, f.body).gstr_append(a, "}\n") }
+// Narrow-integer normalization at function entry, reproducing C's truncation-at-the-boundary that a JS
+// `number` doesn't do on its own:
+//   • u8  — C's uint8_t wraps mod 256 at every store/param/return; a u8 PARAMETER is masked `& 255`
+//     (the visible case: `println(x+y)` with x,y:u8 hits the u8 Display param, 260 -> 4). A u8-annotated
+//     LET masks its initializer (see js_stmt).
+//   • u64 — a JS `number` can't hold the top of the u64 range (a value >= 2^63 lives in the AST as a
+//     NEGATIVE i64); a u64 PARAMETER is reinterpreted UNSIGNED via `__zr.u64` (BigInt only when it no
+//     longer fits a number), so `println(u64max)` prints 18446744073709551615 instead of blank.
+js_is_u8 = (t: Ty) bool {
+    t.match ({
+        .U8 => true,
+        _   => false,
+    })
+}
+js_is_u64 = (t: Ty) bool {
+    t.match ({
+        .Named(n) => eq(n, "u64"),
+        _         => false,
+    })
+}
+js_param_norms = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = js_is_u8(p.ty).match ({ true => out.jname(a, p.name).gstr_append(a, " = (").jname(a, p.name).gstr_append(a, " & 255); "), false => js_is_u64(p.ty).match ({ true => out.jname(a, p.name).gstr_append(a, " = __zr.u64(").jname(a, p.name).gstr_append(a, "); "), false => out }) })
+    })
+    out
+}
+js_func = (s: String, a: MutPtr<Malloc>, f: Func) String { s.gstr_append(a, "function ").js_func_name(a, f.name).gstr_append(a, "(").js_params(a, f.params).gstr_append(a, ") { ").js_param_norms(a, f.params).js_stmts(a, f.body).gstr_append(a, "}\n") }
 // a module-level global `name := init` -> `let name = init;` (mutable; some are scheduler/runtime state).
 js_global = (s: String, a: MutPtr<Malloc>, g: GlobalData) String { s.gstr_append(a, "let ").jname(a, g.name).gstr_append(a, " = ").js_expr(a, g.init).gstr_append(a, ";\n") }
 // does the module define a `main`? then the emitted JS invokes it.
