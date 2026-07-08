@@ -1,0 +1,168 @@
+// std.hash — content hashing: SHA-256 (RFC 6234 / FIPS 180-4, a cryptographic 256-bit digest) and
+// FNV-1a-64 (a fast NON-cryptographic hash for table keys). Pure byte manipulation in the same
+// explicit-allocator style as std.encoding: SHA-256 fills a caller buffer (no hidden heap), and only
+// the `str`/`[u8]` convenience wrappers thread the caller's allocator for their output.
+//
+//   b := "abc".view()                         // [u8] over the bytes
+//   sha256_hex(a, b)                           // "ba7816bf8f01cfea…f20015ad"  (64 lowercase hex chars)
+//   d := sha256(a, b)                          // a fresh 32-byte [u8] owned by `a`
+//   dst: [u8] := [ … 32 bytes … ]             // or hash into a fixed buffer with NO allocation:
+//   sha256_into(b, dst)                        // writes exactly 32 bytes into dst (dst.len must be >= 32)
+//   fnv1a(b)                                   // a u64 hash — fast, deterministic, NOT collision-safe
+//
+// The backend's integer primitives are i32/i64/u8/f64/bool plus width types (u64 lowers to uint64_t).
+// SHA-256 is a 32-bit-word algorithm, so it runs in i64 with every word masked to 32 bits (SHA_MASK):
+// a masked word is always in [0, 2^32) hence non-negative, so `>>` is a logical shift and the digest is
+// bit-identical on every platform. FNV-1a runs in u64 where `*` is C's defined unsigned wraparound
+// (mod 2^64) — exactly the FNV spec — so no masking is needed.
+//
+// NAMING / FLAT-NAMESPACE NOTE: `sha256`, `fnv1a` etc. are exported flat. A program that also defines
+// one of these names (or imports another module that does) collides at flatten time; import the names
+// you use (`{ sha256_hex, fnv1a } = std.hash`) and rename on your side if needed.
+{ Allocator } = std.mem.alloc
+// ── FNV-1a, 64-bit ────────────────────────────────────────────────────────────
+// The FNV-1a-64 prime, 0x100000001b3. The offset basis 0xcbf29ce484222325 is above i64 max, so it is
+// assembled from its two 32-bit halves inside fnv1a rather than named here (a literal that large — or a
+// const-folded product of its halves — is rejected/normalized by the toolchain; only a runtime u64
+// combine of the in-range halves is portable). Every step is a u64 multiply, wrapping mod 2^64 exactly
+// as the FNV spec requires.
+FNV64_PRIME* := 1099511628211
+FNV64_OFFSET_HI := 3421674724    // high 32 bits of the offset basis (0xcbf29ce4)
+FNV64_OFFSET_LO := 2216829733    // low 32 bits of the offset basis (0x84222325)
+// FNV-1a hash of `bytes` (64-bit). Deterministic and fast; a good spread for hash-table keys, but NOT
+// a cryptographic hash (do not use it for integrity/security). Empty input hashes to the offset basis.
+fnv1a* = (bytes: [u8]) u64 {
+    // offset basis = HI << 32 | LO, combined in u64 arithmetic (the folded value exceeds i64 max).
+    h: u64 := FNV64_OFFSET_HI
+    h = h * 4294967296 + FNV64_OFFSET_LO
+    bytes.loop((hh, i, b) {
+        x := to_i64(b)
+        h = (h ^ x) * FNV64_PRIME
+    })
+    h
+}
+// ── SHA-256 ─────────────────────────────────────────────────────────────────────
+SHA_MASK := 4294967295    // 2^32 - 1 — every SHA-256 word is kept in [0, 2^32)
+SHA_PAD := 128    // the 0x80 byte that terminates the message before the length field
+// rotate the low 32 bits of `x` right by `n` (0 < n < 32). `x` is a masked (non-negative) word, so
+// the right half is a logical shift; the left half is re-masked after the OR.
+sha_rotr = (x: i64, n: i64) i64 { (x >> n | x << 32 - n) & SHA_MASK }
+// the byte at absolute position `i` of the padded message: the input bytes, then a single SHA_PAD
+// (0x80) byte, then zero padding, then the 64-bit big-endian message length in bits in the last 8
+// bytes. `plen` is the padded length; `bitlen` is `len * 8`.
+sha_msg_byte = (bytes: [u8], i: i64, len: i64, plen: i64, bitlen: i64) i64 { (i < len).match ({ true => to_i64(bytes[i]), false => (i == len).match ({ true => SHA_PAD, false => (i >= plen - 8).match ({ true => bitlen >> 8 * (plen - 1 - i) & 255, false => 0 }) }) }) }
+// core compression: hash `bytes` and leave the eight 32-bit result words in `hh` (hh.len must be 8).
+sha256_words = (bytes: [u8], hh: [i64]) i64 {
+    len := bytes.len
+    // padded length: input + one 0x80 + zeros + 8 length bytes, rounded up to a multiple of 64.
+    plen := ((len + 8) / 64 + 1) * 64
+    bitlen := len * 8
+    nblocks := plen / 64
+    // initial hash values H0..H7 (fractional parts of sqrt of the first 8 primes).
+    hh[0] = 1779033703
+    hh[1] = 3144134277
+    hh[2] = 1013904242
+    hh[3] = 2773480762
+    hh[4] = 1359893119
+    hh[5] = 2600822924
+    hh[6] = 528734635
+    hh[7] = 1541459225
+    // round constants K0..K63 (fractional parts of cbrt of the first 64 primes).
+    k: [i64] := [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298]
+    // the 64-word message schedule, reused per block.
+    w: [i64] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    bi: i64 := 0
+    @while (bi < nblocks) {
+        base := bi * 64
+        // load the 16 big-endian words of this 512-bit block.
+        j: i64 := 0
+        @while (j < 16) {
+            o := base + j * 4
+            w[j] = sha_msg_byte(bytes, o, len, plen, bitlen) << 24 | sha_msg_byte(bytes, o + 1, len, plen, bitlen) << 16 | sha_msg_byte(bytes, o + 2, len, plen, bitlen) << 8 | sha_msg_byte(bytes, o + 3, len, plen, bitlen)
+            j = j + 1
+        }
+        // extend the 16 words into the remaining 48.
+        t: i64 := 16
+        @while (t < 64) {
+            s0 := sha_rotr(w[t - 15], 7) ^ sha_rotr(w[t - 15], 18) ^ w[t - 15] >> 3
+            s1 := sha_rotr(w[t - 2], 17) ^ sha_rotr(w[t - 2], 19) ^ w[t - 2] >> 10
+            w[t] = w[t - 16] + s0 + w[t - 7] + s1 & SHA_MASK
+            t = t + 1
+        }
+        // working variables a..h seeded from the running hash.
+        a := hh[0]
+        b := hh[1]
+        c := hh[2]
+        d := hh[3]
+        e := hh[4]
+        f := hh[5]
+        g := hh[6]
+        hv := hh[7]
+        r: i64 := 0
+        @while (r < 64) {
+            s1 := sha_rotr(e, 6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25)
+            ch := e & f ^ (e ^ SHA_MASK) & g
+            temp1 := hv + s1 + ch + k[r] + w[r] & SHA_MASK
+            s0 := sha_rotr(a, 2) ^ sha_rotr(a, 13) ^ sha_rotr(a, 22)
+            maj := a & b ^ a & c ^ b & c
+            temp2 := s0 + maj & SHA_MASK
+            hv = g
+            g = f
+            f = e
+            e = d + temp1 & SHA_MASK
+            d = c
+            c = b
+            b = a
+            a = temp1 + temp2 & SHA_MASK
+            r = r + 1
+        }
+        // fold this block's result back into the running hash.
+        hh[0] = hh[0] + a & SHA_MASK
+        hh[1] = hh[1] + b & SHA_MASK
+        hh[2] = hh[2] + c & SHA_MASK
+        hh[3] = hh[3] + d & SHA_MASK
+        hh[4] = hh[4] + e & SHA_MASK
+        hh[5] = hh[5] + f & SHA_MASK
+        hh[6] = hh[6] + g & SHA_MASK
+        hh[7] = hh[7] + hv & SHA_MASK
+        bi = bi + 1
+    }
+    0
+}
+// SHA-256 of `bytes` written as 32 big-endian bytes into `dst` (dst.len must be >= 32). Pure: no
+// allocation, no hidden heap — the whole computation lives in a fixed stack schedule.
+sha256_into* = (bytes: [u8], dst: [u8]) i64 {
+    hh: [i64] := [0, 0, 0, 0, 0, 0, 0, 0]
+    sha256_words(bytes, hh)
+    wi: i64 := 0
+    @while (wi < 8) {
+        v := hh[wi]
+        dst[wi * 4] = to_u8(v >> 24 & 255)
+        dst[wi * 4 + 1] = to_u8(v >> 16 & 255)
+        dst[wi * 4 + 2] = to_u8(v >> 8 & 255)
+        dst[wi * 4 + 3] = to_u8(v & 255)
+        wi = wi + 1
+    }
+    0
+}
+// SHA-256 of `bytes` as a fresh 32-byte [u8] owned by `a`.
+sha256*<A> = (a: MutPtr<A>, bytes: [u8]) [u8] {
+    out: [u8] := a.acquire(32).slice(32)
+    sha256_into(bytes, out)
+    out
+}
+// nibble value (0..15) -> its LOWERCASE hex byte.
+sha_hex_char = (v: i64) u8 { (v < 10).match ({ true => ('0'.to_i64() + v).to_u8(), false => ('a'.to_i64() + v - 10).to_u8() }) }
+// SHA-256 of `bytes` as a fresh 64-char lowercase-hex NUL-terminated `str` owned by `a`.
+sha256_hex*<A> = (a: MutPtr<A>, bytes: [u8]) str {
+    d: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    sha256_into(bytes, d)
+    out: [u8] := a.acquire(65).slice(65)
+    d.loop((h, i, b) {
+        v := to_i64(b)
+        out[i * 2] = sha_hex_char(v >> 4)
+        out[i * 2 + 1] = sha_hex_char(v & 15)
+    })
+    out[64] = 0
+    cstr(out.ptr)
+}
