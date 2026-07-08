@@ -455,8 +455,21 @@ ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) S
     })
     out
 }
-// ── string literal escaping (mirrors genjs) ────────────────────────────────────
-ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.ff_append(a, "\\\""), false => (b == '\\').match ({ true => s.ff_append(a, "\\\\"), false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => s.ff_push(a, b) }) }) }) }
+// ── string literal escaping ────────────────────────────────────────────────────
+// A non-printable byte as a `\xNN` hex escape — the ONLY numeric string escape the Zen lexer accepts
+// (parse_expr.unescape reads `\xNN`; there is no octal form, so genc's `\ooo` cannot be reused here).
+ffhex = (d: i64) u8 { ffbyte("0123456789abcdef", d) }
+ff_hex_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    n := b.to_i64()
+    s.ff_append(a, "\\x").ff_push(a, ffhex(n / 16)).ff_push(a, ffhex(n % 16))
+}
+// escape one byte for a Zen string literal. `"`/`\` are quoted; the common control bytes get their short
+// escapes (\n \r \t); printable ASCII (0x20..0x7E) AND high UTF-8 bytes (>=0x80, valid multibyte text like
+// an em-dash) pass through verbatim; every remaining byte — the C0 controls (CR was the bug #62, plus \t
+// and the other invisibles) and DEL (0x7F) — is emitted as `\xNN`. Result: no raw invisible control byte
+// ever lands in .zen source (fmt output is stable + the CI fmt-check gate can't be silently broken by a
+// stray CR), the parsed value round-trips exactly, and readable UTF-8 text in string literals stays raw.
+ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.ff_append(a, "\\\""), false => (b == '\\').match ({ true => s.ff_append(a, "\\\\"), false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => (b == '\r').match ({ true => s.ff_append(a, "\\r"), false => (b == '\t').match ({ true => s.ff_append(a, "\\t"), false => (b >= ' ' && b <= '~' || b >= 128).match ({ true => s.ff_push(a, b), false => s.ff_hex_byte(a, b) }) }) }) }) }) }) }
 ff_strlit = (s: String, a: MutPtr<Malloc>, v: str) String { s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"") }
 ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String { (ffbyte(v, i) == 0).match ({ true => s, false => s.ff_escape_byte(a, ffbyte(v, i)).ff_escape_from(a, v, i + 1) }) }
 // ── statements ─────────────────────────────────────────────────────────────────
