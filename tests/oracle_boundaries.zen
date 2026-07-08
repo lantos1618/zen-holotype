@@ -250,10 +250,12 @@ checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 3: @while stays in the compiler / named low-level substrate.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-atwhile_allowed = (path: str) bool { eq(path, "zen/compiler/lex.zen") || eq(path, "zen/compiler/parse.zen") || eq(path, "zen/compiler/parse_expr.zen") || eq(path, "zen/compiler/parse_stmt.zen") || eq(path, "zen/compiler/parse_type.zen") || eq(path, "zen/compiler/pretty.zen") || eq(path, "zen/std/math.zen") || eq(path, "zen/std/fs.zen") || eq(path, "zen/std/io/stdin.zen") || eq(path, "zen/std/hash.zen") }
+atwhile_allowed = (path: str) bool { eq(path, "zen/compiler/lex.zen") || eq(path, "zen/compiler/parse.zen") || eq(path, "zen/compiler/parse_expr.zen") || eq(path, "zen/compiler/parse_stmt.zen") || eq(path, "zen/compiler/parse_type.zen") || eq(path, "zen/compiler/pretty.zen") || eq(path, "zen/compiler/genc.zen") || eq(path, "zen/compiler/genc_emit.zen") || eq(path, "zen/compiler/diagnostic.zen") || eq(path, "zen/compiler/check_validate.zen") || eq(path, "zen/std/math.zen") || eq(path, "zen/std/fs.zen") || eq(path, "zen/std/io/stdin.zen") || eq(path, "zen/std/hash.zen") }
 // low-level numeric/filesystem/stdin substrate: these primitives MUST iterate, not recurse — an
 // unbounded recursion depth (huge exponent / directory entry count / stdin byte or line count /
-// SHA-256 512-bit block count over a large message) is a stack-overflow segfault.
+// SHA-256 512-bit block count over a large message) is a stack-overflow segfault. The compiler's
+// lexer/codegen/diagnostic scanners join for the same reason: a ~50KB string literal, a long numeric
+// literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
 atwhile_passes = (mp: MutPtr<Malloc>, path: str) bool {
     path.is_empty().match ({ true => true, false => path.atwhile_allowed().match ({ true => true, false => mp.contents_in(path).match ({
         .Ok(raw) => raw.view().file_has("@while", 3).match ({ true => false, false => true }),
@@ -336,6 +338,15 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 8: a large string literal lexes + runs — the #66c cliff. A ~200KB string literal used to
+// overflow the C stack (str_end / unescape / gen_escape_from recursed per byte). Generate a program
+// with a 200000-char string, compile + run it, and assert the runtime string's length is exact. At the
+// default stack this crashed (SIGSEGV) with the old per-char recursion; iterative lexing/codegen fixes it.
+bigstr_suite = (mp: MutPtr<Malloc>) i32 {
+    rc := shell(mp.zo_cmd("head -c 200000 /dev/zero | tr '\\0' A > $ZT/bb.txt; { printf '{ len } = std.text.str\\n{ to_exit } = std.core.bool\\nmain = () i32 {\\n    s := \"'; cat $ZT/bb.txt; printf '\"\\n    (s.len() == 200000).to_exit()\\n}\\n'; } > $ZT/bigstr.zen; ./zenc run $ZT/bigstr.zen")).expect("oracle: shell")
+    run_suite("boundaries: 200KB string literal lexes + runs (no stack overflow, #66c)", [rc == 0])
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 oracle_boundaries_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -350,5 +361,6 @@ oracle_boundaries_run* = () i32 {
     fails = fails + mp.io_suite()
     fails = fails + mp.map_suite()
     fails = fails + mp.fmt_suite()
+    fails = fails + mp.bigstr_suite()
     fails
 }

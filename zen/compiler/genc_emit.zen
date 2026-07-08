@@ -363,7 +363,15 @@ gen_escape_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String { (b == '"').
 gen_strlit = (s: String, alloc: MutPtr<Malloc>, v: str) String { s.gstr_append(alloc, "\"").gen_escape_from(alloc, v, 0).gstr_append(alloc, "\"") }
 // escape the str's bytes one by one (recursion to the NUL terminator). Avoiding view/slice keeps this
 // helper independent of extra std runtime plumbing in the bootstrap source set.
-gen_escape_from = (s: String, alloc: MutPtr<Malloc>, v: str, i: i32) String { (sbyte(v, i) == 0).match ({ true => s, false => s.gen_escape_byte(alloc, sbyte(v, i)).gen_escape_from(alloc, v, i + 1) }) }
+gen_escape_from = (s: String, alloc: MutPtr<Malloc>, v: str, i: i32) String {
+    acc := s
+    k := i
+    @while (sbyte(v, k) != 0) {
+        acc = acc.gen_escape_byte(alloc, sbyte(v, k))
+        k = k + 1
+    }
+    acc
+}    // ITERATIVE: a ~50KB string literal escapes O(n) by iteration, not O(n) C-stack recursion
 gen_mkenum = (s: String, alloc: MutPtr<Malloc>, m: MakeEnumData) String {
     head := s.gstr_append(alloc, "(").gstr_append(alloc, m.mty).gstr_append(alloc, "){ .tag = ").gstr_append(alloc, m.mty).gstr_append(alloc, "_").gstr_append(alloc, m.variant)
     head.gstr_append(alloc, ", .u.").gstr_append(alloc, m.variant).gstr_append(alloc, " = ").gen_expr(alloc, m.payload).gstr_append(alloc, " }")
