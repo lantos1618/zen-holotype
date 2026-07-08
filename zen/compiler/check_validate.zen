@@ -15,6 +15,9 @@ env_known_fn = (env: Env, fn: str) bool { eq(env.env_func(fn).name, fn) }
 env_params = (env: Env, fn: str) [Param] { env.env_func(fn).params }
 // O(1) indexed struct presence/field lookups (Env carries the decl index).
 env_is_struct = (env: Env, name: str) bool { env.didx.struct_idx.get(name, 0 - 1) >= 0 }
+// A CONCRETE enum (`DEnum`) by name — enums carry variants, not fields, so `e.field` on one is always
+// a mistake (you reach variants via `.match`). Generic enums (Result) are caught via cv_is_gen_enum.
+env_is_enum = (env: Env, name: str) bool { env.didx.enum_idx.get(name, 0 - 1) >= 0 }
 env_struct_fields = (env: Env, name: str) [Field] {
     i := env.didx.struct_idx.get(name, 0 - 1)
     (i >= 0 && i < env.decls.len).match ({ true => env.decls[i].match ({
@@ -609,6 +612,23 @@ cv_is_gen_struct = (decls: [Decl], name: str) bool {
     })
     f
 }
+// A GENERIC enum (`DGenEnum`, e.g. std `Result<T,E>`) by base name — like a concrete enum it holds
+// variants, not fields, so a `.field` access on an instance is a mistake regardless of the type args.
+cv_is_gen_enum = (decls: [Decl], name: str) bool {
+    f := false
+    decls.loop((h, i, d) {
+        f = d.match ({
+            .DGenEnum(g) => eq(g.name, name).match ({ true => true, false => f }),
+            _            => f,
+        })
+    })
+    f
+}
+// An enum lowers to a C `struct { int32_t tag; union {…} u; }` (genc_emit emit_enum), so `.tag` and `.u`
+// ARE its only real members. The match/or_return lowering resolve_module runs BEFORE this validator
+// synthesizes exactly those two accesses on enum values (`subj.tag`, `subj.u`); they compile cleanly and
+// must be accepted. Any OTHER field name has no C member — that is the codegen ICE we reject.
+is_enum_repr_field = (field: str) bool { eq(field, "tag") || eq(field, "u") }
 gen_struct_fields = (decls: [Decl], name: str) [Field] {
     found := no_fields()
     decls.loop((h, i, d) {
@@ -706,17 +726,20 @@ is_scalar_prim = (t: Ty) bool {
     })
 }
 // Field access checks known concrete struct receivers AND generic-struct instances (field names don't
-// depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be).
+// depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be). A KNOWN
+// enum receiver — concrete (`DEnum`) or generic (`DGenEnum` like `Result<i32,IoError>`) — has no fields
+// at all: you reach its variants via `.match`, so any `.field` on one is rejected (closes census #58/#41,
+// where `r.len` on a Result passed `check` then ICE'd in cc with only a `.c` column).
 member_err = (env: Env, obj: Ptr<Expr>, field: str) i32 {
     obj.is_lit_numeric().match ({ true => 1, false => {
         rty := env.infer_expr(obj)
         sname := rty.enum_name()
         env.env_is_struct(sname).match ({ true => env.env_struct_fields(sname).has_field(field).match ({ true => 0, false => 1 }), false => {
             base := rty.gen_base_of()
-            (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({ true => env.decls.gen_struct_fields(base).has_field(field).match ({ true => 0, false => 1 }), false => rty.is_scalar_prim().match ({ true => 1, false => 0 }) })
+            (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({ true => env.decls.gen_struct_fields(base).has_field(field).match ({ true => 0, false => 1 }), false => (env.env_is_enum(sname) || is_empty(base) == false && env.decls.cv_is_gen_enum(base)).match ({ true => field.is_enum_repr_field().match ({ true => 0, false => 1 }), false => rty.is_scalar_prim().match ({ true => 1, false => 0 }) }) })
         } })
     } })
-}    // scalars have no fields; other unknowns (residue) stay lenient
+}    // scalars and enums have no fields; other unknowns (residue) stay lenient
 // Enum matches must be exhaustive and have no duplicate arms.
 no_variants = () [VariantDef] { slice(null_ptr(), 0) }
 enum_variants = (decls: [Decl], ename: str) [VariantDef] {
@@ -2623,11 +2646,15 @@ denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) str {
     s.gstr_finish(a)
 }
 denrich_member_noty = (a: MutPtr<Malloc>, field: str, objty: Ty) str { a.gstr_string(64).gstr_append(a, "type `").gstr_append(a, a.zty(objty)).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "`").gstr_finish(a) }
+// An enum/Result receiver: name the type and steer to `.match` (enums have variants, not fields).
+denrich_enum_member_msg = (a: MutPtr<Malloc>, name: str, field: str) str { a.gstr_string(112).gstr_append(a, "enum `").gstr_append(a, name).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (enums are accessed via `.match`, not `.field`)").gstr_finish(a) }
 denrich_member_msg = (env: Env, field: str, objty: Ty) str {
     a := env.a
     objty.match ({
-        .Named(n) => env.env_is_struct(n).match ({ true => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a), false => a.denrich_member_noty(field, objty) }),
-        _         => a.denrich_member_noty(field, objty),
+        // a generic-enum instance (`Result<i32,IoError>`) reaches here via its base name.
+        .Generic(g) => env.decls.cv_is_gen_enum(g.name).match ({ true => a.denrich_enum_member_msg(g.name, field), false => a.denrich_member_noty(field, objty) }),
+        .Named(n)   => env.env_is_struct(n).match ({ true => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a), false => env.env_is_enum(n).match ({ true => a.denrich_enum_member_msg(n, field), false => a.denrich_member_noty(field, objty) }) }),
+        _           => a.denrich_member_noty(field, objty),
     })
 }
 // the target name of a not-callable call resolves to a value (a local/global), not a function; name its type.
