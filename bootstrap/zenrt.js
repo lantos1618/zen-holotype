@@ -39,14 +39,29 @@ const __zr = (() => {
   const store_i64 = (p, v) => { dv.setBigInt64(p, BigInt(v), true); return v; };
   const slice = (ptr, len) => ({ ptr, len: Number(len) });
   const view = (s) => ({ ptr: s, len: strlen(s) });    // a str's byte view (matches std.text.str.view)
+  // element read/write over a fat pointer, dispatching on how `.ptr` is backed: a SliceLit `[a,b,c]`
+  // carries a JS ARRAY (index it directly), while a str/byte view carries a MEM OFFSET (an integer —
+  // read the byte out of linear memory). Without this split, `sv.ptr[i]` on a byte view indexes an
+  // integer and yields `undefined`, which silently broke every byte-scan (e.g. format's `{}` finder).
+  const idx = (seq, i) => { const p = seq.ptr; return Array.isArray(p) ? p[i] : MEM[p + Number(i)]; };
+  const setidx = (seq, i, v) => { const p = seq.ptr; if (Array.isArray(p)) { p[i] = v; } else { MEM[p + Number(i)] = v & 255; } return v; };
   const eq = (a, b) => a === b || decode(a, strlen(a)) === decode(b, strlen(b));
   const nn = (p) => { if (p === 0) panic("zen: panic: null pointer deref\n"); return p; };
   const addr = (x) => x;               // JS objects are references; scalar aliasing is DEFERRED (boxed refs)
-  const i32 = (x) => x | 0;
-  const i64 = (x) => Math.trunc(x);
+  const i32 = (x) => typeof x === "bigint" ? Number(BigInt.asIntN(32, x)) : x | 0;
+  const i64 = (x) => typeof x === "bigint" ? Number(BigInt.asIntN(64, x)) : Math.trunc(x);
   const sizeof = (_name) => 8;         // element sizes unused on the print path; DEFERRED for typed slices
-  const div = (a, b) => { if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
-  const mod = (a, b) => { if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
+  // u64 reinterpretation: a JS `number` can't hold the top of the u64 range (values >= 2^63 wrapped to
+  // a NEGATIVE i64 in the AST, and anything > 2^53 loses precision), so reinterpret the 64-bit pattern
+  // as UNSIGNED and promote to BigInt only when it no longer fits exactly in a `number`. Small u64s stay
+  // `number` (so ordinary arithmetic with number literals keeps working); huge ones become BigInt so
+  // they print exactly. u64 values enter through the type-driven param normalization genjs emits.
+  const U64_SAFE = 9007199254740991n;  // 2^53 - 1
+  const u64 = (x) => { const b = BigInt.asUintN(64, typeof x === "bigint" ? x : BigInt(Math.trunc(x))); return b <= U64_SAFE ? Number(b) : b; };
+  // div/mod stay integer-guarded (div-by-zero panics), but tolerate a BigInt operand (a wide u64): the
+  // BigInt path never truncates or guards floats — float `/` is emitted natively by genjs, not here.
+  const div = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = BigInt(b); if (bb === 0n) panic("zen: panic: integer divide by zero\n"); return u64(BigInt(a) / bb); } if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
+  const mod = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = BigInt(b); if (bb === 0n) panic("zen: panic: integer modulo by zero\n"); return u64(BigInt(a) % bb); } if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
   const panic = (m) => { const s = typeof m === "number" ? decode(m, strlen(m)) : String(m); process.stderr.write(s); throw new Error("zen panic"); };
 
   // fd 1 = stdout, 2 = stderr; ptr is a MEM offset (or, for a JS-array slice, ignored).
@@ -57,7 +72,7 @@ const __zr = (() => {
   };
 
   return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64,
-           slice, view, eq, nn, addr, i32, i64, sizeof, div, mod, panic, write };
+           slice, view, idx, setidx, eq, nn, addr, i32, i64, u64, sizeof, div, mod, panic, write };
 })();
 
 // ── libc leaves referenced by name from emitted code. The print path needs only write/strlen; the
