@@ -810,6 +810,15 @@ exhaustive_err = (env: Env, m: MatchData) i32 {
     vs := env.decls.enum_variants(m.ename)
     (vs.len == 0).match ({ true => 0, false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }) })
 }
+// the NAME of the first declared variant the arms do not cover (unguarded), else "" — the uncovered
+// variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
+first_missing_variant = (variants: [VariantDef], arms: [ArmData]) str {
+    r := ""
+    variants.loop((h, i, v) {
+        r = (is_empty(r) && arms.arm_covers(v.name) == false).match ({ true => v.name, false => r })
+    })
+    r
+}
 // A later same-variant arm is a duplicate only when an EARLIER arm of that variant is UNGUARDED — an
 // unguarded arm already covers the variant, so anything after it is dead. Two guarded `.Some` arms (or a
 // guarded `.Some` followed by an unguarded `.Some`) are legitimate: the earlier guard may fall through.
@@ -2237,6 +2246,7 @@ KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS ent
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
 KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
 KGUARDTYPE = () i32 { 37 }    // a match-arm `if <guard>` whose guard expression is not a bool (33-36 are the custom channels, so 37 is the next free packed code)
+KMETHODNOTFOUND = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -2465,11 +2475,15 @@ diag_info = (code: i32) DiagInfo {
         kind: "guard-type",
         message: "match arm guard must be a bool",
         hint: "make the `if` guard a boolean expression (e.g. a comparison); the arm is taken only when its pattern matches AND the guard is true",
+    ), false => (code == 38).match ({ true => DiagInfo(
+        kind: "method-not-found",
+        message: "no method with this name on the receiver type",
+        hint: "define the method (a top-level `fn` whose first parameter is the receiver, called `recv.method(...)`), or check the method name",
     ), false => DiagInfo(
         kind: "type",
         message: "type error",
         hint: "",
-    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
 }
 diagnostic_kind_name = (code: i32) str { code.diag_info().kind }
 diagnostic_message = (code: i32) str { code.diag_info().message }
@@ -2697,7 +2711,19 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({ true => f.is_imported_generic().match ({ true => 0, false => env.kv_arg_type_kind(f.tparams, ps, c.args) }), false => KARITY() })
 }
-kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({ true => KTRAITBOUND(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
+// an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
+// first argument whose inferred type is a DECLARED struct/enum (a genuine concrete receiver). A
+// numeric/str/unknown first arg or a zero-arg call stays a plain undefined name. An AMBIGUOUS UFCS
+// call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
+// specific `ambiguous method` enrichment still fires — this is a NO-method case only.
+undef_is_method = (env: Env, c: CallData) bool {
+    (c.args.len == 0).match ({ true => false, false => {
+        rty := env.infer_expr(c.args[0].addr())
+        tn := rty.recv_name()
+        (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({ true => false, false => env.alias_ufcs_candidates(c.fn, rty).count < 2 })
+    } })
+}
+kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({ true => KTRAITBOUND(), false => env.undef_is_method(c).match ({ true => KMETHODNOTFOUND(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
@@ -2996,20 +3022,61 @@ denrich_ambiguous_msg = (env: Env, c: CallData) str {
     s = s.gstr_append(a, " - call it qualified, e.g. `").denrich_dotted(a, cs.first, 0).gstr_append(a, "(recv, ...)`")
     s.gstr_finish(a)
 }
+// ── integer-in-message helper: append a non-negative i64's decimal digits to a String (mirrors dnum) ──
+di_digit = (d: i64) u8 { load(offset("0123456789", d)) }
+gstr_i64 = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({ true => s.gstr_push(a, di_digit(n)), false => {
+        hs := s.gstr_i64(a, n / 10)
+        hs.gstr_push(a, di_digit(n % 10))
+    } })
+}
+// ── arity enrichment: name the expected vs the supplied argument count ─────────────────────────
+// The declared count comes from the callee (a known local fn's params, an intrinsic's fixed arity, or
+// an FnT value's parameter list); -1 = a callee whose arity we can't state here, so keep the generic
+// message. `found` is always the call site's argument count.
+fnt_arity_of = (t: Ty) i64 {
+    t.match ({
+        .FnT(ft) => ft.params.len,
+        _        => 0 - 1,
+    })
+}
+denrich_arity_msg = (env: Env, c: CallData) str {
+    a := env.a
+    exp := env.env_known_fn(c.fn).match ({ true => env.env_params(c.fn).len, false => c.fn.is_intrinsic().match ({ true => to_i64(c.fn.intrinsic_arity()), false => env.var_or_global(c.fn).fnt_arity_of() }) })
+    (exp < 0).match ({ true => "", false => a.gstr_string(64).gstr_append(a, "wrong number of arguments: expected ").gstr_i64(a, exp).gstr_append(a, ", found ").gstr_i64(a, c.args.len).gstr_finish(a) })
+}
+// ── exhaustiveness enrichment: name a variant the match fails to cover ─────────────────────────
+denrich_exhaust_msg = (env: Env, m: MatchData) str {
+    vs := env.decls.enum_variants(m.ename)
+    miss := vs.first_missing_variant(m.arms)
+    is_empty(miss).match ({ true => "", false => env.a.gstr_string(80).gstr_append(env.a, "match does not cover variant `.").gstr_append(env.a, miss).gstr_append(env.a, "`").gstr_finish(env.a) })
+}
+// ── method-not-found enrichment: an undefined call whose first argument is a concrete struct/enum ──
+// receiver reads as a `recv.method()` UFCS call with no such method; name the receiver type + method,
+// phrased so it is true whether it was written `recv.method()` or `method(recv)`.
+denrich_undef_method_msg = (env: Env, c: CallData) str {
+    (c.args.len == 0).match ({ true => {
+        return ""
+    } })
+    a := env.a
+    tn := env.infer_expr(c.args[0].addr()).recv_name()
+    (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({ true => "", false => a.gstr_string(112).gstr_append(a, "no method `").gstr_append(a, c.fn).gstr_append(a, "` on type `").gstr_append(a, tn).gstr_append(a, "`, and no function `").gstr_append(a, c.fn).gstr_append(a, "` is in scope").gstr_finish(a) })
+}
 denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) str {
     load(e).match ({
         .Bin(b)         => (code == KOPERAND() && b.pos.pos_or(load(b.lhs).expr_pos()) == off).match ({ true => env.denrich_operand_msg(b), false => desc_or(a.denrich_expr(env, b.lhs, off, code), a.denrich_expr(env, b.rhs, off, code)) }),
         .Member(m)      => (code == KSTRUCTFIELD() && m.pos.pos_or(load(m.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(m.field, env.infer_expr(m.obj)), false => a.denrich_expr(env, m.obj, off, code) }),
         .Arrow(ar)      => (code == KSTRUCTFIELD() && ar.pos.pos_or(load(ar.obj).expr_pos()) == off).match ({ true => env.denrich_member_msg(ar.field, env.infer_expr(ar.obj)), false => a.denrich_expr(env, ar.obj, off, code) }),
         .MakeStruct(sd) => (code == KSTRUCTFIELD() && sd.pos.pos_or((sd.inits.len == 0).match ({ true => 0, false => load(sd.inits[0].value).expr_pos() })) == off).match ({ true => env.denrich_makestruct_msg(sd), false => a.denrich_inits(env, sd.inits, off, code) }),
-        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KUNDEFINED() && c.pos == off).match ({ true => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KARGTYPE()).match ({ true => desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }) }) }),
+        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({ true => env.denrich_notcallable_msg(c.fn), false => (code == KMETHODNOTFOUND() && c.pos == off).match ({ true => env.denrich_undef_method_msg(c), false => (code == KARITY() && c.pos == off).match ({ true => env.denrich_arity_msg(c), false => (code == KTRAITBOUND() && c.pos == off).match ({ true => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KUNDEFINED() && c.pos == off).match ({ true => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)), false => (code == KARGTYPE()).match ({ true => desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code)), false => a.denrich_args(env, c.args, off, code) }) }) }) }) }) }),
         .SliceLit(sd)   => a.denrich_args(env, sd.items, off, code),
         .Index(ix)      => desc_or(a.denrich_expr(env, ix.seq, off, code), a.denrich_expr(env, ix.idx, off, code)),
         .Cond(d)        => desc_or(a.denrich_expr(env, d.c, off, code), desc_or(a.denrich_expr(env, d.t, off, code), a.denrich_expr(env, d.e, off, code))),
         .MakeEnum(mk)   => a.denrich_expr(env, mk.payload, off, code),
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
-            desc_or(a.denrich_expr(env, m.subj, off, code), a.denrich_arms(env, subjty, m.arms, off, code))
+            sp := load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos())
+            desc_or((code == KEXHAUST() && sp == off).match ({ true => env.denrich_exhaust_msg(m), false => "" }), desc_or(a.denrich_expr(env, m.subj, off, code), a.denrich_arms(env, subjty, m.arms, off, code)))
         },
         .Block(b)       => a.denrich_body(env, b.stmts, off, code),
         .Loop(l)        => desc_or(a.denrich_expr(env, l.seq, off, code), a.denrich_body(a.loop_env(env, l), l.body, off, code)),
@@ -3088,7 +3155,7 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) str {
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
 // dup-fn/undefined-name error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) str {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED() && code != KARGTYPE() && code != KRETURNFIT() && code != KASSIGNFIT()).match ({ true => {
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED() && code != KARGTYPE() && code != KRETURNFIT() && code != KASSIGNFIT() && code != KARITY() && code != KEXHAUST() && code != KMETHODNOTFOUND()).match ({ true => {
         return ""
     } })
     (code == KDUPFN()).match ({ true => {
@@ -3842,24 +3909,27 @@ ut_unknown_tys = (env: Env, tparams: [Param], ts: [Ty]) i32 {
     })
     acc
 }
-ut_params_kind = (env: Env, tparams: [Param], ps: [Param]) i32 {
+// Params/fields/payloads/return carry no per-type source position (a `Ty` node has none), so anchor
+// their unknown-type caret on the enclosing declaration's name offset (`pos`) — always located, even
+// though it points at the decl name rather than the bare type token.
+ut_params_kind = (env: Env, tparams: [Param], ps: [Param], pos: i32) i32 {
     acc := 0
     ps.loop((h, i, p) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()))
+        acc = acc.kv_kor(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
-ut_fields_kind = (env: Env, tparams: [Param], fs: [Field]) i32 {
+ut_fields_kind = (env: Env, tparams: [Param], fs: [Field], pos: i32) i32 {
     acc := 0
     fs.loop((h, i, f) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()))
+        acc = acc.kv_kor(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
-ut_payloads_kind = (env: Env, tparams: [Param], vs: [VariantDef]) i32 {
+ut_payloads_kind = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32 {
     acc := 0
     vs.loop((h, i, v) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()))
+        acc = acc.kv_kor(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
@@ -3883,7 +3953,7 @@ ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32
     })
 }
 // a LOCAL `let` annotation (`x: T := e`); tvoid means unannotated, so nothing to check.
-ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 { l.ty.is_void_ty().match ({ true => 0, false => env.ut_unknown_ty(tparams, l.ty).kv_one(KUNKNOWNTYPE()).kv_at(load(l.value).expr_pos()) }) }
+ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 { l.ty.is_void_ty().match ({ true => 0, false => env.ut_unknown_ty(tparams, l.ty).kv_one(KUNKNOWNTYPE()).kv_at(l.pos.pos_or(load(l.value).expr_pos())) }) }
 ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.ut_let_kind(env, tparams, l).kv_kor(a.ut_expr_kind(env, tparams, l.value)),
@@ -3902,7 +3972,7 @@ ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32
     })
     acc
 }
-ut_func_kind = (a: MutPtr<Malloc>, env: Env, f: Func) i32 { env.ut_params_kind(f.tparams, f.params).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE())).kv_kor(a.ut_body_kind(env, f.tparams, f.body)) }
+ut_func_kind = (a: MutPtr<Malloc>, env: Env, f: Func) i32 { env.ut_params_kind(f.tparams, f.params, f.pos).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()).kv_at(f.pos)).kv_kor(a.ut_body_kind(env, f.tparams, f.body)) }
 check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
     env := Env(
@@ -3917,18 +3987,135 @@ check_module_unknown_type_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         acc = acc.kv_kor(d.match ({
             .DFunc(f)      => a.ut_func_kind(env, f),
             .DForeign(f)   => a.ut_func_kind(env, f),
-            .DStruct(sd)   => env.ut_fields_kind(cv_no_params(), sd.fields),
-            .DEnum(ed)     => env.ut_payloads_kind(cv_no_params(), ed.variants),
-            .DGenStruct(g) => env.ut_fields_kind(g.tparams, g.fields),
-            .DGenEnum(g)   => env.ut_payloads_kind(g.tparams, g.variants),
+            .DStruct(sd)   => env.ut_fields_kind(cv_no_params(), sd.fields, sd.pos),
+            .DEnum(ed)     => env.ut_payloads_kind(cv_no_params(), ed.variants, ed.pos),
+            .DGenStruct(g) => env.ut_fields_kind(g.tparams, g.fields, g.pos),
+            .DGenEnum(g)   => env.ut_payloads_kind(g.tparams, g.variants, g.pos),
             _              => 0,
         }))
     })
     acc
 }
+// ── unknown-type NAME walk: the offending type's NAME, in the SAME traversal order as the kind walk ──
+// A `Ty` carries no source position, so the reported caret anchors on the enclosing declaration; this
+// parallel walk recovers the actual bad type name for the message. It mirrors the kind walk exactly
+// (structure + order) and takes the first non-empty via desc_or, so the name it returns is the SAME
+// unknown type the kind walk positioned on.
+utn_ty = (env: Env, tparams: [Param], t: Ty) str {
+    t.match ({
+        .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({ true => "", false => n }),
+        .Generic(g) => env.env_named_declared(g.name).match ({ true => env.utn_tys(tparams, g.args), false => g.name }),
+        .Ptr(pd)    => env.utn_ty(tparams, load(pd.pointee)),
+        .Slice(e)   => env.utn_ty(tparams, load(e)),
+        _           => "",
+    })
+}
+utn_tys = (env: Env, tparams: [Param], ts: [Ty]) str {
+    r := ""
+    ts.loop((h, i, t) {
+        r = desc_or(r, env.utn_ty(tparams, t))
+    })
+    r
+}
+utn_params = (env: Env, tparams: [Param], ps: [Param]) str {
+    r := ""
+    ps.loop((h, i, p) {
+        r = desc_or(r, env.utn_ty(tparams, p.ty))
+    })
+    r
+}
+utn_fields = (env: Env, tparams: [Param], fs: [Field]) str {
+    r := ""
+    fs.loop((h, i, f) {
+        r = desc_or(r, env.utn_ty(tparams, f.ty))
+    })
+    r
+}
+utn_payloads = (env: Env, tparams: [Param], vs: [VariantDef]) str {
+    r := ""
+    vs.loop((h, i, v) {
+        r = desc_or(r, env.utn_ty(tparams, v.payload))
+    })
+    r
+}
+utn_arms = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) str {
+    r := ""
+    arms.loop((h, i, ar) {
+        r = desc_or(r, a.utn_expr(env, tparams, ar.body))
+    })
+    r
+}
+utn_expr = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) str {
+    load(e).match ({
+        .Block(b) => a.utn_body(env, tparams, b.stmts),
+        .Loop(l)  => a.utn_body(env, tparams, l.body),
+        .Match(m) => a.utn_arms(env, tparams, m.arms),
+        .Cond(d)  => desc_or(a.utn_expr(env, tparams, d.t), a.utn_expr(env, tparams, d.e)),
+        _         => "",
+    })
+}
+utn_let = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) str { l.ty.is_void_ty().match ({ true => "", false => env.utn_ty(tparams, l.ty) }) }
+utn_stmt = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) str {
+    st.match ({
+        .Let(l)      => desc_or(a.utn_let(env, tparams, l), a.utn_expr(env, tparams, l.value)),
+        .Assign(x)   => a.utn_expr(env, tparams, x.value),
+        .Return(r)   => a.utn_expr(env, tparams, r),
+        .ExprStmt(e) => a.utn_expr(env, tparams, e),
+        .If(f)       => desc_or(a.utn_expr(env, tparams, f.c), desc_or(a.utn_body(env, tparams, f.then), a.utn_body(env, tparams, f.els))),
+        .While(w)    => desc_or(a.utn_expr(env, tparams, w.c), a.utn_body(env, tparams, w.body)),
+        .IndexSet(x) => a.utn_expr(env, tparams, x.value),
+    })
+}
+utn_body = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) str {
+    r := ""
+    body.loop((h, i, st) {
+        r = desc_or(r, a.utn_stmt(env, tparams, st))
+    })
+    r
+}
+utn_func = (a: MutPtr<Malloc>, env: Env, f: Func) str { desc_or(env.utn_params(f.tparams, f.params), desc_or(env.utn_ty(f.tparams, f.ret), a.utn_body(env, f.tparams, f.body))) }
+check_module_unknown_type_name = (a: MutPtr<Malloc>, decls: [Decl]) str {
+    idx := a.build_decl_index(decls)
+    env := Env(
+        vars: a.params_env(cv_no_params()),
+        decls: decls,
+        didx: idx,
+        exp: tvoid(),
+        a: a,
+    )
+    r := ""
+    decls.loop((h, i, d) {
+        r = desc_or(r, d.match ({
+            .DFunc(f)      => a.utn_func(env, f),
+            .DForeign(f)   => a.utn_func(env, f),
+            .DStruct(sd)   => env.utn_fields(cv_no_params(), sd.fields),
+            .DEnum(ed)     => env.utn_payloads(cv_no_params(), ed.variants),
+            .DGenStruct(g) => env.utn_fields(g.tparams, g.fields),
+            .DGenEnum(g)   => env.utn_payloads(g.tparams, g.variants),
+            _              => "",
+        }))
+    })
+    r
+}
+// the unknown-type message NAMING the offending type (`unknown type name `Widget``), else the generic
+// ladder message when the name walk found nothing (should not happen when the kind walk fired).
+unknown_type_message = (a: MutPtr<Malloc>, nm: str) str { a.gstr_string(48).gstr_append(a, "unknown type name `").gstr_append(a, nm).gstr_append(a, "`").gstr_finish(a) }
 check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_unknown_type_kind(decls)
-    (packed == 0).match ({ true => check_diagnostic_none(), false => src.check_diagnostic_from_source(packed, 1) })
+    (packed == 0).match ({ true => {
+        return check_diagnostic_none()
+    } })
+    d := src.check_diagnostic_from_source(packed, 1)
+    nm := a.check_module_unknown_type_name(decls)
+    is_empty(nm).match ({ true => d, false => CheckDiagnostic(
+        code: d.code,
+        kind: d.kind,
+        source_offset: d.source_offset,
+        span_width: d.span_width,
+        count: d.count,
+        message: a.unknown_type_message(nm),
+        hint: d.hint,
+    ) })
 }
 // ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
 // A by-value field/payload whose type is the enclosing type — directly (`Node: { next: Node }`,
