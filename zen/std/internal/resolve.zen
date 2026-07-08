@@ -2024,6 +2024,185 @@ shadow_flat = (a: MutPtr<Malloc>, pre: str, mainsrc: str, lo: i64, hi: i64, enab
         bodyend: hi,
     ) })
 }
+// ── MODULE-ALIAS NAME-COLLISION ATTRIBUTION (#66a) ───────────────────────────────────────────────
+// A module alias `alias = std.x.y` flattens y's value decls under an `alias__` prefix, INCLUDING the
+// method bodies of any type y defines whose method names also exist as top-level fns in y (e.g.
+// std.text.string's `String.free_in` alongside the top-level allocator-side `free_in`). When ANOTHER
+// module in the closure imports y UNQUALIFIED (`{ String } = std.text.string`), a second, un-prefixed
+// copy of y's top-level fns is spliced in — but that copy carries NO struct-method definitions, so a
+// bare `x.free_in(...)` call there misresolves to the swapped-arg top-level fn. The type error then
+// surfaces deep inside the stdlib module with zero attribution to the user's alias line. This detects
+// exactly that shape at resolve time and reports it AT THE USER'S IMPORT LINE with the fix. It is
+// deliberately narrow: it fires only when (1) the user aliases a module that (2) has a name defined
+// both top-level AND as a type method (the "split-name" shape), and (3) that module is ALSO imported
+// unqualified somewhere in the closure — the exact conjunction that produces the divergent copies.
+// Programs that alias non-split modules, or split modules that are never also imported bare, are
+// unaffected (no false rejections).
+res_line_of = (src: str, off: i32) i32 {
+    no := 1
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii >= off).match ({ true => {
+            h.break
+        }, false => (b == '\n').match ({ true => {
+            no = no + 1
+        }, false => { } }) })
+    })
+    no
+}
+res_col_of = (src: str, off: i32) i32 {
+    ls := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii >= off).match ({ true => {
+            h.break
+        }, false => (b == '\n').match ({ true => {
+            ls = ii + 1
+        }, false => { } }) })
+    })
+    off - ls + 1
+}
+res_udec = (out: String, a: MutPtr<Malloc>, n: i32) String { (n < 10).match ({ true => out.gstr_push(a, ('0'.to_i64() + to_i64(n)).to_u8()), false => out.res_udec(a, n / 10).gstr_push(a, ('0'.to_i64() + to_i64(n % 10)).to_u8()) }) }
+// index just past the matching `>` of a `<...>` generic list starting at `p` (the `<`). Method decl
+// headers carry only flat lists (`<A>`, `<A, B>`), so a scan to the first `>` is exact.
+skip_to_gt = (s: str, p: i32) i32 { (s.at(p) == 0 || s.at(p) == '>').match ({ true => p + 1, false => s.skip_to_gt(p + 1) }) }
+after_generics = (s: str, j: i32) i32 { (s.at(j) == '<').match ({ true => s.skip_to_gt(j + 1), false => j }) }
+// is the text at name-end `ie` the head of a fn decl — `<...>? *? = (` ?
+is_fn_decl_after = (s: str, ie: i32) bool {
+    j0 := s.after_generics(ie)
+    j := (s.at(j0) == '*').match ({ true => j0 + 1, false => j0 })
+    (s.at(j) == ' ').match ({ true => s.at(j + 1) == '=' && s.at(j + 2) == ' ' && s.at(j + 3) == '(', false => s.at(j) == '=' && s.at(j + 1) == ' ' && s.at(j + 2) == '(' })
+}
+// Newline-separated set of INDENTED fn-decl names in `src` that also appear in `topnames` (the
+// module's top-level value decls) — i.e. every type method whose name shadows a top-level fn. Empty
+// String if the module has no such split name (the common case; then no collision is possible).
+split_names = (a: MutPtr<Malloc>, src: str, topnames: String) String {
+    out := a.gstr_string(64)
+    pos := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
+            h.break
+        }, false => {
+            ls := src.lstrip(pos)
+            (ls > pos && src.at(ls).is_alpha()).match ({ true => {
+                ie := src.res_ident_end(ls)
+                src.is_fn_decl_after(ie).match ({ true => {
+                    nm := a.mimport_name_span(src, ls, ie)
+                    topnames.seen_name(nm).match ({ true => {
+                        out = a.madd_name(out, nm)
+                    }, false => { } })
+                }, false => { } })
+            }, false => { } })
+            pos = src.next_line(pos)
+        } }) })
+    })
+    out
+}
+// The first `.<name>(` method-call in `src` whose `name` is one of `names` — i.e. a call that WOULD
+// misresolve once the aliased module's matching method has been prefixed away. Empty String if none.
+has_method_call_of = (a: MutPtr<Malloc>, src: str, names: String) String {
+    out := a.gstr_string(16)
+    pos := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
+            h.break
+        }, false => {
+            (b == '.' && src.at(ii + 1).is_alpha()).match ({ true => {
+                ie := src.res_ident_end(ii + 1)
+                (src.at(ie) == '(').match ({ true => {
+                    nm := a.mimport_name_span(src, ii + 1, ie)
+                    names.seen_name(nm).match ({ true => {
+                        out = nm
+                        h.break
+                    }, false => { } })
+                }, false => { } })
+            }, false => { } })
+            pos = ii + 1
+        } }) })
+    })
+    out
+}
+AliasCollision: {
+    name: String,
+    importer: str,
+    found: bool,
+}
+// Scan every module in the closure EXCEPT the aliased module itself for a `.<split>(` call: that is
+// the site that will misresolve to the swapped-arg top-level fn once the alias prefixes the method.
+find_split_call_site = (a: MutPtr<Malloc>, table: ModuleTable, modid: str, splits: String) AliasCollision {
+    res := AliasCollision(
+        name: a.gstr_string(1),
+        importer: "",
+        found: false,
+    )
+    table.modules.loop((h, i, m) {
+        skip := res.found.match ({ true => true, false => eq(m.id, modid) })
+        skip.match ({ true => { }, false => {
+            called := a.has_method_call_of(m.source, splits)
+            (called.len > 0).match ({ true => {
+                res = AliasCollision(
+                    name: called,
+                    importer: m.id,
+                    found: true,
+                )
+            }, false => { } })
+        } })
+    })
+    res
+}
+mappend_id_str_dotted = (a: MutPtr<Malloc>, out: String, id: str) String {
+    cur := out
+    bs: [u8] := id.view()
+    bs.loop((h, i, b) {
+        cur = (b == '/').match ({ true => cur.gstr_push(a, '.'), false => cur.gstr_push(a, b) })
+    })
+    cur
+}
+fail_alias_collision = (a: MutPtr<Malloc>, inpath: str, mainsrc: str, edge: ImportEdge, split: String, importer: str) i32 {
+    line := mainsrc.res_line_of(edge.start)
+    col := mainsrc.res_col_of(edge.start)
+    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[import-collision]: module alias `")
+    m1 := m0.gstr_append(a, edge.alias).gstr_append(a, " = ")
+    m2 := a.mappend_id_str_dotted(m1, edge.module).gstr_append(a, "` collides in the flat namespace")
+    l1 := m2.gstr_push(a, 10)
+    // detail: which other module pulls the same names in unqualified, and the shared name that breaks
+    d0 := l1.gstr_append(a, "  `")
+    d1 := a.mappend_id_str_dotted(d0, edge.module).gstr_append(a, "` is also imported unqualified by `")
+    d2 := eq(importer, "").match ({ true => d1.gstr_append(a, "your program"), false => a.mappend_id_str_dotted(d1, importer) })
+    d3 := d2.gstr_append(a, "`, and its method `")
+    d4 := a.mappend_string(d3, split).gstr_append(a, "` shares a name with a top-level function; the alias renames the method (to `")
+    d5 := d4.gstr_append(a, edge.alias).gstr_append(a, "__")
+    d6 := a.mappend_string(d5, split).gstr_append(a, "`), so `.")
+    d7 := a.mappend_string(d6, split).gstr_append(a, "(...)` calls elsewhere no longer resolve")
+    l2 := d7.gstr_push(a, 10)
+    // actionable fix
+    h0 := l2.gstr_append(a, "hint: replace the module alias with a selective import — e.g. `{ ... } = ")
+    h1 := a.mappend_id_str_dotted(h0, edge.module).gstr_append(a, "` — or qualify the conflicting usage")
+    eprint(h1.gstr_push(a, 10).gstr_finish(a))
+    exit(1)
+    0
+}
+check_alias_collisions = (a: MutPtr<Malloc>, table: ModuleTable, graph: ModuleGraph, mainsrc: str, inpath: str) i32 {
+    graph.imports.loop((h, i, edge) {
+        edge.namespace.match ({ true => {
+            entry := table.module(edge.module)
+            splits := a.split_names(entry.source, entry.graph.value_decl_names_in(a))
+            (splits.len > 0).match ({ true => {
+                col := a.find_split_call_site(table, edge.module, splits)
+                col.found.match ({ true => {
+                    a.fail_alias_collision(inpath, mainsrc, edge, col.name, col.importer)
+                }, false => { } })
+            }, false => { } })
+        }, false => { } })
+    })
+    0
+}
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str, mainsrc: str) ResolvedProgram {
@@ -2032,6 +2211,7 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: str, progdir: str, inpath: str
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
+    inpath.internal_source_path().match ({ true => 0, false => a.check_alias_collisions(table, graph, mainsrc, inpath) })
     ns := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
     nsl := ns.c.out.len
     body := ns.c.out.strip_ns_into(a, mainsrc, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, ns.c.out.len == 0)
