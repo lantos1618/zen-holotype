@@ -6,6 +6,7 @@
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
 { contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
+{ or } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
 { open, read, write, close, system, unlink, getpid } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_expr
@@ -19,8 +20,8 @@
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists } = std.internal.resolve
 say = (s: str) i64 {
-    out(s)
-    out("\n")
+    out(s).or(0)
+    out("\n").or(0)
 }
 derr = (s: str) i64 {
     v := s.view()
@@ -559,7 +560,7 @@ mod_path = (mp: MutPtr<Malloc>, root: str, mod: str) str {
 }
 doc_has_star = (v: [u8], i: i64, t: i64) bool { (i >= t).match ({ true => false, false => (v[i] == '*').match ({ true => true, false => (v[i] == '=' || v[i] == ':').match ({ true => false, false => v.doc_has_star(i + 1, t) }) }) }) }
 doc_is_pub = (v: [u8], p: i64, t: i64) bool { (p >= t).match ({ true => false, false => is_name_start(v[p]) && v.doc_has_star(p, t) }) }
-out_range = (v: [u8], p: i64, t: i64) i64 { out_bytes(slice(v.ptr.offset(p), t - p)) }
+out_range = (v: [u8], p: i64, t: i64) i64 { out_bytes(slice(v.ptr.offset(p), t - p)).or(0) }
 doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
     (t - p >= 2 && v[p] == '/' && v[p + 1] == '/').match ({ true => {
         s := (p + 2 < t && v[p + 2] == ' ').match ({ true => p + 3, false => p + 2 })

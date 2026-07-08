@@ -13,7 +13,7 @@
 // already defines `read_file*`), oracle_lib, or the other category files.
 { VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd } = oracle_lib
 { Malloc } = std.mem.alloc
-{ out, save, contents_in, shell } = std.io.file
+{ out, out_bytes, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
@@ -480,6 +480,18 @@ om_shell_code = (cmd: str) i32 {
         .Err(e) => 0 - 1,
     })
 }
+// out/out_bytes are the low-level stdout write funnel; they now return Result<i64, IoError> (a
+// write-all loop) instead of swallowing a short/failed write(2). This asserts the NEW contract in
+// process: writing the 3-byte "hi\n" MATCHES as `.Ok(3)` — adversarial, since a wrong count or an
+// `.Err` fails the bool. The 3 bytes land on the oracle's own stdout (same sink as the progress
+// dots). (println/print stay best-effort and keep their i64 signatures — exercised by every other
+// value case that prints via fmt.)
+om_out_bytes_ok = () bool {
+    out_bytes(view("hi\n")).match ({
+        .Ok(n)  => n == 3,
+        .Err(e) => false,
+    })
+}
 oracle_misc_iofile = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -487,7 +499,7 @@ oracle_misc_iofile = () i32 {
         .Ok(n)  => n == 5,
         .Err(e) => false,
     })
-    run_suite("io.file (save close-check + shell decoded status)", [saved, om_shell_code("exit 0") == 0, om_shell_code("exit 3") == 3, om_shell_code("exit 42") == 42, om_shell_code("this_is_not_a_real_command_zqx 2>/dev/null") == 127, om_shell_code("kill -9 $$") == 137])
+    run_suite("io.file (save close-check + shell decoded status + out_bytes Result)", [saved, om_out_bytes_ok(), om_shell_code("exit 0") == 0, om_shell_code("exit 3") == 3, om_shell_code("exit 42") == 42, om_shell_code("this_is_not_a_real_command_zqx 2>/dev/null") == 127, om_shell_code("kill -9 $$") == 137])
 }
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 oracle_misc_run* = () i32 {
