@@ -485,10 +485,11 @@ AHMap*<K, V>: {
         w.inner.free(ra.addr())
     }
 }
-// a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
-// annotation: `e: AHMap<str, i64> := hmap.new()`. The ambient rt is captured HERE and stored.
-new*<K, V> = () AHMap<K, V> {
-    r := current()
+// EXPLICIT-rt constructor — THE REAL CONSTRUCTION PATH. Build a zero-entry `AHMap<K, V>` bound to a
+// caller-supplied `Rt`, with NO ambient draw (docs/runtime-design.md: explicit capability threading is
+// the model). The ambient `new()` below is a one-line shim — the single `current()` read on the hmap
+// construction path.
+new_in*<K, V> = (r: Rt) AHMap<K, V> {
     ra := RtAlloc(r: r)
     ir: Result<HMap<K, V>, IoError> := empty(ra.addr())
     AHMap<K, V>(
@@ -496,12 +497,15 @@ new*<K, V> = () AHMap<K, V> {
         rt: r,
     )
 }
-// an ambient `AHMap<K, V>` seeded with one pair (mirrors `HMap.of`'s shape — there is no pair-slice
-// literal, so `from` takes the pair directly). K/V are inferred from the seed, so this CHAINS:
-// `m := hmap.from(k, v)`. Fail-fast on OOM. (Named `from`, not `of`, since module `of` is the explicit
-// allocator-threaded seed constructor.)
-from*<K, V> = (k: K, v: V) AHMap<K, V> {
-    r := current()
+// a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
+// annotation: `e: AHMap<str, i64> := hmap.new()`. The ambient rt is drawn ONCE here and stored.
+new*<K, V> = () AHMap<K, V> {
+    m: AHMap<K, V> := new_in(current())
+    m
+}
+// EXPLICIT-rt seed constructor: an `AHMap<K, V>` bound to `r`, seeded with one pair. No ambient draw.
+// (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
+from_in*<K, V> = (r: Rt, k: K, v: V) AHMap<K, V> {
     ra := RtAlloc(r: r)
     ih: HMap<K, V> := of(ra.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
@@ -509,3 +513,7 @@ from*<K, V> = (k: K, v: V) AHMap<K, V> {
         rt: r,
     )
 }
+// an ambient `AHMap<K, V>` seeded with one pair. Thin shim: draw the current rt once, delegate. K/V are
+// inferred from the seed, so this CHAINS: `m := hmap.from(k, v)`. (Named `from`, not `of`, since module
+// `of` is the explicit allocator-threaded seed constructor.)
+from*<K, V> = (k: K, v: V) AHMap<K, V> { from_in(current(), k, v) }

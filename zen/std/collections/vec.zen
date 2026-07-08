@@ -288,24 +288,32 @@ AVec*<T>: {
         w.inner.free(ra.addr())
     }
 }
-// a zero-element ambient `AVec<T>` (capacity for one, like `empty`). T can't be inferred from an
-// argument, so it comes from the LHS annotation: `v: AVec<i32> := vec.new()`. The ambient rt is
-// captured HERE and stored for the life of the vec.
-new*<T> = () AVec<T> {
-    r := current()
+// EXPLICIT-rt constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `AVec<T>` bound to a
+// caller-supplied `Rt`, with NO ambient draw. Per the runtime reversal (docs/runtime-design.md), an
+// explicit capability handed in is the model: a caller who holds an rt (an actor's own rt, an arena
+// via `mem_rt`) calls this and the thread-local is never touched. The ambient `new()` below is a
+// one-line shim over it — the single `current()` read on the vec construction path.
+// `empty`'s T lives only in its return type; pin it via the annotation (nested-return inference can't
+// reach it through the struct-literal field). `empty` is fallible, so unwrap fail-fast here (the
+// ambient form is fail-fast on OOM by design).
+new_in*<T> = (r: Rt) AVec<T> {
     ra := RtAlloc(r: r)
-    // `empty`'s T lives only in its return type; pin it via the annotation (nested-return inference
-    // can't reach it through the struct-literal field). `empty` is now fallible, so unwrap fail-fast here
-    // (the ambient form is fail-fast on OOM by design), exactly as `set.new`/`hmap.new` do.
     ivr: Result<Vec<T>, IoError> := empty(ra.addr())
     AVec<T>(
         inner: ivr.expect("vec.new: out of memory"),
         rt: r,
     )
 }
-// an ambient `AVec<T>` seeded from a slice (copies `xs`). T inferred from the elements. Fail-fast on OOM.
-from*<T> = (xs: [T]) AVec<T> {
-    r := current()
+// a zero-element ambient `AVec<T>` (capacity for one, like `empty`). T can't be inferred from an
+// argument, so it comes from the LHS annotation: `v: AVec<i32> := vec.new()`. The ambient rt is drawn
+// ONCE here and stored for the life of the vec (all later ops use the stored rt, never `current()`).
+new*<T> = () AVec<T> {
+    v: AVec<T> := new_in(current())
+    v
+}
+// EXPLICIT-rt seed constructor: an `AVec<T>` bound to `r`, seeded from a slice (copies `xs`). No
+// ambient draw. T is inferred from the elements.
+from_in*<T> = (r: Rt, xs: [T]) AVec<T> {
     ra := RtAlloc(r: r)
     iv: Vec<T> := of(ra.addr(), xs).expect("vec.from: out of memory")
     AVec<T>(
@@ -313,3 +321,5 @@ from*<T> = (xs: [T]) AVec<T> {
         rt: r,
     )
 }
+// an ambient `AVec<T>` seeded from a slice. Thin shim: draw the current rt once, delegate. Fail-fast.
+from*<T> = (xs: [T]) AVec<T> { from_in(current(), xs) }
