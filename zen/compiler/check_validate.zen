@@ -1358,6 +1358,139 @@ send_own_var = (env: Env, e: Ptr<Expr>) str {
 // the moved owner in an actor send — the MESSAGE (last arg) of the 2-arg inline / 3-arg parallel send
 // (name-matched like the sendable + scratch passes), so the iso move-kill covers the parallel path too.
 send_consume = (env: Env, c: CallData) str { (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({ true => env.send_own_var(c.args[c.args.len - 1].addr()), false => "" }) }
+// ── INTERPROCEDURAL CONSUME (census #56) ──────────────────────────────────────────────────────────
+// The consume machinery above is INTRA-procedural: it kills an owner only when THIS function releases/
+// drops/sends it. But `o` moved into a callee whose PARAMETER is `Own<T>` and whose body CONSUMES that
+// param (release/drop/send, transitively) is a real move — the caller keeps a live alias the callee
+// frees → use-after-free / double-free. We close it with a BOUNDED per-function summary: "does fn's
+// param `pi` get consumed by fn's body?" (depth-bounded so mutual/self recursion terminates). The
+// summary is SOUND-DIRECTION (reject-more) yet zero-over-reject: it is NOT enough for a param to merely
+// BE `Own<T>` — Own's own getters (`get`/`ptr`/`count`/`val`/`clone`) take `o: Own<T>` by value and
+// must stay legal — the body must actually consume it. Borrowing (an `Own` passed to a `MutPtr<T>`/
+// `Ptr<T>` param, or to an Own param the callee only reads) does NOT consume. Only LOCAL callees are
+// analyzable; an imported/unknown callee summarizes to false (honest under-reject).
+consume_depth = () i32 { 4 }    // interprocedural hop budget; deeper transitive consumes under-reject (safe)
+// does the KNOWN local fn `fn` consume its Own-typed param at index `pi`? (bounded interprocedural)
+fn_consumes_param = (env: Env, fn: str, pi: i32, depth: i32) bool {
+    (depth <= 0).match ({ true => false, false => {
+        f := env.env_func(fn)
+        (eq(f.name, fn) && pi >= 0 && pi < f.params.len).match ({ true => env.body_consumes_name(f.body, f.params[pi].name, depth), false => false })
+    } })
+}
+// does `body` consume the local named `nm` on ANY path? (branch-may rule: a conditional consume counts)
+body_consumes_name = (env: Env, body: [Stmt], nm: str, depth: i32) bool {
+    found := false
+    body.loop((h, i, st) {
+        found = env.stmt_consumes_name(st, nm, depth).match ({ true => true, false => found })
+    })
+    found
+}
+stmt_consumes_name = (env: Env, st: Stmt, nm: str, depth: i32) bool {
+    st.match ({
+        .Let(l)      => env.expr_consumes_name(l.value, nm, depth),
+        .Assign(x)   => env.expr_consumes_name(x.value, nm, depth),
+        .Return(r)   => env.expr_consumes_name(r, nm, depth),
+        .ExprStmt(e) => env.expr_consumes_name(e, nm, depth),
+        .If(f)       => env.expr_consumes_name(f.c, nm, depth) || env.body_consumes_name(f.then, nm, depth) || env.body_consumes_name(f.els, nm, depth),
+        .While(w)    => env.expr_consumes_name(w.c, nm, depth) || env.body_consumes_name(w.body, nm, depth),
+        .IndexSet(x) => env.expr_consumes_name(x.seq, nm, depth) || env.expr_consumes_name(x.idx, nm, depth) || env.expr_consumes_name(x.value, nm, depth),
+    })
+}
+expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: str, depth: i32) bool {
+    (depth <= 0).match ({ true => false, false => load(e).match ({
+        .Call(c)      => env.call_consumes_name(c, nm, depth),
+        .Block(b)     => env.body_consumes_name(b.stmts, nm, depth),
+        .Match(m)     => env.expr_consumes_name(m.subj, nm, depth) || env.arms_consume_name(m.arms, nm, depth),
+        .Cond(d)      => env.expr_consumes_name(d.c, nm, depth) || env.expr_consumes_name(d.t, nm, depth) || env.expr_consumes_name(d.e, nm, depth),
+        .Loop(l)      => env.expr_consumes_name(l.seq, nm, depth) || env.body_consumes_name(l.body, nm, depth),
+        .MakeEnum(mk) => env.expr_consumes_name(mk.payload, nm, depth),
+        _             => false,
+    }) })
+}
+arms_consume_name = (env: Env, arms: [ArmData], nm: str, depth: i32) bool {
+    found := false
+    arms.loop((h, i, ar) {
+        found = env.expr_consumes_name(ar.body, nm, depth).match ({ true => true, false => found })
+    })
+    found
+}
+args_consume_name = (env: Env, args: [Expr], nm: str, depth: i32) bool {
+    found := false
+    args.loop((h, i, ar) {
+        found = env.expr_consumes_name(ar.addr(), nm, depth).match ({ true => true, false => found })
+    })
+    found
+}
+// does call `c` consume the local `nm`? LEAF: `nm` is the receiver of a release/drop or the moved owner
+// of a send. TRANSITIVE: `nm` is a bare-Var arg at an Own-typed param position of a callee that itself
+// consumes that param (one interprocedural hop, depth-1). Also descends nested arg exprs.
+call_consumes_name = (env: Env, c: CallData, nm: str, depth: i32) bool {
+    leaf := eq(nm, "") == false && eq(env.is_consume_method(c).match ({ true => c.recv_var_name(), false => env.send_consume(c) }), nm)
+    leaf.match ({ true => true, false => env.call_arg_consumes_name(c, nm, depth) || env.args_consume_name(c.args, nm, depth) })
+}
+// the transitive-hop check, hoisted so the loop's inner match does not nest inside call_consumes_name.
+call_arg_consumes_name = (env: Env, c: CallData, nm: str, depth: i32) bool {
+    ps := env.env_params(c.fn)
+    found := false
+    (ps.len == c.args.len).match ({ true => {
+        c.args.loop((h, i, ar) {
+            (eq(c.arg_var_name(i), nm) && eq(nm, "") == false && eq(ps[i].ty.owner_base(), "Own") && env.fn_consumes_param(c.fn, i, depth - 1)).match ({ true => {
+                found = true
+            }, false => { } })
+        })
+    }, false => { } })
+    found
+}
+// the CALL-SITE kill: for each bare-Var Own arg passed to an Own-typed, consuming param of a known
+// callee, mark that local dead (moved into the callee). Runs in own_step so both passes see the kill.
+own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, c: CallData) Ptr<DeadList> {
+    out := seen
+    ps := env.env_params(c.fn)
+    (ps.len == c.args.len).match ({ true => {
+        c.args.loop((h, i, ar) {
+            (eq(ps[i].ty.owner_base(), "Own") && eq(env.infer_expr(ar.addr()).owner_base(), "Own") && env.fn_consumes_param(c.fn, i, consume_depth())).match ({ true => {
+                nm := c.arg_var_name(i)
+                nm.is_empty().match ({ true => { }, false => {
+                    out = a.dead_kill(out, al, nm)
+                } })
+            }, false => { } })
+        })
+    }, false => { } })
+    out
+}
+// dispatch own_call_kills on the top-level call of an expr (a bare call statement / a call as a
+// let/assign value). Nested-deeper calls under-reject (out of the direct-call slice's scope).
+own_expr_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .Call(c) => a.own_call_kills(env, seen, al, c),
+        _        => seen,
+    })
+}
+own_stmt_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .ExprStmt(e) => a.own_expr_call_kills(env, seen, al, e),
+        .Let(l)      => a.own_expr_call_kills(env, seen, al, l.value),
+        .Assign(x)   => a.own_expr_call_kills(env, seen, al, x.value),
+        _            => seen,
+    })
+}
+// AFFINE COPY: `c := o` / `c = o` where `o` is `Own<T>` MOVES o — a bare struct copy does NOT bump the
+// refcount (only `.clone()` does), so both names free the ONE allocation → double-free. c becomes the
+// live owner; o's binding dies (later use of o → use-after-consume). `c := o.clone()` is a Call, not a
+// bare Var, so it is NOT a move (the legitimate two-owner path). Self-copy `o = o` moves nothing.
+own_var_move = (env: Env, e: Ptr<Expr>, tgt: str) str {
+    load(e).match ({
+        .Var(v) => (eq(env.infer_expr(e).owner_base(), "Own") && eq(v.name, tgt) == false).match ({ true => v.name, false => "" }),
+        _       => "",
+    })
+}
+own_move_src = (env: Env, st: Stmt) str {
+    st.match ({
+        .Let(l)    => env.own_var_move(l.value, l.name),
+        .Assign(x) => env.own_var_move(x.value, target_var_name(x.target)),
+        _          => "",
+    })
+}
 // the bare-Var name of arg `i` (else ""). We only track frees/escapes of SIMPLE LOCALS — a field free
 // like `a.release(m.keys)` (vec/map grow constantly do this) is deliberately NOT tracked, so the
 // stdlib does not over-reject. Field-level liveness is out of scope for v1.
@@ -1664,6 +1797,14 @@ own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>
         .ExprStmt(e) => a.own_dead_expr(env, out, al, e),
         _            => out,
     })
+    // 2c. INTERPROCEDURAL consume (census #56): an `Own<T>` local moved into an owner-typed param whose
+    //     callee CONSUMES it (release/drop/send, transitively) is dead after the call — later use → UAF.
+    out = a.own_stmt_call_kills(env, out, al, st)
+    // 2d. AFFINE COPY: `c := o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
+    mv := env.own_move_src(st)
+    mv.is_empty().match ({ false => {
+        out = a.dead_kill(out, al, mv)
+    } })
     // 3. revival — a (re)bind of a local clears its dead state (ONLY that name: an alias of it stays
     //    dead). Runs LAST so `p = a.resize(p, n)` (free old p in step 2, then rebind p here) nets to
     //    ALIVE, while `q := a.resize(p, n)` leaves p dead (q != p).
@@ -1906,7 +2047,7 @@ KCONFORMANCE = () i32 { 11 }    // a Type.impl(Trait) misses a method or its sig
 KDUPFN = () i32 { 12 }    // two top-level fns share a name (Zen has no overloading)
 KVALPOSRETURN = () i32 { 13 }    // an early (dropped) return in a value-position block arm
 KPARSE = () i32 { 14 }    // unparseable top-level input (the parser's __syntax_error sentinel)
-KOWNERSHIP = () i32 { 15 }    // use of a local owner after release/drop
+KOWNERSHIP = () i32 { 15 }    // use of a local owner after it was consumed (release/drop, send, move into an owner param, or a bare `c := o` copy)
 KTRAITBOUND = () i32 { 16 }    // a type bound to `A: Trait` at a call site does not impl Trait
 KUNKNOWNTYPE = () i32 { 17 }    // a type annotation names a type that is not declared/imported/a tparam
 KLAMBDAVALUE = () i32 { 18 }    // a lambda used as a value the inliner can't splice (stored/returned)
@@ -2059,8 +2200,8 @@ diag_info = (code: i32) DiagInfo {
         hint: "check the syntax around this top-level declaration",
     ), false => (code == 15).match ({ true => DiagInfo(
         kind: "ownership",
-        message: "use of an owner after release/drop",
-        hint: "after release/drop, bind a fresh owner instead of reusing the consumed local",
+        message: "use of an owner after it was consumed (moved, released, or dropped)",
+        hint: "an owner is consumed by release/drop, an actor send, a move into an owner-typed parameter, or a bare `c := o` copy; bind a fresh owner (`o.clone()`) instead of reusing the consumed local",
     ), false => (code == 16).match ({ true => DiagInfo(
         kind: "trait-bound",
         message: "type argument does not satisfy the trait bound",
