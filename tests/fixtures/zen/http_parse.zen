@@ -1,0 +1,71 @@
+// http_parse — deterministic test of std.http's response PARSER (no live network).
+//
+// Feeds `parse_response` several canned raw HTTP/1.1 responses and asserts the parsed status / headers
+// / body: a 200 with a Content-Length body + case-insensitive header lookup, a 404 with an empty body
+// and a false `ok()`, a multi-header response with exact + case-insensitive lookups, a chunked body that
+// must decode to its assembled payload, and two malformed inputs that must surface `.Err`. Also
+// force-compiles the live socket path (`get`) behind a statically-false guard so it is type-checked and
+// monomorphized without ever touching the network. Exit 0 iff every assertion held (`.to_exit()`).
+//
+// The canned responses are written with plain `\n` line breaks and lifted to real CRLF at runtime by
+// `crlfify` — so no CR byte ever appears as a source string literal (the formatter would canonicalise a
+// `\r` escape into a raw CR byte in the file).
+{ to_exit } = std.core.bool
+{ eq } = std.text.str
+{ some_or, expect } = std.core.result
+{ new_in, push_in, finish_in } = std.text.string
+{ gpa } = std.mem.heap
+{ parse_response, get } = std.http
+// turn every '\n' into a CRLF, so a readable `\n`-delimited canned response becomes wire-format HTTP.
+crlfify<A> = (a: MutPtr<A>, s: str) str {
+    sb := a.new_in().expect("http_parse: oom")
+    s.view().loop((h, i, b) {
+        (b == '\n').match ({ true => {
+            sb = a.push_in(sb, '\r').expect("http_parse: oom")
+            sb = a.push_in(sb, '\n').expect("http_parse: oom")
+        }, false => {
+            sb = a.push_in(sb, b).expect("http_parse: oom")
+        } })
+    })
+    a.finish_in(sb).expect("http_parse: oom")
+}
+main = () i32 {
+    h := gpa()
+    a := h.addr()
+    // (1) 200 with Content-Length body + case-insensitive header lookup.
+    c1 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 5\n\nhello")).match ({
+        .Ok(r)  => r.status == 200 && r.ok() && eq(r.body, "hello") && eq(r.header("content-type").some_or(""), "text/plain"),
+        .Err(e) => false,
+    })
+    // (2) 404, empty body, ok() false.
+    c2 := a.parse_response(a.crlfify("HTTP/1.1 404 Not Found\nContent-Length: 0\n\n")).match ({
+        .Ok(r)  => r.status == 404 && r.ok().match ({ true => false, false => true }) && eq(r.body, ""),
+        .Err(e) => false,
+    })
+    // (3) multi-header: header count, exact + case-insensitive lookups, body.
+    c3 := a.parse_response(a.crlfify("HTTP/1.1 201 Created\nServer: zen/0.1\nX-Custom: abc\nContent-Length: 2\n\nhi")).match ({
+        .Ok(r)  => r.status == 201 && r.ok() && r.headers.len == 3 && eq(r.header("X-Custom").some_or(""), "abc") && eq(r.header("server").some_or(""), "zen/0.1") && eq(r.body, "hi"),
+        .Err(e) => false,
+    })
+    // (4) malformed: no CRLFCRLF terminator -> Err.
+    c4 := a.parse_response("this is not http").match ({
+        .Ok(r)  => false,
+        .Err(e) => true,
+    })
+    // (5) chunked transfer-encoding decode -> assembled payload.
+    c5 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n5\nhello\n6\n world\n0\n\n")).match ({
+        .Ok(r)  => r.status == 200 && eq(r.body, "hello world"),
+        .Err(e) => false,
+    })
+    // (6) malformed: a colon-less header line -> Err.
+    c6 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nbadheader\n\n")).match ({
+        .Ok(r)  => false,
+        .Err(e) => true,
+    })
+    // force-compile the live socket path without touching the network (guard is statically false).
+    probe := false.match ({ true => a.get("127.0.0.1", 80, "/").match ({
+        .Ok(r)  => r.status,
+        .Err(e) => 0,
+    }), false => 0 })
+    (c1 && c2 && c3 && c4 && c5 && c6 && probe == 0).to_exit()
+}
