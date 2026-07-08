@@ -1,0 +1,306 @@
+// std.http — a minimal BLOCKING HTTP/1.1 CLIENT over std.net's raw TCP sockets.
+//
+// The census gap was "real programs want HTTP". This is the floor: HTTP/1.1, one request per
+// connection (we always send `Connection: close` and read the response to EOF), no TLS, no keep-alive,
+// no redirects, no cookies. It rides directly on std.net (`dial`/`send_str`/`recv_into`/`close_conn`);
+// concurrency, as everywhere in Zen, comes from ACTORS running these blocking calls on their own
+// workers — an HTTP client does not need its own event loop.
+//
+//   http = std.http
+//   h    := std.mem.heap.gpa()
+//   a    := h.addr()
+//   r    := a.get("93.184.216.34", 80, "/").expect("http get")   // dotted-quad or "localhost"
+//   r.status                                    // 200
+//   r.ok()                                      // true (2xx)
+//   r.header("Content-Type").some_or("")        // case-insensitive lookup
+//   r.body                                      // the response body
+//
+// House style: an explicit allocator is threaded as `a: MutPtr<A>` (never ambient), every network /
+// parse failure is a `Result<_, HttpError>` value the caller must `.match`, and control flow is
+// `.match` + recursion (no imperative loops). Internal allocation failures panic via `.expect` — the
+// same convention std.text.str uses for its builder allocations — so `HttpError` stays reserved for
+// the semantically interesting failures (a dead connection, a malformed response).
+//
+// CR and LF never appear as double-quoted string literals here (the formatter's canonical form for a
+// `\r` escape would be a raw CR byte in source): CRLF is written with the `'\r'`/`'\n'` CHAR literals
+// the formatter preserves, and the header/body boundary is found by an explicit byte scan.
+//
+// THE PARSER IS INDEPENDENTLY TESTABLE. `parse_response` takes a raw response `str` and needs no
+// socket, so a canned HTTP response can be fed straight in — that is the deterministic gate (the live
+// `get`/`request` path has no place in a reproducible test).
+//
+// CHUNKED transfer-encoding IS supported: a `Transfer-Encoding: chunked` body is decoded to its
+// assembled payload (a `5<CRLF>hello<CRLF>6<CRLF> world<CRLF>0<CRLF><CRLF>` body -> "hello world").
+// Otherwise the body is taken verbatim, trimmed to `Content-Length` when that header is present (with
+// `Connection: close` the read-to-EOF remainder already IS the body, so the trim is belt-and-braces).
+{ Result, Opt, IoError, ok, err, expect } = std.core.result
+{ TcpConn, dial, recv_into, send_str, close_conn } = std.net
+{ String, new_in, append_in, push_in, finish_in } = std.text.string
+{ view, find, substr, split, words, trim, starts_with, to_lower, contains, parse_int, nbuf } = std.text.str
+{ integer } = std.text.num
+// ── error channel ────────────────────────────────────────────────────────────────────────────────────
+// Connect: the TCP handshake failed (the wrapped std.net IoError says why). Io: a send/receive failed
+// mid-exchange. Malformed: the bytes came back but are not a well-formed HTTP/1.1 response — the `str`
+// payload is the human reason (missing terminator, bad status line, header without a colon, …).
+HttpError*: Connect(IoError) | Io(IoError) | Malformed(str)
+connect_err = (e: IoError) HttpError { .Connect(e) }
+io_err = (e: IoError) HttpError { .Io(e) }
+malformed = (m: str) HttpError { .Malformed(m) }
+// human-readable label, mirroring std.core.result's IoError `name` (the flat namespace has no
+// overloading, so the type rides in the fn name). `.Malformed` renders its own reason string.
+http_error_name* = (e: HttpError) str {
+    e.match ({
+        .Connect(x)   => "Connect",
+        .Io(x)        => "Io",
+        .Malformed(m) => m,
+    })
+}
+// ── response shape ────────────────────────────────────────────────────────────────────────────────────
+// one `Name: value` header pair (values already trimmed of the leading space and trailing CR).
+Header*: {
+    name: str,
+    value: str,
+}
+// a parsed response: the numeric status, the header list, and the (decoded) body. `header` looks a name
+// up CASE-INSENSITIVELY (HTTP field names are case-insensitive) returning `.Some(value)` / `.None`;
+// `ok` is the 2xx success test.
+Response*: {
+    status: i32,
+    headers: [Header],
+    body: str,
+    header = (r: Response, name: str) Opt<str> { lookup_header(r.headers, name) }
+    ok = (r: Response) bool { r.status >= 200 && r.status < 300 }
+}
+// ── case-insensitive helpers ──────────────────────────────────────────────────────────────────────────
+lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + 32, false => b }) }
+// ASCII-case-insensitive equality of two strs.
+ieq = (x: str, y: str) bool {
+    xv := x.view()
+    yv := y.view()
+    (xv.len == yv.len).match ({ true => {
+        same := true
+        xv.loop((h, i, b) {
+            (lower(b) == lower(yv[i])).match ({ false => {
+                same = false
+                h.break
+            } })
+        })
+        same
+    }, false => false })
+}
+// first header whose name case-insensitively equals `name`, or `.None`.
+lookup_header = (headers: [Header], name: str) Opt<str> {
+    res: Opt<str> := .None
+    headers.loop((h, i, hd) {
+        ieq(hd.name, name).match ({ true => {
+            res = .Some(hd.value)
+            h.break
+        } })
+    })
+    res
+}
+// ── response parsing (the testable core) ──────────────────────────────────────────────────────────────
+// byte index of the CRLFCRLF (`\r\n\r\n`) header/body boundary in `v`, or -1 if absent. Iterative (a
+// `.loop`, like std.text.str's `find`), so a large response never grows the stack; the boundary lives
+// in the small header region anyway.
+crlfcrlf = (v: [u8]) i64 {
+    at: i64 := 0 - 1
+    v.loop((h, i, b) {
+        (i + 4 > v.len).match ({ true => {
+            h.break
+        }, false => (v[i] == '\r' && v[i + 1] == '\n' && v[i + 2] == '\r' && v[i + 3] == '\n').match ({ true => {
+            at = i
+            h.break
+        } }) })
+    })
+    at
+}
+// parse a raw HTTP/1.1 response into a `Response`. `raw` is the full byte stream as a `str`: a status
+// line, CRLF-separated headers, a blank line (CRLFCRLF), then the body. Returns `.Err(.Malformed …)`
+// when the terminator, status line, or a header is not well-formed. Allocations (header copies, the
+// decoded body) come from `a`; an allocation failure panics (`expect`), matching std.text.str.
+parse_response*<A> = (a: MutPtr<A>, raw: str) Result<Response, HttpError> {
+    sep := raw.view().crlfcrlf()
+    out: Result<Response, HttpError> := (sep < 0).match ({ true => err(malformed("http: no CRLFCRLF header terminator")), false => {
+        head := a.substr(raw, 0, sep).expect("http: oom")
+        rl := raw.view().len
+        body_raw := a.substr(raw, sep + 4, rl - (sep + 4)).expect("http: oom")
+        lines := a.split(head, '\n')    // each line still carries a trailing '\r'
+        res: Result<Response, HttpError> := a.parse_status(lines[0]).match ({
+            .Err(e)     => .Err(e),
+            .Ok(status) => {
+                hres: Result<Response, HttpError> := a.collect_headers(lines).match ({
+                    .Err(e)      => .Err(e),
+                    .Ok(headers) => .Ok(Response(
+                        status: status,
+                        headers: headers,
+                        body: a.decide_body(headers, body_raw),
+                    )),
+                })
+                hres
+            },
+        })
+        res
+    } })
+    out
+}
+// status line -> the numeric code. `HTTP/1.1 200 OK` -> 200. `words` drops the trailing CR with the
+// rest of the whitespace, so token[1] is the bare code. Rejects a line that is not `HTTP/… <code> …`
+// with a code in the 100..599 range.
+parse_status*<A> = (a: MutPtr<A>, line: str) Result<i32, HttpError> {
+    toks := a.words(line)
+    (toks.len < 2).match ({ true => err(malformed("http: status line has fewer than two tokens")), false => toks[0].starts_with("HTTP/").match ({ true => {
+        code := toks[1].parse_int()
+        (code < 100 || code > 599).match ({ true => err(malformed("http: status code out of range")), false => ok(to_i32(code)) })
+    }, false => err(malformed("http: status line does not start with HTTP/")) }) })
+}
+// every line after the status line -> a `[Header]`. Each must be `Name: value`; a colon-less line is a
+// malformed response. Name and value are both trimmed (the value of its leading space and trailing CR).
+collect_headers*<A> = (a: MutPtr<A>, lines: [str]) Result<[Header], HttpError> {
+    n := lines.len - 1
+    hs: [Header] := a.nbuf(Header(
+        name: "",
+        value: "",
+    ), n)
+    bad := false
+    lines.loop((h, i, line) {
+        (i == 0).match ({ true => { }, false => {
+            ci := line.find(":")
+            (ci < 0).match ({ true => {
+                bad = true
+                h.break
+            }, false => {
+                nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
+                val := a.trim(a.substr(line, ci + 1, line.view().len - (ci + 1)).expect("http: oom"))
+                hs[i - 1] = Header(
+                    name: nm,
+                    value: val,
+                )
+            } })
+        } })
+    })
+    bad.match ({ true => err(malformed("http: header line missing ':'")), false => ok(hs) })
+}
+// resolve the body from the raw remainder and the parsed headers: decode a `chunked` transfer-encoding,
+// else trim to `Content-Length` when present, else take the read-to-EOF remainder verbatim.
+decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: str) str {
+    lookup_header(headers, "Transfer-Encoding").match ({
+        .Some(te) => a.to_lower(te).contains("chunked").match ({ true => a.decode_chunked(body_raw), false => body_raw }),
+        .None     => lookup_header(headers, "Content-Length").match ({
+            .Some(cl) => a.substr(body_raw, 0, cl.parse_int()).expect("http: oom"),
+            .None     => body_raw,
+        }),
+    })
+}
+// ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
+is_hex = (b: u8) bool { b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F' }
+hex_digit = (b: u8) i64 { (b >= '0' && b <= '9').match ({ true => to_i64(b - '0'), false => (b >= 'a' && b <= 'f').match ({ true => to_i64(b - 'a' + 10), false => to_i64(b - 'A' + 10) }) }) }
+// first index at/after `i` that is not a hex digit (the end of a chunk-size field).
+hex_end = (bv: [u8], i: i64) i64 { (i < bv.len && is_hex(bv[i])).match ({ true => bv.hex_end(i + 1), false => i }) }
+// fold the hex digits bv[i..e] into an integer size.
+hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 { (i >= e).match ({ true => acc, false => bv.hex_val(i + 1, e, acc * 16 + hex_digit(bv[i])) }) }
+// index just past the next '\n' at/after `i` (one line terminator), or `bv.len` if none remains.
+after_lf = (bv: [u8], i: i64) i64 { (i >= bv.len).match ({ true => bv.len, false => (bv[i] == '\n').match ({ true => i + 1, false => bv.after_lf(i + 1) }) }) }
+// append bv[start .. start+n] (clamped to the view) onto the builder `sb`.
+append_range<A> = (a: MutPtr<A>, bv: [u8], start: i64, n: i64, sb: String) String {
+    avail := bv.len - start
+    m := (n < avail).match ({ true => n, false => avail })
+    sub: [u8] := bv.ptr.offset(start).slice(m)
+    acc := sb
+    sub.loop((h, i, b) {
+        acc = a.push_in(acc, b).expect("http: oom")
+    })
+    acc
+}
+// walk the chunked body: at `i` read the hex size line, append that many data bytes, skip the trailing
+// CRLF, and recurse; stop at the terminating 0-size chunk (or end of input).
+chunk_loop<A> = (a: MutPtr<A>, bv: [u8], i: i64, sb: String) String {
+    (i >= bv.len).match ({ true => sb, false => {
+        he := bv.hex_end(i)
+        size := bv.hex_val(i, he, 0)
+        data := bv.after_lf(he)    // past the size line's '\n'
+        (size == 0).match ({ true => sb, false => {
+            filled := a.append_range(bv, data, size, sb)
+            a.chunk_loop(bv, bv.after_lf(data + size), filled)
+        } })
+    } })
+}
+decode_chunked*<A> = (a: MutPtr<A>, body: str) str {
+    bv := body.view()
+    sb := a.new_in().expect("http: oom")
+    a.finish_in(a.chunk_loop(bv, 0, sb)).expect("http: oom")
+}
+// ── request construction + the live socket path ───────────────────────────────────────────────────────
+// append a CRLF line terminator to the builder (char literals, so no CR/LF appears as a source string).
+crlf<A> = (a: MutPtr<A>, sb: String) String { a.push_in(a.push_in(sb, '\r').expect("http: oom"), '\n').expect("http: oom") }
+// serialise a request: `<method> <path> HTTP/1.1`, a `Host` header, `Connection: close`, any caller
+// `headers`, an auto `Content-Length` when `body` is non-empty, the blank line, then the body.
+build_request<A> = (a: MutPtr<A>, method: str, host: str, path: str, headers: [Header], body: str) str {
+    sb := a.new_in().expect("http: oom")
+    sb = a.append_in(sb, method).expect("http: oom")
+    sb = a.append_in(sb, " ").expect("http: oom")
+    sb = a.append_in(sb, path).expect("http: oom")
+    sb = a.append_in(sb, " HTTP/1.1").expect("http: oom")
+    sb = a.crlf(sb)
+    sb = a.append_in(sb, "Host: ").expect("http: oom")
+    sb = a.append_in(sb, host).expect("http: oom")
+    sb = a.crlf(sb)
+    sb = a.append_in(sb, "Connection: close").expect("http: oom")
+    sb = a.crlf(sb)
+    headers.loop((h, i, hd) {
+        sb = a.append_in(sb, hd.name).expect("http: oom")
+        sb = a.append_in(sb, ": ").expect("http: oom")
+        sb = a.append_in(sb, hd.value).expect("http: oom")
+        sb = a.crlf(sb)
+    })
+    (body.view().len > 0).match ({ true => {
+        sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
+        sb = a.append_in(sb, a.integer(to_i64(body.view().len)).expect("http: oom").finish_in(a).expect("http: oom")).expect("http: oom")
+        sb = a.crlf(sb)
+    } })
+    sb = a.crlf(sb)    // blank line: end of headers
+    sb = a.append_in(sb, body).expect("http: oom")
+    a.finish_in(sb).expect("http: oom")
+}
+READ_CHUNK := 4096    // per-recv buffer size for draining the response
+// drain the connection into `sb` one recv at a time until the peer closes (recv returns 0) or errors;
+// `Connection: close` guarantees EOF once the full response has arrived. Recursive (no imperative loop).
+read_loop<A> = (a: MutPtr<A>, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
+    recv_into(c, buf, READ_CHUNK).match ({
+        .Ok(nr) => (nr <= 0).match ({ true => sb, false => a.read_loop(c, buf, a.append_range(buf.slice(nr), 0, nr, sb)) }),
+        .Err(e) => sb,
+    })
+}
+read_all<A> = (a: MutPtr<A>, c: TcpConn) str {
+    buf := a.acquire(READ_CHUNK)
+    full := a.read_loop(c, buf, a.new_in().expect("http: oom"))
+    a.release(buf)
+    a.finish_in(full).expect("http: oom")
+}
+// the general form: open a connection to `host:port`, send `<method> <path>` with `headers`/`body`,
+// read the whole response, and parse it. Any step's failure surfaces as the matching `HttpError`.
+request*<A> = (a: MutPtr<A>, method: str, host: str, port: i32, path: str, headers: [Header], body: str) Result<Response, HttpError> {
+    req := a.build_request(method, host, path, headers, body)
+    out: Result<Response, HttpError> := dial(host, port).match ({
+        .Err(e) => err(connect_err(e)),
+        .Ok(c)  => c.send_str(req).match ({
+            .Err(e) => {
+                c.close_conn()
+                err(io_err(e))
+            },
+            .Ok(w)  => {
+                raw := a.read_all(c)
+                c.close_conn()
+                a.parse_response(raw)
+            },
+        }),
+    })
+    out
+}
+// the common case: a GET with no extra headers and no body.
+get*<A> = (a: MutPtr<A>, host: str, port: i32, path: str) Result<Response, HttpError> {
+    a.request("GET", host, port, path, a.nbuf(Header(
+        name: "",
+        value: "",
+    ), 0), "")
+}
