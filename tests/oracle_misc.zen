@@ -5,6 +5,7 @@
 //   traits       <- tests/test_traits.py        (impl/dispatch VALUE + conformance VERDICT)
 //   string_types <- tests/test_string_types.py   (text/Cstr/str lattice VERDICT)
 //   num_parse    <- tests/test_num_parse.py       (std.text.num parse, value + error-as-value, via `zenc run`)
+//   hashing      <- std.hash                       (SHA-256 published test vectors + FNV-1a-64, via `zenc run`)
 //   acid         <- tests/test_acid.py            (every real std/compiler source EMITs, output starts with HEAD)
 //   differential <- tests/test_differential.py    (large generated constructs: 80 params/fields/match-arms)
 //   faithful_ast <- tests/test_faithful_ast.py    (`fmt --ast` UFCS/round-trip/idempotency + emit-equal corpus)
@@ -148,6 +149,26 @@ oracle_misc_num_parse = () i32 {
 }
 // value path: numbers parse correctly
 // error-as-value path: garbage / empty / bad-digit is .Err, NOT a silent 0
+// ════════════════════════════════════════════════════════════════════════════════
+// hashing  <- std.hash (SHA-256 + FNV-1a-64)
+// Run a real program through `zenc run` (std.hash imports resolved) and assert the SHA-256 hex output
+// matches the PUBLISHED FIPS 180-4 / RFC 6234 test vectors BYTE-FOR-BYTE (empty, "abc", and a longer
+// multi-block string), plus FNV-1a-64 against its known "abc" value and its determinism / distinctness.
+// The value-case harness can't drive this (no module resolver + it clashes with libc redecls), so this
+// mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
+// ════════════════════════════════════════════════════════════════════════════════
+HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
+oracle_misc_hash = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_misc_hash.zen"), HASH_PROG, len(HASH_PROG))
+    save(mp.zo_path("zo_misc_hash.out"), "", 0)
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_hash.zen > $ZT/zo_misc_hash.out 2>/dev/null"))
+    txt := mp.om_read_file(mp.zo_path("zo_misc_hash.out"))
+    run_suite("hashing (run)", [txt.contains("empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n"), txt.contains("abc=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"), txt.contains("fox=d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592\n"), txt.contains("fnv_abc=true\n"), txt.contains("fnv_det=true\n"), txt.contains("fnv_ne=true\n")])
+}
+// SHA-256 vectors match the published FIPS 180-4 / RFC 6234 digests exactly
+// FNV-1a-64 hits its known "abc" value, is deterministic, and separates distinct inputs
 // ════════════════════════════════════════════════════════════════════════════════
 // acid  <- tests/test_acid.py
 // Every real zen/std/*.zen and zen/compiler/*.zen file is fed THROUGH the EMIT binary AS-IS; the
@@ -507,6 +528,7 @@ oracle_misc_run* = () i32 {
     fails = fails + oracle_misc_traits()
     fails = fails + oracle_misc_string_types()
     fails = fails + oracle_misc_num_parse()
+    fails = fails + oracle_misc_hash()
     fails = fails + oracle_misc_acid()
     fails = fails + oracle_misc_differential()
     fails = fails + oracle_misc_faithful()
