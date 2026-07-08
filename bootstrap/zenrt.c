@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <setjmp.h>
+#include <ucontext.h>   /* faulting-thread register context (SP) — used to classify a SIGSEGV */
 /* U1.3: the runtime primitives below are also defined in Zen by resolvable std modules.
  * Built programs emit their own strong definitions when they import those modules; these weak
  * fallbacks keep the bootstrap compiler and import-free programs linkable. String allocation is
@@ -46,9 +47,22 @@ ZWEAK int32_t zen_main(void){ return 0; }
  *
  * The handler MUST run on a DEDICATED alternate stack (sigaltstack + SA_ONSTACK) — when the fault is a
  * stack overflow the normal stack has no room left to run a handler on. write()/_exit()/siglongjmp() are
- * async-signal-safe; the message is a fixed literal, so the handler touches no heap and no shared state.
- * We deliberately report every SIGSEGV as a stack overflow: in a language whose sole unbounded-stack
- * construct is recursion (raw null derefs already panic via genc's AssertNonnull), that is the cause.
+ * async-signal-safe; each candidate message is a fixed literal, so the handler touches no heap and no
+ * shared state.
+ *
+ * ── CLASSIFYING THE FAULT ─────────────────────────────────────────────────────────────────────────
+ * Most null derefs already panic cleanly via genc's AssertNonnull, but an UNGUARDED wild/null access
+ * (e.g. indexing a slice built over a null pointer — the bounds check passes, the deref does not) still
+ * reaches SIGSEGV. We used to report EVERY SIGSEGV as "stack overflow", which actively misled debugging
+ * of a genuine null/wild deref. So the handler now takes SA_SIGINFO and inspects the faulting address
+ * (`si_addr`) against the faulting thread's stack pointer (from the machine context) to distinguish:
+ *   - a STACK OVERFLOW faults in the guard page immediately below the current SP (empirically within a
+ *     few bytes; we allow a generous window) — Zen's sole unbounded-stack construct is recursion;
+ *   - a NULL deref faults at/near address 0 (a null base plus a small struct-field offset);
+ *   - anything else is an arbitrary invalid access (a wild pointer).
+ * The classification reads only si_addr + one register and picks a fixed literal, so it stays async-
+ * signal-safe. When the SP is unavailable (unknown arch) it degrades to the historical assumption that a
+ * non-null fault is an overflow, preserving old behavior on ports we can't introspect.
  *
  * ── PER-THREAD ALT STACK (worker pools) ───────────────────────────────────────────────────────────
  * `sigaltstack` is a PER-THREAD setting, but `sa_flags`/the handler are process-wide. A pool worker
@@ -62,10 +76,38 @@ static _Thread_local char __zen_sigstack[65536];   /* SIGSTKSZ can be a few KB; 
 /* per-worker catch target, defined just below for the isolation path; declared here so the handler can
  * route an actor's overflow into it (siglongjmp) instead of killing the process. */
 static _Thread_local sigjmp_buf* __zen_panic_jmp;
-static void __zen_on_sigsegv(int sig){
+/* the faulting thread's stack pointer, read out of the signal's machine context; 0 = "unavailable on this
+ * arch/OS" (the handler then falls back to the historical stack-overflow assumption for a non-null fault). */
+static uintptr_t __zen_fault_sp(void* ucv){
+#if defined(__linux__) && defined(__x86_64__)
+    return (uintptr_t)((ucontext_t*)ucv)->uc_mcontext.gregs[15];   /* gregs[REG_RSP] */
+#elif defined(__linux__) && defined(__aarch64__)
+    return (uintptr_t)((ucontext_t*)ucv)->uc_mcontext.sp;
+#else
+    (void)ucv; return 0;
+#endif
+}
+/* async-signal-safe strlen for the chosen literal (write() needs a byte count). */
+static int64_t __zen_msg_len(const char* m){ int64_t n = 0; while(m[n]){ n = n + 1; } return n; }
+static void __zen_on_sigsegv(int sig, siginfo_t* info, void* ucv){
     (void)sig;
-    static const char m[] = "zen: panic: stack overflow (recursion too deep)\n";
-    (void)!write(2, m, sizeof(m) - 1);
+    /* Classify: near-0 fault => null deref; fault in the guard window just below the faulting SP =>
+     * stack overflow; SP unknown => assume overflow (old behavior) for a non-null fault; else wild. */
+    uintptr_t addr = (uintptr_t)(info ? info->si_addr : 0);
+    uintptr_t sp   = __zen_fault_sp(ucv);
+    const uintptr_t NULL_WINDOW  = 65536;         /* null base + a plausible struct-field offset */
+    const uintptr_t STACK_WINDOW = 256 * 1024;    /* guard-page slack below SP; empirically the fault is within bytes */
+    const char* m;
+    if(addr < NULL_WINDOW){
+        m = "zen: panic: null pointer dereference\n";
+    } else if(sp == 0){
+        m = "zen: panic: stack overflow (recursion too deep)\n";   /* SP unavailable (unknown arch): preserve old default */
+    } else if(addr < sp && (sp - addr) <= STACK_WINDOW){
+        m = "zen: panic: stack overflow (recursion too deep)\n";
+    } else {
+        m = "zen: panic: segmentation fault (invalid memory access)\n";
+    }
+    (void)!write(2, m, __zen_msg_len(m));
     /* If a per-worker catch is installed (a pool behavior is running under __zen_actor_call), unwind into
      * it like the div0/OOB/null panics do — that ONE actor dies, the worker + pool live on (#410 isolation
      * now covers stack overflow too). Off the pool path (main, inline drain) no catch is installed, so exit
@@ -101,9 +143,9 @@ static void __zen_install_sigsegv_handler(void){
     __zen_thread_init();   /* main thread's own alt stack */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = __zen_on_sigsegv;
+    sa.sa_sigaction = __zen_on_sigsegv;   /* SA_SIGINFO form: we need si_addr + the fault machine context */
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_ONSTACK;   /* process-wide handler; runs on whichever thread's alt stack faulted */
+    sa.sa_flags = SA_ONSTACK | SA_SIGINFO;   /* process-wide handler; runs on whichever thread's alt stack faulted */
     sigaction(SIGSEGV, &sa, 0);
 }
 
