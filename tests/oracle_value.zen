@@ -952,8 +952,36 @@ oracle_value_run* = () i32 {
     ), VCase(
         src: "R<T, E>: Ok(T) | Err(E)\nmk<T> = (x: T) R<T, i32> { .Ok(x) }\ninc<T> = (x: T) R<T, i32> {\n  .Ok(mk(x).or_return())\n}\ntest* = () i32 { inc(9).match ({ .Ok(n) => n, .Err(e) => 0 - 1 }) }",
         want: "9",
+    ), VCase(
+        src: "test* = () i32 { n := 5\n n.match ({ x if x > 0 => 1, x if x < 0 => 2, _ => 3 }) }",
+        want: "1",
+    ), VCase(
+        src: "test* = () i32 { n := 0 - 4\n n.match ({ x if x > 0 => 1, x if x < 0 => 2, _ => 3 }) }",
+        want: "2",
+    ), VCase(
+        src: "test* = () i32 { n := 0\n n.match ({ x if x > 0 => 1, x if x < 0 => 2, _ => 3 }) }",
+        want: "3",
+    ), VCase(
+        src: "Box: Val(i32) | Empty\ntest* = () i32 { Box.Val(42).match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }",
+        want: "1",
+    ), VCase(
+        src: "Box: Val(i32) | Empty\ntest* = () i32 { Box.Val(3).match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }",
+        want: "2",
+    ), VCase(
+        src: "Box: Val(i32) | Empty\ntest* = () i32 { Box.Empty.match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }",
+        want: "3",
+    ), VCase(
+        src: "Box: Val(i32) | Empty\nclassify = (b: Box) i32 { b.match ({ .Val(v) if v > 100 => 3, .Val(v) if v > 10 => 2, .Val(v) => 1, .Empty => 0 }) }\ntest* = () i32 { classify(Box.Val(50)) * 100 + classify(Box.Val(5)) * 10 + classify(Box.Empty) }",
+        want: "210",
     )])
 }
+// MATCH GUARD, bind-all value arm: `x if <cond> => …`, guard true → first matching arm.
+// bind-all guard fall-through: first guard false, second guard true.
+// bind-all guard all-false → the unguarded catch-all `_`.
+// MATCH GUARD, variant arm: `.Val(v) if v > 10` taken (guard true) over the later unguarded `.Val`.
+// variant guard FALL-THROUGH to the later unguarded same-variant arm when the guard is false.
+// variant guard: a different variant is unaffected by the guard.
+// the guard sees the arm's payload binding; second .Val arm is ALSO guarded, third is the catch-all.
 // GENERIC or_return (#54): the Err-guard's synthesized tag const must be monomorphized with the
 // caller's concrete T. Statement position: `v := mk(x).or_return()` in a `R<T, i32>`-returning
 // generic fn once emitted `R_T_i32_Err` (unsubstituted T → C wouldn't compile).

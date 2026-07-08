@@ -80,7 +80,8 @@ ArmData*: {
     bind: str,
     body: Ptr<Expr>,
     pos: i32,
-}    // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal
+    guard: Ptr<Expr>,
+}    // .Variant(bind) [if guard] => body  (bind "" = none, guard expr_null() = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal. A GUARDED arm is taken only when its pattern matches AND its guard evals true; on guard-false control falls through to the next arm (so a guarded arm does NOT complete coverage — exhaustiveness still needs an unguarded catch-all)
 MatchData*: {
     subj: Ptr<Expr>,
     ename: str,
@@ -642,6 +643,7 @@ arm* = (v: str, bind: str, body: Ptr<Expr>) ArmData {
         bind: bind,
         body: body,
         pos: 0,
+        guard: expr_null(),
     )
 }
 arm_at* = (v: str, bind: str, body: Ptr<Expr>, p: i32) ArmData {
@@ -650,8 +652,28 @@ arm_at* = (v: str, bind: str, body: Ptr<Expr>, p: i32) ArmData {
         bind: bind,
         body: body,
         pos: p,
+        guard: expr_null(),
     )
 }    // source-backed (formatter anchors arm comments)
+// guarded variants of the above — carry an `if <guard>` condition on the arm.
+arm_g* = (v: str, bind: str, body: Ptr<Expr>, guard: Ptr<Expr>) ArmData {
+    ArmData(
+        variant: v,
+        bind: bind,
+        body: body,
+        pos: 0,
+        guard: guard,
+    )
+}
+arm_at_g* = (v: str, bind: str, body: Ptr<Expr>, guard: Ptr<Expr>, p: i32) ArmData {
+    ArmData(
+        variant: v,
+        bind: bind,
+        body: body,
+        pos: p,
+        guard: guard,
+    )
+}
 ematch* = (subj: Ptr<Expr>, ename: str, arms: [ArmData]) Expr {
     .Match(MatchData(
         subj: subj,

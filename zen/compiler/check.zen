@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, arm_g, arm_at_g, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstr, tcstr, ttext, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get } = compiler.parse
 { panic, expect } = std.core.result
@@ -1323,23 +1323,28 @@ arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
 resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        buf[i] = arm_at(ar.variant, ar.bind, a.resolve_expr(a.arm_env(env, t, ar), ar.body), ar.pos)
+        aenv := a.arm_env(env, t, ar)
+        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.resolve_expr(aenv, ar.guard) })
+        buf[i] = arm_at_g(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), g, ar.pos)
     })
     buf
 }
 // Discarded matches lower to `if` so arm returns remain real returns. Value-position matches
 // stay expressions. Non-exhaustive enum matches stay Match nodes for the validator to reject.
+// A GUARDED arm never completes coverage (its guard may fail), so — like the validator's has_wildcard /
+// arm_covers — the lowerability check must not count it: a guarded-only match stays a Match node so the
+// exhaustiveness validator can reject it (rather than being lowered to a switch/if that drops the node).
 match_has_wild = (m: MatchData) bool {
     f := false
     m.arms.loop((h, i, ar) {
-        f = eq(ar.variant, "_").match ({ true => true, false => f })
+        f = (eq(ar.variant, "_") && is_expr_null(ar.guard)).match ({ true => true, false => f })
     })
     f
 }
 arm_covers_v = (m: MatchData, vn: str) bool {
     f := false
     m.arms.loop((h, i, ar) {
-        f = eq(ar.variant, vn).match ({ true => true, false => f })
+        f = (eq(ar.variant, vn) && is_expr_null(ar.guard)).match ({ true => true, false => f })
     })
     f
 }
@@ -2479,7 +2484,9 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
             xs = a.add_subst_arg(fargs, bind)
         } })
         br := arm(ar.variant, bind, ar.body)
-        buf[i] = arm(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, a.xform_arm_env(decls, idx, subj, ename, br, env), exp))
+        aenv := a.xform_arm_env(decls, idx, subj, ename, br, env)
+        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.xform_expr_exp(decls, idx, ar.guard, ps, xs, aenv, exp) })
+        buf[i] = arm_g(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, aenv, exp), g)
     })
     buf
 }
@@ -2871,7 +2878,8 @@ subst_exprs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Expr]) [Ex
 subst_arms = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        buf[i] = arm(ar.variant, ar.bind, a.subst_expr(tparams, targs, ar.body))
+        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.subst_expr(tparams, targs, ar.guard) })
+        buf[i] = arm_g(ar.variant, ar.bind, a.subst_expr(tparams, targs, ar.body), g)
     })
     buf
 }
@@ -3332,7 +3340,8 @@ dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
 }
 dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
     arms.loop((h, i, ar) {
-        store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
+        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.dmc_expr_val(ar.guard) })
+        store(arms[i].addr(), arm_at_g(ar.variant, ar.bind, a.dmc_expr_val(ar.body), g, ar.pos))
     })
 }
 // `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
@@ -3955,7 +3964,8 @@ lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u
 lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        buf[i] = arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body))
+        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.lift_rw_expr(decls, idx, gcp, gen, ar.guard) })
+        buf[i] = arm_g(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body), g)
     })
     buf
 }
@@ -4127,7 +4137,8 @@ clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit
 clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos)
+        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.clos_sub_expr(ps, ar.guard) })
+        buf[i] = arm_at_g(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), g, ar.pos)
     })
     buf
 }

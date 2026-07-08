@@ -397,19 +397,27 @@ ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
     ret.ff_block(a, lm.body, ind, true)
 }
 // ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
-arm_pat_len = (ar: ArmData) i32 { eq(ar.variant, "_").match ({ true => 1, false => is_empty(ar.bind).match ({ true => 1 + to_i32(view(ar.variant).len), false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len) }) }) }
-arms_max_pat = (arms: [ArmData]) i32 {
+// An arm's `if <guard>` (rendered ` if <guard>`, 4 + the guard's text length) is part of the aligned
+// PATTERN region, so `=>` still lines up across guarded and unguarded arms. The guard is rendered into a
+// throwaway String only to MEASURE its width; ff_arm_pat re-renders it for output — the two agree, so a
+// guarded arm round-trips through the formatter idempotently.
+ff_guard_len = (a: MutPtr<Malloc>, ar: ArmData) i32 { ar.guard.is_expr_null().match ({ true => 0, false => 4 + to_i32(view(a.gstr_string(64).ff_expr(a, ar.guard, 0).gstr_finish(a)).len) }) }
+arm_pat_len = (a: MutPtr<Malloc>, ar: ArmData) i32 { eq(ar.variant, "_").match ({ true => 1, false => is_empty(ar.bind).match ({ true => 1 + to_i32(view(ar.variant).len), false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len) }) }) + a.ff_guard_len(ar) }
+arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
     m := 0
     arms.loop((h, i, ar) {
-        w := arm_pat_len(ar)
+        w := a.arm_pat_len(ar)
         m = (w > m).match ({ true => w, false => m })
     })
     m
 }
-ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String { eq(ar.variant, "_").match ({ true => s.ff_append(a, "_"), false => is_empty(ar.bind).match ({ true => s.ff_append(a, ".").ff_append(a, ar.variant), false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")") }) }) }
+ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+    pat := eq(ar.variant, "_").match ({ true => s.ff_append(a, "_"), false => is_empty(ar.bind).match ({ true => s.ff_append(a, ".").ff_append(a, ar.variant), false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")") }) })
+    ar.guard.is_expr_null().match ({ true => pat, false => pat.ff_append(a, " if ").ff_expr(a, ar.guard, 0) })
+}
 ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({ true => s, false => s.ff_append(a, " ").ff_pad(a, n - 1) }) }
 ff_match = (s: String, a: MutPtr<Malloc>, m: MatchData, ind: i32) String {
-    maxw := arms_max_pat(m.arms)
+    maxw := a.arms_max_pat(m.arms)
     open := s.ff_recv(a, m.subj, ind).ff_append(a, ".match ({\n")
     body := open.ff_arms(a, m.arms, maxw, ind + 1)
     body.ff_indent(a, ind).ff_append(a, "})")
@@ -440,7 +448,7 @@ ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) S
         nb := gf_next_arm_pos(arms, i + 1)
         lead := out.ff_flush_leading(a, gf_arm_pos(ar), ind)
         line := lead.ff_indent(a, ind).ff_arm_pat(a, ar)
-        padded := line.ff_pad(a, maxw - arm_pat_len(ar))
+        padded := line.ff_pad(a, maxw - a.arm_pat_len(ar))
         bodied := padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",")
         withc := (nb > 0).match ({ true => bodied.ff_trailing(a, nb), false => bodied })
         out = withc.ff_append(a, "\n")
