@@ -316,12 +316,13 @@ acquire = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).match ({ true => nul
 resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 write_str = (dst: RawPtr<u8>, at: i64, t: str) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: str, i: i64) i64 {
-    b := load(offset(t, i))
-    (b == 0).match ({ true => at + i, false => {
-        dst.offset(at + i).store(b)
-        dst.write_str_at(at, t, i + 1)
-    } })
-}
+    k := i
+    @while (load(offset(t, k)) != 0) {
+        dst.offset(at + k).store(load(offset(t, k)))
+        k = k + 1
+    }
+    at + k
+}    // ITERATIVE: copying a long string is O(n) iteration, not O(n) C-stack recursion
 finish_buf = (dst: RawPtr<u8>, n: i64) str {
     dst.offset(n).store(0)
     cstr(dst)

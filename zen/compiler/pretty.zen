@@ -471,7 +471,15 @@ ff_hex_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
 // stray CR), the parsed value round-trips exactly, and readable UTF-8 text in string literals stays raw.
 ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.ff_append(a, "\\\""), false => (b == '\\').match ({ true => s.ff_append(a, "\\\\"), false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => (b == '\r').match ({ true => s.ff_append(a, "\\r"), false => (b == '\t').match ({ true => s.ff_append(a, "\\t"), false => (b >= ' ' && b <= '~' || b >= 128).match ({ true => s.ff_push(a, b), false => s.ff_hex_byte(a, b) }) }) }) }) }) }) }
 ff_strlit = (s: String, a: MutPtr<Malloc>, v: str) String { s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"") }
-ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String { (ffbyte(v, i) == 0).match ({ true => s, false => s.ff_escape_byte(a, ffbyte(v, i)).ff_escape_from(a, v, i + 1) }) }
+ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String {
+    acc := s
+    k := i
+    @while (ffbyte(v, k) != 0) {
+        acc = acc.ff_escape_byte(a, ffbyte(v, k))
+        k = k + 1
+    }
+    acc
+}    // ITERATIVE: formatting a ~50KB string literal is O(n) iteration, not O(n) C-stack recursion
 // ── statements ─────────────────────────────────────────────────────────────────
 // Two block flavors, matching the parser's TWO body parsers:
 //  • VALUE block (drop_ret = true): a function/lambda body — the parser's `parse_stmts` turns the

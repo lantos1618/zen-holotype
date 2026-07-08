@@ -65,10 +65,18 @@ lexeme* = (a: MutPtr<Malloc>, src: str, t: Token) str {
 // A float literal carries its source text verbatim into C, but C float syntax rejects `_`; copy the
 // span dropping any digit separators (`1_000.5` -> `1000.5`).
 copy_no_us = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.copy_no_us(pos + 1, end, dst, di), false => {
-        store(offset(dst, di), src.at(pos))
-        src.copy_no_us(pos + 1, end, dst, di + 1)
-    } }), false => di })
+    p := pos
+    d := di
+    @while (p < end) {
+        (src.at(p) == '_').match ({ true => {
+            p = p + 1
+        }, false => {
+            store(offset(dst, d), src.at(p))
+            p = p + 1
+            d = d + 1
+        } })
+    }
+    d
 }
 float_lexeme = (a: MutPtr<Malloc>, src: str, t: Token) str {
     p := a.acquire(t.len + 1)
@@ -86,14 +94,45 @@ is_addsub = (src: str, t: Token) bool { src.is_op(t, '+') || src.is_op(t, '-') }
 is_muldiv = (src: str, t: Token) bool { src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%') }
 op_str* = (b: u8) str { (b == '+').match ({ true => "+", false => (b == '-').match ({ true => "-", false => (b == '*').match ({ true => "*", false => (b == '%').match ({ true => "%", false => "/" }) }) }) }) }
 digit_val = (b: u8) i32 { b - '0' }
-// `_` digit separators are skipped (they carry no value); every base accumulator threads past them.
-to_int_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.to_int_from(pos + 1, end, acc), false => src.to_int_from(pos + 1, end, acc * 10 + src.at(pos).digit_val()) }), false => acc }) }
 hex_val = (b: u8) i32 { b.is_digit().match ({ true => b - '0', false => (b >= 'a' && b <= 'f').match ({ true => b - 'a' + 10, false => b - 'A' + 10 }) }) }
-hex_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.hex_from(pos + 1, end, acc), false => src.hex_from(pos + 1, end, acc * 16 + src.at(pos).hex_val()) }), false => acc }) }
-bin_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.bin_from(pos + 1, end, acc), false => src.bin_from(pos + 1, end, acc * 2 + src.at(pos).digit_val()) }), false => acc }) }
-oct_from = (src: str, pos: i32, end: i32, acc: i64) i64 { (pos < end).match ({ true => (src.at(pos) == '_').match ({ true => src.oct_from(pos + 1, end, acc), false => src.oct_from(pos + 1, end, acc * 8 + src.at(pos).digit_val()) }), false => acc }) }
+// The largest accumulator / remaining digit for which `acc * base + digit` still fits 2^64-1 on the
+// last step: `floor((2^64-1) / base)` and `(2^64-1) mod base`. Used to catch overflow BEFORE it wraps.
+u64max_div = (base: i32) u64 { (base == 16).match ({ true => 1152921504606846975, false => (base == 2).match ({ true => 9223372036854775807, false => (base == 8).match ({ true => 2305843009213693951, false => 1844674407370955161 }) }) }) }
+u64max_mod = (base: i32) u64 { (base == 16).match ({ true => 15, false => (base == 2).match ({ true => 1, false => (base == 8).match ({ true => 7, false => 5 }) }) }) }
+// Accumulate the base-`base` literal in [pos, end) into a 64-bit value. `_` digit separators carry no
+// value and are threaded past. The value is built in u64 (so a full-range u64 literal keeps its exact
+// bit pattern) and returned reinterpreted as i64 — the declared/inferred width narrows it at the store.
+// ITERATIVE (a long literal is O(n) heap iteration, not O(n) C-stack — a 200KB numeric literal must not
+// overflow the lexer stack). OVERFLOW: a literal whose value exceeds 2^64-1 is unrepresentable in ANY
+// zen integer type, so instead of silently wrapping to a wrong value it flags a positioned parse error
+// (caret at `off`, the literal's first byte) and the module is rejected.
+int_acc = (src: str, pos: i32, end: i32, base: i32, off: i32) i64 {
+    acc: u64 := 0
+    over := false
+    bu: u64 := base
+    lim: u64 := u64max_div(base)
+    rem: u64 := u64max_mod(base)
+    p := pos
+    @while (p < end) {
+        b := src.at(p)
+        (b == '_').match ({ true => {
+            p = p + 1
+        }, false => {
+            d: u64 := (base == 16).match ({ true => b.hex_val(), false => b.digit_val() })
+            (acc > lim || acc == lim && d > rem).match ({ true => {
+                over = true
+            } })
+            acc = acc * bu + d
+            p = p + 1
+        } })
+    }
+    over.match ({ true => {
+        perr_set_at(off)
+    } })
+    acc.to_i64()
+}
 // `0x...` base-16, `0b...` base-2, `0o...` base-8; otherwise decimal.
-to_int = (src: str, t: Token) i64 { src.is_hex_prefix(t.start).match ({ true => src.hex_from(t.start + 2, t.start + t.len, 0), false => src.is_bin_prefix(t.start).match ({ true => src.bin_from(t.start + 2, t.start + t.len, 0), false => src.is_oct_prefix(t.start).match ({ true => src.oct_from(t.start + 2, t.start + t.len, 0), false => src.to_int_from(t.start, t.start + t.len, 0) }) }) }) }
+to_int = (src: str, t: Token) i64 { src.is_hex_prefix(t.start).match ({ true => src.int_acc(t.start + 2, t.start + t.len, 16, t.start), false => src.is_bin_prefix(t.start).match ({ true => src.int_acc(t.start + 2, t.start + t.len, 2, t.start), false => src.is_oct_prefix(t.start).match ({ true => src.int_acc(t.start + 2, t.start + t.len, 8, t.start), false => src.int_acc(t.start, t.start + t.len, 10, t.start) }) }) }) }
 parse_atom* = (a: MutPtr<Malloc>, src: str, pos: i32) PExpr {
     // DEPTH CAP (see parse_type.zen): every nested expression form — parens, prefix `-`/`!`, slice
     // literals, `.match`/`.loop`, lambdas — funnels through parse_atom, so one guard here bounds them
@@ -185,20 +224,28 @@ str_val = (a: MutPtr<Malloc>, src: str, t: Token) str {
     store(offset(p, n), 0)
     cstr(p)
 }
-unescape = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 { (pos < end).match ({ true => src.unescape_one(pos, end, dst, di), false => di }) }
-unescape_one = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 { (src.at(pos) == '\\').match ({ true => src.unescape_esc(pos, end, dst, di), false => src.unescape_plain(pos, end, dst, di) }) }
-unescape_esc = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    (src.at(pos + 1) == 'x').match ({ true => {
-        store(offset(dst, di), src.hex2(pos + 2))    // `\xNN` → one byte, consume 4 chars
-        src.unescape(pos + 4, end, dst, di + 1)
-    }, false => {
-        store(offset(dst, di), esc_byte(src.at(pos + 1)))
-        src.unescape(pos + 2, end, dst, di + 1)
-    } })
-}
-unescape_plain = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    store(offset(dst, di), src.at(pos))
-    src.unescape(pos + 1, end, dst, di + 1)
+// Copy [pos, end) into `dst`, resolving `\`-escapes, returning the byte count written. ITERATIVE (a
+// 50KB string literal is O(n) heap iteration, not O(n) C-stack — per-char recursion overflowed the
+// stack on a long literal). `\xNN` consumes 4 source chars → 1 byte; other `\c` consumes 2 → 1 byte.
+unescape = (src: str, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    p := pos
+    d := di
+    @while (p < end) {
+        (src.at(p) == '\\').match ({ true => (src.at(p + 1) == 'x').match ({ true => {
+            store(offset(dst, d), src.hex2(p + 2))
+            p = p + 4
+            d = d + 1
+        }, false => {
+            store(offset(dst, d), esc_byte(src.at(p + 1)))
+            p = p + 2
+            d = d + 1
+        } }), false => {
+            store(offset(dst, d), src.at(p))
+            p = p + 1
+            d = d + 1
+        } })
+    }
+    d
 }
 // Leading-dot enum constructor; compiler.check fills the enum type.
 parse_ctor = (a: MutPtr<Malloc>, src: str, dot: Scan) PExpr {
