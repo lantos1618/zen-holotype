@@ -973,8 +973,34 @@ oracle_value_run* = () i32 {
     ), VCase(
         src: "Box: Val(i32) | Empty\nclassify = (b: Box) i32 { b.match ({ .Val(v) if v > 100 => 3, .Val(v) if v > 10 => 2, .Val(v) => 1, .Empty => 0 }) }\ntest* = () i32 { classify(Box.Val(50)) * 100 + classify(Box.Val(5)) * 10 + classify(Box.Empty) }",
         want: "210",
+    ), VCase(
+        src: "twice = (f: (i32) i32) (i32) i32 { (x: i32) i32 { f(f(x)) } }\ntest* = () i32 { inc := (x: i32) i32 { x + 1 }\n twice(inc)(5) }",
+        want: "7",
+    ), VCase(
+        src: "compose = (f: (i32) i32, g: (i32) i32) (i32) i32 { (x: i32) i32 { g(f(x)) } }\ntest* = () i32 { inc := (x: i32) i32 { x + 1 }\n dbl := (x: i32) i32 { x * 2 }\n compose(inc, dbl)(3) }",
+        want: "8",
+    ), VCase(
+        src: "add = (a: i32) (i32) i32 { (b: i32) i32 { a + b } }\ntest* = () i32 { add(10)(32) }",
+        want: "42",
+    ), VCase(
+        src: "compose = (f: (i32) i32, g: (i32) i32) (i32) i32 { (x: i32) i32 { g(f(x)) } }\ntest* = () i32 { inc := (x: i32) i32 { x + 1 }\n dbl := (x: i32) i32 { x * 2 }\n h := compose(inc, dbl)\n h(3) + h(10) }",
+        want: "30",
+    ), VCase(
+        src: "inc = (x: i32) i32 { x + 1 }\ntwice = (f: (i32) i32) (i32) i32 { (x: i32) i32 { f(f(x)) } }\ntest* = () i32 { twice(inc)(5) }",
+        want: "7",
+    ), VCase(
+        src: "pipe = (x: i32, f: (i32) i32, g: (i32) i32) i32 { g(f(x)) }\ntest* = () i32 { inc := (x: i32) i32 { x + 1 }\n dbl := (x: i32) i32 { x * 2 }\n pipe(3, inc, dbl) }",
+        want: "8",
     )])
 }
+// HIGHER-ORDER (census #59c): a lambda captures + CALLS a function-typed param. `twice` returns
+// a closure over `f` (an FnT param): the lifted call fn reaches it via `__clenv.f`. f(f(5))=7.
+// compose: capture + call TWO fn-typed params. compose(inc,dbl)(3) = dbl(inc(3)) = (3+1)*2 = 8.
+// curry: a fn returning a closure that captures a NON-fn param (`a`) — the data-capture path,
+// guarding it still works alongside the fn-capture fix. add(10)(32) = 42.
+// the returned closure BOUND to a local and applied twice: h(3)+h(10) = 8 + 22 = 30.
+// a TOP-LEVEL named fn (a bare fn value) captured + called through the closure env. twice(inc)(5)=7.
+// pipe: fn-typed params called directly in a non-returning fn (no closure lowering). g(f(3))=8.
 // MATCH GUARD, bind-all value arm: `x if <cond> => …`, guard true → first matching arm.
 // bind-all guard fall-through: first guard false, second guard true.
 // bind-all guard all-false → the unguarded catch-all `_`.
