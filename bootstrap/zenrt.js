@@ -30,6 +30,7 @@ const __zr = (() => {
   };
   const strlen = (p) => { let n = 0; while (MEM[p + n] !== 0) n++; return n; };
   const decode = (p, len) => dec.decode(MEM.subarray(p, p + Number(len)));
+  const jstr = (p) => decode(p, strlen(p));  // a Zen `str` (MEM offset) -> a real JS string, for DOM/API boundaries
 
   const load = (p) => MEM[p];
   const store = (p, b) => { MEM[p] = b & 255; return b & 255; };
@@ -55,7 +56,7 @@ const __zr = (() => {
     return Number(len);
   };
 
-  return { MEM, str, strlen, decode, malloc, load, store, offset, load_i64, store_i64,
+  return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64,
            slice, view, eq, nn, addr, i32, i64, sizeof, div, mod, panic, write };
 })();
 
