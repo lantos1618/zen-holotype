@@ -54,10 +54,9 @@
 //   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one HMap share one backing store; in-place
 //      upserts are visible through every copy.
 { Result, IoError, Opt } = std.core.result
-{ Allocator, try_acquire } = std.mem.alloc
+{ Allocator, try_acquire, DynAlloc } = std.mem.alloc    // DynAlloc = the narrow Allocator stored by the AMBIENT form
 { eq, view } = std.text.str
-{ Rt, current } = std.rt    // ambient runtime capability — the AMBIENT-FORM surface below draws from it
-{ RtAlloc } = std.collections.vec    // the stored-rt → Allocator bridge (shared with vec/set)
+{ dyn_current } = std.rt    // narrow the ambient rt to an Allocator ONCE — the AMBIENT-FORM surface below draws from it
 Hash*: {
     hash: (Self) i64,
     heq: (Self, Self) bool,
@@ -439,9 +438,10 @@ of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoErr
 }
 // ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
 // The allocator-free twin of `HMap<K, V>`, in the exact `AVec<T>` mold (see std.collections.vec for the
-// full rationale). `AHMap<K, V>` STORES the ambient rt captured at construction and draws every later
-// allocation (grow, free) from THAT rt via an `RtAlloc` bridge — it never re-reads `current()` per op, so
-// an AHMap is safe to outlive the scope it was born in (re-reading would cross-allocator-free on grow).
+// full rationale). `AHMap<K, V>` STORES the narrow allocator captured at construction (the ambient rt
+// narrowed to a `DynAlloc`) and draws every later allocation (grow, free) from THAT allocator — it never
+// re-reads `current()` per op, so an AHMap is safe to outlive the scope it was born in (re-reading would
+// cross-allocator-free on grow).
 // Everything above (the explicit `HMap<K, V>` + `of(a, …)`/`m.put(a, k, v)`/`m.free(a)` forms) is
 // UNCHANGED; this section only adds new names on a new type. This is ALSO the user-facing ambient MAP:
 // `AHMap<str, V>` is the generic equivalent of the str-keyed `Map<T>` (which stays compiler-internal).
@@ -461,59 +461,74 @@ of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoErr
 // `Result<_, IoError>` value.
 AHMap*<K, V>: {
     inner: HMap<K, V>,
-    rt: Rt,
+    alloc: DynAlloc,
     len = (w: AHMap<K, V>) i64 { w.inner.len() }
     has = (w: AHMap<K, V>, k: K) bool { w.inner.has(k) }
     get = (w: AHMap<K, V>, k: K) Opt<V> { w.inner.get(k) }
     get_or = (w: AHMap<K, V>, k: K, dflt: V) V { w.inner.get_or(k, dflt) }
     each = (w: AHMap<K, V>, f: (K, V) void) void { w.inner.each(f) }
     put = (w: AHMap<K, V>, k: K, v: V) AHMap<K, V> {
-        ra := RtAlloc(r: w.rt)
+        a := w.alloc
         AHMap<K, V>(
-            inner: w.inner.put(ra.addr(), k, v).expect("hmap.put: out of memory"),
-            rt: w.rt,
+            inner: w.inner.put(a.addr(), k, v).expect("hmap.put: out of memory"),
+            alloc: w.alloc,
         )
     }
     delete = (w: AHMap<K, V>, k: K) AHMap<K, V> {
         AHMap<K, V>(
             inner: w.inner.delete(k),
-            rt: w.rt,
+            alloc: w.alloc,
         )
     }
     free = (w: AHMap<K, V>) void {
-        ra := RtAlloc(r: w.rt)
-        w.inner.free(ra.addr())
+        a := w.alloc
+        w.inner.free(a.addr())
     }
 }
-// EXPLICIT-rt constructor — THE REAL CONSTRUCTION PATH. Build a zero-entry `AHMap<K, V>` bound to a
-// caller-supplied `Rt`, with NO ambient draw (docs/runtime-design.md: explicit capability threading is
-// the model). The ambient `new()` below is a one-line shim — the single `current()` read on the hmap
-// construction path.
-new_in*<K, V> = (r: Rt) AHMap<K, V> {
-    ra := RtAlloc(r: r)
-    ir: Result<HMap<K, V>, IoError> := empty(ra.addr())
+// EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-entry `AHMap<K, V>` bound to
+// a caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw (docs/runtime-design.md:
+// explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
+// ambient draw (`rt.dyn_current()`) on the hmap construction path.
+new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
+    da := a
+    ir: Result<HMap<K, V>, IoError> := empty(da.addr())
     AHMap<K, V>(
         inner: ir.expect("hmap.new: out of memory"),
-        rt: r,
+        alloc: a,
     )
 }
 // a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
-// annotation: `e: AHMap<str, i64> := hmap.new()`. The ambient rt is drawn ONCE here and stored.
+// annotation: `e: AHMap<str, i64> := hmap.new()`. The ambient rt is narrowed to an allocator ONCE here
+// and stored. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
+// std.text.string's generic `new_in<A>(MutPtr<A>)` once both flatten together; qualified `hmap.new_in`
+// stays the external real path).
 new*<K, V> = () AHMap<K, V> {
-    m: AHMap<K, V> := new_in(current())
-    m
-}
-// EXPLICIT-rt seed constructor: an `AHMap<K, V>` bound to `r`, seeded with one pair. No ambient draw.
-// (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
-from_in*<K, V> = (r: Rt, k: K, v: V) AHMap<K, V> {
-    ra := RtAlloc(r: r)
-    ih: HMap<K, V> := of(ra.addr(), k, v).expect("hmap.from: out of memory")
+    a := dyn_current()
+    ir: Result<HMap<K, V>, IoError> := empty(a.addr())
     AHMap<K, V>(
-        inner: ih,
-        rt: r,
+        inner: ir.expect("hmap.new: out of memory"),
+        alloc: a,
     )
 }
-// an ambient `AHMap<K, V>` seeded with one pair. Thin shim: draw the current rt once, delegate. K/V are
-// inferred from the seed, so this CHAINS: `m := hmap.from(k, v)`. (Named `from`, not `of`, since module
-// `of` is the explicit allocator-threaded seed constructor.)
-from*<K, V> = (k: K, v: V) AHMap<K, V> { from_in(current(), k, v) }
+// EXPLICIT-allocator seed constructor: an `AHMap<K, V>` bound to `a`, seeded with one pair. No ambient
+// draw. (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
+from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
+    da := a
+    ih: HMap<K, V> := of(da.addr(), k, v).expect("hmap.from: out of memory")
+    AHMap<K, V>(
+        inner: ih,
+        alloc: a,
+    )
+}
+// an ambient `AHMap<K, V>` seeded with one pair. Narrow the current rt once; `from_in`'s body is inlined
+// (no bare `from_in` call — same string-`new_in` collision avoidance). K/V are inferred from the seed,
+// so this CHAINS: `m := hmap.from(k, v)`. (Named `from`, not `of`, since module `of` is the explicit
+// allocator-threaded seed constructor.)
+from*<K, V> = (k: K, v: V) AHMap<K, V> {
+    a := dyn_current()
+    ih: HMap<K, V> := of(a.addr(), k, v).expect("hmap.from: out of memory")
+    AHMap<K, V>(
+        inner: ih,
+        alloc: a,
+    )
+}

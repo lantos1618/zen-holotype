@@ -57,9 +57,8 @@
 // module's `union` after flattening.
 //
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
-{ Allocator, try_acquire } = std.mem.alloc    // explicit allocator trait; try_acquire surfaces OOM as .Err
-{ Rt, current } = std.rt    // ambient runtime capability — the AMBIENT-FORM surface below draws from it
-{ RtAlloc } = std.collections.vec    // the stored-rt → Allocator bridge (shared with vec/hmap)
+{ Allocator, try_acquire, DynAlloc } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form
+{ dyn_current } = std.rt    // narrow the ambient rt to an Allocator ONCE — the AMBIENT-FORM surface below draws from it
 Set*<T>: {
     elems: RawPtr<u8>,
     idx: RawPtr<u8>,
@@ -436,9 +435,10 @@ difference*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Result<Set<T>, IoError>
 }
 // ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
 // The allocator-free twin of `Set<T>`, in the exact `AVec<T>` mold (see std.collections.vec for the full
-// rationale). `ASet<T>` STORES the ambient rt captured at construction and draws every later allocation
-// (grow, free) from THAT rt via an `RtAlloc` bridge — it never re-reads `current()` per op, so an ASet is
-// safe to outlive the scope it was born in (re-reading would cross-allocator-free on grow). Everything
+// rationale). `ASet<T>` STORES the narrow allocator captured at construction (the ambient rt narrowed to
+// a `DynAlloc`) and draws every later allocation (grow, free) from THAT allocator — it never re-reads
+// `current()` per op, so an ASet is safe to outlive the scope it was born in (re-reading would
+// cross-allocator-free on grow). Everything
 // above (the explicit `Set<T>` + `of(a, …)`/`s.add(a, x)`/`s.free(a)` forms and the set-algebra free fns)
 // is UNCHANGED; this section only adds new names on a new type.
 //
@@ -453,60 +453,79 @@ difference*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Result<Set<T>, IoError>
 //   t := set.from([1, 2, 2, 3])        // seed + dedup from a slice; T inferred (t.len() == 3)
 ASet*<T>: {
     inner: Set<T>,
-    rt: Rt,
+    alloc: DynAlloc,
     len = (w: ASet<T>) i64 { w.inner.len() }
     has = (w: ASet<T>, x: T) bool { w.inner.has(x) }
     each = (w: ASet<T>, f: (T) void) void { w.inner.each(f) }
     add = (w: ASet<T>, x: T) ASet<T> {
-        ra := RtAlloc(r: w.rt)
+        a := w.alloc
         ASet<T>(
-            inner: w.inner.add(ra.addr(), x).expect("set.add: out of memory"),
-            rt: w.rt,
+            inner: w.inner.add(a.addr(), x).expect("set.add: out of memory"),
+            alloc: w.alloc,
         )
     }
     remove = (w: ASet<T>, x: T) ASet<T> {
-        ra := RtAlloc(r: w.rt)
+        a := w.alloc
         ASet<T>(
-            inner: w.inner.remove(ra.addr(), x),
-            rt: w.rt,
+            inner: w.inner.remove(a.addr(), x),
+            alloc: w.alloc,
         )
     }
     free = (w: ASet<T>) void {
-        ra := RtAlloc(r: w.rt)
-        w.inner.free(ra.addr())
+        a := w.alloc
+        w.inner.free(a.addr())
     }
 }
-// EXPLICIT-rt constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `ASet<T>` bound to a
-// caller-supplied `Rt`, with NO ambient draw (docs/runtime-design.md: explicit capability threading is
-// the model). The ambient `new()` below is a one-line shim — the single `current()` read on the set
-// construction path.
-new_in*<T> = (r: Rt) ASet<T> {
-    ra := RtAlloc(r: r)
-    sr: Result<Set<T>, IoError> := empty(ra.addr())
+// EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `ASet<T>` bound to a
+// caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw (docs/runtime-design.md:
+// explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
+// ambient draw (`rt.dyn_current()`) on the set construction path.
+new_in*<T> = (a: DynAlloc) ASet<T> {
+    da := a
+    sr: Result<Set<T>, IoError> := empty(da.addr())
     ASet<T>(
         inner: sr.expect("set.new: out of memory"),
-        rt: r,
+        alloc: a,
     )
 }
 // a zero-element ambient `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
-// `s: ASet<i64> := set.new()`. The ambient rt is drawn ONCE here and stored for the life of the set.
+// `s: ASet<i64> := set.new()`. The ambient rt is narrowed to an allocator ONCE here and stored for the
+// life of the set. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
+// std.text.string's generic `new_in<A>(MutPtr<A>)` once both flatten together; qualified `set.new_in`
+// stays the external real path).
 new*<T> = () ASet<T> {
-    s: ASet<T> := new_in(current())
-    s
+    a := dyn_current()
+    sr: Result<Set<T>, IoError> := empty(a.addr())
+    ASet<T>(
+        inner: sr.expect("set.new: out of memory"),
+        alloc: a,
+    )
 }
-// EXPLICIT-rt seed constructor: an `ASet<T>` bound to `r`, seeded from a slice (dedups via `add`). No
-// ambient draw. T inferred from the elements.
-from_in*<T> = (r: Rt, xs: [T]) ASet<T> {
-    ra := RtAlloc(r: r)
-    sr: Result<Set<T>, IoError> := empty(ra.addr())
+// EXPLICIT-allocator seed constructor: an `ASet<T>` bound to `a`, seeded from a slice (dedups via `add`).
+// No ambient draw. T inferred from the elements.
+from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
+    da := a
+    sr: Result<Set<T>, IoError> := empty(da.addr())
     st := sr.expect("set.from: out of memory")
     xs.loop((h, i, x) {
-        st = st.add(ra.addr(), x).expect("set.from: out of memory")
+        st = st.add(da.addr(), x).expect("set.from: out of memory")
     })
     ASet<T>(
         inner: st,
-        rt: r,
+        alloc: a,
     )
 }
-// an ambient `ASet<T>` seeded from a slice. Thin shim: draw the current rt once, delegate.
-from*<T> = (xs: [T]) ASet<T> { from_in(current(), xs) }
+// an ambient `ASet<T>` seeded from a slice. Narrow the current rt once; `from_in`'s body is inlined
+// (no bare `from_in` call — same string-`new_in` collision avoidance).
+from*<T> = (xs: [T]) ASet<T> {
+    a := dyn_current()
+    sr: Result<Set<T>, IoError> := empty(a.addr())
+    st := sr.expect("set.from: out of memory")
+    xs.loop((h, i, x) {
+        st = st.add(a.addr(), x).expect("set.from: out of memory")
+    })
+    ASet<T>(
+        inner: st,
+        alloc: a,
+    )
+}
