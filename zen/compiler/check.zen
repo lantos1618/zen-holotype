@@ -2266,7 +2266,13 @@ ref_pos = (e: Ptr<Expr>) i32 {
 // for every param use — so the arg evaluates exactly once and always survives as a real statement.
 // Pure leaves (Var/Int/literal) are left alone: a Var receiver MUST stay concrete for UFCS/trait
 // dispatch (binding it erased the receiver type — a prior attempt regressed 37 cases), and leaves
-// have no effect to duplicate. We bind effectful/instance-bearing args: calls and struct/enum makes.
+// have no effect to duplicate. We bind effectful/instance-bearing args: calls and struct/enum makes,
+// AND — the root of #69/#480 — the compound results of an ALREADY-INLINED nested call. A chained
+// method (`m.put(k,v).put(k2,v2)`) reaches the outer inline with its receiver arg already expanded
+// into a Block (multi-statement body), a Cond (`?:`, from an early-return/or_return lift in the
+// inlined body), or a Match. Those carry the inner op's non-idempotent side effects; if the outer
+// param uses them N>1 times they re-run N times (~3^depth over a chain → hang / slice-OOB / wrong
+// result). Binding them to ONE temp collapses each to a single evaluation.
 ArgBind*: {
     fargs: [Expr],
     binds: [Stmt],
@@ -2277,6 +2283,9 @@ arg_needs_bind = (e: Expr) bool {
         .Call(c)        => true,
         .MakeStruct(sd) => true,
         .MakeEnum(mk)   => true,
+        .Block(b)       => true,
+        .Cond(d)        => true,
+        .Match(m)       => true,
         _               => false,
     })
 }

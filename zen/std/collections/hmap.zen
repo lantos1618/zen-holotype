@@ -468,21 +468,20 @@ AHMap*<K, V>: {
     get_or = (w: AHMap<K, V>, k: K, dflt: V) V { w.inner.get_or(k, dflt) }
     each = (w: AHMap<K, V>, f: (K, V) void) void { w.inner.each(f) }
     put = (w: AHMap<K, V>, k: K, v: V) AHMap<K, V> {
-        // Bind the receiver ONCE (see AVec.push): in a chain `w` is the previous op's side-effecting
-        // result, and its append/link step is NON-idempotent (re-running prepends the same slot into
-        // its bucket chain twice → a self-cycle that hangs `find`). One bind = one evaluation.
-        ww := w
-        a := ww.alloc
+        // In a chain (`m.put(k1,v1).put(k2,v2)`) the receiver `w` is the previous op's
+        // side-effecting result, and its link step is NON-idempotent. The inliner binds such a
+        // multiply-used arg to one temp (evaluate-once), so referencing `w` several times below is
+        // safe — no local rebind needed here.
+        a := w.alloc
         AHMap<K, V>(
-            inner: ww.inner.put(a.addr(), k, v).expect("hmap.put: out of memory"),
-            alloc: ww.alloc,
+            inner: w.inner.put(a.addr(), k, v).expect("hmap.put: out of memory"),
+            alloc: w.alloc,
         )
     }
     delete = (w: AHMap<K, V>, k: K) AHMap<K, V> {
-        ww := w
         AHMap<K, V>(
-            inner: ww.inner.delete(k),
-            alloc: ww.alloc,
+            inner: w.inner.delete(k),
+            alloc: w.alloc,
         )
     }
     free = (w: AHMap<K, V>) void {
