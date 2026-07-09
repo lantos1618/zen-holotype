@@ -21,20 +21,15 @@
 // you use (`{ sha256_hex, fnv1a } = std.hash`) and rename on your side if needed.
 { Allocator } = std.mem.alloc
 // ── FNV-1a, 64-bit ────────────────────────────────────────────────────────────
-// The FNV-1a-64 prime, 0x100000001b3. The offset basis 0xcbf29ce484222325 is above i64 max, so it is
-// assembled from its two 32-bit halves inside fnv1a rather than named here (a literal that large — or a
-// const-folded product of its halves — is rejected/normalized by the toolchain; only a runtime u64
-// combine of the in-range halves is portable). Every step is a u64 multiply, wrapping mod 2^64 exactly
-// as the FNV spec requires.
+// The FNV-1a-64 prime, 0x100000001b3, and offset basis 0xcbf29ce484222325. The basis is above i64 max
+// but a u64 literal round-trips its exact bit pattern (lex → fmt → genc), so it is named directly.
+// Every step is a u64 multiply, wrapping mod 2^64 exactly as the FNV spec requires.
 FNV64_PRIME* := 1099511628211
-FNV64_OFFSET_HI := 3421674724    // high 32 bits of the offset basis (0xcbf29ce4)
-FNV64_OFFSET_LO := 2216829733    // low 32 bits of the offset basis (0x84222325)
+FNV64_OFFSET* := 14695981039346656037
 // FNV-1a hash of `bytes` (64-bit). Deterministic and fast; a good spread for hash-table keys, but NOT
 // a cryptographic hash (do not use it for integrity/security). Empty input hashes to the offset basis.
 fnv1a* = (bytes: [u8]) u64 {
-    // offset basis = HI << 32 | LO, combined in u64 arithmetic (the folded value exceeds i64 max).
-    h: u64 := FNV64_OFFSET_HI
-    h = h * 4294967296 + FNV64_OFFSET_LO
+    h: u64 := FNV64_OFFSET
     bytes.loop((hh, i, b) {
         x := to_i64(b)
         h = (h ^ x) * FNV64_PRIME

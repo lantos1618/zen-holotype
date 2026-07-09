@@ -8,15 +8,23 @@
 // Integer rendering stays byte-only so this self-hosts.
 sbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
 digit = (d: i64) u8 { sbyte("0123456789", d) }
-// Walk negative values directly so INT64_MIN does not overflow on `0 - n`.
-gen_int_neg = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
-    (n > 0 - 10).match ({ true => s.gstr_push(alloc, digit(0 - n)), false => {
+// A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
+// `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern renders as UNSIGNED decimal
+// (the `.Int` literal site suffixes it `ULL`). The i64→u64 assignment reinterprets the bits; u64 `/`,`%`
+// walk the value in its full unsigned range (this also renders INT64_MIN correctly, as `0 - <2^63>`).
+gen_uint_nat = (s: String, alloc: MutPtr<Malloc>, n: u64) String {
+    (n < 10).match ({ true => s.gstr_push(alloc, digit(to_i64(n))), false => {
         // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve (UAF)
-        hs := s.gen_int_neg(alloc, n / 10)
-        hs.gstr_push(alloc, digit(0 - n % 10))
+        hs := s.gen_uint_nat(alloc, n / 10)
+        hs.gstr_push(alloc, digit(to_i64(n % 10)))
     } })
 }
-gen_int = (s: String, alloc: MutPtr<Malloc>, n: i64) String { (n < 0).match ({ true => s.gstr_append(alloc, "-").gen_int_neg(alloc, n), false => s.gen_int_nat(alloc, n) }) }
+gen_int = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
+    (n < 0).match ({ true => {
+        u: u64 := n
+        s.gen_uint_nat(alloc, u)
+    }, false => s.gen_int_nat(alloc, n) })
+}
 gen_int_nat = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
     (n < 10).match ({ true => s.gstr_push(alloc, digit(n)), false => {
         hs := s.gen_int(alloc, n / 10)
@@ -40,7 +48,7 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
         // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
         // computes, and the i32 store/cast narrows back.
-        .Int(n)         => s.gen_int(alloc, n).gstr_append(alloc, "LL"),
+        .Int(n)         => s.gen_int(alloc, n).gstr_append(alloc, (n < 0).match ({ true => "ULL", false => "LL" })),
         .Byte(n)        => s.gen_int(alloc, n),
         .FloatLit(ft)   => s.gstr_append(alloc, ft),
         .Var(v)         => s.gstr_append(alloc, v.name),
