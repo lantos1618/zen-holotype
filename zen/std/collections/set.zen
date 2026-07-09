@@ -458,22 +458,20 @@ ASet*<T>: {
     has = (w: ASet<T>, x: T) bool { w.inner.has(x) }
     each = (w: ASet<T>, f: (T) void) void { w.inner.each(f) }
     add = (w: ASet<T>, x: T) ASet<T> {
-        // Bind the receiver ONCE (see AVec.push): in a chain `w` is the previous op's side-effecting
-        // result, and its append/link step is NON-idempotent (re-running prepends the same slot into
-        // its bucket chain twice → a self-cycle that hangs `find`). One bind = one evaluation.
-        ww := w
-        a := ww.alloc
+        // In a chain (`s.add(x).add(y)`) the receiver `w` is the previous op's side-effecting
+        // result, and its link step is NON-idempotent. The inliner binds such a multiply-used arg
+        // to one temp (evaluate-once), so referencing `w` several times below is safe.
+        a := w.alloc
         ASet<T>(
-            inner: ww.inner.add(a.addr(), x).expect("set.add: out of memory"),
-            alloc: ww.alloc,
+            inner: w.inner.add(a.addr(), x).expect("set.add: out of memory"),
+            alloc: w.alloc,
         )
     }
     remove = (w: ASet<T>, x: T) ASet<T> {
-        ww := w
-        a := ww.alloc
+        a := w.alloc
         ASet<T>(
-            inner: ww.inner.remove(a.addr(), x),
-            alloc: ww.alloc,
+            inner: w.inner.remove(a.addr(), x),
+            alloc: w.alloc,
         )
     }
     free = (w: ASet<T>) void {
