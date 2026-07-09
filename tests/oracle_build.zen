@@ -18,11 +18,11 @@
 //   check_out true => also assert stdout equals want_out; false => assert exit code only.
 //
 // For `zenc check` accept/reject fixtures we reuse oracle_lib.run_verdict on the fixture SOURCE.
-{ Malloc } = std.mem.alloc
+{ Malloc, malloc, free } = std.mem.alloc
 { out, save, contents_in, shell } = std.io.file
-{ eq, len, contains, is_empty } = std.text.str
+{ eq, len, contains, is_empty, starts_with } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd } = oracle_lib
+{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = oracle_lib
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: {
     path: str,
@@ -80,18 +80,62 @@ run_fixture* = (fc: FixtureCase) bool {
         }), false => true }), false => false })
     }, false => false })
 }    // exit-only fixture: matched
-// batch BUILD runner + reporter: run every fixture, print '.'/'F', return the failing count.
+// ── PARALLEL build/emit/doc runners (dogfoods std.thread via oracle_lib's zo_par_run) ─────────────
+// Same three-phase shape as oracle_lib's parallel runners: build a self-contained per-case command that
+// writes gid-namespaced result file(s) (each `zenc build/run` gets its OWN output binary `zob<gid>` and
+// stdout `zobout<gid>` — the serial runner reused fixed `zob`/`zob_out.txt`, fatal under parallelism),
+// run the batch across the worker pool, then compare IN ORDER — byte-identical verdict to serial.
+// (run_shells stays SERIAL: its cases are hand-written `$ZT` pipelines with shared scratch names.)
+// PHASE A command: only the heavy `zenc build` (cc). Parallel-safe — a compile spawns no app threads.
+// The program is NOT run here: many build fixtures are CONCURRENCY/pool acceptance programs that spawn
+// their OWN pthreads, so running 16 at once oversubscribes threads and fails nondeterministically.
+fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) str {
+    z: str := ""
+    zob := mp.zo_idpath("zob", gid, "")
+    brc := mp.zo_idpath("zobbrc", gid, ".txt")
+    mp.zo_join([z, "if ./zenc build ", fc.path, " -o ", zob, " 2>/dev/null; then echo P > ", brc, "; else echo F > ", brc, "; fi"])
+}
+// PHASE B (SERIAL, one fixture at a time): the build must have succeeded, then RUN the binary now (serially
+// — no thread oversubscription) and assert exit == want_exit (+ optional stdout). Same verdict as serial.
+fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
+    built := mp.contents_in(mp.zo_idpath("zobbrc", gid, ".txt")).match ({
+        .Ok(s)  => s.starts_with("P"),
+        .Err(e) => false,
+    })
+    built.match ({ true => {
+        z: str := ""
+        zob := mp.zo_idpath("zob", gid, "")
+        o := mp.zo_idpath("zobout", gid, ".txt")
+        rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("oracle: shell")
+        (rc == 0).match ({ true => fc.check_out.match ({ true => mp.contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
+            .Ok(got) => eq(got, fc.want_out),
+            .Err(e)  => false,
+        }), false => true }), false => false })
+    }, false => false })
+}
+// batch BUILD runner + reporter: build the fixtures IN PARALLEL (the cc-heavy step), then run+check them
+// SERIALLY (thread-spawning concurrency fixtures must not be oversubscribed). Byte-identical verdict.
 run_fixtures* = (name: str, cs: [FixtureCase]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        cmds[i] = mp.fix_build_cmd(i, c)
+    })
+    zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        run_fixture(c).match ({ true => out("."), false => {
+        mp.fix_run_ok(i, c).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(base)
     fails
 }
 // helper: build a one-arg command  `./zenc <verb> <path> <redirect>`
@@ -129,17 +173,43 @@ run_emit* = (ec: EmitCase) bool {
         .Err(e)  => false,
     }), false => false })
 }
+emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) str {
+    z: str := ""
+    c := mp.zo_idpath("zoeemit", gid, ".c")
+    rc := mp.zo_idpath("zoeemitrc", gid, ".txt")
+    mp.zo_join([z, "if ./zenc emit ", ec.path, " > ", c, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+}
+emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
+    passed := mp.contents_in(mp.zo_idpath("zoeemitrc", gid, ".txt")).match ({
+        .Ok(s)  => s.starts_with("P"),
+        .Err(e) => false,
+    })
+    passed.match ({ true => mp.contents_in(mp.zo_idpath("zoeemit", gid, ".c")).match ({
+        .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
+        .Err(e)  => false,
+    }), false => false })
+}
 run_emits* = (name: str, cs: [EmitCase]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        cmds[i] = mp.emit_cmd(i, c)
+    })
+    zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        run_emit(c).match ({ true => out("."), false => {
+        mp.emit_ok(i, c).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(base)
     fails
 }
 // run ONE doc case: `zenc doc <target>` must exit 0 and the markdown must satisfy present/absent.
@@ -152,17 +222,43 @@ run_doc* = (dc: DocCase) bool {
         .Err(e)  => false,
     }), false => false })
 }
+doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) str {
+    z: str := ""
+    f := mp.zo_idpath("zoedoc", gid, ".txt")
+    rc := mp.zo_idpath("zoedocrc", gid, ".txt")
+    mp.zo_join([z, "if ./zenc doc ", dc.target, " > ", f, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+}
+doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
+    passed := mp.contents_in(mp.zo_idpath("zoedocrc", gid, ".txt")).match ({
+        .Ok(s)  => s.starts_with("P"),
+        .Err(e) => false,
+    })
+    passed.match ({ true => mp.contents_in(mp.zo_idpath("zoedoc", gid, ".txt")).match ({
+        .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
+        .Err(e)  => false,
+    }), false => false })
+}
 run_docs* = (name: str, cs: [DocCase]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        cmds[i] = mp.doc_cmd(i, c)
+    })
+    zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        run_doc(c).match ({ true => out("."), false => {
+        mp.doc_ok(i, c).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(base)
     fails
 }
 // run ONE shell case: the pipeline must exit 0. Each `cmd` body uses `$ZT` for its scratch paths;

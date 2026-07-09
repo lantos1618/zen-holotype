@@ -27,13 +27,13 @@
 //   * DOC     — `zenc doc <module>`: must succeed and contain every `present` substring (exported sigs).
 // Resolver-API VALUE cases are ordinary Zen programs that import std.internal.resolve and `to_exit()` —
 // the loader's data structures are tested at the CLI boundary, no Python harness anywhere.
-{ Malloc } = std.mem.alloc
+{ Malloc, malloc, free } = std.mem.alloc
 { out, save, contents_in, shell } = std.io.file
-{ eq, len, contains, is_empty, view } = std.text.str
+{ eq, len, contains, is_empty, view, starts_with, try_parse_int } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
 { integer_in } = std.text.num
-{ zo_path, zo_cmd } = oracle_lib
+{ zo_path, zo_cmd, zo_par_run } = oracle_lib
 // one source file of a project: `name` is the basename (e.g. "p.zen"), `src` its full text.
 ModFile*: {
     name: str,
@@ -236,8 +236,85 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
         },
     }), false => false })
 }
-// batch runners + reporters: run every case, print '.'/'F', return the failing count.
+// ── PARALLEL module runners (dogfoods std.thread via oracle_lib's zo_par_run) ─────────────────────
+// Same three-phase shape as the single-file oracle_lib runners, but each case gets its OWN project dir
+// `zo_mods<gid>/` (the serial runners reused one `zo_mods/` — fatal under parallelism). Each spawned
+// `./zenc run|check` is a distinct process writing pid-unique intermediates (/tmp/zenc_zd_<pid>.*), so
+// concurrent compiles never collide; only the project sources + captured results are gid-namespaced.
+mitoa = (mp: MutPtr<Malloc>, n: i64) str { mp.integer_in(n).expect("oracle: oom").finish_in(mp).expect("oracle: oom") }
+mod_dir_id = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join2("zo_mods", mp.mitoa(gid))) }
+mod_rc_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_rc", mp.mitoa(gid), ".txt")) }
+mod_chk_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_chk", mp.mitoa(gid), ".txt")) }
+// Phase A: fresh per-case project dir + write its files (serial, Zen-side).
+mod_write_files_id = (mp: MutPtr<Malloc>, gid: i64, files: [ModFile]) void {
+    dir := mp.mod_dir_id(gid)
+    shell(mp.zo_cmd(mp.join2(mp.join3("rm -rf ", dir, " && mkdir -p "), dir)))
+    files.loop((h, i, f) {
+        p := mp.join3(dir, "/", f.name)
+        save(p, f.src, len(f.src))
+    })
+}
+// VALUE per-case command: `zenc run <entry>`; capture the program's exit code (WEXITSTATUS / 128+sig —
+// exactly what shell() decoded serially) into rc<gid> with `printf %s` (no newline, so try_parse_int accepts it).
+mod_value_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: str) str {
+    ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
+    mp.join2(mp.join3("./zenc run ", ent, " > /dev/null 2>&1; printf %s \"$?\" > "), mp.mod_rc_path(gid))
+}
+mod_value_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModValCase) bool {
+    mp.contents_in(mp.mod_rc_path(gid)).match ({
+        .Ok(s)  => try_parse_int(s).match ({
+            .Ok(v)  => v == to_i64(mc.want),
+            .Err(e) => false,
+        }),
+        .Err(e) => false,
+    })
+}
+// VERDICT per-case command: `zenc check <entry>`; capture accept(P)/reject(F) + the diagnostic.
+mod_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: str) str {
+    z: str := ""
+    ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
+    chk := mp.mod_chk_path(gid)
+    rc := mp.mod_rc_path(gid)
+    mp.joinv([z, "if ./zenc check ", ent, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+}
+mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
+    accepted := mp.contents_in(mp.mod_rc_path(gid)).match ({
+        .Ok(s)  => s.starts_with("P"),
+        .Err(e) => false,
+    })
+    mc.should_pass.match ({ true => accepted, false => accepted.match ({ true => false, false => is_empty(mc.needle).match ({ true => true, false => mp.contents_in(mp.mod_chk_path(gid)).match ({
+        .Ok(txt) => txt.contains(mc.needle),
+        .Err(e)  => false,
+    }) }) }) })
+}
+// batch runners + reporters: build+write (serial), run in parallel, check IN ORDER — same verdict as serial.
 run_mod_values = (name: str, cs: [ModValCase]) i32 {
+    out(name)
+    out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        mp.mod_write_files_id(i, c.files)
+        cmds[i] = mp.mod_value_cmd(i, c.entry)
+    })
+    zo_par_run(cmds, n)
+    fails := 0
+    cs.loop((h, i, c) {
+        mp.mod_value_ok(i, c).match ({ true => out("."), false => {
+            out("F")
+            fails = fails + 1
+        } })
+    })
+    out("\n")
+    free(base)
+    fails
+}
+// SERIAL value runner — for the deep-loader sub-suite, whose driver sources BAKE the shared `mod_dir()`
+// path (deep_src_*), so those cases must run in that one dir, one at a time (they can't be gid-namespaced).
+run_mod_values_serial = (name: str, cs: [ModValCase]) i32 {
     out(name)
     out("\n")
     fails := 0
@@ -253,9 +330,19 @@ run_mod_values = (name: str, cs: [ModValCase]) i32 {
 run_mod_verdicts = (name: str, cs: [ModVerdictCase]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        mp.mod_write_files_id(i, c.files)
+        cmds[i] = mp.mod_verdict_cmd(i, c.entry)
+    })
+    zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        run_mod_verdict(c).match ({ true => out("."), false => {
+        mp.mod_verdict_ok(i, c).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
@@ -1631,7 +1718,7 @@ oracle_modules_run* = () i32 {
     // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
     // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
     // because the oracle runs `./zenc` from the repo root, so std resolves relative to the cwd.
-    dl := run_mod_values("modules value (deep loader API: resolve_program_data / parsed_program / check)", [ModValCase(
+    dl := run_mod_values_serial("modules value (deep loader API: resolve_program_data / parsed_program / check)", [ModValCase(
         files: [ModFile(
             name: "helper.zen",
             src: "value* = () i32 { 7 }\n",
