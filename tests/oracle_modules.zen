@@ -312,19 +312,52 @@ run_mod_values = (name: str, cs: [ModValCase]) i32 {
     free(base)
     fails
 }
-// SERIAL value runner — for the deep-loader sub-suite, whose driver sources BAKE the shared `mod_dir()`
-// path (deep_src_*), so those cases must run in that one dir, one at a time (they can't be gid-namespaced).
-run_mod_values_serial = (name: str, cs: [ModValCase]) i32 {
+// PARALLEL deep-loader runner. The deep-loader driver sources USED to bake the one shared `mod_dir()`,
+// forcing serial execution; now each case gets its OWN gid-namespaced project dir and the driver's baked
+// progdir points at THAT dir (deep_driver_src(kind, dir)), so the cases are disjoint and run concurrently.
+// Each driver's `zenc run` cc-compiles the whole resolver (~20s), so overlapping the 3 cases across the
+// pool is the single biggest oracle speedup. Every case wants exit 0 (`.to_exit()` on the assertion).
+// A DeepCase is the sibling module files + which resolver-API driver to generate (kind: 0=resolve_program_data
+// table, 1=resolve_parsed_program, 2=check_parsed_program); driver.zen is generated per-gid.
+DeepCase: {
+    base_files: [ModFile],
+    kind: i32,
+}
+deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: str) str { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => mp.deep_src_check(dir) }) }) }
+deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
+    mp.contents_in(mp.mod_rc_path(gid)).match ({
+        .Ok(s)  => try_parse_int(s).match ({
+            .Ok(v)  => v == 0,
+            .Err(e) => false,
+        }),
+        .Err(e) => false,
+    })
+}
+run_mod_deep = (name: str, cs: [DeepCase]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        mp.mod_write_files_id(i, c.base_files)    // fresh per-gid dir + sibling module files
+        dir := mp.join2(mp.mod_dir_id(i), "/")    // slash-terminated progdir baked into the driver
+        drv := mp.deep_driver_src(c.kind, dir)
+        save(mp.join3(mp.mod_dir_id(i), "/", "driver.zen"), drv, len(drv))
+        cmds[i] = mp.mod_value_cmd(i, "driver.zen")
+    })
+    zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        run_mod_value(c).match ({ true => out("."), false => {
+        mp.deep_ok(i).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(base)
     fails
 }
 run_mod_verdicts = (name: str, cs: [ModVerdictCase]) i32 {
@@ -350,17 +383,62 @@ run_mod_verdicts = (name: str, cs: [ModVerdictCase]) i32 {
     out("\n")
     fails
 }
+// PARALLEL emit runner (3-phase, same discipline as run_mod_values): each case writes its project into
+// its OWN gid-namespaced dir, `zenc emit` runs in parallel writing gid-namespaced result + P/F marker
+// files, then present/absent are checked IN ORDER — byte-identical verdict to the old serial loop.
+mod_emit_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_emit", mp.mitoa(gid), ".txt")) }
+mod_emit_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: str) str {
+    z: str := ""
+    ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
+    outp := mp.mod_emit_path(gid)
+    rc := mp.mod_rc_path(gid)
+    mp.joinv([z, "if ./zenc emit ", ent, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+}
+mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
+    passed := mp.contents_in(mp.mod_rc_path(gid)).match ({
+        .Ok(s)  => s.starts_with("P"),
+        .Err(e) => false,
+    })
+    passed.match ({ true => mp.contents_in(mp.mod_emit_path(gid)).match ({
+        .Err(e)  => false,
+        .Ok(txt) => {
+            bad := 0
+            mc.present.loop((h, i, s) {
+                txt.contains(s).match ({ false => {
+                    bad = bad + 1
+                } })
+            })
+            mc.absent.loop((h, i, s) {
+                txt.contains(s).match ({ true => {
+                    bad = bad + 1
+                } })
+            })
+            bad == 0
+        },
+    }), false => false })
+}
 run_mod_emits = (name: str, cs: [ModEmitCase]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        mp.mod_write_files_id(i, c.files)
+        cmds[i] = mp.mod_emit_cmd(i, c.entry)
+    })
+    zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        run_mod_emit(c).match ({ true => out("."), false => {
+        mp.mod_emit_ok(i, c).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(base)
     fails
 }
 run_mod_docs = (name: str, cs: [ModDocCase]) i32 {
@@ -1718,8 +1796,8 @@ oracle_modules_run* = () i32 {
     // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
     // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
     // because the oracle runs `./zenc` from the repo root, so std resolves relative to the cwd.
-    dl := run_mod_values_serial("modules value (deep loader API: resolve_program_data / parsed_program / check)", [ModValCase(
-        files: [ModFile(
+    dl := run_mod_deep("modules value (deep loader API: resolve_program_data / parsed_program / check)", [DeepCase(
+        base_files: [ModFile(
             name: "helper.zen",
             src: "value* = () i32 { 7 }\n",
         ), ModFile(
@@ -1731,14 +1809,10 @@ oracle_modules_run* = () i32 {
         ), ModFile(
             name: "plain.zen",
             src: "plain* = () i32 { 5 }\n",
-        ), ModFile(
-            name: "driver.zen",
-            src: mp.deep_src_table(),
         )],
-        entry: "driver.zen",
-        want: 0,
-    ), ModValCase(
-        files: [ModFile(
+        kind: 0,
+    ), DeepCase(
+        base_files: [ModFile(
             name: "helper.zen",
             src: "value* = () i32 { 7 }\n",
         ), ModFile(
@@ -1750,25 +1824,17 @@ oracle_modules_run* = () i32 {
         ), ModFile(
             name: "plain.zen",
             src: "plain* = () i32 { 5 }\n",
-        ), ModFile(
-            name: "driver.zen",
-            src: mp.deep_src_parsed(),
         )],
-        entry: "driver.zen",
-        want: 0,
-    ), ModValCase(
-        files: [ModFile(
+        kind: 1,
+    ), DeepCase(
+        base_files: [ModFile(
             name: "left.zen",
             src: "thing* = (a: i32, b: i32) i32 { a + b }\n",
         ), ModFile(
             name: "plain.zen",
             src: "plain* = (a: i32) i32 { a }\n",
-        ), ModFile(
-            name: "driver.zen",
-            src: mp.deep_src_check(),
         )],
-        entry: "driver.zen",
-        want: 0,
+        kind: 2,
     )])
     // resolve_program_data: the ResolvedProgram.table holds every transitively-loaded namespace module
     //   (u/left,u/right,u/plain,u/helper) with per-module graphs, and the flat body is namespace-stripped.
@@ -1782,19 +1848,16 @@ oracle_modules_run* = () i32 {
 // Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and
 // the entry inpath (mod_dir already ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
 // root is "." (the oracle's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
-deep_src_table = (mp: MutPtr<Malloc>) str {
+deep_src_table = (mp: MutPtr<Malloc>, dir: str) str {
     z: str := ""
-    dir := mp.mod_dir()
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_program_data } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    resolved := a.addr().resolve_program_data(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    table := resolved.table\n    left := table.module(\"u/left\")\n    helper := table.module(\"u/helper\")\n    ok := (table.count() == 5)\n        && table.has(\"u/left\") && table.has(\"u/right\") && table.has(\"u/plain\") && table.has(\"u/helper\")\n        && left.graph.has(\"thing\") && helper.graph.has(\"value\")\n        && resolved.flat.contains(\"left__thing\") && resolved.flat.contains(\"plain\")\n        && (!resolved.flat.contains(\"left = left\")) && (resolved.body_start <= resolved.body_end)\n    ok.to_exit()\n}\n"])
 }
-deep_src_parsed = (mp: MutPtr<Malloc>) str {
+deep_src_parsed = (mp: MutPtr<Malloc>, dir: str) str {
     z: str := ""
-    dir := mp.mod_dir()
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    program := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    root := program.module(\"\")\n    left := program.module(\"u/left\")\n    helper := program.module(\"u/helper\")\n    ok := (program.count() == 5)\n        && (program.flat_decls.len == 5)\n        && (root.decls.len == 1) && root.body.contains(\"left__thing\") && (!root.body.contains(\"left = left\"))\n        && (left.decls.len == 1) && left.body.contains(\"helper__value\") && (!left.body.contains(\"helper = helper\"))\n        && (helper.decls.len == 1) && helper.body.contains(\"value\")\n    ok.to_exit()\n}\n"])
 }
-deep_src_check = (mp: MutPtr<Malloc>) str {
+deep_src_check = (mp: MutPtr<Malloc>, dir: str) str {
     z: str := ""
-    dir := mp.mod_dir()
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, root_link_decls, check_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain(3) }\\n\"\n    bad_ns := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1) + plain(3) }\\n\"\n    bad_plain := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    nsp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_ns.zen\", bad_ns)\n    pp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_plain.zen\", bad_plain)\n    lib := a.addr().root_link_decls(gp)\n    ok := (lib.len == 2)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_parsed_program(nsp) > 0)\n        && (a.addr().check_parsed_program(pp) > 0)\n    ok.to_exit()\n}\n"])
 }
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a

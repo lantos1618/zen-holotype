@@ -12,12 +12,13 @@
 //
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
 // already defines `read_file*`), oracle_lib, or the other category files.
-{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd } = oracle_lib
+{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = oracle_lib
 { Malloc } = std.mem.alloc
 { out, out_bytes, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
+{ malloc, free } = std.mem.alloc
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD := "typedef struct { void* ptr; int64_t len; } zslice; "
 // ── shared helpers ────────────────────────────────────────────────────────────
@@ -222,12 +223,23 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
     }
     ok
 }
-om_acid_ok = (mp: MutPtr<Malloc>, path: str) bool {
-    save(mp.zo_path("zo_misc_acid.c"), "", 0)
-    rc := shell(mp.zo_cmd(mp.om_cat3("./zenc emit ", path, " > $ZT/zo_misc_acid.c 2>/dev/null"))).expect("oracle: shell")
-    txt := mp.om_read_file(mp.zo_path("zo_misc_acid.c"))
-    src := mp.om_read_file(path)
-    (rc == 0).match ({ true => txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false }), false => false })
+// PARALLEL acid (3-phase, dogfoods zo_par_run): `zenc emit <src>` for each real compiler/std source runs
+// across the worker pool, each writing a gid-namespaced C output + P/F marker; Phase C reads them IN ORDER
+// and applies the SAME check (rc 0 AND output starts with HEAD AND every top-level decl name survives) —
+// byte-identical verdict to the old serial loop. Emitting the big compiler files serially was ~21s.
+om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: str) str {
+    z: str := ""
+    outp := mp.zo_idpath("zo_acid", gid, ".c")
+    rc := mp.zo_idpath("zo_acidrc", gid, ".txt")
+    mp.zo_join([z, "if ./zenc emit ", path, " > ", outp, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+}
+om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: str) bool {
+    passed := mp.om_read_file(mp.zo_idpath("zo_acidrc", gid, ".txt")).starts_with("P")
+    passed.match ({ true => {
+        txt := mp.om_read_file(mp.zo_idpath("zo_acid", gid, ".c"))
+        src := mp.om_read_file(path)
+        txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false })
+    }, false => false })
 }
 oracle_misc_acid = () i32 {
     m := Malloc(_: 0)
@@ -235,14 +247,22 @@ oracle_misc_acid = () i32 {
     files := ["zen/std/atomic.zen", "zen/std/build.zen", "zen/std/json.zen", "zen/std/math.zen", "zen/std/os.zen", "zen/std/rand.zen", "zen/std/scope.zen", "zen/std/sync.zen", "zen/std/thread.zen", "zen/compiler/check.zen", "zen/compiler/check_validate.zen", "zen/compiler/diagnostic.zen", "zen/compiler/genc.zen", "zen/compiler/genc_emit.zen", "zen/compiler/pretty.zen", "zen/compiler/lex.zen", "zen/compiler/mono.zen", "zen/compiler/parse.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_stmt.zen", "zen/compiler/parse_type.zen"]
     out("acid (emit real sources)")
     out("\n")
+    n := files.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    files.loop((h, i, f) {
+        cmds[i] = mp.om_acid_cmd(i, f)
+    })
+    zo_par_run(cmds, n)
     fails := 0
     files.loop((h, i, f) {
-        mp.om_acid_ok(f).match ({ true => out("."), false => {
+        mp.om_acid_ok(i, f).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(base)
     fails
 }
 // ════════════════════════════════════════════════════════════════════════════════
