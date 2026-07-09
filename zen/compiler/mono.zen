@@ -8,7 +8,7 @@
 { view, is_empty, eq } = std.text.str
 { Malloc } = std.mem.alloc
 { panic } = std.core.result
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, GenStructDecl, EnumDecl, VariantDef, GenericData, FieldInit, ArmData, TagData, MakeStructData, MakeEnumData, field, param, dstruct, denum, subst_ty_in, find_genenum, is_generic_fn, is_expr_null } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, GenStructDecl, EnumDecl, VariantDef, GenericData, FieldInit, ArmData, TagData, MakeStructData, MakeEnumData, field, param, dstruct, denum, subst_ty_in, find_genenum, tgeneric, tnamed, mangle_str_in, is_generic_fn, is_expr_null } = compiler.genc
 // ── monomorphization: instantiate generic structs/enums per concrete use ─────────
 // Backend prepass. A `Box<T>: {…}` decl (DGenStruct) emits no concrete type by itself; instead, for
 // every distinct `Box<concrete>` the module uses, we create one concrete StructDecl `Box_i32` with tparam→arg
@@ -46,13 +46,36 @@ find_genstruct = (decls: [Decl], name: str) GenStructDecl {
 }
 // the concrete EnumDecl for one instance: the matching DGenEnum's variants, tparam→arg substituted.
 mono_vbuf = (a: MutPtr<Malloc>, n: i64) [VariantDef] { slice(a.acquire(n * sizeof(VariantDef)), n) }
+mono_tbuf = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
+// A multi-field variant payload `Node(T, T)` lowers to a positional anon struct `__anon__0__1` whose
+// tparam-mentioning fields promote it to a GENERIC struct over the enum's type-vars (parse.augment).
+// Plain tparam→arg substitution can't touch it — the payload is a bare `.Named("__anon__0__1")`, not a
+// tparam — so the union member would keep the TEMPLATE name while the struct's forward-decl + the `.Node`
+// constructor use the monomorphized name (`__anon__0__1_i32`): an `unknown type name` C error. Rebuild the
+// payload as the concrete `.Generic` instance (each anon-struct tparam substituted through the enum's
+// tparam→arg map, then re-mangled), so the union member, its definition, and the ctor all agree — and the
+// instance is discovered (collect_pays) even when the enum is only matched, never explicitly constructed.
+mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], payload: Ty) Ty {
+    sub := a.subst_ty_in(tparams, args, payload)
+    sub.match ({
+        .Named(n) => decls.is_genstruct_name(n).match ({ true => {
+            gsd := decls.find_genstruct(n)
+            tys := a.mono_tbuf(gsd.tparams.len)
+            gsd.tparams.loop((h, i, tp) {
+                tys[i] = a.subst_ty_in(tparams, args, tnamed(tp.name))
+            })
+            tgeneric(n, tys, a.mangle_str_in(n, tys))
+        }, false => sub }),
+        _         => sub,
+    })
+}
 mono_enum = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     ged := decls.find_genenum(g.name)
     buf := a.mono_vbuf(ged.variants.len)
     ged.variants.loop((h, i, v) {
         buf[i] = VariantDef(
             name: v.name,
-            payload: a.subst_ty_in(ged.tparams, g.args, v.payload),
+            payload: a.mono_payload(decls, ged.tparams, g.args, v.payload),
             dflt: v.dflt,
         )
     })
