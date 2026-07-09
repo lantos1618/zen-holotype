@@ -205,13 +205,22 @@ ff_push = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
 // integer rendering, byte-only (mirrors genc_emit so this self-hosts)
 ffbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
 ffdigit = (d: i64) u8 { ffbyte("0123456789", d) }
-ff_int_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n > 0 - 10).match ({ true => s.ff_push(a, ffdigit(0 - n)), false => {
-        hs := s.ff_int_neg(a, n / 10)
-        hs.ff_push(a, ffdigit(0 - n % 10))
+// A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
+// `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern must print as UNSIGNED decimal
+// (`0xcbf29ce484222325` → `14695981039346656037`, not the wrong signed `-3750763034362895579`). The
+// i64→u64 assignment reinterprets the bits; u64 `/`,`%` render the value in its full unsigned range.
+ff_uint_nat = (s: String, a: MutPtr<Malloc>, n: u64) String {
+    (n < 10).match ({ true => s.ff_push(a, ffdigit(to_i64(n))), false => {
+        hs := s.ff_uint_nat(a, n / 10)
+        hs.ff_push(a, ffdigit(to_i64(n % 10)))
     } })
 }
-ff_int = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({ true => s.ff_append(a, "-").ff_int_neg(a, n), false => s.ff_int_nat(a, n) }) }
+ff_int = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 0).match ({ true => {
+        u: u64 := n
+        s.ff_uint_nat(a, u)
+    }, false => s.ff_int_nat(a, n) })
+}
 ff_int_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
     (n < 10).match ({ true => s.ff_push(a, ffdigit(n)), false => {
         hs := s.ff_int(a, n / 10)
