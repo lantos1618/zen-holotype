@@ -8,6 +8,7 @@
 { Allocator, Malloc, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { String } = std.text.string
+{ Map, of } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
 { view, eq, is_empty } = std.text.str
@@ -247,6 +248,19 @@ seen_scan = (set: String, name: String, i: i64) bool { (i >= set.len).match ({ t
 snext_line = (set: String, i: i64) i64 { (i >= set.len).match ({ true => set.len, false => (set.res_sbyte(i) == '\n').match ({ true => i + 1, false => set.snext_line(i + 1) }) }) }
 seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
 add_name* = (set: String, a: MutPtr<Malloc>, name: String) String { set.rappend_string(a, name).rpush(a, 10) }
+// O(1)-average presence set over the shadow-rename pass's symbol keys, replacing the newline-delimited
+// String + linear `seen_name` scan (which made shadow_rename_set O(n²) in decl count — 50k trivial fns
+// never finished). Keys are the clean, NUL-terminated identifiers `symbol_key_in`/`symbol_name_alloc`
+// mint, so a content-hashed Map matches the old explicit-length String comparison byte-for-byte. The
+// "" seed is a sentinel: identifiers are never empty, so it is never a real query. Val is a presence
+// marker (0); membership is by key.
+rset_new = (a: MutPtr<Malloc>) Map<i64> {
+    seed: i64 := 0 - 1
+    of(a, "", seed).expect("std.internal.resolve: rset alloc")
+}
+rset_add = (m: Map<i64>, a: MutPtr<Malloc>, key: String) Map<i64> { m.put(a, cstr(key.ptr), 0).expect("std.internal.resolve: rset alloc") }
+rset_add_str = (m: Map<i64>, a: MutPtr<Malloc>, name: str) Map<i64> { m.put(a, name, 0).expect("std.internal.resolve: rset alloc") }
+rset_has = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
 copy_from = (out: String, a: MutPtr<Malloc>, src: String, i: i64) String {
     cur := out
     (i >= src.len).match ({ true => { }, false => {
@@ -1284,6 +1298,27 @@ value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [Provided
     })
     cur
 }
+// Map-set forms of imported_value_names / value_symbol_names_into_in — same filters, O(1)-membership
+// presence sets for shadow_rename_set (see rset_*). value_symbol_name_set keys on `sym.name` (the raw
+// clean identifier), matching the original allnames String that shadow_mangled(key) is looked up against.
+imported_value_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+    cur := m
+    symbols.loop((h, idx, sym) {
+        (sym.imported && sym.is_type.match ({ true => false, false => true })).match ({ true => {
+            cur = cur.rset_add(a, sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed"))
+        }, false => { } })
+    })
+    cur
+}
+value_symbol_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+    cur := m
+    symbols.loop((h, idx, sym) {
+        (sym.symbol_allowed(false, false) && sym.is_type.match ({ true => false, false => true })).match ({ true => {
+            cur = cur.rset_add_str(a, sym.name)
+        }, false => { } })
+    })
+    cur
+}
 alias_decl_names = (a: MutPtr<Malloc>, src: str) String { a.module_graph(src).decl_names_in(a) }
 span_eq_lit = (s: str, p: i32, e: i32, lit: str, i: i32) bool { (p + i == e).match ({ true => lit.at(i) == 0, false => (lit.at(i) == 0).match ({ true => false, false => s.at(p + i) == lit.at(i) && s.span_eq_lit(p, e, lit, i + 1) }) }) }
 span_eq_name = (s: str, p: i32, e: i32, lit: str) bool { s.span_eq_lit(p, e, lit, 0) }
@@ -1947,17 +1982,6 @@ enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 
 // safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
 shadow_alias_of = (a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, "zshadow") }
 shadow_mangled = (a: MutPtr<Malloc>, name: String) String { a.gstr_string(name.len + 10).gstr_append(a, "zshadow__").rappend_string(a, name) }
-// Names the user imported BY NAME (`{ len } = std.text.str`): a same-named local is a GENUINE conflict —
-// keep the dup-fn error, never auto-rename it away.
-imported_value_names = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64) String {
-    cur := set
-    symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => (sym.imported && sym.is_type.match ({ true => false, false => true })).match ({ true => {
-            cur = a.madd_name(cur, sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed"))
-        }, false => { } }) })
-    })
-    cur
-}
 // The set of user-body value-decl names to rename. A name qualifies iff it is a value decl (not a type,
 // not an import binding) defined EXACTLY ONCE in the user body [lo,hi) (a name defined twice is a real
 // user-vs-user dup → keep the error), whose name ALSO exists as a non-imported value decl OUTSIDE the
@@ -1965,34 +1989,37 @@ imported_value_names = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol
 // already taken (else fall back to the dup-fn error rather than silently rebind).
 shadow_rename_set = (a: MutPtr<Malloc>, flat: str, mainsrc: str, lo: i64, hi: i64) String {
     syms := a.module_graph(flat).symbols
-    imported := a.imported_value_names(a.gstr_string(64), a.module_graph(mainsrc).symbols, 0)
-    allnames := a.value_symbol_names_into_in(a.gstr_string(256), syms, 0)
-    mainseen := a.gstr_string(128)
-    maindup := a.gstr_string(64)
-    nonmain := a.gstr_string(256)
+    imported := a.imported_value_name_set(a.rset_new(), a.module_graph(mainsrc).symbols)
+    allnames := a.value_symbol_name_set(a.rset_new(), syms)
+    mainseen := a.rset_new()
+    maindup := a.rset_new()
+    nonmain := a.rset_new()
     syms.loop((h, i, s) {
         (s.imported || s.foreign || s.is_type).match ({ true => { }, false => {
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            (s.decl_start >= lo && s.decl_start < hi).match ({ true => mainseen.seen_name(key).match ({ true => {
-                maindup = a.madd_name(maindup, key)
+            (s.decl_start >= lo && s.decl_start < hi).match ({ true => mainseen.rset_has(key).match ({ true => {
+                maindup = maindup.rset_add(a, key)
             }, false => {
-                mainseen = a.madd_name(mainseen, key)
-            } }), false => nonmain.seen_name(key).match ({ true => { }, false => {
-                nonmain = a.madd_name(nonmain, key)
+                mainseen = mainseen.rset_add(a, key)
+            } }), false => nonmain.rset_has(key).match ({ true => { }, false => {
+                nonmain = nonmain.rset_add(a, key)
             } }) })
         } })
     })
+    // `out` stays the newline-delimited String the rewrite consumes; `outset` is its O(1) `fresh` mirror.
     out := a.gstr_string(64)
+    outset := a.rset_new()
     syms.loop((h, i, s) {
         (s.imported || s.foreign || s.is_type).match ({ true => { }, false => {
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
             inmain := s.decl_start >= lo && s.decl_start < hi
-            once := mainseen.seen_name(key) && maindup.seen_name(key).match ({ true => false, false => true })
-            unimported := imported.seen_name(key).match ({ true => false, false => true })
-            free := allnames.seen_name(a.shadow_mangled(key)).match ({ true => false, false => true })
-            fresh := out.seen_name(key).match ({ true => false, false => true })
-            (inmain && once && nonmain.seen_name(key) && unimported && free && fresh).match ({ true => {
+            once := mainseen.rset_has(key) && maindup.rset_has(key).match ({ true => false, false => true })
+            unimported := imported.rset_has(key).match ({ true => false, false => true })
+            free := allnames.rset_has(a.shadow_mangled(key)).match ({ true => false, false => true })
+            fresh := outset.rset_has(key).match ({ true => false, false => true })
+            (inmain && once && nonmain.rset_has(key) && unimported && free && fresh).match ({ true => {
                 out = a.madd_name(out, key)
+                outset = outset.rset_add(a, key)
             }, false => { } })
         } })
     })
