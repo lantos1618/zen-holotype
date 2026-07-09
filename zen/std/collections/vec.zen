@@ -259,10 +259,15 @@ AVec*<T>: {
     fold = (w: AVec<T>, init: T, f: (T, T) T) T { w.inner.fold(init, f) }
     find = (w: AVec<T>, pred: (T) bool) Opt<T> { w.inner.find(pred) }
     push = (w: AVec<T>, x: T) AVec<T> {
-        a := w.alloc
+        // Bind the receiver to a local ONCE. In a chain (`v.push(1).push(2)`) `w` is the
+        // side-effecting result of the previous op; referencing it 3× below would let the inliner
+        // re-evaluate that whole sub-expression per use (exponential over the chain depth). One
+        // bind pins it to a single evaluation.
+        ww := w
+        a := ww.alloc
         AVec<T>(
-            inner: w.inner.push(a.addr(), x).expect("vec.push: out of memory"),
-            alloc: w.alloc,
+            inner: ww.inner.push(a.addr(), x).expect("vec.push: out of memory"),
+            alloc: ww.alloc,
         )
     }
     free = (w: AVec<T>) void {
