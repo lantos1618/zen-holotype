@@ -1,0 +1,545 @@
+// std.collections.btree — `BTreeMap<K, V>` + `BTreeSet<K>`, the ORDERED associative map and set.
+// The sorted twin of the hash-based std.collections.{hmap,set}: those store entries in hash/insertion
+// order (iteration order is unspecified and perturbed by delete); these keep entries SORTED BY KEY at
+// all times, so iteration, `min`/`max` and `range` are exact and cheap. Same allocator threading and
+// Result-valued fallible ops as the rest of std.collections — nothing here hides a malloc.
+//
+// KEYS ARE TRAIT-DISPATCHED on `Ord` (a three-way compare, `cmp(a, b) < 0 / == 0 / > 0`). Impls for
+// i64/i32/u8/str ship right here, so scalar and (literal) string keys work out of the box. A STRUCT
+// key is one impl away — compare fields lexicographically:
+//
+//   Pt: { x: i64, y: i64 }
+//   Pt.impl(Ord, {
+//       cmp = (a: Pt, b: Pt) i64 { (a.x == b.x).match ({ true => a.y.cmp(b.y), false => a.x.cmp(b.x) }) }
+//   })
+//
+// IMPLEMENTATION: a sorted, gap-free array (two parallel `keys`/`vals` buffers for the map, one `keys`
+// buffer for the set). `get`/`contains`/`insert`-position are O(log n) binary search; `insert`/`remove`
+// are O(n) (shift the tail) but ALWAYS-SORTED, which is what makes ordered iteration and range queries
+// trivially correct — the array IS the sorted order. (A true B-tree would trade the shift for O(log n)
+// structural updates; the sorted array is the same external contract with far less machinery, and
+// correctness — not asymptotics — is this collection's job.)
+//
+// Every op that allocates returns Result<_, IoError> — allocation failure is a value. `of` seeds one
+// entry and infers K/V from it, so it chains: `m := btree.of(a, k, v).expect("of")`. `empty`'s K/V
+// appear only in its RETURN type, which inference can't reach through a `.expect` chain — pin them with
+// a two-step annotation instead:
+//
+//   r: Result<BTreeMap<i64, i64>, IoError> := btree.empty(a)
+//   m := r.expect("empty")
+//   m = m.insert(a, 5, 50).expect("insert")   // insert — grows through alloc when full
+//   m = m.insert(a, 5, 90).expect("insert")   // upsert — same key overwrites in place
+//   m.get(5)                                   // Opt<i64>: .Some(90); absent keys are .None
+//   m.contains(5)                              // true
+//   m = m.remove(a, 5)                         // remove — closes the gap, stays sorted
+//   m.min()   m.max()                          // Opt<K>: smallest / largest key
+//   m.each((k, v) { ... })                     // visit every pair IN SORTED KEY ORDER
+//   m.keys()                                   // the [K] key column — already sorted
+//   m.range(2, 8, (k, v) { ... })              // visit keys in [2, 8) (lo inclusive, hi exclusive)
+//   m.free(a)                                  // hand all buffers back to alloc
+//
+// VALUE-MOLD CONTRACT (same as Map<T>/HMap/Set — by-design, not bugs): a BTreeMap/BTreeSet is a small
+// by-value header over allocator-owned buffers.
+//   1. ALWAYS USE THE RETURNED VALUE: `insert` may grow (realloc) and `remove` drops len — a stale
+//      pre-call header points at freed memory or lies about len. Rebind every time:
+//      `m = m.insert(...).expect("…")`, `m = m.remove(a, k)`.
+//   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one tree share one backing store.
+{ Result, IoError, Opt } = std.core.result
+{ Allocator, try_acquire } = std.mem.alloc    // explicit allocator trait
+{ strcmp } = std.c.libc    // three-way byte compare for str keys
+// `Ord` — total order on keys as a THREE-WAY compare: `cmp(a, b)` is < 0 when a < b, 0 when a == b,
+// > 0 when a > b. Everything sorted (binary search, insert position, range bounds) is expressed
+// through this one method. Impls for the scalar/str keys ship below.
+Ord*: {
+    cmp: (Self, Self) i64,
+}
+i64.impl(Ord, {
+    cmp = (a: i64, b: i64) i64 { (a < b).match ({ true => 0 - 1, false => (a > b).match ({ true => 1, false => 0 }) }) }
+})
+i32.impl(Ord, {
+    cmp = (a: i32, b: i32) i64 { (a < b).match ({ true => 0 - 1, false => (a > b).match ({ true => 1, false => 0 }) }) }
+})
+u8.impl(Ord, {
+    cmp = (a: u8, b: u8) i64 { (a < b).match ({ true => 0 - 1, false => (a > b).match ({ true => 1, false => 0 }) }) }
+})
+str.impl(Ord, {
+    cmp = (a: str, b: str) i64 {
+        // Byte-wise three-way compare via libc strcmp (sign is what matters; equal LITERALS also share a
+        // pointer, but the byte compare is content-based so computed-equal strings order correctly too).
+        to_i64(a.strcmp(b))
+    }
+})
+// first index in [lo, hi) whose key is NOT LESS THAN k (i.e. the insertion point that keeps `ks` sorted
+// and, when k is present, the index k already occupies). Standard binary search — O(log(hi - lo)).
+bt_lower_bound<K: Ord> = (ks: [K], lo: i64, hi: i64, k: K) i64 {
+    (lo >= hi).match ({ true => lo, false => {
+        mid := lo + (hi - lo) / 2
+        (ks[mid].cmp(k) < 0).match ({ true => bt_lower_bound(ks, mid + 1, hi, k), false => bt_lower_bound(ks, lo, mid, k) })
+    } })
+}
+// shift xs[pos .. i) up by one slot to open a hole at `pos` — writes xs[i] first, walking DOWN so no
+// live slot is clobbered before it is copied. Call with i == len (slot `len` must be in the cap view).
+bt_shift_up<T> = (xs: [T], pos: i64, i: i64) void {
+    (i <= pos).match ({ true => { }, false => {
+        xs[i] = xs[i - 1]
+        bt_shift_up(xs, pos, i - 1)
+    } })
+}
+// shift xs[pos+1 .. len) down by one slot, closing the hole at `pos` — walks UP. Call with i == pos.
+bt_shift_down<T> = (xs: [T], len: i64, i: i64) void {
+    (i >= len - 1).match ({ true => { }, false => {
+        xs[i] = xs[i + 1]
+        bt_shift_down(xs, len, i + 1)
+    } })
+}
+BTreeMap*<K, V>: {
+    keys: RawPtr<u8>,
+    vals: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+    keys = (m: BTreeMap<K, V>) [K] {
+        // Live view over the LEN entries, ALREADY SORTED (slots [0, len), gap-free). Sized to `len` so
+        // a `.loop` walks only real entries; the one-past-len insert write goes through keys_all().
+        slice(m.keys, m.len)
+    }
+    vals = (m: BTreeMap<K, V>) [V] { slice(m.vals, m.len) }
+    keys_all = (m: BTreeMap<K, V>) [K] {
+        // CAP-sized view for the one-past-len insert write (slot [len] is in-bounds in the backing
+        // buffer, just past the len-sized keys()/vals() views).
+        slice(m.keys, m.cap)
+    }
+    vals_all = (m: BTreeMap<K, V>) [V] { slice(m.vals, m.cap) }
+    len = (m: BTreeMap<K, V>) i64 { m.len }
+    pos_of = (m: BTreeMap<K, V>, k: K) i64 { bt_lower_bound(m.keys(), 0, m.len, k) }
+    found_at = (m: BTreeMap<K, V>, pos: i64, k: K) bool {
+        // true iff slot `pos` holds exactly k (pos is a lower_bound result, so it may be == len or
+        // point at the first key > k).
+        (pos < m.len).match ({ true => m.keys()[pos].cmp(k) == 0, false => false })
+    }
+    contains = (m: BTreeMap<K, V>, k: K) bool { m.found_at(m.pos_of(k), k) }
+    get = (m: BTreeMap<K, V>, k: K) Opt<V> {
+        // The value under k as an option: .Some(v) if present, .None if absent.
+        pos := m.pos_of(k)
+        out: Opt<V> := m.found_at(pos, k).match ({ true => .Some(m.vals()[pos]), false => .None })
+        out
+    }
+    get_or = (m: BTreeMap<K, V>, k: K, dflt: V) V {
+        pos := m.pos_of(k)
+        m.found_at(pos, k).match ({ true => m.vals()[pos], false => dflt })
+    }
+    min = (m: BTreeMap<K, V>) Opt<K> {
+        // The smallest key (slot 0) as an option; .None on an empty map.
+        out: Opt<K> := (m.len == 0).match ({ true => .None, false => .Some(m.keys()[0]) })
+        out
+    }
+    max = (m: BTreeMap<K, V>) Opt<K> {
+        out: Opt<K> := (m.len == 0).match ({ true => .None, false => .Some(m.keys()[m.len - 1]) })
+        out
+    }
+    grow<A> = (m: BTreeMap<K, V>, a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
+        // Fresh buffers (double the cap), copy the sorted entries over UNCHANGED (no reindex — the
+        // array carries its own order), release the old ones. OOM at either acquire is a value.
+        cap := m.cap * 2 + 1
+        a.try_acquire(cap * sizeof(K)).match ({
+            .Ok(kp) => {
+                a.try_acquire(cap * sizeof(V)).match ({
+                    .Ok(vp) => {
+                        oldks := m.keys()
+                        oldvs := m.vals()
+                        next := BTreeMap<K, V>(
+                            keys: kp,
+                            vals: vp,
+                            len: m.len,
+                            cap: cap,
+                        )
+                        keys := next.keys()
+                        vals := next.vals()
+                        oldks.loop((h, i, k) {
+                            (i < m.len).match ({ true => {
+                                keys[i] = k
+                                vals[i] = oldvs[i]
+                            }, false => {
+                                h.break
+                            } })
+                        })
+                        a.release(m.keys)
+                        a.release(m.vals)
+                        ok: Result<BTreeMap<K, V>, IoError> := .Ok(next)
+                        ok
+                    },
+                    .Err(e) => {
+                        a.release(kp)
+                        err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+                        err
+                    },
+                })
+            },
+            .Err(e) => {
+                err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+                err
+            },
+        })
+    }
+    insert_at<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, pos: i64, k: K, v: V) Result<BTreeMap<K, V>, IoError> {
+        // Open a hole at `pos` (shift the tail up), write the new pair, len+1. Grows first when full.
+        k := k
+        v := v
+        out: Result<BTreeMap<K, V>, IoError> := (m.len < m.cap).match ({ true => {
+            ks := m.keys_all()
+            vs := m.vals_all()
+            bt_shift_up(ks, pos, m.len)
+            bt_shift_up(vs, pos, m.len)
+            ks[pos] = k
+            vs[pos] = v
+            ok: Result<BTreeMap<K, V>, IoError> := .Ok(BTreeMap<K, V>(
+                keys: m.keys,
+                vals: m.vals,
+                len: m.len + 1,
+                cap: m.cap,
+            ))
+            ok
+        }, false => {
+            m.grow(a).match ({
+                .Ok(next) => {
+                    ks := next.keys_all()
+                    vs := next.vals_all()
+                    bt_shift_up(ks, pos, next.len)
+                    bt_shift_up(vs, pos, next.len)
+                    ks[pos] = k
+                    vs[pos] = v
+                    ok: Result<BTreeMap<K, V>, IoError> := .Ok(BTreeMap<K, V>(
+                        keys: next.keys,
+                        vals: next.vals,
+                        len: next.len + 1,
+                        cap: next.cap,
+                    ))
+                    ok
+                },
+                .Err(e)   => {
+                    err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        } })
+        out
+    }
+    insert<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<BTreeMap<K, V>, IoError> {
+        // Insert or upsert (allocation failure is a value). RETURNS the updated map — always rebind
+        // (`m = m.insert(...).expect("…")`): on grow the buffers are realloced, so a handle captured
+        // before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value is overwritten
+        // IN PLACE (visible through every header sharing this storage).
+        pos := m.pos_of(k)
+        out: Result<BTreeMap<K, V>, IoError> := m.found_at(pos, k).match ({ true => {
+            vals := m.vals()
+            vals[pos] = v
+            ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
+            ok
+        }, false => m.insert_at(a, pos, k, v) })
+        out
+    }
+    remove<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, k: K) BTreeMap<K, V> {
+        // Remove k if present — close the gap by shifting the tail down, len-1. No allocation, no
+        // reindex; the array stays sorted. Absent keys are a no-op. RETURNS the updated map — always
+        // rebind (`m = m.remove(a, k)`): a stale header lies about len. `a` is accepted for signature
+        // symmetry with the other owned ops; `remove` never reallocs.
+        pos := m.pos_of(k)
+        m.found_at(pos, k).match ({ true => {
+            ks := m.keys()
+            vs := m.vals()
+            bt_shift_down(ks, m.len, pos)
+            bt_shift_down(vs, m.len, pos)
+            BTreeMap<K, V>(
+                keys: m.keys,
+                vals: m.vals,
+                len: m.len - 1,
+                cap: m.cap,
+            )
+        }, false => m })
+    }
+    free<A> = (m: BTreeMap<K, V>, a: MutPtr<A>) void {
+        a.release(m.keys)
+        a.release(m.vals)
+    }
+    each = (m: BTreeMap<K, V>, f: (K, V) void) void {
+        // Visit every entry as (key, value) IN SORTED KEY ORDER. `f` is invoked DIRECTLY in the loop
+        // body so an inline lambda splices in (like iter.each).
+        ks := m.keys()
+        vs := m.vals()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                f(k, vs[i])
+            }, false => {
+                h.break
+            } })
+        })
+    }
+    range = (m: BTreeMap<K, V>, lo: K, hi: K, f: (K, V) void) void {
+        // Visit the pairs whose key is in [lo, hi) — lo INCLUSIVE, hi EXCLUSIVE — in sorted order.
+        // Walk the sorted column, skipping keys < lo and BREAKING at the first key >= hi (the tail is
+        // all >= hi). `f` is invoked DIRECTLY in the loop body so an inline lambda splices in.
+        ks := m.keys()
+        vs := m.vals()
+        ks.loop((h, i, k) {
+            (i < m.len).match ({ true => {
+                (k.cmp(hi) < 0).match ({ true => {
+                    (k.cmp(lo) < 0).match ({ true => { }, false => {
+                        f(k, vs[i])
+                    } })
+                }, false => {
+                    h.break
+                } })
+            }, false => {
+                h.break
+            } })
+        })
+    }
+}
+// a zero-entry `BTreeMap<K, V>` with capacity for one entry (so `insert` has a slot before the first
+// grow; growth is 1→3→7→15…). K/V appear only in the return type, so pin them with a TWO-STEP
+// annotation (a one-line `.expect` chain can't reach them):
+//   r: Result<BTreeMap<i64, i64>, IoError> := btree.empty(a)
+//   m := r.expect("empty")
+empty*<K, V, A> = (a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
+    a.try_acquire(sizeof(K)).match ({
+        .Ok(kp) => {
+            a.try_acquire(sizeof(V)).match ({
+                .Ok(vp) => {
+                    m := BTreeMap<K, V>(
+                        keys: kp,
+                        vals: vp,
+                        len: 0,
+                        cap: 1,
+                    )
+                    ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
+                    ok
+                },
+                .Err(e) => {
+                    a.release(kp)
+                    err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+            err
+        },
+    })
+}
+// a `BTreeMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from the
+// seed pair (Zen has no call-site type args), so this one CHAINS: `m := btree.of(a, k, v).expect("of")`.
+of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<BTreeMap<K, V>, IoError> {
+    a.try_acquire(sizeof(K)).match ({
+        .Ok(kp) => {
+            a.try_acquire(sizeof(V)).match ({
+                .Ok(vp) => {
+                    m := BTreeMap<K, V>(
+                        keys: kp,
+                        vals: vp,
+                        len: 1,
+                        cap: 1,
+                    )
+                    keys := m.keys()
+                    vals := m.vals()
+                    keys[0] = seed_key
+                    vals[0] = seed_val
+                    ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
+                    ok
+                },
+                .Err(e) => {
+                    a.release(kp)
+                    err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+            err
+        },
+    })
+}
+// ── BTreeSet<K> — the ordered set ────────────────────────────────────────────────────────────────────
+// The value-free twin of BTreeMap: a single sorted, gap-free `keys` buffer. Same Ord dispatch, same
+// O(log n) membership / O(n) mutate / always-sorted-iteration contract. Free constructors are
+// `set_empty` / `set_of` (module-scope names distinct from the map's `empty`/`of`); owned ops live on
+// BTreeSet<K> (UFCS: `s.insert(a, k)`, `s.has(k)`, …).
+BTreeSet*<K>: {
+    keys: RawPtr<u8>,
+    len: i64,
+    cap: i64,
+    keys = (s: BTreeSet<K>) [K] {
+        // Live, ALREADY-SORTED view over the LEN entries (gap-free). The one-past-len insert write
+        // goes through keys_all().
+        slice(s.keys, s.len)
+    }
+    keys_all = (s: BTreeSet<K>) [K] { slice(s.keys, s.cap) }
+    len = (s: BTreeSet<K>) i64 { s.len }
+    pos_of = (s: BTreeSet<K>, k: K) i64 { bt_lower_bound(s.keys(), 0, s.len, k) }
+    found_at = (s: BTreeSet<K>, pos: i64, k: K) bool { (pos < s.len).match ({ true => s.keys()[pos].cmp(k) == 0, false => false }) }
+    has = (s: BTreeSet<K>, k: K) bool { s.found_at(s.pos_of(k), k) }
+    contains = (s: BTreeSet<K>, k: K) bool { s.found_at(s.pos_of(k), k) }
+    min = (s: BTreeSet<K>) Opt<K> {
+        out: Opt<K> := (s.len == 0).match ({ true => .None, false => .Some(s.keys()[0]) })
+        out
+    }
+    max = (s: BTreeSet<K>) Opt<K> {
+        out: Opt<K> := (s.len == 0).match ({ true => .None, false => .Some(s.keys()[s.len - 1]) })
+        out
+    }
+    grow<A> = (s: BTreeSet<K>, a: MutPtr<A>) Result<BTreeSet<K>, IoError> {
+        cap := s.cap * 2 + 1
+        a.try_acquire(cap * sizeof(K)).match ({
+            .Ok(kp) => {
+                oldks := s.keys()
+                next := BTreeSet<K>(
+                    keys: kp,
+                    len: s.len,
+                    cap: cap,
+                )
+                keys := next.keys()
+                oldks.loop((h, i, k) {
+                    (i < s.len).match ({ true => {
+                        keys[i] = k
+                    }, false => {
+                        h.break
+                    } })
+                })
+                a.release(s.keys)
+                ok: Result<BTreeSet<K>, IoError> := .Ok(next)
+                ok
+            },
+            .Err(e) => {
+                err: Result<BTreeSet<K>, IoError> := .Err(e)
+                err
+            },
+        })
+    }
+    insert_at<A> = (s: BTreeSet<K>, a: MutPtr<A>, pos: i64, k: K) Result<BTreeSet<K>, IoError> {
+        k := k
+        out: Result<BTreeSet<K>, IoError> := (s.len < s.cap).match ({ true => {
+            ks := s.keys_all()
+            bt_shift_up(ks, pos, s.len)
+            ks[pos] = k
+            ok: Result<BTreeSet<K>, IoError> := .Ok(BTreeSet<K>(
+                keys: s.keys,
+                len: s.len + 1,
+                cap: s.cap,
+            ))
+            ok
+        }, false => {
+            s.grow(a).match ({
+                .Ok(next) => {
+                    ks := next.keys_all()
+                    bt_shift_up(ks, pos, next.len)
+                    ks[pos] = k
+                    ok: Result<BTreeSet<K>, IoError> := .Ok(BTreeSet<K>(
+                        keys: next.keys,
+                        len: next.len + 1,
+                        cap: next.cap,
+                    ))
+                    ok
+                },
+                .Err(e)   => {
+                    err: Result<BTreeSet<K>, IoError> := .Err(e)
+                    err
+                },
+            })
+        } })
+        out
+    }
+    insert<A> = (s: BTreeSet<K>, a: MutPtr<A>, k: K) Result<BTreeSet<K>, IoError> {
+        // Insert if absent (allocation failure is a value). Already-present is a no-op (len unchanged).
+        // RETURNS the updated set — always rebind. Mirrors BTreeMap.insert.
+        pos := s.pos_of(k)
+        out: Result<BTreeSet<K>, IoError> := s.found_at(pos, k).match ({ true => {
+            ok: Result<BTreeSet<K>, IoError> := .Ok(s)
+            ok
+        }, false => s.insert_at(a, pos, k) })
+        out
+    }
+    remove<A> = (s: BTreeSet<K>, a: MutPtr<A>, k: K) BTreeSet<K> {
+        // Remove k if present — close the gap, len-1, array stays sorted. Absent keys are a no-op.
+        // RETURNS the updated set. `a` is accepted for signature symmetry; `remove` never reallocs.
+        pos := s.pos_of(k)
+        s.found_at(pos, k).match ({ true => {
+            ks := s.keys()
+            bt_shift_down(ks, s.len, pos)
+            BTreeSet<K>(
+                keys: s.keys,
+                len: s.len - 1,
+                cap: s.cap,
+            )
+        }, false => s })
+    }
+    free<A> = (s: BTreeSet<K>, a: MutPtr<A>) void { a.release(s.keys) }
+    each = (s: BTreeSet<K>, f: (K) void) void {
+        // Visit every element IN SORTED ORDER. `f` is invoked DIRECTLY in the loop body.
+        ks := s.keys()
+        ks.loop((h, i, k) {
+            (i < s.len).match ({ true => {
+                f(k)
+            }, false => {
+                h.break
+            } })
+        })
+    }
+    range = (s: BTreeSet<K>, lo: K, hi: K, f: (K) void) void {
+        // Visit the elements in [lo, hi) — lo INCLUSIVE, hi EXCLUSIVE — in sorted order. Skip elements
+        // < lo, BREAK at the first >= hi. `f` is invoked DIRECTLY in the loop body.
+        ks := s.keys()
+        ks.loop((h, i, k) {
+            (i < s.len).match ({ true => {
+                (k.cmp(hi) < 0).match ({ true => {
+                    (k.cmp(lo) < 0).match ({ true => { }, false => {
+                        f(k)
+                    } })
+                }, false => {
+                    h.break
+                } })
+            }, false => {
+                h.break
+            } })
+        })
+    }
+}
+// a zero-element `BTreeSet<K>` with capacity for one. K appears only in the return type, so pin it via
+// the LHS annotation: `r: Result<BTreeSet<i64>, IoError> := btree.set_empty(a)`.
+set_empty*<K, A> = (a: MutPtr<A>) Result<BTreeSet<K>, IoError> {
+    a.try_acquire(sizeof(K)).match ({
+        .Ok(kp) => {
+            s := BTreeSet<K>(
+                keys: kp,
+                len: 0,
+                cap: 1,
+            )
+            ok: Result<BTreeSet<K>, IoError> := .Ok(s)
+            ok
+        },
+        .Err(e) => {
+            err: Result<BTreeSet<K>, IoError> := .Err(e)
+            err
+        },
+    })
+}
+// a `BTreeSet<K>` seeded with one element, its buffer acquired from `a`. K inferred from the seed, so
+// this CHAINS: `s := btree.set_of(a, 10).expect("set_of")`.
+set_of*<K, A> = (a: MutPtr<A>, first: K) Result<BTreeSet<K>, IoError> {
+    a.try_acquire(sizeof(K)).match ({
+        .Ok(kp) => {
+            s := BTreeSet<K>(
+                keys: kp,
+                len: 1,
+                cap: 1,
+            )
+            keys := s.keys()
+            keys[0] = first
+            ok: Result<BTreeSet<K>, IoError> := .Ok(s)
+            ok
+        },
+        .Err(e) => {
+            err: Result<BTreeSet<K>, IoError> := .Err(e)
+            err
+        },
+    })
+}
