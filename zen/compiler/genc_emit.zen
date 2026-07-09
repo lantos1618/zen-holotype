@@ -1,6 +1,6 @@
 // compiler.genc_emit — C emission over the shared genc AST. Pipeline: genc -> mono -> genc_emit.
 { String } = std.text.string
-{ view, is_empty, eq } = std.text.str
+{ view, is_empty, eq, ends_with } = std.text.str
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, blk_diverges, is_expr_null, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
@@ -600,12 +600,14 @@ gen_fnt_typedefs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
 gen_func* = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     out := s.gen_sig(alloc, f)
     f.main_is_sys().match ({ true => {
-        // `main = (sys: Sys) i32`: emit the user body as `zen_user_main(Sys sys)` (its own braces, no
-        // init prefix), then a NILADIC `zen_main` trampoline that inits globals and feeds it the root
-        // capability. zenrt.c calls `zen_main()` unchanged — the C boundary never sees `Sys`.
+        // `main = (sys: Sys) i32`: emit ONLY the user body as `zen_user_main(Sys sys)` (its own braces,
+        // no init prefix). The NILADIC `zen_main` trampoline that inits globals and feeds it the root
+        // capability is appended ONCE by genModuleIn (below), where the whole decl list is in scope — so
+        // it can name `root` correctly even when std.sys was reached through a namespace alias, which
+        // renames the module's value decls (`root` -> `<alias>__root`). zenrt.c calls `zen_main()`
+        // unchanged — the C boundary never sees `Sys`.
         out = out.gstr_append(alloc, " ")
         out = out.gen_func_body(alloc, f)
-        out = out.gstr_append(alloc, " int32_t zen_main(void){ zen__init_globals(); return zen_user_main(root()); }")
     }, false => eq(f.name, "main").match ({ true => {
         out = out.gstr_append(alloc, " { zen__init_globals(); ")
         out = out.gen_func_body(alloc, f)
@@ -905,6 +907,36 @@ gen_global_inits = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     })
     out.gstr_append(alloc, "} ")
 }
+// The `main = (sys: Sys) i32` capability entry, if the program has one. Its body is emitted as
+// `zen_user_main` (see gen_func); a niladic `zen_main` trampoline feeds it `root()`.
+has_sys_main = (decls: [Decl]) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DFunc(f) => f.main_is_sys().match ({ true => true, false => found }),
+            _         => found,
+        })
+    })
+    found
+}
+// The C name of std.sys's `root()` capability builder. A brace-import (`{ Sys } = std.sys`) keeps it
+// bare `root`; a namespace alias (`sys = std.sys`) renames every value decl of the module under an
+// `<alias>__` prefix, so it becomes e.g. `sys__root`. Identify it STRUCTURALLY — a 0-param fn returning
+// the record `Sys`, whose name is `root` or ends `__root` — so the trampoline calls the actual emitted
+// name in both forms. Falls back to bare `root`.
+sys_root_cname = (decls: [Decl]) str {
+    nm := "root"
+    decls.loop((h, i, d) {
+        nm = d.match ({
+            .DFunc(f) => (f.params.len == 0 && f.ret.match ({
+                .Named(t) => eq(t, "Sys"),
+                _         => false,
+            }) && (eq(f.name, "root") || f.name.ends_with("__root"))).match ({ true => f.name, false => nm }),
+            _         => nm,
+        })
+    })
+    nm
+}
 // Whole translation unit emission.
 genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     decls := a.monomorphize(raw)
@@ -924,7 +956,11 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
         s = s.gen_global(a, d)
     })
     s = s.gen_global_inits(a, decls)
-    s.gen_funcs(a, decls)
+    out := s.gen_funcs(a, decls)
+    // Append the niladic `zen_main` trampoline for the `main = (sys: Sys) i32` entry (its user body was
+    // emitted as `zen_user_main`). Named here — not in gen_func — so `root` resolves to its real C name
+    // even when std.sys was reached through a namespace alias (`sys__root`).
+    has_sys_main(decls).match ({ true => out.gstr_append(a, " int32_t zen_main(void){ zen__init_globals(); return zen_user_main(").gstr_append(a, sys_root_cname(decls)).gstr_append(a, "()); }"), false => out })
 }
 // Compatibility shim used by bootstrap/main.c; allocator-aware callers use genModuleIn.
 genModule* = (raw: [Decl]) String {
