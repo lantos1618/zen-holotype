@@ -4531,15 +4531,22 @@ is_nonnull_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() || t.ptr_kind_of(
 // byte-buffer floor — the trusted allocator/FFI primitive — derefs freely (so it is NOT nullable here).
 // `Ptr<T>` / `MutPtr<T>` are non-null, so they are never nullable.
 is_nullable_ptr_ty* = (t: Ty) bool { (t.ptr_kind_of() == k_raw_ptr()).match ({ true => t.is_raw_ptr_ty().match ({ true => false, false => true }), false => false }) }
-// Pointer-kind direction (R1): a read-only `Ptr<T>` (k_ptr) value must NOT satisfy a writable
-// `MutPtr<T>` (k_mut_ptr) slot — that would launder the read-only guarantee (silently grant write
-// access). Every other direction stays permissive (a writable `MutPtr` fits a read-only `Ptr` slot;
-// same-kind fits; non-pointers are unaffected since `ptr_kind_of` is -1 for them). The `RawPtr<u8>`
-// floor keeps its own coercion (is_raw_ptr_ty, handled before this check is reached).
-ptr_kind_fits* = (g: Ty, w: Ty) bool { (w.ptr_kind_of() == k_mut_ptr() && g.ptr_kind_of() == k_ptr()).match ({ true => false, false => true }) }
+// Direction-axis mode — the writable-vs-readonly subset of the mode lattice (docs/effects-as-types-
+// design.md §2). The full 4-mode `mode_of(decls, t)` (owned/frozen/mut/read) needs `decls` for the
+// frozen⁄read split and lives at the send-sites (Brick 1, check_validate.zen). Inside `fits` there is
+// no `decls`, and only the DIRECTION axis matters (writable `mut` vs readonly `read`), which
+// `ptr_kind_of()` yields WITHOUT `decls`. Returns `k_mut_ptr` = `mut` (writable), `k_ptr` = `read`
+// (readonly), else -1 (not a pointer — direction N/A; the `RawPtr` floor is coerced earlier).
+dir_mode_of* = (t: Ty) i32 { (t.ptr_kind_of() == k_mut_ptr() || t.ptr_kind_of() == k_ptr()).match ({ true => t.ptr_kind_of(), false => 0 - 1 }) }
+// Mode-lattice cell for `fits` (R1): a readonly (`read`) value must NOT satisfy a writable (`mut`)
+// slot — that would launder the read-only guarantee (silently grant write access). Every other
+// direction fits (a writable `mut` fits a `read` slot; same-mode fits; non-pointers unaffected).
+// Behavior-identical to the previous `ptr_kind_fits` (readonly `Ptr<T>` ⊄ writable `MutPtr<T>`),
+// just re-expressed in the mode vocabulary.
+mode_fits* = (g: Ty, w: Ty) bool { (w.dir_mode_of() == k_mut_ptr() && g.dir_mode_of() == k_ptr()).match ({ true => false, false => true }) }
 fits* = (g: Ty, w: Ty) bool {
     numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
-    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.ty_eq(w) && g.ptr_kind_fits(w) }) }) })
+    numeric.match ({ true => g.ty_rank() <= w.ty_rank(), false => g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.ty_eq(w) && g.mode_fits(w) }) }) })
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }

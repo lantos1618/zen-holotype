@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, ptr_kind_fits, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -215,7 +215,7 @@ ty_mentions_tparam = (tps: [Param], t: Ty) bool {
 // with pointee-equality (`ty_eq`) relaxed to "is any pointer", so a plain value where a pointer is wanted
 // (the census cc-ICE "invalid type argument of unary `*`") is rejected, a read-only `Ptr` can't launder
 // into a `MutPtr` slot, and the `RawPtr<u8>` floor (`null_ptr()`) still fits.
-gen_ptr_arg_fits = (g: Ty, w: Ty) bool { g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.is_ptr_ty_g() && g.ptr_kind_fits(w) }) }) }
+gen_ptr_arg_fits = (g: Ty, w: Ty) bool { g.is_raw_ptr_ty().match ({ true => w.is_ptr_ty_g(), false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({ true => false, false => g.is_ptr_ty_g() && g.mode_fits(w) }) }) }
 // Even a tparam-typed param has a checkable outer shape when it is a pointer (see gen_ptr_arg_fits).
 // Non-pointer generic params (`T`, `[T]`, `Vec<T>`) and args whose type is still unknown (residue in a
 // generic body) stay deferred to mono, exactly as before.
@@ -5685,7 +5685,7 @@ check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl
         span_width: src.diagnostic_span_width(pos),
         count: 1,
         message: "MutPtr<T> (a mutable reference) is not sendable across actors — it aliases mutable state the sender keeps, so the receiver mutating it is a data race",
-        hint: "send a readonly `Ptr<T>` (a `val`: deeply immutable, freely aliasable), move an `Own<T>` (an `iso`, sent by move), or send a value copy",
+        hint: "send a readonly `Ptr<T>` (a `frozen` value: deeply immutable, freely aliasable), move an `Own<T>` (an `owned` value, sent by move), or send a value copy",
     ) })
 }
 // ── M1 slice 1 (rt-scoped-runtime): SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────

@@ -83,12 +83,12 @@ Data-race freedom is a **static property of the checker**, not a runtime barrier
   `zenc check` error, same machinery as use-after-free).
 - **No actor-local escape** — a message may not carry a pointer into the sender's actor-local
   region.
-- **Sendable data only** — a message is a value (copied) or an owned `iso`-style block (moved);
+- **Sendable data only** — a message is a value (copied) or an `owned` block (Pony `iso`, moved);
   borrowed pointers into another actor are rejected.
 
-Sendability is read off the payload's **type** (Pony-style reference capabilities: `val` =
-deeply immutable / freely aliasable, `iso` = uniquely owned / sent by move, plain `value` =
-scalars, the common zero-ceremony case), **not** an explicit `share()`/`view()` stdlib verb.
+Sendability is read off the payload's **type** (the mode lattice: `frozen` (Pony `val`) =
+deeply immutable / freely aliasable, `owned` (Pony `iso`) = uniquely owned / sent by move, plain
+`value` = scalars, the common zero-ceremony case), **not** an explicit `share()`/`view()` stdlib verb.
 This is shipped and sound.
 
 ## Panic isolation
