@@ -1,6 +1,6 @@
 // tests/oracle_verdict.zen — the FULL VERDICT + KIND corpus for the Zen-native correctness oracle
 // (the self-hosted replacement for the pytest verdict harness). Ported verbatim from
-// tests/_oracle_corpus.py: VERDICT_CASES (186, accept/reject) + VERDICT_KIND_CASES (83, a reject
+// tests/_oracle_corpus.py: VERDICT_CASES (188, accept/reject) + VERDICT_KIND_CASES (83, a reject
 // pinned by its first-error KIND). `zenc check src` must accept (should_pass=true) or reject
 // (false); a non-empty `kind` (e.g. "arity") makes the harness require `error[<kind>]` in the
 // rejection diagnostic (reject-for-the-right-reason). The harness wraps the bare kind label.
@@ -1012,7 +1012,7 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
-    b := run_verdicts("verdict-kind (186)", [VerdictCase(
+    b := run_verdicts("verdict-kind (188)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1088,6 +1088,14 @@ oracle_verdict_run* = () i32 {
         src: "scalar* = (n: i32) i32 { n }\ntest* = () i32 { s := [1, 2]\n scalar(s) }",
         should_pass: false,
         kind: "arg-type",
+    ), VerdictCase(
+        src: "find* = (s: str, n: str) i64 { 0 }\nSeeker*: { find: (Ptr<Self>, i32) i32 }\nColl*: { n: i32 }\nColl.impl(Seeker, { find = (c: Ptr<Coll>, k: i32) i32 { c.n } })\ntest* = () i32 { xs: [i32] := [1, 2]  to_i32(xs.find(3)) }",
+        should_pass: false,
+        kind: "method-not-found",
+    ), VerdictCase(
+        src: "find* = (s: str, n: str) i64 { 0 }\nSeeker*: { find: (Ptr<Self>, i32) i32 }\nColl*: { n: i32 }\nColl.impl(Seeker, { find = (c: Ptr<Coll>, k: i32) i32 { c.n } })\ntest* = () i32 { c := Coll(n: 7)  c.addr().find(3) }",
+        should_pass: true,
+        kind: "",
     ), VerdictCase(
         src: "test* = () i32 { nope() }",
         should_pass: false,
@@ -1905,6 +1913,11 @@ oracle_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // RECEIVER-TYPED UFCS DISPATCH (#68 slice 4): `find` is BOTH a free fn (str-receiver) and an impl
+    // method (Coll-receiver). A `[i32]` receiver fits NEITHER, so `xs.find(3)` must NOT silently bind to
+    // the free str.find and report `expected str, got [i32]` — it is method-not-found for `[i32]`.
+    // The dual accept: with the SAME name-collision in scope, a `Coll` receiver dispatches to the impl
+    // method by receiver type — receiver-typed preference picks the fitting method, not the free str.find.
     // census #58/#41: `.field` on a generic-enum instance (Result) has no C member — was check-ok
     // then a codegen ICE ("has no member 'len'"); now a positioned struct-field reject.
     // #58/#41: `.field` on a CONCRETE enum is likewise rejected (enums reach variants via .match).

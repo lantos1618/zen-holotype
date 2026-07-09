@@ -2882,7 +2882,29 @@ undef_is_method = (env: Env, c: CallData) bool {
         (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({ true => false, false => env.alias_ufcs_candidates(c.fn, rty).count < 2 })
     } })
 }
-kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.kv_call_errs_kind(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({ true => KTRAITBOUND(), false => env.undef_is_method(c).match ({ true => KMETHODNOTFOUND(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
+// RECEIVER-TYPED UFCS DISPATCH (#68 slice 4). A method name like `find` is a flat free fn (`str.find`)
+// AND an impl method (`Vec.find`, `Set.find`, …) — one entry in the flat namespace. `xs.find(2)` on a
+// `[i32]` desugars to `find(xs, 2)`; dispatch found NO impl/alias whose FIRST parameter fits `[i32]`, so
+// c.fn stayed the flat `find`. The batch then judges the args against `str.find`'s `(str, str)` and yields
+// a misleading `expected str, got [i32]` — binding to the wrong receiver type by NAME ALONE. When the
+// called name is ALSO an impl/trait method (so UFCS legitimately dispatches by receiver) and the receiver
+// (arg 0) does NOT fit the flat fn's concrete first parameter, the flat signature is not the authoritative
+// yardstick (mirrors ka_call_core's `authoritative` gate): this is method-not-found for THIS receiver, not
+// an arg mismatch. Report the clean method-not-found. Fires ONLY on already-erroring calls — a receiver
+// that fits param0, an unknown/void receiver, a zero-arg call, or a tparam-typed param0 all short-circuit
+// — so no program that checks today changes meaning; a wrong-signature arg error only becomes an accurate
+// one. When a receiver-typed impl/alias DOES fit, resolve_call already rewrote c.fn to it and we never get
+// here (is_trait_method on the mangled impl name is false), so real dispatch is untouched.
+recv_typed_miss = (env: Env, c: CallData) bool {
+    (c.args.len > 0 && env.decls.is_trait_method(c.fn)).match ({ true => {
+        f := env.env_func(c.fn)
+        (f.params.len > 0 && f.tparams.ty_mentions_tparam(f.params[0].ty) == false).match ({ true => {
+            rty := env.infer_expr(c.args[0].addr())
+            (env.unknown_ty(rty) || rty.is_void_ty()).match ({ true => false, false => rty.fits(f.params[0].ty) == false })
+        }, false => false })
+    }, false => false })
+}
+kv_check_call_kind = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => KUNDEFINED(), false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.shadow_not_callable(c.fn).match ({ true => KNOTCALLABLE(), false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.recv_typed_miss(c).match ({ true => KMETHODNOTFOUND(), false => env.kv_call_errs_kind(c) }), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => KARITY() }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => kv_at(KTRAITBOUND(), c.pos), false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.kv_fnval_call_kind(c), false => env.is_bound(c.fn).match ({ true => KNOTCALLABLE(), false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({ true => KTRAITBOUND(), false => env.undef_is_method(c).match ({ true => KMETHODNOTFOUND(), false => KUNDEFINED() }) }) }) }) }) }) }) }) }) }) }    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
