@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstr, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, ptr_kind_fits, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, ptr_kind_fits, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -26,7 +26,11 @@ env_struct_fields = (env: Env, name: str) [Field] {
     }), false => no_fields() })
 }
 // O(1) for concrete struct/enum names (the common case); only generics fall back to the linear scan.
-env_named_declared = (env: Env, n: str) bool { (env.didx.struct_idx.get(n, 0 - 1) >= 0 || env.didx.enum_idx.get(n, 0 - 1) >= 0).match ({ true => true, false => env.decls.named_declared(n) }) }
+// A tparam name in scope (threaded into env.vars by bind_tparams) is ABSTRACT — it shadows any global
+// type of the same name inside its own fn body, so a user type `T` cannot make a stdlib generic's `T`
+// tparam look concrete. Only fires when a marker is present; ordinary generics (no colliding user type)
+// resolve exactly as before, because `T` was never a declared struct/enum to begin with.
+env_named_declared = (env: Env, n: str) bool { env.vars.tparam_declared(n).match ({ true => false, false => (env.didx.struct_idx.get(n, 0 - 1) >= 0 || env.didx.enum_idx.get(n, 0 - 1) >= 0).match ({ true => true, false => env.decls.named_declared(n) }) }) }
 // Uninferable types are skipped so validation does not false-reject imported/generic residue.
 is_uninferable = (t: Ty) bool {
     t.match ({
@@ -2248,7 +2252,7 @@ check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 }
 check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env := Env(
-        vars: a.params_env(f.params),
+        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
         didx: idx,
         exp: f.ret,
@@ -3313,7 +3317,7 @@ denrich_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], off: i32, code: i32) 
 }
 denrich_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, off: i32, code: i32) str {
     env := Env(
-        vars: a.params_env(f.params),
+        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
         didx: idx,
         exp: f.ret,
@@ -3526,7 +3530,7 @@ kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
 kv_trailing_kind = (env: Env, body: [Stmt]) i32 { env.exp.is_void_ty().match ({ true => 0, false => (body.len == 0).match ({ true => KFALLTHROUGH(), false => env.kv_last_stmt_kind(body[body.len - 1]) }) }) }
 kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env := Env(
-        vars: a.params_env(f.params),
+        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
         didx: idx,
         exp: f.ret,
@@ -4689,7 +4693,7 @@ kdiag_add = (buf: [i32], cnt: i32, packed: i32) i32 {
 // first error rather than folding to the first). The trailing-value check is anchored on the fn name.
 kv_check_func_kind_all = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, buf: [i32], cnt: i32) i32 {
     env := Env(
-        vars: a.params_env(f.params),
+        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
         didx: idx,
         exp: f.ret,

@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (237)", [VerdictCase(
+    a := run_verdicts("verdict (239)", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -943,6 +943,14 @@ oracle_verdict_run* = () i32 {
         src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) => 1, .Val(v) if v > 0 => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
         should_pass: false,
         kind: "dup-variant",
+    ), VerdictCase(
+        src: "{ println } = std.text.fmt\nT: { x: i32 }\nmain = () i32 { v := T(x: 5)  println(\"hi\")  v.x }\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ println } = std.text.fmt\nT: { x: i32 }\nmain = () i32 { v := T(x: 5)  println(v)  0 }\n",
+        should_pass: false,
+        kind: "trait-bound",
     )])
     // MATCH GUARD accept: a guarded `.Val` arm plus an UNGUARDED `.Val` arm covers the variant.
     // GUARD exhaustiveness: `.Val` covered ONLY by a guarded arm (guard may fail) → not exhaustive.
@@ -1012,6 +1020,12 @@ oracle_verdict_run* = () i32 {
     // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
     // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
     // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
+    // TPARAM-SCOPE accept (#68 slice 3): a user GLOBAL type named `T` — the tparam name of the stdlib
+    // generic `print*<T>` — no longer poisons that generic. The tparam is fn-local (bind_tparams) and
+    // shadows the global type inside its own body, so the generic body stays abstract/deferred and the
+    // program type-checks (was: error pointing into fmt.zen with no attribution to the user file).
+    // TPARAM-SCOPE reject-for-the-right-reason: passing that `T` VALUE where Display IS required is a
+    // genuine trait-bound gap, reported at the USER call site (not leaked into stdlib) — soundness kept.
     b := run_verdicts("verdict-kind (188)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,

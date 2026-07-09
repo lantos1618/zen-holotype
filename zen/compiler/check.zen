@@ -267,6 +267,28 @@ lookup_var = (v: Ptr<VList>, name: str) Ty {
 // void) entry so an enclosing function's return type never leaks into a lambda's `return`.
 bind_fnret* = (a: MutPtr<Malloc>, vars: Ptr<VList>, ret: Ty) Ptr<VList> { a.vcons("0return", ret, vars) }
 fnret_of* = (v: Ptr<VList>) Ty { v.lookup_var("0return") }
+// Generic tparam scoping. A function's type parameters are fn-local names, but in the flat namespace
+// a user's GLOBAL type of the same name (`T: { … }`) is the same identifier as the tparam of a stdlib
+// generic (`print*<T>`). Threading each tparam name into the body Env's var list under the reserved
+// marker "0#tp" (unlexable — a user identifier cannot begin with a digit, so no user binding collides;
+// the same trick as bind_fnret's "0return") lets env_named_declared treat that name as ABSTRACT
+// (fn-local, undeclared) even when a concrete global type of that name exists. So a tparam SHADOWS a
+// same-named global type inside its own function body — the correct language scoping — and a user type
+// named `T` no longer poisons the stdlib generic that happens to name its tparam `T`. The cell carries
+// the tparam name as tnamed(...) so the membership test needs no per-query string allocation.
+bind_tparams* = (a: MutPtr<Malloc>, vars: Ptr<VList>, tparams: [Param]) Ptr<VList> {
+    e := vars
+    tparams.loop((h, i, tp) {
+        e = a.vcons("0#tp", tnamed(tp.name), e)
+    })
+    e
+}
+tparam_declared* = (v: Ptr<VList>, name: str) bool {
+    v.match ({
+        .VNil     => false,
+        .VCons(c) => (eq(c.name, "0#tp") && eq(c.ty.ty_name(), name)).match ({ true => true, false => c.tail.tparam_declared(name) }),
+    })
+}
 // Infer global init types; bind the global name while doing so to avoid self-recursive lookup.
 infer_global_init = (env: Env, name: str, init: Ptr<Expr>) Ty {
     env2 := Env(
