@@ -261,21 +261,65 @@ run_docs* = (name: str, cs: [DocCase]) i32 {
     free(base)
     fails
 }
-// run ONE shell case: the pipeline must exit 0. Each `cmd` body uses `$ZT` for its scratch paths;
-// zo_cmd binds `$ZT` to this run's private dir so concurrent oracle runs never share scratch files.
+// A ShellCase pipeline whose body spawns its OWN app pthreads (a pool/actor acceptance fixture) must NOT
+// run concurrently with the other cases: N such fixtures at once oversubscribe the scheduler and fail
+// nondeterministically (the exact hazard #485 caught for build fixtures). These run SERIALLY; everything
+// else runs across the worker pool. Identified by case name (only the two pool-isolation cases qualify).
+shell_is_serial = (name: str) bool { eq(name, "pool_actor_panic_isolation") || eq(name, "pool_actor_stackoverflow_isolation") }
+// wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
+// subdir `<zo_dir>/sh<gid>` (freshly recreated) so the hand-written pipelines — which reuse fixed scratch
+// names like `$ZT/zbp.c`, `$ZT/zfmt.zen` — never clobber each other under concurrency, then record the
+// pipeline's pass/fail as a P/F marker in `shrc<gid>.txt` (outside the subdir) for the in-order Phase C.
+// The pipeline's own stdout+stderr are sent to /dev/null: the pass/fail is the exit code (captured in the
+// marker), everything a case needs it already redirects into `$ZT`, and a few fixtures otherwise leak a
+// stray line (a fixture's own program output, a `fmt --check` "needs formatting") that — under parallel
+// execution — would interleave with the dot stream at a timing-dependent point, breaking determinism.
+shell_wrap = (mp: MutPtr<Malloc>, gid: i64, cmd: str) str {
+    z: str := ""
+    zt := mp.zo_idpath("sh", gid, "")
+    rc := mp.zo_idpath("shrc", gid, ".txt")
+    mp.zo_join([z, "ZT=", zt, "; rm -rf \"$ZT\"; mkdir -p \"$ZT\"; if ( ", cmd, " ) >/dev/null 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+}
+shell_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
+    mp.contents_in(mp.zo_idpath("shrc", gid, ".txt")).match ({
+        .Ok(s)  => s.starts_with("P"),
+        .Err(e) => false,
+    })
+}
+// run the shell cases: the pipeline must exit 0. Thread-spawning cases (shell_is_serial) run one at a time;
+// all others run across the worker pool. Every case's body is gid-isolated (its own `$ZT` subdir), so the
+// fixed scratch names never collide. Phase C reads the P/F markers IN ORDER — byte-identical verdict to serial.
 run_shells* = (name: str, cs: [ShellCase]) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     out(name)
     out("\n")
+    n := cs.len
+    // Phase A: build every case's wrapped command; partition into the parallel-safe batch (dense array
+    // `pcmds`) and run the thread-spawning ones serially right here (their markers land the same way).
+    pbase := malloc(n * 8)
+    pcmds: [str] := pbase.slice(n)
+    pn: i64 := 0
+    cs.loop((h, i, c) {
+        w := mp.shell_wrap(i, c.cmd)
+        c.name.shell_is_serial().match ({ true => {
+            shell(w).expect("oracle: shell")
+        }, false => {
+            pcmds[pn] = w
+            pn = pn + 1
+        } })
+    })
+    zo_par_run(pcmds, pn)
+    // Phase C: read markers IN ORIGINAL ORDER → identical '.'/'F' sequence, fail count, exit code.
     fails := 0
     cs.loop((h, i, c) {
-        (shell(mp.zo_cmd(c.cmd)).expect("oracle: shell") == 0).match ({ true => out("."), false => {
+        mp.shell_ok(i).match ({ true => out("."), false => {
             out("F")
             fails = fails + 1
         } })
     })
     out("\n")
+    free(pbase)
     fails
 }
 oracle_build_run* = () i32 {
