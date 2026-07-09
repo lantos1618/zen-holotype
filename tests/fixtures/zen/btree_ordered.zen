@@ -1,0 +1,94 @@
+// std.collections.btree — the ORDERED map + set. Proves the core contract: insert keys OUT OF ORDER,
+// then ordered iteration yields them SORTED; get/contains/remove are correct; min/max are the extremes;
+// range queries return exactly the [lo, hi) window in order. The scrambled insert sequence forces
+// several grows (start cap 1 → 3 → 7 → 15), and str keys exercise lexicographic ordering.
+//
+// Entries are built with straight-line chained inserts (the idiomatic pattern, like
+// chained_collections.zen): a struct-returning op reassigned inside a `.loop`/`@while` body hits a
+// known codegen bug shared by HMap/Set/Map, so builder loops are avoided here on purpose.
+halloc = std.mem.heap
+btree = std.collections.btree
+{ expect } = std.core.result
+{ Result, IoError } = std.core.result
+{ BTreeMap, BTreeSet } = std.collections.btree
+{ println, print } = std.text.fmt
+main = () i32 {
+    alloc := halloc.gpa()
+    a := alloc.addr()
+    // ── BTreeMap<i64,i64>: insert 0..9 in a scrambled order, value = key*10 ──
+    r: Result<BTreeMap<i64, i64>, IoError> := btree.empty(a)
+    m := r.expect("empty")
+    m = m.insert(a, 5, 50).expect("insert")
+    m = m.insert(a, 3, 30).expect("insert")
+    m = m.insert(a, 8, 80).expect("insert")
+    m = m.insert(a, 1, 10).expect("insert")
+    m = m.insert(a, 9, 90).expect("insert")
+    m = m.insert(a, 2, 20).expect("insert")
+    m = m.insert(a, 7, 70).expect("insert")
+    m = m.insert(a, 4, 40).expect("insert")
+    m = m.insert(a, 6, 60).expect("insert")
+    m = m.insert(a, 0, 0).expect("insert")
+    println(m.len())    // 10
+    // ordered iteration yields keys SORTED (0 1 2 ... 9) with matching values
+    m.each((k, v) {
+        print(k)
+        print(":")
+        println(v)
+    })
+    // upsert an existing key overwrites in place, len unchanged
+    m = m.insert(a, 5, 555).expect("upsert")
+    println(m.len())    // 10
+    println(m.get_or(5, 0 - 1))    // 555
+    // get / contains
+    println(m.get_or(7, 0 - 1))    // 70
+    m.contains(4).match ({ true => println(1), false => println(0) })    // 1
+    m.contains(11).match ({ true => println(1), false => println(0) })    // 0
+    // min / max
+    m.min().match ({
+        .Some(x) => println(x),
+        .None    => println(0 - 1),
+    })    // 0
+    m.max().match ({
+        .Some(x) => println(x),
+        .None    => println(0 - 1),
+    })    // 9
+    // remove closes the gap and stays sorted; removing an absent key is a no-op
+    m = m.remove(a, 3)
+    m = m.remove(a, 100)
+    println(m.len())    // 9
+    m.contains(3).match ({ true => println(1), false => println(0) })    // 0
+    // ordered iteration after the remove: 0 1 2 4 5 6 7 8 9 (3 gone)
+    m.each((k, v) { print(k) })
+    println(0 - 9)    // -9 sentinel terminating the key line
+    // range [2, 7): keys 2 4 5 6 (3 was removed), lo inclusive, hi exclusive
+    m.range(2, 7, (k, v) { print(k) })
+    println(0 - 9)    // -9 sentinel
+    m.free(a)
+    // ── BTreeSet<str>: insert out of order, ordered iteration is lexicographic ──
+    sr: Result<BTreeSet<str>, IoError> := btree.set_empty(a)
+    s := sr.expect("set_empty")
+    s = s.insert(a, "pear").expect("insert")
+    s = s.insert(a, "apple").expect("insert")
+    s = s.insert(a, "kiwi").expect("insert")
+    s = s.insert(a, "fig").expect("insert")
+    s = s.insert(a, "banana").expect("insert")
+    s = s.insert(a, "apple").expect("insert")    // duplicate — deduped
+    println(s.len())    // 5
+    s.each((w) { println(w) })    // apple banana fig kiwi pear  (sorted)
+    s.has("kiwi").match ({ true => println(1), false => println(0) })    // 1
+    s.has("mango").match ({ true => println(1), false => println(0) })    // 0
+    s = s.remove(a, "fig")
+    println(s.len())    // 4
+    s.min().match ({
+        .Some(w) => println(w),
+        .None    => println("?"),
+    })    // apple
+    s.max().match ({
+        .Some(w) => println(w),
+        .None    => println("?"),
+    })    // pear
+    // range ["banana", "pear"): banana kiwi  (apple < banana excluded, fig removed, pear excluded)
+    s.range("banana", "pear", (w) { println(w) })
+    s.free(a)
+    0
+}
