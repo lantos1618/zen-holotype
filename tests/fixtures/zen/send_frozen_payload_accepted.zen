@@ -1,0 +1,48 @@
+// BRICK 1 (docs/effects-as-types-design.md §2/§4): the send-payload sendability verdict is now read
+// off the SHARED mode lattice — `mode_sendable(mode_of(decls, ty))`. This fixture pins the FROZEN end
+// of the discrimination: `Msg.Wrap` carries a DEEPLY-NESTED, fully-immutable struct (`Outer` → `Inner`
+// → scalars; the recursive `ty_reaches_mutptr` walk finds NO MutPtr), so its mode is `frozen` and the
+// send is ACCEPTED and runs. Its discriminating twin — the SAME shape with one leaf turned `MutPtr<i32>`
+// (mode `read`/`mut`) — is REJECTED (`error[sendable]`) by the matched VerdictCase in oracle_verdict.zen.
+// Together they prove `mode_of` (not an ad-hoc leaf) drives the verdict. Exit = the deep field the actor
+// read back across the boundary (42), proving the frozen payload crossed as its normal type.
+{ Result, IoError, expect } = std.core.result
+actor = std.concurrent.actor
+halloc = std.mem.heap
+Inner*: {
+    a: i32,
+    b: i32,
+}
+Outer*: {
+    tag: i32,
+    inner: Inner,
+}
+Msg*: Wrap(Outer)
+Room*: {
+    n: i32,
+}
+Room.impl(actor.Receiver, {
+    receive = (room: MutPtr<Room>, ctx: actor.Context<Msg>) void {
+        ctx.msg.match ({
+            .Wrap(o) => {
+                room.n = o.inner.a + o.inner.b + o.tag
+            },
+        })
+    }
+})
+main = () i32 {
+    alloc := halloc.gpa()
+    r: Result<actor.ActorHandle<Msg, Room>, IoError> := actor.spawn(alloc.addr(), 4, Room(n: 0))
+    h := r.expect("spawn")
+    h.send(.Wrap(Outer(
+        tag: 2,
+        inner: Inner(
+            a: 15,
+            b: 25,
+        ),
+    )))
+    h.run()
+    got := h.actor().n
+    h.free(alloc.addr())
+    got
+}
