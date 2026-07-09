@@ -21,24 +21,17 @@
 // crash/hang from any clean reject. (Verified adversarially: segv->139, hang->124, reject->1.)
 //
 // Helpers are `fz_`-prefixed so they never collide on the flat-import flatten with std/oracle_lib/etc.
-{ run_suite, zo_path, zo_cmd } = oracle_lib
-{ Malloc } = std.mem.alloc
-{ out, save, shell } = std.io.file
-{ len } = std.text.str
+{ run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = oracle_lib
+{ Malloc, malloc, free } = std.mem.alloc
+{ out, save, shell, contents_in } = std.io.file
+{ len, try_parse_int } = std.text.str
 { String, new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
 { Rng, seed, range } = std.rand
 // fixed, reproducible seed (NO Date.now — the sequence is identical on every run).
 FZ_SEED := 20260623
-// the two crash-resistance probes, each `timeout`-wrapped at a fixed path (no per-call concat needed).
-FZ_CHECK := "timeout 60 ./zenc check $ZT/zo_fuzz.zen > /dev/null 2>&1"
-FZ_EMIT := "timeout 60 ./zenc emit  $ZT/zo_fuzz.zen > /dev/null 2>&1"
 // a real (well-formed) program; the truncation generator feeds prefixes of it (off-by-token garbage).
 FZ_FULL := "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
-// ── crash decision ──────────────────────────────────────────────────────────────
-// true iff the DECODED exit status (shell's `$?` convention) indicates a signal (segfault/abort → 128 +
-// signal) or a timeout/hang (`timeout` exits 124) — i.e. a real bug. Any code >= 124 is one of those.
-fz_crash = (status: i32) bool { status >= 124 }
 // ── small builders (the value harness can't reach these; we build Zen source strings by hand) ─────
 // append a decimal integer VALUE (no leading zeros) — for generated type-cycle names.
 fz_app_int = (mp: MutPtr<Malloc>, s: String, n: i64) String {
@@ -91,49 +84,90 @@ fz_noise = (mp: MutPtr<Malloc>, s: String, rp: MutPtr<Rng>, i: i64, n: i64) Stri
 // grammar-aware malformed programs aimed at the recursion sites (cycles, unterminated nests, tyargs,
 // recursive generics, polymorphic-recursive types, truncations).
 fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) str { (pick == 0).match ({ true => mp.finish_in(mp.fz_cycle(mp.new_in().expect("fuzz: oom"), 0, rp.range(2, 7))).expect("fuzz: oom"), false => (pick == 1).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "test* = () i32 { ").expect("fuzz: oom"), "{ ", 0, rp.range(1, 9))).expect("fuzz: oom"), false => (pick == 2).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "test* = () i32 { ").expect("fuzz: oom"), "( ", 0, rp.range(1, 12))).expect("fuzz: oom"), false => (pick == 3).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "test* = () i32 { 0 .match ({ ").expect("fuzz: oom"), ".V => 0 ", 0, rp.range(1, 7))).expect("fuzz: oom"), false => (pick == 4).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "Foo").expect("fuzz: oom"), "<", 0, rp.range(1, 6))).expect("fuzz: oom"), false => (pick == 5).match ({ true => "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", false => (pick == 6).match ({ true => "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", false => mp.fz_trunc(FZ_FULL, rp.range(1, len(FZ_FULL))) }) }) }) }) }) }) }) }    // type cycle
-fz_run_one = (mp: MutPtr<Malloc>, src: str) i32 {
-    save(mp.zo_path("zo_fuzz.zen"), src, len(src))    // unterminated blocks
-    // unterminated parens
-    // unterminated match arms
-    // malformed `<…>` tail
-    // mutual recursive generic fns
-    // polymorphic-recursive type
-    // off-by-token truncation
-    // ── run one input through both probes; print '.'/crash report, return the crash count (0..2) ──────
-    cc := shell(mp.zo_cmd(FZ_CHECK)).expect("oracle: shell")
-    ec := shell(mp.zo_cmd(FZ_EMIT)).expect("oracle: shell")
+// ── PARALLEL crash-resistance batch (dogfoods std.thread via oracle_lib's zo_par_run) ─────────────
+// Each input is probed by BOTH `zenc check` and `zenc emit` under `timeout 60`; a DECODED exit ≥ 124
+// (timeout=124 / 128+signal) is a crash/hang. The shell command computes the 0..2 crash count itself and
+// writes it to a per-input marker file, so the whole batch runs across the worker pool; Phase C reads the
+// markers IN ORDER, printing '.'/crash-report exactly as the serial runner did (byte-identical output).
+fz_cmd = (mp: MutPtr<Malloc>, gid: i64) str {
+    z: str := ""
+    f := mp.zo_idpath("fz", gid, ".zen")
+    rc := mp.zo_idpath("fzrc", gid, ".txt")
+    mp.zo_join([z, "timeout 60 ./zenc check ", f, " >/dev/null 2>&1; a=$?; timeout 60 ./zenc emit ", f, " >/dev/null 2>&1; b=$?; c=0; [ $a -ge 124 ] && c=$((c+1)); [ $b -ge 124 ] && c=$((c+1)); printf %s $c > ", rc])
+}
+// crash count for input gid (0..2). An unreadable marker counts as a crash (fail loud, never silently pass).
+fz_crash_count = (mp: MutPtr<Malloc>, gid: i64) i32 {
+    mp.contents_in(mp.zo_idpath("fzrc", gid, ".txt")).match ({
+        .Ok(s)  => try_parse_int(s).match ({
+            .Ok(v)  => to_i32(v),
+            .Err(e) => 2,
+        }),
+        .Err(e) => 2,
+    })
+}
+// run every generated src through both probes in parallel, then report IN ORDER; returns total crashes.
+fz_batch = (mp: MutPtr<Malloc>, srcs: [str], n: i64) i32 {
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    i: i64 := 0
+    @while (i < n) {
+        save(mp.zo_idpath("fz", i, ".zen"), srcs[i], len(srcs[i]))
+        cmds[i] = mp.fz_cmd(i)
+        i = i + 1
+    }
+    zo_par_run(cmds, n)
     crashes := 0
-    fz_crash(cc).match ({ true => {
-        crashes = crashes + 1
-    } })
-    fz_crash(ec).match ({ true => {
-        crashes = crashes + 1
-    } })
-    (crashes > 0).match ({ true => {
-        out("\n!! CRASH/HANG on input: ")
-        out(src)
-        out("\n")
-    }, false => out(".") })
+    j: i64 := 0
+    @while (j < n) {
+        cn := mp.fz_crash_count(j)
+        (cn > 0).match ({ true => {
+            out("\n!! CRASH/HANG on input: ")
+            out(srcs[j])
+            out("\n")
+            crashes = crashes + cn
+        }, false => out(".") })
+        j = j + 1
+    }
+    free(base)
     crashes
 }
-// ── phase drivers (recursive counted loops; depth stays modest) ───────────────────
-fz_soup_phase = (mp: MutPtr<Malloc>, toks: [str], nt: i64, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
-    (i >= n).match ({ true => 0, false => {
-        src := mp.finish_in(mp.fz_soup(mp.new_in().expect("fuzz: oom"), toks, nt, rp, 0, rp.range(1, 30))).expect("fuzz: oom")
-        mp.fz_run_one(src) + mp.fz_soup_phase(toks, nt, rp, i + 1, n)
-    } })
+// ── phase drivers: generate all srcs (serial, seeded RNG threaded in the SAME order as before → the
+// inputs are byte-identical to the serial suite), then run the whole phase across the worker pool. ──
+fz_soup_phase = (mp: MutPtr<Malloc>, toks: [str], nt: i64, rp: MutPtr<Rng>, n: i64) i32 {
+    base := malloc(n * 8)
+    srcs: [str] := base.slice(n)
+    i: i64 := 0
+    @while (i < n) {
+        srcs[i] = mp.finish_in(mp.fz_soup(mp.new_in().expect("fuzz: oom"), toks, nt, rp, 0, rp.range(1, 30))).expect("fuzz: oom")
+        i = i + 1
+    }
+    r := mp.fz_batch(srcs, n)
+    free(base)
+    r
 }
-fz_noise_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
-    (i >= n).match ({ true => 0, false => {
-        src := mp.finish_in(mp.fz_noise(mp.new_in().expect("fuzz: oom"), rp, 0, rp.range(1, 60))).expect("fuzz: oom")
-        mp.fz_run_one(src) + mp.fz_noise_phase(rp, i + 1, n)
-    } })
+fz_noise_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
+    base := malloc(n * 8)
+    srcs: [str] := base.slice(n)
+    i: i64 := 0
+    @while (i < n) {
+        srcs[i] = mp.finish_in(mp.fz_noise(mp.new_in().expect("fuzz: oom"), rp, 0, rp.range(1, 60))).expect("fuzz: oom")
+        i = i + 1
+    }
+    r := mp.fz_batch(srcs, n)
+    free(base)
+    r
 }
-fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, i: i64, n: i64) i32 {
-    (i >= n).match ({ true => 0, false => {
-        src := mp.fz_targeted(rp, rp.range(0, 8))
-        mp.fz_run_one(src) + mp.fz_target_phase(rp, i + 1, n)
-    } })
+fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
+    base := malloc(n * 8)
+    srcs: [str] := base.slice(n)
+    i: i64 := 0
+    @while (i < n) {
+        srcs[i] = mp.fz_targeted(rp, rp.range(0, 8))
+        i = i + 1
+    }
+    r := mp.fz_batch(srcs, n)
+    free(base)
+    r
 }
 // crash-class REGRESSIONS: one minimal representative per known malformed-input non-termination bug.
 fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
@@ -147,11 +181,7 @@ fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
     // idxset `[` scan past EOF
     // `<` with no closing `>`
     // self-recursive generic -> inliner
-    fails := 0
-    seeds.loop((h, i, s) {
-        fails = fails + mp.fz_run_one(s)
-    })
-    fails
+    mp.fz_batch(seeds, seeds.len)
 }
 // ── category entry: run every phase, sum crashes (a non-zero result is a REAL bug to report) ──────
 oracle_fuzz_run* = () i32 {
@@ -166,11 +196,11 @@ oracle_fuzz_run* = () i32 {
     out("fuzz seeds (crash-class regressions)\n")
     sf := mp.fz_seed_phase()
     out("\nfuzz token-soup (100)\n")
-    pf := mp.fz_soup_phase(toks, nt, rp, 0, 100)
+    pf := mp.fz_soup_phase(toks, nt, rp, 100)
     out("\nfuzz byte-noise (60)\n")
-    nf := mp.fz_noise_phase(rp, 0, 60)
+    nf := mp.fz_noise_phase(rp, 60)
     out("\nfuzz targeted recursion-bombs (60)\n")
-    tf := mp.fz_target_phase(rp, 0, 60)
+    tf := mp.fz_target_phase(rp, 60)
     out("\n")
     // report via the standard suite line (one synthetic bool: "no crashes found").
     total := sf + pf + nf + tf
