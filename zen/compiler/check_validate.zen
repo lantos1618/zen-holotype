@@ -1502,8 +1502,161 @@ call_arg_consumes_name = (env: Env, c: CallData, nm: str, depth: i32) bool {
     }, false => { } })
     found
 }
+// ── FREE-THROUGH-OWNER-POINTER (re-census #1: release via a borrow) ────────────────────────────────
+// #56 kills an owner MOVED BY VALUE into an `Own`-typed param. But an owner passed BY POINTER
+// (`o.addr()` into a `MutPtr<Own<T>>`/`Ptr<Own<T>>` borrow) whose callee FREES the pointee THROUGH that
+// pointer (`load(p).release_in(a)`, directly or via a local bound to the deref) is ALSO consumed: the
+// pointer and the caller's `o` name the ONE allocation, so the callee's free leaves `o` dangling and a
+// later `o.get()` is a use-after-free that `is_consume_method` (which only fires on a by-value `Own`
+// param) misses. We summarize "does fn free the pointee of its pointer param `pi`?" — STRUCTURALLY (a
+// release/release_in/drop/drop_in whose receiver is `load(pname)` or a local bound to it), bounded like
+// fn_consumes_param — and, at the call site, kill the `o` in `o.addr()` when the matching param is an
+// owner-pointer whose callee frees through it. Sound (reject-more) + zero over-reject: gated on the param
+// being an owner-pointer AND the callee actually freeing through it; a borrow that only READS through the
+// pointer (`load(p).get()`) matches no consume verb and frees nothing, so it stays legal.
+is_owner_base = (b: str) bool { eq(b, "Own") || eq(b, "Rc") || eq(b, "Arc") }
+// the pointee's owner base of a pointer type: `MutPtr<Own<T>>` / `Ptr<Own<T>>` -> "Own" (also Rc/Arc); "" otherwise.
+owner_ptr_base = (t: Ty) str { t.pointee_of().owner_base() }
+// the owner-consume verbs, matched by NAME (no receiver-type infer — the callee's params/locals are not in
+// the caller env that drives the summary, so detection must be structural + the call-site param-type gate).
+is_consume_fn_name = (fn: str) bool { eq(fn, "release") || eq(fn, "release_in") || eq(fn, "drop") || eq(fn, "drop_in") }
+// `<owner>.addr()` where the receiver is an Own/Rc/Arc local -> that owner's var name, else "". Inferred in
+// the CALLER env (which HAS the local bound by the time own_step reaches the call), so infer resolves it.
+addr_owner_var = (env: Env, e: Ptr<Expr>) str {
+    load(e).match ({
+        .Call(c) => (eq(c.fn, "addr") && c.args.len == 1).match ({ true => c.args[0].match ({
+            .Var(v) => is_owner_base(env.infer_expr(c.args[0].addr()).owner_base()).match ({ true => v.name, false => "" }),
+            _       => "",
+        }), false => "" }),
+        _        => "",
+    })
+}
+// `load(pname)` (or any deref intrinsic reading through `pname`): the borrow deref of a specific pointer.
+is_deref_of_var = (e: Ptr<Expr>, pname: str) bool {
+    load(e).match ({
+        .Call(c) => (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({ true => c.args[0].match ({
+            .Var(v) => eq(v.name, pname),
+            _       => false,
+        }), false => false }),
+        _        => false,
+    })
+}
+// locals bound to a deref of `pname` (`r := load(pname)`): consuming `r` later == consuming the pointee.
+cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: str) Ptr<DeadList> {
+    load(e).match ({
+        .Match(m) => env.cdl_arms(seen, m.arms, pname),
+        .Block(b) => env.cdl_body(seen, b.stmts, pname),
+        .Loop(l)  => env.cdl_body(seen, l.body, pname),
+        .Cond(d)  => env.cdl_expr(env.cdl_expr(seen, d.t, pname), d.e, pname),
+        _         => seen,
+    })
+}
+cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: str) Ptr<DeadList> {
+    out := seen
+    arms.loop((h, i, ar) {
+        out = env.cdl_expr(out, ar.body, pname)
+    })
+    out
+}
+cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: str) Ptr<DeadList> {
+    st.match ({
+        .Let(l)      => is_deref_of_var(l.value, pname).match ({ true => env.a.dead_cons(l.name, seen), false => env.cdl_expr(seen, l.value, pname) }),
+        .Assign(x)   => env.cdl_expr(seen, x.value, pname),
+        .If(f)       => env.cdl_body(env.cdl_body(seen, f.then, pname), f.els, pname),
+        .While(w)    => env.cdl_body(seen, w.body, pname),
+        .ExprStmt(e) => env.cdl_expr(seen, e, pname),
+        _            => seen,
+    })
+}
+cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: str) Ptr<DeadList> {
+    out := seen
+    body.loop((h, i, st) {
+        out = env.cdl_stmt(out, st, pname)
+    })
+    out
+}
+// does a consume verb in `c` free the pointee of `pname`? receiver is `load(pname)` directly, a local in the
+// deref set `dl`, or `pname` is forwarded (by pointer) to a callee that frees through it (one bounded hop).
+bft_call = (env: Env, c: CallData, pname: str, dl: Ptr<DeadList>, depth: i32) bool {
+    leaf := (is_consume_fn_name(c.fn) && c.args.len > 0).match ({ true => c.args[0].match ({
+        .Var(v) => dl.dead_has(v.name),
+        _       => is_deref_of_var(c.args[0].addr(), pname),
+    }), false => false })
+    leaf.match ({ true => true, false => env.bft_forward(c, pname, depth) || env.bft_args(c.args, pname, dl, depth) })
+}
+// the transitive hop: `pname` passed as a pointer arg to a callee that itself frees through that param.
+bft_forward = (env: Env, c: CallData, pname: str, depth: i32) bool {
+    (depth <= 1).match ({ true => false, false => {
+        ps := env.env_params(c.fn)
+        found := false
+        (ps.len == c.args.len).match ({ true => {
+            c.args.loop((h, i, ar) {
+                (eq(c.arg_var_name(i), pname) && env.fn_frees_through_ptr(c.fn, i, depth - 1)).match ({ true => {
+                    found = true
+                }, false => { } })
+            })
+        }, false => { } })
+        found
+    } })
+}
+bft_args = (env: Env, args: [Expr], pname: str, dl: Ptr<DeadList>, depth: i32) bool {
+    found := false
+    args.loop((h, i, ar) {
+        found = env.bft_expr(ar.addr(), pname, dl, depth).match ({ true => true, false => found })
+    })
+    found
+}
+bft_arms = (env: Env, arms: [ArmData], pname: str, dl: Ptr<DeadList>, depth: i32) bool {
+    found := false
+    arms.loop((h, i, ar) {
+        found = env.bft_expr(ar.body, pname, dl, depth).match ({ true => true, false => found })
+    })
+    found
+}
+bft_expr = (env: Env, e: Ptr<Expr>, pname: str, dl: Ptr<DeadList>, depth: i32) bool {
+    load(e).match ({
+        .Call(c)      => env.bft_call(c, pname, dl, depth),
+        .Block(b)     => env.bft_body(b.stmts, pname, dl, depth),
+        .Match(m)     => env.bft_expr(m.subj, pname, dl, depth) || env.bft_arms(m.arms, pname, dl, depth),
+        .Cond(d)      => env.bft_expr(d.c, pname, dl, depth) || env.bft_expr(d.t, pname, dl, depth) || env.bft_expr(d.e, pname, dl, depth),
+        .Loop(l)      => env.bft_expr(l.seq, pname, dl, depth) || env.bft_body(l.body, pname, dl, depth),
+        .MakeEnum(mk) => env.bft_expr(mk.payload, pname, dl, depth),
+        _             => false,
+    })
+}
+bft_stmt = (env: Env, st: Stmt, pname: str, dl: Ptr<DeadList>, depth: i32) bool {
+    st.match ({
+        .Let(l)      => env.bft_expr(l.value, pname, dl, depth),
+        .Assign(x)   => env.bft_expr(x.value, pname, dl, depth),
+        .Return(r)   => env.bft_expr(r, pname, dl, depth),
+        .ExprStmt(e) => env.bft_expr(e, pname, dl, depth),
+        .If(f)       => env.bft_expr(f.c, pname, dl, depth) || env.bft_body(f.then, pname, dl, depth) || env.bft_body(f.els, pname, dl, depth),
+        .While(w)    => env.bft_expr(w.c, pname, dl, depth) || env.bft_body(w.body, pname, dl, depth),
+        .IndexSet(x) => env.bft_expr(x.value, pname, dl, depth),
+        _            => false,
+    })
+}
+bft_body = (env: Env, body: [Stmt], pname: str, dl: Ptr<DeadList>, depth: i32) bool {
+    found := false
+    body.loop((h, i, st) {
+        found = env.bft_stmt(st, pname, dl, depth).match ({ true => true, false => found })
+    })
+    found
+}
+body_frees_through_ptr = (env: Env, body: [Stmt], pname: str, depth: i32) bool {
+    dl := env.cdl_body(env.a.dead_nil(), body, pname)
+    env.bft_body(body, pname, dl, depth)
+}
+// does the KNOWN local fn `fn` free the pointee of its pointer param at index `pi`? (bounded interprocedural)
+fn_frees_through_ptr = (env: Env, fn: str, pi: i32, depth: i32) bool {
+    (depth <= 0).match ({ true => false, false => {
+        f := env.env_func(fn)
+        (eq(f.name, fn) && pi >= 0 && pi < f.params.len).match ({ true => env.body_frees_through_ptr(f.body, f.params[pi].name, depth), false => false })
+    } })
+}
 // the CALL-SITE kill: for each bare-Var Own arg passed to an Own-typed, consuming param of a known
 // callee, mark that local dead (moved into the callee). Runs in own_step so both passes see the kill.
+// Also (re-census #1): an owner passed BY POINTER (`o.addr()`) to a borrow whose callee frees through it.
 own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, c: CallData) Ptr<DeadList> {
     out := seen
     ps := env.env_params(c.fn)
@@ -1513,6 +1666,12 @@ own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alia
                 nm := c.arg_var_name(i)
                 nm.is_empty().match ({ true => { }, false => {
                     out = a.dead_kill(out, al, nm)
+                } })
+            }, false => { } })
+            (is_owner_base(ps[i].ty.owner_ptr_base()) && env.fn_frees_through_ptr(c.fn, i, consume_depth())).match ({ true => {
+                onm := env.addr_owner_var(ar.addr())
+                onm.is_empty().match ({ true => { }, false => {
+                    out = a.dead_kill(out, al, onm)
                 } })
             }, false => { } })
         })
@@ -5027,102 +5186,226 @@ ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
 }
 // SENDABILITY rule 3: a message may not carry a pointer into the sender's frame. `send(_, msg)` whose
 // message escapes a local (`.addr()` of a local, directly or forwarded) → the offset of the call, else 0.
-ae_send_pos = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+// the send-message escape (SENDABILITY rule 3) uses the NON-hopping escape check: a laundered send
+// (`send(.Poke(launder(local.addr())))`) is the sendability pass's concern (kind `sendable`), so the
+// call-following added for return-escape must NOT pre-empt it here — hop=false preserves that split.
+ae_send_pos = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c) => (eq(c.fn, "send") && c.args.len >= 2 && a.ae_escapes(locals, c.args[1].addr())).match ({ true => c.pos.pos_or(1), false => 0 }),
+        .Call(c) => (eq(c.fn, "send") && c.args.len >= 2 && a.ae_escapes(decls, locals, c.args[1].addr(), false)).match ({ true => c.pos.pos_or(1), false => 0 }),
         _        => 0,
     })
 }
-ae_block_val_escapes = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, stmts: [Stmt]) bool {
+ae_block_val_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, stmts: [Stmt], hop: bool) bool {
     (stmts.len == 0).match ({ true => false, false => stmts[stmts.len - 1].match ({
-        .ExprStmt(e) => a.ae_escapes(locals, e),
-        .Return(r)   => a.ae_escapes(locals, r),
+        .ExprStmt(e) => a.ae_escapes(decls, locals, e, hop),
+        .Return(r)   => a.ae_escapes(decls, locals, r, hop),
         _            => false,
     }) })
 }
-ae_inits_escape = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, inits: [FieldInit]) bool {
+ae_inits_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, inits: [FieldInit], hop: bool) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = a.ae_escapes(locals, fi.value).match ({ true => true, false => f })
+        f = a.ae_escapes(decls, locals, fi.value, hop).match ({ true => true, false => f })
     })
     f
 }
-ae_arms_escape = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, arms: [ArmData]) bool {
+ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, arms: [ArmData], hop: bool) bool {
     f := false
     arms.loop((h, i, ar) {
-        f = a.ae_escapes(locals, ar.body).match ({ true => true, false => f })
+        f = a.ae_escapes(decls, locals, ar.body, hop).match ({ true => true, false => f })
     })
     f
 }
-// value position: IS a `<local>.addr()`, or forwards one through slice()/struct/match/cond/block.
-ae_escapes = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
+// ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
+// The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
+// in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
+// returns one of its pointer params (`id(x.addr())`, or `Box(p: id(x.addr()))`) — slipped past (the
+// `.Call` arm only forwarded `slice`). We close it with a per-fn summary "does fn's return value derive
+// from its param `pi`?" (bounded, structural — pointer flow needs no type infer), and follow ANY call
+// hop whose matching arg is itself an escaping local address. Sound (reject-more) + zero over-reject: the
+// arg must be an addr-of-LOCAL (the only tainted shape) AND the callee must actually thread that param to
+// its result; a callee that reads through the pointer and returns a fresh/copied value threads nothing.
+// does local fn `fn`'s return value derive from its param at index `pi`? (bounded interprocedural)
+ae_fn_returns_param = (a: MutPtr<Malloc>, decls: [Decl], fn: str, pi: i32, depth: i32) bool {
+    (depth <= 0).match ({ true => false, false => {
+        f := decls.the_func(fn)
+        (eq(f.name, "") == false && pi >= 0 && pi < f.params.len).match ({ true => a.ae_ret_body(decls, f.body, f.params[pi].name, depth), false => false })
+    } })
+}
+// value position: does expr `e` yield the tracked param `name` (directly, forwarded, or via one hop)?
+ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], name: str, e: Ptr<Expr>, depth: i32) bool {
+    load(e).match ({
+        .Var(v)        => eq(v.name, name),
+        .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({ true => a.ae_ret_yields(decls, name, c.args[0].addr(), depth), false => a.ae_ret_call(decls, c, name, depth) }),
+        .MakeStruct(s) => a.ae_ret_inits(decls, s.inits, name, depth),
+        .MakeEnum(mk)  => a.ae_ret_yields(decls, name, mk.payload, depth),
+        .Match(m)      => a.ae_ret_valarms(decls, m.arms, name, depth),
+        .Cond(d)       => a.ae_ret_yields(decls, name, d.t, depth) || a.ae_ret_yields(decls, name, d.e, depth),
+        .Block(b)      => a.ae_ret_blockval(decls, b.stmts, name, depth),
+        _              => false,
+    })
+}
+ae_ret_inits = (a: MutPtr<Malloc>, decls: [Decl], inits: [FieldInit], name: str, depth: i32) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = a.ae_ret_yields(decls, name, fi.value, depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: str, depth: i32) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = a.ae_ret_yields(decls, name, ar.body, depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_blockval = (a: MutPtr<Malloc>, decls: [Decl], stmts: [Stmt], name: str, depth: i32) bool {
+    (stmts.len == 0).match ({ true => false, false => stmts[stmts.len - 1].match ({
+        .ExprStmt(e) => a.ae_ret_yields(decls, name, e, depth),
+        .Return(r)   => a.ae_ret_yields(decls, name, r, depth),
+        _            => false,
+    }) })
+}
+// one interprocedural hop: a call whose arg[i] yields `name` AND whose callee returns its param `i`.
+ae_ret_call = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, name: str, depth: i32) bool {
+    (depth <= 1).match ({ true => false, false => {
+        f := decls.the_func(c.fn)
+        found := false
+        (eq(f.name, "") == false && f.params.len == c.args.len).match ({ true => {
+            c.args.loop((h, i, ar) {
+                (a.ae_ret_yields(decls, name, ar.addr(), depth - 1) && a.ae_fn_returns_param(decls, c.fn, i, depth - 1)).match ({ true => {
+                    found = true
+                }, false => { } })
+            })
+        }, false => { } })
+        found
+    } })
+}
+// returns-only statement walker over the callee body (mirrors the escape walker; trailing handled by caller).
+ae_ret_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], name: str, depth: i32) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = a.ae_ret_stmt(decls, st, name, depth).match ({ true => true, false => f })
+    })
+    (body.len == 0).match ({ true => f, false => body[body.len - 1].match ({
+        .ExprStmt(e) => a.ae_ret_yields(decls, name, e, depth).match ({ true => true, false => f }),
+        _            => f,
+    }) })
+}
+ae_ret_stmt = (a: MutPtr<Malloc>, decls: [Decl], st: Stmt, name: str, depth: i32) bool {
+    st.match ({
+        .Return(r)   => a.ae_ret_yields(decls, name, r, depth),
+        .If(f)       => a.ae_ret_body(decls, f.then, name, depth) || a.ae_ret_body(decls, f.els, name, depth),
+        .While(w)    => a.ae_ret_body(decls, w.body, name, depth),
+        .ExprStmt(e) => a.ae_ret_estmt(decls, e, name, depth),
+        _            => false,
+    })
+}
+ae_ret_estmt = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, name: str, depth: i32) bool {
+    load(e).match ({
+        .Match(m) => a.ae_ret_stmtarms(decls, m.arms, name, depth),
+        .Cond(d)  => a.ae_ret_estmt(decls, d.t, name, depth) || a.ae_ret_estmt(decls, d.e, name, depth),
+        .Block(b) => a.ae_ret_body(decls, b.stmts, name, depth),
+        .Loop(l)  => a.ae_ret_body(decls, l.body, name, depth),
+        _         => false,
+    })
+}
+ae_ret_stmtarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: str, depth: i32) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        hit := load(ar.body).match ({
+            .Block(b) => a.ae_ret_body(decls, b.stmts, name, depth),
+            _         => false,
+        })
+        f = hit.match ({ true => true, false => f })
+    })
+    f
+}
+// the call-following forward for the escape walk: a local's address escaping into a returning-param arg.
+ae_call_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, c: CallData) bool {
+    f := decls.the_func(c.fn)
+    found := false
+    (eq(f.name, "") == false && f.params.len == c.args.len).match ({ true => {
+        c.args.loop((h, i, ar) {
+            (a.ae_escapes(decls, locals, ar.addr(), true) && a.ae_fn_returns_param(decls, c.fn, i, consume_depth())).match ({ true => {
+                found = true
+            }, false => { } })
+        })
+    }, false => { } })
+    found
+}
+// value position: IS a `<local>.addr()`, or forwards one through slice()/struct/match/cond/block, or (only
+// when `hop`) through a call to a fn that returns one of its pointer params (identity/wrapper laundering).
+// `hop` is on for the return/trailing escape (the actual stack-escape-via-fn vuln) and off for the send
+// path, which the sendability pass owns (so a laundered send stays kind `sendable`, not `escape`).
+ae_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Expr>, hop: bool) bool {
     locals.ae_is_addr_local(e).match ({ true => true, false => load(e).match ({
-        .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({ true => a.ae_escapes(locals, c.args[0].addr()), false => false }),
-        .MakeEnum(mk)  => a.ae_escapes(locals, mk.payload),
-        .MakeStruct(s) => a.ae_inits_escape(locals, s.inits),
-        .Match(m)      => a.ae_arms_escape(locals, m.arms),
-        .Cond(d)       => a.ae_escapes(locals, d.t) || a.ae_escapes(locals, d.e),
-        .Block(b)      => a.ae_block_val_escapes(locals, b.stmts),
+        .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({ true => a.ae_escapes(decls, locals, c.args[0].addr(), hop), false => hop.match ({ true => a.ae_call_escapes(decls, locals, c), false => false }) }),
+        .MakeEnum(mk)  => a.ae_escapes(decls, locals, mk.payload, hop),
+        .MakeStruct(s) => a.ae_inits_escape(decls, locals, s.inits, hop),
+        .Match(m)      => a.ae_arms_escape(decls, locals, m.arms, hop),
+        .Cond(d)       => a.ae_escapes(decls, locals, d.t, hop) || a.ae_escapes(decls, locals, d.e, hop),
+        .Block(b)      => a.ae_block_val_escapes(decls, locals, b.stmts, hop),
         _              => false,
     }) })
 }
 // position walk (mirrors kv_escape_*): the source offset of the first escaping return/trailing, 0 = none.
-ae_kv_arm = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, body: Ptr<Expr>) i32 {
+ae_kv_arm = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: Ptr<Expr>) i32 {
     load(body).match ({
-        .Block(b) => a.ae_kv_stmts(locals, b.stmts),
+        .Block(b) => a.ae_kv_stmts(decls, locals, b.stmts),
         _         => 0,
     })
 }
-ae_kv_arms = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, arms: [ArmData]) i32 {
+ae_kv_arms = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.ae_kv_arm(locals, ar.body))
+        acc = acc.kv_kor(a.ae_kv_arm(decls, locals, ar.body))
     })
     acc
 }
-ae_kv_expr_stmt = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+ae_kv_expr_stmt = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Match(m) => a.ae_kv_arms(locals, m.arms),
-        .Cond(d)  => a.ae_kv_expr_stmt(locals, d.t).kv_kor(a.ae_kv_expr_stmt(locals, d.e)),
-        .Block(b) => a.ae_kv_stmts(locals, b.stmts),
-        .Loop(l)  => a.ae_kv_stmts(locals, l.body),
+        .Match(m) => a.ae_kv_arms(decls, locals, m.arms),
+        .Cond(d)  => a.ae_kv_expr_stmt(decls, locals, d.t).kv_kor(a.ae_kv_expr_stmt(decls, locals, d.e)),
+        .Block(b) => a.ae_kv_stmts(decls, locals, b.stmts),
+        .Loop(l)  => a.ae_kv_stmts(decls, locals, l.body),
         _         => 0,
     })
 }
-ae_kv_stmt = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, st: Stmt) i32 {
+ae_kv_stmt = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
-        .Return(r)   => a.ae_escapes(locals, r).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
-        .If(f)       => a.ae_kv_stmts(locals, f.then).kv_kor(a.ae_kv_stmts(locals, f.els)),
-        .While(w)    => a.ae_kv_stmts(locals, w.body),
-        .Let(l)      => a.ae_send_pos(locals, l.value),
-        .Assign(x)   => a.ae_send_pos(locals, x.value),
-        .ExprStmt(e) => a.ae_kv_expr_stmt(locals, e).kv_kor(a.ae_send_pos(locals, e)),
+        .Return(r)   => a.ae_escapes(decls, locals, r, true).match ({ true => load(r).expr_pos().pos_or(1), false => 0 }),
+        .If(f)       => a.ae_kv_stmts(decls, locals, f.then).kv_kor(a.ae_kv_stmts(decls, locals, f.els)),
+        .While(w)    => a.ae_kv_stmts(decls, locals, w.body),
+        .Let(l)      => a.ae_send_pos(decls, locals, l.value),
+        .Assign(x)   => a.ae_send_pos(decls, locals, x.value),
+        .ExprStmt(e) => a.ae_kv_expr_stmt(decls, locals, e).kv_kor(a.ae_send_pos(decls, locals, e)),
         _            => 0,
     })
 }
-ae_kv_stmts = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, body: [Stmt]) i32 {
+ae_kv_stmts = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ae_kv_stmt(locals, st))
+        acc = acc.kv_kor(a.ae_kv_stmt(decls, locals, st))
     })
     acc
 }
-ae_kv_body = (a: MutPtr<Malloc>, locals: Ptr<DeadList>, body: [Stmt]) i32 {
-    acc := a.ae_kv_stmts(locals, body)
+ae_kv_body = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := a.ae_kv_stmts(decls, locals, body)
     acc.kv_kor((body.len == 0).match ({ true => 0, false => body[body.len - 1].match ({
-        .ExprStmt(e) => a.ae_escapes(locals, e).match ({ true => load(e).expr_pos().pos_or(1), false => 0 }),
+        .ExprStmt(e) => a.ae_escapes(decls, locals, e, true).match ({ true => load(e).expr_pos().pos_or(1), false => 0 }),
         _            => 0,
     }) }))
 }
-ae_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
+ae_check_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
     locals := a.ae_collect(a.dead_nil(), f.body)
-    a.ae_kv_body(locals, f.body)
+    a.ae_kv_body(decls, locals, f.body)
 }
 check_module_addr_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.ae_check_func(f),
+            .DFunc(f) => a.ae_check_func(decls, f),
             _         => 0,
         }))
     })
