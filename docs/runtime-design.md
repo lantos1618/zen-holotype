@@ -3,9 +3,9 @@
 **Status:** CURRENT. This is the single source of truth for Zen's runtime/capability model.
 It supersedes the *ambient rt* line of design (`rt-scoped-runtime.md`,
 `pluggable-runtime-plan.md`, `scope-runtime-goal.md`, `actors-pony-zig.md`), all now marked
-SUPERSEDED. The execution plan that lands this model is
-[`sys-migration-plan.md`](sys-migration-plan.md); the print/IO honesty step is
-[`sys-phase2-print-writer.md`](sys-phase2-print-writer.md).
+SUPERSEDED. The execution-plan docs (`sys-migration-plan.md`, `sys-phase2-print-writer.md`)
+are not yet written; the phase-2 print/IO → `Result` work is tracked in GOALS.md item 12
+("Capability entry (Sys) & explicit runtime").
 
 ## The one-line model
 
@@ -126,8 +126,9 @@ shipped.
 
 **In progress / unbuilt:**
 - **Writer → Result** (honest IO: `write` returning `Result`, surfacing EPIPE/ENOSPC instead of
-  swallowing). Design in [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md); `println`
-  stays best-effort during the transition (additive, no 314-site churn).
+  swallowing). The design doc (`sys-phase2-print-writer.md`) is not yet written; the work is
+  tracked in GOALS.md item 12. `println` stays best-effort during the transition (additive, no
+  314-site churn).
 - **`Spawner` capability** — spawn-as-a-Sys-capability (actor semantics already shipped; the
   capability surface is not).
 - **Two-memory scratch/shared runtime** — concept only, above.
@@ -136,9 +137,8 @@ shipped.
 
 ## See also
 
-- [`sys-migration-plan.md`](sys-migration-plan.md) — the execution plan (phasing, seed-risk
-  isolation, byte-exact gates).
-- [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md) — the print/IO → `Writer` + `Result`
-  step.
+- `sys-migration-plan.md` (the execution plan) and `sys-phase2-print-writer.md` (the print/IO →
+  `Writer` + `Result` step) — **not yet written**; until they exist, the phase-2 work is tracked
+  in GOALS.md item 12 ("Capability entry (Sys) & explicit runtime").
 - Superseded (history, do not follow): `rt-scoped-runtime.md`, `pluggable-runtime-plan.md`,
   `scope-runtime-goal.md`, `actors-pony-zig.md`.
