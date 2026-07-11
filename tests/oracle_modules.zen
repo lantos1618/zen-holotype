@@ -323,7 +323,7 @@ DeepCase: {
     base_files: [ModFile],
     kind: i32,
 }
-deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: str) str { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => mp.deep_src_check(dir) }) }) }
+deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: str) str { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => (kind == 2).match ({ true => mp.deep_src_check(dir), false => mp.deep_src_check_all(dir) }) }) }) }
 deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
     mp.contents_in(mp.mod_rc_path(gid)).match ({
         .Ok(s)  => try_parse_int(s).match ({
@@ -1835,6 +1835,15 @@ oracle_modules_run* = () i32 {
             src: "plain* = (a: i32) i32 { a }\n",
         )],
         kind: 2,
+    ), DeepCase(
+        base_files: [ModFile(
+            name: "helper.zen",
+            src: "value* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "left.zen",
+            src: "helper = helper\nthing* = () i32 { helper.value(1) }\n",
+        )],
+        kind: 3,
     )])
     // resolve_program_data: the ResolvedProgram.table holds every transitively-loaded namespace module
     //   (u/left,u/right,u/plain,u/helper) with per-module graphs, and the flat body is namespace-stripped.
@@ -1842,6 +1851,9 @@ oracle_modules_run* = () i32 {
     // check_parsed_program + root_link_decls: the graph-linked cross-module check accepts a well-typed
     //   program (0) and rejects both a namespace-qualified and a plain wrong-arity call (> 0); the root
     //   link set is exactly the 2 direct imports.
+    // check_all_parsed_modules + module_link_decls: validates EVERY module body against its import graph.
+    //   Root-only check passes (main calls left.thing()), but left's internal helper.value(1) arity
+    //   error is caught by the all-modules pass (> 0).
     v + d + e + dc + sd + dl
 }
 // ── deep-loader driver builders (paths injected at runtime) ──────────────────────────────────────
@@ -1859,6 +1871,10 @@ deep_src_parsed = (mp: MutPtr<Malloc>, dir: str) str {
 deep_src_check = (mp: MutPtr<Malloc>, dir: str) str {
     z: str := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, root_link_decls, check_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain(3) }\\n\"\n    bad_ns := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1) + plain(3) }\\n\"\n    bad_plain := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    nsp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_ns.zen\", bad_ns)\n    pp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_plain.zen\", bad_plain)\n    lib := a.addr().root_link_decls(gp)\n    ok := (lib.len == 2)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_parsed_program(nsp) > 0)\n        && (a.addr().check_parsed_program(pp) > 0)\n    ok.to_exit()\n}\n"])
+}
+deep_src_check_all = (mp: MutPtr<Malloc>, dir: str) str {
+    z: str := ""
+    mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, module_link_decls, check_parsed_program, check_all_parsed_modules } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\nmain = () i32 { left.thing() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    left := gp.module(\"u/left\")\n    lib := a.addr().module_link_decls(gp, left)\n    ok := (lib.len == 1)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_all_parsed_modules(gp) > 0)\n    ok.to_exit()\n}\n"])
 }
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a
 // Zen string literal in the GENERATED program text. The byte we look for is ASCII 10.

@@ -1777,23 +1777,23 @@ alias_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl
     a.parse_module(body)
 }
 root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] { edge.namespace.match ({ true => a.alias_edge_decls(p, edge), false => p.module(edge.module).decls }) }
-root_link_count* = (a: MutPtr<Malloc>, p: ParsedProgram) i64 {
+module_link_count* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) i64 {
     n := 0
-    root := p.module("")
-    root.graph.imports.loop((h, i, edge) {
+    m.graph.imports.loop((h, i, edge) {
         n = n + a.root_link_edge_decls(p, edge).len
     })
     n
 }
-root_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram) [Decl] {
-    root := p.module("")
-    buf := a.parsed_decl_buf(a.root_link_count(p))
+module_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) [Decl] {
+    buf := a.parsed_decl_buf(a.module_link_count(p, m))
     j := 0
-    root.graph.imports.loop((h, i, edge) {
+    m.graph.imports.loop((h, i, edge) {
         j = buf.append_decls_to(j, a.root_link_edge_decls(p, edge))
     })
     slice(buf.ptr, j)
 }
+root_link_count* = (a: MutPtr<Malloc>, p: ParsedProgram) i64 { a.module_link_count(p, p.module("")) }
+root_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram) [Decl] { a.module_link_decls(p, p.module("")) }
 check_parsed_program* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     root := p.module("")
     a.check_linked(root.decls, a.root_link_decls(p))
@@ -1801,6 +1801,23 @@ check_parsed_program* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
 check_parsed_program_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     root := p.module("")
     a.check_linked_kind(root.decls, a.root_link_decls(p))
+}
+// Graph-linked validation for EVERY module body: each ParsedModule is checked against the import
+// library built from its own ModuleGraph edges (not only the root). Positions stay in the module's
+// stripped body — the incremental step toward a full symbol-table/module-world resolver (GOALS #5).
+check_all_parsed_modules* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
+    acc := 0
+    p.modules.loop((h, i, m) {
+        acc = acc + a.check_linked(m.decls, a.module_link_decls(p, m))
+    })
+    acc
+}
+check_all_parsed_modules_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
+    acc := 0
+    p.modules.loop((h, i, m) {
+        acc = acc + a.check_linked_kind(m.decls, a.module_link_decls(p, m))
+    })
+    acc
 }
 // ── VISIBILITY: `*` exports are ENFORCED across modules (error[private-name]) ─────────────────────
 // A top-level name is cross-module visible only when its declaration carries the `*` export marker
