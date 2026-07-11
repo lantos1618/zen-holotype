@@ -1,0 +1,305 @@
+// tests/oracle_differential.zen — differential C-vs-JS oracle category. Each runtime case is compiled
+// and executed on BOTH backends (`zenc run` vs `zenc emit-js | node`); stdout and success/failure class
+// must agree (panic exit codes differ — C aborts at 134, JS throws at 1 — so we compare rc==0 vs rc!=0,
+// never exact codes). Check cases compare `zenc check` vs `zenc emit-js` accept/reject parity.
+//
+// Skip-list (documented JS gaps, SPEC.md / genjs.zen): i64/BigInt precision beyond f64, MutPtr scalar
+// aliasing. `known_bug` cases (generic multi-field enum Tree<T>: Leaf(T)|Node(T,T)) are expected to
+// disagree until fix/generic-enum-mono merges — mismatches there do not fail the suite.
+//
+// Wired into tests/oracle.zen via `oracle_differential_run`.
+{ run_suite, zo_cmd, zo_idpath, zo_join, zo_par_run } = oracle_lib
+{ Malloc, malloc, free } = std.mem.alloc
+{ out, save, contents_in, shell } = std.io.file
+{ len, starts_with } = std.text.str
+{ expect } = std.core.result
+// ── case shapes ────────────────────────────────────────────────────────────────────────────────────
+// Runtime parity: `src` must define `main`; programs print results via println and return 0 (JS does
+// not propagate main's return value as the node exit code). `panic=true` expects both backends to fail
+// with a zen panic on stderr. `skip=true` documents a known JS gap (prints 's', always passes).
+// `known_bug=true` expects a C/JS mismatch until the enum-mono fix lands (prints 'k' on mismatch, passes).
+DiffCase*: {
+    src: str,
+    skip: bool,
+    known_bug: bool,
+    panic: bool,
+}
+// Check parity: both backends must accept (should_pass=true) or reject (false) identically.
+DiffCheckCase*: {
+    src: str,
+    should_pass: bool,
+    skip: bool,
+}
+// ── helpers (od_ prefix — flat-import collision guard) ───────────────────────────────────────────
+od_read = (mp: MutPtr<Malloc>, path: str) str {
+    mp.contents_in(path).match ({
+        .Ok(t)  => t,
+        .Err(e) => "",
+    })
+}
+// Runtime shell: capture stdout/stderr, compare in-shell, record P/F marker.
+od_run_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DiffCase) str {
+    z: str := ""
+    src := mp.zo_idpath("df", gid, ".zen")
+    cout := mp.zo_idpath("dco", gid, ".txt")
+    cerr := mp.zo_idpath("dce", gid, ".txt")
+    jout := mp.zo_idpath("djo", gid, ".txt")
+    jerr := mp.zo_idpath("dje", gid, ".txt")
+    mark := mp.zo_idpath("dm", gid, ".txt")
+    panic_chk := mp.zo_join([z, "grep -Fq \"zen: panic:\" ", cerr, " && grep -Fq \"zen: panic:\" ", jerr])
+    ok_body := mp.zo_join([z, "cmp -s ", cout, " ", jout, " && test \"$cr\" -eq 0 && test \"$jr\" -eq 0"])
+    fail_class := mp.zo_join([z, "test \"$cr\" -ne 0 && test \"$jr\" -ne 0"])
+    pass_test := dc.panic.match ({ true => mp.zo_join([z, fail_class, " && ", panic_chk]), false => ok_body })
+    mp.zo_join([z, "./zenc run ", src, " > ", cout, " 2> ", cerr, "; cr=$?; ./zenc emit-js ", src, " 2>/dev/null | node > ", jout, " 2> ", jerr, "; jr=$?; if ", pass_test, "; then echo P > ", mark, "; else echo F > ", mark, "; fi"])
+}
+// Check shell: record accept(P)/reject(F) for check and emit-js.
+od_check_cmd = (mp: MutPtr<Malloc>, gid: i64) str {
+    z: str := ""
+    src := mp.zo_idpath("dc", gid, ".zen")
+    cchk := mp.zo_idpath("dcc", gid, ".txt")
+    crc := mp.zo_idpath("dck", gid, ".txt")
+    jchk := mp.zo_idpath("dcj", gid, ".txt")
+    jrc := mp.zo_idpath("dcjk", gid, ".txt")
+    mp.zo_join([z, "if ./zenc check ", src, " > ", cchk, " 2>&1; then echo P > ", crc, "; else echo F > ", crc, "; fi; if ./zenc emit-js ", src, " > /dev/null 2> ", jchk, "; then echo P > ", jrc, "; else echo F > ", jrc, "; fi"])
+}
+od_run_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiffCase) bool {
+    mp.od_read(mp.zo_idpath("dm", gid, ".txt")).starts_with("P")
+}
+od_check_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiffCheckCase) bool {
+    cacc := mp.od_read(mp.zo_idpath("dck", gid, ".txt")).starts_with("P")
+    jacc := mp.od_read(mp.zo_idpath("dcjk", gid, ".txt")).starts_with("P")
+    cacc == dc.should_pass && jacc == dc.should_pass && cacc == jacc
+}
+// Batch runtime runner: parallel subprocess phase, serial ordered verdict.
+run_diffs* = (name: str, cs: [DiffCase]) i32 {
+    out(name)
+    out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        c.skip.match ({
+            true => { cmds[i] = "true" },
+            false => {
+                save(mp.zo_idpath("df", i, ".zen"), c.src, len(c.src))
+                save(mp.zo_idpath("dco", i, ".txt"), "", 0)
+                save(mp.zo_idpath("djo", i, ".txt"), "", 0)
+                save(mp.zo_idpath("dm", i, ".txt"), "", 0)
+                cmds[i] = mp.od_run_cmd(i, c)
+            },
+        })
+    })
+    zo_par_run(cmds, n)
+    fails := 0
+    cs.loop((h, i, c) {
+        c.skip.match ({
+            true => out("s"),
+            false => {
+                ok := mp.od_run_ok(i, c)
+                ok.match ({
+                    true => out("."),
+                    false => c.known_bug.match ({
+                        true => out("k"),
+                        false => {
+                            out("F")
+                            fails = fails + 1
+                        },
+                    }),
+                })
+            },
+        })
+    })
+    out("\n")
+    free(base)
+    fails
+}
+run_diff_checks* = (name: str, cs: [DiffCheckCase]) i32 {
+    out(name)
+    out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    n := cs.len
+    base := malloc(n * 8)
+    cmds: [str] := base.slice(n)
+    cs.loop((h, i, c) {
+        c.skip.match ({
+            true => { cmds[i] = "true" },
+            false => {
+                save(mp.zo_idpath("dc", i, ".zen"), c.src, len(c.src))
+                cmds[i] = mp.od_check_cmd(i)
+            },
+        })
+    })
+    zo_par_run(cmds, n)
+    fails := 0
+    cs.loop((h, i, c) {
+        c.skip.match ({
+            true => out("s"),
+            false => mp.od_check_ok(i, c).match ({
+                true => out("."),
+                false => {
+                    out("F")
+                    fails = fails + 1
+                },
+            }),
+        })
+    })
+    out("\n")
+    fails
+}
+// Fixture-based battery: run an on-disk program on both backends and compare full stdout.
+od_fixture_ok = (mp: MutPtr<Malloc>, rel: str) bool {
+    cout := mp.zo_idpath("fxco", 0, ".txt")
+    jout := mp.zo_idpath("fxjo", 0, ".txt")
+    z: str := ""
+    body := mp.zo_join([z, "./zenc run ", rel, " > ", cout, " 2>/dev/null; cr=$?; ./zenc emit-js ", rel, " 2>/dev/null | node > ", jout, " 2>/dev/null; jr=$?; cmp -s ", cout, " ", jout, " && test \"$cr\" -eq 0 && test \"$jr\" -eq 0"])
+    shell(mp.zo_cmd(body)).expect("oracle: shell") == 0
+}
+// ── corpus: runtime parity by feature family ───────────────────────────────────────────────────────
+od_runtime_corpus = () [DiffCase] {
+    [DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { println(2 + 3)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { println(10000000000 / 10)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { a := 7  b := 2  println((a > b).match ({ true => a >> b, false => 0 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "id<T> = (x: T) T { x }\n{ println } = std.text.fmt\nmain = () i32 { println(id<i64>(5))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Box<T>: { v: T }\n{ println } = std.text.fmt\nmain = () i32 { b := Box<Box<i32>>(v: Box<i32>(v: 7))  println(b.v.v)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Opt<T>: Some(T) | None\n{ println } = std.text.fmt\nmain = () i32 { println((.Some(5)).match({ .Some(x) => x, .None => 0 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Opt<T>: Some(T) | None\n{ println } = std.text.fmt\nmain = () i32 { o: Opt<i32> := .None  println(o.match({ .Some(x) => x, .None => 99 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Two<A, B>: L(A) | P(A, B)\n{ println } = std.text.fmt\nmain = () i32 { t: Two<i32, i32> := .P(4, 5)  println(t.match({ .L(x) => x, .P(a, b) => a * 10 + b }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Tri<T>: N | V(T, T, T)\n{ println } = std.text.fmt\nmain = () i32 { t: Tri<i32> := .V(1, 2, 3)  println(t.match({ .N => 0, .V(a, b, c) => a + b + c }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Tree<T>: Leaf(T) | Node(T, T)\n{ println } = std.text.fmt\nmain = () i32 { t: Tree<i32> := .Node(1, 2)  println(t.match({ .Leaf(x) => x, .Node(a, b) => a + b }))  0 }\n",
+        skip: false, known_bug: true, panic: false,
+    ), DiffCase(
+        src: "Tree<T>: Leaf(T) | Node(T, T)\n{ println } = std.text.fmt\nmain = () i32 { t: Tree<i32> := .Leaf(40)  println(t.match({ .Leaf(x) => x, .Node(a, b) => a + b }))  0 }\n",
+        skip: false, known_bug: true, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { n := 1  println(n.match ({ 1 => 5, _ => 7 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { c := true  println(c.match ({ true => 1, false => 0 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Point*: { x: i32, y: i32 }\n{ println } = std.text.fmt\nmain = () i32 { p := Point(x: 3, y: 4)  println(p.x + p.y)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { s := [10, 20, 30]  println(s[2])  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { xs := [10, 20, 30]  println(xs.len())  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "sum = (xs: ...i32) i32 { t := 0  xs.loop((h, i, x) { t = t + x })  t }\n{ println } = std.text.fmt\nmain = () i32 { println(sum(1, 2, 3, 4))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "add = (a: i32, b: i32) i32 { a + b }\n{ println } = std.text.fmt\nmain = () i32 { println(1.add(2).add(3))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { a := 3  b := 4  println(((a < b) && (b > a)).match ({ true => 1, false => 0 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { println('A')  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { u8v: u8 := 200  u8v = u8v + 100  println(u8v)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { u16v: u16 := 60000  u16v = u16v + 10000  println(u16v)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { u32a: u32 := 100000  u32b: u32 := 100000  println(u32a * u32b)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { i16v: i16 := 30000  i16v = i16v + 10000  println(i16v)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "fnv1a = (data: str, n: i32) u32 {\n    hash: u32 := 2166136261\n    i := 0\n    @while (i < n) { b: u8 := load(offset(data, i))  hash = (hash ^ b) * 16777619  i = i + 1 }\n    hash\n}\n{ println } = std.text.fmt\nmain = () i32 { println(fnv1a(\"hello\", 5))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "RE: NotFound\nResult<T, E>: Ok(T) | Err(E)\n{ println } = std.text.fmt\nmain = () i32 { r: Result<i32, RE> := .Ok(42)  println(r.match({ .Ok(v) => v, .Err(e) => 0 - 1 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "first<T> = (xs: [T]) T { xs[0] }\n{ println } = std.text.fmt\nmain = () i32 { println(first([7, 8]))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Box<M>: { buf: [M]  n: i32  at = (b: MutPtr<Box<M>>, i: i32) M { b.buf[i] } }\n{ println } = std.text.fmt\nmain = () i32 { data := [111, 222, 333]  b := Box<i32>(buf: data, n: 3)  p := b.addr()  println(p.at(0) + p.at(1))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "Plain: Some(i32) | Other\n{ println } = std.text.fmt\nmain = () i32 { p: Plain := .Some(9)  println(p.match({ .Some(x) => x, .Other => 0 }))  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { i := 0  t := 0  @while (i < 4) { t = t + i  i = i + 1 }  println(t)  0 }\n",
+        skip: false, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "main = () i32 { x: i32 := 1 / 0  0 }\n",
+        skip: false, known_bug: false, panic: true,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { x: u64 := 14695981039346656037  println(to_i64(x % 1000000000))  0 }\n",
+        skip: true, known_bug: false, panic: false,
+    ), DiffCase(
+        src: "{ println } = std.text.fmt\nmain = () i32 { x := 5  p := x.addr()  q := p  p.store(7)  println(q.load())  0 }\n",
+        skip: true, known_bug: false, panic: false,
+    )]
+}
+od_check_corpus = () [DiffCheckCase] {
+    [DiffCheckCase(
+        src: "main = () i32 { 0 }\n",
+        should_pass: true, skip: false,
+    ), DiffCheckCase(
+        src: "main = () i32 { nope() }\n",
+        should_pass: false, skip: false,
+    ), DiffCheckCase(
+        src: "test* = () i32 { a: u8 := 300  0 }\n",
+        should_pass: false, skip: false,
+    ), DiffCheckCase(
+        src: "pick<T> = (xs: [T], a: T) T { a }\nmain = () i32 { pick([1, 2]) }\n",
+        should_pass: false, skip: false,
+    ), DiffCheckCase(
+        src: "Box<T>: { n: i32 }\nempty<T> = (k: i32) Box<T> { Box<T>( n: k ) }\nmain = () i32 { m: Box<i32> := empty(7)  0 }\n",
+        should_pass: true, skip: false,
+    ), DiffCheckCase(
+        src: "Box<T>: { n: i32 }\nempty<T> = (k: i32) Box<T> { Box<T>( n: k ) }\nmain = () i32 { m := empty(7)  0 }\n",
+        should_pass: false, skip: false,
+    ), DiffCheckCase(
+        src: "Opt<T>: Some(T) | None\nmain = () i32 { o: Opt<i32> := .Some(1)  0 }\n",
+        should_pass: true, skip: false,
+    ), DiffCheckCase(
+        src: "E*: A(i32) | B\ntest* = () i32 { x := E.A(\"s\")  0 }\n",
+        should_pass: false, skip: false,
+    ), DiffCheckCase(
+        src: "sum = (xs: ...i32) i32 { 0 }\nmain = () i32 { sum(1, 2) }\n",
+        should_pass: true, skip: false,
+    ), DiffCheckCase(
+        src: "bad = (xs: ...i32, y: i32) i32 { y }\nmain = () i32 { bad(1, 2, 3) }\n",
+        should_pass: false, skip: false,
+    )]
+}
+oracle_differential_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    rt := od_runtime_corpus()
+    ck := od_check_corpus()
+    f1 := run_diffs("differential run (34)", rt)
+    f2 := run_diff_checks("differential check (10)", ck)
+    f3 := run_suite("differential fixture (1)", [mp.od_fixture_ok("tests/fixtures/zen/js_width_battery.zen")])
+    f1 + f2 + f3
+}
