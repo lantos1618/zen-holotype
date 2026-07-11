@@ -450,7 +450,7 @@ match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
     })
     out
 }
-result_compatible = (want: Ty, got: Ty) bool { (want.is_str_t() && got.is_str_t()).match ({ true => true, false => (want.ty_rank() >= 0 && got.ty_rank() >= 0).match ({ true => true, false => want.ty_eq(got) }) }) }    // text/str/Cstr are one compatible family
+result_compatible = (want: Ty, got: Ty) bool { (want.is_str_t() && got.is_str_t()).match ({ true => true, false => (want.ty_rank() >= 0 && got.ty_rank() >= 0).match ({ true => true, false => want.ty_eq(got) }) }) }    // string_* types are one compatible family
 cond_numlike = (t: Ty) bool { t.ty_rank() >= 0 || t.is_f64_ty() }
 // A value/bool `.match` (and `if` expression) lowers to a ternary Cond at parse time, so its two
 // value branches escape the enum-match arm checks above. Their result types must still be C-compatible
@@ -752,9 +752,9 @@ is_scalar_prim = (t: Ty) bool {
 // so `slice.len` on its `{ptr,len}` struct still passes. Closes census #60 (sibling of #58).
 is_fieldless_prim = (t: Ty) bool {
     t.match ({
-        .Str  => true,
-        .Cstr => true,
-        .Text => true,
+        .StringView    => true,
+        .StringCstr    => true,
+        .StringLiteral => true,
         _     => t.is_scalar_prim(),
     })
 }
@@ -2306,7 +2306,7 @@ has_method = (methods: [Param], name: str) bool {
     found
 }
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
-impl_ty = (tyname: str) Ty { eq(tyname, "i32").match ({ true => ti32(), false => eq(tyname, "i64").match ({ true => ti64(), false => eq(tyname, "u8").match ({ true => tu8(), false => eq(tyname, "f64").match ({ true => tf64(), false => eq(tyname, "bool").match ({ true => tbool(), false => eq(tyname, "str").match ({ true => tstr(), false => tnamed(tyname) }) }) }) }) }) }) }
+impl_ty = (tyname: str) Ty { eq(tyname, "i32").match ({ true => ti32(), false => eq(tyname, "i64").match ({ true => ti64(), false => eq(tyname, "u8").match ({ true => tu8(), false => eq(tyname, "f64").match ({ true => tf64(), false => eq(tyname, "bool").match ({ true => tbool(), false => eq(tyname, "string_view").match ({ true => tstring_view(), false => eq(tyname, "str").match ({ true => tstring_view(), false => tnamed(tyname) }) }) }) }) }) }) }) }
 subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: str) Ty {
     t.match ({
         .Named(n) => eq(n, "Self").match ({ true => impl_ty(tyname), false => t }),
@@ -3037,9 +3037,9 @@ zty* = (a: MutPtr<Malloc>, t: Ty) str {
         .U8         => "u8",
         .F64        => "f64",
         .Bool       => "bool",
-        .Str        => "str",
-        .Cstr       => "str",
-        .Text       => "str",
+        .StringView    => "string_view",
+        .StringCstr    => "string_cstr",
+        .StringLiteral => "string_literal",
         .Void       => "(unknown)",
         .Named(n)   => n,
         .Generic(g) => g.name,
@@ -3104,9 +3104,9 @@ denrich_member_msg = (env: Env, field: str, objty: Ty) str {
     objty.match ({
         // a generic-enum instance (`Result<i32,IoError>`) reaches here via its base name.
         .Generic(g) => env.decls.cv_is_gen_enum(g.name).match ({ true => a.denrich_enum_member_msg(g.name, field), false => a.denrich_member_noty(field, objty) }),
-        .Str        => a.denrich_str_member_msg(field, objty),
-        .Cstr       => a.denrich_str_member_msg(field, objty),
-        .Text       => a.denrich_str_member_msg(field, objty),
+        .StringView    => a.denrich_str_member_msg(field, objty),
+        .StringCstr    => a.denrich_str_member_msg(field, objty),
+        .StringLiteral => a.denrich_str_member_msg(field, objty),
         .Named(n)   => env.env_is_struct(n).match ({ true => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a), false => env.env_is_enum(n).match ({ true => a.denrich_enum_member_msg(n, field), false => a.denrich_member_noty(field, objty) }) }),
         _           => a.denrich_member_noty(field, objty),
     })

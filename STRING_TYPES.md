@@ -1,73 +1,105 @@
-# Explicit string types — `text` / `view` / `String` / `Cstr`
+# String types — one family, names that say what they mean
 
-Status: Phase 1 DONE — `Cstr` and `Text` are real backend `Ty` variants (both lower to
-`const char*`), the checker rejects the dangle conversions below, and tests cover it. `str`
-remains the **unified surface spelling and display type**; the provenance variants sit under it.
-Phase 2 (`view` + migrating the ~946 borrowed `str` params) is pending. Motivation: today `str`
-(= C `const char*`) is overloaded across three roles with **incompatible lifetimes**, and the
-type can't tell them apart — so a pointer into a heap `String` can escape and dangle with no
-diagnostic. The fix is to make the bytes' *provenance* a type, so a signature documents the
-lifetime contract (enforceable even without a borrow checker).
+**Rule:** every string *type* starts with `string_`. No more overloaded `str` / `text` / `Cstr`
+hiding incompatible lifetimes behind the same spelling.
 
-## The four types
+## The family
 
-| Type | Owns? | Storage / lifetime | Mutable | Length | C repr |
-|------|-------|--------------------|---------|--------|--------|
-| `text` | no | **static** (rodata) — **immortal** | no | NUL-scan | `const char*` |
-| `view` | no | **borrowed** — = the owner's lifetime | no | carried `(ptr,len)` | `zslice` / `{u8* ptr; i64 len}` |
-| `String` | **yes** | **heap**, via an explicit `Allocator` | yes (grows) | carried `(ptr,len,cap)` | `{u8* ptr; i64 len; i64 cap}` |
-| `Cstr` | no | **borrowed from a `String`** — valid until that buffer is freed/realloc'd | no | NUL-scan | `const char*` |
+| Type | Old name(s) | Owns bytes? | Lifetime | Example |
+|------|-------------|-------------|----------|---------|
+| **`string_literal`** | `text`, `Text` | no | **immortal** (rodata) | `"hello"`, `op_str` → `"+"` |
+| **`string_view`** | `view`, most `str` params | no | **borrowed** — don't outlive owner | token span in source, `fn f(s: string_view)` |
+| **`string`** | `String` (struct) | **yes** | until `free_in(a)` | growable buffer via allocator |
+| **`string_cstr`** | `Cstr`, `cstr(...)` | no | **borrowed NUL*** — don't outlive buffer | `s.finish_in(a)`, `lexeme`, FFI |
 
-- **`text`** is what a string literal `"…"` is. Safe to return/store forever.
-- **`view`** is the right default for *reading* a string (substring, a token slice of source, a
-  param that only reads). No NUL scan; length is free. Lives as long as whoever owns the bytes.
-- **`String`** is the only owner of heap string bytes and the only thing you `free`. Every op takes
-  the allocator explicitly (`s.gstr_push(a, b)`), so the bytes' fate is never implicit.
-- **`Cstr`** is the FFI bridge: a `const char*` pointing **into a `String`'s buffer** (what `finish`
-  hands back). The name screams "borrowed C pointer — mind my lifetime." Its lifetime IS the
-  allocator that owns the String's buffer.
+All four are string types. The suffix tells you **provenance**, not the C repr (several lower to
+`const char*` or `{ptr,len}`).
 
-## Conversions (the contract the checker enforces)
+### What each name means
+
+- **`string_literal`** — compile-time / rodata. Store forever. `"…"` literals only (plus static
+  data). Never heap, never borrow.
+
+- **`string_view`** — read-only slice `(ptr, len)`. No NUL scan for length. Valid while the owner
+  lives (source buffer, `[u8]` parent, etc.). Default for “I only need to read bytes.”
+
+- **`string`** — the **owned** growable buffer `{ ptr, len, cap }`. Every mutating op takes an
+  `Allocator`. This is the only type you `free`. (Struct may stay spelled `String` in code until
+  rename lands; the *type* in signatures is `string`.)
+
+- **`string_cstr`** — borrowed `const char*` that is **NUL-terminated** but **not immortal**.
+  Points into a `string` buffer, an arena, or raw heap from `cstr(p)`. Mind the lifetime.
+
+### Retired / migration aliases
+
+| Old | Becomes | Notes |
+|-----|---------|-------|
+| `str` | `string_view` (params) or context-specific | **stop using as catch-all** |
+| `text` | `string_literal` | |
+| `Cstr` | `string_cstr` | |
+| `view` | `string_view` | |
+| `String` (struct) | `string` (type) / struct rename TBD | owned handle |
+
+During migration, checker may treat the old and new names as one **compatible family** for C emission
+(all still `const char*` where applicable), but **conversions** enforce lifetime rules.
+
+## Conversions (checker contract)
 
 Legal:
-- `"…"` literal  ⟶ `text`
-- `text`  ⟶ `view`            (a literal is trivially a borrowed view; length via NUL scan once)
-- `String.view()`  ⟶ `view`   (borrow the live buffer)
-- `String.finish(a)`  ⟶ `Cstr` (NUL-terminate + reinterpret the buffer pointer)
-- `cstr(rawptr)`  ⟶ `Cstr`     (assert NUL-terminated bytes at a raw pointer)
-- `Cstr`  ⟶ `view`             (read it; pays one NUL scan for the length)
 
-ILLEGAL (these are the dangle/mutate bugs):
-- `Cstr`  ⟶ `text`   — a finished/heap pointer is NOT immortal. **This is the bug to reject.**
-- `view`  ⟶ `text`   — a borrowed view is not immortal.
-- mutating a `text`  — it's in rodata.
-- returning a `view`/`Cstr` that outlives its owner — best-effort flag; not fully checkable without
-  a borrow checker, but the type at least documents the obligation.
+- `"…"`  ⟶ `string_literal`
+- `string_literal`  ⟶ `string_view`     (read it; one NUL scan if needed)
+- `string.view()`  ⟶ `string_view`
+- `string.finish_in(a)`  ⟶ `string_cstr`
+- `cstr(rawptr)`  ⟶ `string_cstr`
+- `string_cstr`  ⟶ `string_view`        (read via NUL scan)
 
-## Audit (seed sources, for sizing)
+Illegal (the bugs we reject):
 
-- `str` in type positions: **946** — the vast majority are **borrowed source-views** (`view`): tokens
-  and names read out of the source buffer, which lives the whole compile.
-- string literals: **671** ⟶ `text`.
-- `view`/slice reads: **45**.
-- **`cstr`/`finish` sites (the `Cstr` surface): ~34** — localized in `resolve.zen` (~23, module
-  ids/bodies/symbol keys), `genc.zen` (mangled names), `parse_expr.zen` (interned AST names),
-  `io/file.zen` (file contents). These are the dangle-risk surface and the minimum that must split.
+- `string_cstr`  ⟶ `string_literal`   — heap/arena pointer is not rodata
+- `string_view`  ⟶ `string_literal`   — borrow is not immortal
+- mutate `string_literal`               — rodata
+- return `string_view` / `string_cstr` past owner death
 
-## Implementation plan
+## API naming (stdlib)
 
-### Phase 1 — minimal split (kills the footgun, least churn)
-1. AST/`Ty` (genc.zen): add a `Cstr` variant (and `Text` if literals get their own type); emit both as `const char*`.
-2. Lexer/parser: string literals get type `text` (or keep `str` meaning "borrowed view" and literals as `text`).
-3. Ops: `cstr()` and `String.finish(a)`/`gstr_finish` return **`Cstr`**, not `str`/`text`.
-4. Checker (check_validate): reject `Cstr` (and `view`) where a `text`/immortal is required; reject `text` mutation.
-5. Re-reach byte-exact fixpoint; the ~34 `Cstr` sites now carry an honest type.
+Prefer `string_*` on ops too, grouped under `std.text`:
 
-### Phase 2 — full taxonomy
-6. `view` as the length-carrying `(ptr,len)` borrowed type (back it with `zslice`); retype `str.len/at/eq/slice` and `String.view()` to `view` (no `strlen`).
-7. Migrate the 946 borrowed `str` params ⟶ `view`.
-8. `String` always-takes/carries its `Allocator` so `Cstr` lifetime = that allocator's buffer.
+```zen
+// owned builder (type string, struct String for now)
+s := string.new_in(a, 64)?
+s = s.append_in(a, "hi")?
+fin := s.finish_in(a)?          // → string_cstr
 
-### Tests
-9. `Cstr` cannot be returned where `text` is required; a finished-`String`-as-`text` is a check error.
-10. `view` ops (len/at/eq/slice); the legal conversions; `text` immutability.
+// borrowed read
+string_view.len(v)
+string_view.eq(a, b)
+
+// literals — type is string_literal, spellings unchanged at use site
+x: string_literal = "hello"
+```
+
+Legacy `std.text.str` helpers migrate to `string_view.*` (and take `string_view` params).
+
+## Implementation phases
+
+### Phase 1 — rename backend `Ty` + checker (minimal churn)
+1. `Ty`: `Text` → `StringLiteral`, `Cstr` → `StringCstr`, keep `Str` as legacy alias → `StringView`
+2. Surface spellings: `string_literal`, `string_cstr`, `text`/`Cstr` deprecated aliases
+3. `cstr()` / `finish_in()` return **`string_cstr`**, not `str`
+4. Reject `string_cstr` / `string_view` where `string_literal` required
+5. Compiler sites (~34): `lexeme` → `string_cstr`, literals → `string_literal`
+
+### Phase 2 — params + `string_view` as `(ptr,len)`
+6. `string_view` backed by `zslice` / `{u8*, len}` in C
+7. Migrate ~946 borrowed `str` params → `string_view`
+8. `string` struct always threads allocator; `string_cstr` lifetime = that buffer
+
+### Phase 3 — kill `str`
+9. Remove `str` as a type (keep as doc alias only if needed)
+10. Struct `String` → align spelling with type `string` if we want one word for owned
+
+## Tests
+- `string_cstr` cannot flow to `string_literal`
+- `string_view` ops; legal conversions
+- `string_literal` immutability

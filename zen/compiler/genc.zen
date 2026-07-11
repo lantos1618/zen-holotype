@@ -206,7 +206,7 @@ PtrData*: {
     pointee: Ptr<Ty>,
     kind: i32,
 }    // a `Ptr`/`MutPtr`/`RawPtr` node: the pointee + which kind was spelled
-Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)    // scalar/f64/struct/void/str, T*, [T], (A)R, or N<T>
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | StringView | StringCstr | StringLiteral | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)    // scalar/f64/struct/void/string_*, T*, [T], (A)R, or N<T>
 Param*: {
     name: str,
     ty: Ty,
@@ -703,9 +703,12 @@ strlit_at* = (v: str, p: i32) Expr {
         pos: p,
     ))
 }    // a source-backed string literal
-tstr* = () Ty { .Str }
-tcstr* = () Ty { .Cstr }
-ttext* = () Ty { .Text }
+tstring_view* = () Ty { .StringView }
+tstring_cstr* = () Ty { .StringCstr }
+tstring_literal* = () Ty { .StringLiteral }
+tstr* = () Ty { .StringView }    // deprecated alias → string_view
+tcstr* = () Ty { .StringCstr }    // deprecated alias → string_cstr
+ttext* = () Ty { .StringLiteral }    // deprecated alias → string_literal
 slet* = (nm: str, v: Ptr<Expr>) Stmt {
     .Let(LetData(
         name: nm,
@@ -801,9 +804,9 @@ mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
         // arg inferred as `text` (e.g. from a string literal) names the SAME C instance as one annotated
         // `str`. This is what makes `okv("hi")` flowing into a `Result<str, _>` context name-match.
         .Bool       => s.gstr_append(a, "bool"),
-        .Str        => s.gstr_append(a, "str"),
-        .Cstr       => s.gstr_append(a, "str"),
-        .Text       => s.gstr_append(a, "str"),
+        .StringView    => s.gstr_append(a, "str"),
+        .StringCstr    => s.gstr_append(a, "str"),
+        .StringLiteral => s.gstr_append(a, "str"),
         .Void       => s.gstr_append(a, "void"),
         .Named(n)   => s.gstr_append(a, n),
         .Generic(g) => s.gstr_append(a, g.mangled),
@@ -819,9 +822,9 @@ mangle_ty_len = (t: Ty) i64 {
         .U8         => 2,
         .F64        => 3,
         .Bool       => 4,
-        .Str        => 3,
-        .Cstr       => 3,
-        .Text       => 3,
+        .StringView    => 3,
+        .StringCstr    => 3,
+        .StringLiteral => 3,
         .Void       => 4,
         .Named(n)   => n.view().len,
         .Generic(g) => g.mangled.view().len,
@@ -844,9 +847,9 @@ mangle_write_ty = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
         .U8         => dst.write_str(at, "u8"),
         .F64        => dst.write_str(at, "f64"),
         .Bool       => dst.write_str(at, "bool"),
-        .Str        => dst.write_str(at, "str"),
-        .Cstr       => dst.write_str(at, "str"),
-        .Text       => dst.write_str(at, "str"),
+        .StringView    => dst.write_str(at, "str"),
+        .StringCstr    => dst.write_str(at, "str"),
+        .StringLiteral => dst.write_str(at, "str"),
         .Void       => dst.write_str(at, "void"),
         .Named(n)   => dst.write_str(at, n),
         .Generic(g) => dst.write_str(at, g.mangled),
@@ -1203,13 +1206,13 @@ gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
         .Void       => {
             out = out.gstr_append(a, "void")
         },
-        .Str        => {
+        .StringView    => {
             out = out.gstr_append(a, "const char*")
         },
-        .Cstr       => {
+        .StringCstr    => {
             out = out.gstr_append(a, "const char*")
         },
-        .Text       => {
+        .StringLiteral => {
             out = out.gstr_append(a, "const char*")
         },
         .Named(n)   => {
@@ -1241,9 +1244,9 @@ cname_len = (t: Ty) i64 {
         .F64        => 6,
         .Bool       => 4,
         .Void       => 4,
-        .Str        => 11,
-        .Cstr       => 11,
-        .Text       => 11,
+        .StringView    => 11,
+        .StringCstr    => 11,
+        .StringLiteral => 11,
         .Named(n)   => width_cname(n).view().len,
         .Generic(g) => g.mangled.view().len,
         .Ptr(pd)    => load(pd.pointee).cname_len() + 1,
@@ -1259,9 +1262,9 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
         .F64        => dst.write_str(at, "double"),
         .Bool       => dst.write_str(at, "bool"),
         .Void       => dst.write_str(at, "void"),
-        .Str        => dst.write_str(at, "const char*"),
-        .Cstr       => dst.write_str(at, "const char*"),
-        .Text       => dst.write_str(at, "const char*"),
+        .StringView    => dst.write_str(at, "const char*"),
+        .StringCstr    => dst.write_str(at, "const char*"),
+        .StringLiteral => dst.write_str(at, "const char*"),
         .Named(n)   => dst.write_str(at, width_cname(n)),
         .Generic(g) => dst.write_str(at, g.mangled),
         .Ptr(pd)    => dst.write_str(dst.cname_write(at, load(pd.pointee)), "*"),
