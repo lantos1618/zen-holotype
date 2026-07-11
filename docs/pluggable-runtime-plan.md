@@ -13,7 +13,7 @@ Goal: deliver `docs/actors-pony-zig.md` — a runtime the user assembles from po
 Scheduler / Collector), Pony semantics, safe sends. **Binding acceptance constraint: ERGONOMICS.**
 The user-facing surface (`actor`, `send`, `receive`, the chat demo) must get *cleaner*, never clunkier;
 the existing actor fixtures + `actor_demo.zen` must keep compiling and running unchanged at every step.
-Each increment: `make oracle` green + fixpoint byte-exact + adversarial.
+Each increment: `make harness` green + fixpoint byte-exact + adversarial.
 
 ## Current state (traced)
 - `actor.zen`: a low-level i64 `Mailbox` (ring: buf/head/tail/cap, send/recv/pending) AND a generic

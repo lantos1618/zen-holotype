@@ -20,7 +20,7 @@ value params through `xform_*`, leaving `ix.elem`/`l.elemTy`/`sd.elem`/`[M]` let
 Fix the inliner once and all three become removable. It is the highest-leverage change in the codebase.
 
 ## Milestones (ordered; compiler-core SERIALIZED; each gated)
-**Gate for every milestone:** `make oracle` ALL PASS · seed regen byte-exact (FIXPOINT) · adversarial
+**Gate for every milestone:** `make harness` ALL PASS · seed regen byte-exact (FIXPOINT) · adversarial
 verify · PR + review + merge. De-slop before & after each increment.
 
 - **M0 — Formatter unification** *(in flight, worktree `feat-unified-formatter`).* One comment-preserving

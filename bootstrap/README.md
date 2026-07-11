@@ -26,7 +26,7 @@ make -f bootstrap/Makefile zenc   # cc bootstrap/{zenc.gen.c,zenrt.c} -o zenc
 
 `zenc` reads Zen and emits C. Fed its **own** graph-listed Zen sources, it emits
 byte-for-byte the C in `zenc.gen.c` — the compiler reproduces itself. The Zen-native
-oracle (`tests/oracle.zen`, `fixpoint` suite) builds the binary from the committed C
+oracle (`tests/harness.zen`, `fixpoint` suite) builds the binary from the committed C
 and checks that reproduction. The modules oracle checks that `sources.txt` matches the
 resolver graph's SCC order.
 

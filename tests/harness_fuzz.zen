@@ -1,12 +1,12 @@
-// tests/oracle_fuzz.zen — the FUZZ category for the Zen-native oracle. It ports the two pytest fuzz
+// tests/harness_fuzz.zen — the FUZZ category for the Zen-native harness. It ports the two pytest fuzz
 // suites into self-hosted Zen, driven against the committed `zenc` binary (NO Python):
 //
 //   _fuzz_campaign.py   -> a crash-hunt over MANY generated malformed inputs (random token soup,
 //                          random byte noise, grammar-aware "targeted" recursion bombs)
-//   test_oracle_fuzz.py -> the crash-class REGRESSION gate (one minimal representative per malformed-
+//   test_harness_fuzz.py -> the crash-class REGRESSION gate (one minimal representative per malformed-
 //                          input non-termination bug the campaign originally surfaced)
 //
-// Unlike the value/verdict categories, this is NOT a correctness oracle: a clean *reject* is fine.
+// Unlike the value/verdict categories, this is NOT a correctness harness: a clean *reject* is fine.
 // It is a CRASH-RESISTANCE gate. `zenc check`/`emit` must terminate WITHOUT a signal (no segfault /
 // SIGABRT) and WITHOUT hanging. The only failures here are real robustness bugs.
 //
@@ -20,8 +20,8 @@
 // `zenc check`/`emit` only ever exit 0 or 1 on these inputs, so `code >= 124` cleanly separates a
 // crash/hang from any clean reject. (Verified adversarially: segv->139, hang->124, reject->1.)
 //
-// Helpers are `fz_`-prefixed so they never collide on the flat-import flatten with std/oracle_lib/etc.
-{ run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = oracle_lib
+// Helpers are `fz_`-prefixed so they never collide on the flat-import flatten with std/harness_lib/etc.
+{ run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
 { Malloc, malloc, free } = std.mem.alloc
 { out, save, shell, contents_in } = std.io.file
 { len, try_parse_int } = std.text.str
@@ -84,7 +84,7 @@ fz_noise = (mp: MutPtr<Malloc>, s: String, rp: MutPtr<Rng>, i: i64, n: i64) Stri
 // grammar-aware malformed programs aimed at the recursion sites (cycles, unterminated nests, tyargs,
 // recursive generics, polymorphic-recursive types, truncations).
 fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) str { (pick == 0).match ({ true => mp.finish_in(mp.fz_cycle(mp.new_in().expect("fuzz: oom"), 0, rp.range(2, 7))).expect("fuzz: oom"), false => (pick == 1).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "test* = () i32 { ").expect("fuzz: oom"), "{ ", 0, rp.range(1, 9))).expect("fuzz: oom"), false => (pick == 2).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "test* = () i32 { ").expect("fuzz: oom"), "( ", 0, rp.range(1, 12))).expect("fuzz: oom"), false => (pick == 3).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "test* = () i32 { 0 .match ({ ").expect("fuzz: oom"), ".V => 0 ", 0, rp.range(1, 7))).expect("fuzz: oom"), false => (pick == 4).match ({ true => mp.finish_in(mp.fz_rep(mp.new_in().expect("fuzz: oom").append_in(mp, "Foo").expect("fuzz: oom"), "<", 0, rp.range(1, 6))).expect("fuzz: oom"), false => (pick == 5).match ({ true => "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", false => (pick == 6).match ({ true => "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", false => mp.fz_trunc(FZ_FULL, rp.range(1, len(FZ_FULL))) }) }) }) }) }) }) }) }    // type cycle
-// ── PARALLEL crash-resistance batch (dogfoods std.thread via oracle_lib's zo_par_run) ─────────────
+// ── PARALLEL crash-resistance batch (dogfoods std.thread via harness_lib's zo_par_run) ─────────────
 // Each input is probed by BOTH `zenc check` and `zenc emit` under `timeout 60`; a DECODED exit ≥ 124
 // (timeout=124 / 128+signal) is a crash/hang. The shell command computes the 0..2 crash count itself and
 // writes it to a per-input marker file, so the whole batch runs across the worker pool; Phase C reads the
@@ -184,7 +184,7 @@ fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
     mp.fz_batch(seeds, seeds.len)
 }
 // ── category entry: run every phase, sum crashes (a non-zero result is a REAL bug to report) ──────
-oracle_fuzz_run* = () i32 {
+harness_fuzz_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     r := seed(FZ_SEED)

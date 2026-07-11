@@ -34,4 +34,4 @@ Per [`runtime-design.md`](runtime-design.md):
 
 ## Gates per slice
 
-Each slice merges only after isolated `make oracle` ALL PASS and byte-exact seed fixpoint.
+Each slice merges only after isolated `make harness` ALL PASS and byte-exact seed fixpoint.

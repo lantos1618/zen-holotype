@@ -1,28 +1,28 @@
-// tests/oracle_build.zen — BUILD category for the Zen-native correctness oracle: the self-hosted
+// tests/harness_build.zen — BUILD category for the Zen-native correctness harness: the self-hosted
 // replacement for tests/test_build.py (the 3728-line pytest that drives `zenc build`/`run`/`check`
 // against real fixture programs). NO Python: this file declares fixture cases as Zen data and a
 // CUSTOM runner drives the committed `zenc` binary via std.io, asserting exit code and/or stdout.
 //
-// ── THE CUSTOM RUNNER (why it differs from oracle_lib.run_value) ──────────────────────────────────
-// run_value compiles a tiny `test*` snippet through tests/oracle_runner.c and compares a printed int.
+// ── THE CUSTOM RUNNER (why it differs from harness_lib.run_value) ──────────────────────────────────
+// run_value compiles a tiny `test*` snippet through tests/harness_runner.c and compares a printed int.
 // A BUILD fixture is a whole `main = () i32 { … }` program: we `zenc build <path> -o $ZT/zob`, run the
 // binary, and assert its EXIT CODE and (optionally) its STDOUT. The exit code is captured by embedding
 // `test "$?" -eq <want_exit>` in the shell command — `std.io.file.shell` returns the system(3) wait
 // status (exit<<8), not the raw code, so we let the shell do the comparison and check rc==0 instead.
 //
 // FixtureCase { path, want_exit, want_out, check_out }:
-//   path      relative-to-ROOT path of the .zen program (the oracle runs from the repo root).
+//   path      relative-to-ROOT path of the .zen program (the harness runs from the repo root).
 //   want_exit decimal STRING of the expected process exit code (string so it interpolates into the
 //             shell `test` command without an int→str conversion).
 //   want_out  exact expected stdout bytes (with embedded "\n"); only asserted when check_out is true.
 //   check_out true => also assert stdout equals want_out; false => assert exit code only.
 //
-// For `zenc check` accept/reject fixtures we reuse oracle_lib.run_verdict on the fixture SOURCE.
+// For `zenc check` accept/reject fixtures we reuse harness_lib.run_verdict on the fixture SOURCE.
 { Malloc, malloc, free } = std.mem.alloc
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, is_empty, starts_with } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = oracle_lib
+{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: {
     path: str,
@@ -52,36 +52,36 @@ ShellCase*: {
 }
 // helper: build the command body  `./zenc build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
 build_cmd = (mp: MutPtr<Malloc>, path: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "./zenc build ").expect("oracle: oom")
-    s = s.append_in(mp, path).expect("oracle: oom")
-    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null").expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "./zenc build ").expect("harness: oom")
+    s = s.append_in(mp, path).expect("harness: oom")
+    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null").expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
 // (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
 run_cmd = (mp: MutPtr<Malloc>, want_exit: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ").expect("oracle: oom")
-    s = s.append_in(mp, want_exit).expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ").expect("harness: oom")
+    s = s.append_in(mp, want_exit).expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // run ONE build fixture: build must succeed, then exit code (+ optional stdout) must match.
 run_fixture* = (fc: FixtureCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zob_out.txt"), "", 0)
-    bc := shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("oracle: shell")
+    bc := shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("harness: shell")
     (bc == 0).match ({ true => {
-        rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("oracle: shell")    // `zenc build` must succeed
+        rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
         (rc == 0).match ({ true => fc.check_out.match ({ true => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
             .Ok(got) => eq(got, fc.want_out),    // exit code mismatch => fail
             .Err(e)  => false,
         }), false => true }), false => false })
     }, false => false })
 }    // exit-only fixture: matched
-// ── PARALLEL build/emit/doc runners (dogfoods std.thread via oracle_lib's zo_par_run) ─────────────
-// Same three-phase shape as oracle_lib's parallel runners: build a self-contained per-case command that
+// ── PARALLEL build/emit/doc runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────
+// Same three-phase shape as harness_lib's parallel runners: build a self-contained per-case command that
 // writes gid-namespaced result file(s) (each `zenc build/run` gets its OWN output binary `zob<gid>` and
 // stdout `zobout<gid>` — the serial runner reused fixed `zob`/`zob_out.txt`, fatal under parallelism),
 // run the batch across the worker pool, then compare IN ORDER — byte-identical verdict to serial.
@@ -106,7 +106,7 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
         z: str := ""
         zob := mp.zo_idpath("zob", gid, "")
         o := mp.zo_idpath("zobout", gid, ".txt")
-        rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("oracle: shell")
+        rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
         (rc == 0).match ({ true => fc.check_out.match ({ true => mp.contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
             .Ok(got) => eq(got, fc.want_out),
             .Err(e)  => false,
@@ -140,13 +140,13 @@ run_fixtures* = (name: str, cs: [FixtureCase]) i32 {
 }
 // helper: build a one-arg command  `./zenc <verb> <path> <redirect>`
 cmd_for = (mp: MutPtr<Malloc>, verb: str, path: str, redirect: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "./zenc ").expect("oracle: oom")
-    s = s.append_in(mp, verb).expect("oracle: oom")
-    s = s.append_in(mp, " ").expect("oracle: oom")
-    s = s.append_in(mp, path).expect("oracle: oom")
-    s = s.append_in(mp, redirect).expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "./zenc ").expect("harness: oom")
+    s = s.append_in(mp, verb).expect("harness: oom")
+    s = s.append_in(mp, " ").expect("harness: oom")
+    s = s.append_in(mp, path).expect("harness: oom")
+    s = s.append_in(mp, redirect).expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
 all_present_absent = (txt: str, present: [str], absent: [str]) bool {
@@ -167,7 +167,7 @@ all_present_absent = (txt: str, present: [str], absent: [str]) bool {
 run_emit* = (ec: EmitCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    rc := shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("oracle: shell")
+    rc := shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("harness: shell")
     (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
         .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
         .Err(e)  => false,
@@ -216,7 +216,7 @@ run_emits* = (name: str, cs: [EmitCase]) i32 {
 run_doc* = (dc: DocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    rc := shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("oracle: shell")
+    rc := shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("harness: shell")
     (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
         .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
         .Err(e)  => false,
@@ -303,7 +303,7 @@ run_shells* = (name: str, cs: [ShellCase]) i32 {
     cs.loop((h, i, c) {
         w := mp.shell_wrap(i, c.cmd)
         c.name.shell_is_serial().match ({ true => {
-            shell(w).expect("oracle: shell")
+            shell(w).expect("harness: shell")
         }, false => {
             pcmds[pn] = w
             pn = pn + 1
@@ -322,7 +322,7 @@ run_shells* = (name: str, cs: [ShellCase]) i32 {
     free(pbase)
     fails
 }
-oracle_build_run* = () i32 {
+harness_build_run* = () i32 {
     fp := "tests/fixtures/zen/"
     // ── (a) build+run+exit-only fixtures (concurrency / scope / runtime acceptance programs) ──────
     ex := run_fixtures("build exit", [FixtureCase(
@@ -980,7 +980,7 @@ oracle_build_run* = () i32 {
         want_out: "",
         check_out: false,
     )])
-    // ── (c) `zenc check` accept/reject fixtures (reuse oracle_lib.run_verdict on inline SOURCE) ───
+    // ── (c) `zenc check` accept/reject fixtures (reuse harness_lib.run_verdict on inline SOURCE) ───
     vd := run_verdicts("build check", [VerdictCase(
         src: "main = () i32 { 6 * 2 }\n",
         should_pass: true,
@@ -1555,7 +1555,6 @@ oracle_build_run* = () i32 {
         src: "f = (n: i32) i32 {\n    x := (n > 3).match ({ true => 1 })\n    x\n}\nmain = () i32 { 0 }\n",
         wants: [":2:13: error[exhaustiveness]: match does not cover every variant", "      x := (n > 3).match ({ true => 1 })", "              ^", "hint: add arms for every variant, or add an explicit `_` arm"],
     ), DiagCase(
-        // Multi-return uses named anonymous structs, not tuple syntax `(T1, T2)`.
         src: "f* = () (i32, i32) { (1, 2) }\nmain = () i32 { 0 }\n",
         wants: ["error[parse]: syntax error"],
     ), DiagCase(
@@ -1628,6 +1627,7 @@ oracle_build_run* = () i32 {
         src: "{ print } = std.text.fmt\nQ*: { a: i32, b: i32 }\nmain = () i32 {\n    q := Q(a: 1, b: 2)\n    print(q)\n    0\n}\n",
         wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
     )])
+    // Multi-return uses named anonymous structs `{ x: T, y: U }`, not parenthesized type lists.
     // census #59b: a type error raised while checking a GENERIC stdlib body (here `println*<T>`'s
     // `x.fmt_println()`, instantiated for a type with no Display impl) must be attributed to the
     // USER's CALL SITE — `zod_v.zen:5:5` — NOT the library-internal line inside `std/text/fmt.zen`.
@@ -1645,7 +1645,7 @@ oracle_build_run* = () i32 {
     // R7: a value-less body tail is positioned on the last statement, with the fall-through message.
     // a ONE-ARMED bool `.match` in VALUE position is non-exhaustive (the missing branch has no value):
     // a POSITIONED exhaustiveness diagnostic, identical in shape to the enum case above — NOT the old
-    // position-less undefined-name sentinel. (In statement position the same form is legal; see oracle_value.)
+    // position-less undefined-name sentinel. (In statement position the same form is legal; see harness_value.)
     // ── (h) `zenc emit` C-substring assertions (enum switch / bool ternary / no self-capture) ─────
     em := run_emits("build emit", [EmitCase(
         path: "tests/fixtures/zen/enum_emit.zen",

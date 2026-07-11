@@ -1,6 +1,6 @@
-// tests/oracle_misc.zen — the MISC category for the Zen-native correctness oracle. It ports six of the
+// tests/harness_misc.zen — the MISC category for the Zen-native correctness harness. It ports six of the
 // remaining pytest suites into self-hosted Zen cases driven against the committed `zenc` binary (NO
-// Python). Sub-suites, each returning a fail count, summed by `oracle_misc_run`:
+// Python). Sub-suites, each returning a fail count, summed by `harness_misc_run`:
 //
 //   traits       <- tests/test_traits.py        (impl/dispatch VALUE + conformance VERDICT)
 //   string_types <- tests/test_string_types.py   (text/Cstr/str lattice VERDICT)
@@ -11,8 +11,8 @@
 //   faithful_ast <- tests/test_faithful_ast.py    (`fmt --ast` UFCS/round-trip/idempotency + emit-equal corpus)
 //
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
-// already defines `read_file*`), oracle_lib, or the other category files.
-{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = oracle_lib
+// already defines `read_file*`), harness_lib, or the other category files.
+{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
 { Malloc } = std.mem.alloc
 { out, out_bytes, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
@@ -31,10 +31,10 @@ om_read_file = (mp: MutPtr<Malloc>, path: str) str {
 om_not = (b: bool) bool { b.match ({ true => false, false => true }) }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
 om_cat2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, a).expect("oracle: oom")
-    s = s.append_in(mp, b).expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, a).expect("harness: oom")
+    s = s.append_in(mp, b).expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 om_cat3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str { mp.om_cat2(a, mp.om_cat2(b, c)) }
 // ════════════════════════════════════════════════════════════════════════════════
@@ -43,7 +43,7 @@ om_cat3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str { mp.om_cat2(a, mp.om
 // VERDICT: impl conformance — accept a complete/matching impl; reject missing/wrong-signature ones
 // (`zenc check` emits `error[conformance]`, equivalent to the pytest `check_count(...) == 1`).
 // ════════════════════════════════════════════════════════════════════════════════
-oracle_misc_traits = () i32 {
+harness_misc_traits = () i32 {
     v := run_values("traits value", [VCase(
         src: "Point*: { x: i32, y: i32 }\nPoint.impl(Show, { sumk = (p: Ptr<Point>, k: i32) i32 { p.x + p.y + k } })\ntest* = () i32 { p := Point(x: 3, y: 4)\n p.addr().sumk(10) }",
         want: "17",
@@ -103,7 +103,7 @@ oracle_misc_traits = () i32 {
 // string_types  <- tests/test_string_types.py
 // text (immortal literal) <: {str, Cstr}; Cstr <: str; but Cstr/str do NOT fit text.
 // ════════════════════════════════════════════════════════════════════════════════
-oracle_misc_string_types = () i32 {
+harness_misc_string_types = () i32 {
     run_verdicts("string_types verdict", [VerdictCase(
         src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(\"ok\") }",
         should_pass: true,
@@ -139,7 +139,7 @@ oracle_misc_string_types = () i32 {
 // a small custom `zenc run` + stdout-substring runner.
 // ════════════════════════════════════════════════════════════════════════════════
 NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: str, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: str, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    0\n}\n"
-oracle_misc_num_parse = () i32 {
+harness_misc_num_parse = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_np.zen"), NP_PROG, len(NP_PROG))
@@ -159,7 +159,7 @@ oracle_misc_num_parse = () i32 {
 // mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
 // ════════════════════════════════════════════════════════════════════════════════
 HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
-oracle_misc_hash = () i32 {
+harness_misc_hash = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_hash.zen"), HASH_PROG, len(HASH_PROG))
@@ -211,7 +211,7 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
                     q2 = q2 + 1
                 }
                 (q2 < n && sv[q2] == '(').match ({ true => {
-                    name := mp.substr(src, i, e - i).expect("oracle: oom")
+                    name := mp.substr(src, i, e - i).expect("harness: oom")
                     contains(c, name).match ({ true => { }, false => {
                         ok = false
                     } })
@@ -241,7 +241,7 @@ om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: str) bool {
         txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false })
     }, false => false })
 }
-oracle_misc_acid = () i32 {
+harness_misc_acid = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     files := ["zen/std/atomic.zen", "zen/std/build.zen", "zen/std/json.zen", "zen/std/math.zen", "zen/std/os.zen", "zen/std/rand.zen", "zen/std/scope.zen", "zen/std/sync.zen", "zen/std/thread.zen", "zen/compiler/check.zen", "zen/compiler/check_validate.zen", "zen/compiler/diagnostic.zen", "zen/compiler/genc.zen", "zen/compiler/genc_emit.zen", "zen/compiler/pretty.zen", "zen/compiler/lex.zen", "zen/compiler/mono.zen", "zen/compiler/parse.zen", "zen/compiler/parse_expr.zen", "zen/compiler/parse_stmt.zen", "zen/compiler/parse_type.zen"]
@@ -275,28 +275,28 @@ oracle_misc_acid = () i32 {
 om_app2 = (mp: MutPtr<Malloc>, s: String, n: i32) String {
     tens: u8 := ('0' + n / 10).to_u8()
     ones: u8 := ('0' + (n - n / 10 * 10)).to_u8()
-    s2 := mp.push_in(s, tens).expect("oracle: oom")
-    mp.push_in(s2, ones).expect("oracle: oom")
+    s2 := mp.push_in(s, tens).expect("harness: oom")
+    mp.push_in(s2, ones).expect("harness: oom")
 }
 // append a decimal integer VALUE (no leading zeros) — for argument / arm constants.
 om_app_int = (mp: MutPtr<Malloc>, s: String, n: i32) String {
     (n < 10).match ({ true => {
         d: u8 := ('0' + n).to_u8()
-        mp.push_in(s, d).expect("oracle: oom")
+        mp.push_in(s, d).expect("harness: oom")
     }, false => {
         s2 := mp.om_app_int(s, n / 10)
         d2: u8 := ('0' + (n - n / 10 * 10)).to_u8()
-        mp.push_in(s2, d2).expect("oracle: oom")
+        mp.push_in(s2, d2).expect("harness: oom")
     } })
 }
-om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({ true => s, false => s.append_in(mp, ", ").expect("oracle: oom") }) }
+om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({ true => s, false => s.append_in(mp, ", ").expect("harness: oom") }) }
 // "p00: i32, p01: i32, ..." — param declarations
 om_decl_params = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "p").expect("oracle: oom")
+        s2 := s1.append_in(mp, "p").expect("harness: oom")
         s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": i32").expect("oracle: oom")
+        s4 := s3.append_in(mp, ": i32").expect("harness: oom")
         mp.om_decl_params(s4, i + 1, n)
     } })
 }
@@ -312,9 +312,9 @@ om_call_args = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
 om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "x").expect("oracle: oom")
+        s2 := s1.append_in(mp, "x").expect("harness: oom")
         s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": i32").expect("oracle: oom")
+        s4 := s3.append_in(mp, ": i32").expect("harness: oom")
         mp.om_decl_fields(s4, i + 1, n)
     } })
 }
@@ -322,9 +322,9 @@ om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
 om_init_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "x").expect("oracle: oom")
+        s2 := s1.append_in(mp, "x").expect("harness: oom")
         s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": ").expect("oracle: oom")
+        s4 := s3.append_in(mp, ": ").expect("harness: oom")
         s5 := mp.om_app_int(s4, i)
         mp.om_init_fields(s5, i + 1, n)
     } })
@@ -334,37 +334,37 @@ om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     (i >= n).match ({ true => s, false => {
         s1 := mp.om_sep(s, i)
         s2 := mp.om_app_int(s1, i)
-        s3 := s2.append_in(mp, " => ").expect("oracle: oom")
+        s3 := s2.append_in(mp, " => ").expect("harness: oom")
         s4 := mp.om_app_int(s3, i * 2)
         mp.om_arms(s4, i + 1, n)
     } })
 }
 om_gen_many_params = (mp: MutPtr<Malloc>) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "f* = (").expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "f* = (").expect("harness: oom")
     s = mp.om_decl_params(s, 0, 80)
-    s = s.append_in(mp, ") i32 { p79 }\ntest* = () i32 { f(").expect("oracle: oom")
+    s = s.append_in(mp, ") i32 { p79 }\ntest* = () i32 { f(").expect("harness: oom")
     s = mp.om_call_args(s, 0, 80)
-    s = s.append_in(mp, ") }").expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s = s.append_in(mp, ") }").expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 om_gen_many_fields = (mp: MutPtr<Malloc>) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "S*: { ").expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "S*: { ").expect("harness: oom")
     s = mp.om_decl_fields(s, 0, 80)
-    s = s.append_in(mp, " }\ntest* = () i32 { S(").expect("oracle: oom")
+    s = s.append_in(mp, " }\ntest* = () i32 { S(").expect("harness: oom")
     s = mp.om_init_fields(s, 0, 80)
-    s = s.append_in(mp, ").x79 }").expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s = s.append_in(mp, ").x79 }").expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 om_gen_many_arms = (mp: MutPtr<Malloc>) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "test* = () i32 { (50).match({ ").expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "test* = () i32 { (50).match({ ").expect("harness: oom")
     s = mp.om_arms(s, 0, 80)
-    s = s.append_in(mp, ", _ => 999 }) }").expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s = s.append_in(mp, ", _ => 999 }) }").expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
-oracle_misc_differential = () i32 {
+harness_misc_differential = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     r1 := run_value(VCase(
@@ -408,13 +408,13 @@ om_run_rc = (src: str) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_run.zen"), src, len(src))
-    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_run.zen > /dev/null 2>&1")).expect("oracle: shell")
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_run.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt --ast a source, then run the FORMATTED output; returns its exit code.
 om_fmt_then_run = (mp: MutPtr<Malloc>, src: str) i32 {
     save(mp.zo_path("zo_misc_ftr.zen"), src, len(src))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_ftr.zen > $ZT/zo_misc_ftr_f.zen 2>/dev/null"))
-    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("oracle: shell")
+    shell(mp.zo_cmd("./zenc run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt(fmt src) == fmt(src) on a source string.
 om_fmt_idem = (src: str) bool {
@@ -423,13 +423,13 @@ om_fmt_idem = (src: str) bool {
     save(mp.zo_path("zo_misc_id.zen"), src, len(src))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null"))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("oracle: shell") == 0
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("harness: shell") == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
 om_corpus_idem = (mp: MutPtr<Malloc>, rel: str) bool {
     shell(mp.zo_cmd(mp.om_cat3("./zenc fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null")))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")).expect("oracle: shell") == 0
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")).expect("harness: shell") == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
@@ -438,9 +438,9 @@ om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: str) bool {
     shell(mp.zo_cmd(mp.om_cat3("cp ", rel, " $ZT/zo_misc_co.zen")))
     shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null"))
     shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")).expect("oracle: shell") == 0
+    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")).expect("harness: shell") == 0
 }
-oracle_misc_faithful = () i32 {
+harness_misc_faithful = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     // fmt-output / emit / run scenarios (one bool per pytest assertion class).
@@ -498,7 +498,7 @@ oracle_misc_faithful = () i32 {
 // The comment-gap ctor and the depth-suppressed splits (paren group / slice element / match-arm
 // value) all normalize to the one-line `Type.Variant(…)` under fmt; the formatted source must
 // recompile and run to the SAME value, and formatting must be a fixpoint on the raw shapes.
-oracle_misc_vbreak = () i32 {
+harness_misc_vbreak = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     s_cmt := "Res: Okv(i32) | Nov\nmain = () i32 {\n    x := Res /* continuation\n    comment */ .Okv(42)\n    x.match ({ .Okv(v) => v, .Nov => 9, })\n}\n"
@@ -528,7 +528,7 @@ om_shell_code = (cmd: str) i32 {
 // out/out_bytes are the low-level stdout write funnel; they now return Result<i64, IoError> (a
 // write-all loop) instead of swallowing a short/failed write(2). This asserts the NEW contract in
 // process: writing the 3-byte "hi\n" MATCHES as `.Ok(3)` — adversarial, since a wrong count or an
-// `.Err` fails the bool. The 3 bytes land on the oracle's own stdout (same sink as the progress
+// `.Err` fails the bool. The 3 bytes land on the harness's own stdout (same sink as the progress
 // dots). (println/print stay best-effort and keep their i64 signatures — exercised by every other
 // value case that prints via fmt.)
 om_out_bytes_ok = () bool {
@@ -537,7 +537,7 @@ om_out_bytes_ok = () bool {
         .Err(e) => false,
     })
 }
-oracle_misc_iofile = () i32 {
+harness_misc_iofile = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     saved := save(mp.zo_path("zo_misc_save.txt"), "hello", 5).match ({
@@ -547,16 +547,16 @@ oracle_misc_iofile = () i32 {
     run_suite("io.file (save close-check + shell decoded status + out_bytes Result)", [saved, om_out_bytes_ok(), om_shell_code("exit 0") == 0, om_shell_code("exit 3") == 3, om_shell_code("exit 42") == 42, om_shell_code("this_is_not_a_real_command_zqx 2>/dev/null") == 127, om_shell_code("kill -9 $$") == 137])
 }
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
-oracle_misc_run* = () i32 {
+harness_misc_run* = () i32 {
     fails := 0
-    fails = fails + oracle_misc_traits()
-    fails = fails + oracle_misc_string_types()
-    fails = fails + oracle_misc_num_parse()
-    fails = fails + oracle_misc_hash()
-    fails = fails + oracle_misc_acid()
-    fails = fails + oracle_misc_differential()
-    fails = fails + oracle_misc_faithful()
-    fails = fails + oracle_misc_vbreak()
-    fails = fails + oracle_misc_iofile()
+    fails = fails + harness_misc_traits()
+    fails = fails + harness_misc_string_types()
+    fails = fails + harness_misc_num_parse()
+    fails = fails + harness_misc_hash()
+    fails = fails + harness_misc_acid()
+    fails = fails + harness_misc_differential()
+    fails = fails + harness_misc_faithful()
+    fails = fails + harness_misc_vbreak()
+    fails = fails + harness_misc_iofile()
     fails
 }

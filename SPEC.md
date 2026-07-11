@@ -4,15 +4,15 @@ This is the current-state spec for the self-hosted `zenc` compiler in this
 repository. It describes behavior implemented by the code and covered by tests,
 not every long-term idea in [VISION.md](VISION.md).
 
-The strongest executable references are the Zen-native oracle (no Python):
+The strongest executable references are the Zen-native harness (no Python):
 
-- [tests/oracle.zen](tests/oracle.zen) — entry that sums category fail counts.
-- [tests/oracle_build.zen](tests/oracle_build.zen) — CLI, examples, fixtures, diagnostics.
-- [tests/oracle_verdict.zen](tests/oracle_verdict.zen) — accept/reject + `error[kind]` pins.
-- [tests/oracle_value.zen](tests/oracle_value.zen) — stdout value cases.
-- [tests/oracle_modules.zen](tests/oracle_modules.zen) — imports / resolver / std coverage.
-- [tests/oracle_boundaries.zen](tests/oracle_boundaries.zen) — raw primitive boundaries.
-- [tests/oracle_fuzz.zen](tests/oracle_fuzz.zen) — malformed-input crash resistance.
+- [tests/harness.zen](tests/harness.zen) — entry that sums category fail counts.
+- [tests/harness_build.zen](tests/harness_build.zen) — CLI, examples, fixtures, diagnostics.
+- [tests/harness_verdict.zen](tests/harness_verdict.zen) — accept/reject + `error[kind]` pins.
+- [tests/harness_value.zen](tests/harness_value.zen) — stdout value cases.
+- [tests/harness_modules.zen](tests/harness_modules.zen) — imports / resolver / std coverage.
+- [tests/harness_boundaries.zen](tests/harness_boundaries.zen) — raw primitive boundaries.
+- [tests/harness_fuzz.zen](tests/harness_fuzz.zen) — malformed-input crash resistance.
 
 ## Source Files
 
@@ -520,13 +520,13 @@ docs. It is a first-pass docs command, not a rich documentation generator.
 
 | Spec area | Primary tests |
 |---|---|
-| CLI build/run/check/project manifest | [tests/oracle_build.zen](tests/oracle_build.zen) |
-| Examples | [tests/oracle_build.zen](tests/oracle_build.zen) |
-| Lexer/parser/bootstrap/fixpoint | [tests/oracle.zen](tests/oracle.zen) (`fixpoint` suite) |
-| Accepted/rejected core language behavior | [tests/oracle_verdict.zen](tests/oracle_verdict.zen), [tests/oracle_value.zen](tests/oracle_value.zen) |
-| Crash-resistance fuzzing (malformed input) | [tests/oracle_fuzz.zen](tests/oracle_fuzz.zen) |
-| Traits and impl conformance | [tests/oracle_verdict.zen](tests/oracle_verdict.zen) |
-| Imports and resolver behavior | [tests/oracle_modules.zen](tests/oracle_modules.zen) |
-| Std module import coverage | [tests/oracle_modules.zen](tests/oracle_modules.zen) |
-| Raw primitive boundaries | [tests/oracle_boundaries.zen](tests/oracle_boundaries.zen) |
-| Formatter and docs commands | [tests/oracle_build.zen](tests/oracle_build.zen) |
+| CLI build/run/check/project manifest | [tests/harness_build.zen](tests/harness_build.zen) |
+| Examples | [tests/harness_build.zen](tests/harness_build.zen) |
+| Lexer/parser/bootstrap/fixpoint | [tests/harness.zen](tests/harness.zen) (`fixpoint` suite) |
+| Accepted/rejected core language behavior | [tests/harness_verdict.zen](tests/harness_verdict.zen), [tests/harness_value.zen](tests/harness_value.zen) |
+| Crash-resistance fuzzing (malformed input) | [tests/harness_fuzz.zen](tests/harness_fuzz.zen) |
+| Traits and impl conformance | [tests/harness_verdict.zen](tests/harness_verdict.zen) |
+| Imports and resolver behavior | [tests/harness_modules.zen](tests/harness_modules.zen) |
+| Std module import coverage | [tests/harness_modules.zen](tests/harness_modules.zen) |
+| Raw primitive boundaries | [tests/harness_boundaries.zen](tests/harness_boundaries.zen) |
+| Formatter and docs commands | [tests/harness_build.zen](tests/harness_build.zen) |

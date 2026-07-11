@@ -8,8 +8,8 @@ The compiler is written entirely in Zen (`zen/compiler/`) and compiles itself, w
 and user-facing library modules in `zen/std/`. There is no Python frontend and no tree-sitter —
 `cc` builds a `zenc` binary from committed C, and `zenc` regenerates that C. C is the intentional
 intermediate/bootstrap target for the self-hosted compiler; a **second backend emits JavaScript**
-(`genjs`) over the same checked AST. The repo has **zero `.py` files**: even the test oracle is a
-Zen program (`tests/oracle.zen`) that drives the `zenc` binary as a subprocess.
+(`genjs`) over the same checked AST. The repo has **zero `.py` files**: even the test harness is a
+Zen program (`tests/harness.zen`) that drives the `zenc` binary as a subprocess.
 
 ## The pipeline
 
@@ -89,29 +89,29 @@ make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self boo
 ```
 
 **The fixpoint.** `--build-self` reads `bootstrap/sources.txt`, strips each listed source's
-module import lines, concatenates them in the graph-derived SCC order checked by the resolver oracle,
+module import lines, concatenates them in the graph-derived SCC order checked by the resolver harness,
 and emits C. Fed its **own** sources,
 `zenc` emits **byte-for-byte** the committed `zenc.gen.c` — the compiler reproduces itself.
-The oracle's `fixpoint` suite builds the binary from the committed C and checks the
+The harness's `fixpoint` suite builds the binary from the committed C and checks the
 reproduction; codegen is deterministic, so the byte-exact match is the parity guarantee
 (no separate "compare two compilers" oracle is needed).
 
-## Correctness: the Zen-native oracle
+## Correctness: the Zen-native harness
 
-The test suite (`tests/`, run with `make oracle`) is the **sole correctness reference**, and it
-is Python-*free*: the oracle is itself a Zen program (`tests/oracle.zen` plus the `oracle_*.zen`
+The test suite (`tests/`, run with `make harness`) is the **sole correctness reference**, and it
+is Python-*free*: the harness is itself a Zen program (`tests/harness.zen` plus the `harness_*.zen`
 suites) and the repo has zero `.py` files. It is built with the freshly-made `zenc` and drives
 that same shipping binary as a subprocess:
 
 - **value cases** — `emit_value(src, want)` runs `zenc emit`, `#include`s the emitted C body into
-  `tests/oracle_runner.c`, compiles and runs it, and asserts the printed result (a silent-miscompile
+  `tests/harness_runner.c`, compiles and runs it, and asserts the printed result (a silent-miscompile
   guard);
 - **verdict cases** — `verdict(src)` runs the shipping `zenc check`/`build` and asserts accept vs.
   reject (a reject-parity guard);
 - **command / module / build / fuzz / fixpoint** suites drive the real `zenc check`, `zenc build`,
   and `zenc run` paths end to end, including std-import resolution and the self-host fixpoint.
 
-`make oracle-fast` runs just the quick value + verdict subset for the inner loop; `make oracle`
+`make harness-fast` runs just the quick value + verdict subset for the inner loop; `make harness`
 (the full suite) is the merge gate. Its exit code is the failing-case count.
 
 ## One AST, many emitters

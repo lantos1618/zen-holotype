@@ -279,12 +279,12 @@ and half flat and still produce the identical seed. Recommended staging:
 ### 4.3 Byte-exact-seed risk — **HIGH**
 
 This renames nearly every symbol in the emitted C, so the seed changes wholesale
-in one commit. The repo's correctness oracle is byte-exact fixpoint + the binary
+in one commit. The repo's correctness harness is byte-exact fixpoint + the binary
 oracle corpus. Plan: regenerate seed, run full fixpoint, expect a large but
 *mechanical* diff (every `std__…` name appears). The danger is a *silent*
 mis-rewrite (a string-literal or comment identifier wrongly prefixed, or a
 missed UFCS dispatch that compiles to a different-but-valid call) — these won't
-fail the build, only the oracle. Mitigate by leaning on the existing
+fail the build, only the harness. Mitigate by leaning on the existing
 comment/quote-skipping in `rewrite_alias_names` (already battle-tested) and by
 diffing the pre/post emitted C for *unexpected* (non-prefix) changes.
 

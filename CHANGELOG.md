@@ -75,8 +75,8 @@ multiple modules, all in Zen:
 **Self-hosted — Python and tree-sitter removed.** The compiler is now the `zenc` binary alone:
 `cc` builds it from `bootstrap/{zenc.gen.c,zenrt.c,driver.c}`, and `zenc --build-self` regenerates
 `zenc.gen.c` byte-for-byte (the fixpoint). The former Python reference frontend, `tree-sitter-zen`,
-`generate.py`, and `mypy` are gone; only the binary-only test oracle (pytest as a runner that
-imports no compiler code) remains, and it is being ported to a Zen-native oracle.
+`generate.py`, and `mypy` are gone; only the binary-only test harness (pytest as a runner that
+imports no compiler code) remains, and it is being ported to a Zen-native harness.
 
 - **`compiler.genjs`** — a second backend over the *same* `compiler.genc` AST, emitting JavaScript (the
   computational subset). Demonstrates reuse of the shared AST for a second backend: zen generates its
@@ -84,7 +84,7 @@ imports no compiler code) remains, and it is being ported to a Zen-native oracle
 - **Enum variants are `|`-separated** (was `,`): `Opt*<T>: None | Some(T)`. A sum type is a
   *choice*, so `|` ("or") — visually distinct from the `{a, b}` *record* (comma = "and").
 
-CI (`.github/workflows/ci.yml`) builds `zenc` and runs the Zen-native oracle on every push and PR.
+CI (`.github/workflows/ci.yml`) builds `zenc` and runs the Zen-native harness on every push and PR.
 
 ## History — the self-hosting / bootstrap path (now complete)
 

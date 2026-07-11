@@ -36,6 +36,6 @@ diagnostic (check_validate.zen). The working ident-RHS alias path is untouched.
 
 ## Regression coverage
 
-tests/oracle_verdict.zen `verdict-kind` suite: `k = 5` and `x = 3 + 4` reject with
+tests/harness_verdict.zen `verdict-kind` suite: `k = 5` and `x = 3 + 4` reject with
 `error[bad-binding]`; `m = std.math` alias, `k := 5` global, and `f = () i32 {…}` function
 all still accept.

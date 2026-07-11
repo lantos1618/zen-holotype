@@ -250,11 +250,11 @@ shapes coexist:
 - **`compiler.check` + `compiler.check_validate`** — the resolver and the `fits()` validator, in Zen.
   `check` fills the type information the parser can't (each `match`'s enum name, each
   constructor's enum type) by looking names up among a module's decls; `check_validate` adds
-  the validating pass whose exit code is the type-error count (the CHECK binary the oracle drives).
+  the validating pass whose exit code is the type-error count (the CHECK binary the harness drives).
 - **The loop is closed — the compiler is ordinary Zen.** `compiler.lex` → `compiler.parse*` → `compiler.check`
   → `compiler.genc` is the whole `zenc` pipeline, all ordinary Zen. Fed its **own** sources, `zenc`
   re-emits the committed `bootstrap/zenc.gen.c` byte-for-byte (the fixpoint). Correctness is the
-  **binary-only oracle** (`tests/`): emit/run parity, reject-parity, and the byte-exact
+  **binary-only harness** (`tests/`): emit/run parity, reject-parity, and the byte-exact
   reproduction — no second compiler to diff against, since the compiler reproduces itself.
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).

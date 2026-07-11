@@ -2,7 +2,7 @@
 
 Status: **Part 1 (allocator UAF / double-free + revival) and Part 2 (escaping local pointer) both
 IMPLEMENTED & verified** — adversarial reject/accept pass, 0 over-rejection across all 54 zen sources,
-`make oracle` green, fixpoint byte-exact. Extends the lexical `DeadList` passes in `check_validate.zen`.
+`make harness` green, fixpoint byte-exact. Extends the lexical `DeadList` passes in `check_validate.zen`.
 
 Part 2 (`check_module_addr_escape*`): a SEPARATE pass (cannot reuse the scope walker — a general
 allocator's `a.acquire(n)` returns heap that legitimately outlives the call). Collects the function's
@@ -95,7 +95,7 @@ would be a FALSE POSITIVE. Proposal: a `Let`/`Assign` that rebinds a dead name t
 ## Verification (adversarial, both directions)
 REJECT: `free(p); load(p)` · `free(p); free(p)` · `return local.addr()` · `return slice(local.addr(), n)`.
 ACCEPT (no over-rejection): `p:=malloc(); free(p); p=malloc(); use(p)` (revival) · `return <Ptr param>` ·
-`return malloc()`-derived · **the whole stdlib + `make oracle` still check clean** · fixpoint byte-exact.
+`return malloc()`-derived · **the whole stdlib + `make harness` still check clean** · fixpoint byte-exact.
 
 ## Review decisions
 1. **Revival** — YES, rebinding a freed/moved local revives it (avoids over-rejecting realloc/reuse). ✓

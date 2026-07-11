@@ -186,11 +186,11 @@ make -f bootstrap/Makefile regen       # zenc --build-self bootstrap/zenc.gen.c 
 git diff --quiet bootstrap/zenc.gen.c  # the fixpoint: regenerated C must be byte-identical
 ```
 
-**Tests.** The Zen-native oracle (no Python — the repo has zero `.py` files):
+**Tests.** The Zen-native harness (no Python — the repo has zero `.py` files):
 
 ```sh
-make oracle            # the Zen-native oracle (tests/oracle.zen); exit code = failing-case count
-make oracle-fast       # value + verdict smoke subset (~20s) for the inner loop
+make harness            # the Zen-native harness (tests/harness.zen); exit code = failing-case count
+make harness-fast       # value + verdict smoke subset (~20s) for the inner loop
 ```
 
 ## Diagnostics
@@ -249,7 +249,7 @@ This is rough around the edges. Known limits worth flagging up front:
 | `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (161-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
 | `examples/` | runnable single-file programs |
-| `tests/` | the Zen-native oracle (`oracle.zen`) + fixtures |
+| `tests/` | the Zen-native harness (`harness.zen`) + fixtures |
 
 ## More docs
 
