@@ -37,24 +37,19 @@ cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic { (a.code == 0)
 // types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
 // INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
 // batch (the flat sentinels would otherwise spray bogus type errors).
-check_diag_no_main = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDiagnostic { mp.check_module_parse_diagnostic_from_source(decls, flat).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)) }    // scope-derived value escapes
+check_diag_no_main = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: str) CheckDiagnostic { mp.check_module_parse_diagnostic_from_source(decls, flat).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)) }
 RenderTarget*: {
     path: str,
     src: str,
-}    // return local.addr()
+}
 pick_module = (flat: str, mods: [ModuleEntry], i: i64, off: i32, w: i32, rpath: str, rsrc: str) RenderTarget {
     (i >= mods.len).match ({ true => RenderTarget(
         path: rpath,
         src: rsrc,
     ), false => {
-        m := mods[i]    // Rc not sendable across actors
-        // bounded generics `A: Trait`
-        // undefined type names
-        // struct/enum contains itself by value
-        // discarded value-mold result
-        // names / types / arity / …
-        // which (path, source) an error renders against: the main file if its span maps there, else the
-        // imported module whose source the flat offset maps cleanly into (diag_user_span fails -> line 0).
+        m := mods[i]
+        // Map a flat-source diagnostic span onto the module whose source contains it
+        // (diag_user_span fails -> line 0 → try the next module).
         sp := diag_user_span(flat, m.source, off, w)
         (sp.line > 0).match ({ true => RenderTarget(
             path: m.path,
@@ -184,17 +179,15 @@ compile_to = (mp: MutPtr<Malloc>, root: str, path: str, src: str, out: str, ccfl
 }
 // ── subcommands ───────────────────────────────────────────────────────────────────────────────────
 // `emit <file>` type-checks FIRST (like check/build) and STOPS on any error, so a type-broken program
-// never produces C that references undefined names. `emit --force <file>` (or `--no-check`) restores the
-// raw source→C path for compiler debugging. flag may sit before OR after the path.
+// never produces C that references undefined names. `--force` / `--no-check` are CLI aliases of the
+// checked path (they do NOT bypass the validator); flag may sit before OR after the path.
 emit_file = (mp: MutPtr<Malloc>, root: str, a2: str, a3: str) i32 {
     flag2 := eq(a2, "--force") || eq(a2, "--no-check")
     path := flag2.match ({ true => a3, false => a2 })
     force := flag2 || eq(a3, "--force") || eq(a3, "--no-check")
     force.match ({ true => mp.emit_raw(root, path), false => mp.emit_checked(root, path) })
 }
-// --force: resolve imports + emit, but STILL run the strict validator (audit C4) — a type error fails
-// the emit rather than producing C that silently miscompiles. `--force`/`--no-check` is retained for CLI
-// compatibility but no longer bypasses the checker; it now behaves exactly like the checked emit path.
+// emit_raw is an alias of emit_checked — kept so older call sites still resolve.
 emit_raw = (mp: MutPtr<Malloc>, root: str, path: str) i32 { mp.emit_checked(root, path) }
 // checked: run the full report_check pipeline; emit only when clean, else exit 1 with the diagnostic.
 emit_checked = (mp: MutPtr<Malloc>, root: str, path: str) i32 {
