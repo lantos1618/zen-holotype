@@ -38,7 +38,7 @@ bootstrap, FFI boundaries, and low-level std modules.
 `try_alloc`/`try_zeroed`/`try_of` when allocation failure should stay in the
 value flow.
 
-Raw allocation calls are guarded by `tests/test_primitive_boundaries.py`:
+Raw allocation calls are guarded by `tests/oracle_boundaries.zen`:
 `malloc`/`calloc`/`realloc`/`free` may appear only in `std.mem.alloc`,
 `std.mem.raw`, or the compiler bootstrap allocation shim. Everything else should
 thread an allocator and call `acquire`/`resize`/`release` or a higher-level

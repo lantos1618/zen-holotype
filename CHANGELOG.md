@@ -22,7 +22,8 @@ All notable changes to **zen**. The format loosely follows
 - **Actor safety made static.** The checker's SENDABILITY pass enforces move-on-send (an `Own<T>`
   passed into a `send` kills the sender's binding), deep-immutability for sending `Ptr<T>`, and a
   scratch-escape pass; at runtime, a `panic` inside one actor is isolated to that actor
-  (per-worker catch in `zenrt.c`), and a work-stealing thread pool runs actors across N OS cores.
+  (per-worker catch in `zenrt.c`), and a multi-threaded actor pool runs actors across N OS cores
+  (global run queue today; work-stealing deques are roadmap).
 - **Namespace hygiene.** Namespace binds (`alias = std.X`) prefix a module's direct exports, so
   two modules can both export `thing`/`Box`/`of`/`default` and be used as `left.thing()` /
   `right.thing()` without a short-name collision; `zenc emit` runs the same resolver as

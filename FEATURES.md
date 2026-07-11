@@ -134,12 +134,16 @@ shapes coexist:
   as the model — see [MEMORY_MODEL.md](MEMORY_MODEL.md).
 
 ## Actors & concurrency safety
-- **Actors** (`std.concurrent.actor`) — typed message enums, a `Receiver<M>` implemented via
-  `Type.impl(Receiver<M>, { receive = … })`, and `ActorRef<M>` / `ReplyRef<T>` / `ActorHandle<M, ActorT>`
-  wrappers. Sends are `send(handle, msg)` / fire-and-forget `tell`; request/reply threads a
-  `ReplyRef<T>`. Allocating constructors (`spawn`, `cell`, `engine`, `reply`) return `Result`.
-- **Real parallelism** — a work-stealing thread pool (`std.concurrent.pool`) runs actors across N
-  OS cores on real pthreads + atomics; `std.thread`/`std.sync` are the OS-thread + locking floor.
+- **Two actor surfaces (do not conflate):**
+  - **Cooperative** (`std.concurrent.actor`) — typed message enums, `Receiver<M>`,
+    `ActorRef` / `ReplyRef` / `ActorHandle`. `send` enqueues; `run` / `request` / `ask` drain
+    **inline on the caller thread** (optional coroutine checkpoint). Good for demos and
+    request/reply; **not** N-core parallel.
+  - **Parallel typed** (`std.concurrent.pool_actor`) — same `receive` shape, scheduled on
+    `std.concurrent.pool` workers. Requires one concrete trampoline stub per `(Msg, ActorT)`
+    (Zen cannot take the address of a generic fn yet). This is the KEEP path for real parallelism.
+- **Pool** (`std.concurrent.pool`) — multi-threaded actor run queue across N OS cores (global
+  mutex queue today; work-stealing deques are roadmap). `std.thread`/`std.sync` are the floor.
 - **Sendability is statically checked** (`compiler.check_validate`, the SENDABILITY pass):
   **move-on-send** — passing an owned `Own<T>` into a send transfers it, so the sender's binding
   is killed (a later use is `error`), which stops the double-free where both actors free the same

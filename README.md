@@ -79,7 +79,7 @@ half_of = (n: i32) Result<i32, IoError> {
 ```
 
 See **[`examples/`](examples/)** (`hello`, `tour`, `shapes`, `stats`, `str_ops_demo`,
-`json_demo`, `store_demo`, `actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
+`json_demo`, `store_demo`, `actor_demo`, `pool_actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
 every one runs with `zenc run examples/<name>.zen`.
 
 ## The language
@@ -128,7 +128,7 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 | collections | `std.collections.{vec, map, hmap, set, iter}` |
 | text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
 | memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
-| concurrent | `std.concurrent.{actor, pool, sched, runtime, coroutine, cown, ring}` — actors on a multi-threaded pool (one global run queue; work-stealing deques are roadmap) |
+| concurrent | `std.concurrent.{actor, pool_actor, pool, sched, runtime, coroutine, cown, ring}` — cooperative typed actors (`actor`) vs parallel typed actors on the pool (`pool_actor` + trampoline); pool is one global run queue (work-stealing deques are roadmap) |
 | io / os | `std.io.{c, file, stdin}`, `std.fs`, `std.os` (argv/env), `std.process`, `std.sync`, `std.atomic`, `std.thread` |
 | data / encoding | `std.json`, `std.csv`, `std.encoding` (base64/hex), `std.path` |
 | net / web | `std.net` (sockets), `std.web.dom` |

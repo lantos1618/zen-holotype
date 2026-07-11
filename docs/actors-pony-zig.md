@@ -22,8 +22,8 @@ sends statically (the move/escape/UAF checker), not with a GC or a capability la
 - **`send` is fire-and-forget.** It enqueues a message on the target's mailbox and returns immediately.
 - **Results come back as messages**, not as awaited returns. The "continuation" is the next behavior,
   triggered by the reply. There is **no `await`, no future-`get`, no `request`/`ask`-that-blocks**.
-- **Parallelism = many actors × many OS threads** (a work-stealing scheduler). NOT yielding within a
-  behavior.
+- **Parallelism = many actors × many OS threads** (shipped: global-queue pool; work-stealing deques
+  are roadmap). NOT yielding within a behavior.
 - **No function coloring — by construction.** A behavior never depends on another actor's result
   mid-body, so there is no sync/async split to color. Coloring is *impossible*, not hidden.
 

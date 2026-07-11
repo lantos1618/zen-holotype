@@ -1,8 +1,9 @@
-// std.concurrent.pool_actor — TYPED actors that run on the work-stealing pool (rt M4, docs/rt-scoped-
-// runtime.md §3). This heals the typed-vs-parallel SPLIT-BRAIN: std.concurrent.actor's typed handles
-// drain INLINE on the caller thread (h.send + h.run, no scheduling), while std.concurrent.pool runs
-// only UNTYPED `(RawPtr<u8>, i64) void` behaviors in parallel. pool_actor adapts typed→untyped at the
-// boundary so a typed actor's `receive` runs on a pool worker, in parallel, exactly-once.
+// std.concurrent.pool_actor — TYPED actors that run on the multi-threaded pool (rt M4, docs/rt-scoped-
+// runtime.md §3). The pool is Cut 1: one global mutex-guarded run queue (NOT work-stealing; Cut 2
+// deques are roadmap). This heals the typed-vs-parallel SPLIT-BRAIN: std.concurrent.actor's typed
+// handles drain INLINE on the caller thread (h.send + h.run, no scheduling), while std.concurrent.pool
+// runs only UNTYPED `(RawPtr<u8>, i64) void` behaviors in parallel. pool_actor adapts typed→untyped at
+// the boundary so a typed actor's `receive` runs on a pool worker, in parallel, exactly-once.
 //
 // It is the KEEP path: built purely on pool.zen + rt.zen, it carries no coroutine/inline-drain baggage
 // (std.concurrent.actor is on the retire list). Own lightweight Receiver/Context — no actor.zen dep.
@@ -103,3 +104,17 @@ close*<ActorT> = (h: PooledHandle<ActorT>) void {
 // malloc'd by `send`; the free happens on the worker, matching the malloc/free allocator pair, so the
 // actor's ambient rt is irrelevant to the transport box — it governs allocations inside `receive`.)
 free_msg* = (msg: i64) void { free(msg.offset(0)) }
+// the whole trampoline body, generic: reconstitute actor state + boxed message, run the typed
+// `receive` (trait dispatch, deferred to mono like actor.zen's drain), reclaim the box. The user's
+// concrete stub shrinks to one line — `tramp = (user: RawPtr<u8>, msg: i64) void
+// { dispatch<Counter, Msg>(user, msg) }` (destructure `dispatch`; explicit tparams are required,
+// nothing in the args pins ActorT/M) — keeping all raw-pointer surgery here in the stdlib. The stub
+// itself must STAY concrete (generic fns are inlined, so their address cannot be taken).
+dispatch*<ActorT, M> = (user: RawPtr<u8>, msg: i64) void {
+    a: [ActorT] := user.slice(1)
+    b: [M] := msg.offset(0).slice(1)
+    b.loop((h, i, m) {
+        a[0].addr().receive(Context<M>(msg: m))
+    })
+    free_msg(msg)
+}
