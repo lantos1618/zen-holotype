@@ -5274,6 +5274,13 @@ ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, arms:
     })
     f
 }
+ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, items: [Expr], hop: bool) bool {
+    f := false
+    items.loop((h, i, it) {
+        f = a.ae_escapes(decls, locals, it.addr(), hop).match ({ true => true, false => f })
+    })
+    f
+}
 // ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
 // The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
 // in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
@@ -5300,6 +5307,7 @@ ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], name: str, e: Ptr<Expr>, dept
         .Match(m)      => a.ae_ret_valarms(decls, m.arms, name, depth),
         .Cond(d)       => a.ae_ret_yields(decls, name, d.t, depth) || a.ae_ret_yields(decls, name, d.e, depth),
         .Block(b)      => a.ae_ret_blockval(decls, b.stmts, name, depth),
+        .SliceLit(sd)  => a.ae_ret_items(decls, sd.items, name, depth),
         _              => false,
     })
 }
@@ -5314,6 +5322,13 @@ ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: str, 
     f := false
     arms.loop((h, i, ar) {
         f = a.ae_ret_yields(decls, name, ar.body, depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], items: [Expr], name: str, depth: i32) bool {
+    f := false
+    items.loop((h, i, it) {
+        f = a.ae_ret_yields(decls, name, it.addr(), depth).match ({ true => true, false => f })
     })
     f
 }
@@ -5404,6 +5419,7 @@ ae_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Ex
         .Match(m)      => a.ae_arms_escape(decls, locals, m.arms, hop),
         .Cond(d)       => a.ae_escapes(decls, locals, d.t, hop) || a.ae_escapes(decls, locals, d.e, hop),
         .Block(b)      => a.ae_block_val_escapes(decls, locals, b.stmts, hop),
+        .SliceLit(sd)  => a.ae_items_escape(decls, locals, sd.items, hop),
         _              => false,
     }) })
 }
