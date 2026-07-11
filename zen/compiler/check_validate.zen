@@ -308,7 +308,7 @@ is_unresolved_trait_call = (env: Env, c: CallData) bool { (c.args.len > 0).match
 // redirect) and that is neither a free function nor an imported name — would emit a bare `area`
 // call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
 trait_recv_missing = (env: Env, c: CallData) bool { (c.args.len > 0 && env.decls.is_trait_method(c.fn) && env.decls.is_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({ true => eq(env.dispatch_name(c), c.fn) && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false, false => false }) }
-is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }    // explicit int -> f64 cast
+is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }
 // A fn's OWN params and locals SHADOW same-named top-level names in its body: a call through a
 // locally-bound name (e.g. a closure param `f` while a top-level `f` exists) must NEVER be judged
 // against the top-level fn / intrinsic / import — the emitted C scopes the local as the call target.
@@ -326,15 +326,15 @@ shadow_not_callable = (env: Env, fn: str) bool {
     (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
 }
 // Intrinsic arity must be checked before emission.
-check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => env.shadow_not_callable(c.fn).match ({ true => 1, false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }) }    // null_ptr() takes no operands
-store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }    // atomic_add_i64(p, delta) -> new value
-store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }    // atomic_store_i64(p, val) -> void
-store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }    // atomic_cas_i64(p, expected, desired) -> bool
+check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => env.shadow_not_callable(c.fn).match ({ true => 1, false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }) }
+store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }
+store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }
+store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }
 // every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
 is_deref_intrinsic = (fn: str) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_load_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
-derefs_nullable = (env: Env, c: CallData) bool { (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({ true => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(), false => false }) }    // atomic_fence() -> void
-null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({ true => 1, false => 0 }) }    // atomic_load_i64/load_i64/load/addr/cstr/malloc/sizeof/to_* (incl. to_f64) = 1
+derefs_nullable = (env: Env, c: CallData) bool { (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({ true => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(), false => false }) }
+null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({ true => 1, false => 0 }) }
 // Generic UFCS trait calls may need to defer even if a top-level fn has the same name.
 // `@malloc` is not a magic allocator; use an ordinary foreign function or allocator API.
 // Calls: local signatures are checked; imported/deferred trait names are accepted; unknowns reject.
@@ -779,8 +779,9 @@ enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     found := no_variants()
     decls.loop((h, i, d) {
         found = d.match ({
-            .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants, false => found }),
-            _          => found,
+            .DEnum(ed)   => eq(ed.name, ename).match ({ true => ed.variants, false => found }),
+            .DGenEnum(g) => eq(g.name, ename).match ({ true => g.variants, false => found }),
+            _            => found,
         })
     })
     found
@@ -852,7 +853,15 @@ enum_declares = (decls: [Decl], vn: str) bool {
     })
     f
 }
-mkenum_err = (env: Env, ty: str, variant: str) i32 { is_empty(ty).match ({ true => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }), false => 0 }) }
+// Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
+// `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
+// qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
+mkenum_err = (env: Env, ty: str, variant: str) i32 {
+    is_empty(ty).match ({ true => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }), false => {
+        vs := env.decls.enum_variants(ty)
+        (vs.len == 0).match ({ true => 0, false => vs.arm_known(variant).match ({ true => 0, false => 1 }) })
+    } })
+}
 // A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
 // Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
 // Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.

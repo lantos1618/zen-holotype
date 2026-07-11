@@ -1290,6 +1290,33 @@ is_slice_len_call = (env: Env, fn: str, buf: [Expr]) bool {
         _         => false,
     }), false => false })
 }
+// UFCS auto-ref: a value `T` passed where param0 is `Ptr<T>` / `MutPtr<T>` (e.g. `r.next()` with
+// `next = (r: MutPtr<Rng>) …`) is rewritten to `addr(r)` so the call type-checks and emits `&r`.
+// Lvalue-only (Var/Member/Index/Arrow): a temp like `seed(1).next()` would otherwise mutate a
+// discarded copy. Already-pointer args and unknown/void types are left alone (idempotent).
+is_auto_ref_lvalue = (e: Expr) bool {
+    e.match ({
+        .Var(v)    => true,
+        .Member(m) => true,
+        .Index(ix) => true,
+        .Arrow(ar) => true,
+        _          => false,
+    })
+}
+needs_ufcs_auto_ref = (env: Env, ps: [Param], arg0: Expr) bool {
+    (ps.len > 0 && ps[0].ty.is_nonnull_ptr_ty()).match ({ true => {
+        want := ps[0].ty.pointee_of()
+        got := env.infer_expr(arg0.addr())
+        (want.is_void_ty() || got.is_void_ty() || got.is_ptr_ty_g()).match ({ true => false, false => got.ty_eq(want) && arg0.is_auto_ref_lvalue() })
+    }, false => false })
+}
+ufcs_auto_ref_arg0 = (a: MutPtr<Malloc>, env: Env, ps: [Param], buf: [Expr], pos: i32) void {
+    (buf.len > 0 && env.needs_ufcs_auto_ref(ps, buf[0])).match ({ true => {
+        ab := a.cebuf(1)
+        ab[0] = buf[0]
+        buf[0] = load(a.cenode(call_at("addr", ab, pos)))
+    }, false => { } })
+}
 // `g(args)` where `g` is a LOCAL of by-value closure-struct type (lower_closures generated a struct
 // `__clos_K` for it plus a call fn `__clos_K_call`) is an indirect closure call. Return the call-fn
 // name if `g` is such a local (its type is a Named struct with a matching `_call` fn in the index),
@@ -1322,6 +1349,8 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         ex := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
+    // After args resolve: value→Ptr/MutPtr auto-ref on arg0 (UFCS MutPtr receivers like r.next()).
+    (ps.len == buf.len).match ({ true => a.ufcs_auto_ref_arg0(env, ps, buf, c.pos), false => { } })
     cclos := env.clos_local_call_name(c.fn)
     env.is_slice_len_call(c.fn, buf).match ({ true => a.cenode(member(buf[0].addr(), "len")), false => eq(cclos, "").match ({ true => env.is_fn_field_call(dn, buf).match ({ true => a.rewrite_fn_field_call(env, c.fn, buf), false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(ps, buf)) }), false => a.clos_call_rewrite(c, cclos, buf) }) })
 }

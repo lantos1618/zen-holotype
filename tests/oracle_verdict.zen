@@ -7,7 +7,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = oracle_lib
 oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (239)", [VerdictCase(
+    a := run_verdicts("verdict (469)", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -1934,6 +1934,36 @@ oracle_verdict_run* = () i32 {
         src: "d<T> = (p: Ptr<T>) T { p.load() }\ntest* = () i32 { x: i64 := 5  y := d(x.addr())  to_i32(y) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
+        src: "rand = std.rand\ntest* = () i32 { r := rand.seed(1)  to_i32(r.next() % 1000) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // no over-accept: temp receiver seed(1).next() stays rejected (not an lvalue).
+        src: "rand = std.rand\ntest* = () i32 { to_i32(rand.seed(1).next() % 1000) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        // census: Color.Purple passed check then ICEd at cc (undeclared Color_Purple).
+        src: "Color*: Red | Blue\ntest* = () i32 { c := Color.Purple  0 }",
+        should_pass: false,
+        kind: "undefined-name",
+    ), VerdictCase(
+        // no over-rejection: a valid qualified tag still accepts.
+        src: "Color*: Red | Blue\ntest* = () i32 { c := Color.Red  0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        // same hole on a payload ctor: Color.Purple(1) must reject before emit.
+        src: "Color*: Red | Blue(i32)\ntest* = () i32 { c := Color.Purple(1)  0 }",
+        should_pass: false,
+        kind: "undefined-name",
+    ), VerdictCase(
+        // generic enum: Result.Bogus must reject (enum_variants covers DGenEnum).
+        src: "{ Result, IoError } = std.core.result\ntest* = () i32 { r: Result<i32, IoError> := Result.Bogus  0 }",
+        should_pass: false,
+        kind: "undefined-name",
     )])
     // BRICK 1 discriminating PAIR (docs/effects-as-types-design.md §4): identical program modulo the
     // pointer KIND at one nested leaf. A deeply-frozen `Outer→Inner→scalars` payload (mode `frozen`,
