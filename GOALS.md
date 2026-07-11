@@ -69,11 +69,12 @@ Compact roadmap from the current codebase. Each goal names the gap and the check
      byte-identical. `std.sys` bundles narrow capabilities (`Writer`, process `Allocator`, `Env`,
      `Clock`, `Fs`) built for attenuation. This is the explicit-capability alternative to the
      ambient runtime (`std.rt`), which is being reworked rather than adopted.
-   - Gap: `Writer.write` still returns `i64` and swallows `write(2)` errors; the print/IO spine is
-     not yet `Result`-shaped (Sys phase 2, design in `docs/runtime-design.md`). The
-     ambient-rt rework (ambient-within-scope, two-memory scratch/shared split) is unresolved.
-   - Done when: the print spine returns `Result` behind a `Writer` capability, and the runtime
-     story is settled as explicit-at-boundary with the escape checker enforcing scope lifetimes.
+   - Gap: ambient `println`/`print` still target fd-1 best-effort (`i64`); batch migration to
+     explicit `Writer` is open (see `docs/sys-phase2-print-writer.md`). The ambient-rt rework
+     (ambient-within-scope, two-memory scratch/shared split) is unresolved — design in
+     `docs/two-memory-design.md`.
+   - Done when: new IO code uses the Result `Writer` spine by default, ambient `println` is
+     retired or clearly legacy, and the two-memory promotion verbs ship.
 
 13. **Second backend / browser (JS)**
    - Status: `compiler.genjs` walks the same post-mono AST and emits JavaScript over

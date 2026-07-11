@@ -17,8 +17,8 @@ All notable changes to **zen**. The format loosely follows
   `main = () i32`; the compiler renames the body to `zen_user_main` and emits a niladic `zen_main`
   trampoline that feeds it `std.sys.root()`, keeping the `zenrt.c` boundary byte-identical.
   `std.sys` bundles narrow capabilities — `Writer` (stdout/stderr), the process `Allocator`,
-  `Env`, `Clock`, `Fs` — for attenuation. (`Writer.write` still returns `i64`; the `Result`-shaped
-  print spine is Sys phase 2.)
+  `Env`, `Clock`, `Fs` — for attenuation. `Writer.write` returns `Result<i64, IoError>` (Sys
+  phase 2; see `docs/sys-phase2-print-writer.md`).
 - **Actor safety made static.** The checker's SENDABILITY pass enforces move-on-send (an `Own<T>`
   passed into a `send` kills the sender's binding), deep-immutability for sending `Ptr<T>`, and a
   scratch-escape pass; at runtime, a `panic` inside one actor is isolated to that actor

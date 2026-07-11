@@ -3,9 +3,8 @@
 **Status:** CURRENT. This is the single source of truth for Zen's runtime/capability model.
 It supersedes the *ambient rt* line of design (`rt-scoped-runtime.md`,
 `pluggable-runtime-plan.md`, `scope-runtime-goal.md`, `actors-pony-zig.md`), all now marked
-SUPERSEDED. The execution-plan docs (`sys-migration-plan.md`, `sys-phase2-print-writer.md`)
-are not yet written; the phase-2 print/IO → `Result` work is tracked in GOALS.md item 12
-("Capability entry (Sys) & explicit runtime").
+SUPERSEDED. The execution-plan doc `sys-migration-plan.md` is not yet written.
+Phase-2 print/IO → `Result` is **shipped** — see [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md).
 
 ## The one-line model
 
@@ -125,20 +124,20 @@ shipped.
 - The multi-threaded actor pool + Arc-backed lifetimes + the static sendability checker.
 
 **In progress / unbuilt:**
-- **Writer → Result** (honest IO: `write` returning `Result`, surfacing EPIPE/ENOSPC instead of
-  swallowing). The design doc (`sys-phase2-print-writer.md`) is not yet written; the work is
-  tracked in GOALS.md item 12. `println` stays best-effort during the transition (additive, no
-  314-site churn).
 - **`Spawner` capability** — spawn-as-a-Sys-capability (actor semantics already shipped; the
   capability surface is not).
-- **Two-memory scratch/shared runtime** — concept only, above.
+- **Two-memory scratch/shared runtime** — concept only; design in [`two-memory-design.md`](two-memory-design.md).
 - **Ambient-`println` retirement** — flipping call sites to `sys.stdout().write` in batches, a
-  later phase once the honest sink exists.
+  later phase once the honest sink exists (see [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md) transition plan).
+
+**Shipped (Sys phase 2):**
+- **Writer → Result** — `Writer.write` / `write_bytes` / `write_line` return `Result<i64, IoError>`;
+  `write_or_panic` for scripts. Ambient `println` remains best-effort during migration.
 
 ## See also
 
-- `sys-migration-plan.md` (the execution plan) and `sys-phase2-print-writer.md` (the print/IO →
-  `Writer` + `Result` step) — **not yet written**; until they exist, the phase-2 work is tracked
-  in GOALS.md item 12 ("Capability entry (Sys) & explicit runtime").
+- [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md) — Sys phase 2: honest `Writer` +
+  `Result` print spine (shipped) and `println` migration plan.
+- `sys-migration-plan.md` (the full Sys execution plan) — **not yet written**.
 - Superseded (history, do not follow): `rt-scoped-runtime.md`, `pluggable-runtime-plan.md`,
   `scope-runtime-goal.md`, `actors-pony-zig.md`.

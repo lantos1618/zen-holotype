@@ -75,8 +75,9 @@ the C boundary (`zenrt.c`) is byte-identical to the niladic case. `Sys`
 (`std.sys`) bundles narrow capabilities — `heap()` (the process `Allocator`),
 `stdout()`/`stderr()` (`Writer`s), `env()`, `clock()`, `fs()` — and the intended
 style is attenuation: a function takes the narrowest capability it needs (a
-`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` currently
-returns `i64`; a `Result`-returning print spine is a roadmap item.
+`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` returns
+`Result<i64, IoError>`; `write_or_panic` is the fatal script sink. Ambient `println` remains
+best-effort during migration (`docs/sys-phase2-print-writer.md`).
 
 ## Types
 
