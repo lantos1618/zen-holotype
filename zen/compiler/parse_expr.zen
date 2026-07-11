@@ -1351,32 +1351,18 @@ fill_arg = (a: MutPtr<Malloc>, src: str, pos: i32, buf: [Expr], i: i32) PEnd {
         )
     } })
 }
-// Parenthesized value: a single expr `(e)`, or a tuple literal `(e1, e2, …)` → anon struct `{_0: e1, …}`.
 parse_paren = (a: MutPtr<Malloc>, src: str, open: Scan) PExpr {
     inner := a.parse_or_nested(src, open.next)
-    after := src.scan(inner.next)
-    src.is_comma(after.tok).match ({ true => {
-        buf := a.finit_buf()
-        pe := a.fill_payload_args(src, open.next, buf, 0)
-        inits := buf.take_inits(pe.count)
-        fields := a.inits_as_fields(inits)
-        name := a.mangle_anon_in(fields)
-        register_anon(name, fields)
+    close := src.scan(inner.next)
+    src.is_rparen(close.tok).match ({ true => PExpr(
+        expr: inner.expr,
+        next: close.next,
+    ), false => {
+        perr_set_at(close.tok.start)
         PExpr(
-            expr: a.enode(mkstruct_at(name, inits, open.tok.start)),
-            next: pe.next,
-        )
-    }, false => {
-        src.is_rparen(after.tok).match ({ true => PExpr(
             expr: inner.expr,
-            next: after.next,
-        ), false => {
-            perr_set_at(after.tok.start)
-            PExpr(
-                expr: inner.expr,
-                next: inner.next,
-            )
-        } })
+            next: inner.next,
+        )
     } })
 }
 // Prefix ops lower without adding Unary nodes.

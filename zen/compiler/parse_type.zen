@@ -174,55 +174,6 @@ parse_ty_inner = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
     tt := src.scan(pos)    // the head type token
     src.is_lbrace(tt.tok).match ({ true => a.parse_anon_ty(src, tt.next), false => src.is_lbracket(tt.tok).match ({ true => a.parse_slice_ty(src, tt.next), false => src.is_lparen(tt.tok).match ({ true => a.parse_fn_ty(src, tt.next), false => src.is_ptr_kw(tt.tok).match ({ true => a.parse_ptr_ty(src, tt.tok, tt.next), false => a.parse_leaf_ty(src, tt) }) }) }) })
 }    // { name: T, … } -> a structural anon struct
-// After a `)`-closed parenthesized type list in RETURN position, does a return type follow (making
-// `(A) R` a function type)? `{` opens the body, not a type.
-is_ret_fn_ty_follow = (src: str, t: Token) bool {
-    src.is_lbrace(t).match ({ true => false, false => src.is_lbracket(t).match ({ true => true, false => src.is_lparen(t).match ({ true => true, false => src.is_ptr_kw(t).match ({ true => true, false => is_ident_tok(t).match ({ true => true, false => src.tok_in(t, "void|i32|i64|u8|f64|bool|str|Cstr|text") }) }) }) }) })
-}
-// Return-type position only: `(T1, T2)` is a tuple (anon struct), not a one-arg fn type. `(T) R` and
-// `() R` stay function types; parameter/field types keep using `parse_ty` → `parse_fn_ty`.
-parse_ret_ty* = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
-    tt := src.scan(pos)
-    src.is_lparen(tt.tok).match ({ true => a.parse_ret_paren_ty(src, tt.next), false => a.parse_ty(src, pos) })
-}
-parse_ret_paren_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
-    sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => {
-        rt := a.parse_ty(src, sc.next)
-        TyEnd(
-            ty: fntype(slice(null_ptr(), 0), a.tynode(rt.ty)),
-            next: rt.next,
-        )
-    }, false => {
-        buf := a.afield_buf()
-        fe := a.fill_payload_tys(src, pos, buf, 0)
-        after := src.scan(fe.next)
-        src.is_ret_fn_ty_follow(after.tok).match ({ true => {
-            tbuf := a.ty_buf()
-            i := 0
-            @while (i < fe.count) {
-                tbuf[i] = buf[i].ty
-                i = i + 1
-            }
-            rt := a.parse_ty(src, fe.next)
-            TyEnd(
-                ty: fntype(tbuf.take_tys(fe.count), a.tynode(rt.ty)),
-                next: rt.next,
-            )
-        }, false => (fe.count == 1).match ({ true => TyEnd(
-            ty: buf[0].ty,
-            next: fe.next,
-        ), false => {
-            fields := buf.take_afields(fe.count)
-            name := a.mangle_anon_in(fields)
-            register_anon(name, fields)
-            TyEnd(
-                ty: tnamed(name),
-                next: fe.next,
-            )
-        } }) })
-    } })
-}
 afield_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }    // [ T ]
 take_afields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }    // ( A, T ) R -> FnT (a closure/template param)
 parse_anon_ty = (a: MutPtr<Malloc>, src: str, pos: i32) TyEnd {
