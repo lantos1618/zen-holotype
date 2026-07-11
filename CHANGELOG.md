@@ -17,12 +17,13 @@ All notable changes to **zen**. The format loosely follows
   `main = () i32`; the compiler renames the body to `zen_user_main` and emits a niladic `zen_main`
   trampoline that feeds it `std.sys.root()`, keeping the `zenrt.c` boundary byte-identical.
   `std.sys` bundles narrow capabilities — `Writer` (stdout/stderr), the process `Allocator`,
-  `Env`, `Clock`, `Fs` — for attenuation. (`Writer.write` still returns `i64`; the `Result`-shaped
-  print spine is Sys phase 2.)
+  `Env`, `Clock`, `Fs` — for attenuation. `Writer.write` returns `Result<i64, IoError>` (Sys
+  phase 2; see `docs/sys-phase2-print-writer.md`).
 - **Actor safety made static.** The checker's SENDABILITY pass enforces move-on-send (an `Own<T>`
   passed into a `send` kills the sender's binding), deep-immutability for sending `Ptr<T>`, and a
   scratch-escape pass; at runtime, a `panic` inside one actor is isolated to that actor
-  (per-worker catch in `zenrt.c`), and a work-stealing thread pool runs actors across N OS cores.
+  (per-worker catch in `zenrt.c`), and a multi-threaded actor pool runs actors across N OS cores
+  (global run queue today; work-stealing deques are roadmap).
 - **Namespace hygiene.** Namespace binds (`alias = std.X`) prefix a module's direct exports, so
   two modules can both export `thing`/`Box`/`of`/`default` and be used as `left.thing()` /
   `right.thing()` without a short-name collision; `zenc emit` runs the same resolver as
@@ -74,8 +75,8 @@ multiple modules, all in Zen:
 **Self-hosted — Python and tree-sitter removed.** The compiler is now the `zenc` binary alone:
 `cc` builds it from `bootstrap/{zenc.gen.c,zenrt.c,driver.c}`, and `zenc --build-self` regenerates
 `zenc.gen.c` byte-for-byte (the fixpoint). The former Python reference frontend, `tree-sitter-zen`,
-`generate.py`, and `mypy` are gone; only the binary-only test oracle (pytest as a runner that
-imports no compiler code) remains, and it is being ported to a Zen-native oracle.
+`generate.py`, and `mypy` are gone; only the binary-only test harness (pytest as a runner that
+imports no compiler code) remains, and it is being ported to a Zen-native harness.
 
 - **`compiler.genjs`** — a second backend over the *same* `compiler.genc` AST, emitting JavaScript (the
   computational subset). Demonstrates reuse of the shared AST for a second backend: zen generates its
@@ -83,7 +84,7 @@ imports no compiler code) remains, and it is being ported to a Zen-native oracle
 - **Enum variants are `|`-separated** (was `,`): `Opt*<T>: None | Some(T)`. A sum type is a
   *choice*, so `|` ("or") — visually distinct from the `{a, b}` *record* (comma = "and").
 
-CI (`.github/workflows/ci.yml`) builds `zenc` and runs the Zen-native oracle on every push and PR.
+CI (`.github/workflows/ci.yml`) builds `zenc` and runs the Zen-native harness on every push and PR.
 
 ## History — the self-hosting / bootstrap path (now complete)
 

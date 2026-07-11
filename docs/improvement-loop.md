@@ -42,7 +42,7 @@ cycles, it's "dry" — deepen the search or retire it.
 - **Deterministic gates are necessary but NOT sufficient.** Fixpoint byte-exact and emitted-C byte-diff
   are authoritative for the *compiler's own* code — but they MISS regressions in user-facing stdlib that
   the compiler tree-shakes (e.g. a broken unused `try_*` in `std.internal.resolve`: fixpoint stayed green,
-  every user import broke). So an **isolated `make oracle` must be ALL PASS to merge** — especially the
+  every user import broke). So an **isolated `make harness` must be ALL PASS to merge** — especially the
   `modules`/user-import suites, which are the only thing that exercises std-as-a-user-would.
 - **Do NOT dismiss oracle failures as "flake."** Only ONE suite is load-flaky: `build result-paths`
   (subprocess-heavy, times out under concurrent load). A non-zero count is REAL until you've confirmed the

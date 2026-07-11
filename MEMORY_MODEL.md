@@ -18,10 +18,10 @@ and ownership APIs.
 > **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt`
 > capability with `rt.alloc`/`rt.with`) and `std.scope` exist as an experiment
 > toward scoped runtimes, but the shipped, documented model is the explicit one
-> above. A design review flagged the "ambient rt on every allocating function"
-> shape as unsound/noisy (`docs/runtime-design.md`); the direction
-> is "ambient-within-scope, explicit-at-boundary", which is roadmap, not the
-> current rule. Read allocation as explicit unless a signature says otherwise.
+> above. The A-wrapper convenience constructors (`vec.new`, `set.new`, `hmap.new`,
+> and their `from`/`from` variants) no longer draw from `std.rt` — they capture the
+> process heap once via `dyn_heap()` at construction and store that `DynAlloc` for
+> the container's lifetime. `new_in`/`from_in` remain the explicit real paths.
 
 String bytes carry their own provenance discipline — immortal `text`, borrowed
 `view`/`Cstr`, and the heap-owned `String` (freed through the allocator that owns
@@ -38,7 +38,7 @@ bootstrap, FFI boundaries, and low-level std modules.
 `try_alloc`/`try_zeroed`/`try_of` when allocation failure should stay in the
 value flow.
 
-Raw allocation calls are guarded by `tests/test_primitive_boundaries.py`:
+Raw allocation calls are guarded by `tests/harness_boundaries.zen`:
 `malloc`/`calloc`/`realloc`/`free` may appear only in `std.mem.alloc`,
 `std.mem.raw`, or the compiler bootstrap allocation shim. Everything else should
 thread an allocator and call `acquire`/`resize`/`release` or a higher-level

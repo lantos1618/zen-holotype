@@ -59,7 +59,8 @@ mat: 1
 
 | Example | What it shows | Run |
 | --- | --- | --- |
-| `actor_demo.zen` | Spawn an actor, `send` it messages, `request` state back over a one-shot reply channel, and print it. | `./zenc run examples/actor_demo.zen` |
+| `actor_demo.zen` | Cooperative typed actor: `send` + `request` drained inline on the caller thread. | `./zenc run examples/actor_demo.zen` |
+| `pool_actor_demo.zen` | Parallel typed actors on the pool (concrete trampoline + workers). | `./zenc run examples/pool_actor_demo.zen` |
 
 Expected output:
 
@@ -67,5 +68,9 @@ Expected output:
 $ ./zenc run examples/actor_demo.zen
 after alice joined:   online=1 posted=0
 after bob + a message: online=2 posted=1
+ok
+
+$ ./zenc run examples/pool_actor_demo.zen
+total=1000
 ok
 ```

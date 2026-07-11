@@ -197,6 +197,6 @@ stable error kind, and a source-line caret.
 ## Run the test suite
 
 ```sh
-make oracle                          # the Zen-native oracle (tests/oracle.zen); exit code = failing-case count
+make harness                          # the Zen-native harness (tests/harness.zen); exit code = failing-case count
 make regen                           # regenerate the C seed; must be byte-identical (self-host gate)
 ```

@@ -21,6 +21,7 @@ here for provenance. Where a topic has a current, maintained doc (e.g.
 | `rt-m3-notes.md` | 2026-07 | rt M3 impl notes — process-wide default runtime (SHIPPED, option a; §2b). |
 | `rt-m4-notes.md` | 2026-07 | rt M4 impl notes — typed actors on the pool + per-actor ambient rt (§3). |
 | `actor-panic-isolation-findings.md` | 2026-07 | Actor panic-isolation Phase 1 findings (a behavior panic kills that actor; the pool survives). |
+| `usable-trustworthy-census-2026-07-08.md` | 2026-07-08 | Usable/trustworthy re-census v3 (usable 5.5 / trustworthy 5) — canonical of the three same-day drafts. |
 
 _Superseded-by pointers, where applicable:_ the `rt-*` snapshots implement
 slices of the living `docs/rt-scoped-runtime.md`; the scout / audit / review

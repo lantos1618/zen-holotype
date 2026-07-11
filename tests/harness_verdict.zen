@@ -1,13 +1,13 @@
-// tests/oracle_verdict.zen — the FULL VERDICT + KIND corpus for the Zen-native correctness oracle
+// tests/harness_verdict.zen — the FULL VERDICT + KIND corpus for the Zen-native correctness harness
 // (the self-hosted replacement for the pytest verdict harness). Ported verbatim from
 // tests/_oracle_corpus.py: VERDICT_CASES (188, accept/reject) + VERDICT_KIND_CASES (83, a reject
 // pinned by its first-error KIND). `zenc check src` must accept (should_pass=true) or reject
 // (false); a non-empty `kind` (e.g. "arity") makes the harness require `error[<kind>]` in the
 // rejection diagnostic (reject-for-the-right-reason). The harness wraps the bare kind label.
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
-{ VerdictCase, run_verdicts } = oracle_lib
-oracle_verdict_run* = () i32 {
-    a := run_verdicts("verdict (239)", [VerdictCase(
+{ VerdictCase, run_verdicts } = harness_lib
+harness_verdict_run* = () i32 {
+    a := run_verdicts("verdict (469)", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -1699,6 +1699,10 @@ oracle_verdict_run* = () i32 {
         should_pass: false,
         kind: "escape",
     ), VerdictCase(
+        src: "leak* = () [MutPtr<i32>] {\n    x := 5\n    [x.addr()]\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
         src: "raw = std.mem.raw\nBox*: { p: MutPtr<i32> }\nid = (q: MutPtr<i32>) MutPtr<i32> { q }\nmake_box = () Box {\n    s := raw.of(0, 1)\n    q := s[0].addr()\n    Box(p: id(q))\n}\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
@@ -1934,7 +1938,48 @@ oracle_verdict_run* = () i32 {
         src: "d<T> = (p: Ptr<T>) T { p.load() }\ntest* = () i32 { x: i64 := 5  y := d(x.addr())  to_i32(y) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "rand = std.rand\ntest* = () i32 { r := rand.seed(1)  to_i32(r.next() % 1000) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "rand = std.rand\ntest* = () i32 { to_i32(rand.seed(1).next() % 1000) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "Color*: Red | Blue\ntest* = () i32 { c := Color.Purple  0 }",
+        should_pass: false,
+        kind: "undefined-name",
+    ), VerdictCase(
+        src: "Color*: Red | Blue\ntest* = () i32 { c := Color.Red  0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Color*: Red | Blue(i32)\ntest* = () i32 { c := Color.Purple(1)  0 }",
+        should_pass: false,
+        kind: "undefined-name",
+    ), VerdictCase(
+        src: "{ Result, IoError } = std.core.result\ntest* = () i32 { r: Result<i32, IoError> := Result.Bogus  0 }",
+        should_pass: false,
+        kind: "undefined-name",
+    ), VerdictCase(
+        src: "os = std.os\ntest* = () i32 { os.env(\"PATH\")  0 }",
+        should_pass: false,
+        kind: "undefined-name",
+    ), VerdictCase(
+        src: "f* = (p: MutPtr<i64>) i64 { p.load() }\ntest* = () i32 { to_i32(f(5)) }",
+        should_pass: false,
+        kind: "arg-type",
     )])
+    // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
+    // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
+    // no over-accept: temp receiver seed(1).next() stays rejected (not an lvalue).
+    // census: Color.Purple passed check then ICEd at cc (undeclared Color_Purple).
+    // no over-rejection: a valid qualified tag still accepts.
+    // same hole on a payload ctor: Color.Purple(1) must reject before emit.
+    // generic enum: Result.Bogus must reject (enum_variants covers DGenEnum).
+    // census: undefined module member in a UFCS chain (os.env) — positioned reject at check, not cc ICE.
+    // MutPtr param mismatch on a non-lvalue literal — gate at check, not cc ICE.
     // BRICK 1 discriminating PAIR (docs/effects-as-types-design.md §4): identical program modulo the
     // pointer KIND at one nested leaf. A deeply-frozen `Outer→Inner→scalars` payload (mode `frozen`,
     // reaches no MutPtr) is ACCEPTED — the runtime twin is send_frozen_payload_accepted.zen.

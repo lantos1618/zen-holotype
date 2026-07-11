@@ -79,7 +79,7 @@ half_of = (n: i32) Result<i32, IoError> {
 ```
 
 See **[`examples/`](examples/)** (`hello`, `tour`, `shapes`, `stats`, `str_ops_demo`,
-`json_demo`, `store_demo`, `actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
+`json_demo`, `store_demo`, `actor_demo`, `pool_actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
 every one runs with `zenc run examples/<name>.zen`.
 
 ## The language
@@ -128,7 +128,7 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 | collections | `std.collections.{vec, map, hmap, set, iter}` |
 | text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
 | memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
-| concurrent | `std.concurrent.{actor, pool, sched, runtime, coroutine, cown, ring}` — actors on a multi-threaded pool (one global run queue; work-stealing deques are roadmap) |
+| concurrent | `std.concurrent.{actor, pool_actor, pool, sched, runtime, coroutine, cown, ring}` — cooperative typed actors (`actor`) vs parallel typed actors on the pool (`pool_actor` + trampoline); pool is one global run queue (work-stealing deques are roadmap) |
 | io / os | `std.io.{c, file, stdin}`, `std.fs`, `std.os` (argv/env), `std.process`, `std.sync`, `std.atomic`, `std.thread` |
 | data / encoding | `std.json`, `std.csv`, `std.encoding` (base64/hex), `std.path` |
 | net / web | `std.net` (sockets), `std.web.dom` |
@@ -186,11 +186,11 @@ make -f bootstrap/Makefile regen       # zenc --build-self bootstrap/zenc.gen.c 
 git diff --quiet bootstrap/zenc.gen.c  # the fixpoint: regenerated C must be byte-identical
 ```
 
-**Tests.** The Zen-native oracle (no Python — the repo has zero `.py` files):
+**Tests.** The Zen-native harness (no Python — the repo has zero `.py` files):
 
 ```sh
-make oracle            # the Zen-native oracle (tests/oracle.zen); exit code = failing-case count
-make oracle-fast       # value + verdict smoke subset (~20s) for the inner loop
+make harness            # the Zen-native harness (tests/harness.zen); exit code = failing-case count
+make harness-fast       # value + verdict smoke subset (~20s) for the inner loop
 ```
 
 ## Diagnostics
@@ -249,7 +249,7 @@ This is rough around the edges. Known limits worth flagging up front:
 | `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (161-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
 | `examples/` | runnable single-file programs |
-| `tests/` | the Zen-native oracle (`oracle.zen`) + fixtures |
+| `tests/` | the Zen-native harness (`harness.zen`) + fixtures |
 
 ## More docs
 

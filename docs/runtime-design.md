@@ -3,9 +3,8 @@
 **Status:** CURRENT. This is the single source of truth for Zen's runtime/capability model.
 It supersedes the *ambient rt* line of design (`rt-scoped-runtime.md`,
 `pluggable-runtime-plan.md`, `scope-runtime-goal.md`, `actors-pony-zig.md`), all now marked
-SUPERSEDED. The execution plan that lands this model is
-[`sys-migration-plan.md`](sys-migration-plan.md); the print/IO honesty step is
-[`sys-phase2-print-writer.md`](sys-phase2-print-writer.md).
+SUPERSEDED. The execution-plan doc `sys-migration-plan.md` is not yet written.
+Phase-2 print/IO → `Result` is **shipped** — see [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md).
 
 ## The one-line model
 
@@ -100,21 +99,22 @@ intercepts it per-worker (setjmp/longjmp trampoline around the behavior call). S
 recovery (signal-based) is deferred. See `actor-panic-isolation-findings.md`. This is
 early-phase, not fully shipped.
 
-## Two memories (a surviving concept, unbuilt)
+## Two memories (design — load-bearing concept, verbs unbuilt)
 
 One genuinely good idea from the ambient-rt line survives as a **concept**, decoupled from the
-ambient delivery mechanism that was rejected:
+ambient delivery mechanism that was rejected. Full design:
+[`two-memory-design.md`](two-memory-design.md).
 
 - **scratch** — cheap region/bump memory, bulk-freed, scoped to (at most) one behavior run;
   **never** escapes its scope, **never** crosses a send or lands in actor state.
 - **shared** — Arc-tracked heap; refcounted; the only memory that may cross an actor boundary.
 
 Actor state is constructed under the actor's own memory at spawn (not the spawner's), which
-kills cross-actor UAF by construction. Promotion (scratch→shared) is explicit and visible.
+kills cross-actor UAF by construction. Promotion (scratch→shared) is explicit via planned
+`.share(alloc)` / `.give(alloc)` verbs (see design doc).
 
-This is **unbuilt** and, when built, will be delivered through explicit capabilities (a scratch
-`Allocator` handed in), **not** an ambient thread-local `rt`. Nothing here is claimed as
-shipped.
+The **scratch-escape checker is shipped** (rejects spawner scratch in sends/state); promotion
+verbs and scratch capabilities are **unbuilt**.
 
 ## What is shipped vs unbuilt (no overclaiming)
 
@@ -125,20 +125,21 @@ shipped.
 - The multi-threaded actor pool + Arc-backed lifetimes + the static sendability checker.
 
 **In progress / unbuilt:**
-- **Writer → Result** (honest IO: `write` returning `Result`, surfacing EPIPE/ENOSPC instead of
-  swallowing). Design in [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md); `println`
-  stays best-effort during the transition (additive, no 314-site churn).
 - **`Spawner` capability** — spawn-as-a-Sys-capability (actor semantics already shipped; the
   capability surface is not).
-- **Two-memory scratch/shared runtime** — concept only, above.
+- **Two-memory promotion verbs** — `.share`/`.give` unbuilt; design in [`two-memory-design.md`](two-memory-design.md).
 - **Ambient-`println` retirement** — flipping call sites to `sys.stdout().write` in batches, a
-  later phase once the honest sink exists.
+  later phase once the honest sink exists (see [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md) transition plan).
+
+**Shipped (Sys phase 2):**
+- **Writer → Result** — `Writer.write` / `write_bytes` / `write_line` return `Result<i64, IoError>`;
+  `write_or_panic` for scripts. Ambient `println` remains best-effort during migration.
 
 ## See also
 
-- [`sys-migration-plan.md`](sys-migration-plan.md) — the execution plan (phasing, seed-risk
-  isolation, byte-exact gates).
-- [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md) — the print/IO → `Writer` + `Result`
-  step.
+- [`two-memory-design.md`](two-memory-design.md) — scratch vs shared, promotion verbs.
+- [`sys-phase2-print-writer.md`](sys-phase2-print-writer.md) — Sys phase 2: honest `Writer` +
+  `Result` print spine (shipped) and `println` migration plan.
+- `sys-migration-plan.md` (the full Sys execution plan) — **not yet written**.
 - Superseded (history, do not follow): `rt-scoped-runtime.md`, `pluggable-runtime-plan.md`,
   `scope-runtime-goal.md`, `actors-pony-zig.md`.

@@ -26,11 +26,11 @@ ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 
-.PHONY: zenc regen clean oracle oracle-fast setup-git resolve-seed
+.PHONY: zenc regen clean harness harness-fast setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # Built to a per-builder pid temp then atomically `mv`d into place: two concurrent `make` runs (e.g.
-# parallel `make oracle`) each compile their own temp and never see a half-written `$(ZENC)`, since a
+# parallel `make harness`) each compile their own temp and never see a half-written `$(ZENC)`, since a
 # direct `cc -o $(ZENC)` truncates-then-writes and a racing `./zenc` exec could hit a partial binary.
 zenc:
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
@@ -44,21 +44,21 @@ regen: zenc
 clean:
 	rm -f $(ZENC)
 
-# The Zen-native correctness oracle (tests/oracle.zen) — the self-hosted replacement for the pytest
+# The Zen-native correctness harness (tests/harness.zen) — the self-hosted replacement for the pytest
 # value/verdict harness. Build it with the freshly-built `zenc`, then run it from the repo ROOT (the
-# oracle drives `./zenc` + `tests/oracle_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
-# The oracle's exit code is the failing-case count, so `make oracle` fails iff any case fails.
-#   make -f bootstrap/Makefile oracle
-oracle: zenc
-	cd $(ROOT) && ZO=/tmp/zo_oracle.$$$$ && $(ZENC) build tests/oracle.zen -o $$ZO && $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+# harness drives `./zenc` + `tests/harness_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
+# The harness's exit code is the failing-case count, so `make harness` fails iff any case fails.
+#   make -f bootstrap/Makefile harness
+harness: zenc
+	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
 
-# Fast SMOKE subset of the oracle (~13s vs ~3min): runs only the quick deterministic correctness
-# suites (value + verdict) via ZEN_ORACLE_FAST and SKIPS the slow subprocess-heavy suites (modules /
+# Fast SMOKE subset of the harness (~13s vs ~3min): runs only the quick deterministic correctness
+# suites (value + verdict) via ZEN_HARNESS_FAST and SKIPS the slow subprocess-heavy suites (modules /
 # build / boundaries / misc / fuzz / fixpoint). For inner-loop iteration only — the full `make
-# oracle` above stays the merge gate. See tests/oracle.zen for which suites the flag selects.
-#   make -f bootstrap/Makefile oracle-fast
-oracle-fast: zenc
-	cd $(ROOT) && ZO=/tmp/zo_oracle_fast.$$$$ && $(ZENC) build tests/oracle.zen -o $$ZO && ZEN_ORACLE_FAST=1 $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+# harness` above stays the merge gate. See tests/harness.zen for which suites the flag selects.
+#   make -f bootstrap/Makefile harness-fast
+harness-fast: zenc
+	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
 
 # Register the local git merge driver that auto-resolves the generated seed (bootstrap/zenc.gen.c).
 # `.gitattributes` maps that path to `merge=zenseed`; this points the driver at scripts/zenseed-merge.sh.

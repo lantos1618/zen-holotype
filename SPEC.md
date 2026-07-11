@@ -4,18 +4,15 @@ This is the current-state spec for the self-hosted `zenc` compiler in this
 repository. It describes behavior implemented by the code and covered by tests,
 not every long-term idea in [VISION.md](VISION.md).
 
-The strongest executable references are:
+The strongest executable references are the Zen-native harness (no Python):
 
-- [tests/test_build.py](tests/test_build.py) for CLI, examples, std integration,
-  diagnostics, formatter, doc output, actors, and runtime behavior.
-- [tests/test_traits.py](tests/test_traits.py) for trait/impl conformance.
-- [tests/test_oracle.py](tests/test_oracle.py) and
-  [tests/_oracle_corpus.py](tests/_oracle_corpus.py) for accepted/rejected
-  language behavior through the binary oracle.
-- [tests/test_resolver_oracle.py](tests/test_resolver_oracle.py) and
-  [tests/test_user_imports.py](tests/test_user_imports.py) for import resolution.
-- [tests/test_primitive_boundaries.py](tests/test_primitive_boundaries.py) for
-  raw primitive boundaries.
+- [tests/harness.zen](tests/harness.zen) — entry that sums category fail counts.
+- [tests/harness_build.zen](tests/harness_build.zen) — CLI, examples, fixtures, diagnostics.
+- [tests/harness_verdict.zen](tests/harness_verdict.zen) — accept/reject + `error[kind]` pins.
+- [tests/harness_value.zen](tests/harness_value.zen) — stdout value cases.
+- [tests/harness_modules.zen](tests/harness_modules.zen) — imports / resolver / std coverage.
+- [tests/harness_boundaries.zen](tests/harness_boundaries.zen) — raw primitive boundaries.
+- [tests/harness_fuzz.zen](tests/harness_fuzz.zen) — malformed-input crash resistance.
 
 ## Source Files
 
@@ -78,8 +75,9 @@ the C boundary (`zenrt.c`) is byte-identical to the niladic case. `Sys`
 (`std.sys`) bundles narrow capabilities — `heap()` (the process `Allocator`),
 `stdout()`/`stderr()` (`Writer`s), `env()`, `clock()`, `fs()` — and the intended
 style is attenuation: a function takes the narrowest capability it needs (a
-`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` currently
-returns `i64`; a `Result`-returning print spine is a roadmap item.
+`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` returns
+`Result<i64, IoError>`; `write_or_panic` is the fatal script sink. Ambient `println` remains
+best-effort during migration (`docs/sys-phase2-print-writer.md`).
 
 ## Types
 
@@ -429,14 +427,19 @@ Concurrency support is stdlib-level today:
   with namespace-bound `runtime.sync` / `runtime.async` constructors;
 - `std.concurrent.sched`: small scheduler, with `try_run` / `try_run_in`
   for fallible scheduler flag allocation;
-- `std.concurrent.actor`: typed actor queue, `Receiver<M>`, `ActorRef<M>`,
-  `ReplyRef<T>`, `ActorEngine<M>`, `ActorCell<M>`, and
-  `ActorHandle<M, ActorT>`;
+- `std.concurrent.actor`: cooperative typed actors (inline drain on the caller
+  thread) — `Receiver<M>`, `ActorRef<M>`, `ReplyRef<T>`, `ActorEngine<M>`,
+  `ActorCell<M>`, and `ActorHandle<M, ActorT>`. `run` / `request` / `ask` are
+  same-thread; not scheduled on the pool.
+- `std.concurrent.pool_actor`: parallel typed actors on `std.concurrent.pool`
+  (`PooledHandle`, `spawn_actor`, typed `send`). Requires a concrete trampoline
+  stub per `(Msg, ActorT)` until the compiler can address generic instantiations.
 - `std.concurrent.cown`: owned FFI-handle examples, with namespace-bound
   `cown.buf` / `cown.try_buf` / `cown.file` / `cown.file_in` spellings;
-- `std.concurrent.pool`: a work-stealing thread pool that runs actors across N OS
-  cores on real pthreads + atomics; `std.thread` / `std.sync` are the OS-thread
-  and locking floor beneath it.
+- `std.concurrent.pool`: a multi-threaded actor pool that runs actors across N OS
+  cores on real pthreads + atomics (one global mutex-guarded run queue; work-stealing
+  deques are roadmap); `std.thread` / `std.sync` are the OS-thread and locking floor
+  beneath it.
 
 Public code should call runtime/actor APIs rather than raw coroutine checkpoint
 primitives. Actor draining checkpoints internally, while allocator parameters
@@ -473,13 +476,15 @@ then unwrap with `cell_r.expect("cell allocation")` (or keep the failure in the
 value flow with `.match` / `.or_return()`), where `actor` is a namespace bind
 for `std.concurrent.actor` and `heap` may come from namespace-bound
 `alloc.gpa()` (`alloc = std.mem.heap`).
-`ActorHandle<M, ActorT>` is the higher-level stateful actor wrapper. A program
-creates one with `actor.spawn(heap.addr(), 16, ActorState(...))`, which returns
+`ActorHandle<M, ActorT>` is the higher-level stateful actor wrapper for the
+**cooperative** path. A program creates one with
+`actor.spawn(heap.addr(), 16, ActorState(...))`, which returns
 `Result<ActorHandle<M, ActorT>, IoError>`.
 It sends typed messages with `handle.tell(message)`, drains its owned state with
-`handle.run()`, wraps request/reply flows through `handle.request(...)`, and
-releases storage with `handle.free(heap.addr())`. Actor state persists across
-multiple drains.
+`handle.run()` (inline on the caller), wraps request/reply flows through
+`handle.request(...)`, and releases storage with `handle.free(heap.addr())`.
+For parallel typed actors on the pool, use `std.concurrent.pool_actor` instead
+(see `examples/pool_actor_demo.zen`).
 `request` creates the `ReplyRef<T>`, calls a request callback that returns the
 typed message, for example `(reply) { .GetStats(reply) }`, enqueues it, drains
 the receiver, awaits the reply, and releases the reply storage. The lower-level
@@ -515,13 +520,13 @@ docs. It is a first-pass docs command, not a rich documentation generator.
 
 | Spec area | Primary tests |
 |---|---|
-| CLI build/run/check/project manifest | [tests/test_build.py](tests/test_build.py) |
-| Examples | [tests/test_build.py::test_all_examples_run](tests/test_build.py) |
-| Lexer/parser/bootstrap/fixpoint | [tests/test_bootstrap.py](tests/test_bootstrap.py), [tests/test_acid.py](tests/test_acid.py) |
-| Accepted/rejected core language behavior | [tests/test_oracle.py](tests/test_oracle.py) |
-| Crash-resistance fuzzing (malformed input) | [tests/oracle_fuzz.zen](tests/oracle_fuzz.zen) |
-| Traits and impl conformance | [tests/test_traits.py](tests/test_traits.py) |
-| Imports and resolver behavior | [tests/test_user_imports.py](tests/test_user_imports.py), [tests/test_resolver_oracle.py](tests/test_resolver_oracle.py) |
-| Std module import coverage | [tests/test_modules_oracle.py](tests/test_modules_oracle.py) |
-| Raw primitive boundaries | [tests/test_primitive_boundaries.py](tests/test_primitive_boundaries.py) |
-| Formatter and docs commands | [tests/test_build.py](tests/test_build.py) |
+| CLI build/run/check/project manifest | [tests/harness_build.zen](tests/harness_build.zen) |
+| Examples | [tests/harness_build.zen](tests/harness_build.zen) |
+| Lexer/parser/bootstrap/fixpoint | [tests/harness.zen](tests/harness.zen) (`fixpoint` suite) |
+| Accepted/rejected core language behavior | [tests/harness_verdict.zen](tests/harness_verdict.zen), [tests/harness_value.zen](tests/harness_value.zen) |
+| Crash-resistance fuzzing (malformed input) | [tests/harness_fuzz.zen](tests/harness_fuzz.zen) |
+| Traits and impl conformance | [tests/harness_verdict.zen](tests/harness_verdict.zen) |
+| Imports and resolver behavior | [tests/harness_modules.zen](tests/harness_modules.zen) |
+| Std module import coverage | [tests/harness_modules.zen](tests/harness_modules.zen) |
+| Raw primitive boundaries | [tests/harness_boundaries.zen](tests/harness_boundaries.zen) |
+| Formatter and docs commands | [tests/harness_build.zen](tests/harness_build.zen) |

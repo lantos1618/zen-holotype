@@ -1,12 +1,12 @@
 # Top-level convenience Makefile — pure forwarding to bootstrap/Makefile so a newcomer can type
-# plain `make` (build the compiler), `make oracle` (run the test oracle), etc. from the repo root
+# plain `make` (build the compiler), `make harness` (run the test harness), etc. from the repo root
 # without remembering the `-f bootstrap/Makefile` incantation. All real build logic lives in
 # bootstrap/Makefile; this file only delegates. CI uses `make -f bootstrap/Makefile <target>`
 # directly, so this wrapper never changes what CI builds.
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zenc regen oracle oracle-fast clean setup-git resolve-seed
+.PHONY: all zenc regen harness harness-fast clean setup-git resolve-seed
 
 # Default: build ./zenc.
 all: zenc
@@ -17,11 +17,11 @@ zenc:
 regen:
 	$(BOOT) regen
 
-oracle:
-	$(BOOT) oracle
+harness:
+	$(BOOT) harness
 
-oracle-fast:
-	$(BOOT) oracle-fast
+harness-fast:
+	$(BOOT) harness-fast
 
 clean:
 	$(BOOT) clean

@@ -31,7 +31,7 @@ map/filter/fold, callbacks, returned functions, builders — the bulk of "real" 
   doc); re-score usability; tee up the next big swing (type-sets).
 
 ## GATES (non-negotiable, hard-won this session)
-- Every PR: isolated `make oracle` ALL PASS + seed byte-exact fixpoint + `--build-self`
+- Every PR: isolated `make harness` ALL PASS + seed byte-exact fixpoint + `--build-self`
   (zero over-rejection on the compiler's own source) + examples/demos run unchanged.
 - **Ergonomics is a VETO**: no change that worsens the surface or adds hidden heap.
 - Serialize compiler-core (check/parse/genc = one writer per file); parallelize

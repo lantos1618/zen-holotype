@@ -127,19 +127,24 @@ shapes coexist:
   `stdout()`/`stderr()` fd-1/fd-2 `Writer`s, `env()` (argv + env vars), `clock()` (mono + wall
   time), `fs()` (file read/write). The design point is **attenuation** — a library function takes
   the narrowest capability it actually needs (`greet = (w: Writer) void`), never the whole `Sys`.
-- **Roadmap, not shipped:** `Writer.write` still returns `i64` (swallows `write(2)` errors);
-  making the print spine return `Result` is Sys phase 2 (design only; see the runtime source of
-  truth `docs/runtime-design.md`). Threading `Sys`/allocators explicitly is the model; the ambient-runtime
-  experiment (`std.rt`, `std.scope`) is being reworked toward ambient-within-scope, not adopted
-  as the model — see [MEMORY_MODEL.md](MEMORY_MODEL.md).
+- **`Writer` Result spine (Sys phase 2, shipped):** `Writer.write` / `write_bytes` / `write_line`
+  return `Result<i64, IoError>`; `write_or_panic` for scripts. Ambient `println` remains
+  best-effort during migration — see [`docs/sys-phase2-print-writer.md`](docs/sys-phase2-print-writer.md).
+  Threading `Sys`/allocators explicitly is the model; the ambient-runtime experiment (`std.rt`,
+  `std.scope`) is being reworked toward ambient-within-scope, not adopted as the model — see
+  [MEMORY_MODEL.md](MEMORY_MODEL.md) and [`docs/two-memory-design.md`](docs/two-memory-design.md).
 
 ## Actors & concurrency safety
-- **Actors** (`std.concurrent.actor`) — typed message enums, a `Receiver<M>` implemented via
-  `Type.impl(Receiver<M>, { receive = … })`, and `ActorRef<M>` / `ReplyRef<T>` / `ActorHandle<M, ActorT>`
-  wrappers. Sends are `send(handle, msg)` / fire-and-forget `tell`; request/reply threads a
-  `ReplyRef<T>`. Allocating constructors (`spawn`, `cell`, `engine`, `reply`) return `Result`.
-- **Real parallelism** — a work-stealing thread pool (`std.concurrent.pool`) runs actors across N
-  OS cores on real pthreads + atomics; `std.thread`/`std.sync` are the OS-thread + locking floor.
+- **Two actor surfaces (do not conflate):**
+  - **Cooperative** (`std.concurrent.actor`) — typed message enums, `Receiver<M>`,
+    `ActorRef` / `ReplyRef` / `ActorHandle`. `send` enqueues; `run` / `request` / `ask` drain
+    **inline on the caller thread** (optional coroutine checkpoint). Good for demos and
+    request/reply; **not** N-core parallel.
+  - **Parallel typed** (`std.concurrent.pool_actor`) — same `receive` shape, scheduled on
+    `std.concurrent.pool` workers. Requires one concrete trampoline stub per `(Msg, ActorT)`
+    (Zen cannot take the address of a generic fn yet). This is the KEEP path for real parallelism.
+- **Pool** (`std.concurrent.pool`) — multi-threaded actor run queue across N OS cores (global
+  mutex queue today; work-stealing deques are roadmap). `std.thread`/`std.sync` are the floor.
 - **Sendability is statically checked** (`compiler.check_validate`, the SENDABILITY pass):
   **move-on-send** — passing an owned `Own<T>` into a send transfers it, so the sender's binding
   is killed (a later use is `error`), which stops the double-free where both actors free the same
@@ -245,11 +250,11 @@ shapes coexist:
 - **`compiler.check` + `compiler.check_validate`** — the resolver and the `fits()` validator, in Zen.
   `check` fills the type information the parser can't (each `match`'s enum name, each
   constructor's enum type) by looking names up among a module's decls; `check_validate` adds
-  the validating pass whose exit code is the type-error count (the CHECK binary the oracle drives).
+  the validating pass whose exit code is the type-error count (the CHECK binary the harness drives).
 - **The loop is closed — the compiler is ordinary Zen.** `compiler.lex` → `compiler.parse*` → `compiler.check`
   → `compiler.genc` is the whole `zenc` pipeline, all ordinary Zen. Fed its **own** sources, `zenc`
   re-emits the committed `bootstrap/zenc.gen.c` byte-for-byte (the fixpoint). Correctness is the
-  **binary-only oracle** (`tests/`): emit/run parity, reject-parity, and the byte-exact
+  **binary-only harness** (`tests/`): emit/run parity, reject-parity, and the byte-exact
   reproduction — no second compiler to diff against, since the compiler reproduces itself.
 - **Zero-cost ambient:** the helpers are templates/generics, so importing `std` emits
   nothing unless a program actually uses them (they inline at the call site).
@@ -319,8 +324,8 @@ Plain emit mode skips the std-import loader and validator and writes C for one f
 - Two shipping backends (C + JS); the JS backend is the **computational subset** (i64/64-bit
   bitwise and scalar-through-`MutPtr` aliasing are deferred). An LLVM backend and the
   one-structure surface syntax from [VISION](VISION.md) are the *direction*, not the current state.
-- **`Writer.write` returns `i64`, not `Result`** — the print/IO spine still swallows `write(2)`
-  errors; making it honest is Sys phase 2 (roadmap, `docs/runtime-design.md`).
+- **`Writer.write` returns `i64`, not `Result`** — RESOLVED (Sys phase 2): `Writer.write` returns
+  `Result<i64, IoError>`. Ambient `println` migration remains open.
 - **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt` capability) and
   `std.scope` exist as an experiment, but the shipped direction is **explicit** capabilities —
   threaded allocators and a `Sys` at the entry. Reworking the ambient rt toward

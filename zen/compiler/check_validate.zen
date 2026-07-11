@@ -308,7 +308,7 @@ is_unresolved_trait_call = (env: Env, c: CallData) bool { (c.args.len > 0).match
 // redirect) and that is neither a free function nor an imported name — would emit a bare `area`
 // call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
 trait_recv_missing = (env: Env, c: CallData) bool { (c.args.len > 0 && env.decls.is_trait_method(c.fn) && env.decls.is_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({ true => eq(env.dispatch_name(c), c.fn) && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false, false => false }) }
-is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }    // explicit int -> f64 cast
+is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }
 // A fn's OWN params and locals SHADOW same-named top-level names in its body: a call through a
 // locally-bound name (e.g. a closure param `f` while a top-level `f` exists) must NEVER be judged
 // against the top-level fn / intrinsic / import — the emitted C scopes the local as the call target.
@@ -326,15 +326,15 @@ shadow_not_callable = (env: Env, fn: str) bool {
     (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
 }
 // Intrinsic arity must be checked before emission.
-check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => env.shadow_not_callable(c.fn).match ({ true => 1, false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }) }    // null_ptr() takes no operands
-store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }    // atomic_add_i64(p, delta) -> new value
-store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }    // atomic_store_i64(p, val) -> void
-store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }    // atomic_cas_i64(p, expected, desired) -> bool
+check_call = (env: Env, c: CallData) i32 { c.is_forbidden_raw_call().match ({ true => 1, false => env.is_unresolved_trait_call(c).match ({ true => 0, false => env.shadows_toplevel(c.fn).match ({ true => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => env.shadow_not_callable(c.fn).match ({ true => 1, false => 0 }) }), false => env.env_known_fn(c.fn).match ({ true => env.call_errs(c), false => c.fn.is_intrinsic().match ({ true => (c.args.len == c.fn.intrinsic_arity()).match ({ true => 0, false => 1 }), false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({ true => env.trait_recv_missing(c).match ({ true => 1, false => 0 }), false => env.var_or_global(c.fn).is_fnt().match ({ true => env.fnval_call_errs(c), false => 1 }) }) }) }) }) }) }) }
+store_writes_readonly = (env: Env, c: CallData) bool { (eq(c.fn, "store") && c.args.len == 2).match ({ true => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(), false => false }) }
+store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({ true => 1, false => 0 }) }
+store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos) }
 // every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
 is_deref_intrinsic = (fn: str) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_load_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
-derefs_nullable = (env: Env, c: CallData) bool { (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({ true => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(), false => false }) }    // atomic_fence() -> void
-null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({ true => 1, false => 0 }) }    // atomic_load_i64/load_i64/load/addr/cstr/malloc/sizeof/to_* (incl. to_f64) = 1
+derefs_nullable = (env: Env, c: CallData) bool { (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({ true => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(), false => false }) }
+null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({ true => 1, false => 0 }) }
 // Generic UFCS trait calls may need to defer even if a top-level fn has the same name.
 // `@malloc` is not a magic allocator; use an ordinary foreign function or allocator API.
 // Calls: local signatures are checked; imported/deferred trait names are accepted; unknowns reject.
@@ -779,8 +779,9 @@ enum_variants = (decls: [Decl], ename: str) [VariantDef] {
     found := no_variants()
     decls.loop((h, i, d) {
         found = d.match ({
-            .DEnum(ed) => eq(ed.name, ename).match ({ true => ed.variants, false => found }),
-            _          => found,
+            .DEnum(ed)   => eq(ed.name, ename).match ({ true => ed.variants, false => found }),
+            .DGenEnum(g) => eq(g.name, ename).match ({ true => g.variants, false => found }),
+            _            => found,
         })
     })
     found
@@ -852,7 +853,15 @@ enum_declares = (decls: [Decl], vn: str) bool {
     })
     f
 }
-mkenum_err = (env: Env, ty: str, variant: str) i32 { is_empty(ty).match ({ true => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }), false => 0 }) }
+// Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
+// `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
+// qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
+mkenum_err = (env: Env, ty: str, variant: str) i32 {
+    is_empty(ty).match ({ true => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }), false => {
+        vs := env.decls.enum_variants(ty)
+        (vs.len == 0).match ({ true => 0, false => vs.arm_known(variant).match ({ true => 0, false => 1 }) })
+    } })
+}
 // A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
 // Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
 // Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
@@ -2398,7 +2407,7 @@ check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 // RIGHT reason. It reuses every predicate from the count layer (same is_*_err logic), only
 // swapping each "+ 1" for "this error's kind". Zero new judgments → the count and the kind
 // agree exactly (kind != 0 iff count > 0). These are DISTINCT functions (kv_*/…_kind suffix);
-// they never touch check_module/check_linked, so the oracle's count exit code is untouched.
+// they never touch check_module/check_linked, so the harness's count exit code is untouched.
 //
 // Kind codes (small fixed set the task names). KNONE=0 means "no error".
 KNONE = () i32 { 0 }
@@ -4092,7 +4101,7 @@ check_module_or_return_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Dec
 // "unknown type". Runs ONLY in the driver check chain, on the FULLY-FLATTENED decls — where every
 // legitimate (incl. imported) type is present — so an undeclared name is genuinely undefined, not the
 // cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
-// part of check_module's count/kind (the oracle runs that on NON-flattened source), so the oracle is
+// part of check_module's count/kind (the harness runs that on NON-flattened source), so the harness is
 // untouched. Pointer/slice elements and generic args recurse; FnT internals are left to later checks.
 ut_has_tparam = (tparams: [Param], n: str) bool {
     f := false
@@ -4673,7 +4682,7 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
 }
 // the KIND of the FIRST error check_module would have counted, in the same order: dup-fn names
 // first, then each decl's body (DFunc) / impl (DImpl). Returns KNONE (0) for an accepting module.
-// A CHECK-KIND binary reads this; check_module's COUNT is untouched, so the oracle's verdict path
+// A CHECK-KIND binary reads this; check_module's COUNT is untouched, so the harness's verdict path
 // (which exits with the count) keeps working unchanged.
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := decls.kv_dup_name_kind()
@@ -5265,6 +5274,13 @@ ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, arms:
     })
     f
 }
+ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, items: [Expr], hop: bool) bool {
+    f := false
+    items.loop((h, i, it) {
+        f = a.ae_escapes(decls, locals, it.addr(), hop).match ({ true => true, false => f })
+    })
+    f
+}
 // ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
 // The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
 // in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
@@ -5291,6 +5307,7 @@ ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], name: str, e: Ptr<Expr>, dept
         .Match(m)      => a.ae_ret_valarms(decls, m.arms, name, depth),
         .Cond(d)       => a.ae_ret_yields(decls, name, d.t, depth) || a.ae_ret_yields(decls, name, d.e, depth),
         .Block(b)      => a.ae_ret_blockval(decls, b.stmts, name, depth),
+        .SliceLit(sd)  => a.ae_ret_items(decls, sd.items, name, depth),
         _              => false,
     })
 }
@@ -5305,6 +5322,13 @@ ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: str, 
     f := false
     arms.loop((h, i, ar) {
         f = a.ae_ret_yields(decls, name, ar.body, depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], items: [Expr], name: str, depth: i32) bool {
+    f := false
+    items.loop((h, i, it) {
+        f = a.ae_ret_yields(decls, name, it.addr(), depth).match ({ true => true, false => f })
     })
     f
 }
@@ -5395,6 +5419,7 @@ ae_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Ex
         .Match(m)      => a.ae_arms_escape(decls, locals, m.arms, hop),
         .Cond(d)       => a.ae_escapes(decls, locals, d.t, hop) || a.ae_escapes(decls, locals, d.e, hop),
         .Block(b)      => a.ae_block_val_escapes(decls, locals, b.stmts, hop),
+        .SliceLit(sd)  => a.ae_items_escape(decls, locals, sd.items, hop),
         _              => false,
     }) })
 }
@@ -5908,7 +5933,7 @@ sx_message = (a: MutPtr<Malloc>, code: i32, subject: str) str {
     tail := (code == KSCRATCHSEND()).match ({ true => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)", false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)" })
     a.gstr_string(256).gstr_append(a, subject).gstr_append(a, tail).gstr_finish(a)
 }
-sx_hint = (code: i32) str { (code == KSCRATCHSEND()).match ({ true => "construct it inside the actor, wrap it in Arc (`new_in(alloc, v)`) and send that, or send by value", false => "construct it inside the actor, wrap it in Arc (`new_in(alloc, v)`), or pass the state as plain values" }) }
+sx_hint = (code: i32) str { (code == KSCRATCHSEND()).match ({ true => "construct inside the actor, or promote with `.share(alloc)` (Arc) / `.give(alloc)` (iso move) — see docs/two-memory-design.md", false => "construct inside the actor, promote with `.share(alloc)` / `.give(alloc)`, or pass state as plain values — see docs/two-memory-design.md" }) }
 check_module_scratch_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: str) CheckDiagnostic {
     packed := a.check_module_scratch_kind(decls)
     (packed == 0).match ({ true => check_diagnostic_none(), false => {

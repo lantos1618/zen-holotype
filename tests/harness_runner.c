@@ -1,10 +1,10 @@
-/* Value-case runner for tests/oracle.zen (the Zen-native correctness oracle).
+/* Value-case runner for tests/harness.zen (the Zen-native correctness harness).
  *
- * The oracle runs `zenc emit <case.zen>` to produce the case's C body at /tmp/zo_body.c, then
+ * The harness runs `zenc emit <case.zen>` to produce the case's C body at /tmp/zo_body.c, then
  * compiles THIS file (which #includes that body) and runs it: main() prints `test()`'s integer to
- * stdout, which the oracle compares to the expected value. Mirrors tests/_oracle.py's _RUNNER + shim.
+ * stdout, which the harness compares to the expected value. Mirrors tests/_oracle.py's _RUNNER + shim.
  *
- * Build:  cc -std=gnu11 -w -I/tmp tests/oracle_runner.c -o /tmp/zo_prog   (-I/tmp finds zo_body.c)
+ * Build:  cc -std=gnu11 -w -I/tmp tests/harness_runner.c -o /tmp/zo_prog   (-I/tmp finds zo_body.c)
  */
 #include <stdint.h>
 #include <stdbool.h>

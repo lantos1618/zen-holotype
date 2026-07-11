@@ -21,11 +21,10 @@ is a `Result`/`Opt` value, propagated with `.or_return()` and branched with
 `.match`.
 
 The current runtime/capability source of truth is
-[`docs/runtime-design.md`](docs/runtime-design.md), which also names the loudest
-open "errors are values" gap: the print/IO spine (`println`/`print`/`Writer.write`)
-still returns `i64` and swallows `write(2)` errors (EPIPE/ENOSPC/EBADF). Making it
-return `Result` behind a `Writer` capability is Sys phase 2 — roadmap, not yet
-shipped.
+[`docs/runtime-design.md`](docs/runtime-design.md). The print/IO spine behind `Writer` returns
+`Result<i64, IoError>` (Sys phase 2, shipped — see
+[`docs/sys-phase2-print-writer.md`](docs/sys-phase2-print-writer.md)). Ambient `println`/`print`
+remain best-effort (`i64`) during the callsite migration.
 
 ## Runtime safety (trustworthy execution)
 

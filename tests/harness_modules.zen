@@ -1,9 +1,9 @@
-// tests/oracle_modules.zen — the CROSS-MODULE / import-resolution category of the Zen-native oracle.
-// Where oracle_value/oracle_verdict drive single-file `zenc emit`/`zenc check`, this file drives the
+// tests/harness_modules.zen — the CROSS-MODULE / import-resolution category of the Zen-native harness.
+// Where harness_value/harness_verdict drive single-file `zenc emit`/`zenc check`, this file drives the
 // REAL multi-file path: it writes a small PROJECT (several sibling .zen files) into a temp dir and runs
 // `./zenc run <entry>` / `./zenc check <entry>` / `./zenc emit <entry>` / `./zenc doc <module>`, so the
 // committed compiler's import loader (std.internal.resolve) + cross-module type-checker (check_linked)
-// are exercised end-to-end — the dimension the flat oracle structurally cannot reach.
+// are exercised end-to-end — the dimension the flat harness structurally cannot reach.
 //
 // It ports the FULL cross-module pytest suites (see PARITY map at the bottom):
 //   tests/test_user_imports.py      — sibling/namespace import loading + value + loader-error quality
@@ -33,7 +33,7 @@
 { new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
 { integer_in } = std.text.num
-{ zo_path, zo_cmd, zo_par_run } = oracle_lib
+{ zo_path, zo_cmd, zo_par_run } = harness_lib
 // one source file of a project: `name` is the basename (e.g. "p.zen"), `src` its full text.
 ModFile*: {
     name: str,
@@ -76,64 +76,64 @@ ModStdinCase*: {
 mod_dir = (mp: MutPtr<Malloc>) str { mp.zo_path("zo_mods/") }
 // concat two / three strings through an allocator-owned String (no fixed-buffer assumptions).
 join2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, a).expect("oracle: oom")
-    s = s.append_in(mp, b).expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, a).expect("harness: oom")
+    s = s.append_in(mp, b).expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 join3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, a).expect("oracle: oom")
-    s = s.append_in(mp, b).expect("oracle: oom")
-    s = s.append_in(mp, c).expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, a).expect("harness: oom")
+    s = s.append_in(mp, b).expect("harness: oom")
+    s = s.append_in(mp, c).expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // concat an arbitrary list of pieces through an allocator-owned String.
 joinv = (mp: MutPtr<Malloc>, parts: [str]) str {
-    s := mp.new_in().expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
     parts.loop((h, i, p) {
-        s = s.append_in(mp, p).expect("oracle: oom")
+        s = s.append_in(mp, p).expect("harness: oom")
     })
-    mp.finish_in(s).expect("oracle: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // ── source generators (for the recursion-depth / stack-growth stress cases) ──────────────────────
 // "v0* = () i32 { 0 }\n" … "v{n-1}* = () i32 { (i%10) }\n" — an n-decl module body.
 gen_decls = (mp: MutPtr<Malloc>, n: i32) str {
-    s := mp.new_in().expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
     i := 0
     @while (i < n) {
-        s = s.append_in(mp, "v").expect("oracle: oom")
-        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect("oracle: oom").finish_in(mp).expect("oracle: oom")).expect("oracle: oom")
-        s = s.append_in(mp, "* = () i32 { ").expect("oracle: oom")
-        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).expect("oracle: oom").finish_in(mp).expect("oracle: oom")).expect("oracle: oom")
-        s = s.append_in(mp, " }\n").expect("oracle: oom")
+        s = s.append_in(mp, "v").expect("harness: oom")
+        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect("harness: oom").finish_in(mp).expect("harness: oom")).expect("harness: oom")
+        s = s.append_in(mp, "* = () i32 { ").expect("harness: oom")
+        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).expect("harness: oom").finish_in(mp).expect("harness: oom")).expect("harness: oom")
+        s = s.append_in(mp, " }\n").expect("harness: oom")
         i = i + 1
     }
-    mp.finish_in(s).expect("oracle: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // "v0, v1, … v{n-1}" — a comma-separated import-head name list.
 gen_names = (mp: MutPtr<Malloc>, n: i32) str {
-    s := mp.new_in().expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
     i := 0
     @while (i < n) {
         (i > 0).match ({ true => {
-            s = s.append_in(mp, ", ").expect("oracle: oom")
+            s = s.append_in(mp, ", ").expect("harness: oom")
         } })
-        s = s.append_in(mp, "v").expect("oracle: oom")
-        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect("oracle: oom").finish_in(mp).expect("oracle: oom")).expect("oracle: oom")
+        s = s.append_in(mp, "v").expect("harness: oom")
+        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect("harness: oom").finish_in(mp).expect("harness: oom")).expect("harness: oom")
         i = i + 1
     }
-    mp.finish_in(s).expect("oracle: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // `chunk` repeated `n` times.
 gen_repeat = (mp: MutPtr<Malloc>, chunk: str, n: i32) str {
-    s := mp.new_in().expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
     i := 0
     @while (i < n) {
-        s = s.append_in(mp, chunk).expect("oracle: oom")
+        s = s.append_in(mp, chunk).expect("harness: oom")
         i = i + 1
     }
-    mp.finish_in(s).expect("oracle: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // fresh temp project dir, then every file written into it (paths are mod_dir + basename).
 write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
@@ -150,7 +150,7 @@ run_mod_value* = (mc: ModValCase) bool {
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
+    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     // `shell` now returns the DECODED exit code (WEXITSTATUS, or 128 + signal). A build/loader failure
     // surfaces as rc != 0.
     rc == mc.want
@@ -163,7 +163,7 @@ run_mod_verdict* = (mc: ModVerdictCase) bool {
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
+    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     mc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(mc.needle).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_mods_chk.txt")).match ({
         .Ok(txt) => txt.contains(mc.needle),
         .Err(e)  => false,
@@ -177,7 +177,7 @@ run_mod_emit* = (mc: ModEmitCase) bool {
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
+    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
         .Err(e)  => false,
         .Ok(txt) => {
@@ -201,7 +201,7 @@ run_mod_doc* = (mc: ModDocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     cmd := mp.join3("./zenc doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("oracle: shell")
+    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
         .Err(e)  => false,
         .Ok(txt) => {
@@ -221,7 +221,7 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_mods_stdin.zen"), mc.src, len(mc.src))
-    rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("oracle: shell")
+    rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("harness: shell")
     ok_rc := mc.should_succeed.match ({ true => rc == 0, false => rc != 0 })
     ok_rc.match ({ true => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
         .Err(e)  => false,
@@ -236,12 +236,12 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
         },
     }), false => false })
 }
-// ── PARALLEL module runners (dogfoods std.thread via oracle_lib's zo_par_run) ─────────────────────
-// Same three-phase shape as the single-file oracle_lib runners, but each case gets its OWN project dir
+// ── PARALLEL module runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────────────
+// Same three-phase shape as the single-file harness_lib runners, but each case gets its OWN project dir
 // `zo_mods<gid>/` (the serial runners reused one `zo_mods/` — fatal under parallelism). Each spawned
 // `./zenc run|check` is a distinct process writing pid-unique intermediates (/tmp/zenc_zd_<pid>.*), so
 // concurrent compiles never collide; only the project sources + captured results are gid-namespaced.
-mitoa = (mp: MutPtr<Malloc>, n: i64) str { mp.integer_in(n).expect("oracle: oom").finish_in(mp).expect("oracle: oom") }
+mitoa = (mp: MutPtr<Malloc>, n: i64) str { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
 mod_dir_id = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join2("zo_mods", mp.mitoa(gid))) }
 mod_rc_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_rc", mp.mitoa(gid), ".txt")) }
 mod_chk_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_chk", mp.mitoa(gid), ".txt")) }
@@ -316,14 +316,14 @@ run_mod_values = (name: str, cs: [ModValCase]) i32 {
 // forcing serial execution; now each case gets its OWN gid-namespaced project dir and the driver's baked
 // progdir points at THAT dir (deep_driver_src(kind, dir)), so the cases are disjoint and run concurrently.
 // Each driver's `zenc run` cc-compiles the whole resolver (~20s), so overlapping the 3 cases across the
-// pool is the single biggest oracle speedup. Every case wants exit 0 (`.to_exit()` on the assertion).
+// pool is the single biggest harness speedup. Every case wants exit 0 (`.to_exit()` on the assertion).
 // A DeepCase is the sibling module files + which resolver-API driver to generate (kind: 0=resolve_program_data
 // table, 1=resolve_parsed_program, 2=check_parsed_program); driver.zen is generated per-gid.
 DeepCase: {
     base_files: [ModFile],
     kind: i32,
 }
-deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: str) str { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => mp.deep_src_check(dir) }) }) }
+deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: str) str { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => (kind == 2).match ({ true => mp.deep_src_check(dir), false => mp.deep_src_check_all(dir) }) }) }) }
 deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
     mp.contents_in(mp.mod_rc_path(gid)).match ({
         .Ok(s)  => try_parse_int(s).match ({
@@ -467,7 +467,7 @@ run_mod_stdins = (name: str, cs: [ModStdinCase]) i32 {
     out("\n")
     fails
 }
-oracle_modules_run* = () i32 {
+harness_modules_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     z: str := ""    // a str-typed leading element so mixed literal/variable joinv arrays infer as [str]
@@ -1795,7 +1795,7 @@ oracle_modules_run* = () i32 {
     // These drive the loader's INTERNAL structures (the module_table, per-module ParsedProgram AST
     // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
     // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
-    // because the oracle runs `./zenc` from the repo root, so std resolves relative to the cwd.
+    // because the harness runs `./zenc` from the repo root, so std resolves relative to the cwd.
     dl := run_mod_deep("modules value (deep loader API: resolve_program_data / parsed_program / check)", [DeepCase(
         base_files: [ModFile(
             name: "helper.zen",
@@ -1835,6 +1835,15 @@ oracle_modules_run* = () i32 {
             src: "plain* = (a: i32) i32 { a }\n",
         )],
         kind: 2,
+    ), DeepCase(
+        base_files: [ModFile(
+            name: "helper.zen",
+            src: "value* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "left.zen",
+            src: "helper = helper\nthing* = () i32 { helper.value(1) }\n",
+        )],
+        kind: 3,
     )])
     // resolve_program_data: the ResolvedProgram.table holds every transitively-loaded namespace module
     //   (u/left,u/right,u/plain,u/helper) with per-module graphs, and the flat body is namespace-stripped.
@@ -1842,12 +1851,15 @@ oracle_modules_run* = () i32 {
     // check_parsed_program + root_link_decls: the graph-linked cross-module check accepts a well-typed
     //   program (0) and rejects both a namespace-qualified and a plain wrong-arity call (> 0); the root
     //   link set is exactly the 2 direct imports.
+    // check_all_parsed_modules + module_link_decls: validates EVERY module body against its import graph.
+    //   Root-only check passes (main calls left.thing()), but left's internal helper.value(1) arity
+    //   error is caught by the all-modules pass (> 0).
     v + d + e + dc + sd + dl
 }
 // ── deep-loader driver builders (paths injected at runtime) ──────────────────────────────────────
 // Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and
 // the entry inpath (mod_dir already ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
-// root is "." (the oracle's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
+// root is "." (the harness's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
 deep_src_table = (mp: MutPtr<Malloc>, dir: str) str {
     z: str := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_program_data } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    resolved := a.addr().resolve_program_data(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    table := resolved.table\n    left := table.module(\"u/left\")\n    helper := table.module(\"u/helper\")\n    ok := (table.count() == 5)\n        && table.has(\"u/left\") && table.has(\"u/right\") && table.has(\"u/plain\") && table.has(\"u/helper\")\n        && left.graph.has(\"thing\") && helper.graph.has(\"value\")\n        && resolved.flat.contains(\"left__thing\") && resolved.flat.contains(\"plain\")\n        && (!resolved.flat.contains(\"left = left\")) && (resolved.body_start <= resolved.body_end)\n    ok.to_exit()\n}\n"])
@@ -1860,22 +1872,26 @@ deep_src_check = (mp: MutPtr<Malloc>, dir: str) str {
     z: str := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, root_link_decls, check_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain(3) }\\n\"\n    bad_ns := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1) + plain(3) }\\n\"\n    bad_plain := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    nsp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_ns.zen\", bad_ns)\n    pp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_plain.zen\", bad_plain)\n    lib := a.addr().root_link_decls(gp)\n    ok := (lib.len == 2)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_parsed_program(nsp) > 0)\n        && (a.addr().check_parsed_program(pp) > 0)\n    ok.to_exit()\n}\n"])
 }
+deep_src_check_all = (mp: MutPtr<Malloc>, dir: str) str {
+    z: str := ""
+    mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, module_link_decls, check_parsed_program, check_all_parsed_modules } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\nmain = () i32 { left.thing() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    left := gp.module(\"u/left\")\n    lib := a.addr().module_link_decls(gp, left)\n    ok := (lib.len == 1)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_all_parsed_modules(gp) > 0)\n    ok.to_exit()\n}\n"])
+}
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a
 // Zen string literal in the GENERATED program text. The byte we look for is ASCII 10.
 esc_nl = (mp: MutPtr<Malloc>, s: str) str {
-    out := mp.new_in().expect("oracle: oom")
+    out := mp.new_in().expect("harness: oom")
     v: [u8] := s.view()
     i: i64 := 0
     n: i64 := len(s)
     @while (i < n) {
         (v[i] == 10).match ({ true => {
-            out = out.append_in(mp, "\\n").expect("oracle: oom")
+            out = out.append_in(mp, "\\n").expect("harness: oom")
         }, false => {
-            out = out.push_in(mp, v[i]).expect("oracle: oom")
+            out = out.push_in(mp, v[i]).expect("harness: oom")
         } })
         i = i + 1
     }
-    mp.finish_in(out).expect("oracle: oom")
+    mp.finish_in(out).expect("harness: oom")
 }
 edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1910,7 +1926,7 @@ edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 //   stdin no-program-dir mode. The THREE deep-loader tests — resolve_program_data /
 //   resolve_parsed_program / check_parsed_program (module_table, parsed-program AST boundary, graph-linked
 //   check) — ARE NOW PORTED as the `dl` batch above (driver programs with this run's mod_dir baked in as
-//   progdir and root "." = the oracle's repo-root cwd). The heap-layout-sensitive resolve_program_data bug
+//   progdir and root "." = the harness's repo-root cwd). The heap-layout-sensitive resolve_program_data bug
 //   the prior port cited ("unknown module 'left'" with more downstream string constants) no longer
 //   reproduces on the committed compiler — all three drivers pass reliably via `zenc run`.
 //   (Also covered-by-equivalent, not separately ported: the 81-file edge fan-out ≡ the 700-edge in-string
@@ -1925,6 +1941,6 @@ edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
 //   data structure", so they are not black-box-portable. The one real invariant among them —
 //   every std module type-checks through its transitive imports (0 cross-module errors) — is enforced
 //   every build: the committed zenc is compiled from the whole stdlib, so any cross-module type error
-//   breaks the bootstrap (CI's `make oracle` gate). Nothing user-observable is lost by deleting the
+//   breaks the bootstrap (CI's `make harness` gate). Nothing user-observable is lost by deleting the
 //   Python reimplementation and the tests that assert on it.
 // ════════════════════════════════════════════════════════════════════════════════════════════════

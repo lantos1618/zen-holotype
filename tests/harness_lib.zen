@@ -1,14 +1,14 @@
-// tests/oracle_lib.zen — the REUSABLE harness library for the Zen-native correctness oracle (the
+// tests/harness_lib.zen — the REUSABLE harness library for the Zen-native correctness harness (the
 // self-hosted replacement for the pytest value/verdict harness). A category test file imports this,
 // declares its cases as Zen data, and calls the batch runners — NO Python anywhere; the compiler
 // tests itself, in itself, by driving the committed `zenc` binary via std.io.
 //
-// ── HOW TO WRITE A CATEGORY FILE (tests/oracle_<cat>.zen) ────────────────────────────────────────
+// ── HOW TO WRITE A CATEGORY FILE (tests/harness_<cat>.zen) ────────────────────────────────────────
 //
-//   { VCase, VerdictCase, run_values, run_verdicts } = oracle_lib
+//   { VCase, VerdictCase, run_values, run_verdicts } = harness_lib
 //
-//   // Export ONE uniquely-named entry `oracle_<cat>_run*` returning this category's fail count.
-//   oracle_<cat>_run* = () i32 {
+//   // Export ONE uniquely-named entry `harness_<cat>_run*` returning this category's fail count.
+//   harness_<cat>_run* = () i32 {
 //       v := run_values("<cat> value", [
 //           VCase(src: "test* = () i64 { 6 * 7 }", want: "42"),
 //           // ... `src` defines `test* = () iNN { … }`; the emitted program must print `want`.
@@ -23,7 +23,7 @@
 //   }
 //
 // A value-only category returns just `run_values(...)`; a verdict-only one returns `run_verdicts(...)`.
-// Then tests/oracle.zen flat-imports each `oracle_<cat>_run` (unique names never collide) and sums them.
+// Then tests/harness.zen flat-imports each `harness_<cat>_run` (unique names never collide) and sums them.
 { Malloc, malloc, free } = std.mem.alloc
 { out, save, contents_in, shell } = std.io.file
 { eq, len, contains, is_empty, starts_with, try_parse_int } = std.text.str
@@ -33,68 +33,68 @@
 { getpid } = std.c.libc
 thread = std.thread    // NAMESPACED: std.thread.join collides in the flat namespace with std.text.str.join / std.path.join
 // ── PER-RUN UNIQUE TEMP NAMESPACE (concurrency safety) ────────────────────────────────────────────
-// `make oracle` is run concurrently all the time (parallel agents). The hazard is shared `/tmp`
+// `make harness` is run concurrently all the time (parallel agents). The hazard is shared `/tmp`
 // paths: if two runs touched the SAME fixed file, they would clobber each other mid-flight →
 // nondeterministic failures. Two layers of scratch state, both now PER-RUN/PER-PROCESS unique:
 //
-//   (1) TEST scratch files: every oracle PROCESS derives a private scratch dir `/tmp/zo.<pid>/`
+//   (1) TEST scratch files: every harness PROCESS derives a private scratch dir `/tmp/zo.<pid>/`
 //       (getpid is constant for the whole run) and threads it through every temp path — direct
 //       std.io writes via `zo_path`, shell pipelines via `zo_cmd` (which binds `$ZT` to the dir so a
 //       literal command body can interpolate it). Unique dirs => no clobber; `zo_cleanup` removes it.
 //
 //   (2) COMPILER scratch files: `zenc emit/check/build` write their intermediate C+binary to
 //       PID-NAMESPACED paths (driver.zen `/tmp/zenc_zd_<pid>.c`, `/tmp/zenc_zd_<pid>.bin`), and each
-//       `./zenc` the oracle spawns is a distinct process with a distinct pid — so two concurrent
+//       `./zenc` the harness spawns is a distinct process with a distinct pid — so two concurrent
 //       compiles can never share an intermediate file. (This used to require a global `flock` on
 //       `/tmp/zo_zenc.lock` serializing every zenc compile — back when the compiler used FIXED
 //       `/tmp/zenc_zd.*` paths. Now that those paths are pid-unique the lock is redundant; it was
-//       removed because it had been forcing N concurrent `make oracle` runs to execute strictly
+//       removed because it had been forcing N concurrent `make harness` runs to execute strictly
 //       one-at-a-time. Per-run uniqueness gives the same correctness with full parallelism.)
 // the private scratch directory for this run, e.g. `/tmp/zo.12345` (no trailing slash).
 zo_dir* = (mp: MutPtr<Malloc>) str {
-    b := mp.new_in().expect("oracle: oom")
-    b = b.append_in(mp, "/tmp/zo.").expect("oracle: oom")
-    b = b.append_in(mp, mp.finish_in(mp.integer_in(getpid().to_i64()).expect("oracle: oom")).expect("oracle: oom")).expect("oracle: oom")
-    mp.finish_in(b).expect("oracle: oom")
+    b := mp.new_in().expect("harness: oom")
+    b = b.append_in(mp, "/tmp/zo.").expect("harness: oom")
+    b = b.append_in(mp, mp.finish_in(mp.integer_in(getpid().to_i64()).expect("harness: oom")).expect("harness: oom")).expect("harness: oom")
+    mp.finish_in(b).expect("harness: oom")
 }
-// build `<zo_dir>/<name>` — a scratch path private to this oracle run (for std.io save/contents_in).
+// build `<zo_dir>/<name>` — a scratch path private to this harness run (for std.io save/contents_in).
 zo_path* = (mp: MutPtr<Malloc>, name: str) str {
-    b := mp.new_in().expect("oracle: oom")
-    b = b.append_in(mp, mp.zo_dir()).expect("oracle: oom")
-    b = b.append_in(mp, "/").expect("oracle: oom")
-    b = b.append_in(mp, name).expect("oracle: oom")
-    mp.finish_in(b).expect("oracle: oom")
+    b := mp.new_in().expect("harness: oom")
+    b = b.append_in(mp, mp.zo_dir()).expect("harness: oom")
+    b = b.append_in(mp, "/").expect("harness: oom")
+    b = b.append_in(mp, name).expect("harness: oom")
+    mp.finish_in(b).expect("harness: oom")
 }
 // wrap a shell command body so it can use `$ZT` for the private scratch dir; the dir is (re)created
 // first so any command can write into it even before a std.io save runs. No cross-run lock is needed:
 // the body's own scratch lives under `$ZT` (per-pid) and any `zenc` it spawns writes pid-namespaced
-// intermediates (`/tmp/zenc_zd_<pid>.*`), so concurrent oracle runs never collide — they run fully
+// intermediates (`/tmp/zenc_zd_<pid>.*`), so concurrent harness runs never collide — they run fully
 // in parallel.
 zo_cmd* = (mp: MutPtr<Malloc>, body: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "ZT=").expect("oracle: oom")
-    s = s.append_in(mp, mp.zo_dir()).expect("oracle: oom")
-    s = s.append_in(mp, "; mkdir -p \"$ZT\"; ").expect("oracle: oom")
-    s = s.append_in(mp, body).expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "ZT=").expect("harness: oom")
+    s = s.append_in(mp, mp.zo_dir()).expect("harness: oom")
+    s = s.append_in(mp, "; mkdir -p \"$ZT\"; ").expect("harness: oom")
+    s = s.append_in(mp, body).expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
-// create the private scratch dir (idempotent); call once at oracle startup before any std.io save.
+// create the private scratch dir (idempotent); call once at harness startup before any std.io save.
 zo_ensure* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    shell(mp.zo_cmd("true")).expect("oracle: shell")
+    shell(mp.zo_cmd("true")).expect("harness: shell")
 }
-// remove the private scratch dir; call once at oracle teardown.
+// remove the private scratch dir; call once at harness teardown.
 zo_cleanup* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "rm -rf ").expect("oracle: oom")
-    s = s.append_in(mp, mp.zo_dir()).expect("oracle: oom")
-    shell(mp.finish_in(s).expect("oracle: oom")).expect("oracle: shell")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "rm -rf ").expect("harness: oom")
+    s = s.append_in(mp, mp.zo_dir()).expect("harness: oom")
+    shell(mp.finish_in(s).expect("harness: oom")).expect("harness: shell")
 }
 // ── PARALLEL CASE EXECUTION (dogfoods std.thread) ─────────────────────────────────────────────────
-// The oracle's wall-time is process-spawn bound: each case forks `./zenc` (+ `cc` + a test binary),
+// The harness's wall-time is process-spawn bound: each case forks `./zenc` (+ `cc` + a test binary),
 // and a single zenc build is ~0.08s, so the cost is the ~1000× SERIAL fork, not the compiler. We keep
 // every case's PASS/FAIL decision in Zen (unchanged, so the verdict is byte-identical to serial) and
 // parallelize only the expensive subprocess step, in three phases per suite:
@@ -110,14 +110,14 @@ zo_cleanup* = () i32 {
 // PRIVATE include dir `<$ZT>/d<gid>/` so the runner's fixed `#include "zo_body.c"` never collides.
 NWORKERS_FALLBACK := 8    // used only if `nproc` can't be read
 // integer → allocator-owned str (decimal), for building per-case paths/commands.
-zo_itoa* = (mp: MutPtr<Malloc>, n: i64) str { mp.integer_in(n).expect("oracle: oom").finish_in(mp).expect("oracle: oom") }
+zo_itoa* = (mp: MutPtr<Malloc>, n: i64) str { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
 // concat a list of pieces through an allocator-owned String.
 zo_join* = (mp: MutPtr<Malloc>, parts: [str]) str {
-    s := mp.new_in().expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
     parts.loop((h, i, p) {
-        s = s.append_in(mp, p).expect("oracle: oom")
+        s = s.append_in(mp, p).expect("harness: oom")
     })
-    mp.finish_in(s).expect("oracle: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
 // an ABSOLUTE per-case scratch path `<zo_dir>/<prefix><gid><suffix>` (used by BOTH the Zen-side save and
 // the shell command, so no `$ZT` interpolation is needed — the command is fully self-contained).
@@ -213,13 +213,13 @@ DiagCase*: {
 }
 // build the diagnostic needle `error[<kind>]` for a kind label.
 kind_needle = (mp: MutPtr<Malloc>, kind: str) str {
-    s := mp.new_in().expect("oracle: oom")
-    s = s.append_in(mp, "error[").expect("oracle: oom")
-    s = s.append_in(mp, kind).expect("oracle: oom")
-    s = s.append_in(mp, "]").expect("oracle: oom")
-    mp.finish_in(s).expect("oracle: oom")
+    s := mp.new_in().expect("harness: oom")
+    s = s.append_in(mp, "error[").expect("harness: oom")
+    s = s.append_in(mp, kind).expect("harness: oom")
+    s = s.append_in(mp, "]").expect("harness: oom")
+    mp.finish_in(s).expect("harness: oom")
 }
-// VALUE: emit C for the case, compile it with tests/oracle_runner.c, run it, compare the printed int
+// VALUE: emit C for the case, compile it with tests/harness_runner.c, run it, compare the printed int
 // to `want`. /tmp/zo_out.txt is cleared first so a stale value can't masquerade as a pass when emit
 // or cc fails (the `&&` chain then never runs the program).
 run_value* = (vc: VCase) bool {
@@ -227,7 +227,7 @@ run_value* = (vc: VCase) bool {
     mp := m.addr()
     save(mp.zo_path("zo_case.zen"), vc.src, len(vc.src))
     save(mp.zo_path("zo_out.txt"), "", 0)
-    shell(mp.zo_cmd("./zenc emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/oracle_runner.c -o $ZT/zo_prog 2>/dev/null && $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
+    shell(mp.zo_cmd("./zenc emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/harness_runner.c -o $ZT/zo_prog 2>/dev/null && $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
     mp.contents_in(mp.zo_path("zo_out.txt")).match ({
         .Ok(got) => eq(got, vc.want),
         .Err(e)  => false,
@@ -239,7 +239,7 @@ run_verdict* = (vc: VerdictCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("oracle: shell")
+    rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
     vc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(vc.kind).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
         .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
         .Err(e)  => false,
@@ -251,7 +251,7 @@ run_diag* = (dc: DiagCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("oracle: shell")
+    rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
     (rc == 0).match ({ true => false, false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
         .Ok(txt) => {
             all := true
@@ -271,7 +271,7 @@ fixpoint_ok* = () bool {
     m := Malloc(_: 0)
     mp := m.addr()
     shell(mp.zo_cmd("./zenc --build-self $ZT/zo_gen_after.c . 2>/dev/null"))
-    same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("oracle: shell")
+    same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("harness: shell")
     same == 0
 }
 // REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. Use when a caller
@@ -298,7 +298,7 @@ zo_value_cmd = (mp: MutPtr<Malloc>, gid: i64) str {
     dir := mp.zo_idpath("d", gid, "")
     prog := mp.zo_idpath("p", gid, "")
     outp := mp.zo_idpath("o", gid, ".txt")
-    mp.zo_join([z, "mkdir -p ", dir, "; ./zenc emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/oracle_runner.c -o ", prog, " 2>/dev/null && ", prog, " > ", outp, " 2>/dev/null; true"])
+    mp.zo_join([z, "mkdir -p ", dir, "; ./zenc emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/harness_runner.c -o ", prog, " 2>/dev/null && ", prog, " > ", outp, " 2>/dev/null; true"])
 }
 // VALUE per-case check (Phase C): the captured program output must equal `want`. A missing/empty file
 // (emit or cc failed → the `&&` chain never ran the program) can't equal `want`, so it FAILS — exactly
