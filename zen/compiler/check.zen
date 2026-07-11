@@ -910,11 +910,29 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
 // Stamp enum constructors with their concrete generic instance when needed.
 resolve_mkenum = (a: MutPtr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str, payload: Ptr<Expr>) Ptr<Expr> {
     p := a.resolve_expr(env.clr_exp(), payload)
-    (etargs.len > 0).match ({ true => a.cenode(mkenumg(ety, emty, etargs, variant, p)), false => eq(ety, "").match ({ true => a.resolve_mkenum_fresh(env, variant, p), false => a.cenode(mkenumg(ety, emty, no_tys(), variant, p)) }) })
+    (etargs.len > 0).match ({ true => {
+        p2 := a.restamp_enum_payload(env, ety, etargs, variant, p)
+        a.cenode(mkenumg(ety, emty, etargs, variant, p2))
+    }, false => eq(ety, "").match ({ true => a.resolve_mkenum_fresh(env, variant, p), false => a.cenode(mkenumg(ety, emty, no_tys(), variant, p)) }) })
 }
 resolve_mkenum_fresh = (a: MutPtr<Malloc>, env: Env, variant: str, p: Ptr<Expr>) Ptr<Expr> {
     inst := env.enum_inst_mk(variant, p)
-    a.cenode(mkenumg(inst.base, inst.mty, inst.targs, variant, p))
+    p2 := a.restamp_enum_payload(env, inst.base, inst.targs, variant, p)
+    a.cenode(mkenumg(inst.base, inst.mty, inst.targs, variant, p2))
+}
+// A multi-field variant payload lowers to a positional anon struct whose tparams mirror the enum's.
+// resolve_genlit_bare infers the anon instance from the literal init types (integer literals → i32),
+// which can disagree with the enum instance (Tree<i64>, Two<i32,i64>). Re-stamp the payload
+// MakeStruct with the monomorphized payload type from the enum's tparam→arg map — same rebuild as
+// compiler.mono.mono_payload, but on the constructor side so collect_ty discovers one instance.
+restamp_enum_payload = (a: MutPtr<Malloc>, env: Env, ename: str, etargs: [Ty], variant: str, p: Ptr<Expr>) Ptr<Expr> {
+    load(p).match ({
+        .MakeStruct(sd) => env.enum_payload_mono_ty(ename, etargs, variant).match ({
+            .Generic(cg) => eq(cg.name, sd.ty).match ({ true => a.cenode(mkstructg_at(sd.ty, cg.mangled, cg.args, sd.inits, sd.pos)), false => p }),
+            _             => p,
+        }),
+        _ => p,
+    })
 }
 resolve_mktag = (a: MutPtr<Malloc>, env: Env, ety: str, emty: str, etargs: [Ty], variant: str) Ptr<Expr> { (etargs.len > 0).match ({ true => a.emit_tag_or_default(env, ety, emty, etargs, variant), false => eq(ety, "").match ({ true => a.resolve_mktag_fresh(env, variant), false => a.emit_tag_or_default(env, ety, emty, no_tys(), variant) }) }) }
 resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: str) Ptr<Expr> {
@@ -925,7 +943,11 @@ resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: str) Ptr<Expr> {
 // payload constructor with the baked-in constant; otherwise the bare tag.
 emit_tag_or_default = (a: MutPtr<Malloc>, env: Env, base: str, mty: str, targs: [Ty], variant: str) Ptr<Expr> {
     def := env.didx.idx_variant_default(env.decls, base, variant)
-    def.is_expr_null().match ({ true => a.cenode(mktagg(base, mty, targs, variant)), false => a.cenode(mkenumg(base, mty, targs, variant, a.resolve_expr(env.clr_exp(), def))) })
+    def.is_expr_null().match ({ true => a.cenode(mktagg(base, mty, targs, variant)), false => {
+        p := a.resolve_expr(env.clr_exp(), def)
+        p2 := a.restamp_enum_payload(env, base, targs, variant, p)
+        a.cenode(mkenumg(base, mty, targs, variant, p2))
+    } })
 }
 // Keep concrete slice element types across re-resolve.
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty { existing.is_void_ty().match ({ true => env.infer_expr(seq).elem_of(), false => existing }) }
@@ -1130,7 +1152,30 @@ subj_variant_payload* = (env: Env, t: Ty, variant: str) Ty {
         _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant),
     })
 }
-gsubst = (pty: Ty, env: Env, g: GenericData) Ty { env.a.subst_ty_in(env.decls.find_genenum(g.name).tparams, g.args, pty) }
+gsubst = (pty: Ty, env: Env, g: GenericData) Ty {
+    ged := env.decls.find_genenum(g.name)
+    sub := env.a.subst_ty_in(ged.tparams, g.args, pty)
+    sub.match ({
+        .Named(n) => {
+            gsd := env.decls.gstruct_of(n)
+            is_empty(gsd.name).match ({ true => sub, false => {
+                tys := env.a.tbuf(gsd.tparams.len)
+                gsd.tparams.loop((h, i, tp) {
+                    tys[i] = env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name))
+                })
+                tgeneric(n, tys, env.a.mangle_str_in(n, tys))
+            } })
+        },
+        _ => sub,
+    })
+}
+enum_payload_mono_ty = (env: Env, ename: str, etargs: [Ty], variant: str) Ty {
+    env.decls.find_genenum(ename).gen_variant_payload(variant).gsubst(env, GenericData(
+        name: ename,
+        args: etargs,
+        mangled: env.a.mangle_str_in(ename, etargs),
+    ))
+}
 // Fill match enum name and choose pointer/value tag access.
 resolve_match = (a: MutPtr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
     subj2 := a.resolve_expr(env.clr_exp(), m.subj)
