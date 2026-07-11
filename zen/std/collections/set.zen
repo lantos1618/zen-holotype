@@ -57,8 +57,7 @@
 // module's `union` after flattening.
 //
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
-{ Allocator, try_acquire, DynAlloc } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form
-{ dyn_current } = std.rt    // narrow the ambient rt to an Allocator ONCE — the AMBIENT-FORM surface below draws from it
+{ Allocator, try_acquire, DynAlloc, dyn_heap } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form
 Set*<T>: {
     elems: RawPtr<u8>,
     idx: RawPtr<u8>,
@@ -482,7 +481,7 @@ ASet*<T>: {
 // EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `ASet<T>` bound to a
 // caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw (docs/runtime-design.md:
 // explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
-// ambient draw (`rt.dyn_current()`) on the set construction path.
+// process-heap draw (`dyn_heap()`) on the set construction path.
 new_in*<T> = (a: DynAlloc) ASet<T> {
     da := a
     sr: Result<Set<T>, IoError> := empty(da.addr())
@@ -492,12 +491,12 @@ new_in*<T> = (a: DynAlloc) ASet<T> {
     )
 }
 // a zero-element ambient `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
-// `s: ASet<i64> := set.new()`. The ambient rt is narrowed to an allocator ONCE here and stored for the
+// `s: ASet<i64> := set.new()`. The process heap is drawn ONCE here (as a DynAlloc) and stored for the
 // life of the set. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
 // std.text.string's generic `new_in<A>(MutPtr<A>)` once both flatten together; qualified `set.new_in`
 // stays the external real path).
 new*<T> = () ASet<T> {
-    a := dyn_current()
+    a := dyn_heap()
     sr: Result<Set<T>, IoError> := empty(a.addr())
     ASet<T>(
         inner: sr.expect("set.new: out of memory"),
@@ -518,10 +517,10 @@ from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
         alloc: a,
     )
 }
-// an ambient `ASet<T>` seeded from a slice. Narrow the current rt once; `from_in`'s body is inlined
+// an ambient `ASet<T>` seeded from a slice. Narrow the process heap once; `from_in`'s body is inlined
 // (no bare `from_in` call — same string-`new_in` collision avoidance).
 from*<T> = (xs: [T]) ASet<T> {
-    a := dyn_current()
+    a := dyn_heap()
     sr: Result<Set<T>, IoError> := empty(a.addr())
     st := sr.expect("set.from: out of memory")
     xs.loop((h, i, x) {

@@ -18,10 +18,10 @@ and ownership APIs.
 > **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt`
 > capability with `rt.alloc`/`rt.with`) and `std.scope` exist as an experiment
 > toward scoped runtimes, but the shipped, documented model is the explicit one
-> above. A design review flagged the "ambient rt on every allocating function"
-> shape as unsound/noisy (`docs/runtime-design.md`); the direction
-> is "ambient-within-scope, explicit-at-boundary", which is roadmap, not the
-> current rule. Read allocation as explicit unless a signature says otherwise.
+> above. The A-wrapper convenience constructors (`vec.new`, `set.new`, `hmap.new`,
+> and their `from`/`from` variants) no longer draw from `std.rt` — they capture the
+> process heap once via `dyn_heap()` at construction and store that `DynAlloc` for
+> the container's lifetime. `new_in`/`from_in` remain the explicit real paths.
 
 String bytes carry their own provenance discipline — immortal `text`, borrowed
 `view`/`Cstr`, and the heap-owned `String` (freed through the allocator that owns
