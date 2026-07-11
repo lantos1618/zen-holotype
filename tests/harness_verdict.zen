@@ -1699,7 +1699,6 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "escape",
     ), VerdictCase(
-        // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
         src: "leak* = () [MutPtr<i32>] {\n    x := 5\n    [x.addr()]\n}\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "escape",
@@ -1940,46 +1939,47 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
         src: "rand = std.rand\ntest* = () i32 { r := rand.seed(1)  to_i32(r.next() % 1000) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // no over-accept: temp receiver seed(1).next() stays rejected (not an lvalue).
         src: "rand = std.rand\ntest* = () i32 { to_i32(rand.seed(1).next() % 1000) }",
         should_pass: false,
         kind: "arg-type",
     ), VerdictCase(
-        // census: Color.Purple passed check then ICEd at cc (undeclared Color_Purple).
         src: "Color*: Red | Blue\ntest* = () i32 { c := Color.Purple  0 }",
         should_pass: false,
         kind: "undefined-name",
     ), VerdictCase(
-        // no over-rejection: a valid qualified tag still accepts.
         src: "Color*: Red | Blue\ntest* = () i32 { c := Color.Red  0 }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        // same hole on a payload ctor: Color.Purple(1) must reject before emit.
         src: "Color*: Red | Blue(i32)\ntest* = () i32 { c := Color.Purple(1)  0 }",
         should_pass: false,
         kind: "undefined-name",
     ), VerdictCase(
-        // generic enum: Result.Bogus must reject (enum_variants covers DGenEnum).
         src: "{ Result, IoError } = std.core.result\ntest* = () i32 { r: Result<i32, IoError> := Result.Bogus  0 }",
         should_pass: false,
         kind: "undefined-name",
     ), VerdictCase(
-        // census: undefined module member in a UFCS chain (os.env) — positioned reject at check, not cc ICE.
         src: "os = std.os\ntest* = () i32 { os.env(\"PATH\")  0 }",
         should_pass: false,
         kind: "undefined-name",
     ), VerdictCase(
-        // MutPtr param mismatch on a non-lvalue literal — gate at check, not cc ICE.
         src: "f* = (p: MutPtr<i64>) i64 { p.load() }\ntest* = () i32 { to_i32(f(5)) }",
         should_pass: false,
         kind: "arg-type",
     )])
+    // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
+    // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
+    // no over-accept: temp receiver seed(1).next() stays rejected (not an lvalue).
+    // census: Color.Purple passed check then ICEd at cc (undeclared Color_Purple).
+    // no over-rejection: a valid qualified tag still accepts.
+    // same hole on a payload ctor: Color.Purple(1) must reject before emit.
+    // generic enum: Result.Bogus must reject (enum_variants covers DGenEnum).
+    // census: undefined module member in a UFCS chain (os.env) — positioned reject at check, not cc ICE.
+    // MutPtr param mismatch on a non-lvalue literal — gate at check, not cc ICE.
     // BRICK 1 discriminating PAIR (docs/effects-as-types-design.md §4): identical program modulo the
     // pointer KIND at one nested leaf. A deeply-frozen `Outer→Inner→scalars` payload (mode `frozen`,
     // reaches no MutPtr) is ACCEPTED — the runtime twin is send_frozen_payload_accepted.zen.

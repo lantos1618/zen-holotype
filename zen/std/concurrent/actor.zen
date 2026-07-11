@@ -86,12 +86,14 @@ ReplyRef*<T>: {
         reply.ready.store_i64(1)
         true
     }
-    // Cooperative only: meaningful after a same-thread `run`/`request` drain. Not pool-safe.
-    ready = (reply: ReplyRef<T>) bool { reply.ready.load_i64() == 1 }
-    // Reads the reply value after the caller has already drained (request/ask call `run` first).
-    // Does NOT spin on `ready` — under the cooperative model the drain is synchronous, so the
-    // value is already written. A pool-aware future would park; this path never will.
+    ready = (reply: ReplyRef<T>) bool {
+        // Cooperative only: meaningful after a same-thread `run`/`request` drain. Not pool-safe.
+        reply.ready.load_i64() == 1
+    }
     await<A> = (reply: ReplyRef<T>, alloc: MutPtr<A>) T {
+        // Reads the reply value after the caller has already drained (request/ask call `run` first).
+        // Does NOT spin on `ready` — under the cooperative model the drain is synchronous, so the
+        // value is already written. A pool-aware future would park; this path never will.
         vals := reply.values()
         value := vals[0]
         alloc.release(reply.value)
@@ -244,8 +246,8 @@ ActorHandle*<M, ActorT>: {
             } })
         })
     }
-    // Cooperative RPC: enqueue + inline `run` + read reply. Blocks the caller; not pool-parallel.
     request<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, make: (ReplyRef<T>) M) Result<T, IoError> {
+        // Cooperative RPC: enqueue + inline `run` + read reply. Blocks the caller; not pool-parallel.
         r: Result<ReplyRef<T>, IoError> := alloc.reply()
         r.match ({
             .Ok(reply_to) => {
