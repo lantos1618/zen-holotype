@@ -17,6 +17,7 @@
 // outside the alphabet (an out-of-place `=` counts as a bad byte).
 { Allocator } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
+{ view } = std.text.str
 ENC_BAD_LEN* := 22    // EINVAL — input length is not a valid base64/hex codeword multiple
 ENC_BAD_CHAR* := 84    // EILSEQ — a byte outside the alphabet (or a misplaced `=` pad)
 // ── base64 ────────────────────────────────────────────────────────────────────
@@ -30,7 +31,7 @@ b64_pad = (sv: [u8]) i64 {
     (sv[n - 1] == '=').match ({ true => (sv[n - 2] == '=').match ({ true => 2, false => 1 }), false => 0 })
 }
 // base64-encode `data`. Output length is 4*ceil(n/3) with `=` padding; empty input yields "".
-base64_encode*<A> = (a: MutPtr<A>, data: [u8]) str {
+base64_encode*<A> = (a: MutPtr<A>, data: [u8]) string_view {
     n := data.len
     ngroups := (n + 2) / 3
     olen := ngroups * 4
@@ -74,10 +75,10 @@ base64_encode*<A> = (a: MutPtr<A>, data: [u8]) str {
     out[olen] = 0
     cstr(out.ptr)
 }
-base64_encode_in*<A> = (a: MutPtr<A>, data: [u8]) str { a.base64_encode(data) }
+base64_encode_in*<A> = (a: MutPtr<A>, data: [u8]) string_view { a.base64_encode(data) }
 // base64-decode `s`. `.Err(.Errno(ENC_BAD_LEN))` when the length is not a multiple of 4;
 // `.Err(.Errno(ENC_BAD_CHAR))` on any byte outside the alphabet (incl. a misplaced `=`).
-base64_decode*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
+base64_decode*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
     sv := s.view()
     n := sv.len
     (n == 0).match ({ true => ok(slice(null_ptr(), 0)), false => (n % 4 != 0).match ({ true => err(IoError.Errno(ENC_BAD_LEN)), false => {
@@ -145,14 +146,14 @@ base64_decode*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
         })
     } }) })
 }
-base64_decode_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.base64_decode(s) }
+base64_decode_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> { a.base64_decode(s) }
 // ── hex ───────────────────────────────────────────────────────────────────────
 // nibble value (0..15) -> its LOWERCASE hex byte.
 hex_char = (v: i64) u8 { (v < 10).match ({ true => ('0'.to_i64() + v).to_u8(), false => ('a'.to_i64() + v - 10).to_u8() }) }
 // hex byte -> its nibble value (0..15), or -1 for a non-hex byte. Accepts both cases on input.
 hex_val = (c: u8) i64 { (c >= '0' && c <= '9').match ({ true => (c - '0').to_i64(), false => (c >= 'a' && c <= 'f').match ({ true => (c - 'a').to_i64() + 10, false => (c >= 'A' && c <= 'F').match ({ true => (c - 'A').to_i64() + 10, false => 0 - 1 }) }) }) }
 // lowercase-hex-encode `data`. Output length is 2*n; empty input yields "".
-hex_encode*<A> = (a: MutPtr<A>, data: [u8]) str {
+hex_encode*<A> = (a: MutPtr<A>, data: [u8]) string_view {
     n := data.len
     olen := n * 2
     out: [u8] := a.acquire(olen + 1).slice(olen + 1)
@@ -164,10 +165,10 @@ hex_encode*<A> = (a: MutPtr<A>, data: [u8]) str {
     out[olen] = 0
     cstr(out.ptr)
 }
-hex_encode_in*<A> = (a: MutPtr<A>, data: [u8]) str { a.hex_encode(data) }
+hex_encode_in*<A> = (a: MutPtr<A>, data: [u8]) string_view { a.hex_encode(data) }
 // hex-decode `s` (either case). `.Err(.Errno(ENC_BAD_LEN))` when the length is odd;
 // `.Err(.Errno(ENC_BAD_CHAR))` on any non-hex byte.
-hex_decode*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
+hex_decode*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
     sv := s.view()
     n := sv.len
     (n % 2 != 0).match ({ true => err(IoError.Errno(ENC_BAD_LEN)), false => {
@@ -195,4 +196,4 @@ hex_decode*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
         }) })
     } })
 }
-hex_decode_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.hex_decode(s) }
+hex_decode_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> { a.hex_decode(s) }

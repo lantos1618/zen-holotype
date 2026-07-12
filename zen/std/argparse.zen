@@ -28,19 +28,19 @@
 // ── spec records ─────────────────────────────────────────────────────────────
 // A `short` of 0 means "no short form". `name` is the long name WITHOUT the leading `--`.
 FlagSpec*: {
-    name: str,
+    name: string_view,
     short: u8,
-    help: str,
+    help: string_view,
 }
 OptSpec*: {
-    name: str,
+    name: string_view,
     short: u8,
-    help: str,
+    help: string_view,
     req: bool,
 }
 PosSpec*: {
-    name: str,
-    help: str,
+    name: string_view,
+    help: string_view,
     req: bool,
 }
 // A parse failure, as a value. Each carries the offending token / argument name.
@@ -48,10 +48,10 @@ PosSpec*: {
 //   MissingValue    — an option that takes a value was given none (last token, or nothing after it)
 //   MissingRequired — a `.option_req` / `.positional_req` argument was absent
 //   NoValueAllowed  — a boolean flag was written as `--flag=value`
-ArgError*: UnknownFlag(str) | MissingValue(str) | MissingRequired(str) | NoValueAllowed(str)
+ArgError*: UnknownFlag(string_view) | MissingValue(string_view) | MissingRequired(string_view) | NoValueAllowed(string_view)
 // Human-readable variant name (mirrors std.core.result's `name`) so error paths can print which kind
 // fired without unpacking the payload: `println(e.ap_error_name())`.
-ap_error_name* = (e: ArgError) str {
+ap_error_name* = (e: ArgError) string_view {
     e.match ({
         .UnknownFlag(n)     => "UnknownFlag",
         .MissingValue(n)    => "MissingValue",
@@ -60,12 +60,12 @@ ap_error_name* = (e: ArgError) str {
     })
 }
 // ── small internal builders (top-level names carry an `ap_` prefix to stay unique on the flat namespace) ──
-ap_unknown = (s: str) ArgError { .UnknownFlag(s) }
-ap_missing_value = (s: str) ArgError { .MissingValue(s) }
-ap_missing_required = (s: str) ArgError { .MissingRequired(s) }
-ap_no_value = (s: str) ArgError { .NoValueAllowed(s) }
-ap_some = (v: str) Opt<str> { .Some(v) }
-ap_none = () Opt<str> { .None }
+ap_unknown = (s: string_view) ArgError { .UnknownFlag(s) }
+ap_missing_value = (s: string_view) ArgError { .MissingValue(s) }
+ap_missing_required = (s: string_view) ArgError { .MissingRequired(s) }
+ap_no_value = (s: string_view) ArgError { .NoValueAllowed(s) }
+ap_some = (v: string_view) Opt<string_view> { .Some(v) }
+ap_none = () Opt<string_view> { .None }
 // append one element to a slice, copied into a fresh allocator-owned buffer of length +1.
 ap_add*<T, A> = (a: MutPtr<A>, xs: [T], x: T) [T] {
     n := xs.len
@@ -85,9 +85,9 @@ ap_bools*<A> = (a: MutPtr<A>, n: i64) [bool] {
     out
 }
 // an all-`.None` `[Opt<str>]` of length `n` (parallel to the option specs).
-ap_opts*<A> = (a: MutPtr<A>, n: i64) [Opt<str>] {
-    seed: Opt<str> := .None
-    out: [Opt<str>] := a.nbuf(seed, n)
+ap_opts*<A> = (a: MutPtr<A>, n: i64) [Opt<string_view>] {
+    seed: Opt<string_view> := .None
+    out: [Opt<string_view>] := a.nbuf(seed, n)
     out.loop((h, i, e) {
         out[i] = seed
     })
@@ -95,11 +95,11 @@ ap_opts*<A> = (a: MutPtr<A>, n: i64) [Opt<str>] {
 }
 // ── the parser spec ──────────────────────────────────────────────────────────
 Parser*: {
-    prog: str,
+    prog: string_view,
     flags: [FlagSpec],
     opts: [OptSpec],
     poss: [PosSpec],
-    flag<A> = (p: Parser, a: MutPtr<A>, name: str, short: u8, help: str) Parser {
+    flag<A> = (p: Parser, a: MutPtr<A>, name: string_view, short: u8, help: string_view) Parser {
         Parser(
             prog: p.prog,
             flags: a.ap_add(p.flags, FlagSpec(
@@ -111,7 +111,7 @@ Parser*: {
             poss: p.poss,
         )
     }
-    option<A> = (p: Parser, a: MutPtr<A>, name: str, short: u8, help: str) Parser {
+    option<A> = (p: Parser, a: MutPtr<A>, name: string_view, short: u8, help: string_view) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -124,7 +124,7 @@ Parser*: {
             poss: p.poss,
         )
     }
-    option_req<A> = (p: Parser, a: MutPtr<A>, name: str, short: u8, help: str) Parser {
+    option_req<A> = (p: Parser, a: MutPtr<A>, name: string_view, short: u8, help: string_view) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -137,7 +137,7 @@ Parser*: {
             poss: p.poss,
         )
     }
-    positional<A> = (p: Parser, a: MutPtr<A>, name: str, help: str) Parser {
+    positional<A> = (p: Parser, a: MutPtr<A>, name: string_view, help: string_view) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -149,7 +149,7 @@ Parser*: {
             )),
         )
     }
-    positional_req<A> = (p: Parser, a: MutPtr<A>, name: str, help: str) Parser {
+    positional_req<A> = (p: Parser, a: MutPtr<A>, name: string_view, help: string_view) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -161,7 +161,7 @@ Parser*: {
             )),
         )
     }
-    flag_index = (p: Parser, name: str) i64 {
+    flag_index = (p: Parser, name: string_view) i64 {
         // spec lookups: index into the parallel result arrays (-1 when absent).
         idx: i64 := 0 - 1
         p.flags.loop((h, i, f) {
@@ -182,7 +182,7 @@ Parser*: {
         })
         idx
     }
-    opt_index = (p: Parser, name: str) i64 {
+    opt_index = (p: Parser, name: string_view) i64 {
         idx: i64 := 0 - 1
         p.opts.loop((h, i, o) {
             eq(o.name, name).match ({ true => {
@@ -212,11 +212,11 @@ Parser*: {
         })
         c
     }
-    parse<A> = (p: Parser, a: MutPtr<A>, args: [str]) Result<Parsed, ArgError> {
+    parse<A> = (p: Parser, a: MutPtr<A>, args: [string_view]) Result<Parsed, ArgError> {
         // parse — see the free `ap_parse` below; this is the UFCS entry `p.parse(a, args)`.
         a.ap_parse(p, args)
     }
-    usage<A> = (p: Parser, a: MutPtr<A>) str {
+    usage<A> = (p: Parser, a: MutPtr<A>) string_view {
         // a one-line-per-item usage / help string, allocator-owned.
         s := a.new_in().expect("argparse: oom")
         s = s.append_in(a, "usage: ").expect("argparse: oom")
@@ -247,7 +247,7 @@ Parser*: {
     }
 }
 // a fresh parser with no specs. Build it up with the `.flag` / `.option` / `.positional` methods.
-ap_new* = (prog: str) Parser {
+ap_new* = (prog: string_view) Parser {
     fs: [FlagSpec] := slice(null_ptr(), 0)
     os: [OptSpec] := slice(null_ptr(), 0)
     ps: [PosSpec] := slice(null_ptr(), 0)
@@ -264,24 +264,24 @@ ap_new* = (prog: str) Parser {
 Parsed*: {
     spec: Parser,
     flags: [bool],
-    opts: [Opt<str>],
-    poss: [str],
+    opts: [Opt<string_view>],
+    poss: [string_view],
     help: bool,
-    get_flag = (r: Parsed, name: str) bool {
+    get_flag = (r: Parsed, name: string_view) bool {
         // was `--<name>` / `-<short>` given? (unknown names read as false)
         fi := r.spec.flag_index(name)
         (fi >= 0).match ({ true => r.flags[fi], false => false })
     }
-    get_opt = (r: Parsed, name: str) Opt<str> {
+    get_opt = (r: Parsed, name: string_view) Opt<string_view> {
         // the value of `--<name>`, or `.None` (unknown names also read as `.None`).
         oi := r.spec.opt_index(name)
         (oi >= 0).match ({ true => r.opts[oi], false => ap_none() })
     }
-    positionals = (r: Parsed) [str] {
+    positionals = (r: Parsed) [string_view] {
         // the positional arguments, in the order they appeared.
         r.poss
     }
-    pos_at = (r: Parsed, i: i64) Opt<str> {
+    pos_at = (r: Parsed, i: i64) Opt<string_view> {
         // the i-th positional, or `.None` when out of range.
         (i >= 0 && i < r.poss.len).match ({ true => ap_some(r.poss[i]), false => ap_none() })
     }
@@ -293,10 +293,10 @@ Parsed*: {
 // ── the parse driver ─────────────────────────────────────────────────────────
 // Walk `args` (the arguments AFTER the program name). Returns the filled `Parsed`, or the first
 // `ArgError` encountered. `a` owns every allocation in the result.
-ap_parse*<A> = (a: MutPtr<A>, p: Parser, args: [str]) Result<Parsed, ArgError> {
+ap_parse*<A> = (a: MutPtr<A>, p: Parser, args: [string_view]) Result<Parsed, ArgError> {
     flags: [bool] := a.ap_bools(p.flags.len)
-    optvals: [Opt<str>] := a.ap_opts(p.opts.len)
-    poss: [str] := a.nbuf("", args.len)    // upper bound: every arg a positional
+    optvals: [Opt<string_view>] := a.ap_opts(p.opts.len)
+    poss: [string_view] := a.nbuf("", args.len)    // upper bound: every arg a positional
     np: i64 := 0
     help := false
     end := false

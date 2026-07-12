@@ -18,7 +18,7 @@ print_owned_in<A> = (a: MutPtr<A>, t: String) i64 {
     t.free_in(a)
     w
 }
-write_text = (s: str) i64 { out_bytes(s.view()).or(0) }
+write_text = (s: string_view) i64 { out_bytes(s.view()).or(0) }
 newline = () i64 { "\n".write_text() }
 write_string = (s: String) i64 { out_bytes(s.bytes()).or(0) }
 write_int_in*<A> = (a: MutPtr<A>, n: i64) Result<i64, IoError> {
@@ -144,7 +144,7 @@ println*<T> = (x: T) i64 { x.fmt_println() }
 // See LIMITATION at the bottom for the broader dispatch story.
 Printer*: {
     n: i64,
-    s = (p: Printer, t: str) Printer { Printer(n: p.n + t.write_text()) }
+    s = (p: Printer, t: string_view) Printer { Printer(n: p.n + t.write_text()) }
     i = (p: Printer, k: i64) Printer { Printer(n: p.n + k.write_int()) }
     f = (p: Printer, x: f64) Printer { Printer(n: p.n + x.write_float()) }
     b = (p: Printer, x: bool) Printer {
@@ -159,7 +159,7 @@ Printer*: {
 // Named `put` (not `out`) to avoid colliding with std.io.file.out (an i64-returning
 // raw byte writer) — a same-named free function in another module would shadow this
 // one's Printer return type at the call site.
-put* = (t: str) Printer { Printer(n: t.write_text()) }
+put* = (t: string_view) Printer { Printer(n: t.write_text()) }
 // ── {}-template interpolation: format / formatln ─────────────────────────────
 //
 // The streaming Printer mixes types but reads as a chain; the first thing most
@@ -179,12 +179,12 @@ put* = (t: str) Printer { Printer(n: t.write_text()) }
 //
 // `format` is NON-GENERIC (concrete `[Arg]` + `str`), so it resolves cleanly across
 // modules — it sidesteps the generic+struct-param dispatch gap noted below.
-Arg*: Int(i64) | Flt(f64) | Str(str) | Bool(bool) | Owned(String)
+Arg*: Int(i64) | Flt(f64) | Str(string_view) | Bool(bool) | Owned(String)
 // Arg constructors — named `arg_*` (not `i`/`s`/`f`) so they never clash on the flat
 // import namespace with an importer's own top-level `i`/`s`/`f` or the Printer methods.
 arg_int* = (n: i64) Arg { .Int(n) }
 arg_flt* = (x: f64) Arg { .Flt(x) }
-arg_str* = (s: str) Arg { .Str(s) }
+arg_str* = (s: string_view) Arg { .Str(s) }
 arg_bool* = (x: bool) Arg { .Bool(x) }
 arg_owned* = (g: String) Arg { .Owned(g) }
 // write one Arg with the writer matching its kind; returns the bytes written.
@@ -202,7 +202,7 @@ write_run = (sv: [u8], lo: i64, hi: i64) i64 { out_bytes(slice(sv.ptr.offset(lo)
 // write the i-th arg, or nothing when the template has more `{}` than the slice has args.
 write_arg_at = (args: [Arg], i: i64) i64 { (i < args.len).match ({ true => write_arg(args[i]), false => 0 }) }
 // splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
-format* = (template: str, args: [Arg]) i64 {
+format* = (template: string_view, args: [Arg]) i64 {
     sv := template.view()
     n: i64 := 0    // bytes written so far
     ai: i64 := 0    // next arg slot
@@ -234,7 +234,7 @@ format* = (template: str, args: [Arg]) i64 {
     n
 }
 // `format` plus a trailing newline — the println-shaped one-call interpolator.
-formatln* = (template: str, args: [Arg]) i64 { format(template, args) + newline() }
+formatln* = (template: string_view, args: [Arg]) i64 { format(template, args) + newline() }
 // LIMITATION — why typed ops (.i/.f/.s) and not one generic `.v(x)` or printf:
 //
 //   1. A single generic `v<T>(p: Printer, x: T) Printer` would read cleanest —
@@ -255,9 +255,9 @@ formatln* = (template: str, args: [Arg]) i64 { format(template, args) + newline(
 // and writes straight to stdout — zero heap, works today. When the compiler closes
 // gap (1) — generic + struct-param dispatch across modules — a single `.v(x)` (and
 // then a `{}`-template `format` on top of it) can layer on without changing this core.
-str.impl(Display, {
-    fmt_print = (s: str) i64 { s.write_text() }
-    fmt_println = (s: str) i64 {
+string_view.impl(Display, {
+    fmt_print = (s: string_view) i64 { s.write_text() }
+    fmt_println = (s: string_view) i64 {
         s.write_text()
         newline()
     }

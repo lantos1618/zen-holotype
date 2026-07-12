@@ -86,7 +86,7 @@ next to main.zen)`), not a linker failure.
 ## The language on one page
 
 ```zen
-// bindings & types: i32 i64 u8 f64 bool str. `:=` binds, `=` reassigns.
+// bindings & types: i32 i64 u8 f64 bool string_view. `:=` binds, `=` reassigns.
 x := 41
 x = x + 1
 
@@ -102,7 +102,7 @@ area := h * h * 0.5                  // f64 * f64 — fine
 n := to_i32(area * 100.0)            // explicit float -> int (truncates toward zero)
 
 // control flow is .match — there is no if/while statement.
-sign = (n: i32) str {
+sign = (n: i32) string_view {
     (n < 0).match ({ true => "neg", false => (n == 0).match ({ true => "zero", false => "pos" }) })
 }
 
@@ -178,7 +178,7 @@ EOF
 ```
 
 `examples/wordfreq.zen` is the classic stdin filter — read all of stdin, split on whitespace,
-count each word in an `HMap<str, i64>`, print each distinct word with its count:
+count each word in an `HMap<string_view, i64>`, print each distinct word with its count:
 
 ```sh
 printf 'the cat sat on the mat the cat\n' | ./zenc run examples/wordfreq.zen

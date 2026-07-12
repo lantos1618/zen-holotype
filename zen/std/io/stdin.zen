@@ -3,14 +3,14 @@
 // Three surfaces, all allocator-explicit (no hidden heap):
 //
 //   { read_line, read_all, lines } = std.io.stdin
-//   a.read_line()          // Result<Opt<str>, IoError> — Some(line) per line, None at EOF
-//   a.read_all()           // Result<str, IoError>      — everything until EOF, one owned str
+//   a.read_line()          // Result<Opt<string_view>, IoError> — Some(line) per line, None at EOF
+//   a.read_all()           // Result<string_view, IoError>      — everything until EOF, one owned buffer
 //   a.lines((line) { … })  // Result<i64, IoError>      — run a closure per line, count returned
 //
 // Lines are returned WITHOUT the trailing '\n'. A final unterminated line ("abc" then EOF)
-// still comes back as Some("abc"); the next call reports None. Every returned str is an
+// still comes back as Some("abc"); the next call reports None. Every returned view is an
 // allocator-owned NUL-terminated buffer (same contract as std.io.file.contents_in), so a
-// stdin byte stream containing NULs truncates at the first NUL — the str floor, not a bug.
+// stdin byte stream containing NULs truncates at the first NUL — the Phase-1 pointer floor, not a bug.
 { read } = std.c.libc
 { Result, IoError, Opt, ok, err } = std.core.result
 { Allocator, try_acquire } = std.mem.alloc
@@ -22,9 +22,9 @@ READ_CHUNK := 4096
 // (exactly what std.io.file.read_file_open does for a bad lseek).
 read_failed = () IoError { IoError.Errno(0 - 1) }
 // Reads one line from stdin: Ok(.Some(line)) without the '\n', Ok(.None) at EOF,
-// Err on read/allocation failure. The line is an allocator-owned str — release it
+// Err on read/allocation failure. The line is an allocator-owned view — release it
 // via `a.release(line.view().ptr)` (or let an arena reclaim it) when done.
-read_line*<A> = (a: MutPtr<A>) Result<Opt<str>, IoError> {
+read_line*<A> = (a: MutPtr<A>) Result<Opt<string_view>, IoError> {
     a.init(64).match ({
         .Err(e) => err(e),
         .Ok(s0) => {
@@ -51,16 +51,16 @@ read_line*<A> = (a: MutPtr<A>) Result<Opt<str>, IoError> {
                     },
                 }), false => s })
             }
-            out: Result<Opt<str>, IoError> := failed.match ({ true => {
+            out: Result<Opt<string_view>, IoError> := failed.match ({ true => {
                 s.free_in(a)
                 err(ev)
             }, false => (consumed == 0).match ({ true => {
                 s.free_in(a)
-                none: Opt<str> := .None
+                none: Opt<string_view> := .None
                 ok(none)
             }, false => s.finish_in(a).match ({
                 .Ok(line) => {
-                    some: Opt<str> := .Some(line)
+                    some: Opt<string_view> := .Some(line)
                     ok(some)
                 },
                 .Err(fe)  => err(fe),
@@ -91,9 +91,9 @@ append_chunk<A> = (a: MutPtr<A>, s: String, chunk: RawPtr<u8>, n: i64) Result<St
     out: Result<String, IoError> := failed.match ({ true => err(ev), false => ok(cur) })
     out
 }
-// Reads stdin to EOF into one allocator-owned NUL-terminated str (the stdin twin of
+// Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
 // std.io.file.contents_in — `a.contents_in("/dev/stdin")` needs a seekable fd; this doesn't).
-read_all*<A> = (a: MutPtr<A>) Result<str, IoError> {
+read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
     a.try_acquire(READ_CHUNK).match ({
         .Err(e)    => err(e),
         .Ok(chunk) => a.init(READ_CHUNK).match ({
@@ -122,10 +122,13 @@ read_all*<A> = (a: MutPtr<A>) Result<str, IoError> {
                     }), false => s })
                 }
                 a.release(chunk)
-                out: Result<str, IoError> := failed.match ({ true => {
+                out: Result<string_view, IoError> := failed.match ({ true => {
                     s.free_in(a)
                     err(ev)
-                }, false => s.finish_in(a) })
+                }, false => s.finish_in(a).match ({
+                    .Ok(done) => ok(done),
+                    .Err(e)   => err(e),
+                }) })
                 out
             },
         }),
@@ -136,7 +139,7 @@ read_all*<A> = (a: MutPtr<A>) Result<str, IoError> {
 // must outlive the call. `on_line` is a first-class closure arg, same shape as
 // std.collections.iter's helpers, so an inline lambda splices straight in:
 // `a.lines((line) { out(line) })`.
-lines*<A> = (a: MutPtr<A>, on_line: (str) void) Result<i64, IoError> {
+lines*<A> = (a: MutPtr<A>, on_line: (string_view) void) Result<i64, IoError> {
     n: i64 := 0
     failed := false
     ev := IoError.Eof

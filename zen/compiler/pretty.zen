@@ -24,7 +24,7 @@
 // comment. Comments never enter the AST, so the lowered tree (and emitted C) is identical with or
 // without them — only the formatted text changes. State is module-level (mirrors parse's exports_buf).
 gf_no_cmts = () [Comment] { slice(null_ptr(), 0) }
-gf_empty_str = () str { "" }    // a str-typed (not fixed-array) empty literal
+gf_empty_str = () string_view { "" }    // a str-typed (not fixed-array) empty literal
 gf_src := gf_empty_str()
 gf_cmts := gf_no_cmts()
 gf_idx := 0
@@ -33,7 +33,7 @@ gf_idx := 0
 // past it into the following decl. Set per top-level decl in pretty_module_in; 0 = the final decl.
 gf_block_end := 0
 pretty_set_block_end* = (e: i32) void { gf_block_end = e }
-pretty_set_comments* = (src: str, cmts: [Comment]) void {
+pretty_set_comments* = (src: string_view, cmts: [Comment]) void {
     gf_src = src
     gf_cmts = cmts
     gf_idx = 0
@@ -200,10 +200,10 @@ ff_string = (a: MutPtr<Malloc>, cap: i64) String {
         cap: cap,
     )
 }
-ff_append = (s: String, a: MutPtr<Malloc>, t: str) String { s.gstr_append(a, t) }
+ff_append = (s: String, a: MutPtr<Malloc>, t: string_view) String { s.gstr_append(a, t) }
 ff_push = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
 // integer rendering, byte-only (mirrors genc_emit so this self-hosts)
-ffbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+ffbyte = (v: string_view, i: i64) u8 { load(offset(v, i)) }
 ffdigit = (d: i64) u8 { ffbyte("0123456789", d) }
 // A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
 // `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern must print as UNSIGNED decimal
@@ -256,23 +256,23 @@ ff_char = (s: String, a: MutPtr<Malloc>, n: i32) String {
 ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({ true => s, false => s.ff_append(a, "    ").ff_indent(a, n - 1) }) }
 // ── types ────────────────────────────────────────────────────────────────────
 // the source keyword for a pointer kind (preserves the spelling on round-trip)
-ptr_kw = (kind: i32) str { (kind == k_raw_ptr()).match ({ true => "RawPtr", false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" }) }) }
+ptr_kw = (kind: i32) string_view { (kind == k_raw_ptr()).match ({ true => "RawPtr", false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" }) }) }
 ff_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
-        .I32        => s.ff_append(a, "i32"),
-        .I64        => s.ff_append(a, "i64"),
-        .U8         => s.ff_append(a, "u8"),
-        .F64        => s.ff_append(a, "f64"),
-        .Bool       => s.ff_append(a, "bool"),
-        .Void       => s.ff_append(a, "void"),
+        .I32           => s.ff_append(a, "i32"),
+        .I64           => s.ff_append(a, "i64"),
+        .U8            => s.ff_append(a, "u8"),
+        .F64           => s.ff_append(a, "f64"),
+        .Bool          => s.ff_append(a, "bool"),
+        .Void          => s.ff_append(a, "void"),
         .StringView    => s.ff_append(a, "string_view"),
         .StringCstr    => s.ff_append(a, "string_cstr"),
         .StringLiteral => s.ff_append(a, "string_literal"),
-        .Named(nm)  => s.ff_append(a, nm),
-        .Ptr(pd)    => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a, "<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
-        .Slice(p)   => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
-        .FnT(ft)    => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
-        .Generic(g) => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">"),
+        .Named(nm)     => s.ff_append(a, nm),
+        .Ptr(pd)       => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a, "<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
+        .Slice(p)      => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
+        .FnT(ft)       => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
+        .Generic(g)    => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">"),
     })
 }
 ff_tys = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
@@ -288,10 +288,10 @@ ff_tys = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
 //  • a Bin used as a postfix RECEIVER (`(n > 0).match(…)`, `(a + b).field`) must be wrapped — else
 //    `.match`/`.field` would bind to the right operand;
 //  • a Bin operand of a tighter-or-equal (on the right, for left-assoc) Bin must be wrapped.
-ff_is_cmp_op = (op: str) bool { eq(op, "==") || eq(op, "!=") || eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
-ff_is_shift_op = (op: str) bool { eq(op, "<<") || eq(op, ">>") }
-ff_is_add_op = (op: str) bool { eq(op, "+") || eq(op, "-") }
-ff_op_prec = (op: str) i32 { eq(op, "||").match ({ true => 1, false => eq(op, "&&").match ({ true => 2, false => ff_is_cmp_op(op).match ({ true => 3, false => eq(op, "|").match ({ true => 4, false => eq(op, "^").match ({ true => 5, false => eq(op, "&").match ({ true => 6, false => ff_is_shift_op(op).match ({ true => 7, false => ff_is_add_op(op).match ({ true => 8, false => 9 }) }) }) }) }) }) }) }) }
+ff_is_cmp_op = (op: string_view) bool { eq(op, "==") || eq(op, "!=") || eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
+ff_is_shift_op = (op: string_view) bool { eq(op, "<<") || eq(op, ">>") }
+ff_is_add_op = (op: string_view) bool { eq(op, "+") || eq(op, "-") }
+ff_op_prec = (op: string_view) i32 { eq(op, "||").match ({ true => 1, false => eq(op, "&&").match ({ true => 2, false => ff_is_cmp_op(op).match ({ true => 3, false => eq(op, "|").match ({ true => 4, false => eq(op, "^").match ({ true => 5, false => eq(op, "&").match ({ true => 6, false => ff_is_shift_op(op).match ({ true => 7, false => ff_is_add_op(op).match ({ true => 8, false => 9 }) }) }) }) }) }) }) }) }
 ff_expr_prec = (e: Expr) i32 {
     e.match ({
         .Bin(b) => ff_op_prec(b.op),
@@ -360,7 +360,7 @@ ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String { (d.oa =
 // a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
 // the parser records the args in `targs`, and dropping them would lose the type info monomorphization
 // needs (the literal becomes `Rc(…)` → T uninferable → wrong/void element type).
-ff_tyname = (s: String, a: MutPtr<Malloc>, name: str, targs: [Ty]) String { (targs.len > 0).match ({ true => s.ff_append(a, name).ff_append(a, "<").ff_tys(a, targs).ff_append(a, ">"), false => s.ff_append(a, name) }) }
+ff_tyname = (s: String, a: MutPtr<Malloc>, name: string_view, targs: [Ty]) String { (targs.len > 0).match ({ true => s.ff_append(a, name).ff_append(a, "<").ff_tys(a, targs).ff_append(a, ">"), false => s.ff_append(a, name) }) }
 // `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
 ff_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData, ind: i32) String {
     head := is_empty(m.ty).match ({ true => s.ff_append(a, "."), false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, ".") })
@@ -479,8 +479,8 @@ ff_hex_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
 // ever lands in .zen source (fmt output is stable + the CI fmt-check gate can't be silently broken by a
 // stray CR), the parsed value round-trips exactly, and readable UTF-8 text in string literals stays raw.
 ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.ff_append(a, "\\\""), false => (b == '\\').match ({ true => s.ff_append(a, "\\\\"), false => (b == '\n').match ({ true => s.ff_append(a, "\\n"), false => (b == '\r').match ({ true => s.ff_append(a, "\\r"), false => (b == '\t').match ({ true => s.ff_append(a, "\\t"), false => (b >= ' ' && b <= '~' || b >= 128).match ({ true => s.ff_push(a, b), false => s.ff_hex_byte(a, b) }) }) }) }) }) }) }
-ff_strlit = (s: String, a: MutPtr<Malloc>, v: str) String { s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"") }
-ff_escape_from = (s: String, a: MutPtr<Malloc>, v: str, i: i32) String {
+ff_strlit = (s: String, a: MutPtr<Malloc>, v: string_view) String { s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"") }
+ff_escape_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
     acc := s
     k := i
     @while (ffbyte(v, k) != 0) {
@@ -634,14 +634,14 @@ ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     } })
 }
 // the `*` export marker: appended right after a top-level decl name when it was starred in the source.
-ff_exported = (exp: [Param], name: str) bool {
+ff_exported = (exp: [Param], name: string_view) bool {
     found := false
     exp.loop((h, i, p) {
         found = found || eq(p.name, name)
     })
     found
 }
-ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: str) String { exp.ff_exported(name).match ({ true => s.ff_append(a, name).ff_append(a, "*"), false => s.ff_append(a, name) }) }
+ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String { exp.ff_exported(name).match ({ true => s.ff_append(a, name).ff_append(a, "*"), false => s.ff_append(a, name) }) }
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
 ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
@@ -655,7 +655,7 @@ ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String { s.ff
 // the formatter REASSEMBLES them: inherent methods print inside the struct body, trait-impl methods
 // inside `Ty.impl(Tr, { … })`, and the hoisted DFuncs / inherent DImpl markers are SKIPPED at top level.
 ff_no_params = () [Param] { slice(null_ptr(), 0) }
-ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: str) Func {
+ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: string_view) Func {
     res := Func(
         name: "",
         params: ff_no_params(),
@@ -674,7 +674,7 @@ ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: str) Func {
     res
 }
 // the type's own tparams (so a method's print drops them, keeping only the method's OWN tparams)
-ff_type_tparams = (decls: [Decl], tyname: str) [Param] {
+ff_type_tparams = (decls: [Decl], tyname: string_view) [Param] {
     res := ff_no_params()
     decls.loop((h, i, d) {
         d.match ({
@@ -689,7 +689,7 @@ ff_type_tparams = (decls: [Decl], tyname: str) [Param] {
     })
     res
 }
-ff_tparams_has = (ps: [Param], name: str) bool {
+ff_tparams_has = (ps: [Param], name: string_view) bool {
     found := false
     ps.loop((h, i, p) {
         found = found || eq(p.name, name)
@@ -708,7 +708,7 @@ ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
     slice(buf.ptr, n)
 }
 // is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
-ff_is_hoisted = (a: MutPtr<Malloc>, decls: [Decl], fname: str) bool {
+ff_is_hoisted = (a: MutPtr<Malloc>, decls: [Decl], fname: string_view) bool {
     found := false
     decls.loop((h, i, d) {
         d.match ({
@@ -735,7 +735,7 @@ ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [P
     out
 }
 // the inherent methods of `tyname` (the DImpl where ty == trname == tyname), printed at `ind`
-ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: str, ctp: [Param], ind: i32) String {
+ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: string_view, ctp: [Param], ind: i32) String {
     out := s
     decls.loop((h, i, d) {
         d.match ({

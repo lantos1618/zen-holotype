@@ -22,7 +22,7 @@
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD := "typedef struct { void* ptr; int64_t len; } zslice; "
 // ── shared helpers ────────────────────────────────────────────────────────────
-om_read_file = (mp: MutPtr<Malloc>, path: str) str {
+om_read_file = (mp: MutPtr<Malloc>, path: string_view) string_view {
     mp.contents_in(path).match ({
         .Ok(t)  => t,
         .Err(e) => "",
@@ -30,13 +30,13 @@ om_read_file = (mp: MutPtr<Malloc>, path: str) str {
 }
 om_not = (b: bool) bool { b.match ({ true => false, false => true }) }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
-om_cat2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
+om_cat2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, a).expect("harness: oom")
     s = s.append_in(mp, b).expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
-om_cat3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str { mp.om_cat2(a, mp.om_cat2(b, c)) }
+om_cat3 = (mp: MutPtr<Malloc>, a: string_view, b: string_view, c: string_view) string_view { mp.om_cat2(a, mp.om_cat2(b, c)) }
 // ════════════════════════════════════════════════════════════════════════════════
 // traits  <- tests/test_traits.py
 // VALUE: impl methods compile + dispatch via UFCS (incl. a DECLARED trait with an impl).
@@ -100,37 +100,85 @@ harness_misc_traits = () i32 {
     v + d
 }
 // ════════════════════════════════════════════════════════════════════════════════
-// string_types  <- tests/test_string_types.py
-// string_literal (immortal literal) <: {string_view, string_cstr}; string_cstr <: string_view; but string_cstr/string_view do NOT fit string_literal.
+// Canonical string provenance names + their directional value lattice. Coercions are outer-value
+// only: mutable pointers and generic storage remain invariant, and match joins choose the broader
+// provenance independent of arm order. The three old spellings remain parser aliases during migration.
 // ════════════════════════════════════════════════════════════════════════════════
 harness_misc_string_types = () i32 {
     run_verdicts("string_types verdict", [VerdictCase(
-        src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(\"ok\") }",
+        src: "take = (s: string_literal) i32 { 0 }\nmain = () i32 { take(\"ok\") }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "g = (s: str) i32 { 0 }\nmain = () i32 { g(\"ok\") }",
+        src: "take = (s: string_view) i32 { 0 }\nmain = () i32 { take(\"ok\") }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "g = (s: str) i32 { 0 }\nmain = () i32 { g(cstr(null_ptr())) }",
+        src: "take = (s: string_view) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "foo = (s: text) i32 { 0 }\nmain = () i32 { foo(cstr(null_ptr())) }",
+        src: "take = (s: string_cstr) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "take = (s: string_literal) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
         should_pass: false,
         kind: "arg-type",
+    ), VerdictCase(
+        src: "bad = (s: string_view) string_literal { s }\nmain = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        src: "bad = (v: string_view, b: bool) string_literal { b.match ({ true => \"literal\", false => v }) }\nmain = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        src: "bad = (v: string_view, b: bool) string_literal { b.match ({ true => v, false => \"literal\" }) }\nmain = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        src: "E: Lit | Borrow(string_view)\nbad = (e: E) string_literal { e.match ({ .Lit => \"literal\", .Borrow(v) => v }) }\nmain = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        src: "E: Borrow(string_view) | Lit\nbad = (e: E) string_literal { e.match ({ .Borrow(v) => v, .Lit => \"literal\" }) }\nmain = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        src: "good = (v: string_view, b: bool) string_view { b.match ({ true => \"literal\", false => v }) }\nmain = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Box<T>: { value: T }\nneeds_literal = (b: Box<string_literal>) i32 { 0 }\nbad = (v: string_view) i32 { b: Box<string_view> := Box<string_view>(value: v)  needs_literal(b) }\nmain = () i32 { bad(\"ok\") }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "R<T>: Ok(T) | Err(i32)\nbad = (r: R<string_cstr>) R<string_view> { r }\nmain = () i32 { 0 }",
+        should_pass: false,
+        kind: "return-fit",
+    ), VerdictCase(
+        src: "R<T>: Ok(T) | Err(i32)\ngood = (r: R<string_cstr>) R<string_view> { r.match ({ .Ok(v) => .Ok(v), .Err(e) => .Err(e) }) }\nmain = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "overwrite = (p: MutPtr<string_view>, v: string_view) void { p.store(v) }\nlaunder = (slot: string_literal, v: string_view) string_literal { overwrite(slot.addr(), v)  slot }\nmain = () i32 { launder(\"safe\", cstr(null_ptr()))  0 }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "legacy = (v: str, l: text, c: Cstr) i32 { 0 }\nmain = () i32 { legacy(\"view\", \"literal\", cstr(null_ptr())) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Label*: { label: (string_view) i32 }\nstr.impl(Label, { label = (s: string_view) i32 { 0 } })\nmain = () i32 { \"legacy\".label() }",
+        should_pass: true,
+        kind: "",
     ), VerdictCase(
         src: "bar = (x: str) i32 { foo(x) }\nfoo = (s: text) i32 { 0 }\nmain = () i32 { bar(\"hi\") }",
         should_pass: false,
         kind: "arg-type",
     )])
 }
-// a literal IS text -> accept where text required
-// text <: str -> a literal works where a borrowed str is expected
-// Cstr <: str -> a finished pointer is a valid const char* to read
-// cstr(...) is mortal Cstr -> must NOT be accepted where text is required
-// a borrowed str param flowing into a text param is rejected too
 // ════════════════════════════════════════════════════════════════════════════════
 // num_parse  <- tests/test_num_parse.py
 // Run ONE real program through `zenc run` (std.text.num imports resolved) and assert both the value
@@ -185,7 +233,7 @@ om_is_alnum = (b: u8) bool { om_is_alpha(b) || b >= '0' && b <= '9' }
 // `\s` is approximated by space/tab between the tokens (the only whitespace real source uses there);
 // this only ever matches a SUBSET of the regex, so it can never raise a failure the regex wouldn't.
 // Byte access goes through a single `[u8]` view (O(1) index) — NOT `at` (which re-strlens per call).
-om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
+om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
     sv: [u8] := src.view()
     n := sv.len
     i: i64 := 0
@@ -227,13 +275,13 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: str, c: str) bool {
 // across the worker pool, each writing a gid-namespaced C output + P/F marker; Phase C reads them IN ORDER
 // and applies the SAME check (rc 0 AND output starts with HEAD AND every top-level decl name survives) —
 // byte-identical verdict to the old serial loop. Emitting the big compiler files serially was ~21s.
-om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: str) str {
-    z: str := ""
+om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: string_view) string_view {
+    z: string_view := ""
     outp := mp.zo_idpath("zo_acid", gid, ".c")
     rc := mp.zo_idpath("zo_acidrc", gid, ".txt")
     mp.zo_join([z, "if ./zenc emit ", path, " > ", outp, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: str) bool {
+om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: string_view) bool {
     passed := mp.om_read_file(mp.zo_idpath("zo_acidrc", gid, ".txt")).starts_with("P")
     passed.match ({ true => {
         txt := mp.om_read_file(mp.zo_idpath("zo_acid", gid, ".c"))
@@ -249,7 +297,7 @@ harness_misc_acid = () i32 {
     out("\n")
     n := files.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     files.loop((h, i, f) {
         cmds[i] = mp.om_acid_cmd(i, f)
     })
@@ -339,7 +387,7 @@ om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
         mp.om_arms(s4, i + 1, n)
     } })
 }
-om_gen_many_params = (mp: MutPtr<Malloc>) str {
+om_gen_many_params = (mp: MutPtr<Malloc>) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "f* = (").expect("harness: oom")
     s = mp.om_decl_params(s, 0, 80)
@@ -348,7 +396,7 @@ om_gen_many_params = (mp: MutPtr<Malloc>) str {
     s = s.append_in(mp, ") }").expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
-om_gen_many_fields = (mp: MutPtr<Malloc>) str {
+om_gen_many_fields = (mp: MutPtr<Malloc>) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "S*: { ").expect("harness: oom")
     s = mp.om_decl_fields(s, 0, 80)
@@ -357,7 +405,7 @@ om_gen_many_fields = (mp: MutPtr<Malloc>) str {
     s = s.append_in(mp, ").x79 }").expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
-om_gen_many_arms = (mp: MutPtr<Malloc>) str {
+om_gen_many_arms = (mp: MutPtr<Malloc>) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "test* = () i32 { (50).match({ ").expect("harness: oom")
     s = mp.om_arms(s, 0, 80)
@@ -388,14 +436,14 @@ harness_misc_differential = () i32 {
 // is idempotent, and on a REAL corpus emit(fmt F) == emit(F) and fmt(fmt F) == fmt(F).
 // ════════════════════════════════════════════════════════════════════════════════
 // fmt --ast a source string, returning the formatted output.
-om_do_fmt = (mp: MutPtr<Malloc>, src: str) str {
+om_do_fmt = (mp: MutPtr<Malloc>, src: string_view) string_view {
     save(mp.zo_path("zo_misc_fa.zen"), src, len(src))
     save(mp.zo_path("zo_misc_fa.out"), "", 0)
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_fa.zen > $ZT/zo_misc_fa.out 2>/dev/null"))
     mp.om_read_file(mp.zo_path("zo_misc_fa.out"))
 }
 // emit a source string, returning the emitted C.
-om_do_emit = (mp: MutPtr<Malloc>, src: str) str {
+om_do_emit = (mp: MutPtr<Malloc>, src: string_view) string_view {
     save(mp.zo_path("zo_misc_em.zen"), src, len(src))
     save(mp.zo_path("zo_misc_em.c"), "", 0)
     shell(mp.zo_cmd("./zenc emit $ZT/zo_misc_em.zen > $ZT/zo_misc_em.c 2>/dev/null"))
@@ -404,20 +452,20 @@ om_do_emit = (mp: MutPtr<Malloc>, src: str) str {
 // `zenc run` a source string, returning the program's exit code (a value-returning main's value).
 // `shell` already DECODES the wait status (WEXITSTATUS, or 128 + signal), so its `.Ok` is the exit code
 // a normally-terminating program returned.
-om_run_rc = (src: str) i32 {
+om_run_rc = (src: string_view) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_run.zen"), src, len(src))
     shell(mp.zo_cmd("./zenc run $ZT/zo_misc_run.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt --ast a source, then run the FORMATTED output; returns its exit code.
-om_fmt_then_run = (mp: MutPtr<Malloc>, src: str) i32 {
+om_fmt_then_run = (mp: MutPtr<Malloc>, src: string_view) i32 {
     save(mp.zo_path("zo_misc_ftr.zen"), src, len(src))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_ftr.zen > $ZT/zo_misc_ftr_f.zen 2>/dev/null"))
     shell(mp.zo_cmd("./zenc run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt(fmt src) == fmt(src) on a source string.
-om_fmt_idem = (src: str) bool {
+om_fmt_idem = (src: string_view) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_id.zen"), src, len(src))
@@ -426,14 +474,14 @@ om_fmt_idem = (src: str) bool {
     shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("harness: shell") == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
-om_corpus_idem = (mp: MutPtr<Malloc>, rel: str) bool {
+om_corpus_idem = (mp: MutPtr<Malloc>, rel: string_view) bool {
     shell(mp.zo_cmd(mp.om_cat3("./zenc fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null")))
     shell(mp.zo_cmd("./zenc fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null"))
     shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")).expect("harness: shell") == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
-om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: str) bool {
+om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: string_view) bool {
     shell(mp.zo_cmd(mp.om_cat3("./zenc fmt --ast ", rel, " > $ZT/zo_misc_cf.zen 2>/dev/null")))
     shell(mp.zo_cmd(mp.om_cat3("cp ", rel, " $ZT/zo_misc_co.zen")))
     shell(mp.zo_cmd("ZEN_ROOT=. ./zenc emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null"))
@@ -454,11 +502,12 @@ harness_misc_faithful = () i32 {
     o_lam := mp.om_do_fmt("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n")
     o_var := mp.om_do_fmt("sum = (xs: ...i32) i32 { 0 }\n")
     o_vdef := mp.om_do_fmt("Pixel: RGB(i32) | Blank = RGB(255)\n")
+    o_simpl := mp.om_do_fmt("Label*: { label: (str) i32 }\nstr.impl(Label, { label = (s: str) i32 { 0 } })\n")
     // #61: a u64 literal above i64-max round-trips to its exact UNSIGNED decimal, never the signed-
     // normalized value (0xcbf29ce484222325 → 14695981039346656037, NOT -3750763034362895579).
     o_u64 := mp.om_do_fmt("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n")
     o_emit := mp.om_do_emit("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
-    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).match"), om_not(o_bin.contains("n > 0.match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
+    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).match"), om_not(o_bin.contains("n > 0.match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("string_view.impl(Label"), om_not(o_simpl.contains("str.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
     // PHASE 1: emit of `s.len()` still lowers to the flat `len(...)`
     // PHASE 2: fmt --ast keeps UFCS — `x.len()`, NOT `len(x)`
     // a multi-arg method chain round-trips with method args inside the parens
@@ -519,7 +568,7 @@ harness_misc_vbreak = () i32 {
 //  - shell() returns Result<i32, IoError> whose .Ok is the DECODED exit status (the shell `$?`
 //    convention): WEXITSTATUS for a normal exit, 127 for a command sh can't run, 128 + signal for a
 //    signal death. Before the fix it handed back the raw wait status with these folded together.
-om_shell_code = (cmd: str) i32 {
+om_shell_code = (cmd: string_view) i32 {
     shell(cmd).match ({
         .Ok(c)  => c,
         .Err(e) => 0 - 1,

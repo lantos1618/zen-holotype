@@ -15,8 +15,8 @@ Compact roadmap from the current codebase. Each goal names the gap and the check
    - Done when: modules/types can export natural same short names without import collisions and resolver tests prove those names coexist.
 
 2. **Generic Method Inference**
-   - Status: `ReplyRef<T>.send` is generic; actor demo and a trait-impl match-arm regression prove it. Match-arm payload bindings now participate in return-type inference, so unannotated locals can infer generic receiver method returns such as `Box<str>.get()` from enum payloads in first and non-first arms. Enum match expression arms now reject the concrete C-unsafe string/non-string result mismatch before C emission.
-   - Next: broaden inference coverage beyond actor replies and move match result typing toward a real common-type rule instead of first-arm result typing.
+   - Status: `ReplyRef<T>.send` is generic; actor demo and a trait-impl match-arm regression prove it. Match-arm payload bindings participate in return-type inference, so unannotated locals infer generic receiver method returns such as `Box<string_view>.get()` from enum payloads in first and non-first arms. Match and conditional results now use a safe common-type join rather than first-arm selection.
+   - Next: broaden inference coverage beyond actor replies and keep generic inference consistent across full and light checker paths.
 
 3. **Formatter**
    - Status: `zenc fmt [--check] <file>` exists; the first formatter preserves line comments, block comments, strings, char literals, and braces inside comments/literals, normalizes brace indentation/trailing whitespace, is idempotent, and has fixture tests.

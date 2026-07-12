@@ -25,33 +25,33 @@
 { VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: {
-    path: str,
-    want_exit: str,
-    want_out: str,
+    path: string_view,
+    want_exit: string_view,
+    want_out: string_view,
     check_out: bool,
 }
 // an EMIT case: `zenc emit <path>` must emit C containing every `present` string and none of `absent`.
 EmitCase*: {
-    path: str,
-    present: [str],
-    absent: [str],
+    path: string_view,
+    present: [string_view],
+    absent: [string_view],
 }
 // a DOC case: `zenc doc <target>` must succeed (exit 0), its markdown containing every `present` string
 // and none of `absent` (target = a `std.x.y` module name OR a `file.zen` path, both relative to ROOT).
 DocCase*: {
-    target: str,
-    present: [str],
-    absent: [str],
+    target: string_view,
+    present: [string_view],
+    absent: [string_view],
 }
 // a SHELL case: a self-contained `/bin/sh` pipeline that encodes a whole procedural test (project mode,
 // fmt idempotency, --help/--version, bad-file, cross-module sibling diagnostics, emit byte-equality). It
 // must exit 0 iff the test passes — every assertion is a `&&`-chained command / `test`/`grep -F` check.
 ShellCase*: {
-    name: str,
-    cmd: str,
+    name: string_view,
+    cmd: string_view,
 }
 // helper: build the command body  `./zenc build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
-build_cmd = (mp: MutPtr<Malloc>, path: str) str {
+build_cmd = (mp: MutPtr<Malloc>, path: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "./zenc build ").expect("harness: oom")
     s = s.append_in(mp, path).expect("harness: oom")
@@ -60,7 +60,7 @@ build_cmd = (mp: MutPtr<Malloc>, path: str) str {
 }
 // helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
 // (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
-run_cmd = (mp: MutPtr<Malloc>, want_exit: str) str {
+run_cmd = (mp: MutPtr<Malloc>, want_exit: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ").expect("harness: oom")
     s = s.append_in(mp, want_exit).expect("harness: oom")
@@ -89,8 +89,8 @@ run_fixture* = (fc: FixtureCase) bool {
 // PHASE A command: only the heavy `zenc build` (cc). Parallel-safe — a compile spawns no app threads.
 // The program is NOT run here: many build fixtures are CONCURRENCY/pool acceptance programs that spawn
 // their OWN pthreads, so running 16 at once oversubscribes threads and fails nondeterministically.
-fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) str {
-    z: str := ""
+fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) string_view {
+    z: string_view := ""
     zob := mp.zo_idpath("zob", gid, "")
     brc := mp.zo_idpath("zobbrc", gid, ".txt")
     mp.zo_join([z, "if ./zenc build ", fc.path, " -o ", zob, " 2>/dev/null; then echo P > ", brc, "; else echo F > ", brc, "; fi"])
@@ -103,7 +103,7 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
         .Err(e) => false,
     })
     built.match ({ true => {
-        z: str := ""
+        z: string_view := ""
         zob := mp.zo_idpath("zob", gid, "")
         o := mp.zo_idpath("zobout", gid, ".txt")
         rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
@@ -115,14 +115,14 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
 }
 // batch BUILD runner + reporter: build the fixtures IN PARALLEL (the cc-heavy step), then run+check them
 // SERIALLY (thread-spawning concurrency fixtures must not be oversubscribed). Byte-identical verdict.
-run_fixtures* = (name: str, cs: [FixtureCase]) i32 {
+run_fixtures* = (name: string_view, cs: [FixtureCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.fix_build_cmd(i, c)
     })
@@ -139,7 +139,7 @@ run_fixtures* = (name: str, cs: [FixtureCase]) i32 {
     fails
 }
 // helper: build a one-arg command  `./zenc <verb> <path> <redirect>`
-cmd_for = (mp: MutPtr<Malloc>, verb: str, path: str, redirect: str) str {
+cmd_for = (mp: MutPtr<Malloc>, verb: string_view, path: string_view, redirect: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "./zenc ").expect("harness: oom")
     s = s.append_in(mp, verb).expect("harness: oom")
@@ -149,7 +149,7 @@ cmd_for = (mp: MutPtr<Malloc>, verb: str, path: str, redirect: str) str {
     mp.finish_in(s).expect("harness: oom")
 }
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
-all_present_absent = (txt: str, present: [str], absent: [str]) bool {
+all_present_absent = (txt: string_view, present: [string_view], absent: [string_view]) bool {
     ok := true
     present.loop((h, i, s) {
         txt.contains(s).match ({ false => {
@@ -173,8 +173,8 @@ run_emit* = (ec: EmitCase) bool {
         .Err(e)  => false,
     }), false => false })
 }
-emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) str {
-    z: str := ""
+emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) string_view {
+    z: string_view := ""
     c := mp.zo_idpath("zoeemit", gid, ".c")
     rc := mp.zo_idpath("zoeemitrc", gid, ".txt")
     mp.zo_join([z, "if ./zenc emit ", ec.path, " > ", c, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
@@ -189,14 +189,14 @@ emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
         .Err(e)  => false,
     }), false => false })
 }
-run_emits* = (name: str, cs: [EmitCase]) i32 {
+run_emits* = (name: string_view, cs: [EmitCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.emit_cmd(i, c)
     })
@@ -222,8 +222,8 @@ run_doc* = (dc: DocCase) bool {
         .Err(e)  => false,
     }), false => false })
 }
-doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) str {
-    z: str := ""
+doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) string_view {
+    z: string_view := ""
     f := mp.zo_idpath("zoedoc", gid, ".txt")
     rc := mp.zo_idpath("zoedocrc", gid, ".txt")
     mp.zo_join([z, "if ./zenc doc ", dc.target, " > ", f, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
@@ -238,14 +238,14 @@ doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
         .Err(e)  => false,
     }), false => false })
 }
-run_docs* = (name: str, cs: [DocCase]) i32 {
+run_docs* = (name: string_view, cs: [DocCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.doc_cmd(i, c)
     })
@@ -265,7 +265,7 @@ run_docs* = (name: str, cs: [DocCase]) i32 {
 // run concurrently with the other cases: N such fixtures at once oversubscribe the scheduler and fail
 // nondeterministically (the exact hazard #485 caught for build fixtures). These run SERIALLY; everything
 // else runs across the worker pool. Identified by case name (only the two pool-isolation cases qualify).
-shell_is_serial = (name: str) bool { eq(name, "pool_actor_panic_isolation") || eq(name, "pool_actor_stackoverflow_isolation") }
+shell_is_serial = (name: string_view) bool { eq(name, "pool_actor_panic_isolation") || eq(name, "pool_actor_stackoverflow_isolation") }
 // wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
 // subdir `<zo_dir>/sh<gid>` (freshly recreated) so the hand-written pipelines — which reuse fixed scratch
 // names like `$ZT/zbp.c`, `$ZT/zfmt.zen` — never clobber each other under concurrency, then record the
@@ -274,8 +274,8 @@ shell_is_serial = (name: str) bool { eq(name, "pool_actor_panic_isolation") || e
 // marker), everything a case needs it already redirects into `$ZT`, and a few fixtures otherwise leak a
 // stray line (a fixture's own program output, a `fmt --check` "needs formatting") that — under parallel
 // execution — would interleave with the dot stream at a timing-dependent point, breaking determinism.
-shell_wrap = (mp: MutPtr<Malloc>, gid: i64, cmd: str) str {
-    z: str := ""
+shell_wrap = (mp: MutPtr<Malloc>, gid: i64, cmd: string_view) string_view {
+    z: string_view := ""
     zt := mp.zo_idpath("sh", gid, "")
     rc := mp.zo_idpath("shrc", gid, ".txt")
     mp.zo_join([z, "ZT=", zt, "; rm -rf \"$ZT\"; mkdir -p \"$ZT\"; if ( ", cmd, " ) >/dev/null 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
@@ -289,7 +289,7 @@ shell_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
 // run the shell cases: the pipeline must exit 0. Thread-spawning cases (shell_is_serial) run one at a time;
 // all others run across the worker pool. Every case's body is gid-isolated (its own `$ZT` subdir), so the
 // fixed scratch names never collide. Phase C reads the P/F markers IN ORDER — byte-identical verdict to serial.
-run_shells* = (name: str, cs: [ShellCase]) i32 {
+run_shells* = (name: string_view, cs: [ShellCase]) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     out(name)
@@ -298,7 +298,7 @@ run_shells* = (name: str, cs: [ShellCase]) i32 {
     // Phase A: build every case's wrapped command; partition into the parallel-safe batch (dense array
     // `pcmds`) and run the thread-spawning ones serially right here (their markers land the same way).
     pbase := malloc(n * 8)
-    pcmds: [str] := pbase.slice(n)
+    pcmds: [string_view] := pbase.slice(n)
     pn: i64 := 0
     cs.loop((h, i, c) {
         w := mp.shell_wrap(i, c.cmd)
@@ -1511,7 +1511,7 @@ harness_build_run* = () i32 {
         wants: [":3:26: error[arg-type]: expected `u8`, got `i64`", "  main = () i32 { takes_u8(big()) }", "                           ^~~", "hint: check the argument type or add an explicit conversion at the call site"],
     ), DiagCase(
         src: "f = (x: i32) i32 { x }\nmain = () i32 { f(\"s\") }\n",
-        wants: [":2:19: error[arg-type]: expected `i32`, got `str`", "  main = () i32 { f(\"s\") }", "                    ^~~", "hint: check the argument type or add an explicit conversion at the call site"],
+        wants: [":2:19: error[arg-type]: expected `i32`, got `string_literal`", "  main = () i32 { f(\"s\") }", "                    ^~~", "hint: check the argument type or add an explicit conversion at the call site"],
     ), DiagCase(
         src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { })\n",
         wants: [":3:1: error[conformance]: impl does not satisfy the trait", "  Point.impl(Show, { })", "  ^~~~~", "hint: define every required trait method with the exact receiver, parameter, and return types"],
@@ -1538,10 +1538,10 @@ harness_build_run* = () i32 {
         wants: [":1:19: error[return-fit]: expected `i32`, got `bool`", "  main = () i32 { 1 < 2 }", "                    ^", "hint: make the returned value fit the function's declared return type"],
     ), DiagCase(
         src: "main = () i32 {\n    x: i32 := \"hi\"\n    0\n}\n",
-        wants: [":2:15: error[assign-fit]: expected `i32`, got `str`", "      x: i32 := \"hi\"", "                ^~~~", "hint: make the assigned value fit the target's type"],
+        wants: [":2:15: error[assign-fit]: expected `i32`, got `string_literal`", "      x: i32 := \"hi\"", "                ^~~~", "hint: make the assigned value fit the target's type"],
     ), DiagCase(
         src: "f = () i32 { \"hi\" }\nmain = () i32 { 0 }\n",
-        wants: [":1:14: error[return-fit]: expected `i32`, got `str`", "  f = () i32 { \"hi\" }", "               ^~~~", "hint: make the returned value fit the function's declared return type"],
+        wants: [":1:14: error[return-fit]: expected `i32`, got `string_literal`", "  f = () i32 { \"hi\" }", "               ^~~~", "hint: make the returned value fit the function's declared return type"],
     ), DiagCase(
         src: "P: { x: i32, y: i32 }\nf = (p: P) i32 {\n    p.nofield\n}\nmain = () i32 { 0 }\n",
         wants: [":3:7: error[struct-field]: struct `P` has no field `nofield` (fields: x, y)", "      p.nofield", "        ^~~~~~~", "hint: check the struct literal or field access against the declared fields"],
@@ -1619,7 +1619,7 @@ harness_build_run* = () i32 {
         wants: [":2:1: error[reserved-name]: `store` is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function", "  store = (p: i64, v: i64) i64 { p + v }", "  ^~~~~", "hint: rename — `store` is a compiler intrinsic"],
     ), DiagCase(
         src: "f = () i32 {\n    a := nope()\n    c: i32 := \"hi\"\n    \"s\"\n}\nmain = () i32 { f() }\n",
-        wants: [":2:10: error[undefined-name]: undefined name", "      a := nope()", "           ^~~~", ":3:15: error[assign-fit]: expected `i32`, got `str`", "      c: i32 := \"hi\"", ":4:5: error[return-fit]: expected `i32`, got `str`", "      \"s\""],
+        wants: [":2:10: error[undefined-name]: undefined name", "      a := nope()", "           ^~~~", ":3:15: error[assign-fit]: expected `i32`, got `string_literal`", "      c: i32 := \"hi\"", ":4:5: error[return-fit]: expected `i32`, got `string_literal`", "      \"s\""],
     ), DiagCase(
         src: "{ println } = std.text.fmt\nPoint*: { x: i32 }\nmain = () i32 {\n    p := Point(x: 1)\n    println(p)\n    0\n}\n",
         wants: [":5:5: error[trait-bound]: type `Point` does not implement trait `Display` (which declares `fmt_println`) — missing method(s): fmt_print, fmt_println", "      println(p)", "      ^~~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
@@ -1691,11 +1691,11 @@ harness_build_run* = () i32 {
         absent: ["buf*<T>", "try_buf", "dup*<T>", "try_dup", "node*<T>", "try_node", "concat*<T>", "try_concat", "nbuf"],
     ), DocCase(
         target: "std.text.bytes",
-        present: ["at* = (s: str, i: i32) u8", "is_digit*"],
+        present: ["at* = (s: string_view, i: i32) u8", "is_digit*"],
         absent: ["byte_at"],
     ), DocCase(
         target: "std.concurrent.cown",
-        present: ["buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError>", "file*<A> = (alloc: MutPtr<A>, path: str)", "file_in*<A>"],
+        present: ["buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError>", "file*<A> = (alloc: MutPtr<A>, path: string_view)", "file_in*<A>"],
         absent: ["try_buf", "buf_alloc", "buf_free", "file_open", "file_wrap"],
     ), DocCase(
         target: "std.concurrent.runtime",
@@ -1727,7 +1727,7 @@ harness_build_run* = () i32 {
         absent: ["try_of", "try_push", "try_grow", "vec_of", "try_vec_of", "vpush", "vgrow", "vfree", "vitems", "vlen"],
     ), DocCase(
         target: "std.collections.map",
-        present: ["of*<T, A> = (a: MutPtr<A>, seed_key: str, seed_val: T) Result<Map<T>, IoError>"],
+        present: ["of*<T, A> = (a: MutPtr<A>, seed_key: string_view, seed_val: T) Result<Map<T>, IoError>"],
         absent: ["try_of", "try_put", "try_append", "IntMap", "int_of", "map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
     ), DocCase(
         target: "std.collections.iter",
@@ -1739,7 +1739,7 @@ harness_build_run* = () i32 {
         absent: ["tracked*<T> = (x: T)", "collect* = () void", "hcount*", "list_push*", "trace_child*", "node_set_kid*", "cc_mark*", "blk_drop*", "trace_child", "node_set_kid", "hcount", "list_push", "cc_mark", "blk_drop", "try_tracked", "try_root", "try_collect"],
     ), DocCase(
         target: "std.text.str",
-        present: ["dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>", "dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError>", "substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>", "substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError>", "at* = (s: str, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: str) Result<i64, ParseError>", "what made try_parse_int refuse"],
+        present: ["dup_bytes*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError>", "dup_bytes_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError>", "substr*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError>", "substr_in*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError>", "at* = (s: string_view, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: string_view) Result<i64, ParseError>", "what made try_parse_int refuse"],
         absent: ["try_dup_bytes", "try_substr", "char_at", "str_parse_int"],
     ), DocCase(
         target: "std.text.num",
@@ -1747,8 +1747,8 @@ harness_build_run* = () i32 {
         absent: ["try_integer", "try_uinteger", "try_float", "int_string", "float_string", "int_to_str", "float_to_str"],
     ), DocCase(
         target: "std.io.file",
-        present: ["out* = (s: str) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError>", "contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError>", "save* = (path: str, data: str, n: i64) Result<i64, IoError>", "shell* = (cmd: str) Result<i32, IoError>", "Reads a whole file into an allocator-owned NUL-terminated buffer."],
-        absent: ["contents* = (path: str) Result<str, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
+        present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned NUL-terminated buffer."],
+        absent: ["contents* = (path: string_view) Result<string_view, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
     ), DocCase(
         target: "zen/compiler/genc.zen",
         present: ["mangle_str_in*", "impl_cname_in*", "fnt_from_func_in*", "ty_cname_in*", "subst_ty_in*"],

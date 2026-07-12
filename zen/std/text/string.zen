@@ -1,6 +1,6 @@
 // std.text.string — a growable, allocator-backed byte String, ASSEMBLED at runtime.
 //
-// `str` is a comptime C-string literal; a `String` is built while the program runs —
+// `string_literal` is compile-time storage; a `String` is built while the program runs —
 // the keystone for runtime code generation (a backend that emits source as a value).
 // The API is functional: each op returns the updated String. The (ptr, len, cap)
 // header is a small value passed by copy; the byte buffer is realloc'd underneath, so
@@ -20,13 +20,17 @@ String*: {
     ptr: RawPtr<u8>,
     len: i64,
     cap: i64,
-    bytes = (s: String) [u8] { s.ptr.slice(s.len) }
+    bytes = (s: String) [u8] {
+        // Physical allocation size. Builders keep at least one byte beyond `len` for finish_in's NUL;
+        // init(requested) therefore reports at least requested + 1 here.
+        s.ptr.slice(s.len)
+    }
     push_in<A> = (s: String, a: MutPtr<A>, b: u8) Result<String, IoError> { a.push_in(s, b) }
-    append_in<A> = (s: String, a: MutPtr<A>, t: str) Result<String, IoError> { a.append_in(s, t) }
+    append_in<A> = (s: String, a: MutPtr<A>, t: string_view) Result<String, IoError> { a.append_in(s, t) }
     finish_in<A> = (s: String, a: MutPtr<A>) Result<string_cstr, IoError> { a.finish_in(s) }
     free_in<A> = (s: String, a: MutPtr<A>) void { a.free_in(s) }
 }
-copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: str) void {
+copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: string_view) void {
     src := t.view()
     src.loop((h, i, b) {
         dst.offset(at + i).store(b)
@@ -34,11 +38,14 @@ copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: str) void {
 }
 // ── explicit allocator variants (all fallible ops return Result) ─────────────
 init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
-    a.try_acquire(cap).match ({
+    // `cap` requests content capacity. The public field records physical allocation capacity,
+    // including one spare byte for finish_in's trailing NUL.
+    actual := cap + 1
+    a.try_acquire(actual).match ({
         .Ok(p)  => ok(String(
             ptr: p,
             len: 0,
-            cap: cap,
+            cap: actual,
         )),
         .Err(e) => err(e),
     })
@@ -66,7 +73,7 @@ reserve_in<A> = (a: MutPtr<A>, s: String, need: i64) Result<String, IoError> {
 // Force value args to locals first so callers may safely pass expressions that read `s`.
 push_in*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
     b := b
-    a.reserve_in(s, 1).match ({
+    a.reserve_in(s, 2).match ({
         .Ok(r)  => {
             r.ptr.offset(r.len).store(b)
             ok(String(
@@ -78,10 +85,10 @@ push_in*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
         .Err(e) => err(e),
     })
 }
-append_in*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
+append_in*<A> = (a: MutPtr<A>, s: String, t: string_view) Result<String, IoError> {
     t := t
     n := t.len()
-    a.reserve_in(s, n).match ({
+    a.reserve_in(s, n + 1).match ({
         .Ok(r)  => {
             r.ptr.copy_str_bytes(r.len, t)
             ok(String(
@@ -94,8 +101,13 @@ append_in*<A> = (a: MutPtr<A>, s: String, t: str) Result<String, IoError> {
     })
 }
 finish_in*<A> = (a: MutPtr<A>, s: String) Result<string_cstr, IoError> {
-    a.push_in(s, 0).match ({
-        .Ok(done) => ok(cstr(done.ptr)),
+    // init/push/append maintain one spare byte, so this does not relocate the allocation and the
+    // caller's String header remains the correct owner to pass to free_in.
+    a.reserve_in(s, 1).match ({
+        .Ok(done) => {
+            done.ptr.offset(done.len).store(0)
+            ok(cstr(done.ptr))
+        },
         .Err(e)   => err(e),
     })
 }

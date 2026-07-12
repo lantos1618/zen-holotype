@@ -239,7 +239,7 @@ This is rough around the edges. Known limits worth flagging up front:
 
 | path | role |
 |---|---|
-| `zen/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `str` |
+| `zen/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `string_view` |
 | `zen/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
 | `zen/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
 | `zen/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |

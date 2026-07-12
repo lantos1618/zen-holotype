@@ -23,10 +23,10 @@ and ownership APIs.
 > process heap once via `dyn_heap()` at construction and store that `DynAlloc` for
 > the container's lifetime. `new_in`/`from_in` remain the explicit real paths.
 
-String bytes carry their own provenance discipline — immortal `text`, borrowed
-`view`/`Cstr`, and the heap-owned `String` (freed through the allocator that owns
-its buffer). See [STRING_TYPES.md](STRING_TYPES.md) (`Cstr`/`Text` are Phase-1
-backend types today).
+String bytes carry their own provenance discipline — static `string_literal`,
+borrowed NUL-terminated `string_cstr`, general borrowed `string_view`, and the
+heap-owned `String` (freed through the allocator that owns its buffer). The old
+`text`/`Cstr`/`str` spellings are parser aliases; see [STRING_TYPES.md](STRING_TYPES.md).
 
 ## Current Rules
 

@@ -84,7 +84,7 @@ parse_octets = (v: [u8], i: i64, cell: RawPtr<u8>, octet: i64, count: i64, seen:
 }
 // parse `host` (a dotted-quad "a.b.c.d" or the literal "localhost") into the four sin_addr octets at
 // cell[4..8]; return false on a malformed address. "0.0.0.0" (INADDR_ANY) binds all interfaces.
-fill_ipv4 = (host: str, cell: RawPtr<u8>) bool {
+fill_ipv4 = (host: string_view, cell: RawPtr<u8>) bool {
     eq(host, "localhost").match ({ true => {
         cell.offset(4).store(127)
         cell.offset(5).store(0)
@@ -94,7 +94,7 @@ fill_ipv4 = (host: str, cell: RawPtr<u8>) bool {
     }, false => host.view().parse_octets(0, cell, 0, 0, false) == 4 })
 }
 // stamp family + port + address into a zeroed 16-byte cell; false if `host` is unparseable.
-fill_sockaddr = (cell: RawPtr<u8>, host: str, port: i32) bool {
+fill_sockaddr = (cell: RawPtr<u8>, host: string_view, port: i32) bool {
     cell.store(to_u8(AF_INET))    // sin_family low byte (host order; high byte stays 0)
     cell.offset(2).store(to_u8(port >> 8 & 255))    // sin_port high byte (network order)
     cell.offset(3).store(to_u8(port & 255))    // sin_port low byte
@@ -112,7 +112,7 @@ set_reuse = (fd: i32) void {
 // open a listening TCP socket bound to `host:port` (port 0 => kernel-chosen ephemeral). `host` is an
 // IPv4 dotted-quad or "localhost"; "0.0.0.0" binds every interface. Returns a ready `TcpListener` whose
 // accept queue is `BACKLOG` deep, or the first failing step's errno.
-serve* = (host: str, port: i32) Result<TcpListener, IoError> {
+serve* = (host: string_view, port: i32) Result<TcpListener, IoError> {
     fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
     out: Result<TcpListener, IoError> := (fd < 0).match ({ true => err(IoError.Errno(fd)), false => {
         fd.set_reuse()
@@ -164,7 +164,7 @@ close_listener* = (l: TcpListener) void { l.fd.close() }
 // ── connection ─────────────────────────────────────────────────────────────────────────────────────────
 // open an active TCP connection to `host:port` ("localhost"/dotted-quad). Returns a live `TcpConn`
 // or the failing step's errno. Blocking: connect returns once the handshake completes.
-dial* = (host: str, port: i32) Result<TcpConn, IoError> {
+dial* = (host: string_view, port: i32) Result<TcpConn, IoError> {
     fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
     out: Result<TcpConn, IoError> := (fd < 0).match ({ true => err(IoError.Errno(fd)), false => {
         cell := zeroed(SOCKADDR_LEN)
@@ -192,11 +192,11 @@ recv_into* = (c: TcpConn, buf: RawPtr<u8>, n: i64) Result<i64, IoError> {
 }
 // read up to `n` bytes into a fresh allocator-owned NUL-terminated buffer, returning it as a `str`
 // of the bytes actually read (a single read() — one TCP segment; loop with recv_into for a full stream).
-recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<str, IoError> {
+recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<string_view, IoError> {
     a.try_acquire(n + 1).match ({
         .Ok(buf) => {
             r := c.fd.read(buf, n)
-            out: Result<str, IoError> := (r < 0).match ({ true => {
+            out: Result<string_view, IoError> := (r < 0).match ({ true => {
                 a.release(buf)
                 err(IoError.Errno(to_i32(r)))
             }, false => {
@@ -221,6 +221,6 @@ send* = (c: TcpConn, bytes: [u8]) Result<i64, IoError> {
     (w == bytes.len).match ({ true => ok(w), false => err(IoError.Eof) })
 }
 // convenience: send a `str`'s bytes (no trailing NUL).
-send_str* = (c: TcpConn, s: str) Result<i64, IoError> { c.send(s.view()) }
+send_str* = (c: TcpConn, s: string_view) Result<i64, IoError> { c.send(s.view()) }
 // close the connection.
 close_conn* = (c: TcpConn) void { c.fd.close() }

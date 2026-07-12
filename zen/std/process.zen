@@ -28,7 +28,7 @@
 CHUNK := 4096
 // A finished subprocess: its captured stdout and decoded exit code.
 Output*: {
-    stdout: str,
+    stdout: string_view,
     exit: i64,
 }
 // Decode a pclose/waitpid status into a plain exit code: WEXITSTATUS (`status >> 8 & 0xff`) for a
@@ -93,13 +93,13 @@ capture<A> = (a: MutPtr<A>, f: RawPtr<u8>) Result<Output, IoError> {
 // `stdout` is allocator-owned — release it via `a.release(out.stdout.view().ptr)` (or let an arena
 // reclaim it). A nonzero exit is NOT an error here: it rides back in `Output.exit` for the caller to
 // inspect (use `run_ok` when a nonzero exit should be an error).
-run*<A> = (a: MutPtr<A>, cmd: str) Result<Output, IoError> {
+run*<A> = (a: MutPtr<A>, cmd: string_view) Result<Output, IoError> {
     f := cmd.popen("r")
     (f == null_ptr()).match ({ true => err(IoError.NotFound), false => a.capture(f) })
 }
 // Convenience: run `cmd` and return its stdout, treating a nonzero exit as `.Err(.Errno(code))`. For
 // commands run purely for their output, where a failure should short-circuit the Result chain.
-run_ok*<A> = (a: MutPtr<A>, cmd: str) Result<str, IoError> {
+run_ok*<A> = (a: MutPtr<A>, cmd: string_view) Result<string_view, IoError> {
     a.run(cmd).match ({
         .Err(e) => err(e),
         .Ok(o)  => (o.exit == 0).match ({ true => ok(o.stdout), false => err(IoError.Errno(to_i32(o.exit))) }),
