@@ -21,7 +21,9 @@ ROOT := $(abspath $(HERE)..)
 # in the environment still wins (this only sets the default).
 CCACHE  := $(shell command -v ccache 2>/dev/null)
 CC      ?= $(if $(CCACHE),ccache cc,cc)
-CFLAGS  ?= -std=gnu11 -fwrapv -w
+# Apple Clang treats generated forward calls as errors unless this diagnostic
+# is made non-fatal. (The runtime itself defines macOS's ucontext feature macro.)
+CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c

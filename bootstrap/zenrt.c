@@ -1,3 +1,7 @@
+#ifdef __APPLE__
+#define _XOPEN_SOURCE 700
+#endif
+
 #include "zenrt.h"
 #include <stdlib.h>
 #include <string.h>
