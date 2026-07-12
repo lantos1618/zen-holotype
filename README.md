@@ -124,7 +124,7 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 
 | area | modules |
 |---|---|
-| core | `std.core.{result, ptr, slice, bool}`; `std.sys` (the root capability) |
+| core | `std.core.{result, ptr, slice, bool}`; `std.sys` (the root capability); `std.platform` (host/target OS, architecture, ABI) |
 | collections | `std.collections.{vec, map, hmap, set, iter}` |
 | text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
 | memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
