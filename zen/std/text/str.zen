@@ -5,19 +5,19 @@
 { Result, Opt, IoError, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
 { is_space } = std.text.bytes
-len* = (s: str) i64 { s.strlen() }
-is_empty* = (s: str) bool { (s.strlen() == 0).match ({ true => true, false => false }) }
-eq* = (a: str, b: str) bool { (a.strcmp(b) == 0).match ({ true => true, false => false }) }
-ne* = (a: str, b: str) bool { a.eq(b).match ({ true => false, false => true }) }
+len* = (s: string_view) i64 { s.strlen() }
+is_empty* = (s: string_view) bool { (s.strlen() == 0).match ({ true => true, false => false }) }
+eq* = (a: string_view, b: string_view) bool { (a.strcmp(b) == 0).match ({ true => true, false => false }) }
+ne* = (a: string_view, b: string_view) bool { a.eq(b).match ({ true => false, false => true }) }
 // ── bytes: borrow or own ────────────────────────────────────────────────────
-view* = (s: str) [u8] { s.slice(s.strlen()) }
+view* = (s: string_view) [u8] { s.slice(s.strlen()) }
 alloc_size = (n: i64) i64 { (n == 0).match ({ true => 1, false => n }) }
 copy_bytes = (src: [u8], out: [u8]) void {
     src.loop((h, i, b) {
         out[i] = b
     })
 }
-dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
+dup_bytes_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
     src := s.view()
     a.try_acquire(src.len.alloc_size()).match ({
         .Ok(p)  => {
@@ -28,7 +28,7 @@ dup_bytes_in*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> {
         .Err(e) => err(e),
     })
 }
-dup_bytes*<A> = (a: MutPtr<A>, s: str) Result<[u8], IoError> { a.dup_bytes_in(s) }
+dup_bytes*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> { a.dup_bytes_in(s) }
 // ── search ──────────────────────────────────────────────────────────────────
 // do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
 has_at = (sv: [u8], pv: [u8], at: i64) bool {
@@ -45,7 +45,7 @@ has_at = (sv: [u8], pv: [u8], at: i64) bool {
 }
 // byte index of the first occurrence of `needle` in `s`, -1 if absent.
 // the empty needle matches at 0 (the strstr convention).
-find* = (s: str, needle: str) i64 {
+find* = (s: string_view, needle: string_view) i64 {
     sv := s.view()
     pv := needle.view()
     (pv.len == 0).match ({ true => 0, false => {
@@ -62,18 +62,18 @@ find* = (s: str, needle: str) i64 {
     } })
 }
 // does `s` contain `needle`? (the empty needle is contained in everything)
-contains* = (s: str, needle: str) bool { s.find(needle) >= 0 }
+contains* = (s: string_view, needle: string_view) bool { s.find(needle) >= 0 }
 // NOTE: `find` IS the index-of operation (first byte index, -1 if absent) — there is no separate
 // `index_of` here on purpose: it would duplicate `find` AND collide on the flattened namespace with
 // std.core.slice's `index_of<T>`. Reach for `find` (raw -1 sentinel) or `find_opt` (Opt<i64>).
 // does `s` begin with `prefix`? (every str starts with the empty prefix)
-starts_with* = (s: str, prefix: str) bool {
+starts_with* = (s: string_view, prefix: string_view) bool {
     sv := s.view()
     pv := prefix.view()
     pv.len <= sv.len && sv.has_at(pv, 0)
 }
 // does `s` end with `suffix`? (every str ends with the empty suffix)
-ends_with* = (s: str, suffix: str) bool {
+ends_with* = (s: string_view, suffix: string_view) bool {
     sv := s.view()
     fv := suffix.view()
     fv.len <= sv.len && sv.has_at(fv, sv.len - fv.len)
@@ -92,7 +92,7 @@ copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out[m] = 0
 }
 // Out-of-range is clamped: a.substr("hi", 1, 99) == "i"; a.substr("hi", 5, 2) == "".
-substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> {
+substr_in*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError> {
     sv := s.view()
     lo := start.pin(0, sv.len)
     m := n.pin(0, sv.len - lo)
@@ -105,9 +105,9 @@ substr_in*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> 
         .Err(e) => err(e),
     })
 }
-substr*<A> = (a: MutPtr<A>, s: str, start: i64, n: i64) Result<str, IoError> { a.substr_in(s, start, n) }
+substr*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError> { a.substr_in(s, start, n) }
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
-at* = (s: str, i: i64) u8 {
+at* = (s: string_view, i: i64) u8 {
     sv := s.view()
     (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
 }
@@ -141,51 +141,51 @@ ws_end = (v: [u8]) i64 {
     hi
 }
 // zero-copy `[u8]` sub-views (no allocation) — both ends / leading / trailing.
-trim_view* = (s: str) [u8] {
+trim_view* = (s: string_view) [u8] {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
     (hi > lo).match ({ true => slice(v.ptr.offset(lo), hi - lo), false => slice(v.ptr, 0) })
 }
-ltrim_view* = (s: str) [u8] {
+ltrim_view* = (s: string_view) [u8] {
     v: [u8] := s.view()
     lo := v.ws_start()
     slice(v.ptr.offset(lo), v.len - lo)
 }
-rtrim_view* = (s: str) [u8] {
+rtrim_view* = (s: string_view) [u8] {
     v: [u8] := s.view()
     slice(v.ptr, v.ws_end())
 }
 // leading-only trim AS A STR — zero-copy: the original NUL terminator still ends the result.
-ltrim* = (s: str) str {
+ltrim* = (s: string_view) string_view {
     v: [u8] := s.view()
     cstr(v.ptr.offset(v.ws_start()))
 }
 // allocator-owned NUL-terminated trimmed copies (both ends / trailing).
-trim_in*<A> = (a: MutPtr<A>, s: str) str {
+trim_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
     a.substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 })).expect("std.text.str: allocation failed")
 }
-trim*<A> = (a: MutPtr<A>, s: str) str { a.trim_in(s) }
-rtrim_in*<A> = (a: MutPtr<A>, s: str) str {
+trim*<A> = (a: MutPtr<A>, s: string_view) string_view { a.trim_in(s) }
+rtrim_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
     v: [u8] := s.view()
     a.substr_in(s, 0, v.ws_end()).expect("std.text.str: allocation failed")
 }
-rtrim*<A> = (a: MutPtr<A>, s: str) str { a.rtrim_in(s) }
+rtrim*<A> = (a: MutPtr<A>, s: string_view) string_view { a.rtrim_in(s) }
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): like `ltrim`, dropping a prefix only
 // advances the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
 // it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
-trim_prefix* = (s: str, prefix: str) str { s.starts_with(prefix).match ({ true => cstr(s.view().ptr.offset(prefix.len())), false => s }) }
+trim_prefix* = (s: string_view, prefix: string_view) string_view { s.starts_with(prefix).match ({ true => cstr(s.view().ptr.offset(prefix.len())), false => s }) }
 // strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
 // own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
 // trim_suffix("file.zen", ".zen") == "file".
-trim_suffix_in*<A> = (a: MutPtr<A>, s: str, suffix: str) str {
+trim_suffix_in*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_view {
     n := s.len()
     s.ends_with(suffix).match ({ true => a.substr_in(s, 0, n - suffix.len()).expect("std.text.str: allocation failed"), false => a.substr_in(s, 0, n).expect("std.text.str: allocation failed") })
 }
-trim_suffix*<A> = (a: MutPtr<A>, s: str, suffix: str) str { a.trim_suffix_in(s, suffix) }
+trim_suffix*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_view { a.trim_suffix_in(s, suffix) }
 // ── splitting: fields and words ───────────────────────────────────────────────
 //
 // A returned `[str]` holds NUL-terminated COPIES of each field, not zero-copy sub-views: `str` is
@@ -196,7 +196,7 @@ trim_suffix*<A> = (a: MutPtr<A>, s: str, suffix: str) str { a.trim_suffix_in(s, 
 nbuf*<T, A> = (a: MutPtr<A>, seed: T, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
 // split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
 // kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
-split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
+split_in*<A> = (a: MutPtr<A>, s: string_view, sep: u8) [string_view] {
     sv := s.view()
     nf: i64 := 1
     sv.loop((h, i, b) {
@@ -204,7 +204,7 @@ split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
             nf = nf + 1
         } })
     })
-    out: [str] := a.nbuf("", nf)
+    out: [string_view] := a.nbuf("", nf)
     fi: i64 := 0    // next field slot
     start: i64 := 0
     sv.loop((h, i, b) {
@@ -217,10 +217,10 @@ split_in*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] {
     out[fi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
     out
 }
-split*<A> = (a: MutPtr<A>, s: str, sep: u8) [str] { a.split_in(s, sep) }
+split*<A> = (a: MutPtr<A>, s: string_view, sep: u8) [string_view] { a.split_in(s, sep) }
 // split `s` on RUNS of ASCII whitespace, dropping empty fields: "  the  cat sat " -> ["the","cat","sat"];
 // "" / all-whitespace -> [] (an empty slice).
-words_in*<A> = (a: MutPtr<A>, s: str) [str] {
+words_in*<A> = (a: MutPtr<A>, s: string_view) [string_view] {
     sv := s.view()
     nw: i64 := 0    // word count = whitespace(or start)->non-whitespace transitions
     inw := false
@@ -232,7 +232,7 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
             nw = nw + 1
         } }) })
     })
-    out: [str] := a.nbuf("", nw)
+    out: [string_view] := a.nbuf("", nw)
     wi: i64 := 0    // next word slot
     start: i64 := 0 - 1
     sv.loop((h, i, b) {
@@ -250,7 +250,7 @@ words_in*<A> = (a: MutPtr<A>, s: str) [str] {
     } })
     out
 }
-words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
+words*<A> = (a: MutPtr<A>, s: string_view) [string_view] { a.words_in(s) }
 // ── building new strings: join / replace / case / repeat / pad ─────────────────
 //
 // Each op below ALLOCATES a fresh NUL-terminated `str` from the caller's allocator (a `MutPtr<A>`),
@@ -261,7 +261,7 @@ words*<A> = (a: MutPtr<A>, s: str) [str] { a.words_in(s) }
 // common names. They are unique across std today (grepped) — the only near-miss is std.core.slice's
 // `index_of<T>`, which is why no `index_of` is defined here (use `find`). Keep new globals distinct.
 // copy `t`'s bytes into `out` starting at `at`; return the offset just past them.
-copy_at = (out: [u8], at: i64, t: str) i64 {
+copy_at = (out: [u8], at: i64, t: string_view) i64 {
     tv := t.view()
     tv.loop((h, i, b) {
         out[at + i] = b
@@ -273,7 +273,7 @@ to_ascii_lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + ('a' -
 to_ascii_upper = (b: u8) u8 { (b >= 'a' && b <= 'z').match ({ true => b - ('a' - 'A'), false => b }) }
 // ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
-to_lower_in*<A> = (a: MutPtr<A>, s: str) str {
+to_lower_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
     sv := s.view()
     out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
     sv.loop((h, i, b) {
@@ -282,8 +282,8 @@ to_lower_in*<A> = (a: MutPtr<A>, s: str) str {
     out[sv.len] = 0
     cstr(out.ptr)
 }
-to_lower*<A> = (a: MutPtr<A>, s: str) str { a.to_lower_in(s) }
-to_upper_in*<A> = (a: MutPtr<A>, s: str) str {
+to_lower*<A> = (a: MutPtr<A>, s: string_view) string_view { a.to_lower_in(s) }
+to_upper_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
     sv := s.view()
     out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
     sv.loop((h, i, b) {
@@ -292,9 +292,9 @@ to_upper_in*<A> = (a: MutPtr<A>, s: str) str {
     out[sv.len] = 0
     cstr(out.ptr)
 }
-to_upper*<A> = (a: MutPtr<A>, s: str) str { a.to_upper_in(s) }
+to_upper*<A> = (a: MutPtr<A>, s: string_view) string_view { a.to_upper_in(s) }
 // `s` concatenated `n` times. `n <= 0` yields ""; an empty `s` also yields "". repeat("ab", 3) == "ababab".
-repeat_in*<A> = (a: MutPtr<A>, s: str, n: i64) str {
+repeat_in*<A> = (a: MutPtr<A>, s: string_view, n: i64) string_view {
     sv := s.view()
     cnt := (n < 0).match ({ true => 0, false => n })
     total := sv.len * cnt
@@ -309,10 +309,10 @@ repeat_in*<A> = (a: MutPtr<A>, s: str, n: i64) str {
     })
     cstr(out.ptr)
 }
-repeat*<A> = (a: MutPtr<A>, s: str, n: i64) str { a.repeat_in(s, n) }
+repeat*<A> = (a: MutPtr<A>, s: string_view, n: i64) string_view { a.repeat_in(s, n) }
 // join a slice of `str`s with `sep` between each: join(["a","b","c"], ",") == "a,b,c".
 // An empty slice yields "", a one-element slice yields that element (no separator).
-join_in*<A> = (a: MutPtr<A>, parts: [str], sep: str) str {
+join_in*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view {
     np := parts.len
     total: i64 := 0
     parts.loop((h, i, p) {
@@ -331,7 +331,7 @@ join_in*<A> = (a: MutPtr<A>, parts: [str], sep: str) str {
     out[total] = 0
     cstr(out.ptr)
 }
-join*<A> = (a: MutPtr<A>, parts: [str], sep: str) str { a.join_in(parts, sep) }
+join*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view { a.join_in(parts, sep) }
 // ── concatenation: explicit allocator, NO hidden heap ─────────────────────────
 //
 // Zen has no `str + str` operator on purpose: `+` would hide a malloc. Concatenation is
@@ -346,7 +346,7 @@ join*<A> = (a: MutPtr<A>, parts: [str], sep: str) str { a.join_in(parts, sep) }
 //
 //   a.cat(a.cat("a", "b"), "c")  ==  a.join(["a", "b", "c"], "")  ==  "abc"
 //   a.join(["name=", name, "\n"], "")  builds  "name=<name>\n"
-cat_in*<A> = (a: MutPtr<A>, x: str, y: str) str {
+cat_in*<A> = (a: MutPtr<A>, x: string_view, y: string_view) string_view {
     xv := x.view()
     yv := y.view()
     total := xv.len + yv.len
@@ -356,7 +356,7 @@ cat_in*<A> = (a: MutPtr<A>, x: str, y: str) str {
     out[total] = 0
     cstr(out.ptr)
 }
-cat*<A> = (a: MutPtr<A>, x: str, y: str) str { a.cat_in(x, y) }
+cat*<A> = (a: MutPtr<A>, x: string_view, y: string_view) string_view { a.cat_in(x, y) }
 // count NON-overlapping occurrences of `fv` (len >= 1) in `sv`. `nextpos` skips past a match's bytes so
 // "aaaa" has 2 occurrences of "aa", not 3.
 count_occ = (sv: [u8], fv: [u8]) i64 {
@@ -373,7 +373,7 @@ count_occ = (sv: [u8], fv: [u8]) i64 {
 // replace ALL non-overlapping occurrences of `from` with `to` (not just the first). An empty `from`
 // matches nothing and returns a copy of `s` unchanged (the strstr convention would loop forever).
 // replace("hello", "l", "L") == "heLLo"; replace("a.b.c", ".", "/") == "a/b/c".
-replace_in*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str {
+replace_in*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view) string_view {
     sv := s.view()
     fv := from.view()
     (fv.len == 0).match ({ true => a.substr_in(s, 0, sv.len).expect("std.text.str: allocation failed"), false => {
@@ -395,10 +395,10 @@ replace_in*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str {
         cstr(out.ptr)
     } })
 }
-replace*<A> = (a: MutPtr<A>, s: str, from: str, to: str) str { a.replace_in(s, from, to) }
+replace*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view) string_view { a.replace_in(s, from, to) }
 // pad `s` to at least `width` bytes by prepending / appending `fill`; a longer `s` is copied unchanged.
 // pad_left("7", 3, '0') == "007"; pad_right("hi", 4, ' ') == "hi  ".
-pad_left_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
+pad_left_in*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
     sv := s.view()
     pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
     total := pad + sv.len
@@ -413,8 +413,8 @@ pad_left_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
     })
     cstr(out.ptr)
 }
-pad_left*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str { a.pad_left_in(s, width, fill) }
-pad_right_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
+pad_left*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view { a.pad_left_in(s, width, fill) }
+pad_right_in*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
     sv := s.view()
     pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
     total := sv.len + pad
@@ -429,13 +429,13 @@ pad_right_in*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str {
     })
     cstr(out.ptr)
 }
-pad_right*<A> = (a: MutPtr<A>, s: str, width: i64, fill: u8) str { a.pad_right_in(s, width, fill) }
+pad_right*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view { a.pad_right_in(s, width, fill) }
 // ── numbers ─────────────────────────────────────────────────────────────────
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of
 // digits. Parsing stops at the first non-digit and never errors: no leading digits
 // (empty str, garbage, a bare '-') parse as 0 — parse_int("42") == 42,
 // parse_int("-7") == -7, parse_int("12ab") == 12, parse_int("zen") == 0.
-parse_int* = (s: str) i64 {
+parse_int* = (s: string_view) i64 {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.match ({ true => 1, false => 0 })
@@ -454,7 +454,7 @@ parse_int* = (s: str) i64 {
 // unchecked — a.substr(s, find(s, n), k) silently clamps the -1 to index 0 via pin.
 some_at = (i: i64) Opt<i64> { .Some(i) }
 no_hit = () Opt<i64> { .None }
-find_opt* = (s: str, needle: str) Opt<i64> {
+find_opt* = (s: string_view, needle: string_view) Opt<i64> {
     i := s.find(needle)
     (i >= 0).match ({ true => some_at(i), false => no_hit() })
 }
@@ -465,7 +465,7 @@ I64_MAX_DIV10 := 922337203685477580    // i64 max / 10: the pre-multiply overflo
 // Human-readable variant name, mirroring IoError's `name` (std.core.result) so parse failures
 // print too: `println(e.parse_error_name())`. Flat namespace has no overloading, so the type
 // rides in the fn name. `.Trailing`'s offending byte is not rendered — match for it.
-parse_error_name* = (e: ParseError) str {
+parse_error_name* = (e: ParseError) string_view {
     e.match ({
         .NoDigits    => "NoDigits",
         .Trailing(b) => "Trailing",
@@ -477,7 +477,7 @@ e_trailing = (b: u8) ParseError { .Trailing(b) }
 e_overflow = () ParseError { .Overflow }
 // parse_int, honestly: "zen" and "12ab" are errors, not 0 and 12. An optional leading '-', then
 // digits to the very end; the magnitude must fit i64 (|INT64_MIN| itself counts as overflow).
-try_parse_int* = (s: str) Result<i64, ParseError> {
+try_parse_int* = (s: string_view) Result<i64, ParseError> {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.match ({ true => 1, false => 0 })

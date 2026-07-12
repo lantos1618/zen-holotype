@@ -49,7 +49,8 @@ f = (p: Ptr<u8>, q: Ptr<u8>, r: Ptr<u8>) void { }     # MutPtr/RawPtr ERASED
 ### 2.2 AST — one variant for all three
 `zen/compiler/genc.zen:84`:
 ```
-Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(string_view) | Void
+   | StringView | StringCstr | StringLiteral
    | Ptr(Ptr<Ty>) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)
 ```
 `Ptr(Ptr<Ty>)` carries only the pointee. Constructor `tptr* = (t: Ptr<Ty>) Ty { .Ptr(t) }`

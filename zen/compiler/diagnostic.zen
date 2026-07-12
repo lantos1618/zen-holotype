@@ -23,7 +23,7 @@ dspan_none = () DiagSpan {
     )
 }
 // length of the line of `s` that starts at byte `p` (up to '\n' or NUL)
-dline_len = (s: str, p: i32, n: i32) i32 {
+dline_len = (s: string_view, p: i32, n: i32) i32 {
     k := n
     @while (s.at(p + k) != 0 && s.at(p + k) != '\n') {
         k = k + 1
@@ -31,7 +31,7 @@ dline_len = (s: str, p: i32, n: i32) i32 {
     k
 }
 // start byte of the line containing `off` (scan back past the previous '\n')
-dline_start = (s: str, off: i32) i32 {
+dline_start = (s: string_view, off: i32) i32 {
     p := off
     @while (p != 0 && s.at(p - 1) != '\n') {
         p = p - 1
@@ -39,7 +39,7 @@ dline_start = (s: str, off: i32) i32 {
     p
 }
 // user[up..up+ln] == flat[fp..fp+ln] byte-exact
-dseg_eq = (user: str, up: i32, flat: str, fp: i32, ln: i32, i: i32) bool {
+dseg_eq = (user: string_view, up: i32, flat: string_view, fp: i32, ln: i32, i: i32) bool {
     k := i
     eq := true
     @while (k < ln && eq == true) {
@@ -52,29 +52,29 @@ dseg_eq = (user: str, up: i32, flat: str, fp: i32, ln: i32, i: i32) bool {
     eq
 }
 // the 1-based line in `user` whose text exactly equals flat[fp..fp+ln], else 0.
-duser_line_at = (user: str, up: i32, flat: str, fp: i32, ln: i32, no: i32) i32 {
+duser_line_at = (user: string_view, up: i32, flat: string_view, fp: i32, ln: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
     (ulen == ln && user.dseg_eq(up, flat, fp, ln, 0)).match ({ true => no, false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_at(up + ulen + 1, flat, fp, ln, no + 1) }) })
 }
-duser_line* = (user: str, flat: str, fp: i32, ln: i32) i32 { user.duser_line_at(0, flat, fp, ln, 1) }
+duser_line* = (user: string_view, flat: string_view, fp: i32, ln: i32) i32 { user.duser_line_at(0, flat, fp, ln, 1) }
 // ── alias-rewrite inverse: a flat line `…alias__name…` whose user form removed the inserted span.
 //    find the first `__` after leading whitespace; the removed span is [lead, j+2). ──
-dlead_ws = (s: str, p: i32, ln: i32, i: i32) i32 { (i >= ln).match ({ true => i, false => (s.at(p + i) == ' ' || s.at(p + i) == '\t').match ({ true => s.dlead_ws(p, ln, i + 1), false => i }) }) }
+dlead_ws = (s: string_view, p: i32, ln: i32, i: i32) i32 { (i >= ln).match ({ true => i, false => (s.at(p + i) == ' ' || s.at(p + i) == '\t').match ({ true => s.dlead_ws(p, ln, i + 1), false => i }) }) }
 // first index >= lead+1 where flat[fp+j]=='_' && flat[fp+j+1]=='_' (j+1 < ln-1), else -1
-dfind_dunder = (flat: str, fp: i32, ln: i32, j: i32) i32 { (j + 1 >= ln - 1).match ({ true => 0 - 1, false => (flat.at(fp + j) == '_' && flat.at(fp + j + 1) == '_').match ({ true => j, false => flat.dfind_dunder(fp, ln, j + 1) }) }) }
+dfind_dunder = (flat: string_view, fp: i32, ln: i32, j: i32) i32 { (j + 1 >= ln - 1).match ({ true => 0 - 1, false => (flat.at(fp + j) == '_' && flat.at(fp + j + 1) == '_').match ({ true => j, false => flat.dfind_dunder(fp, ln, j + 1) }) }) }
 // user[up..up+ulen] == flat[fp..fp+flen] with [start,start+n) removed (lengths must match)
-dmatch_removed = (user: str, up: i32, ulen: i32, flat: str, fp: i32, flen: i32, start: i32, n: i32) bool { (start + n > flen || ulen != flen - n).match ({ true => false, false => user.dseg_eq(up, flat, fp, start, 0) && user.dseg_eq(up + start, flat, fp + start + n, flen - start - n, 0) }) }
+dmatch_removed = (user: string_view, up: i32, ulen: i32, flat: string_view, fp: i32, flen: i32, start: i32, n: i32) bool { (start + n > flen || ulen != flen - n).match ({ true => false, false => user.dseg_eq(up, flat, fp, start, 0) && user.dseg_eq(up + start, flat, fp + start + n, flen - start - n, 0) }) }
 // flat byte offset within a line -> user column after removing [start,start+n)
 dremoved_col = (off: i32, start: i32, n: i32) i32 { (off < start).match ({ true => off + 1, false => (off < start + n).match ({ true => start + 1, false => off - n + 1 }) }) }
 // ── ns-normalize inverse: compare treating each `__` in the flat line as a single `.`. ──
 // user[up..] equals flat[fp..fp+flen] with every `__` collapsed to one char; returns user line len match.
-dseg_eq_ns = (user: str, up: i32, ui: i32, flat: str, fp: i32, fi: i32, flen: i32) bool { (fi == flen).match ({ true => user.at(up + ui) == 0 || user.at(up + ui) == '\n', false => (fi + 1 < flen && flat.at(fp + fi) == '_' && flat.at(fp + fi + 1) == '_').match ({ true => user.at(up + ui) == '.' && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 2, flen), false => user.at(up + ui) == flat.at(fp + fi) && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen) }) }) }
-duser_line_ns_at = (user: str, up: i32, flat: str, fp: i32, flen: i32, no: i32) i32 {
+dseg_eq_ns = (user: string_view, up: i32, ui: i32, flat: string_view, fp: i32, fi: i32, flen: i32) bool { (fi == flen).match ({ true => user.at(up + ui) == 0 || user.at(up + ui) == '\n', false => (fi + 1 < flen && flat.at(fp + fi) == '_' && flat.at(fp + fi + 1) == '_').match ({ true => user.at(up + ui) == '.' && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 2, flen), false => user.at(up + ui) == flat.at(fp + fi) && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen) }) }) }
+duser_line_ns_at = (user: string_view, up: i32, flat: string_view, fp: i32, flen: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
     user.dseg_eq_ns(up, 0, flat, fp, 0, flen).match ({ true => no, false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_ns_at(up + ulen + 1, flat, fp, flen, no + 1) }) })
 }
 // flat offset -> column counting each `__` as one char
-dnorm_col = (flat: str, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
+dnorm_col = (flat: string_view, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
     k := i
     c := col
     @while (k < off) {
@@ -89,7 +89,7 @@ dnorm_col = (flat: str, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
 }
 // the entry point main.c calls per candidate source: flat = import-flattened source the checker saw,
 // user = one real source file, offset = the error's flat byte offset, span_width = its width.
-diag_user_span* = (flat: str, user: str, offset: i32, span_width: i32) DiagSpan {
+diag_user_span* = (flat: string_view, user: string_view, offset: i32, span_width: i32) DiagSpan {
     (offset <= 0).match ({ true => {
         return dspan_none()
     } })
@@ -133,11 +133,11 @@ diag_user_span* = (flat: str, user: str, offset: i32, span_width: i32) DiagSpan 
     dspan_none()
 }
 // alias variant of duser_line: match each user line against flat[ls..ls+llen] with [lead,lead+rn) removed
-duser_line_alias_at = (user: str, up: i32, flat: str, ls: i32, llen: i32, lead: i32, rn: i32, no: i32) i32 {
+duser_line_alias_at = (user: string_view, up: i32, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
     user.dmatch_removed(up, ulen, flat, ls, llen, lead, rn).match ({ true => no, false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_alias_at(up + ulen + 1, flat, ls, llen, lead, rn, no + 1) }) })
 }
-duser_line_alias = (user: str, flat: str, ls: i32, llen: i32, lead: i32, rn: i32) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }
+duser_line_alias = (user: string_view, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }
 // ── zen.toml manifest value lookup — moved out of the C driver (driver.c) ──────────────────────
 // Scan a manifest source for a `key = "value"` line and return the value's span (start<0 = absent);
 // the driver dup_range's src[start..start+len] into a NUL-terminated string. Pure char-scan, no alloc.
@@ -152,13 +152,13 @@ mf_none = () MfSpan {
     )
 }
 mf_ws = (b: u8) bool { b == ' ' || b == '\t' }
-mf_skip_ws = (s: str, p: i32, e: i32) i32 { (p < e && s.at(p).mf_ws()).match ({ true => s.mf_skip_ws(p + 1, e), false => p }) }
+mf_skip_ws = (s: string_view, p: i32, e: i32) i32 { (p < e && s.at(p).mf_ws()).match ({ true => s.mf_skip_ws(p + 1, e), false => p }) }
 // match `key` literally at p; return pos just past it, or -1
-mf_key_at = (s: str, p: i32, e: i32, key: str, k: i32) i32 { (key.at(k) == 0).match ({ true => p, false => (p < e && s.at(p) == key.at(k)).match ({ true => s.mf_key_at(p + 1, e, key, k + 1), false => 0 - 1 }) }) }
+mf_key_at = (s: string_view, p: i32, e: i32, key: string_view, k: i32) i32 { (key.at(k) == 0).match ({ true => p, false => (p < e && s.at(p) == key.at(k)).match ({ true => s.mf_key_at(p + 1, e, key, k + 1), false => 0 - 1 }) }) }
 // the closing-quote position from `i`, or -1
-mf_close = (s: str, i: i32, e: i32) i32 { (i >= e).match ({ true => 0 - 1, false => (s.at(i) == '"').match ({ true => i, false => s.mf_close(i + 1, e) }) }) }
+mf_close = (s: string_view, i: i32, e: i32) i32 { (i >= e).match ({ true => 0 - 1, false => (s.at(i) == '"').match ({ true => i, false => s.mf_close(i + 1, e) }) }) }
 // parse one line [p,e) for `key = "value"` -> the value span, or mf_none
-mf_line = (s: str, p: i32, e: i32, key: str) MfSpan {
+mf_line = (s: string_view, p: i32, e: i32, key: string_view) MfSpan {
     i0 := s.mf_skip_ws(p, e)
     (i0 >= e || s.at(i0) == '#').match ({ true => {
         return mf_none()
@@ -182,9 +182,9 @@ mf_line = (s: str, p: i32, e: i32, key: str) MfSpan {
         len: ce - start,
     ) })
 }
-mf_line_end = (s: str, p: i32, len: i32) i32 { (p < len && s.at(p) != '\n' && s.at(p) != '\r').match ({ true => s.mf_line_end(p + 1, len), false => p }) }
+mf_line_end = (s: string_view, p: i32, len: i32) i32 { (p < len && s.at(p) != '\n' && s.at(p) != '\r').match ({ true => s.mf_line_end(p + 1, len), false => p }) }
 // scan `src` (length `len`) for `key`'s value, starting at line `p`. The driver calls with p=0.
-manifest_value_span* = (src: str, len: i32, key: str, p: i32) MfSpan {
+manifest_value_span* = (src: string_view, len: i32, key: string_view, p: i32) MfSpan {
     (p >= len).match ({ true => {
         return mf_none()
     } })
@@ -200,7 +200,7 @@ manifest_value_span* = (src: str, len: i32, key: str, p: i32) MfSpan {
 // Builds the full "zenc: path:line:col: error[kind]: message" line, the source line + ^~~~ caret,
 // and the hint, into one NUL-terminated string the driver writes to stderr. The driver keeps only
 // file I/O and the per-module span search.
-dsbyte = (v: str, i: i64) u8 { load(offset(v, i)) }
+dsbyte = (v: string_view, i: i64) u8 { load(offset(v, i)) }
 ddigit = (d: i64) u8 { dsbyte("0123456789", d) }
 dnum = (s: String, a: MutPtr<Malloc>, n: i64) String {
     (n < 10).match ({ true => s.gstr_push(a, ddigit(n)), false => {
@@ -209,7 +209,7 @@ dnum = (s: String, a: MutPtr<Malloc>, n: i64) String {
     } })
 }
 // byte offset of the start of the `line`-th (1-based) line in `user`
-dline_off = (user: str, line: i32, p: i32) i32 {
+dline_off = (user: string_view, line: i32, p: i32) i32 {
     q := p
     ln := line
     @while (ln > 1 && user.at(q) != 0) {
@@ -221,7 +221,7 @@ dline_off = (user: str, line: i32, p: i32) i32 {
     q
 }
 // append the source line at byte `p` (until \n/NUL/CR) to s
-dput_line = (s: String, a: MutPtr<Malloc>, user: str, p: i32) String {
+dput_line = (s: String, a: MutPtr<Malloc>, user: string_view, p: i32) String {
     acc := s
     q := p
     @while (user.at(q) != 0 && user.at(q) != '\n' && user.at(q) != '\r') {
@@ -231,7 +231,7 @@ dput_line = (s: String, a: MutPtr<Malloc>, user: str, p: i32) String {
     acc
 }
 // append `col-1` leading-blanks, preserving tabs from the source line at `ls`
-dput_blanks = (s: String, a: MutPtr<Malloc>, user: str, ls: i32, col: i32, i: i32) String {
+dput_blanks = (s: String, a: MutPtr<Malloc>, user: string_view, ls: i32, col: i32, i: i32) String {
     acc := s
     k := i
     @while (k < col - 1) {
@@ -252,7 +252,7 @@ dput_carets = (s: String, a: MutPtr<Malloc>, n: i32, i: i32) String {
     acc
 }
 // render one diagnostic to a NUL-terminated string (line<=0 / col<=0 => no caret)
-render_diagnostic* = (a: MutPtr<Malloc>, in_path: str, user: str, line: i32, col: i32, end_col: i32, kind: str, message: str, hint: str, count: i32) str {
+render_diagnostic* = (a: MutPtr<Malloc>, in_path: string_view, user: string_view, line: i32, col: i32, end_col: i32, kind: string_view, message: string_view, hint: string_view, count: i32) string_view {
     // Pre-size to bound the whole rendered diagnostic (header + message + source line + carets + hint)
     // so the buffer NEVER grows: a gstr_grow/resize mid-render reallocs the buffer and the inlined
     // append chain would then write through the freed pointer (heap-use-after-free). The content is

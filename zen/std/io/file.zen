@@ -21,7 +21,7 @@ out_write_all = (ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
 }
 // Writes a str to stdout without the trailing NUL. Returns `.Ok(byte count)` on success, or `.Err` on a
 // write failure — the root fd sink under fmt/io. println/print discard the Result to stay best-effort.
-out* = (s: str) Result<i64, IoError> {
+out* = (s: string_view) Result<i64, IoError> {
     v := s.view()
     out_write_all(v.ptr, v.len, 0)
 }
@@ -47,10 +47,10 @@ fd_read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
     } })
 }
 ENOMEM := 12
-read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<str, IoError> {
+read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<string_view, IoError> {
     got := fd.fd_read_all(buf, 0, n)
     fd.close()
-    out: Result<str, IoError> := (got == n).match ({ true => {
+    out: Result<string_view, IoError> := (got == n).match ({ true => {
         buf.offset(n).store(0)
         ok(cstr(buf))
     }, false => {
@@ -59,7 +59,7 @@ read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<st
     } })
     out
 }
-read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<str, IoError> {
+read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<string_view, IoError> {
     a.try_acquire(n + 1).match ({
         .Ok(buf) => a.read_file_finish(fd, buf, n),
         .Err(e)  => {
@@ -68,23 +68,23 @@ read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<str, IoError> {
         },
     })
 }
-read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<str, IoError> {
+read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<string_view, IoError> {
     n := fd.file_size()
-    out: Result<str, IoError> := (n < 0).match ({ true => {
+    out: Result<string_view, IoError> := (n < 0).match ({ true => {
         fd.close()
         err(IoError.Errno(0 - 1))
     }, false => a.read_file_alloc(fd, n) })
     out
 }
 // Reads a whole file into an allocator-owned NUL-terminated buffer.
-contents_in*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> {
+contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError> {
     fd := path.open(O_RDONLY, 0)
-    out: Result<str, IoError> := (fd < 0).match ({ true => err(IoError.NotFound), false => a.read_file_open(fd) })
+    out: Result<string_view, IoError> := (fd < 0).match ({ true => err(IoError.NotFound), false => a.read_file_open(fd) })
     out
 }
-contents*<A> = (a: MutPtr<A>, path: str) Result<str, IoError> { a.contents_in(path) }
+contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError> { a.contents_in(path) }
 // Writes a str's bytes to a file, creating/truncating it.
-save* = (path: str, data: str, n: i64) Result<i64, IoError> {
+save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError> {
     fd := path.open(O_WRTRUNC, MODE_644)
     out: Result<i64, IoError> := (fd < 0).match ({ true => err(IoError.Denied), false => {
         v := data.view()
@@ -104,7 +104,7 @@ save* = (path: str, data: str, n: i64) Result<i64, IoError> {
 // the exit code — WEXITSTATUS (`status >> 8 & 0xff`) for a normal exit, or 128 + signal when the child
 // was killed by a signal (the shell `$?` convention). This decodes what raw `system()` folds together:
 // -1 (fork failure), 127 (command not found), and a real exit code were all indistinguishable before.
-shell* = (cmd: str) Result<i32, IoError> {
+shell* = (cmd: string_view) Result<i32, IoError> {
     st := cmd.system()
     (st < 0).match ({ true => err(IoError.Errno(st)), false => {
         sig := st & 127

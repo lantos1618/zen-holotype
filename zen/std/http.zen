@@ -42,13 +42,13 @@
 // Connect: the TCP handshake failed (the wrapped std.net IoError says why). Io: a send/receive failed
 // mid-exchange. Malformed: the bytes came back but are not a well-formed HTTP/1.1 response — the `str`
 // payload is the human reason (missing terminator, bad status line, header without a colon, …).
-HttpError*: Connect(IoError) | Io(IoError) | Malformed(str)
+HttpError*: Connect(IoError) | Io(IoError) | Malformed(string_view)
 connect_err = (e: IoError) HttpError { .Connect(e) }
 io_err = (e: IoError) HttpError { .Io(e) }
-malformed = (m: str) HttpError { .Malformed(m) }
+malformed = (m: string_view) HttpError { .Malformed(m) }
 // human-readable label, mirroring std.core.result's IoError `name` (the flat namespace has no
 // overloading, so the type rides in the fn name). `.Malformed` renders its own reason string.
-http_error_name* = (e: HttpError) str {
+http_error_name* = (e: HttpError) string_view {
     e.match ({
         .Connect(x)   => "Connect",
         .Io(x)        => "Io",
@@ -58,8 +58,8 @@ http_error_name* = (e: HttpError) str {
 // ── response shape ────────────────────────────────────────────────────────────────────────────────────
 // one `Name: value` header pair (values already trimmed of the leading space and trailing CR).
 Header*: {
-    name: str,
-    value: str,
+    name: string_view,
+    value: string_view,
 }
 // a parsed response: the numeric status, the header list, and the (decoded) body. `header` looks a name
 // up CASE-INSENSITIVELY (HTTP field names are case-insensitive) returning `.Some(value)` / `.None`;
@@ -67,14 +67,14 @@ Header*: {
 Response*: {
     status: i32,
     headers: [Header],
-    body: str,
-    header = (r: Response, name: str) Opt<str> { lookup_header(r.headers, name) }
+    body: string_view,
+    header = (r: Response, name: string_view) Opt<string_view> { lookup_header(r.headers, name) }
     ok = (r: Response) bool { r.status >= 200 && r.status < 300 }
 }
 // ── case-insensitive helpers ──────────────────────────────────────────────────────────────────────────
 lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + 32, false => b }) }
 // ASCII-case-insensitive equality of two strs.
-ieq = (x: str, y: str) bool {
+ieq = (x: string_view, y: string_view) bool {
     xv := x.view()
     yv := y.view()
     (xv.len == yv.len).match ({ true => {
@@ -89,8 +89,8 @@ ieq = (x: str, y: str) bool {
     }, false => false })
 }
 // first header whose name case-insensitively equals `name`, or `.None`.
-lookup_header = (headers: [Header], name: str) Opt<str> {
-    res: Opt<str> := .None
+lookup_header = (headers: [Header], name: string_view) Opt<string_view> {
+    res: Opt<string_view> := .None
     headers.loop((h, i, hd) {
         ieq(hd.name, name).match ({ true => {
             res = .Some(hd.value)
@@ -119,7 +119,7 @@ crlfcrlf = (v: [u8]) i64 {
 // line, CRLF-separated headers, a blank line (CRLFCRLF), then the body. Returns `.Err(.Malformed …)`
 // when the terminator, status line, or a header is not well-formed. Allocations (header copies, the
 // decoded body) come from `a`; an allocation failure panics (`expect`), matching std.text.str.
-parse_response*<A> = (a: MutPtr<A>, raw: str) Result<Response, HttpError> {
+parse_response*<A> = (a: MutPtr<A>, raw: string_view) Result<Response, HttpError> {
     sep := raw.view().crlfcrlf()
     out: Result<Response, HttpError> := (sep < 0).match ({ true => err(malformed("http: no CRLFCRLF header terminator")), false => {
         head := a.substr(raw, 0, sep).expect("http: oom")
@@ -147,7 +147,7 @@ parse_response*<A> = (a: MutPtr<A>, raw: str) Result<Response, HttpError> {
 // status line -> the numeric code. `HTTP/1.1 200 OK` -> 200. `words` drops the trailing CR with the
 // rest of the whitespace, so token[1] is the bare code. Rejects a line that is not `HTTP/… <code> …`
 // with a code in the 100..599 range.
-parse_status*<A> = (a: MutPtr<A>, line: str) Result<i32, HttpError> {
+parse_status*<A> = (a: MutPtr<A>, line: string_view) Result<i32, HttpError> {
     toks := a.words(line)
     (toks.len < 2).match ({ true => err(malformed("http: status line has fewer than two tokens")), false => toks[0].starts_with("HTTP/").match ({ true => {
         code := toks[1].parse_int()
@@ -156,7 +156,7 @@ parse_status*<A> = (a: MutPtr<A>, line: str) Result<i32, HttpError> {
 }
 // every line after the status line -> a `[Header]`. Each must be `Name: value`; a colon-less line is a
 // malformed response. Name and value are both trimmed (the value of its leading space and trailing CR).
-collect_headers*<A> = (a: MutPtr<A>, lines: [str]) Result<[Header], HttpError> {
+collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], HttpError> {
     n := lines.len - 1
     hs: [Header] := a.nbuf(Header(
         name: "",
@@ -183,7 +183,7 @@ collect_headers*<A> = (a: MutPtr<A>, lines: [str]) Result<[Header], HttpError> {
 }
 // resolve the body from the raw remainder and the parsed headers: decode a `chunked` transfer-encoding,
 // else trim to `Content-Length` when present, else take the read-to-EOF remainder verbatim.
-decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: str) str {
+decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) string_view {
     lookup_header(headers, "Transfer-Encoding").match ({
         .Some(te) => a.to_lower(te).contains("chunked").match ({ true => a.decode_chunked(body_raw), false => body_raw }),
         .None     => lookup_header(headers, "Content-Length").match ({
@@ -225,7 +225,7 @@ chunk_loop<A> = (a: MutPtr<A>, bv: [u8], i: i64, sb: String) String {
         } })
     } })
 }
-decode_chunked*<A> = (a: MutPtr<A>, body: str) str {
+decode_chunked*<A> = (a: MutPtr<A>, body: string_view) string_view {
     bv := body.view()
     sb := a.new_in().expect("http: oom")
     a.finish_in(a.chunk_loop(bv, 0, sb)).expect("http: oom")
@@ -235,7 +235,7 @@ decode_chunked*<A> = (a: MutPtr<A>, body: str) str {
 crlf<A> = (a: MutPtr<A>, sb: String) String { a.push_in(a.push_in(sb, '\r').expect("http: oom"), '\n').expect("http: oom") }
 // serialise a request: `<method> <path> HTTP/1.1`, a `Host` header, `Connection: close`, any caller
 // `headers`, an auto `Content-Length` when `body` is non-empty, the blank line, then the body.
-build_request<A> = (a: MutPtr<A>, method: str, host: str, path: str, headers: [Header], body: str) str {
+build_request<A> = (a: MutPtr<A>, method: string_view, host: string_view, path: string_view, headers: [Header], body: string_view) string_view {
     sb := a.new_in().expect("http: oom")
     sb = a.append_in(sb, method).expect("http: oom")
     sb = a.append_in(sb, " ").expect("http: oom")
@@ -271,7 +271,7 @@ read_loop<A> = (a: MutPtr<A>, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
         .Err(e) => sb,
     })
 }
-read_all<A> = (a: MutPtr<A>, c: TcpConn) str {
+read_all<A> = (a: MutPtr<A>, c: TcpConn) string_view {
     buf := a.acquire(READ_CHUNK)
     full := a.read_loop(c, buf, a.new_in().expect("http: oom"))
     a.release(buf)
@@ -279,7 +279,7 @@ read_all<A> = (a: MutPtr<A>, c: TcpConn) str {
 }
 // the general form: open a connection to `host:port`, send `<method> <path>` with `headers`/`body`,
 // read the whole response, and parse it. Any step's failure surfaces as the matching `HttpError`.
-request*<A> = (a: MutPtr<A>, method: str, host: str, port: i32, path: str, headers: [Header], body: str) Result<Response, HttpError> {
+request*<A> = (a: MutPtr<A>, method: string_view, host: string_view, port: i32, path: string_view, headers: [Header], body: string_view) Result<Response, HttpError> {
     req := a.build_request(method, host, path, headers, body)
     out: Result<Response, HttpError> := dial(host, port).match ({
         .Err(e) => err(connect_err(e)),
@@ -298,7 +298,7 @@ request*<A> = (a: MutPtr<A>, method: str, host: str, port: i32, path: str, heade
     out
 }
 // the common case: a GET with no extra headers and no body.
-get*<A> = (a: MutPtr<A>, host: str, port: i32, path: str) Result<Response, HttpError> {
+get*<A> = (a: MutPtr<A>, host: string_view, port: i32, path: string_view) Result<Response, HttpError> {
     a.request("GET", host, port, path, a.nbuf(Header(
         name: "",
         value: "",

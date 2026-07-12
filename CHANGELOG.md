@@ -36,8 +36,9 @@ All notable changes to **zen**. The format loosely follows
 - **Errors as values, tightened.** `panic` is abort-only; recoverable failures are `Result`/`Opt`
   threaded with `.or_return()`/`.match`. Runtime safety guards make div/mod-zero, slice OOB, and
   stack overflow deterministic message-bearing panics (see [ERROR_POLICY.md](ERROR_POLICY.md) and
-  `docs/runtime-design.md`). String provenance types `Cstr`/`Text` landed as backend `Ty`
-  variants (Phase 1 of [STRING_TYPES.md](STRING_TYPES.md)); `f64` + float literals are supported.
+  `docs/runtime-design.md`). Canonical string provenance types `string_literal`, `string_cstr`, and
+  `string_view` landed in the checker and surface syntax (Phase 1 of
+  [STRING_TYPES.md](STRING_TYPES.md)); `f64` + float literals are supported.
 - **Note on the runtime direction.** The ambient runtime (`std.rt`, `std.scope`) is an experiment,
   not the shipped model; the direction is explicit capabilities, with the rt rework tracked as
   "ambient-within-scope, explicit-at-boundary" (`docs/runtime-design.md`).

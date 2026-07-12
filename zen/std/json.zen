@@ -6,9 +6,9 @@
 //
 // VALUE SHAPE. A `Value` is a tagged union over the six JSON kinds:
 //
-//   Entry*:  { key: str, val: Value }
+//   Entry*:  { key: string_view, val: Value }
 //   Object*: { entries: [Entry] }
-//   Value*:  Null | Bool(bool) | Num(f64) | Str(str) | Arr([Value]) | Obj(Object)
+//   Value*:  Null | Bool(bool) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
 //
 // Objects are an insertion-ordered slice of (key, value) Entry pairs, and growable
 // arrays/objects accumulate through the module-local `VBuf`/`EBuf` structs.
@@ -19,8 +19,8 @@
 //   1. Objects can't be `Obj(Map<Value>)`. It compiles and round-trips WITHIN one file, but
 //      instantiating ANOTHER module's generic struct (`Map<T>`) against a recursive enum defined
 //      here fails to monomorphize once this module is imported (cross-module generic-struct-param).
-//   2. Objects can't even use a parallel `Vec<str>`: `str` is not a nameable C element type for a
-//      foreign generic struct's buffer (same reason std.collections.map wraps keys in `MKey`).
+//   2. Objects can't use a parallel `Vec<string_view>` across this module boundary: that foreign
+//      generic string-element buffer still hits the cross-module monomorphization limit.
 //      Wrapping the key in the local `Entry` struct dodges it.
 //
 // ALLOCATOR. parse/stringify are generic over the allocator: every allocating entry takes
@@ -56,16 +56,16 @@
 // threads the caller's allocator whose exhaustion is fatal by policy, so builder Results are unwrapped
 // at the module boundary with these two helpers — parse/stringify keep their observable behavior.
 jok = (r: Result<String, IoError>) String { r.expect("std.json: allocation failed") }
-jfin = (r: Result<str, IoError>) str { r.expect("std.json: allocation failed") }
+jfin = (r: Result<string_cstr, IoError>) string_view { r.expect("std.json: allocation failed") }
 // ── the value type ───────────────────────────────────────────────────────────
 Entry*: {
-    key: str,
+    key: string_view,
     val: Value,
 }
 Object*: {
     entries: [Entry],
 }
-Value*: Null | Bool(bool) | Num(f64) | Str(str) | Arr([Value]) | Obj(Object)
+Value*: Null | Bool(bool) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
 // A parse error, carrying the byte offset where it was detected (UnexpectedEof carries none).
 JsonError*: Unexpected(i64) | BadString(i64) | BadNumber(i64) | BadLiteral(i64) | TrailingGarbage(i64) | UnexpectedEof | TooDeep
 // nesting cap so a pathological "[[[[…" can't blow the native stack.
@@ -76,7 +76,7 @@ Step: {
     pos: i64,
 }
 StrStep: {
-    s: str,
+    s: string_view,
     pos: i64,
 }
 step_ok = (v: Value, pos: i64) Result<Step, JsonError> {
@@ -85,7 +85,7 @@ step_ok = (v: Value, pos: i64) Result<Step, JsonError> {
         pos: pos,
     ))
 }
-sstep_ok = (s: str, pos: i64) Result<StrStep, JsonError> {
+sstep_ok = (s: string_view, pos: i64) Result<StrStep, JsonError> {
     .Ok(StrStep(
         s: s,
         pos: pos,
@@ -176,9 +176,9 @@ hex4 = (sv: [u8], at: i64) i64 {
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
 push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String { (cp < 128).match ({ true => sb.push_in(a, cp.to_u8()).jok(), false => (cp < 2048).match ({ true => sb.push_in(a, (192 | cp >> 6).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(), false => sb.push_in(a, (224 | cp >> 12).to_u8()).jok().push_in(a, (128 | cp >> 6 & 63).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok() }) }) }
-// decode the JSON string starting at sv[pos] == '"'; returns the decoded str + the offset
+// decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
-parse_string_raw<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64) Result<StrStep, JsonError> {
+parse_string_raw<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<StrStep, JsonError> {
     sb: String := a.new_in().jok()
     endpos: i64 := 0 - 1
     errpos: i64 := 0 - 1
@@ -238,7 +238,7 @@ parse_string_raw<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64) Result<StrSte
 }
 // ── scalar parsers ─────────────────────────────────────────────────────────────
 // match sv[pos..] against `word`; on success produce `v` at pos+len, else BadLiteral.
-parse_lit = (sv: [u8], pos: i64, word: str, v: Value) Result<Step, JsonError> {
+parse_lit = (sv: [u8], pos: i64, word: string_view, v: Value) Result<Step, JsonError> {
     wv := word.view()
     ok: bool := pos + wv.len <= sv.len
     wv.loop((h, i, b) {
@@ -251,7 +251,7 @@ parse_lit = (sv: [u8], pos: i64, word: str, v: Value) Result<Step, JsonError> {
     })
     ok.match ({ true => step_ok(v, pos + wv.len), false => err(.BadLiteral(pos)) })
 }
-parse_number<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64) Result<Step, JsonError> {
+parse_number<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
     endp: i64 := pos
     sv.loop((h, i, b) {
         (i < pos).match ({ true => { }, false => b.is_num_byte().match ({ true => {
@@ -269,18 +269,18 @@ parse_number<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64) Result<Step, Json
         })
     } })
 }
-parse_str_value<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64) Result<Step, JsonError> {
+parse_str_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
     a.parse_string_raw(src, sv, pos).match ({
         .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
         .Err(e) => err(e),
     })
 }
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
-parse_array<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
+parse_array<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
     (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == ']').match ({ true => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1), false => a.arr_loop(src, sv, p, depth, a.vbuf_new()) }) })
 }
-arr_loop<A> = (a: MutPtr<A>, src: str, sv: [u8], p: i64, depth: i64, vb: VBuf) Result<Step, JsonError> {
+arr_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, vb: VBuf) Result<Step, JsonError> {
     a.parse_value(src, sv, p, depth + 1).match ({
         .Err(e) => err(e),
         .Ok(st) => {
@@ -290,11 +290,11 @@ arr_loop<A> = (a: MutPtr<A>, src: str, sv: [u8], p: i64, depth: i64, vb: VBuf) R
         },
     })
 }
-parse_object<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
+parse_object<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
     (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == '}').match ({ true => step_ok(.Obj(Object(entries: a.ebuf_new().ebuf_slice())), p + 1), false => a.obj_loop(src, sv, p, depth, a.ebuf_new()) }) })
 }
-obj_loop<A> = (a: MutPtr<A>, src: str, sv: [u8], p: i64, depth: i64, eb: EBuf) Result<Step, JsonError> {
+obj_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, eb: EBuf) Result<Step, JsonError> {
     (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == '"').match ({ true => a.parse_string_raw(src, sv, p).match ({
         .Err(e) => err(e),
         .Ok(ks) => {
@@ -314,7 +314,7 @@ obj_loop<A> = (a: MutPtr<A>, src: str, sv: [u8], p: i64, depth: i64, eb: EBuf) R
     }), false => err(.Unexpected(p)) }) })
 }
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
-parse_value<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
+parse_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     (depth > MAX_DEPTH).match ({ true => err(.TooDeep), false => {
         p := sv.skip_ws(pos)
         (p >= sv.len).match ({ true => err(.UnexpectedEof), false => {
@@ -326,7 +326,7 @@ parse_value<A> = (a: MutPtr<A>, src: str, sv: [u8], pos: i64, depth: i64) Result
 // ── public parse ───────────────────────────────────────────────────────────────
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
-parse*<A> = (a: MutPtr<A>, s: str) Result<Value, JsonError> {
+parse*<A> = (a: MutPtr<A>, s: string_view) Result<Value, JsonError> {
     sv := s.view()
     out: Result<Value, JsonError> := a.parse_value(s, sv, 0, 0).match ({
         .Err(e) => {
@@ -348,7 +348,7 @@ write_u_esc<A> = (a: MutPtr<A>, sb: String, b: u8) String {
     sb.push_in(a, '\\').jok().push_in(a, 'u').jok().push_in(a, '0').jok().push_in(a, '0').jok().push_in(a, hex_digit(bi >> 4 & 15)).jok().push_in(a, hex_digit(bi & 15)).jok()
 }
 write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String { (b == '"').match ({ true => sb.push_in(a, '\\').jok().push_in(a, '"').jok(), false => (b == '\\').match ({ true => sb.push_in(a, '\\').jok().push_in(a, '\\').jok(), false => (b == '\n').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 'n').jok(), false => (b == '\t').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 't').jok(), false => (b == '\r').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 'r').jok(), false => (b < 32).match ({ true => a.write_u_esc(sb, b), false => sb.push_in(a, b).jok() }) }) }) }) }) }) }
-write_str_lit<A> = (a: MutPtr<A>, sb: String, s: str) String {
+write_str_lit<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     out: String := sb.push_in(a, '"').jok()
     sv := s.view()
     sv.loop((h, i, b) {
@@ -389,15 +389,15 @@ write_value<A> = (a: MutPtr<A>, sb: String, v: Value) String {
         .Obj(o)  => a.write_obj(sb, o),
     })
 }
-// Serialize a Value to compact JSON text (allocator-owned, NUL-terminated str).
-stringify*<A> = (a: MutPtr<A>, v: Value) str {
+// Serialize a Value to compact JSON text (allocator-owned, NUL-terminated view).
+stringify*<A> = (a: MutPtr<A>, v: Value) string_view {
     sb: String := a.new_in().jok()
     sb = a.write_value(sb, v)
     sb.finish_in(a).jfin()
 }
 // ── accessors ──────────────────────────────────────────────────────────────────
 // index of `key` in the object's entry list, or -1 (O(n) linear scan).
-obj_find* = (o: Object, key: str) i64 {
+obj_find* = (o: Object, key: string_view) i64 {
     found: i64 := 0 - 1
     o.entries.loop((h, i, e) {
         (found < 0).match ({ true => eq(e.key, key).match ({ true => {
@@ -410,13 +410,13 @@ obj_find* = (o: Object, key: str) i64 {
     found
 }
 // Object member lookup: .Some(value) if `key` is present, else .None.
-obj_get* = (o: Object, key: str) Opt<Value> {
+obj_get* = (o: Object, key: string_view) Opt<Value> {
     i := o.obj_find(key)
     out: Opt<Value> := (i < 0).match ({ true => .None, false => .Some(o.entries[i].val) })
     out
 }
 // Member lookup on a Value: .Some(value) if it is an Obj containing `key`, else .None.
-get* = (obj: Value, key: str) Opt<Value> {
+get* = (obj: Value, key: string_view) Opt<Value> {
     out: Opt<Value> := obj.match ({
         .Obj(o) => o.obj_get(key),
         _       => .None,
@@ -437,8 +437,8 @@ as_num* = (v: Value) Opt<f64> {
     })
     out
 }
-as_str* = (v: Value) Opt<str> {
-    out: Opt<str> := v.match ({
+as_str* = (v: Value) Opt<string_view> {
+    out: Opt<string_view> := v.match ({
         .Str(s) => .Some(s),
         _       => .None,
     })

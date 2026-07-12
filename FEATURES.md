@@ -10,15 +10,15 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
 [VISION](VISION.md).)
 
 ## Type system
-- **Primitives:** `i32`, `i64`, `u8`, `f64`, `bool`, `void`, `str` (a C string; compile-time literals,
-  or built at runtime via `cstr` — see Foreign bindings below). **Char literals** `'a'` are sugar
+- **Primitives:** `i32`, `i64`, `u8`, `f64`, `bool`, `void`, plus the non-owning string family
+  `string_literal`, `string_cstr`, and `string_view`. **Char literals** `'a'` are sugar
   for the byte value (reuse the integer path, so `b == ':'` not `b == 58`). **Float literals**
   (`1.5`) carry their source lexeme verbatim and are typed `f64`.
-- **String provenance types:** the backend `Ty` also carries `Cstr` (a borrowed C pointer into a
-  live `String` buffer) and `Text` (an immortal rodata literal) as distinct variants of the `str`
-  family — both emit `const char*`, so a signature can document a string's lifetime. `str` stays the
-  unified surface spelling and display type; the full split is tracked in
-  [STRING_TYPES.md](STRING_TYPES.md) (Phase 1 landed).
+- **String provenance types:** `string_literal` is static literal storage, `string_cstr` is a
+  borrowed NUL-terminated pointer, and `string_view` is the general readable borrow. All three emit
+  `const char*` in Phase 1, but the checker keeps their one-way conversions and aggregate identity
+  distinct. `text`, `Cstr`, and `str` remain parser aliases; the formatter and diagnostics use the
+  canonical names. See [STRING_TYPES.md](STRING_TYPES.md).
 - **Products** — structs: `Point: { x: i32, y: i32 }`.
 - **Sums** — enums with optional payloads, variants `|`-separated (a sum is a *choice*):
   `Shape: Circle(i32) | Square(i32) | Dot`
@@ -35,7 +35,9 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   `Area*: { area: (Ptr<Self>) i32 }`; an impl is owned by the type
   `Vec.impl(Area, { … })` (no `trait`/`impl`/`for` keywords — the block is an argument,
   like `.match({…})`), structural conformance; trait methods dispatch through bounds, an
-  unsatisfied bound is a type error.
+  unsatisfied bound is a type error. Read-only string traits canonicalize their receiver to
+  `string_view`, so one impl serves literal, C-string, and view provenance without making their
+  stored types covariant.
 - **Inference:** integer literals adapt to the expected type; return types inferred from
   bodies (across calls); `match` exhaustiveness enforced.
 
@@ -108,8 +110,8 @@ three layers: what's **implicitly there** (the head + intrinsics), what **just l
 - **Raw memory intrinsics** (handled inline by the backend — never declared or imported):
   `x.addr()`, `load(p)`, `store(p, v)`, `offset(p, i)`, `load_i64`/`store_i64`,
   `atomic_add_i64`, `slice(ptr, len)`, **`sizeof(T)`** (byte size of a named type), and
-  **`cstr(p)`** (reinterpret a NUL-terminated byte pointer as a runtime `str`).
-  `load`/`offset` also read a `str`'s bytes raw (a `str` is a `const char*`), so source
+  **`cstr(p)`** (reinterpret a NUL-terminated byte pointer as `string_cstr`).
+  `load`/`offset` also read string bytes raw (all Phase-1 non-owning strings are `const char*`), so source
   text can be scanned slice-free. The emitted C head provides the `zslice` typedef (the
   `[T]` fat pointer); you write nothing to get it.
 - Enough to build a **heap-allocating, growable `String`** on an allocator — and on top of
@@ -182,13 +184,13 @@ shapes coexist:
   ownership is explicit.
 - **`slice(ptr, len)`** intrinsic — build a `[T]` view from a raw pointer + length (Rust's
   `from_raw_parts`); the element type comes from the wanted slice type (a return/param slot).
-- **`std.text.str`** — `len` / `eq` / `ne` / `is_empty` on a `str` (C string), plus `view` (a
-  read-only `[u8]` byte view that borrows a str's memory), `at` (safe byte indexing with 0
+- **`std.text.str`** — `len` / `eq` / `ne` / `is_empty` on a `string_view`, plus `view` (a
+  `[u8]` byte view that borrows the string's memory), `at` (safe byte indexing with 0
   out of range), and allocator-first `dup` / `substr` helpers for owned copies. An owned string
   is a length-tracked byte slice — `text.dup(a, "hi").len`, index its bytes, release through
   the same allocator, or allocate scoped copies through an arena. String literals are first-class values.
 - **`std.text.string`** — a growable, allocator-backed **`String`** assembled at **runtime** (vs a
-  comptime `str` literal): `new_in` / `init`, `push_in` (a byte), `append_in` (a `str`),
+  `string_literal`): `new_in` / `init`, `push_in` (a byte), `append_in` (a `string_view`),
   `bytes` (a `[u8]` view), `free_in`. Construction takes an allocator, and each op returns the
   updated `(ptr,len,cap)` header while the buffer is resized underneath, so
   `s := s.append_in(a, "…")` threads it. This is the keystone for
@@ -208,7 +210,7 @@ shapes coexist:
   namespace-bound `vec.of(a, [1, 2])`, then `v.push(a, x)` (grows via `a.resize`) /
   `v.get(i)` / `v.len()` / `v.free(a)`; `of` and `push` return `Result` directly for
   `Result`-shaped allocation failure (no `try_*` doubling).
-- **`std.collections.map`** — a str-keyed `Map<T>` with the same allocator-visible
+- **`std.collections.map`** — a `string_view`-keyed `Map<T>` with the same allocator-visible
   shape: namespace-bound `maps.of(a, "k", 1)` (returns `Result`), with receiver
   methods `m.put` (returns `Result`), `m.get`, `m.has`, `m.len`, and `m.free`. The
   collections also include a **fully generic `HMap<K, V>`** (`std.collections.hmap`, any hashable
@@ -234,7 +236,8 @@ shapes coexist:
   source branch form remains `.match`. This is the actual backend the `zenc` binary uses,
   not a demo.
 - **`compiler.lex` — a lexer written in Zen.** `scan(src, pos) → { tok: { kind, start, len }, next }`,
-  kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (a `str` is a `const char*`),
+  kinds `Ident | Int | Str | Sym | Eof`. Reads the source slice-free (Phase-1 `string_view` is a
+  `const char*`),
   tokens are spans (allocation-free), and it handles idents, ints, strings (with escapes), multi-char
   operators (`:= == => <= …`), and `//` comments. The token stream is the pure positional `scan`
   iterated to Eof — or a materialized heap cons-list via `tokenize(a, src)`.
@@ -331,5 +334,6 @@ Plain emit mode skips the std-import loader and validator and writes C for one f
   threaded allocators and a `Sys` at the entry. Reworking the ambient rt toward
   "ambient-within-scope, explicit-at-boundary" (and the two-memory scratch/shared split) is
   roadmap, not shipped (the current runtime source of truth is `docs/runtime-design.md`).
-- String provenance is Phase 1: `Cstr`/`Text` are real backend `Ty` variants, but the full
-  `view`/`String` taxonomy migration ([STRING_TYPES.md](STRING_TYPES.md) Phase 2) is pending.
+- String provenance Phase 1 is canonical: `string_literal`, `string_cstr`, and `string_view` are
+  distinct checker types. Turning `string_view` into `(ptr, len)` and auditing every stdlib
+  signature/capability remains Phase 2 of [STRING_TYPES.md](STRING_TYPES.md).

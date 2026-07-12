@@ -84,7 +84,8 @@ best-effort during migration (`docs/sys-phase2-print-writer.md`).
 Implemented scalar and structural types:
 
 ```zen
-i32 i64 u8 f64 bool void str
+i32 i64 u8 f64 bool void
+string_literal string_cstr string_view
 Ptr<T> MutPtr<T> RawPtr<T>
 [T]
 (A, B) C
@@ -92,14 +93,15 @@ Name
 Name<T, U>
 ```
 
-`str` is a C string pointer and the unified surface spelling/display type for
-strings. The backend `Ty` additionally carries `Cstr` (a borrowed pointer into a
-live `String` buffer) and `Text` (an immortal rodata literal) as provenance
-variants of the `str` family — both lower to `const char*`. This is Phase 1 of
-the string-lifetime split ([STRING_TYPES.md](STRING_TYPES.md)); the full
-`view`/`String` migration is pending. `[T]` is a fat slice with a pointer and
-length. Function types are parameter types for inline templates and closure
-arguments.
+The three canonical non-owning string types express provenance:
+`string_literal` is static literal storage, `string_cstr` is a borrowed
+NUL-terminated pointer, and `string_view` is the general readable borrow. They
+currently lower to `const char*`; a true `(ptr, len)` view is Phase 2 of
+[STRING_TYPES.md](STRING_TYPES.md). The parser still accepts `text`, `Cstr`, and
+`str` as migration aliases, while formatting and diagnostics use the canonical
+names. The owned growable buffer remains `String`. `[T]` is a fat slice with a
+pointer and length. Function types are parameter types for inline templates and
+closure arguments.
 
 Current pointer status: the parser accepts `Ptr<T>`, `MutPtr<T>`, and
 `RawPtr<T>`, but the checker/backend currently collapse them to one pointer
@@ -165,6 +167,11 @@ is routed through the loop handle.
 UFCS is part of call syntax: `x.f(a)` parses as `f(x, a)`. The checker can route
 that call to receiver-specific inherent or trait methods.
 
+For read-only trait lookup, all three non-owning string provenances dispatch
+through the canonical `string_view` receiver. Thus one `string_view.impl(Trait,
+{ ... })` serves literals, C strings, and views; this lookup normalization does
+not weaken their value conversions or aggregate invariance.
+
 ## Structs, Enums, Match
 
 Structs are product types:
@@ -208,7 +215,8 @@ Circle.impl(Area, {
 An impl must define every required method with the exact receiver, parameter,
 and return types after substituting `Self` with the implementing type. Trait
 default bodies are allowed in method-record fields and are materialized for
-impls that omit them.
+impls that omit them. The sole receiver-normalization exception is the read-only
+string family described above.
 
 Data structs can also own inherent methods inside their record body:
 
@@ -269,13 +277,13 @@ the same file.
 work:
 
 ```zen
-ImportEdge*: { module: str, alias: str, namespace: bool, start: i32, next: i32 }
-ProvidedSymbol*: { name: str, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
+ImportEdge*: { module: string_view, alias: string_view, namespace: bool, start: i32, next: i32 }
+ProvidedSymbol*: { name: string_view, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
 ModuleGraph*: { imports: [ImportEdge], symbols: [ProvidedSymbol] }
-ModuleEntry*: { id: str, path: str, source: str, graph: ModuleGraph }
+ModuleEntry*: { id: string_view, path: string_view, source: string_view, graph: ModuleGraph }
 ModuleTable*: { modules: [ModuleEntry] }
-ResolvedProgram*: { table: ModuleTable, flat: str, body_start: i64, body_end: i64 }
-ParsedModule*: { id: str, path: str, source: str, body: str, graph: ModuleGraph, decls: [Decl] }
+ResolvedProgram*: { table: ModuleTable, flat: string_view, body_start: i64, body_end: i64 }
+ParsedModule*: { id: string_view, path: string_view, source: string_view, body: string_view, graph: ModuleGraph, decls: [Decl] }
 ParsedProgram*: { resolved: ResolvedProgram, modules: [ParsedModule], flat_decls: [Decl] }
 ```
 

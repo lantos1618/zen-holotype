@@ -41,16 +41,16 @@ S_IFDIR := 16384    // 0o040000 — directory
 D_NAME_OFF := 19
 // ── metadata queries (no allocation) ──────────────────────────────────────────
 // does `path` exist? (any file type; no permission check)
-exists* = (path: str) bool { (path.access(F_OK) == 0).match ({ true => true, false => false }) }
+exists* = (path: string_view) bool { (path.access(F_OK) == 0).match ({ true => true, false => false }) }
 // is `path` an existing directory? false if it is missing or a non-directory.
-is_dir* = (path: str) bool {
+is_dir* = (path: string_view) bool {
     buf := zeroed(STAT_SIZE)
     yes := (path.stat(buf) == 0).match ({ true => buf.offset(ST_MODE_OFF).load_i64() & S_IFMT == S_IFDIR, false => false })
     buf.release()
     yes
 }
 // `path`'s size in bytes, or -1 when it cannot be stat'd.
-size* = (path: str) i64 {
+size* = (path: string_view) i64 {
     buf := zeroed(STAT_SIZE)
     n := (path.stat(buf) == 0).match ({ true => buf.offset(ST_SIZE_OFF).load_i64(), false => 0 - 1 })
     buf.release()
@@ -58,16 +58,16 @@ size* = (path: str) i64 {
 }
 // ── mutating ops ───────────────────────────────────────────────────────────────
 // create directory `path` (mode 0o755). Errors if it exists or the parent is missing.
-make_dir* = (path: str) Result<i32, IoError> { ok_if(path.mkdir(MODE_755)) }
+make_dir* = (path: string_view) Result<i32, IoError> { ok_if(path.mkdir(MODE_755)) }
 // remove the (empty) directory `path`.
-remove_dir* = (path: str) Result<i32, IoError> { ok_if(path.rmdir()) }
+remove_dir* = (path: string_view) Result<i32, IoError> { ok_if(path.rmdir()) }
 // delete the file `path` (unlink). Companion to make_dir/remove_dir for plain files.
-remove_file* = (path: str) Result<i32, IoError> { ok_if(path.unlink()) }
+remove_file* = (path: string_view) Result<i32, IoError> { ok_if(path.unlink()) }
 // rename/move `from` to `to` (atomic within a filesystem).
-rename_path* = (from: str, to: str) Result<i32, IoError> { ok_if(from.rename(to)) }
+rename_path* = (from: string_view, to: string_view) Result<i32, IoError> { ok_if(from.rename(to)) }
 // ── directory listing ──────────────────────────────────────────────────────────
 // the "." / ".." pseudo-entries every directory carries — skipped by read_dir.
-is_dot = (name: str) bool {
+is_dot = (name: string_view) bool {
     v := name.view()
     v.len == 1 && v[0] == '.' || v.len == 2 && v[0] == '.' && v[1] == '.'
 }
@@ -83,7 +83,7 @@ count_entries = (d: RawPtr<u8>) i64 {
 }
 // copy each remaining entry name into `out[i..]`; return the next free slot, or `.Err` if a name copy
 // fails to allocate. read_dir advertises Result, so an OOM here threads out as a value — never aborts.
-fill_entries<A> = (a: MutPtr<A>, d: RawPtr<u8>, out: [str], i: i64) Result<i64, IoError> {
+fill_entries<A> = (a: MutPtr<A>, d: RawPtr<u8>, out: [string_view], i: i64) Result<i64, IoError> {
     e := d.readdir()
     (e == null_ptr()).match ({ true => {
         return ok(i)
@@ -105,15 +105,15 @@ nbuf_r<T, A> = (a: MutPtr<A>, seed: T, n: i64) Result<[T], IoError> {
     })
 }
 // allocate the backbone and fill it, threading any alloc failure out as `.Err` (never `.expect`-abort).
-fill_all<A> = (a: MutPtr<A>, d: RawPtr<u8>, n: i64) Result<[str], IoError> {
-    buf: [str] := a.nbuf_r("", n).or_return()
+fill_all<A> = (a: MutPtr<A>, d: RawPtr<u8>, n: i64) Result<[string_view], IoError> {
+    buf: [string_view] := a.nbuf_r("", n).or_return()
     filled := a.fill_entries(d, buf, 0).or_return()
     ok(buf)
 }
 // list `path`'s entries as an allocator-owned `[str]` (each an owned NUL-terminated copy), excluding
 // "." and "..". The order is the directory's own (unsorted). .Err(.NotFound) if `path` can't be opened;
 // .Err on an allocation failure while sizing the backbone or copying a name (surfaced, not aborted).
-read_dir*<A> = (a: MutPtr<A>, path: str) Result<[str], IoError> {
+read_dir*<A> = (a: MutPtr<A>, path: string_view) Result<[string_view], IoError> {
     d := path.opendir()
     (d == null_ptr()).match ({ true => {
         return err(IoError.NotFound)

@@ -23,7 +23,8 @@ move is a unified `cap` classification consulted *everywhere*, plus a `cap_fits`
 `Ty` is a flat sum (`zen/compiler/genc.zen:209`):
 
 ```
-Ty*: I32 | I64 | U8 | F64 | Bool | Named(str) | Void | Str | Cstr | Text
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(string_view) | Void
+   | StringView | StringCstr | StringLiteral
    | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)
 ```
 

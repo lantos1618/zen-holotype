@@ -48,19 +48,19 @@ lerr_reset* = () void {
 lerr_get* = () bool { lex_failed == 1 }
 lerr_off_get* = () i32 { lex_err_off }
 // ── skip whitespace, `//` line comments, and `/* */` block comments → next significant pos ──
-is_comment = (src: str, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '/' }
-is_block_open = (src: str, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '*' }
-skip_line = (src: str, pos: i32) i32 {
+is_comment = (src: string_view, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '/' }
+is_block_open = (src: string_view, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '*' }
+skip_line = (src: string_view, pos: i32) i32 {
     p := pos
     @while (at(src, p) != '\0' && at(src, p) != '\n') {
         p = p + 1
     }
     p
 }    // stop at NUL / newline (iterative — a long line must not recurse per byte)
-skip_block_comment = (src: str, pos: i32) i32 { src.skip_bc_d(pos, 1, pos - 2) }    // pos just past `/*`; the `/*` opens at pos-2
+skip_block_comment = (src: string_view, pos: i32) i32 { src.skip_bc_d(pos, 1, pos - 2) }    // pos just past `/*`; the `/*` opens at pos-2
 // NESTED block comments: track depth so `/* /* */ */` closes at the OUTER `*/`, not the first one.
 // `open` carries the byte offset of the OUTER `/*` so an unterminated comment can caret its start.
-skip_bc_d = (src: str, pos: i32, depth: i32, open: i32) i32 {
+skip_bc_d = (src: string_view, pos: i32, depth: i32, open: i32) i32 {
     p := pos
     d := depth
     r := 0 - 1
@@ -83,7 +83,7 @@ skip_bc_d = (src: str, pos: i32, depth: i32, open: i32) i32 {
     }
     r
 }    // unterminated — stop at NUL and FLAG it (positioned at the opening `/*`); iterative (a long comment must not recurse per byte)
-skip = (src: str, pos: i32) i32 {
+skip = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
@@ -100,7 +100,7 @@ skip = (src: str, pos: i32) i32 {
     p
 }    // a nested `/*`; iterative — a long whitespace/comment run must not recurse per byte
 // ── span ends: advance while the class holds ───────────────────────────────────
-ident_end = (src: str, pos: i32) i32 {
+ident_end = (src: string_view, pos: i32) i32 {
     p := pos
     @while (is_alnum(at(src, p))) {
         p = p + 1
@@ -112,7 +112,7 @@ ident_end = (src: str, pos: i32) i32 {
 // var `x_1` / `_y` still scans as an identifier.
 // iterative digit-run scanners (a long numeric literal must not recurse per digit): advance over
 // class digits, and over a `_` that sits BETWEEN two class digits (the separator rule).
-int_end = (src: str, pos: i32) i32 {
+int_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
@@ -126,7 +126,7 @@ int_end = (src: str, pos: i32) i32 {
     }
     p
 }
-hex_end = (src: str, pos: i32) i32 {
+hex_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
@@ -140,7 +140,7 @@ hex_end = (src: str, pos: i32) i32 {
     }
     p
 }
-bin_end = (src: str, pos: i32) i32 {
+bin_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
@@ -154,7 +154,7 @@ bin_end = (src: str, pos: i32) i32 {
     }
     p
 }
-oct_end = (src: str, pos: i32) i32 {
+oct_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
@@ -170,16 +170,16 @@ oct_end = (src: str, pos: i32) i32 {
 }
 // a number span from its first digit: `0x…` runs over hex digits, `0b…` binary, `0o…` octal,
 // otherwise decimal digits.
-is_hex_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'x' || at(src, pos + 1) == 'X') }
-is_bin_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'b' || at(src, pos + 1) == 'B') }
-is_oct_prefix* = (src: str, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'o' || at(src, pos + 1) == 'O') }
-num_end = (src: str, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.radix_end(pos + 2, src.hex_end(pos + 2)), false => src.is_bin_prefix(pos).match ({ true => src.radix_end(pos + 2, src.bin_end(pos + 2)), false => src.is_oct_prefix(pos).match ({ true => src.radix_end(pos + 2, src.oct_end(pos + 2)), false => src.int_end(pos + 1) }) }) }) }
+is_hex_prefix* = (src: string_view, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'x' || at(src, pos + 1) == 'X') }
+is_bin_prefix* = (src: string_view, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'b' || at(src, pos + 1) == 'B') }
+is_oct_prefix* = (src: string_view, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'o' || at(src, pos + 1) == 'O') }
+num_end = (src: string_view, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.radix_end(pos + 2, src.hex_end(pos + 2)), false => src.is_bin_prefix(pos).match ({ true => src.radix_end(pos + 2, src.bin_end(pos + 2)), false => src.is_oct_prefix(pos).match ({ true => src.radix_end(pos + 2, src.oct_end(pos + 2)), false => src.int_end(pos + 1) }) }) }) }
 // Validate a `0x`/`0b`/`0o` radix literal. `ds` = first digit (just past the 2-char prefix), `e` =
 // end of the consumed base-digit run. Two malformings flag a positioned lexer error (caret at the
 // `0` of the prefix, ds-2): an EMPTY literal (no digit consumed, `0b`/`0o`/`0x`) and a digit-run
 // immediately followed by an alphanumeric that is NOT a valid digit of the base (`0o9`, `0b19`,
 // `0xFFg`) — which the old scanner silently split into two tokens with the wrong value.
-radix_end = (src: str, ds: i32, e: i32) i32 {
+radix_end = (src: string_view, ds: i32, e: i32) i32 {
     (e == ds || is_alnum(at(src, e))).match ({ true => {
         lerr_set_at(ds - 2)
         e
@@ -188,13 +188,13 @@ radix_end = (src: str, ds: i32, e: i32) i32 {
 // scientific exponent: `[eE][+-]?[0-9]+` right after the mantissa. Returns the end past the
 // exponent when one is present, else `pos` unchanged — so `1e` (no digit) / `1einstein` /
 // `x.e` are NOT mis-consumed; the exponent only fuses when a digit actually follows.
-exp_end = (src: str, pos: i32) i32 {
+exp_end = (src: string_view, pos: i32) i32 {
     (at(src, pos) == 'e' || at(src, pos) == 'E').match ({ true => {
         p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({ true => pos + 2, false => pos + 1 })
         is_digit(at(src, p2)).match ({ true => src.int_end(p2), false => pos })
     }, false => pos })
 }
-str_end = (src: str, pos: i32) i32 {
+str_end = (src: string_view, pos: i32) i32 {
     p := pos    // pos just past the opening quote
     r := 0 - 1
     @while (r < 0) {
@@ -211,7 +211,7 @@ str_end = (src: str, pos: i32) i32 {
     }
     r
 }    // unterminated — stop at NUL; ITERATIVE so a ~50KB string literal is O(n) iteration, not O(n) C-stack
-char_end = (src: str, pos: i32) i32 {
+char_end = (src: string_view, pos: i32) i32 {
     b := at(src, pos)    // closing quote
     // backslash: skip the escaped char
     // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
@@ -219,7 +219,7 @@ char_end = (src: str, pos: i32) i32 {
     // pos = first byte inside the quotes
     (b == '\'').match ({ true => pos + 1, false => (b == '\\').match ({ true => src.scan_quote_end(pos + 2), false => src.scan_quote_end(pos + 1) }) })
 }    // empty ''  → consume just the two quotes
-scan_quote_end = (src: str, pos: i32) i32 {
+scan_quote_end = (src: string_view, pos: i32) i32 {
     // Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
     // DESYNCING the token stream — it consumes the whole literal instead of leaving a stray quote.
     // Iterative so a long malformed char literal cannot recurse per byte.
@@ -233,7 +233,7 @@ scan_quote_end = (src: str, pos: i32) i32 {
 // zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
 two_op = (b0: u8, b1: u8) bool { b0 == ':' && b1 == '=' || b0 == '=' && b1 == '=' || b0 == '<' && b1 == '=' || b0 == '>' && b1 == '=' || b0 == '=' && b1 == '>' || b0 == '&' && b1 == '&' || b0 == '!' && b1 == '=' || b0 == '|' && b1 == '|' || b0 == '<' && b1 == '<' || b0 == '>' && b1 == '>' || b1 == '=' && (b0 == '+' || b0 == '-' || b0 == '*' || b0 == '/' || b0 == '%') }    // := ; the last clause adds the compound-assign ops `+= -= *= /= %=`
-sym_end = (src: str, pos: i32) i32 { two_op(at(src, pos), at(src, pos + 1)).match ({ true => pos + 2, false => pos + 1 }) }    // ==
+sym_end = (src: string_view, pos: i32) i32 { two_op(at(src, pos), at(src, pos + 1)).match ({ true => pos + 2, false => pos + 1 }) }    // ==
 mk = (k: TokKind, start: i32, end: i32) Scan {
     Scan(
         tok: Token(
@@ -245,7 +245,7 @@ mk = (k: TokKind, start: i32, end: i32) Scan {
     )
 }    // <=
 tok_eof = () TokKind { .Eof }    // >=
-num_tok = (src: str, pos: i32) Scan {
+num_tok = (src: string_view, pos: i32) Scan {
     e := src.num_end(pos)    // =>
     // &&
     // !=
@@ -264,8 +264,8 @@ num_tok = (src: str, pos: i32) Scan {
     end := nofloat.match ({ true => me, false => src.exp_end(me) })
     (has_frac || end > me).match ({ true => mk(.Float, pos, end), false => mk(.Int, pos, e) })
 }
-scan_one = (src: str, pos: i32, b: u8) Scan { is_alpha(b).match ({ true => mk(.Ident, pos, src.ident_end(pos + 1)), false => is_digit(b).match ({ true => src.num_tok(pos), false => (b == '"').match ({ true => mk(.Str, pos, src.str_end(pos + 1)), false => (b == '\'').match ({ true => mk(.Char, pos, src.char_end(pos + 1)), false => mk(.Sym, pos, src.sym_end(pos)) }) }) }) }) }
-scan* = (src: str, pos0: i32) Scan {
+scan_one = (src: string_view, pos: i32, b: u8) Scan { is_alpha(b).match ({ true => mk(.Ident, pos, src.ident_end(pos + 1)), false => is_digit(b).match ({ true => src.num_tok(pos), false => (b == '"').match ({ true => mk(.Str, pos, src.str_end(pos + 1)), false => (b == '\'').match ({ true => mk(.Char, pos, src.char_end(pos + 1)), false => mk(.Sym, pos, src.sym_end(pos)) }) }) }) }) }
+scan* = (src: string_view, pos0: i32) Scan {
     pos := src.skip(pos0)
     b := at(src, pos)
     (b == '\0').match ({ true => Scan(
@@ -283,8 +283,8 @@ scan* = (src: str, pos0: i32) Scan {
 // and the token layer stays allocation-free. count() traverses the whole stream this
 // way; tokenize() (below) is the alternative when you want it as a heap value.
 // total token count, Eof excluded — a traversal of the entire stream by iteration.
-count* = (src: str) i32 { src.count_from(0) }
-count_from = (src: str, pos: i32) i32 {
+count* = (src: string_view) i32 { src.count_from(0) }
+count_from = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => 0,
@@ -320,14 +320,14 @@ cons_node = (h: Token, t: Ptr<TokList>) TokList {
     ))
 }
 // build the token list [pos .. Eof] in order; recursion builds the tail first
-build = (a: MutPtr<Malloc>, src: str, pos: i32) Ptr<TokList> {
+build = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<TokList> {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => a.node(nil_node()),
         _    => a.node(cons_node(sc.tok, a.build(src, sc.next))),
     })
 }
-tokenize* = (a: MutPtr<Malloc>, src: str) Ptr<TokList> { a.build(src, 0) }
+tokenize* = (a: MutPtr<Malloc>, src: string_view) Ptr<TokList> { a.build(src, 0) }
 // walk the list: number of Cons nodes (the terminal Nil ends it)
 list_len* = (l: Ptr<TokList>) i32 {
     l.match ({
@@ -350,14 +350,14 @@ Comment*: {
 }    // span [start, start+len); trailing = same-line code before it
 cmt_buf = (a: MutPtr<Malloc>, n: i32) [Comment] { slice(a.acquire(n * sizeof(Comment)), n) }
 // count comments first so the buffer is exact (no cap guesswork on a 100KB file).
-collect_comments* = (a: MutPtr<Malloc>, src: str) [Comment] {
+collect_comments* = (a: MutPtr<Malloc>, src: string_view) [Comment] {
     n := src.count_comments()
     buf := a.cmt_buf(n + 1)    // +1 keeps a 0-comment file from a 0-size acquire
     src.fill_comments(buf, 0)
     slice(buf.ptr, n)
 }
 // number of comments in the source — one iterative scan (no per-byte recursion: big files).
-count_comments* = (src: str) i32 {
+count_comments* = (src: string_view) i32 {
     i := 0
     n := 0
     in_str := false
@@ -406,7 +406,7 @@ count_comments* = (src: str) i32 {
     n
 }
 // is byte position `s` the start of a fresh line (only whitespace back to the previous '\n' / BOF)?
-line_is_blank_before = (src: str, s: i32) bool {
+line_is_blank_before = (src: string_view, s: i32) bool {
     p := s - 1
     blank := true
     @while (p >= 0 && at(src, p) != '\n') {
@@ -418,7 +418,7 @@ line_is_blank_before = (src: str, s: i32) bool {
     blank
 }
 // record each comment span into `buf` (exactly count_comments() of them); same scanner as the count.
-fill_comments* = (src: str, buf: [Comment], k0: i32) void {
+fill_comments* = (src: string_view, buf: [Comment], k0: i32) void {
     i := 0
     k := k0
     in_str := false

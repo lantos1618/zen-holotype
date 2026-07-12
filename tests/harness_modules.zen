@@ -36,52 +36,52 @@
 { zo_path, zo_cmd, zo_par_run } = harness_lib
 // one source file of a project: `name` is the basename (e.g. "p.zen"), `src` its full text.
 ModFile*: {
-    name: str,
-    src: str,
+    name: string_view,
+    src: string_view,
 }
 // a VALUE case: write `files`, `zenc run <entry>`; the program's exit code must equal `want`.
 ModValCase*: {
     files: [ModFile],
-    entry: str,
+    entry: string_view,
     want: i32,
 }
 // a VERDICT case: write `files`, `zenc check <entry>`. should_pass => accept; else reject, and when
 // `needle` is non-empty the diagnostic must contain it (error kind / loader message / user source span).
 ModVerdictCase*: {
     files: [ModFile],
-    entry: str,
+    entry: string_view,
     should_pass: bool,
-    needle: str,
+    needle: string_view,
 }
 // an EMIT case: write `files`, `zenc emit <entry>`; emitted C must contain every `present`, no `absent`.
 ModEmitCase*: {
     files: [ModFile],
-    entry: str,
-    present: [str],
-    absent: [str],
+    entry: string_view,
+    present: [string_view],
+    absent: [string_view],
 }
 // a DOC case: `zenc doc <module>`; stdout must contain every `present` substring.
 ModDocCase*: {
-    module: str,
-    present: [str],
+    module: string_view,
+    present: [string_view],
 }
 // a STDIN case: pipe `src` into `./zenc` (no file, no program dir); should_succeed => exit 0 else != 0;
 // the combined stdout+stderr must contain every `present` substring.
 ModStdinCase*: {
-    src: str,
+    src: string_view,
     should_succeed: bool,
-    present: [str],
+    present: [string_view],
 }
 // this run's private project dir (trailing slash), unique per process so concurrent runs never clash.
-mod_dir = (mp: MutPtr<Malloc>) str { mp.zo_path("zo_mods/") }
+mod_dir = (mp: MutPtr<Malloc>) string_view { mp.zo_path("zo_mods/") }
 // concat two / three strings through an allocator-owned String (no fixed-buffer assumptions).
-join2 = (mp: MutPtr<Malloc>, a: str, b: str) str {
+join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, a).expect("harness: oom")
     s = s.append_in(mp, b).expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
-join3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str {
+join3 = (mp: MutPtr<Malloc>, a: string_view, b: string_view, c: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, a).expect("harness: oom")
     s = s.append_in(mp, b).expect("harness: oom")
@@ -89,7 +89,7 @@ join3 = (mp: MutPtr<Malloc>, a: str, b: str, c: str) str {
     mp.finish_in(s).expect("harness: oom")
 }
 // concat an arbitrary list of pieces through an allocator-owned String.
-joinv = (mp: MutPtr<Malloc>, parts: [str]) str {
+joinv = (mp: MutPtr<Malloc>, parts: [string_view]) string_view {
     s := mp.new_in().expect("harness: oom")
     parts.loop((h, i, p) {
         s = s.append_in(mp, p).expect("harness: oom")
@@ -98,7 +98,7 @@ joinv = (mp: MutPtr<Malloc>, parts: [str]) str {
 }
 // ── source generators (for the recursion-depth / stack-growth stress cases) ──────────────────────
 // "v0* = () i32 { 0 }\n" … "v{n-1}* = () i32 { (i%10) }\n" — an n-decl module body.
-gen_decls = (mp: MutPtr<Malloc>, n: i32) str {
+gen_decls = (mp: MutPtr<Malloc>, n: i32) string_view {
     s := mp.new_in().expect("harness: oom")
     i := 0
     @while (i < n) {
@@ -112,7 +112,7 @@ gen_decls = (mp: MutPtr<Malloc>, n: i32) str {
     mp.finish_in(s).expect("harness: oom")
 }
 // "v0, v1, … v{n-1}" — a comma-separated import-head name list.
-gen_names = (mp: MutPtr<Malloc>, n: i32) str {
+gen_names = (mp: MutPtr<Malloc>, n: i32) string_view {
     s := mp.new_in().expect("harness: oom")
     i := 0
     @while (i < n) {
@@ -126,7 +126,7 @@ gen_names = (mp: MutPtr<Malloc>, n: i32) str {
     mp.finish_in(s).expect("harness: oom")
 }
 // `chunk` repeated `n` times.
-gen_repeat = (mp: MutPtr<Malloc>, chunk: str, n: i32) str {
+gen_repeat = (mp: MutPtr<Malloc>, chunk: string_view, n: i32) string_view {
     s := mp.new_in().expect("harness: oom")
     i := 0
     @while (i < n) {
@@ -241,10 +241,10 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
 // `zo_mods<gid>/` (the serial runners reused one `zo_mods/` — fatal under parallelism). Each spawned
 // `./zenc run|check` is a distinct process writing pid-unique intermediates (/tmp/zenc_zd_<pid>.*), so
 // concurrent compiles never collide; only the project sources + captured results are gid-namespaced.
-mitoa = (mp: MutPtr<Malloc>, n: i64) str { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
-mod_dir_id = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join2("zo_mods", mp.mitoa(gid))) }
-mod_rc_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_rc", mp.mitoa(gid), ".txt")) }
-mod_chk_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_chk", mp.mitoa(gid), ".txt")) }
+mitoa = (mp: MutPtr<Malloc>, n: i64) string_view { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
+mod_dir_id = (mp: MutPtr<Malloc>, gid: i64) string_view { mp.zo_path(mp.join2("zo_mods", mp.mitoa(gid))) }
+mod_rc_path = (mp: MutPtr<Malloc>, gid: i64) string_view { mp.zo_path(mp.join3("zo_mods_rc", mp.mitoa(gid), ".txt")) }
+mod_chk_path = (mp: MutPtr<Malloc>, gid: i64) string_view { mp.zo_path(mp.join3("zo_mods_chk", mp.mitoa(gid), ".txt")) }
 // Phase A: fresh per-case project dir + write its files (serial, Zen-side).
 mod_write_files_id = (mp: MutPtr<Malloc>, gid: i64, files: [ModFile]) void {
     dir := mp.mod_dir_id(gid)
@@ -256,7 +256,7 @@ mod_write_files_id = (mp: MutPtr<Malloc>, gid: i64, files: [ModFile]) void {
 }
 // VALUE per-case command: `zenc run <entry>`; capture the program's exit code (WEXITSTATUS / 128+sig —
 // exactly what shell() decoded serially) into rc<gid> with `printf %s` (no newline, so try_parse_int accepts it).
-mod_value_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: str) str {
+mod_value_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: string_view) string_view {
     ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
     mp.join2(mp.join3("./zenc run ", ent, " > /dev/null 2>&1; printf %s \"$?\" > "), mp.mod_rc_path(gid))
 }
@@ -270,8 +270,8 @@ mod_value_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModValCase) bool {
     })
 }
 // VERDICT per-case command: `zenc check <entry>`; capture accept(P)/reject(F) + the diagnostic.
-mod_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: str) str {
-    z: str := ""
+mod_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: string_view) string_view {
+    z: string_view := ""
     ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
     chk := mp.mod_chk_path(gid)
     rc := mp.mod_rc_path(gid)
@@ -288,14 +288,14 @@ mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
     }) }) }) })
 }
 // batch runners + reporters: build+write (serial), run in parallel, check IN ORDER — same verdict as serial.
-run_mod_values = (name: str, cs: [ModValCase]) i32 {
+run_mod_values = (name: string_view, cs: [ModValCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_value_cmd(i, c.entry)
@@ -323,7 +323,7 @@ DeepCase: {
     base_files: [ModFile],
     kind: i32,
 }
-deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: str) str { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => (kind == 2).match ({ true => mp.deep_src_check(dir), false => mp.deep_src_check_all(dir) }) }) }) }
+deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: string_view) string_view { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => (kind == 2).match ({ true => mp.deep_src_check(dir), false => mp.deep_src_check_all(dir) }) }) }) }
 deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
     mp.contents_in(mp.mod_rc_path(gid)).match ({
         .Ok(s)  => try_parse_int(s).match ({
@@ -333,14 +333,14 @@ deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
         .Err(e) => false,
     })
 }
-run_mod_deep = (name: str, cs: [DeepCase]) i32 {
+run_mod_deep = (name: string_view, cs: [DeepCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.base_files)    // fresh per-gid dir + sibling module files
         dir := mp.join2(mp.mod_dir_id(i), "/")    // slash-terminated progdir baked into the driver
@@ -360,14 +360,14 @@ run_mod_deep = (name: str, cs: [DeepCase]) i32 {
     free(base)
     fails
 }
-run_mod_verdicts = (name: str, cs: [ModVerdictCase]) i32 {
+run_mod_verdicts = (name: string_view, cs: [ModVerdictCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_verdict_cmd(i, c.entry)
@@ -386,9 +386,9 @@ run_mod_verdicts = (name: str, cs: [ModVerdictCase]) i32 {
 // PARALLEL emit runner (3-phase, same discipline as run_mod_values): each case writes its project into
 // its OWN gid-namespaced dir, `zenc emit` runs in parallel writing gid-namespaced result + P/F marker
 // files, then present/absent are checked IN ORDER — byte-identical verdict to the old serial loop.
-mod_emit_path = (mp: MutPtr<Malloc>, gid: i64) str { mp.zo_path(mp.join3("zo_mods_emit", mp.mitoa(gid), ".txt")) }
-mod_emit_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: str) str {
-    z: str := ""
+mod_emit_path = (mp: MutPtr<Malloc>, gid: i64) string_view { mp.zo_path(mp.join3("zo_mods_emit", mp.mitoa(gid), ".txt")) }
+mod_emit_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: string_view) string_view {
+    z: string_view := ""
     ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
     outp := mp.mod_emit_path(gid)
     rc := mp.mod_rc_path(gid)
@@ -417,14 +417,14 @@ mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
         },
     }), false => false })
 }
-run_mod_emits = (name: str, cs: [ModEmitCase]) i32 {
+run_mod_emits = (name: string_view, cs: [ModEmitCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
     base := malloc(n * 8)
-    cmds: [str] := base.slice(n)
+    cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_emit_cmd(i, c.entry)
@@ -441,7 +441,7 @@ run_mod_emits = (name: str, cs: [ModEmitCase]) i32 {
     free(base)
     fails
 }
-run_mod_docs = (name: str, cs: [ModDocCase]) i32 {
+run_mod_docs = (name: string_view, cs: [ModDocCase]) i32 {
     out(name)
     out("\n")
     fails := 0
@@ -454,7 +454,7 @@ run_mod_docs = (name: str, cs: [ModDocCase]) i32 {
     out("\n")
     fails
 }
-run_mod_stdins = (name: str, cs: [ModStdinCase]) i32 {
+run_mod_stdins = (name: string_view, cs: [ModStdinCase]) i32 {
     out(name)
     out("\n")
     fails := 0
@@ -470,7 +470,7 @@ run_mod_stdins = (name: str, cs: [ModStdinCase]) i32 {
 harness_modules_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    z: str := ""    // a str-typed leading element so mixed literal/variable joinv arrays infer as [str]
+    z: string_view := ""    // typed leading element so mixed literal/variable arrays infer as [string_view]
     // ── generated stress sources (recursion-depth / stack-growth guards) ─────────────────────────
     big240 := mp.gen_decls(240)    // 240 top-level decls (symbol-consumer stress)
     big120 := mp.gen_decls(120)    // 120 decls + a 120-name import head
@@ -523,6 +523,34 @@ harness_modules_run* = () i32 {
         ), ModFile(
             name: "p.zen",
             src: "{ shout } = h\nmain = () i32 { shout(\"hi\") 0 }\n",
+        )],
+        entry: "p.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "{ print } = std.text.fmt\nmain = () i32 {\n  v: string_view := \"v\"\n  c: string_cstr := cstr(\"c\")\n  n := print(\"l\") + print(v) + print(c)\n  (n == 3).match ({ true => 0, false => 1 })\n}\n",
+        )],
+        entry: "p.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "{ assert_eq } = std.testing\nmain = () i32 {\n  v: string_view := \"same\"\n  c: string_cstr := cstr(\"same\")\n  lit_ok := assert_eq(\"same\", \"same\", \"literal\").match ({ .Pass => true, .Fail(msg) => false })\n  view_ok := assert_eq(v, v, \"view\").match ({ .Pass => true, .Fail(msg) => false })\n  cstr_ok := assert_eq(c, c, \"cstr\").match ({ .Pass => true, .Fail(msg) => false })\n  ok := lit_ok && view_ok && cstr_ok\n  ok.match ({ true => 0, false => 1 })\n}\n",
+        )],
+        entry: "p.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "btree = std.collections.btree\nheap = std.mem.heap\n{ expect } = std.core.result\nmain = () i32 {\n  h := heap.gpa()\n  a := h.addr()\n  m := btree.of(a, \"b\", 2).expect(\"btree.of\")\n  m = m.insert(a, \"a\", 1).expect(\"btree.insert\")\n  ok := (m.get_or(\"a\", 0) == 1) && (m.get_or(\"b\", 0) == 2)\n  m.free(a)\n  ok.match ({ true => 0, false => 1 })\n}\n",
+        )],
+        entry: "p.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "hmap = std.collections.hmap\nmain = () i32 {\n  m := hmap.from(\"x\", 1)\n  m = m.put(\"y\", 2)\n  ok := (m.get_or(\"x\", 0) == 1) && (m.get_or(\"y\", 0) == 2)\n  m.free()\n  ok.match ({ true => 0, false => 1 })\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -763,6 +791,20 @@ harness_modules_run* = () i32 {
         files: [ModFile(
             name: "p.zen",
             src: "{ integer_in, float_in } = std.text.num\nhalloc = std.mem.heap\n{ expect } = std.core.result\n{ eq } = std.text.str\n{ finish_in } = std.text.string\n{ to_exit } = std.core.bool\nmain = () i32 {\n  a := halloc.gpa()\n  i := a.addr().integer_in(-12).expect(\"int\")\n  f := a.addr().float_in(1.5).expect(\"flt\")\n  ok_fast := eq(a.addr().finish_in(i).expect(\"fin\"), \"-12\") && eq(a.addr().finish_in(f).expect(\"fin\"), \"1.5\")\n  ri := a.addr().integer_in(42)\n  rf := a.addr().float_in(42.25)\n  ok_try := ri.match({ .Ok(x) => eq(a.addr().finish_in(x).expect(\"fin\"), \"42\"), .Err(e) => false }) && rf.match({ .Ok(x) => eq(a.addr().finish_in(x).expect(\"fin\"), \"42.25\"), .Err(e) => false })\n  (ok_fast && ok_try).to_exit()\n}\n",
+        )],
+        entry: "p.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "heap = std.mem.heap\ncsv = std.csv\n{ integer } = std.text.num\n{ expect } = std.core.result\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nmain = () i32 {\n  mem := heap.gpa()\n  a := mem.addr()\n  owned := a.integer(42).expect(\"integer\")\n  text := owned.finish_in(a).expect(\"finish\")\n  eq(text, \"42\").to_exit()\n}\n",
+        )],
+        entry: "p.zen",
+        want: 0,
+    ), ModValCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "{ Allocator, Heap } = std.mem.alloc\nheap = std.mem.heap\n{ init } = std.text.string\n{ expect } = std.core.result\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nCounting: { heap: Heap, resizes: i32 }\nCounting.impl(Allocator, {\n  acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> { a.heap.addr().acquire(n) }\n  resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> {\n    a.resizes = a.resizes + 1\n    a.heap.addr().resize(p, n)\n  }\n  release = (a: MutPtr<Counting>, p: RawPtr<u8>) void { a.heap.addr().release(p) }\n})\nmain = () i32 {\n  backing := Counting(heap: heap.gpa(), resizes: 0)\n  a := backing.addr()\n  s := a.init(1).expect(\"init\")\n  cap_ok := s.cap == 2\n  s = s.append_in(a, \"x\").expect(\"append\")\n  before := backing.resizes\n  text := s.finish_in(a).expect(\"finish\")\n  ok := cap_ok && (backing.resizes == before) && eq(text, \"x\")\n  s.free_in(a)\n  ok.to_exit()\n}\n",
         )],
         entry: "p.zen",
         want: 0,
@@ -1860,25 +1902,25 @@ harness_modules_run* = () i32 {
 // Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and
 // the entry inpath (mod_dir already ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
 // root is "." (the harness's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
-deep_src_table = (mp: MutPtr<Malloc>, dir: str) str {
-    z: str := ""
+deep_src_table = (mp: MutPtr<Malloc>, dir: string_view) string_view {
+    z: string_view := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_program_data } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    resolved := a.addr().resolve_program_data(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    table := resolved.table\n    left := table.module(\"u/left\")\n    helper := table.module(\"u/helper\")\n    ok := (table.count() == 5)\n        && table.has(\"u/left\") && table.has(\"u/right\") && table.has(\"u/plain\") && table.has(\"u/helper\")\n        && left.graph.has(\"thing\") && helper.graph.has(\"value\")\n        && resolved.flat.contains(\"left__thing\") && resolved.flat.contains(\"plain\")\n        && (!resolved.flat.contains(\"left = left\")) && (resolved.body_start <= resolved.body_end)\n    ok.to_exit()\n}\n"])
 }
-deep_src_parsed = (mp: MutPtr<Malloc>, dir: str) str {
-    z: str := ""
+deep_src_parsed = (mp: MutPtr<Malloc>, dir: string_view) string_view {
+    z: string_view := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    program := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    root := program.module(\"\")\n    left := program.module(\"u/left\")\n    helper := program.module(\"u/helper\")\n    ok := (program.count() == 5)\n        && (program.flat_decls.len == 5)\n        && (root.decls.len == 1) && root.body.contains(\"left__thing\") && (!root.body.contains(\"left = left\"))\n        && (left.decls.len == 1) && left.body.contains(\"helper__value\") && (!left.body.contains(\"helper = helper\"))\n        && (helper.decls.len == 1) && helper.body.contains(\"value\")\n    ok.to_exit()\n}\n"])
 }
-deep_src_check = (mp: MutPtr<Malloc>, dir: str) str {
-    z: str := ""
+deep_src_check = (mp: MutPtr<Malloc>, dir: string_view) string_view {
+    z: string_view := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, root_link_decls, check_parsed_program } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain(3) }\\n\"\n    bad_ns := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1) + plain(3) }\\n\"\n    bad_plain := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    nsp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_ns.zen\", bad_ns)\n    pp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_plain.zen\", bad_plain)\n    lib := a.addr().root_link_decls(gp)\n    ok := (lib.len == 2)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_parsed_program(nsp) > 0)\n        && (a.addr().check_parsed_program(pp) > 0)\n    ok.to_exit()\n}\n"])
 }
-deep_src_check_all = (mp: MutPtr<Malloc>, dir: str) str {
-    z: str := ""
+deep_src_check_all = (mp: MutPtr<Malloc>, dir: string_view) string_view {
+    z: string_view := ""
     mp.joinv([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, module_link_decls, check_parsed_program, check_all_parsed_modules } = std.internal.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\nmain = () i32 { left.thing() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    left := gp.module(\"u/left\")\n    lib := a.addr().module_link_decls(gp, left)\n    ok := (lib.len == 1)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_all_parsed_modules(gp) > 0)\n    ok.to_exit()\n}\n"])
 }
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a
 // Zen string literal in the GENERATED program text. The byte we look for is ASCII 10.
-esc_nl = (mp: MutPtr<Malloc>, s: str) str {
+esc_nl = (mp: MutPtr<Malloc>, s: string_view) string_view {
     out := mp.new_in().expect("harness: oom")
     v: [u8] := s.view()
     i: i64 := 0
@@ -1893,7 +1935,7 @@ esc_nl = (mp: MutPtr<Malloc>, s: str) str {
     }
     mp.finish_in(out).expect("harness: oom")
 }
-edges700_esc = (mp: MutPtr<Malloc>, s: str) str { mp.esc_nl(s) }
+edges700_esc = (mp: MutPtr<Malloc>, s: string_view) string_view { mp.esc_nl(s) }
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // PARITY MAP — what the deleted/kept pytest cross-module suites map to here.
 //
