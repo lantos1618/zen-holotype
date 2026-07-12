@@ -1747,7 +1747,7 @@ harness_build_run* = () i32 {
         absent: ["try_integer", "try_uinteger", "try_float", "int_string", "float_string", "int_to_str", "float_to_str"],
     ), DocCase(
         target: "std.io.file",
-        present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned NUL-terminated buffer."],
+        present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned NUL-terminated buffer."],
         absent: ["contents* = (path: string_view) Result<string_view, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
     ), DocCase(
         target: "zen/compiler/genc.zen",
@@ -1798,6 +1798,27 @@ harness_build_run* = () i32 {
         name: "build_rejects_illtyped",
         cmd: "printf \"main = () i32 { 1 < 2 }\\n\" > $ZT/zit.zen && { ./zenc build $ZT/zit.zen -o $ZT/zit_bin 2>/dev/null; test \"$?\" != 0; } && test ! -e $ZT/zit_bin",
     ), ShellCase(
+        name: "init_executable_build_run",
+        cmd: "rm -rf $ZT/hello-z && ./zenc init $ZT/hello-z --bin </dev/null >$ZT/init.txt 2>&1 && test -f $ZT/hello-z/zen.toml && test -f $ZT/hello-z/src/main.zen && grep -Fqx 'package = \"hello-z\"' $ZT/hello-z/zen.toml && grep -Fqx 'kind = \"executable\"' $ZT/hello-z/zen.toml && grep -Fqx 'root = \"src\"' $ZT/hello-z/zen.toml && grep -Fqx 'main = \"main.zen\"' $ZT/hello-z/zen.toml && grep -Fqx 'out = \"hello-z\"' $ZT/hello-z/zen.toml && ./zenc fmt --check $ZT/hello-z/src/main.zen && ./zenc check $ZT/hello-z && ./zenc run $ZT/hello-z >$ZT/run.txt && grep -Fqx 'Hello from hello-z!' $ZT/run.txt && ./zenc build $ZT/hello-z >/dev/null 2>&1 && test -x $ZT/hello-z/hello-z && $ZT/hello-z/hello-z >$ZT/bin.txt && cmp -s $ZT/run.txt $ZT/bin.txt",
+    ), ShellCase(
+        name: "init_library_check_consume",
+        cmd: "rm -rf $ZT/mathlib && ./zenc init --lib $ZT/mathlib </dev/null >$ZT/libinit.txt 2>&1 && test -f $ZT/mathlib/src/lib.zen && test ! -e $ZT/mathlib/src/main.zen && grep -Fqx 'kind = \"library\"' $ZT/mathlib/zen.toml && grep -Fqx 'main = \"lib.zen\"' $ZT/mathlib/zen.toml && ! grep -Fq 'out = ' $ZT/mathlib/zen.toml && ./zenc fmt --check $ZT/mathlib/src/lib.zen && ./zenc check $ZT/mathlib && printf '{ answer } = lib\\nmain = () i32 { answer() }\\n' >$ZT/mathlib/src/consumer.zen && ./zenc check $ZT/mathlib/src/consumer.zen && { ./zenc run $ZT/mathlib/src/consumer.zen; test \"$?\" = 42; } && { ./zenc build $ZT/mathlib >$ZT/libbuild.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'cannot build a library project yet' $ZT/libbuild.txt && { ./zenc run $ZT/mathlib >$ZT/librun.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'cannot run a library project' $ZT/librun.txt",
+    ), ShellCase(
+        name: "init_interactive_prompts",
+        cmd: "rm -rf $ZT/asked $ZT/default-bin && ZR=$(pwd) && ( cd $ZT && printf 'asked\\n2\\n' | \"$ZR/zenc\" init >$ZT/prompt.txt 2>&1 ) && grep -Fq 'Project name or path:' $ZT/prompt.txt && grep -Fq 'Project type:' $ZT/prompt.txt && grep -Fq 'Select [1]:' $ZT/prompt.txt && test -f $ZT/asked/src/lib.zen && printf '\\n' | ./zenc init $ZT/default-bin >$ZT/default.txt 2>&1 && test -f $ZT/default-bin/src/main.zen",
+    ), ShellCase(
+        name: "init_existing_dir_no_clobber",
+        cmd: "rm -rf $ZT/existing && mkdir $ZT/existing && printf 'keep-byte-exact\\n' >$ZT/existing/KEEP && cp $ZT/existing/KEEP $ZT/keep.before && ./zenc init $ZT/existing --exe >/dev/null 2>&1 && cmp -s $ZT/keep.before $ZT/existing/KEEP && test -f $ZT/existing/src/main.zen && test -f $ZT/existing/zen.toml",
+    ), ShellCase(
+        name: "init_collisions_are_atomic",
+        cmd: "rm -rf $ZT/collide $ZT/source-collide $ZT/build-collide && mkdir -p $ZT/collide/src $ZT/source-collide/src $ZT/build-collide && printf 'sentinel manifest\\n' >$ZT/collide/zen.toml && printf 'sentinel source\\n' >$ZT/collide/src/main.zen && cp $ZT/collide/zen.toml $ZT/manifest.before && cp $ZT/collide/src/main.zen $ZT/source.before && { ./zenc init $ZT/collide --bin >$ZT/collide.txt 2>&1; test \"$?\" = 1; } && cmp -s $ZT/manifest.before $ZT/collide/zen.toml && cmp -s $ZT/source.before $ZT/collide/src/main.zen && grep -Fq 'already exists' $ZT/collide.txt && printf 'source sentinel\\n' >$ZT/source-collide/src/main.zen && cp $ZT/source-collide/src/main.zen $ZT/source-only.before && { ./zenc init $ZT/source-collide --bin >/dev/null 2>&1; test \"$?\" = 1; } && cmp -s $ZT/source-only.before $ZT/source-collide/src/main.zen && test ! -e $ZT/source-collide/zen.toml && printf 'build sentinel\\n' >$ZT/build-collide/build.zen && { ./zenc init $ZT/build-collide --lib >/dev/null 2>&1; test \"$?\" = 1; } && grep -Fqx 'build sentinel' $ZT/build-collide/build.zen && test ! -e $ZT/build-collide/zen.toml && test ! -e $ZT/build-collide/src",
+    ), ShellCase(
+        name: "init_cli_validation",
+        cmd: "rm -rf $ZT/conflict $ZT/a $ZT/b $ZT/unknown $ZT/dot $ZT/escaped $ZT/dot-app && { ./zenc init $ZT/conflict --bin --lib >$ZT/e1 2>&1; test \"$?\" = 2; } && test ! -e $ZT/conflict && grep -Fq 'usage:' $ZT/e1 && { ./zenc init $ZT/a $ZT/b --bin >$ZT/e2 2>&1; test \"$?\" = 2; } && test ! -e $ZT/a && test ! -e $ZT/b && { ./zenc init $ZT/unknown --wat >$ZT/e3 2>&1; test \"$?\" = 2; } && test ! -e $ZT/unknown && { ./zenc init \"$ZT/bad name\" --bin >$ZT/e4 2>&1; test \"$?\" = 2; } && test ! -e \"$ZT/bad name\" && { ./zenc init $ZT/dot/../escaped --bin >$ZT/e5 2>&1; test \"$?\" = 2; } && test ! -e $ZT/dot && test ! -e $ZT/escaped && { ./zenc init $ZT/./dot-app --bin >$ZT/e6 2>&1; test \"$?\" = 2; } && test ! -e $ZT/dot-app && ./zenc init --help >$ZT/ih 2>&1 && grep -Fq -- '--bin' $ZT/ih && grep -Fq -- '--lib' $ZT/ih && ./zenc --help >$ZT/th 2>&1 && grep -Fq 'zenc init' $ZT/th",
+    ), ShellCase(
+        name: "init_relocated_binary_embeds_templates",
+        cmd: "rm -rf $ZT/shipped && cp ./zenc $ZT/zenc-moved && { cd $ZT && ./zenc-moved init shipped --bin </dev/null >$ZT/moved.txt 2>&1; } && test -f $ZT/shipped/zen.toml && test -f $ZT/shipped/src/main.zen && grep -Fqx 'package = \"shipped\"' $ZT/shipped/zen.toml",
+    ), ShellCase(
         name: "project_simple_app",
         cmd: "rm -rf $ZT/zsa && cp -r tests/fixtures/project/simple_app $ZT/zsa && ./zenc build $ZT/zsa 2>$ZT/zsa.txt && test -x $ZT/zsa/app && grep -Fq \"$ZT/zsa/app\" $ZT/zsa.txt && { $ZT/zsa/app; test \"$?\" = 7; }",
     ), ShellCase(
@@ -1821,6 +1842,12 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "fmt_basic",
         cmd: "cp tests/fixtures/fmt/basic_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/basic_formatted.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+    ), ShellCase(
+        name: "fmt_bool_struct_arm",
+        cmd: "cp tests/fixtures/fmt/bool_struct_arm_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/bool_struct_arm_formatted.zen && grep -Fq '        true => InitArgs(' $ZT/zfmt.zen && grep -Fq '        false => {' $ZT/zfmt.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+    ), ShellCase(
+        name: "fmt_function_width",
+        cmd: "cp tests/fixtures/fmt/function_width_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/function_width_formatted.zen && grep -Fqx 'BUILDBIN = (mp: MutPtr<Malloc>) string_view {' $ZT/zfmt.zen && grep -Fqx 'SHORT = () string_view { \"ok\" }' $ZT/zfmt.zen && grep -Fqx 'COMPLEX = (n: i32) i32 { (n > 100).match ({ true => n, false => n + 1 }) }' $ZT/zfmt.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
     ), ShellCase(
         name: "fmt_block_comments",
         cmd: "cp tests/fixtures/fmt/block_comments_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/block_comments_formatted.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",

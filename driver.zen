@@ -5,9 +5,10 @@
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
-{ contents_in, out, out_bytes, save, O_WRTRUNC, MODE_644 } = std.io.file
+{ contents_in, out, out_bytes, save, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
 { or } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
-{ open, read, write, close, system, unlink, getpid } = std.c.libc
+{ then } = std.core.bool
+{ open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_expr
 { perr_get } = compiler.parse_type
@@ -43,25 +44,34 @@ RenderTarget*: {
     src: string_view,
 }
 pick_module = (flat: string_view, mods: [ModuleEntry], i: i64, off: i32, w: i32, rpath: string_view, rsrc: string_view) RenderTarget {
-    (i >= mods.len).match ({ true => RenderTarget(
-        path: rpath,
-        src: rsrc,
-    ), false => {
-        m := mods[i]
-        // Map a flat-source diagnostic span onto the module whose source contains it
-        // (diag_user_span fails -> line 0 → try the next module).
-        sp := diag_user_span(flat, m.source, off, w)
-        (sp.line > 0).match ({ true => RenderTarget(
-            path: m.path,
-            src: m.source,
-        ), false => flat.pick_module(mods, i + 1, off, w, rpath, rsrc) })
-    } })
+    (i >= mods.len).match ({
+        true => RenderTarget(
+            path: rpath,
+            src: rsrc,
+        ),
+        false => {
+            m := mods[i]
+            // Map a flat-source diagnostic span onto the module whose source contains it
+            // (diag_user_span fails -> line 0 → try the next module).
+            sp := diag_user_span(flat, m.source, off, w)
+            (sp.line > 0).match ({
+                true => RenderTarget(
+                    path: m.path,
+                    src: m.source,
+                ),
+                false => flat.pick_module(mods, i + 1, off, w, rpath, rsrc),
+            })
+        },
+    })
 }
 pick_render = (rp: ResolvedProgram, off: i32, w: i32, rpath: string_view, rsrc: string_view) RenderTarget {
-    (diag_user_span(rp.flat, rsrc, off, w).line == 0).match ({ true => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc), false => RenderTarget(
-        path: rpath,
-        src: rsrc,
-    ) })
+    (diag_user_span(rp.flat, rsrc, off, w).line == 0).match ({
+        true => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc),
+        false => RenderTarget(
+            path: rpath,
+            src: rsrc,
+        ),
+    })
 }
 // render ONE diagnostic (file:line:col + caret + hint) to stderr, mapping its flat offset to the
 // module its error actually lives in. cd.count>1 appends the legacy inline "(+K more)" suffix — used
@@ -106,7 +116,9 @@ report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProg
 // suppresses zenrt's String (the program emits its own). --build-self uses the plain seed variant.
 // module-level str CONSTS don't emit as C globals in the seed, so these are zero-arg fns.
 HEAD = () string_view { "typedef struct { void* ptr; int64_t len; } zslice; " }
-HEAD_REPL = () string_view { "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n" }
+HEAD_REPL = () string_view {
+    "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n"
+}
 // Intermediate /tmp files are namespaced by pid so two concurrent `zenc` invocations never clobber
 // each other's temp.c / temp.bin (a fixed path made one process compile/run the OTHER's program).
 // getpid() is constant for the life of a run, so each builder yields the SAME path on every call —
@@ -300,6 +312,10 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
 }
 build_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, flag: string_view, outarg: string_view) i32 {
     spec.ok.match ({ true => {
+        spec.library.match ({ true => {
+            derr("zenc: cannot build a library project yet; use `zenc check <project>`\n")
+            return 1
+        } })
         out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })    // resolve_spec already reported why
         // -o flag, or zen.toml `out`
         contents_in(mp, spec.source).match ({
@@ -343,18 +359,24 @@ append_run_args = (s: String, mp: MutPtr<Malloc>, i: i32, n: i32) String { (i >=
 // (arg(3)..; the program reads it back via std.os.arg(i)/argc(), argv[0] being the temp binary).
 run_command = (mp: MutPtr<Malloc>, bin: string_view) string_view { mp.gstr_string(128).gstr_append(mp, bin).append_run_args(mp, 3, argc()).gstr_finish(mp) }
 run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
-    spec.ok.match ({ true => contents_in(mp, spec.source).match ({
-        .Ok(src) => {
-            bin := mp.TMPBIN()
-            (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links) == 0).match ({ true => mp.run_command(bin).system() / 256, false => 1 })
-        },
-        .Err(e)  => {
-            derr("zenc: cannot open input: ")
-            derr(spec.source)
-            derr("\n")
-            1
-        },
-    }), false => 1 })
+    spec.ok.match ({ true => {
+        spec.library.match ({ true => {
+            derr("zenc: cannot run a library project; use `zenc check <project>`\n")
+            return 1
+        } })
+        contents_in(mp, spec.source).match ({
+            .Ok(src) => {
+                bin := mp.TMPBIN()
+                (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links) == 0).match ({ true => mp.run_command(bin).system() / 256, false => 1 })
+            },
+            .Err(e)  => {
+                derr("zenc: cannot open input: ")
+                derr(spec.source)
+                derr("\n")
+                1
+            },
+        })
+    }, false => 1 })
 }
 // the project ROOT (holds zen/std + zen/compiler + bootstrap): $ZEN_ROOT if set (a relocated binary
 // points it at a checkout), else the directory of the binary (argv[0]).
@@ -362,7 +384,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     e := getEnv("ZEN_ROOT")
     eq(e, "").match ({ true => mp.dirname(arg(0)), false => e })
 }
-HELP = () string_view { "usage: zenc <run|build|check|emit|doc|fmt|--build-self|--version|--help> <file>\n  zenc doc <std.mod|file.zen>\n  cat file.zen | zenc   (source -> C filter)\n" }
+HELP = () string_view { "usage: zenc <run|build|check|emit|doc|fmt|init|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc doc <std.mod|file.zen>\n  cat file.zen | zenc   (source -> C filter)\n" }
 main = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -377,7 +399,7 @@ main = () i32 {
     }, false => eq(cmd, "--build-self").match ({ true => eq(arg(2), "").match ({ true => {
         derr("usage: zenc --build-self <out.c> <srcroot>\n")
         2
-    }, false => mp.build_self(arg(3), arg(2)) }), false => eq(cmd, "emit").match ({ true => mp.emit_file(root, arg(2), arg(3)), false => eq(cmd, "emit-js").match ({ true => mp.emit_js(root, arg(2)), false => eq(cmd, "check").match ({ true => mp.check_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "run").match ({ true => mp.run_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "build").match ({ true => mp.build_target(root), false => eq(cmd, "fmt").match ({ true => mp.fmt_cmd(arg(2), arg(3)), false => eq(cmd, "doc").match ({ true => mp.doc_cmd(root, arg(2)), false => mp.default_emit(cmd) }) }) }) }) }) }) }) }) }) })
+    }, false => mp.build_self(arg(3), arg(2)) }), false => eq(cmd, "emit").match ({ true => mp.emit_file(root, arg(2), arg(3)), false => eq(cmd, "emit-js").match ({ true => mp.emit_js(root, arg(2)), false => eq(cmd, "check").match ({ true => mp.check_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "run").match ({ true => mp.run_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "build").match ({ true => mp.build_target(root), false => eq(cmd, "fmt").match ({ true => mp.fmt_cmd(arg(2), arg(3)), false => eq(cmd, "doc").match ({ true => mp.doc_cmd(root, arg(2)), false => eq(cmd, "init").match ({ true => mp.zi_cmd(), false => mp.default_emit(cmd) }) }) }) }) }) }) }) }) }) }) })
 }    // --build-self <out.c> <srcroot>
 build_out = (flag: string_view, out: string_view) string_view { eq(flag, "-o").match ({ true => out, false => "a.out" }) }    // `zenc <file>` (or stdin) -> raw C on stdout, the harness filter
 // build output path: `build <file> -o <out>` -> <out>, else "a.out".
@@ -616,20 +638,23 @@ fmt_render = (mp: MutPtr<Malloc>, src: string_view) FmtResult {
     set_faithful_lexeme(true)    // keep C-keyword identifiers RAW (float, if, …) for round-trip
     decls := mp.parse_module(src)    // faithful AST (keeps MethodCall)
     set_faithful_lexeme(false)
-    (perr_get() || lerr_get()).match ({ true => FmtResult(
-        text: "",
-        len: 0,
-        ok: false,
-    ), false => {
-        exps := exports_get()    // the `*` export markers parse_module recorded
-        pretty_set_comments(src, mp.collect_comments(src))    // weave source comments back in
-        o := mp.pretty_module_in(decls, exps)
-        FmtResult(
-            text: o.gstr_finish(mp),
-            len: o.len,
-            ok: true,
-        )
-    } })
+    (perr_get() || lerr_get()).match ({
+        true => FmtResult(
+            text: "",
+            len: 0,
+            ok: false,
+        ),
+        false => {
+            exps := exports_get()    // the `*` export markers parse_module recorded
+            pretty_set_comments(src, mp.collect_comments(src))    // weave source comments back in
+            o := mp.pretty_module_in(decls, exps)
+            FmtResult(
+                text: o.gstr_finish(mp),
+                len: o.len,
+                ok: true,
+            )
+        },
+    })
 }
 fmt_parse_err = (mp: MutPtr<Malloc>) i32 {
     derr("zenc: fmt: cannot format (syntax error — a faithful formatter refuses a file it cannot represent)\n")
@@ -697,12 +722,282 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
         2
     }, false => mp.fmt_file(a2, false) }) }) })
 }
+// ── project bootstrap: `zenc init [path] [--bin|--lib]` ──────────────────────────────────
+// The templates live in this driver, so a relocated standalone zenc does not need a templates
+// directory beside it. Fully flagged invocations never touch stdin; missing values are prompted.
+ZI_USAGE = () string_view {
+    "usage: zenc init [path] [--bin|--lib]\n       zenc init --help\n"
+}
+ZiInitArgs: {
+    path: string_view,
+    kind: i32,
+    ok: bool,
+    help: bool,
+}
+ZI_KIND_PROMPT := 0
+ZI_KIND_EXECUTABLE := 1
+ZI_KIND_LIBRARY := 2
+zi_pick_kind = (have: i32, want: i32) i32 { (have == ZI_KIND_PROMPT || have == want).match ({ true => want, false => 0 - 1 }) }
+zi_init_args = (path: string_view, kind: i32, ok: bool, help: bool) ZiInitArgs {
+    ZiInitArgs(
+        path: path,
+        kind: kind,
+        ok: ok,
+        help: help,
+    )
+}
+zi_scan_args = (i: i32, n: i32, path: string_view, kind: i32, valid: bool) ZiInitArgs {
+    (i >= n).match ({ true => {
+        return zi_init_args(path, kind, valid, false)
+    } })
+    a := arg(i)
+    eq(a, "--help").match ({ true => {
+        return zi_init_args(path, kind, true, true)
+    } })
+    (eq(a, "--bin") || eq(a, "--exe")).match ({ true => {
+        next := zi_pick_kind(kind, ZI_KIND_EXECUTABLE)
+        return zi_scan_args(i + 1, n, path, next, valid && next > 0)
+    } })
+    eq(a, "--lib").match ({ true => {
+        next := zi_pick_kind(kind, ZI_KIND_LIBRARY)
+        return zi_scan_args(i + 1, n, path, next, valid && next > 0)
+    } })
+    v: [u8] := a.view()
+    (v.len > 0 && v[0] == '-').match ({ true => zi_init_args(path, kind, false, false), false => eq(path, "").match ({ true => zi_scan_args(i + 1, n, a, kind, valid), false => zi_init_args(path, kind, false, false) }) })
+}
+// One prompt line, without consuming the next prompt's input (read_stdin intentionally reads to EOF).
+zi_read_line = (mp: MutPtr<Malloc>, prompt: string_view) string_view {
+    derr(prompt)
+    s := mp.gstr_string(64)
+    cell: [u8] := [0]
+    done := false
+    @while (done == false) {
+        n := read(0, cell.ptr, 1)
+        done = n <= 0 || cell[0] == '\n'
+        s = (n > 0 && cell[0] != '\n' && cell[0] != '\r').match ({ true => s.gstr_push(mp, cell[0]), false => s })
+    }
+    s.gstr_finish(mp)
+}
+zi_kind_choice = (s: string_view) i32 { (eq(s, "") || eq(s, "1") || eq(s, "bin") || eq(s, "exe") || eq(s, "executable")).match ({ true => ZI_KIND_EXECUTABLE, false => (eq(s, "2") || eq(s, "lib") || eq(s, "library")).match ({ true => ZI_KIND_LIBRARY, false => 0 - 1 }) }) }
+zi_prompt_kind = (mp: MutPtr<Malloc>) i32 {
+    derr("Project type:\n  1) Executable\n  2) Library\n")
+    zi_kind_choice(mp.zi_read_line("Select [1]: "))
+}
+// Names are embedded in TOML, a string literal, and the executable output path. Keep them portable
+// and injection-free until the compiler's own cc command quotes arbitrary project paths.
+zi_ascii_alnum = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' }
+zi_name_tail = (v: [u8], i: i64) bool { (i >= v.len).match ({ true => true, false => (zi_ascii_alnum(v[i]) || v[i] == '_' || v[i] == '-').match ({ true => v.zi_name_tail(i + 1), false => false }) }) }
+zi_name_valid = (s: string_view) bool {
+    v: [u8] := s.view()
+    v.len > 0 && zi_ascii_alnum(v[0]) && v.zi_name_tail(1)
+}
+zi_path_char = (b: u8) bool { zi_ascii_alnum(b) || b == '_' || b == '-' || b == '.' || b == '/' }
+zi_dot_segment = (v: [u8], start: i64, end: i64) bool {
+    n := end - start
+    n == 1 && v[start] == '.' || n == 2 && v[start] == '.' && v[start + 1] == '.'
+}
+zi_path_valid_at = (v: [u8], i: i64, start: i64) bool { (i >= v.len).match ({ true => v.zi_dot_segment(start, i) == false, false => (zi_path_char(v[i]) && (v[i] != '/' || i == 0 || v[i - 1] != '/')).match ({ true => (v[i] == '/').match ({ true => (v.zi_dot_segment(start, i) == false).match ({ true => v.zi_path_valid_at(i + 1, i + 1), false => false }), false => v.zi_path_valid_at(i + 1, start) }), false => false }) }) }
+zi_path_valid = (s: string_view) bool { s.view().zi_path_valid_at(0, 0) }
+zi_trim_end = (v: [u8], n: i64) i64 { (n > 0 && v[n - 1] == '/').match ({ true => v.zi_trim_end(n - 1), false => n }) }
+zi_normal_path = (mp: MutPtr<Malloc>, raw: string_view) string_view {
+    v: [u8] := raw.view()
+    n := v.zi_trim_end(v.len)
+    (n == v.len).match ({ true => raw, false => mp.cstr_substr(raw, 0, to_i32(n)) })
+}
+zi_project_name = (mp: MutPtr<Malloc>, path: string_view) string_view {
+    v: [u8] := path.view()
+    slash := last_slash(v, 0, 0 - 1)
+    start := slash + 1
+    mp.cstr_substr(path, to_i32(start), to_i32(v.len - start))
+}
+zi_is_dir = (path: string_view) bool {
+    d := opendir(path)
+    (d == null_ptr()).match ({ true => false, false => {
+        closedir(d)
+        true
+    } })
+}
+ZI_OPEN_NEW := O_WRONLY | O_CREAT | O_EXCL
+ZiDirCreate: {
+    ok: bool,
+    created: bool,
+}
+// mkdir may lose a race after the existence probe. A directory now present is usable, but `created`
+// stays false so rollback never removes something another process owns.
+zi_ensure_dir = (path: string_view) ZiDirCreate {
+    file_exists(path).match ({
+        true => ZiDirCreate(
+            ok: zi_is_dir(path),
+            created: false,
+        ),
+        false => (mkdir(path, MODE_755) == 0).match ({
+            true => ZiDirCreate(
+                ok: true,
+                created: true,
+            ),
+            false => ZiDirCreate(
+                ok: zi_is_dir(path),
+                created: false,
+            ),
+        }),
+    })
+}
+zi_make_tree = (mp: MutPtr<Malloc>, path: string_view) ZiDirCreate {
+    v: [u8] := path.view()
+    i: i64 := 1
+    ok := true
+    @while (i < v.len && ok) {
+        (v[i] == '/').match ({ true => {
+            prefix := mp.cstr_substr(path, 0, to_i32(i))
+            ok = zi_ensure_dir(prefix).ok
+        } })
+        i = i + 1
+    }
+    ok.match ({
+        true => zi_ensure_dir(path),
+        false => ZiDirCreate(
+            ok: false,
+            created: false,
+        ),
+    })
+}
+zi_write_all = (fd: i32, p: RawPtr<u8>, n: i64) bool {
+    (n <= 0).match ({ true => true, false => {
+        wrote := write(fd, p, n)
+        (wrote <= 0).match ({ true => false, false => zi_write_all(fd, p.offset(wrote), n - wrote) })
+    } })
+}
+// Exclusive creation is the no-clobber guarantee even if another process races the preflight.
+zi_save_new = (path: string_view, data: string_view) bool {
+    fd := open(path, ZI_OPEN_NEW, MODE_644)
+    (fd < 0).match ({ true => false, false => {
+        v: [u8] := data.view()
+        wrote := zi_write_all(fd, v.ptr, v.len)
+        shut := close(fd) == 0
+        (wrote && shut).match ({ true => true, false => {
+            unlink(path)
+            false
+        } })
+    } })
+}
+zi_manifest = (mp: MutPtr<Malloc>, name: string_view, kind: i32) string_view {
+    s := mp.gstr_string(160).gstr_append(mp, "package = \"").gstr_append(mp, name)
+    (kind == ZI_KIND_LIBRARY).match ({ true => s.gstr_append(mp, "\"\nkind = \"library\"\nroot = \"src\"\nmain = \"lib.zen\"\n").gstr_finish(mp), false => s.gstr_append(mp, "\"\nkind = \"executable\"\nroot = \"src\"\nmain = \"main.zen\"\nout = \"").gstr_append(mp, name).gstr_append(mp, "\"\n").gstr_finish(mp) })
+}
+zi_source = (mp: MutPtr<Malloc>, name: string_view, kind: i32) string_view { (kind == ZI_KIND_LIBRARY).match ({ true => "answer* = () i32 { 42 }\n", false => mp.gstr_string(128).gstr_append(mp, "{ println } = std.text.fmt\nmain = () i32 {\n    println(\"Hello from ").gstr_append(mp, name).gstr_append(mp, "!\")\n    0\n}\n").gstr_finish(mp) }) }
+zi_collision = (path: string_view) i32 {
+    derr("zenc init: ")
+    derr(path)
+    derr(" already exists; nothing was changed\n")
+    1
+}
+zi_remove_dir = (path: string_view) void { removed := rmdir(path) }
+zi_cleanup_dirs = (srcdir: string_view, target: string_view, made_src: bool, made_target: bool) void {
+    made_src.then(() { zi_remove_dir(srcdir) })
+    made_target.then(() { zi_remove_dir(target) })
+}
+zi_create = (mp: MutPtr<Malloc>, target: string_view, name: string_view, kind: i32) i32 {
+    manifest := mp.join2(target, "zen.toml")
+    buildfile := mp.join2(target, "build.zen")
+    srcdir := mp.join2(target, "src")
+    entry := (kind == ZI_KIND_LIBRARY).match ({ true => "lib.zen", false => "main.zen" })
+    source := mp.join2(srcdir, entry)
+    target_exists := file_exists(target)
+    (target_exists && zi_is_dir(target) == false).match ({ true => {
+        derr("zenc init: target exists and is not a directory: ")
+        derr(target)
+        derr("\n")
+        return 1
+    } })
+    file_exists(buildfile).match ({ true => {
+        return zi_collision(buildfile)
+    } })
+    file_exists(manifest).match ({ true => {
+        return zi_collision(manifest)
+    } })
+    (file_exists(srcdir) && zi_is_dir(srcdir) == false).match ({ true => {
+        return zi_collision(srcdir)
+    } })
+    file_exists(source).match ({ true => {
+        return zi_collision(source)
+    } })
+    target_dir := mp.zi_make_tree(target)
+    target_dir.ok.match ({ false => {
+        derr("zenc init: could not create project directory: ")
+        derr(target)
+        derr("\n")
+        return 1
+    } })
+    src_dir := zi_ensure_dir(srcdir)
+    src_dir.ok.match ({ false => {
+        derr("zenc init: could not create source directory: ")
+        derr(srcdir)
+        derr("\n")
+        zi_cleanup_dirs(srcdir, target, false, target_dir.created)
+        return 1
+    } })
+    zi_save_new(source, mp.zi_source(name, kind)).match ({ false => {
+        derr("zenc init: could not create source file: ")
+        derr(source)
+        derr("\n")
+        zi_cleanup_dirs(srcdir, target, src_dir.created, target_dir.created)
+        return 1
+    } })
+    zi_save_new(manifest, mp.zi_manifest(name, kind)).match ({ false => {
+        unlink(source)
+        derr("zenc init: could not create manifest: ")
+        derr(manifest)
+        derr("\n")
+        zi_cleanup_dirs(srcdir, target, src_dir.created, target_dir.created)
+        return 1
+    } })
+    derr("Created ")
+    derr((kind == ZI_KIND_LIBRARY).match ({ true => "library", false => "executable" }))
+    derr(" project `")
+    derr(name)
+    derr("` at ")
+    derr(target)
+    derr("\n")
+    derr((kind == ZI_KIND_LIBRARY).match ({ true => "Check it with: zenc check ", false => "Run it with: zenc run " }))
+    derr(target)
+    derr("\n")
+    0
+}
+zi_cmd = (mp: MutPtr<Malloc>) i32 {
+    parsed := zi_scan_args(2, argc(), "", ZI_KIND_PROMPT, true)
+    parsed.help.match ({ true => {
+        say(ZI_USAGE())
+        return 0
+    } })
+    (parsed.ok == false).match ({ true => {
+        derr(ZI_USAGE())
+        return 2
+    } })
+    rawpath := eq(parsed.path, "").match ({ true => mp.zi_read_line("Project name or path: "), false => parsed.path })
+    path := mp.zi_normal_path(rawpath)
+    (eq(path, "") || zi_path_valid(path) == false).match ({ true => {
+        derr("zenc init: project path uses unsafe characters or a '.'/'..' component\n")
+        return 2
+    } })
+    name := mp.zi_project_name(path)
+    zi_name_valid(name).match ({ false => {
+        derr("zenc init: project name must match [A-Za-z0-9][A-Za-z0-9_-]*\n")
+        return 2
+    } })
+    kind := (parsed.kind == ZI_KIND_PROMPT).match ({ true => mp.zi_prompt_kind(), false => parsed.kind })
+    (kind != ZI_KIND_EXECUTABLE && kind != ZI_KIND_LIBRARY).match ({ true => {
+        derr("zenc init: choose 1/executable or 2/library\n")
+        return 2
+    } })
+    mp.zi_create(path, name, kind)
+}
 // ── project mode: `zenc build|run|check <dir>` driven by <dir>/zen.toml ───────────────────────────
 Spec*: {
     source: string_view,
     out: string_view,
     ccflags: string_view,
     links: string_view,
+    library: bool,
     ok: bool,
 }
 join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view { mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp) }
@@ -725,30 +1020,38 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
         .Ok(src) => {
             root := mp.manifest_value(src, "root")
             main := mp.manifest_value(src, "main")
-            (eq(root, "") || eq(main, "")).match ({ true => Spec(
-                source: "",
-                out: "",
-                ccflags: "",
-                links: "",
-                ok: false,
-            ), false => {
-                out := mp.manifest_value(src, "out")
-                cc := mp.manifest_value(src, "ccflags")
-                lk := mp.manifest_value(src, "link")
-                Spec(
-                    source: mp.join2(mp.join2(dir, root), main),
-                    out: eq(out, "").match ({ true => "", false => mp.join2(dir, out) }),
-                    ccflags: cc,
-                    links: eq(lk, "").match ({ true => "", false => mp.link_flag(lk) }),
-                    ok: true,
-                )
-            } })
+            kind := mp.manifest_value(src, "kind")
+            kind_ok := eq(kind, "") || eq(kind, "executable") || eq(kind, "library")
+            (eq(root, "") || eq(main, "") || kind_ok == false).match ({
+                true => Spec(
+                    source: "",
+                    out: "",
+                    ccflags: "",
+                    links: "",
+                    library: false,
+                    ok: false,
+                ),
+                false => {
+                    out := mp.manifest_value(src, "out")
+                    cc := mp.manifest_value(src, "ccflags")
+                    lk := mp.manifest_value(src, "link")
+                    Spec(
+                        source: mp.join2(mp.join2(dir, root), main),
+                        out: eq(out, "").match ({ true => "", false => mp.join2(dir, out) }),
+                        ccflags: cc,
+                        links: eq(lk, "").match ({ true => "", false => mp.link_flag(lk) }),
+                        library: eq(kind, "library"),
+                        ok: true,
+                    )
+                },
+            })
         },
         .Err(e)  => Spec(
             source: "",
             out: "",
             ccflags: "",
             links: "",
+            library: false,
             ok: false,
         ),
     })
@@ -757,27 +1060,37 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
 // cc/links/out). A manifest that EXISTS but is malformed (missing root/main, won't compile) is a loud
 // error (ok=false) — NOT a silent fall-through to treating the directory itself as a source file.
 resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
-    file_exists(mp.join2(arg, "build.zen")).match ({ true => mp.build_zen_spec(root, arg), false => file_exists(mp.join2(arg, "zen.toml")).match ({ true => {
-        s := mp.proj_spec(arg)    // build.zen wins; prints its own errors on failure
-        s.ok.match ({ true => s, false => {
-            derr("zenc: ")
-            derr(mp.join2(arg, "zen.toml"))
-            derr(": invalid manifest (need both `root` and `main` keys)\n")
-            s
-        } })
-    }, false => Spec(
-        source: arg,
-        out: "",
-        ccflags: "",
-        links: "",
-        ok: true,
-    ) }) })
+    file_exists(mp.join2(arg, "build.zen")).match ({ true => mp.build_zen_spec(root, arg), false => file_exists(mp.join2(arg, "zen.toml")).match ({
+        true => {
+            s := mp.proj_spec(arg)    // build.zen wins; prints its own errors on failure
+            s.ok.match ({ true => s, false => {
+                derr("zenc: ")
+                derr(mp.join2(arg, "zen.toml"))
+                derr(": invalid manifest (need `root`/`main`; optional `kind` is executable or library)\n")
+                s
+            } })
+        },
+        false => Spec(
+            source: arg,
+            out: "",
+            ccflags: "",
+            links: "",
+            library: false,
+            ok: true,
+        ),
+    }) })
 }    // a single .zen file
 // ── build.zen mode: the build IS a Zen program. Append a main that prints its Target's spec, compile
 // + run it (capturing stdout to a file), parse the 5 fields back. Wins over zen.toml. ─────────────
-BUILDBIN = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".bin") }
-SPECFILE = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".txt") }
-BUILD_TAIL = () string_view { "\nmain = () i32 { build(Build(_: 0)).emit_spec()  0 }\n" }
+BUILDBIN = (mp: MutPtr<Malloc>) string_view {
+    mp.pid_path("/tmp/zenbuild_spec_", ".bin")
+}
+SPECFILE = (mp: MutPtr<Malloc>) string_view {
+    mp.pid_path("/tmp/zenbuild_spec_", ".txt")
+}
+BUILD_TAIL = () string_view {
+    "\nmain = () i32 { build(Build(_: 0)).emit_spec()  0 }\n"
+}
 // the [start,end) of line `idx` (0-based) in v; field idx of the emitted spec.
 line_start = (v: [u8], idx: i32, p: i64) i64 { (idx <= 0).match ({ true => p, false => (p >= v.len).match ({ true => p, false => v.line_start(idx - 1, v.bs_line_end(p, v.len) + 1) }) }) }
 spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) string_view {
@@ -792,22 +1105,27 @@ parse_spec = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view) Spec {
     main := mp.spec_field(v, 2)
     out := mp.spec_field(v, 3)
     link := mp.spec_field(v, 4)
-    (eq(root, "") || eq(main, "")).match ({ true => {
-        derr("zenc: build.zen: target is missing root/main\n")
-        Spec(
-            source: "",
-            out: "",
+    (eq(root, "") || eq(main, "")).match ({
+        true => {
+            derr("zenc: build.zen: target is missing root/main\n")
+            Spec(
+                source: "",
+                out: "",
+                ccflags: "",
+                links: "",
+                library: false,
+                ok: false,
+            )
+        },
+        false => Spec(
+            source: mp.join2(mp.join2(dir, root), main),
+            out: eq(out, "").match ({ true => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }), false => mp.join2(dir, out) }),
             ccflags: "",
-            links: "",
-            ok: false,
-        )
-    }, false => Spec(
-        source: mp.join2(mp.join2(dir, root), main),
-        out: eq(out, "").match ({ true => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }), false => mp.join2(dir, out) }),
-        ccflags: "",
-        links: eq(link, "").match ({ true => "", false => mp.link_flag(link) }),
-        ok: true,
-    ) })
+            links: eq(link, "").match ({ true => "", false => mp.link_flag(link) }),
+            library: false,
+            ok: true,
+        ),
+    })
 }
 build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec {
     contents_in(mp, mp.join2(dir, "build.zen")).match ({
@@ -832,6 +1150,7 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec 
                         out: "",
                         ccflags: "",
                         links: "",
+                        library: false,
                         ok: false,
                     ),
                 })
@@ -845,6 +1164,7 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec 
                     out: "",
                     ccflags: "",
                     links: "",
+                    library: false,
                     ok: false,
                 )
             } })
@@ -854,6 +1174,7 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec 
             out: "",
             ccflags: "",
             links: "",
+            library: false,
             ok: false,
         ),
     })

@@ -354,8 +354,33 @@ ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
     head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
     head.ff_tyname(a, c.fn, c.targs).ff_append(a, "(").ff_args(a, c.args, ind).ff_append(a, ")")
 }
-// bool .match lowers to a Cond in the AST — print it back as `c.match ({ true => t, false => e })`.
-ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String { (d.oa == 1).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"), false => (d.oa == 2).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"), false => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })") }) }) }
+// bool .match lowers to a Cond in the AST. Preserve the established compact layout for block arms, but
+// when a DIRECT multi-field struct arm renders across multiple lines, split both arms. This fixes
+// `true => Type(` being stranded beside the opening `({` without recursively expanding every parent
+// cond that merely contains a block, enum match, or nested cond.
+ff_direct_arm_needs_split = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .MakeStruct(m) => m.inits.len > 1,
+        _              => false,
+    })
+}
+ff_cond_needs_split = (d: CondData) bool {
+    tm := (d.oa == 2).match ({ true => false, false => ff_direct_arm_needs_split(d.t) })
+    em := (d.oa == 1).match ({ true => false, false => ff_direct_arm_needs_split(d.e) })
+    tm || em
+}
+ff_bool_arm = (s: String, a: MutPtr<Malloc>, label: string_view, e: Ptr<Expr>, ind: i32) String { s.ff_indent(a, ind).ff_append(a, label).ff_append(a, " => ").ff_expr(a, e, ind).ff_append(a, ",\n") }
+ff_cond_multiline = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    out := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({\n")
+    (d.oa != 2).match ({ true => {
+        out = out.ff_bool_arm(a, "true", d.t, ind + 1)
+    } })
+    (d.oa != 1).match ({ true => {
+        out = out.ff_bool_arm(a, "false", d.e, ind + 1)
+    } })
+    out.ff_indent(a, ind).ff_append(a, "})")
+}
+ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String { ff_cond_needs_split(d).match ({ true => s.ff_cond_multiline(a, d, ind), false => (d.oa == 1).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"), false => (d.oa == 2).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"), false => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })") }) }) }) }
 // one-armed bool match: print only the arm the user wrote (the other branch is a synthetic `{}`).
 // a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
 // the parser records the args in `targs`, and dropping them would lose the type info monomorphization
@@ -500,6 +525,46 @@ ff_escape_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
 // statement formats to ONE line — a multi-arm match / multi-field struct splits and forces multi-line.)
 ff_scan_nl = (p: RawPtr<u8>, i: i64, n: i64) bool { (i >= n).match ({ true => false, false => (load(offset(p, i)) == '\n').match ({ true => true, false => ff_scan_nl(p, i + 1, n) }) }) }
 ff_str_has_nl = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
+// Zen's formatter uses an 88-column budget for SIMPLE constant-style function bodies. Complex Cond/Bin
+// expressions need their own expression-breaking rules before enforcing a width on them; wrapping only
+// the surrounding braces would still leave an overlong body line. `ff_func_block` below therefore wraps
+// a direct string/call/method-call body only when BOTH the signature and the moved body fit this budget.
+FF_MAX_LINE := 88
+ff_last_line_len = (s: String) i64 {
+    i := s.len
+    @while (i > 0 && load(offset(s.ptr, i - 1)) != '\n') {
+        i = i - 1
+    }
+    s.len - i
+}
+ff_simple_const_expr = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .StrLit(sl)     => true,
+        .Call(c)        => true,
+        .MethodCall(mc) => true,
+        _               => false,
+    })
+}
+ff_simple_const_stmt = (st: Stmt) bool {
+    st.match ({
+        .Return(e) => ff_simple_const_expr(e),
+        _          => false,
+    })
+}
+// Constant-style helpers use the codebase's existing ALL_CAPS spelling. Restricting the first width
+// rule to these leaf helpers avoids a tree-wide rewrite before Cond/Bin/call-argument breaking exists.
+ff_const_name = (name: string_view) bool {
+    i := 0
+    seen := false
+    ok := true
+    @while (ok && ffbyte(name, i) != 0) {
+        b := ffbyte(name, i)
+        ok = b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_'
+        seen = true
+        i = i + 1
+    }
+    seen && ok
+}
 // does the single statement format to ONE physical line? Formats into a THROWAWAY String. ff_stmt_at can
 // reach ff_arms (a Match weaves comments and ADVANCES gf_idx), so the comment cursor is SNAPSHOT and
 // RESTORED — making this trial render side-effect-free (otherwise a single-statement body that holds a
@@ -509,6 +574,23 @@ ff_one_line = (a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) bool {
     r := ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).match ({ true => false, false => true })
     gf_idx = save
     r
+}
+// Would changing `{ expr }` to `{\n    expr\n}` make this simple function obey the line budget? `s`
+// already ends in the signature's separating space, so +1 is its multiline `{`, while +4 is inline
+// `{ ` + ` }`. Snapshot the comment cursor for the same reason as ff_one_line.
+ff_simple_needs_wrap = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) bool {
+    ff_simple_const_stmt(st).match ({ false => {
+        return false
+    } })
+    save := gf_idx
+    body := a.ff_string(256).ff_stmt_at(a, st, true, ind)
+    one := ff_str_has_nl(body).match ({ true => false, false => true })
+    sigcol := s.ff_last_line_len()
+    inline_fits := sigcol + body.len + 4 <= FF_MAX_LINE
+    sig_fits := sigcol + 1 <= FF_MAX_LINE
+    body_fits := to_i64((ind + 1) * 4) + body.len <= FF_MAX_LINE
+    gf_idx = save
+    one && inline_fits == false && sig_fits && body_fits
 }
 // Inlining a single-statement body skips ff_stmts, so it is SAFE exactly when ff_stmts would weave no
 // comment into this body. For one statement (the last), ff_stmts drains nothing (db = ib = 0) and only
@@ -538,6 +620,15 @@ ff_block = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
         inner := open.ff_stmts(a, body, ind + 1, drop_ret)
         inner.ff_indent(a, ind).ff_append(a, "}")
     } }) })
+}
+// Top-level functions and methods get the narrow simple-body width rule; lambdas keep ff_block's existing
+// layout because their signature begins inside a surrounding expression that has no breaking model yet.
+ff_func_block = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, constant_style: bool) String {
+    (constant_style && body.len == 1 && ff_no_lead_cmt(gf_stmt_pos(body[0])) && s.ff_simple_needs_wrap(a, body[0], ind)).match ({ true => {
+        open := s.ff_append(a, "{\n")
+        inner := open.ff_stmts(a, body, ind + 1, true)
+        inner.ff_indent(a, ind).ff_append(a, "}")
+    }, false => s.ff_block(a, body, ind, true) })
 }
 ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
     out := s
@@ -646,7 +737,7 @@ ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String
 // an anonymous-struct return type `{ field: T }`, changing the AST.
 ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
     sig := s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
-    sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
+    sig.ff_append(a, " ").ff_func_block(a, f.body, 0, ff_const_name(f.name))
 }
 ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String { s.ff_name(a, exp, f.name).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret) }
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
@@ -730,7 +821,7 @@ ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [P
         f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
         own := a.ff_minus_tparams(f.tparams, ctp)
         sig := out.ff_indent(a, ind).ff_append(a, mp.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
-        out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
+        out = sig.ff_append(a, " ").ff_func_block(a, f.body, ind, ff_const_name(mp.name)).ff_append(a, "\n")
     })
     out
 }

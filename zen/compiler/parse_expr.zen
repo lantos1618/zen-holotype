@@ -139,10 +139,13 @@ parse_atom* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
     // all. Past the cap, set the parse-error flag and return a placeholder WITHOUT recursing further;
     // the enclosing frames simply unwind (each does O(1) work), so there is no hang.
     pdepth_enter()
-    r := pdepth_over().match ({ true => PExpr(
-        expr: a.enode(lit(0)),
-        next: pos,
-    ), false => a.parse_postfix(src, a.parse_base(src, pos)) })
+    r := pdepth_over().match ({
+        true => PExpr(
+            expr: a.enode(lit(0)),
+            next: pos,
+        ),
+        false => a.parse_postfix(src, a.parse_base(src, pos)),
+    })
     pdepth_exit()
     r
 }
@@ -161,10 +164,13 @@ parse_base = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
             expr: a.enode(byte_lit(src.char_val(sc.tok.start))),
             next: sc.next,
         ),
-        .Str   => src.str_open(sc.tok).match ({ true => a.parse_garbage(src, sc), false => PExpr(
-            expr: a.enode(strlit_at(a.str_val(src, sc.tok), sc.tok.start)),
-            next: sc.next,
-        ) }),
+        .Str   => src.str_open(sc.tok).match ({
+            true => a.parse_garbage(src, sc),
+            false => PExpr(
+                expr: a.enode(strlit_at(a.str_val(src, sc.tok), sc.tok.start)),
+                next: sc.next,
+            ),
+        }),
         .Ident => a.parse_ident(src, sc),
         .Eof   => {
             perr_set_at(sc.tok.start)
@@ -264,10 +270,13 @@ parse_ctor = (a: MutPtr<Malloc>, src: string_view, dot: Scan) PExpr {
 parse_ctor_named = (a: MutPtr<Malloc>, src: string_view, vt: Scan) PExpr {
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)
-    (src.is_lparen(nx.tok) && src.nl_between(vt.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.is_rparen(src.scan(nx.next).tok).match ({ true => a.parse_ctor_empty(src, vn, nx), false => a.parse_ctor_payload(src, vn, nx) }), false => PExpr(
-        expr: a.enode(mktag("", vn)),
-        next: vt.next,
-    ) })
+    (src.is_lparen(nx.tok) && src.nl_between(vt.next, nx.tok.start).match ({ true => false, false => true })).match ({
+        true => src.is_rparen(src.scan(nx.next).tok).match ({ true => a.parse_ctor_empty(src, vn, nx), false => a.parse_ctor_payload(src, vn, nx) }),
+        false => PExpr(
+            expr: a.enode(mktag("", vn)),
+            next: vt.next,
+        ),
+    })
 }
 parse_ctor_empty = (a: MutPtr<Malloc>, src: string_view, vn: string_view, lp: Scan) PExpr {
     rp := src.scan(lp.next)
@@ -289,13 +298,16 @@ parse_payload_args = (a: MutPtr<Malloc>, src: string_view, lp: Scan) PExpr {
     buf := a.finit_buf()
     pe := a.fill_payload_args(src, lp.next, buf, 0)
     inits := buf.take_inits(pe.count)
-    (pe.count == 1).match ({ true => PExpr(
-        expr: inits[0].value,
-        next: pe.next,
-    ), false => PExpr(
-        expr: a.enode(mkstruct(a.mangle_anon_in(a.inits_as_fields(inits)), inits)),
-        next: pe.next,
-    ) })
+    (pe.count == 1).match ({
+        true => PExpr(
+            expr: inits[0].value,
+            next: pe.next,
+        ),
+        false => PExpr(
+            expr: a.enode(mkstruct(a.mangle_anon_in(a.inits_as_fields(inits)), inits)),
+            next: pe.next,
+        ),
+    })
 }    // single payload: the arg itself
 fill_payload_args = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
     (i >= buf.len).match ({ true => {
@@ -577,13 +589,19 @@ parse_field_plain = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: str
 // nullary tag and the `(` a new statement (`a := State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
 parse_qual_ctor = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, fld: Scan) PExpr {
     nx := src.scan(fld.next)
-    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.is_rparen(src.scan(nx.next).tok).match ({ true => PExpr(
-        expr: a.enode(mktag(tyname, vn)),
-        next: src.scan(nx.next).next,
-    ), false => a.parse_qual_payload(src, tyname, vn, nx) }), false => PExpr(
-        expr: a.enode(mktag(tyname, vn)),
-        next: fld.next,
-    ) })
+    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({
+        true => src.is_rparen(src.scan(nx.next).tok).match ({
+            true => PExpr(
+                expr: a.enode(mktag(tyname, vn)),
+                next: src.scan(nx.next).next,
+            ),
+            false => a.parse_qual_payload(src, tyname, vn, nx),
+        }),
+        false => PExpr(
+            expr: a.enode(mktag(tyname, vn)),
+            next: fld.next,
+        ),
+    })
 }
 parse_qual_payload = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, lp: Scan) PExpr {
     pl := a.parse_payload_args(src, lp)
@@ -697,16 +715,19 @@ GuardEnd*: {
 }
 parse_arm_guard = (a: MutPtr<Malloc>, src: string_view, pos: i32) GuardEnd {
     sc := src.scan(pos)
-    src.is_if_kw(sc.tok).match ({ true => {
-        g := a.parse_or_nested(src, sc.next)
-        GuardEnd(
-            guard: g.expr,
-            next: g.next,
-        )
-    }, false => GuardEnd(
-        guard: expr_null(),
-        next: pos,
-    ) })
+    src.is_if_kw(sc.tok).match ({
+        true => {
+            g := a.parse_or_nested(src, sc.next)
+            GuardEnd(
+                guard: g.expr,
+                next: g.next,
+            )
+        },
+        false => GuardEnd(
+            guard: expr_null(),
+            next: pos,
+        ),
+    })
 }
 // Bool match requires two arms or a wildcard; assembly is order-independent.
 BoolArmEnd*: {
@@ -742,24 +763,30 @@ bool_second = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, a0: BoolArmEnd,
 // side is real: oa=1 → only `true` (e is empty), oa=2 → only `false` (t is empty).
 empty_arm = (a: MutPtr<Malloc>) Ptr<Expr> { a.enode(block(a.no_arm_stmts())) }
 bool_one = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, a0: BoolArmEnd, next: i32) PExpr {
-    a0.ok.match ({ true => src.tok_eq(a0.lab, "false").match ({ true => PExpr(
-        expr: a.enode(cond_oa(subj.expr, a.empty_arm(), a0.body, 2)),
-        next: next,
-    ), false => PExpr(
-        expr: a.enode(cond_oa(subj.expr, a0.body, a.empty_arm(), 1)),
-        next: next,
-    ) }), false => a.reject_match(next) })
+    a0.ok.match ({ true => src.tok_eq(a0.lab, "false").match ({
+        true => PExpr(
+            expr: a.enode(cond_oa(subj.expr, a.empty_arm(), a0.body, 2)),
+            next: next,
+        ),
+        false => PExpr(
+            expr: a.enode(cond_oa(subj.expr, a0.body, a.empty_arm(), 1)),
+            next: next,
+        ),
+    }), false => a.reject_match(next) })
 }
 bool_close = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, a0: BoolArmEnd, a1: BoolArmEnd) PExpr {
     c0 := src.scan(a1.next)
     close := src.is_comma(c0.tok).match ({ true => src.scan(c0.next), false => c0 })
-    (a0.ok && a1.ok && src.is_rbrace(close.tok)).match ({ true => src.tok_eq(a0.lab, "true").match ({ true => PExpr(
-        expr: a.enode(cond(subj.expr, a0.body, a1.body)),
-        next: close.next,
-    ), false => PExpr(
-        expr: a.enode(cond(subj.expr, a1.body, a0.body)),
-        next: close.next,
-    ) }), false => a.reject_match(close.next) })
+    (a0.ok && a1.ok && src.is_rbrace(close.tok)).match ({ true => src.tok_eq(a0.lab, "true").match ({
+        true => PExpr(
+            expr: a.enode(cond(subj.expr, a0.body, a1.body)),
+            next: close.next,
+        ),
+        false => PExpr(
+            expr: a.enode(cond(subj.expr, a1.body, a0.body)),
+            next: close.next,
+        ),
+    }), false => a.reject_match(close.next) })
 }
 // Literal match lowers to nested equality conditionals. A BIND-ALL guarded arm (`x if <cond> => body`)
 // binds the subject to `x` for the guard and body: `test` is the guard, `bind` the binder name, and
@@ -792,10 +819,13 @@ parse_lit_after = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArm
             perr_set_at(after.tok.start)
             a.reject_match(after.next)
         },
-        _    => src.is_rbrace(after.tok).match ({ true => arm.wild.match ({ true => PExpr(
-            expr: arm.body,
-            next: after.next,
-        ), false => a.reject_match(after.next) }), false => src.is_comma(after.tok).match ({ true => a.lit_arm_more(src, subj, arm, after), false => {
+        _    => src.is_rbrace(after.tok).match ({ true => arm.wild.match ({
+            true => PExpr(
+                expr: arm.body,
+                next: after.next,
+            ),
+            false => a.reject_match(after.next),
+        }), false => src.is_comma(after.tok).match ({ true => a.lit_arm_more(src, subj, arm, after), false => {
             perr_set_at(after.tok.start)
             a.reject_match(after.next)
         } }) }),
@@ -804,20 +834,26 @@ parse_lit_after = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArm
 // Trailing comma may close a literal match; otherwise parse the next arm.
 lit_arm_more = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
     nx := src.scan(after.next)
-    src.is_rbrace(nx.tok).match ({ true => arm.wild.match ({ true => PExpr(
-        expr: arm.body,
-        next: nx.next,
-    ), false => a.reject_match(nx.next) }), false => a.cons_lit_arm(src, subj, arm, after) })
+    src.is_rbrace(nx.tok).match ({ true => arm.wild.match ({
+        true => PExpr(
+            expr: arm.body,
+            next: nx.next,
+        ),
+        false => a.reject_match(nx.next),
+    }), false => a.cons_lit_arm(src, subj, arm, after) })
 }
 cons_lit_arm = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
     rest := a.parse_lit_arms(src, subj, after.next)
-    arm.bindall.match ({ true => PExpr(
-        expr: a.enode(a.bindall_block(subj, arm, rest.expr)),
-        next: rest.next,
-    ), false => PExpr(
-        expr: a.enode(cond(arm.test, arm.body, rest.expr)),
-        next: rest.next,
-    ) })
+    arm.bindall.match ({
+        true => PExpr(
+            expr: a.enode(a.bindall_block(subj, arm, rest.expr)),
+            next: rest.next,
+        ),
+        false => PExpr(
+            expr: a.enode(cond(arm.test, arm.body, rest.expr)),
+            next: rest.next,
+        ),
+    })
 }
 // A bind-all guarded value arm `x if g => body`, with the following arms lowered to `rest`, becomes
 // `({ x := subj  (g ? body : rest) })`: the let binds the subject so the guard `g` and `body` can name
@@ -948,10 +984,13 @@ fill_arms = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [ArmData], i: i
                 next: sc.next,
             )
         },
-        _    => src.is_rbrace(sc.tok).match ({ true => PEnd(
-            count: i,
-            next: sc.next,
-        ), false => a.fill_marm(src, pos, buf, i) }),
+        _    => src.is_rbrace(sc.tok).match ({
+            true => PEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => a.fill_marm(src, pos, buf, i),
+        }),
     })
 }
 // Variant or wildcard arm; the leading token tells them apart.
@@ -1035,13 +1074,19 @@ parse_ident = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
-    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({ true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => src.looks_turbofish(nx.next).match ({ true => a.parse_turbofish_call(src, name, nx.next, sc.tok.start), false => src.looks_generic_ctor(nx.next).match ({ true => a.parse_generic_ctor(src, name, nx.next), false => PExpr(
-        expr: a.enode(vref_at(name, sc.tok.start)),
-        next: sc.next,
-    ) }) }) }), false => PExpr(
-        expr: a.enode(vref_at(name, sc.tok.start)),
-        next: sc.next,
-    ) }) })
+    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.paren_is_struct(nx.next).match ({ true => a.parse_paren_struct_lit(src, name, nx, sc.tok.start), false => a.parse_call(src, name, nx, sc.tok.start) }), false => src.is_langle(nx.tok).match ({
+        true => src.looks_generic_lit(nx.next).match ({ true => a.parse_generic_struct_lit(src, name, nx.next, sc.tok.start), false => src.looks_turbofish(nx.next).match ({ true => a.parse_turbofish_call(src, name, nx.next, sc.tok.start), false => src.looks_generic_ctor(nx.next).match ({
+            true => a.parse_generic_ctor(src, name, nx.next),
+            false => PExpr(
+                expr: a.enode(vref_at(name, sc.tok.start)),
+                next: sc.next,
+            ),
+        }) }) }),
+        false => PExpr(
+            expr: a.enode(vref_at(name, sc.tok.start)),
+            next: sc.next,
+        ),
+    }) })
 }
 // A generic enum constructor with EXPLICIT type args: `Name<TyArgs>.Variant(args)` (or nullary
 // `Name<TyArgs>.None`). Distinguished from turbofish/generic-struct-lit (which want a `(` after the
@@ -1071,19 +1116,25 @@ parse_generic_ctor = (a: MutPtr<Malloc>, src: string_view, name: string_view, po
 // statement. Empty `()` → nullary tag; `(a, …)` → payload enum; no `(` → nullary tag.
 finish_generic_ctor = (a: MutPtr<Malloc>, src: string_view, ty: string_view, mty: string_view, targs: [Ty], vn: string_view, vs: Scan) PExpr {
     nx := src.scan(vs.next)
-    (src.is_lparen(nx.tok) && src.nl_between(vs.next, nx.tok.start).match ({ true => false, false => true })).match ({ true => src.is_rparen(src.scan(nx.next).tok).match ({ true => PExpr(
-        expr: a.enode(mktagg(ty, mty, targs, vn)),
-        next: src.scan(nx.next).next,
-    ), false => {
-        pl := a.parse_payload_args(src, nx)
-        PExpr(
-            expr: a.enode(mkenumg(ty, mty, targs, vn, pl.expr)),
-            next: pl.next,
-        )
-    } }), false => PExpr(
-        expr: a.enode(mktagg(ty, mty, targs, vn)),
-        next: vs.next,
-    ) })
+    (src.is_lparen(nx.tok) && src.nl_between(vs.next, nx.tok.start).match ({ true => false, false => true })).match ({
+        true => src.is_rparen(src.scan(nx.next).tok).match ({
+            true => PExpr(
+                expr: a.enode(mktagg(ty, mty, targs, vn)),
+                next: src.scan(nx.next).next,
+            ),
+            false => {
+                pl := a.parse_payload_args(src, nx)
+                PExpr(
+                    expr: a.enode(mkenumg(ty, mty, targs, vn, pl.expr)),
+                    next: pl.next,
+                )
+            },
+        }),
+        false => PExpr(
+            expr: a.enode(mktagg(ty, mty, targs, vn)),
+            next: vs.next,
+        ),
+    })
 }
 // Turbofish: `name<Type, …>(args)` — an explicit-type-arg CALL (positional args, NOT a struct lit).
 // Disambiguates from comparison: require a well-formed `<Type…>` (parse_type tokens, matching `>`)
@@ -1213,10 +1264,13 @@ fill_ainits = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], 
                 next: sc.next,
             )
         },
-        _    => src.is_rbrace(sc.tok).match ({ true => PEnd(
-            count: i,
-            next: sc.next,
-        ), false => a.fill_ainit(src, pos, buf, i) }),
+        _    => src.is_rbrace(sc.tok).match ({
+            true => PEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => a.fill_ainit(src, pos, buf, i),
+        }),
     })
 }
 fill_ainit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
@@ -1233,10 +1287,13 @@ fill_ainit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i
     v := a.parse_or_nested(src, colon.next)    // the value expression
     buf[i] = finit(nm, v.expr)
     after := src.scan(v.next)    // ',' / next field / '}'
-    src.is_comma(after.tok).match ({ true => a.fill_ainits(src, after.next, buf, i + 1), false => is_ident_tok(after.tok).match ({ true => a.fill_ainits(src, v.next, buf, i + 1), false => PEnd(
-        count: i + 1,
-        next: after.next,
-    ) }) })
+    src.is_comma(after.tok).match ({ true => a.fill_ainits(src, after.next, buf, i + 1), false => is_ident_tok(after.tok).match ({
+        true => a.fill_ainits(src, v.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: after.next,
+        ),
+    }) })
 }
 // Paren struct construction: `Name(field: value, ...)`.
 finit_buf = (a: MutPtr<Malloc>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }
@@ -1251,10 +1308,13 @@ parse_paren_struct_lit = (a: MutPtr<Malloc>, src: string_view, name: string_view
 }
 fill_pinits = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd(
-        count: i,
-        next: sc.next,
-    ), false => a.fill_pinit(src, pos, buf, i) })
+    src.is_rparen(sc.tok).match ({
+        true => PEnd(
+            count: i,
+            next: sc.next,
+        ),
+        false => a.fill_pinit(src, pos, buf, i),
+    })
 }
 fill_pinit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
     // Guard fixed-size field-init buffer.
@@ -1324,10 +1384,13 @@ parse_raw_call = (a: MutPtr<Malloc>, src: string_view, at: Scan) PExpr {
 }
 fill_args = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd(
-        count: i,
-        next: sc.next,
-    ), false => a.fill_arg(src, pos, buf, i) })
+    src.is_rparen(sc.tok).match ({
+        true => PEnd(
+            count: i,
+            next: sc.next,
+        ),
+        false => a.fill_arg(src, pos, buf, i),
+    })
 }
 fill_arg = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size arg buffer.
@@ -1354,16 +1417,19 @@ fill_arg = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) 
 parse_paren = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
     inner := a.parse_or_nested(src, open.next)
     close := src.scan(inner.next)
-    src.is_rparen(close.tok).match ({ true => PExpr(
-        expr: inner.expr,
-        next: close.next,
-    ), false => {
-        perr_set_at(close.tok.start)
-        PExpr(
+    src.is_rparen(close.tok).match ({
+        true => PExpr(
             expr: inner.expr,
-            next: inner.next,
-        )
-    } })
+            next: close.next,
+        ),
+        false => {
+            perr_set_at(close.tok.start)
+            PExpr(
+                expr: inner.expr,
+                next: inner.next,
+            )
+        },
+    })
 }
 // Prefix ops lower without adding Unary nodes.
 is_minus = (src: string_view, t: Token) bool { src.is_op(t, '-') }
@@ -1390,10 +1456,13 @@ parse_not = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
 // Slice literal element type is filled by compiler.check.
 fill_sitems = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rbracket(sc.tok).match ({ true => PEnd(
-        count: i,
-        next: sc.next,
-    ), false => a.fill_sitem(src, pos, buf, i) })
+    src.is_rbracket(sc.tok).match ({
+        true => PEnd(
+            count: i,
+            next: sc.next,
+        ),
+        false => a.fill_sitem(src, pos, buf, i),
+    })
 }
 fill_sitem = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size slice item buffer.
@@ -1449,10 +1518,13 @@ lam_after_sep = (a: MutPtr<Malloc>, src: string_view, sep: Scan) bool { src.is_c
 // types when the lambda is inline-spliced, so the body still binds the names as before.
 fill_lnames = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd(
-        count: i,
-        next: sc.next,
-    ), false => a.fill_lname(src, pos, buf, i) })
+    src.is_rparen(sc.tok).match ({
+        true => PEnd(
+            count: i,
+            next: sc.next,
+        ),
+        false => a.fill_lname(src, pos, buf, i),
+    })
 }
 fill_lname = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
     // Guard fixed-size lambda-param buffer.
@@ -1465,26 +1537,35 @@ fill_lname = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i3
     } })
     nt := src.scan(pos)
     sep0 := src.scan(nt.next)
-    te := src.is_op(sep0.tok, ':').match ({ true => a.parse_ty(src, sep0.next), false => TyEnd(
-        ty: tvoid(),
-        next: nt.next,
-    ) })    // optional `: Type` — kept for round-trip (Void when absent)
+    te := src.is_op(sep0.tok, ':').match ({
+        true => a.parse_ty(src, sep0.next),
+        false => TyEnd(
+            ty: tvoid(),
+            next: nt.next,
+        ),
+    })    // optional `: Type` — kept for round-trip (Void when absent)
     buf[i] = param(a.lexeme(src, nt.tok), te.ty)
     sep := src.scan(te.next)
-    src.is_comma(sep.tok).match ({ true => a.fill_lnames(src, sep.next, buf, i + 1), false => PEnd(
-        count: i + 1,
-        next: sep.next,
-    ) })
+    src.is_comma(sep.tok).match ({
+        true => a.fill_lnames(src, sep.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: sep.next,
+        ),
+    })
 }
 parse_lambda = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
     buf := a.param_buf()
     pe := a.fill_lnames(src, open.next, buf, 0)
     // optional return type before the body '{' — KEEP it (lam_r) so a generic call can infer a tparam
     // bound only by a closure-param's return position `(T) U`.
-    rt := src.is_lbrace(src.scan(pe.next).tok).match ({ true => TyEnd(
-        ty: tvoid(),
-        next: pe.next,
-    ), false => a.parse_ty(src, pe.next) })
+    rt := src.is_lbrace(src.scan(pe.next).tok).match ({
+        true => TyEnd(
+            ty: tvoid(),
+            next: pe.next,
+        ),
+        false => a.parse_ty(src, pe.next),
+    })
     ob := src.scan(rt.next)
     body := a.build_body(src, ob.next)
     endp := src.skip_block(ob.next)

@@ -163,10 +163,13 @@ is_lbracket* = (src: string_view, t: Token) bool { src.is_op(t, '[') }
 is_rbracket* = (src: string_view, t: Token) bool { src.is_op(t, ']') }
 parse_ty* = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
     pdepth_enter()
-    r := pdepth_over().match ({ true => TyEnd(
-        ty: tvoid(),
-        next: pos,
-    ), false => a.parse_ty_inner(src, pos) })    // nesting too deep — bail with a placeholder (perr already set)
+    r := pdepth_over().match ({
+        true => TyEnd(
+            ty: tvoid(),
+            next: pos,
+        ),
+        false => a.parse_ty_inner(src, pos),
+    })    // nesting too deep — bail with a placeholder (perr already set)
     pdepth_exit()
     r
 }
@@ -198,18 +201,21 @@ parse_anon_ty = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
 parse_variant_payload* = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
     buf := a.afield_buf()
     fe := a.fill_payload_tys(src, pos, buf, 0)
-    (fe.count == 1).match ({ true => TyEnd(
-        ty: buf[0].ty,
-        next: fe.next,
-    ), false => {
-        fields := buf.take_afields(fe.count)    // single payload: the bare type
-        name := a.mangle_anon_in(fields)
-        register_anon(name, fields)
-        TyEnd(
-            ty: tnamed(name),
+    (fe.count == 1).match ({
+        true => TyEnd(
+            ty: buf[0].ty,
             next: fe.next,
-        )
-    } })
+        ),
+        false => {
+            fields := buf.take_afields(fe.count)    // single payload: the bare type
+            name := a.mangle_anon_in(fields)
+            register_anon(name, fields)
+            TyEnd(
+                ty: tnamed(name),
+                next: fe.next,
+            )
+        },
+    })
 }
 fill_payload_tys = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32) PEnd {
     (i >= buf.len).match ({ true => {
@@ -240,10 +246,13 @@ fill_anon_fields = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field],
                 next: sc.next,
             )
         },    // unterminated `{…`: flag, terminate
-        _    => src.is_rbrace(sc.tok).match ({ true => PEnd(
-            count: i,
-            next: sc.next,
-        ), false => a.fill_anon_field(src, pos, buf, i) }),
+        _    => src.is_rbrace(sc.tok).match ({
+            true => PEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => a.fill_anon_field(src, pos, buf, i),
+        }),
     })
 }
 fill_anon_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32) PEnd {
@@ -261,10 +270,13 @@ fill_anon_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], 
     te := a.parse_ty(src, colon.next)    // the field type (may be Ptr<…>, nested anon, …)
     buf[i] = field(nm, te.ty)
     after := src.scan(te.next)    // ',' / next field / '}'
-    src.is_comma(after.tok).match ({ true => a.fill_anon_fields(src, after.next, buf, i + 1), false => is_ident_tok(after.tok).match ({ true => a.fill_anon_fields(src, te.next, buf, i + 1), false => PEnd(
-        count: i + 1,
-        next: after.next,
-    ) }) })
+    src.is_comma(after.tok).match ({ true => a.fill_anon_fields(src, after.next, buf, i + 1), false => is_ident_tok(after.tok).match ({
+        true => a.fill_anon_fields(src, te.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: after.next,
+        ),
+    }) })
 }    // whitespace-separated fields (no comma)
 // copy the raw source span `[start, endpos)` into a fresh NUL-terminated string. Used to materialize a
 // QUALIFIED type name (`io.Writer`) verbatim — the `.` and the segments are contiguous in source.
@@ -306,25 +318,31 @@ parse_leaf_ty = (a: MutPtr<Malloc>, src: string_view, tt: Scan) TyEnd {
         a.leaf_after_name(src, name, qe.next, src.scan(qe.next))
     }, false => {
         nx := src.scan(tt.next)
-        src.is_langle(nx.tok).match ({ true => a.parse_generic_ty(src, tt, nx.next), false => TyEnd(
-            ty: a.ty_of(src, tt.tok),
-            next: tt.next,
-        ) })
+        src.is_langle(nx.tok).match ({
+            true => a.parse_generic_ty(src, tt, nx.next),
+            false => TyEnd(
+                ty: a.ty_of(src, tt.tok),
+                next: tt.next,
+            ),
+        })
     } })
 }
 // resolve a leaf type given its (already materialized, possibly qualified) name and the resume position:
 // `<…>` after it → a generic instance, else a plain Named type.
 leaf_after_name = (a: MutPtr<Malloc>, src: string_view, name: string_view, after: i32, nx: Scan) TyEnd {
-    src.is_langle(nx.tok).match ({ true => {
-        ta := a.parse_tyargs(src, nx.next)
-        TyEnd(
-            ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)),
-            next: ta.next,
-        )
-    }, false => TyEnd(
-        ty: tnamed(name),
-        next: after,
-    ) })
+    src.is_langle(nx.tok).match ({
+        true => {
+            ta := a.parse_tyargs(src, nx.next)
+            TyEnd(
+                ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)),
+                next: ta.next,
+            )
+        },
+        false => TyEnd(
+            ty: tnamed(name),
+            next: after,
+        ),
+    })
 }
 TyArgs*: {
     args: [Ty],
@@ -350,10 +368,13 @@ fill_tyargs = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32)
     te := a.parse_ty(src, pos)
     buf[i] = te.ty
     after := src.scan(te.next)    // ',' or '>'
-    src.is_comma(after.tok).match ({ true => a.fill_tyargs(src, after.next, buf, i + 1), false => PEnd(
-        count: i + 1,
-        next: src.gt_resume(after),
-    ) })
+    src.is_comma(after.tok).match ({
+        true => a.fill_tyargs(src, after.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: src.gt_resume(after),
+        ),
+    })
 }    // '>' (splits a nested '>>')
 parse_generic_ty = (a: MutPtr<Malloc>, src: string_view, nameTok: Scan, pos: i32) TyEnd {
     name := a.lexeme(src, nameTok.tok)    // pos just past '<'
@@ -369,10 +390,13 @@ ty_buf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(256 * sizeof(Ty)), 256) }   
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
 fill_tys = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PEnd {
     sc := src.scan(pos)
-    src.is_rparen(sc.tok).match ({ true => PEnd(
-        count: i,
-        next: sc.next,
-    ), false => a.fill_ty(src, pos, buf, i) })
+    src.is_rparen(sc.tok).match ({
+        true => PEnd(
+            count: i,
+            next: sc.next,
+        ),
+        false => a.fill_ty(src, pos, buf, i),
+    })
 }
 fill_ty = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
@@ -460,10 +484,13 @@ fill_params* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: 
                 next: sc.next,
             )
         },    // unterminated `(…`: a truncated param list
-        _    => src.is_rparen(sc.tok).match ({ true => PEnd(
-            count: i,
-            next: sc.next,
-        ), false => a.fill_one(src, pos, buf, i) }),
+        _    => src.is_rparen(sc.tok).match ({
+            true => PEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => a.fill_one(src, pos, buf, i),
+        }),
     })
 }
 // `...` (a variadic-param marker before the element type). Three consecutive `.` Sym tokens — the
@@ -498,10 +525,13 @@ fill_fixed = (a: MutPtr<Malloc>, src: string_view, nm: string_view, tpos: i32, b
     te := a.parse_ty(src, tpos)    // the type (may be Ptr<…>)
     buf[i] = param(nm, te.ty)
     after := src.scan(te.next)    // ',' or ')'
-    src.is_comma(after.tok).match ({ true => a.fill_params(src, after.next, buf, i + 1), false => PEnd(
-        count: i + 1,
-        next: after.next,
-    ) })
+    src.is_comma(after.tok).match ({
+        true => a.fill_params(src, after.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: after.next,
+        ),
+    })
 }    // ')'
 // a trailing `name: ...T` param: store it as the collected `[T]` (the body sees a normal slice) and
 // flag the param variadic. It MUST be last — a `,` after it (another param follows) is a parse error.
@@ -509,16 +539,19 @@ fill_variadic = (a: MutPtr<Malloc>, src: string_view, nm: string_view, dotpos: i
     te := a.parse_ty(src, src.ellipsis_skip(dotpos))    // the element type T
     buf[i] = pvariadic(nm, tslice(a.tynode(te.ty)))    // body sees `[T]`
     after := src.scan(te.next)    // must be ')'
-    src.is_comma(after.tok).match ({ true => {
-        perr_set_at(after.tok.start)
-        PEnd(
+    src.is_comma(after.tok).match ({
+        true => {
+            perr_set_at(after.tok.start)
+            PEnd(
+                count: i + 1,
+                next: after.next,
+            )
+        },
+        false => PEnd(
             count: i + 1,
             next: after.next,
-        )
-    }, false => PEnd(
-        count: i + 1,
-        next: after.next,
-    ) })
+        ),
+    })
 }    // a param after the variadic one — reject
 is_rbrace* = (src: string_view, t: Token) bool { src.is_op(t, '}') }    // ')'
 // skip a brace-delimited block: `pos` is just past the opening `{`; returns the position

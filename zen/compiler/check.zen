@@ -179,35 +179,41 @@ with_exp = (env: Env, t: Ty) Env {
 }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 let_exp = (env: Env, t: Ty) Env {
-    t.is_void_ty().match ({ true => env.clr_exp(), false => Env(
-        vars: env.vars,
-        decls: env.decls,
-        didx: env.didx,
-        exp: t,
-        a: env.a,
-    ) })
+    t.is_void_ty().match ({
+        true => env.clr_exp(),
+        false => Env(
+            vars: env.vars,
+            decls: env.decls,
+            didx: env.didx,
+            exp: t,
+            a: env.a,
+        ),
+    })
 }
 // O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
 // remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
 env_func* = (env: Env, name: string_view) Func {
     i := env.didx.func_idx.get(name, 0 - 1)
-    (i >= 0 && i < env.decls.len).match ({ true => env.decls[i].match ({
-        .DFunc(f)    => f,
-        .DForeign(f) => f,
-        _            => Func(
+    (i >= 0 && i < env.decls.len).match ({
+        true => env.decls[i].match ({
+            .DFunc(f)    => f,
+            .DForeign(f) => f,
+            _            => Func(
+                name: "",
+                params: empty_params(),
+                ret: tvoid(),
+                tparams: empty_params(),
+                body: no_stmts(),
+            ),
+        }),
+        false => Func(
             name: "",
             params: empty_params(),
             ret: tvoid(),
             tparams: empty_params(),
             body: no_stmts(),
         ),
-    }), false => Func(
-        name: "",
-        params: empty_params(),
-        ret: tvoid(),
-        tparams: empty_params(),
-        body: no_stmts(),
-    ) })
+    })
 }
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
 cebuf<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
@@ -526,21 +532,27 @@ enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: strin
 }
 enum_inst_gen = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
     env.exp.match ({
-        .Generic(ge) => eq(ge.name, base).match ({ true => EnumInst(
-            base: base,
-            mty: ge.mangled,
-            targs: ge.args,
-        ), false => env.enum_inst_payload(g, base, variant, pty) }),
+        .Generic(ge) => eq(ge.name, base).match ({
+            true => EnumInst(
+                base: base,
+                mty: ge.mangled,
+                targs: ge.args,
+            ),
+            false => env.enum_inst_payload(g, base, variant, pty),
+        }),
         _            => env.enum_inst_payload(g, base, variant, pty),
     })
 }
 enum_inst_of = (env: Env, base: string_view, variant: string_view, pty: Ty) EnumInst {
     g := env.decls.find_genenum(base)
-    eq(g.name, "").match ({ true => EnumInst(
-        base: base,
-        mty: base,
-        targs: no_tys(),
-    ), false => env.enum_inst_gen(g, base, variant, pty) })
+    eq(g.name, "").match ({
+        true => EnumInst(
+            base: base,
+            mty: base,
+            targs: no_tys(),
+        ),
+        false => env.enum_inst_gen(g, base, variant, pty),
+    })
 }    // a non-generic enum
 enum_inst_mk = (env: Env, variant: string_view, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
 enum_inst_tag = (env: Env, variant: string_view) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
@@ -1419,13 +1431,16 @@ rec_dispatch = (env: Env, dn: string_view, fn: Func, args: [Expr], etargs: [Ty])
 }
 // Arm payload binds get their concrete payload type.
 arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
-    eq(ar.bind, "").match ({ true => env, false => Env(
-        vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars),
-        decls: env.decls,
-        didx: env.didx,
-        exp: env.exp,
-        a: env.a,
-    ) })
+    eq(ar.bind, "").match ({
+        true => env,
+        false => Env(
+            vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars),
+            decls: env.decls,
+            didx: env.didx,
+            exp: env.exp,
+            a: env.a,
+        ),
+    })
 }
 resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
@@ -2195,11 +2210,14 @@ hide_param = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
     (idx < 0).match ({ true => params, false => {
         buf := a.pbuf(params.len)
         params.loop((h, i, p) {
-            buf[i] = eq(p.name, name).match ({ true => Param(
-                name: "",
-                ty: p.ty,
-                variadic: p.variadic,
-            ), false => p })
+            buf[i] = eq(p.name, name).match ({
+                true => Param(
+                    name: "",
+                    ty: p.ty,
+                    variadic: p.variadic,
+                ),
+                false => p,
+            })
         })
         buf
     } })
@@ -2300,23 +2318,26 @@ the_func* = (decls: [Decl], name: string_view) Func {
 // O(1) indexed Func lookup for the inline/template path (mirrors env_func; same last-match result).
 idx_func* = (idx: DeclIndex, decls: [Decl], name: string_view) Func {
     i := idx.func_idx.get(name, 0 - 1)
-    (i >= 0 && i < decls.len).match ({ true => decls[i].match ({
-        .DFunc(f)    => f,
-        .DForeign(f) => f,
-        _            => Func(
+    (i >= 0 && i < decls.len).match ({
+        true => decls[i].match ({
+            .DFunc(f)    => f,
+            .DForeign(f) => f,
+            _            => Func(
+                name: "",
+                params: empty_params(),
+                ret: tvoid(),
+                tparams: empty_params(),
+                body: no_stmts(),
+            ),
+        }),
+        false => Func(
             name: "",
             params: empty_params(),
             ret: tvoid(),
             tparams: empty_params(),
             body: no_stmts(),
         ),
-    }), false => Func(
-        name: "",
-        params: empty_params(),
-        ret: tvoid(),
-        tparams: empty_params(),
-        body: no_stmts(),
-    ) })
+    })
 }
 is_template_call = (decls: [Decl], name: string_view) bool { decls.the_func(name).is_generic_fn() }
 idx_template_call = (idx: DeclIndex, decls: [Decl], name: string_view) bool { idx.idx_func(decls, name).is_generic_fn() }

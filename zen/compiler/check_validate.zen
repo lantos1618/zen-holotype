@@ -118,23 +118,32 @@ LitVal*: {
     neg: bool,
 }
 lit_binop = (op: string_view, l: i64, r: i64) LitVal {
-    eq(op, "+").match ({ true => LitVal(
-        ok: true,
-        v: l + r,
-        neg: l + r < 0,
-    ), false => eq(op, "-").match ({ true => LitVal(
-        ok: true,
-        v: l - r,
-        neg: l - r < 0,
-    ), false => eq(op, "*").match ({ true => LitVal(
-        ok: true,
-        v: l * r,
-        neg: l * r < 0,
-    ), false => LitVal(
-        ok: false,
-        v: 0,
-        neg: false,
-    ) }) }) })
+    eq(op, "+").match ({
+        true => LitVal(
+            ok: true,
+            v: l + r,
+            neg: l + r < 0,
+        ),
+        false => eq(op, "-").match ({
+            true => LitVal(
+                ok: true,
+                v: l - r,
+                neg: l - r < 0,
+            ),
+            false => eq(op, "*").match ({
+                true => LitVal(
+                    ok: true,
+                    v: l * r,
+                    neg: l * r < 0,
+                ),
+                false => LitVal(
+                    ok: false,
+                    v: 0,
+                    neg: false,
+                ),
+            }),
+        }),
+    })
 }
 lit_val = (e: Ptr<Expr>) LitVal {
     load(e).match ({
@@ -146,11 +155,14 @@ lit_val = (e: Ptr<Expr>) LitVal {
         .Bin(b) => {
             l := b.lhs.lit_val()
             r := b.rhs.lit_val()
-            (l.ok && r.ok).match ({ true => lit_binop(b.op, l.v, r.v), false => LitVal(
-                ok: false,
-                v: 0,
-                neg: false,
-            ) })
+            (l.ok && r.ok).match ({
+                true => lit_binop(b.op, l.v, r.v),
+                false => LitVal(
+                    ok: false,
+                    v: 0,
+                    neg: false,
+                ),
+            })
         },
         _       => LitVal(
             ok: false,
@@ -2565,147 +2577,249 @@ DiagInfo: {
     hint: string_view,
 }
 diag_info = (code: i32) DiagInfo {
-    (code == 1).match ({ true => DiagInfo(
-        kind: "arity",
-        message: "wrong number of arguments",
-        hint: "check the callee signature and pass exactly the declared parameters",
-    ), false => (code == 2).match ({ true => DiagInfo(
-        kind: "arg-type",
-        message: "argument type does not fit the parameter",
-        hint: "check the argument type or add an explicit conversion at the call site",
-    ), false => (code == 3).match ({ true => DiagInfo(
-        kind: "undefined-name",
-        message: "undefined name",
-        hint: "declare the name, import it, or qualify the intended module binding",
-    ), false => (code == 4).match ({ true => DiagInfo(
-        kind: "struct-field",
-        message: "unknown struct field or invalid field access",
-        hint: "check the struct literal or field access against the declared fields",
-    ), false => (code == 5).match ({ true => DiagInfo(
-        kind: "exhaustiveness",
-        message: "match does not cover every variant",
-        hint: "add arms for every variant, or add an explicit `_` arm",
-    ), false => (code == 6).match ({ true => DiagInfo(
-        kind: "dup-variant",
-        message: "duplicate match arm variant",
-        hint: "remove the repeated match arm for this variant",
-    ), false => (code == 7).match ({ true => DiagInfo(
-        kind: "operand-type",
-        message: "operator cannot be applied to these operand types",
-        hint: "use an operator supported by both operand types",
-    ), false => (code == 8).match ({ true => DiagInfo(
-        kind: "index",
-        message: "invalid index operation",
-        hint: "index only slice-like values with an integer index",
-    ), false => (code == 9).match ({ true => DiagInfo(
-        kind: "return-fit",
-        message: "returned value does not fit the declared return type",
-        hint: "make the returned value fit the function's declared return type",
-    ), false => (code == 10).match ({ true => DiagInfo(
-        kind: "assign-fit",
-        message: "assigned value does not fit the variable's type",
-        hint: "make the assigned value fit the target's type",
-    ), false => (code == 11).match ({ true => DiagInfo(
-        kind: "conformance",
-        message: "impl does not satisfy the trait",
-        hint: "define every required trait method with the exact receiver, parameter, and return types",
-    ), false => (code == 12).match ({ true => DiagInfo(
-        kind: "dup-fn",
-        message: "duplicate top-level definition",
-        hint: "rename one definition or move it behind a real module namespace",
-    ), false => (code == 13).match ({ true => DiagInfo(
-        kind: "value-pos-return",
-        message: "early `return` in a value-position match arm",
-        hint: "return a value from the arm instead of using early `return` in value position",
-    ), false => (code == 14).match ({ true => DiagInfo(
-        kind: "parse",
-        message: "syntax error: unparseable top-level input",
-        hint: "check the syntax around this top-level declaration",
-    ), false => (code == 15).match ({ true => DiagInfo(
-        kind: "ownership",
-        message: "use of an owner after it was consumed (moved, released, or dropped)",
-        hint: "an owner is consumed by release/drop, an actor send, a move into an owner-typed parameter, or a bare `c := o` copy; bind a fresh owner (`o.clone()`) instead of reusing the consumed local",
-    ), false => (code == 16).match ({ true => DiagInfo(
-        kind: "trait-bound",
-        message: "type argument does not satisfy the trait bound",
-        hint: "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
-    ), false => (code == 17).match ({ true => DiagInfo(
-        kind: "unknown-type",
-        message: "unknown type name",
-        hint: "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
-    ), false => (code == 18).match ({ true => DiagInfo(
-        kind: "lambda-value",
-        message: "a lambda can only be used directly as a call argument",
-        hint: "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
-    ), false => (code == 19).match ({ true => DiagInfo(
-        kind: "must-use",
-        message: "result of a self-mutating container method is discarded; the receiver is invalid after this call",
-        hint: "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
-    ), false => (code == 20).match ({ true => DiagInfo(
-        kind: "need-annotation",
-        message: "cannot infer the type parameter of this binding",
-        hint: "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
-    ), false => (code == 21).match ({ true => DiagInfo(
-        kind: "ptr-write",
-        message: "cannot write through a read-only `Ptr<T>`",
-        hint: "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
-    ), false => (code == 22).match ({ true => DiagInfo(
-        kind: "infinite-type",
-        message: "type contains itself by value, so it has infinite size",
-        hint: "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value",
-    ), false => (code == 23).match ({ true => DiagInfo(
-        kind: "null-deref",
-        message: "`RawPtr<T>` may be null; deref requires a null-check first",
-        hint: "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
-    ), false => (code == 24).match ({ true => DiagInfo(
-        kind: "not-callable",
-        message: "value is not a function",
-        hint: "call a function, or store a function value in this name before calling it",
-    ), false => (code == 25).match ({ true => DiagInfo(
-        kind: "return-fit",
-        message: "function body falls through with no value; add a trailing expression of the declared return type",
-        hint: "",
-    ), false => (code == 26).match ({ true => DiagInfo(
-        kind: "no-type-args",
-        message: "this function takes no type arguments",
-        hint: "remove the `<…>` type arguments, or call a generic function",
-    ), false => (code == 27).match ({ true => DiagInfo(
-        kind: "or-return",
-        message: "`.or_return()` requires the enclosing function to return a `Result` carrying the receiver's error type",
-        hint: "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x := recv.or_return()`), or handle the `Result` with `.match`",
-    ), false => (code == 28).match ({ true => DiagInfo(
-        kind: "recursive-hof",
-        message: "recursive function with a function-typed parameter — its body is inlined per call site, so the recursive call has no emitted function to land on",
-        hint: "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function",
-    ), false => (code == 29).match ({ true => DiagInfo(
-        kind: "parse",
-        message: "syntax error: a newline before `.Variant` starts a new statement",
-        hint: "keep the qualified constructor's `.` on the same line as its type (`Type.Variant(…)`)",
-    ), false => (code == 30).match ({ true => DiagInfo(
-        kind: "main-signature",
-        message: "`main` must be `() i32` or `(sys: Sys) i32` — any other parameter shape would read garbage (the OS entry passes at most the `Sys` capability)",
-        hint: "declare it `main = () i32 { … }`, or take the root capability `main = (sys: Sys) i32 { … }` (import `{ Sys } = std.sys`) and thread narrow caps like `sys.stdout()` / `sys.heap()`",
-    ), false => (code == 31).match ({ true => DiagInfo(
-        kind: "arm-value",
-        message: "match arm yields no value, but the match result is used as a value",
-        hint: "end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm",
-    ), false => (code == 32).match ({ true => DiagInfo(
-        kind: "bad-binding",
-        message: "top-level `=` binding is neither a module alias nor a function",
-        hint: "use `:=` for a value global (`k := 5`); a single `=` at top level is only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
-    ), false => (code == 37).match ({ true => DiagInfo(
-        kind: "guard-type",
-        message: "match arm guard must be a bool",
-        hint: "make the `if` guard a boolean expression (e.g. a comparison); the arm is taken only when its pattern matches AND the guard is true",
-    ), false => (code == 38).match ({ true => DiagInfo(
-        kind: "method-not-found",
-        message: "no method with this name on the receiver type",
-        hint: "define the method (a top-level `fn` whose first parameter is the receiver, called `recv.method(...)`), or check the method name",
-    ), false => DiagInfo(
-        kind: "type",
-        message: "type error",
-        hint: "",
-    ) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) }) })
+    (code == 1).match ({
+        true => DiagInfo(
+            kind: "arity",
+            message: "wrong number of arguments",
+            hint: "check the callee signature and pass exactly the declared parameters",
+        ),
+        false => (code == 2).match ({
+            true => DiagInfo(
+                kind: "arg-type",
+                message: "argument type does not fit the parameter",
+                hint: "check the argument type or add an explicit conversion at the call site",
+            ),
+            false => (code == 3).match ({
+                true => DiagInfo(
+                    kind: "undefined-name",
+                    message: "undefined name",
+                    hint: "declare the name, import it, or qualify the intended module binding",
+                ),
+                false => (code == 4).match ({
+                    true => DiagInfo(
+                        kind: "struct-field",
+                        message: "unknown struct field or invalid field access",
+                        hint: "check the struct literal or field access against the declared fields",
+                    ),
+                    false => (code == 5).match ({
+                        true => DiagInfo(
+                            kind: "exhaustiveness",
+                            message: "match does not cover every variant",
+                            hint: "add arms for every variant, or add an explicit `_` arm",
+                        ),
+                        false => (code == 6).match ({
+                            true => DiagInfo(
+                                kind: "dup-variant",
+                                message: "duplicate match arm variant",
+                                hint: "remove the repeated match arm for this variant",
+                            ),
+                            false => (code == 7).match ({
+                                true => DiagInfo(
+                                    kind: "operand-type",
+                                    message: "operator cannot be applied to these operand types",
+                                    hint: "use an operator supported by both operand types",
+                                ),
+                                false => (code == 8).match ({
+                                    true => DiagInfo(
+                                        kind: "index",
+                                        message: "invalid index operation",
+                                        hint: "index only slice-like values with an integer index",
+                                    ),
+                                    false => (code == 9).match ({
+                                        true => DiagInfo(
+                                            kind: "return-fit",
+                                            message: "returned value does not fit the declared return type",
+                                            hint: "make the returned value fit the function's declared return type",
+                                        ),
+                                        false => (code == 10).match ({
+                                            true => DiagInfo(
+                                                kind: "assign-fit",
+                                                message: "assigned value does not fit the variable's type",
+                                                hint: "make the assigned value fit the target's type",
+                                            ),
+                                            false => (code == 11).match ({
+                                                true => DiagInfo(
+                                                    kind: "conformance",
+                                                    message: "impl does not satisfy the trait",
+                                                    hint: "define every required trait method with the exact receiver, parameter, and return types",
+                                                ),
+                                                false => (code == 12).match ({
+                                                    true => DiagInfo(
+                                                        kind: "dup-fn",
+                                                        message: "duplicate top-level definition",
+                                                        hint: "rename one definition or move it behind a real module namespace",
+                                                    ),
+                                                    false => (code == 13).match ({
+                                                        true => DiagInfo(
+                                                            kind: "value-pos-return",
+                                                            message: "early `return` in a value-position match arm",
+                                                            hint: "return a value from the arm instead of using early `return` in value position",
+                                                        ),
+                                                        false => (code == 14).match ({
+                                                            true => DiagInfo(
+                                                                kind: "parse",
+                                                                message: "syntax error: unparseable top-level input",
+                                                                hint: "check the syntax around this top-level declaration",
+                                                            ),
+                                                            false => (code == 15).match ({
+                                                                true => DiagInfo(
+                                                                    kind: "ownership",
+                                                                    message: "use of an owner after it was consumed (moved, released, or dropped)",
+                                                                    hint: "an owner is consumed by release/drop, an actor send, a move into an owner-typed parameter, or a bare `c := o` copy; bind a fresh owner (`o.clone()`) instead of reusing the consumed local",
+                                                                ),
+                                                                false => (code == 16).match ({
+                                                                    true => DiagInfo(
+                                                                        kind: "trait-bound",
+                                                                        message: "type argument does not satisfy the trait bound",
+                                                                        hint: "implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound",
+                                                                    ),
+                                                                    false => (code == 17).match ({
+                                                                        true => DiagInfo(
+                                                                            kind: "unknown-type",
+                                                                            message: "unknown type name",
+                                                                            hint: "declare the type, import it, or qualify it with its module (e.g. `mod.Type`)",
+                                                                        ),
+                                                                        false => (code == 18).match ({
+                                                                            true => DiagInfo(
+                                                                                kind: "lambda-value",
+                                                                                message: "a lambda can only be used directly as a call argument",
+                                                                                hint: "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
+                                                                            ),
+                                                                            false => (code == 19).match ({
+                                                                                true => DiagInfo(
+                                                                                    kind: "must-use",
+                                                                                    message: "result of a self-mutating container method is discarded; the receiver is invalid after this call",
+                                                                                    hint: "rebind the returned container (e.g. `m = m.put(...)`); a value-mold method may realloc and returns the updated handle",
+                                                                                ),
+                                                                                false => (code == 20).match ({
+                                                                                    true => DiagInfo(
+                                                                                        kind: "need-annotation",
+                                                                                        message: "cannot infer the type parameter of this binding",
+                                                                                        hint: "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
+                                                                                    ),
+                                                                                    false => (code == 21).match ({
+                                                                                        true => DiagInfo(
+                                                                                            kind: "ptr-write",
+                                                                                            message: "cannot write through a read-only `Ptr<T>`",
+                                                                                            hint: "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
+                                                                                        ),
+                                                                                        false => (code == 22).match ({
+                                                                                            true => DiagInfo(
+                                                                                                kind: "infinite-type",
+                                                                                                message: "type contains itself by value, so it has infinite size",
+                                                                                                hint: "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value",
+                                                                                            ),
+                                                                                            false => (code == 23).match ({
+                                                                                                true => DiagInfo(
+                                                                                                    kind: "null-deref",
+                                                                                                    message: "`RawPtr<T>` may be null; deref requires a null-check first",
+                                                                                                    hint: "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
+                                                                                                ),
+                                                                                                false => (code == 24).match ({
+                                                                                                    true => DiagInfo(
+                                                                                                        kind: "not-callable",
+                                                                                                        message: "value is not a function",
+                                                                                                        hint: "call a function, or store a function value in this name before calling it",
+                                                                                                    ),
+                                                                                                    false => (code == 25).match ({
+                                                                                                        true => DiagInfo(
+                                                                                                            kind: "return-fit",
+                                                                                                            message: "function body falls through with no value; add a trailing expression of the declared return type",
+                                                                                                            hint: "",
+                                                                                                        ),
+                                                                                                        false => (code == 26).match ({
+                                                                                                            true => DiagInfo(
+                                                                                                                kind: "no-type-args",
+                                                                                                                message: "this function takes no type arguments",
+                                                                                                                hint: "remove the `<…>` type arguments, or call a generic function",
+                                                                                                            ),
+                                                                                                            false => (code == 27).match ({
+                                                                                                                true => DiagInfo(
+                                                                                                                    kind: "or-return",
+                                                                                                                    message: "`.or_return()` requires the enclosing function to return a `Result` carrying the receiver's error type",
+                                                                                                                    hint: "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x := recv.or_return()`), or handle the `Result` with `.match`",
+                                                                                                                ),
+                                                                                                                false => (code == 28).match ({
+                                                                                                                    true => DiagInfo(
+                                                                                                                        kind: "recursive-hof",
+                                                                                                                        message: "recursive function with a function-typed parameter — its body is inlined per call site, so the recursive call has no emitted function to land on",
+                                                                                                                        hint: "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function",
+                                                                                                                    ),
+                                                                                                                    false => (code == 29).match ({
+                                                                                                                        true => DiagInfo(
+                                                                                                                            kind: "parse",
+                                                                                                                            message: "syntax error: a newline before `.Variant` starts a new statement",
+                                                                                                                            hint: "keep the qualified constructor's `.` on the same line as its type (`Type.Variant(…)`)",
+                                                                                                                        ),
+                                                                                                                        false => (code == 30).match ({
+                                                                                                                            true => DiagInfo(
+                                                                                                                                kind: "main-signature",
+                                                                                                                                message: "`main` must be `() i32` or `(sys: Sys) i32` — any other parameter shape would read garbage (the OS entry passes at most the `Sys` capability)",
+                                                                                                                                hint: "declare it `main = () i32 { … }`, or take the root capability `main = (sys: Sys) i32 { … }` (import `{ Sys } = std.sys`) and thread narrow caps like `sys.stdout()` / `sys.heap()`",
+                                                                                                                            ),
+                                                                                                                            false => (code == 31).match ({
+                                                                                                                                true => DiagInfo(
+                                                                                                                                    kind: "arm-value",
+                                                                                                                                    message: "match arm yields no value, but the match result is used as a value",
+                                                                                                                                    hint: "end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm",
+                                                                                                                                ),
+                                                                                                                                false => (code == 32).match ({
+                                                                                                                                    true => DiagInfo(
+                                                                                                                                        kind: "bad-binding",
+                                                                                                                                        message: "top-level `=` binding is neither a module alias nor a function",
+                                                                                                                                        hint: "use `:=` for a value global (`k := 5`); a single `=` at top level is only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
+                                                                                                                                    ),
+                                                                                                                                    false => (code == 37).match ({
+                                                                                                                                        true => DiagInfo(
+                                                                                                                                            kind: "guard-type",
+                                                                                                                                            message: "match arm guard must be a bool",
+                                                                                                                                            hint: "make the `if` guard a boolean expression (e.g. a comparison); the arm is taken only when its pattern matches AND the guard is true",
+                                                                                                                                        ),
+                                                                                                                                        false => (code == 38).match ({
+                                                                                                                                            true => DiagInfo(
+                                                                                                                                                kind: "method-not-found",
+                                                                                                                                                message: "no method with this name on the receiver type",
+                                                                                                                                                hint: "define the method (a top-level `fn` whose first parameter is the receiver, called `recv.method(...)`), or check the method name",
+                                                                                                                                            ),
+                                                                                                                                            false => DiagInfo(
+                                                                                                                                                kind: "type",
+                                                                                                                                                message: "type error",
+                                                                                                                                                hint: "",
+                                                                                                                                            ),
+                                                                                                                                        }),
+                                                                                                                                    }),
+                                                                                                                                }),
+                                                                                                                            }),
+                                                                                                                        }),
+                                                                                                                    }),
+                                                                                                                }),
+                                                                                                            }),
+                                                                                                        }),
+                                                                                                    }),
+                                                                                                }),
+                                                                                            }),
+                                                                                        }),
+                                                                                    }),
+                                                                                }),
+                                                                            }),
+                                                                        }),
+                                                                    }),
+                                                                }),
+                                                            }),
+                                                        }),
+                                                    }),
+                                                }),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
 }
 diagnostic_kind_name = (code: i32) string_view { code.diag_info().kind }
 diagnostic_message = (code: i32) string_view { code.diag_info().message }
@@ -2726,15 +2840,18 @@ check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
 }
 check_diagnostic_from_source* = (src: string_view, packed: i32, count: i32) CheckDiagnostic {
     d := check_diagnostic_from_packed(packed, count)
-    (d.code == 0).match ({ true => d, false => CheckDiagnostic(
-        code: d.code,
-        kind: d.kind,
-        source_offset: d.source_offset,
-        span_width: src.diagnostic_span_width(d.source_offset),
-        count: d.count,
-        message: d.message,
-        hint: d.hint,
-    ) })
+    (d.code == 0).match ({
+        true => d,
+        false => CheckDiagnostic(
+            code: d.code,
+            kind: d.kind,
+            source_offset: d.source_offset,
+            span_width: src.diagnostic_span_width(d.source_offset),
+            count: d.count,
+            message: d.message,
+            hint: d.hint,
+        ),
+    })
 }
 check_to_diagnostic* = (d: CheckDiagnostic) Diagnostic {
     Diagnostic(
@@ -4361,15 +4478,18 @@ check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [
     } })
     d := src.check_diagnostic_from_source(packed, 1)
     nm := a.check_module_unknown_type_name(decls)
-    is_empty(nm).match ({ true => d, false => CheckDiagnostic(
-        code: d.code,
-        kind: d.kind,
-        source_offset: d.source_offset,
-        span_width: d.span_width,
-        count: d.count,
-        message: a.unknown_type_message(nm),
-        hint: d.hint,
-    ) })
+    is_empty(nm).match ({
+        true => d,
+        false => CheckDiagnostic(
+            code: d.code,
+            kind: d.kind,
+            source_offset: d.source_offset,
+            span_width: d.span_width,
+            count: d.count,
+            message: a.unknown_type_message(nm),
+            hint: d.hint,
+        ),
+    })
 }
 // ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
 // A by-value field/payload whose type is the enclosing type — directly (`Node: { next: Node }`,
@@ -5525,15 +5645,18 @@ check_module_addr_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 check_module_addr_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_addr_escape_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_addr_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_addr_escape_kind(decls)
-    (pos == 0).match ({ true => check_diagnostic_none(), false => CheckDiagnostic(
-        code: KESCAPE(),
-        kind: "escape",
-        source_offset: pos,
-        span_width: src.diagnostic_span_width(pos),
-        count: 1,
-        message: "pointer to a local escapes the function (the local's frame is gone after return)",
-        hint: "return the value by copy, or allocate it through an allocator/owner that outlives the call",
-    ) })
+    (pos == 0).match ({
+        true => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KESCAPE(),
+            kind: "escape",
+            source_offset: pos,
+            span_width: src.diagnostic_span_width(pos),
+            count: 1,
+            message: "pointer to a local escapes the function (the local's frame is gone after return)",
+            hint: "return the value by copy, or allocate it through an allocator/owner that outlives the call",
+        ),
+    })
 }
 // ── SENDABILITY rule 2: an Rc<T> may not be sent across actors. ───────────────────────────────────
 // Rc's refcount is a plain (non-atomic) i64, so sharing one between actors on different threads races.
@@ -5650,15 +5773,18 @@ check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_mo
 check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_rc_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_send_rc_kind(decls)
-    (pos == 0).match ({ true => check_diagnostic_none(), false => CheckDiagnostic(
-        code: KOWNERSHIP(),
-        kind: "sendable",
-        source_offset: pos,
-        span_width: src.diagnostic_span_width(pos),
-        count: 1,
-        message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
-        hint: "use Arc<T> for a value shared between actors, or send a value/owned copy",
-    ) })
+    (pos == 0).match ({
+        true => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KOWNERSHIP(),
+            kind: "sendable",
+            source_offset: pos,
+            span_width: src.diagnostic_span_width(pos),
+            count: 1,
+            message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
+            hint: "use Arc<T> for a value shared between actors, or send a value/owned copy",
+        ),
+    })
 }
 // ── SENDABILITY AS A TYPE CAPABILITY: `ref` (MutPtr<T>) is not sendable (rt-scoped-runtime.md §4) ──
 // The send-payload classifier, read off the payload's TYPE (Pony reference-capabilities, NOT a verb):
@@ -5740,15 +5866,18 @@ check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_m
 check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 }) }
 check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_send_mut_kind(decls)
-    (pos == 0).match ({ true => check_diagnostic_none(), false => CheckDiagnostic(
-        code: KOWNERSHIP(),
-        kind: "sendable",
-        source_offset: pos,
-        span_width: src.diagnostic_span_width(pos),
-        count: 1,
-        message: "MutPtr<T> (a mutable reference) is not sendable across actors — it aliases mutable state the sender keeps, so the receiver mutating it is a data race",
-        hint: "send a readonly `Ptr<T>` (a `frozen` value: deeply immutable, freely aliasable), move an `Own<T>` (an `owned` value, sent by move), or send a value copy",
-    ) })
+    (pos == 0).match ({
+        true => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KOWNERSHIP(),
+            kind: "sendable",
+            source_offset: pos,
+            span_width: src.diagnostic_span_width(pos),
+            count: 1,
+            message: "MutPtr<T> (a mutable reference) is not sendable across actors — it aliases mutable state the sender keeps, so the receiver mutating it is a data race",
+            hint: "send a readonly `Ptr<T>` (a `frozen` value: deeply immutable, freely aliasable), move an `Own<T>` (an `owned` value, sent by move), or send a value copy",
+        ),
+    })
 }
 // ── M1 slice 1 (rt-scoped-runtime): SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────
 // docs/rt-scoped-runtime.md M1: memory that must not cross an actor boundary, crossing it — the

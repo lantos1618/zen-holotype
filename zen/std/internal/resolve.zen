@@ -2049,24 +2049,30 @@ ShadowFlat*: {
 // Given the pre-dedup flat, rename the user's colliding decls in the body region [lo,hi) and return the
 // rewritten flat plus the shifted body end. `enable` is false for internal sources (byte-identical no-op).
 shadow_flat = (a: MutPtr<Malloc>, pre: string_view, mainsrc: string_view, lo: i64, hi: i64, enable: bool) ShadowFlat {
-    enable.match ({ true => {
-        names := a.shadow_rename_set(pre, mainsrc, lo, hi)
-        (names.len == 0).match ({ true => ShadowFlat(
+    enable.match ({
+        true => {
+            names := a.shadow_rename_set(pre, mainsrc, lo, hi)
+            (names.len == 0).match ({
+                true => ShadowFlat(
+                    flat: pre,
+                    bodyend: hi,
+                ),
+                false => {
+                    main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
+                    rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
+                    nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
+                    ShadowFlat(
+                        flat: nf,
+                        bodyend: lo + rewS.len,
+                    )
+                },
+            })
+        },
+        false => ShadowFlat(
             flat: pre,
             bodyend: hi,
-        ), false => {
-            main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
-            rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
-            nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
-            ShadowFlat(
-                flat: nf,
-                bodyend: lo + rewS.len,
-            )
-        } })
-    }, false => ShadowFlat(
-        flat: pre,
-        bodyend: hi,
-    ) })
+        ),
+    })
 }
 // ── MODULE-ALIAS NAME-COLLISION ATTRIBUTION (#66a) ───────────────────────────────────────────────
 // A module alias `alias = std.x.y` flattens y's value decls under an `alias__` prefix, INCLUDING the

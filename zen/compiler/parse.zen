@@ -26,18 +26,21 @@ parse_decl_at = (a: MutPtr<Malloc>, src: string_view, pos: i32) DeclEnd {
     pe := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)
     rt := a.parse_ty(src, pe.next)
     params := buf.take_params(pe.count)
-    src.is_lbrace(src.scan(rt.next).tok).match ({ true => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next), nt.tok.start), false => DeclEnd(
-        func: Func(
-            name: name,
-            params: params,
-            ret: rt.ty,
-            tparams: tp.names,
-            body: a.no_body(),
-            pos: nt.tok.start,
+    src.is_lbrace(src.scan(rt.next).tok).match ({
+        true => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next), nt.tok.start),
+        false => DeclEnd(
+            func: Func(
+                name: name,
+                params: params,
+                ret: rt.ty,
+                tparams: tp.names,
+                body: a.no_body(),
+                pos: nt.tok.start,
+            ),
+            next: rt.next,
+            foreign: true,
         ),
-        next: rt.next,
-        foreign: true,
-    ) })
+    })
 }
 parse_fn_body = (a: MutPtr<Malloc>, src: string_view, name: string_view, params: [Param], tparams: [Param], ret: Ty, bstart: i32, dpos: i32) DeclEnd {
     func := Func(
@@ -75,11 +78,14 @@ TParamEnd*: {
 }
 parse_tparams = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
     sc := src.scan(pos)
-    src.is_langle(sc.tok).match ({ true => a.parse_tparam_list(src, sc.next), false => TParamEnd(
-        names: a.no_tparams(),
-        count: 0,
-        next: pos,
-    ) })
+    src.is_langle(sc.tok).match ({
+        true => a.parse_tparam_list(src, sc.next),
+        false => TParamEnd(
+            names: a.no_tparams(),
+            count: 0,
+            next: pos,
+        ),
+    })
 }
 parse_tparam_list = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
     buf := a.param_buf()
@@ -123,10 +129,13 @@ fill_tparams = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: 
                 next: sc.next,
             )
         },
-        _    => src.is_rangle(sc.tok).match ({ true => PEnd(
-            count: i,
-            next: sc.next,
-        ), false => is_ident_tok(sc.tok).match ({ true => a.record_tparam(src, sc, buf, i), false => a.fill_tparams(src, sc.next, buf, i) }) }),
+        _    => src.is_rangle(sc.tok).match ({
+            true => PEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => is_ident_tok(sc.tok).match ({ true => a.record_tparam(src, sc, buf, i), false => a.fill_tparams(src, sc.next, buf, i) }),
+        }),
     })
 }
 field_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(1024 * sizeof(Field)), 1024) }
@@ -157,11 +166,14 @@ fill_fields = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i
                 next: sc.next,
             )
         },
-        _    => src.is_rbrace(sc.tok).match ({ true => FieldsEnd(
-            count: i,
-            ndef: dn,
-            next: sc.next,
-        ), false => a.fill_field(src, pos, buf, i, dbuf, dn) }),
+        _    => src.is_rbrace(sc.tok).match ({
+            true => FieldsEnd(
+                count: i,
+                ndef: dn,
+                next: sc.next,
+            ),
+            false => a.fill_field(src, pos, buf, i, dbuf, dn),
+        }),
     })
 }
 // Default methods store both the FnT requirement and the reusable body.
@@ -322,10 +334,13 @@ fill_variant = (a: MutPtr<Malloc>, src: string_view, nt: Scan, buf: [VariantDef]
     vd := a.variant_after(src, nm, nt, pk)
     buf[i] = vd.vdf
     after := src.scan(vd.next)
-    src.is_bar(after.tok).match ({ true => a.fill_variants(src, after.next, buf, i + 1), false => PEnd(
-        count: i + 1,
-        next: vd.next,
-    ) })
+    src.is_bar(after.tok).match ({
+        true => a.fill_variants(src, after.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: vd.next,
+        ),
+    })
 }
 // After the variant name, dispatch on the next token: `(Type)` payload, `= expr` default, or bare.
 variant_after = (a: MutPtr<Malloc>, src: string_view, nm: string_view, nt: Scan, pk: Scan) VDf {
@@ -335,16 +350,19 @@ variant_after = (a: MutPtr<Malloc>, src: string_view, nm: string_view, nt: Scan,
             vdf: vdef(nm, vp.ty),
             next: vp.next,
         )
-    }, false => src.is_eq1(pk.tok).match ({ true => {
-        de := a.parse_bxor(src, pk.next)
-        VDf(
-            vdf: vdef_default(nm, tvoid(), de.expr),
-            next: de.next,
-        )
-    }, false => VDf(
-        vdf: vdef(nm, tvoid()),
-        next: nt.next,
-    ) }) })
+    }, false => src.is_eq1(pk.tok).match ({
+        true => {
+            de := a.parse_bxor(src, pk.next)
+            VDf(
+                vdf: vdef_default(nm, tvoid(), de.expr),
+                next: de.next,
+            )
+        },
+        false => VDf(
+            vdf: vdef(nm, tvoid()),
+            next: nt.next,
+        ),
+    }) })
 }
 skip_to_colon = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
@@ -541,10 +559,13 @@ fill_import_names = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param]
                 next: sc.next,
             )
         },
-        _    => src.is_rbrace(sc.tok).match ({ true => ImportEnd(
-            count: i,
-            next: sc.next,
-        ), false => is_ident_tok(sc.tok).match ({ true => a.record_name(src, sc, buf, i), false => a.fill_import_names(src, sc.next, buf, i) }) }),
+        _    => src.is_rbrace(sc.tok).match ({
+            true => ImportEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => is_ident_tok(sc.tok).match ({ true => a.record_name(src, sc, buf, i), false => a.fill_import_names(src, sc.next, buf, i) }),
+        }),
     })
 }
 fill_decls = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
@@ -663,11 +684,14 @@ fill_impl_methods = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl],
                 next: sc.next,
             )
         },
-        _    => src.is_comma(sc.tok).match ({ true => a.fill_impl_methods(src, sc.next, buf, i, mbuf, m, tyname, trname), false => src.is_rbrace(sc.tok).match ({ true => ImplEnd(
-            decls: i,
-            methods: m,
-            next: sc.next,
-        ), false => a.fill_impl_one(src, pos, buf, i, mbuf, m, tyname, trname) }) }),
+        _    => src.is_comma(sc.tok).match ({ true => a.fill_impl_methods(src, sc.next, buf, i, mbuf, m, tyname, trname), false => src.is_rbrace(sc.tok).match ({
+            true => ImplEnd(
+                decls: i,
+                methods: m,
+                next: sc.next,
+            ),
+            false => a.fill_impl_one(src, pos, buf, i, mbuf, m, tyname, trname),
+        }) }),
     })
 }
 fill_impl_one = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: string_view, trname: string_view) ImplEnd {
@@ -1110,71 +1134,89 @@ decl_span* = (a: MutPtr<Malloc>, src: string_view, pos: i32) DeclSpan {
             start: sc.tok.start,
             next: sc.next,
         ),
-        _    => src.decl_is_import(pos).match ({ true => DeclSpan(
-            name: "",
-            named: false,
-            eof: false,
-            is_type: false,
-            start: sc.tok.start,
-            next: src.import_span_end(pos),
-        ), false => sc.tok.kind.match ({
-            .Ident => a.named_span(src, pos, sc.tok.start),
-            _      => DeclSpan(
+        _    => src.decl_is_import(pos).match ({
+            true => DeclSpan(
                 name: "",
                 named: false,
                 eof: false,
                 is_type: false,
                 start: sc.tok.start,
-                next: sc.next,
+                next: src.import_span_end(pos),
             ),
-        }) }),
+            false => sc.tok.kind.match ({
+                .Ident => a.named_span(src, pos, sc.tok.start),
+                _      => DeclSpan(
+                    name: "",
+                    named: false,
+                    eof: false,
+                    is_type: false,
+                    start: sc.tok.start,
+                    next: sc.next,
+                ),
+            }),
+        }),
     })
 }
 named_span = (a: MutPtr<Malloc>, src: string_view, pos: i32, start: i32) DeclSpan {
     nm := a.lexeme(src, src.scan(pos).tok)
-    src.decl_is_impl(pos).match ({ true => DeclSpan(
-        name: nm,
-        named: false,
-        eof: false,
-        is_type: false,
-        start: start,
-        next: a.impl_span_end(src, pos),
-    ), false => src.decl_is_global(pos).match ({ true => DeclSpan(
-        name: nm,
-        named: true,
-        eof: false,
-        is_type: false,
-        start: start,
-        next: a.parse_or(src, src.decl_marker(pos).next).next,
-    ), false => a.decl_is_typed_global(src, pos).match ({ true => DeclSpan(
-        name: nm,
-        named: true,
-        eof: false,
-        is_type: false,
-        start: start,
-        next: a.typed_global_end(src, pos),
-    ), false => src.decl_is_struct(pos).match ({ true => DeclSpan(
-        name: nm,
-        named: true,
-        eof: false,
-        is_type: true,
-        start: start,
-        next: a.parse_struct_at(src, pos).next,
-    ), false => src.decl_is_enum(pos).match ({ true => DeclSpan(
-        name: nm,
-        named: true,
-        eof: false,
-        is_type: true,
-        start: start,
-        next: a.parse_enum_at(src, pos).next,
-    ), false => DeclSpan(
-        name: nm,
-        named: true,
-        eof: false,
-        is_type: false,
-        start: start,
-        next: a.parse_decl_at(src, pos).next,
-    ) }) }) }) }) })
+    src.decl_is_impl(pos).match ({
+        true => DeclSpan(
+            name: nm,
+            named: false,
+            eof: false,
+            is_type: false,
+            start: start,
+            next: a.impl_span_end(src, pos),
+        ),
+        false => src.decl_is_global(pos).match ({
+            true => DeclSpan(
+                name: nm,
+                named: true,
+                eof: false,
+                is_type: false,
+                start: start,
+                next: a.parse_or(src, src.decl_marker(pos).next).next,
+            ),
+            false => a.decl_is_typed_global(src, pos).match ({
+                true => DeclSpan(
+                    name: nm,
+                    named: true,
+                    eof: false,
+                    is_type: false,
+                    start: start,
+                    next: a.typed_global_end(src, pos),
+                ),
+                false => src.decl_is_struct(pos).match ({
+                    true => DeclSpan(
+                        name: nm,
+                        named: true,
+                        eof: false,
+                        is_type: true,
+                        start: start,
+                        next: a.parse_struct_at(src, pos).next,
+                    ),
+                    false => src.decl_is_enum(pos).match ({
+                        true => DeclSpan(
+                            name: nm,
+                            named: true,
+                            eof: false,
+                            is_type: true,
+                            start: start,
+                            next: a.parse_enum_at(src, pos).next,
+                        ),
+                        false => DeclSpan(
+                            name: nm,
+                            named: true,
+                            eof: false,
+                            is_type: false,
+                            start: start,
+                            next: a.parse_decl_at(src, pos).next,
+                        ),
+                    }),
+                }),
+            }),
+        }),
+    })
 }
 // Parse impl methods into scratch buffers only to find the block end.
 impl_scratch = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(1024 * sizeof(Decl)), 1024) }
