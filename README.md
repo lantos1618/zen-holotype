@@ -103,7 +103,9 @@ every one runs with `zenc run examples/<name>.zen`.
   are `|`-separated variants with optional payloads, lowered to C tagged unions.
 - **Other surface.** Return-type inference (omit the type, inferred from the body across
   calls); UFCS method chains (`x.f(a)`); `*` marks a declaration public; `x := v`
-  let-bindings; slices `[T]`; the full operator set (`+ - * / %  == < > <= >=  && || !`).
+  let-bindings; slices `[T]`; arithmetic/comparison/logical operators, plus bitwise
+  `& | ^ << >>`. In a type declaration (`Colour: Red | Green`), `|` separates enum variants;
+  in a value expression (`read | create`), the same glyph is bitwise OR.
 - **Literals.** Decimal, hex `0x`, binary `0b`, octal `0o`, digit separators
   `1_000_000`, and floats with e-notation `6.022e23`.
 - **Capabilities at the entry point.** `main` can take the root capability explicitly —
@@ -148,6 +150,8 @@ works too and is what CI invokes.)
 CLI surface:
 
 ```sh
+zenc init hello --bin          # create an executable project (omit flags for prompts)
+zenc init math --lib           # create a checkable library project
 zenc run prog.zen              # resolve std imports, type-check, emit C, link, run
 zenc build prog.zen -o p       # same, but stop at the linked binary
 zenc build --target js prog.zen -o p.js   # JS backend: write the JS floor + module to p.js
@@ -171,15 +175,25 @@ the program is flattened before parsing. The bare-filter form (`cat file.zen | z
 expects already-flat source and does no import loading or checking — use `zenc emit` for
 real files with imports.
 
+`init` is built into the standalone compiler; its templates do not depend on files from the
+compiler checkout. `zenc init` prompts for a path and for executable versus library, while
+`--bin`/`--lib` make it non-interactive. It can initialize an existing directory without touching
+unrelated files, but never overwrites `zen.toml`, `build.zen`, or the generated entry source.
+
 `check`/`build`/`run` also accept a project directory containing `zen.toml`:
 
 ```toml
 package = "hello"
+kind    = "executable"  # optional; "executable" (default) or "library"
 root    = "src"
 main    = "main.zen"
 out     = "hello"
 ccflags = "native.c"     # passed through to cc (extra sources / flags)
 ```
+
+Library projects are source projects in this first version: `zenc check my_library` validates one,
+but `zenc` does not yet emit a library archive. `build`/`run` reject a manifest whose
+`kind = "library"` rather than silently producing the runtime's empty fallback executable.
 
 **Regenerate the committed C** after editing any bootstrap compiler source (the manifest is
 `bootstrap/sources.txt`, checked against the resolver graph's SCC order):
