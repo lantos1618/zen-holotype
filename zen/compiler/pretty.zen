@@ -354,9 +354,22 @@ ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
     head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
     head.ff_tyname(a, c.fn, c.targs).ff_append(a, "(").ff_args(a, c.args, ind).ff_append(a, ")")
 }
-// bool .match lowers to a Cond in the AST — print it back as `c.match ({ true => t, false => e })`.
-ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String { (d.oa == 1).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"), false => (d.oa == 2).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"), false => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })") }) }) }
-// one-armed bool match: print only the arm the user wrote (the other branch is a synthetic `{}`).
+// Bool `.match` lowers to Cond. Keep genuinely short forms inline, but expand a long/nested result
+// exactly like an enum match instead of letting recursive `false => cond` chains become giant lines.
+// One-armed matches print only the arm the user wrote (the other branch is a synthetic `{}`).
+ff_cond_inline = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String { (d.oa == 1).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"), false => (d.oa == 2).match ({ true => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"), false => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })") }) }) }
+ff_cond_multiline = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    open := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({\n")
+    body := (d.oa == 1).match ({ true => open.ff_indent(a, ind + 1).ff_append(a, "true => ").ff_expr(a, d.t, ind + 1).ff_append(a, ",\n"), false => (d.oa == 2).match ({ true => open.ff_indent(a, ind + 1).ff_append(a, "false => ").ff_expr(a, d.e, ind + 1).ff_append(a, ",\n"), false => open.ff_indent(a, ind + 1).ff_append(a, "true  => ").ff_expr(a, d.t, ind + 1).ff_append(a, ",\n").ff_indent(a, ind + 1).ff_append(a, "false => ").ff_expr(a, d.e, ind + 1).ff_append(a, ",\n") }) })
+    body.ff_indent(a, ind).ff_append(a, "})")
+}
+ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    saved_comment := gf_idx
+    trial := a.ff_string(256).ff_cond_inline(a, d, ind)
+    gf_idx = saved_comment
+    too_long := trial.len + to_i64(ind * 4) > 120
+    too_long.match ({ true => s.ff_cond_multiline(a, d, ind), false => s.ff_cond_inline(a, d, ind) })
+}
 // a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
 // the parser records the args in `targs`, and dropping them would lose the type info monomorphization
 // needs (the literal becomes `Rc(…)` → T uninferable → wrong/void element type).
