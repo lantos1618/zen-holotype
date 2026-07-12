@@ -272,7 +272,7 @@ build_target = (mp: MutPtr<Malloc>, root: string_view) i32 {
     (eq(arg(2), "--target") && eq(arg(3), "js")).match ({ true => {
         out := eq(arg(5), "-o").match ({ true => arg(6), false => "a.js" })
         mp.build_js(root, arg(4), out)
-    }, false => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)) })
+    }, false => eq(arg(2), "--target").match ({ true => mp.build_named_plan(root, arg(4), arg(3)), false => eq(arg(2), "--all").match ({ true => mp.build_all_plan(root, arg(3)), false => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)) }) }) })
 }
 // check/build/run operate on a Spec (a single file, or a zen.toml project). spec.source is the
 // entry; spec.ccflags/links/out come from a project's manifest (empty for a single file).
@@ -360,7 +360,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     e := getEnv("ZEN_ROOT")
     eq(e, "").match ({ true => mp.dirname(arg(0)), false => e })
 }
-HELP = () string_view { "usage: zenc <run|build|check|emit|doc|fmt|--build-self|--version|--help> <file>\n  zenc doc <std.mod|file.zen>\n  cat file.zen | zenc   (source -> C filter)\n" }
+HELP = () string_view { "usage: zenc <run|build|check|emit|doc|fmt|targets|--build-self|--version|--help> <file>\n  zenc build --target <name> <project>\n  zenc build --all <project>\n  zenc targets <project>\n  zenc doc <std.mod|file.zen>\n  cat file.zen | zenc   (source -> C filter)\n" }
 main = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -375,7 +375,7 @@ main = () i32 {
     }, false => eq(cmd, "--build-self").match ({ true => eq(arg(2), "").match ({ true => {
         derr("usage: zenc --build-self <out.c> <srcroot>\n")
         2
-    }, false => mp.build_self(arg(3), arg(2)) }), false => eq(cmd, "emit").match ({ true => mp.emit_file(root, arg(2), arg(3)), false => eq(cmd, "emit-js").match ({ true => mp.emit_js(root, arg(2)), false => eq(cmd, "check").match ({ true => mp.check_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "run").match ({ true => mp.run_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "build").match ({ true => mp.build_target(root), false => eq(cmd, "fmt").match ({ true => mp.fmt_cmd(arg(2), arg(3)), false => eq(cmd, "doc").match ({ true => mp.doc_cmd(root, arg(2)), false => mp.default_emit(cmd) }) }) }) }) }) }) }) }) }) })
+    }, false => mp.build_self(arg(3), arg(2)) }), false => eq(cmd, "emit").match ({ true => mp.emit_file(root, arg(2), arg(3)), false => eq(cmd, "emit-js").match ({ true => mp.emit_js(root, arg(2)), false => eq(cmd, "check").match ({ true => mp.check_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "run").match ({ true => mp.run_spec(root, mp.resolve_spec(root, arg(2))), false => eq(cmd, "build").match ({ true => mp.build_target(root), false => eq(cmd, "targets").match ({ true => mp.list_plan_targets(root, arg(2)), false => eq(cmd, "fmt").match ({ true => mp.fmt_cmd(arg(2), arg(3)), false => eq(cmd, "doc").match ({ true => mp.doc_cmd(root, arg(2)), false => mp.default_emit(cmd) }) }) }) }) }) }) }) }) }) }) })
 }    // --build-self <out.c> <srcroot>
 build_out = (flag: string_view, out: string_view) string_view { eq(flag, "-o").match ({ true => out, false => "a.out" }) }    // `zenc <file>` (or stdin) -> raw C on stdout, the harness filter
 // build output path: `build <file> -o <out>` -> <out>, else "a.out".
@@ -783,14 +783,25 @@ spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) string_view {
     e := v.bs_line_end(s, v.len)
     mp.bs_push_range(mp.gstr_string(e - s + 1), v, s, e).gstr_finish(mp)
 }
-parse_spec = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view) Spec {
+source_word_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ').match ({ true => i, false => v.source_word_end(i + 1) }) }
+source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: String) String {
+    (i >= v.len).match ({ true => out, false => (v[i] == ' ').match ({ true => mp.source_words(dir, v, i + 1, out), false => {
+        e := v.source_word_end(i)
+        prefixed := (v[i] == '/').match ({ true => out, false => out.gstr_append(mp, dir).gstr_append(mp, "/") })
+        next := mp.bs_push_range(prefixed, v, i, e).gstr_append(mp, " ")
+        mp.source_words(dir, v, e, next)
+    } }) })
+}
+source_flags = (mp: MutPtr<Malloc>, dir: string_view, src: string_view) string_view { mp.source_words(dir, src.view(), 0, mp.gstr_string(128)).gstr_finish(mp) }
+parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, index: i32) Spec {
     v: [u8] := specsrc.view()
-    name := mp.spec_field(v, 0)
-    root := mp.spec_field(v, 1)
-    main := mp.spec_field(v, 2)
-    out := mp.spec_field(v, 3)
-    link := mp.spec_field(v, 4)
-    cc := mp.spec_field(v, 5)
+    base := 1 + index * 9
+    name := mp.spec_field(v, base)
+    root := mp.spec_field(v, base + 1)
+    main := mp.spec_field(v, base + 2)
+    out := mp.spec_field(v, base + 3)
+    link := mp.spec_field(v, base + 4)
+    cc := mp.spec_field(v, base + 5)
     (eq(root, "") || eq(main, "")).match ({ true => {
         derr("zenc: build.zen: target is missing root/main\n")
         Spec(
@@ -803,12 +814,30 @@ parse_spec = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view) Spec {
     }, false => Spec(
         source: mp.join2(mp.join2(dir, root), main),
         out: eq(out, "").match ({ true => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }), false => mp.join2(dir, out) }),
-        ccflags: cc,
+        ccflags: mp.source_flags(dir, cc),
         links: link,
         ok: true,
     ) })
 }
-build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec {
+empty_spec = () Spec {
+    Spec(
+        source: "",
+        out: "",
+        ccflags: "",
+        links: "",
+        ok: false,
+    )
+}
+plan_nat = (v: [u8], i: i64, e: i64, n: i32) i32 { (i >= e).match ({ true => n, false => (v[i] >= '0' && v[i] <= '9').match ({ true => v.plan_nat(i + 1, e, n * 10 + to_i32(v[i] - '0')), false => n }) }) }
+plan_count = (specsrc: string_view) i32 {
+    v := specsrc.view()
+    v.plan_nat(0, v.bs_line_end(0, v.len), 0)
+}
+PlanSource*: {
+    src: string_view,
+    ok: bool,
+}
+build_zen_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) PlanSource {
     contents_in(mp, mp.join2(dir, "build.zen")).match ({
         .Ok(bsrc) => {
             es := mp.gstr_string(1024).gstr_append(mp, bsrc).gstr_append(mp, BUILD_TAIL())
@@ -825,12 +854,12 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec 
                 spf := mp.SPECFILE()
                 mp.gstr_string(256).gstr_append(mp, bbin).gstr_append(mp, " > ").gstr_append(mp, spf).gstr_finish(mp).system()
                 sp := contents_in(mp, spf).match ({
-                    .Ok(spec) => mp.parse_spec(dir, spec),
-                    .Err(e)   => Spec(
-                        source: "",
-                        out: "",
-                        ccflags: "",
-                        links: "",
+                    .Ok(spec) => PlanSource(
+                        src: spec,
+                        ok: true,
+                    ),
+                    .Err(e)   => PlanSource(
+                        src: "",
                         ok: false,
                     ),
                 })
@@ -839,21 +868,46 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec 
                 sp
             }, false => {
                 derr("zenc: build.zen: the build program did not compile\n")
-                Spec(
-                    source: "",
-                    out: "",
-                    ccflags: "",
-                    links: "",
+                PlanSource(
+                    src: "",
                     ok: false,
                 )
             } })
         },
-        .Err(e)   => Spec(
-            source: "",
-            out: "",
-            ccflags: "",
-            links: "",
+        .Err(e)   => PlanSource(
+            src: "",
             ok: false,
         ),
     })
+}
+plan_find_name = (mp: MutPtr<Malloc>, src: string_view, wanted: string_view, i: i32, n: i32) i32 { (i >= n).match ({ true => 0 - 1, false => eq(mp.spec_field(src.view(), 1 + i * 9), wanted).match ({ true => i, false => mp.plan_find_name(src, wanted, i + 1, n) }) }) }
+build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec {
+    p := mp.build_zen_plan(root, dir)
+    (p.ok && p.src.plan_count() > 0).match ({ true => mp.parse_spec_at(dir, p.src, 0), false => empty_spec() })
 }    // no build.zen -> try zen.toml
+build_named_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, wanted: string_view) i32 {
+    p := mp.build_zen_plan(root, dir)
+    n := p.src.plan_count()
+    i := mp.plan_find_name(p.src, wanted, 0, n)
+    (p.ok && i >= 0).match ({ true => mp.build_spec(root, mp.parse_spec_at(dir, p.src, i), "", ""), false => {
+        derr("zenc: build.zen: no target named `")
+        derr(wanted)
+        derr("`\n")
+        1
+    } })
+}
+build_plan_from = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, src: string_view, i: i32, n: i32, failures: i32) i32 { (i >= n).match ({ true => failures, false => mp.build_plan_from(root, dir, src, i + 1, n, failures + mp.build_spec(root, mp.parse_spec_at(dir, src, i), "", "")) }) }
+build_all_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) i32 {
+    p := mp.build_zen_plan(root, dir)
+    p.ok.match ({ true => mp.build_plan_from(root, dir, p.src, 0, p.src.plan_count(), 0), false => 1 })
+}
+list_plan_from = (mp: MutPtr<Malloc>, src: string_view, i: i32, n: i32) i32 {
+    (i >= n).match ({ true => 0, false => {
+        say(mp.spec_field(src.view(), 1 + i * 9))
+        mp.list_plan_from(src, i + 1, n)
+    } })
+}
+list_plan_targets = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) i32 {
+    p := mp.build_zen_plan(root, dir)
+    p.ok.match ({ true => mp.list_plan_from(p.src, 0, p.src.plan_count()), false => 1 })
+}

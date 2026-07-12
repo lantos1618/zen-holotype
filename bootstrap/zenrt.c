@@ -38,48 +38,6 @@ char**  __zen_argv = 0;
  * range index is an empty string, not a crash. */
 int32_t zen_argc(void){ return __zen_argc; }
 const char* zen_argv_at(int32_t i){ return (i >= 0 && i < __zen_argc) ? __zen_argv[i] : ""; }
-/* std.platform host selection: stable integer ABI kept below the public Zen enums. */
-int32_t zen_platform_host_os(void){
-#if defined(__APPLE__)
-    return 1;
-#elif defined(__linux__)
-    return 2;
-#elif defined(_WIN32)
-    return 3;
-#elif defined(__FreeBSD__)
-    return 4;
-#else
-    return 0;
-#endif
-}
-int32_t zen_platform_host_arch(void){
-#if defined(__aarch64__) || defined(_M_ARM64)
-    return 1;
-#elif defined(__x86_64__) || defined(_M_X64)
-    return 2;
-#elif defined(__riscv) && __riscv_xlen == 64
-    return 3;
-#elif defined(__wasm32__)
-    return 4;
-#else
-    return 0;
-#endif
-}
-int32_t zen_platform_host_abi(void){
-#if defined(__APPLE__)
-    return 1;
-#elif defined(__linux__) && defined(__GLIBC__)
-    return 2;
-#elif defined(__linux__)
-    return 3;
-#elif defined(_MSC_VER)
-    return 4;
-#elif defined(__wasi__)
-    return 5;
-#else
-    return 0;
-#endif
-}
 /* Weak stub so the zenc binary (whose weak main below is overridden by driver.c and never runs) still
  * links — a user program emits its own strong zen_main, which overrides this. */
 ZWEAK int32_t zen_main(void){ return 0; }

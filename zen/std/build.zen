@@ -2,20 +2,20 @@
 // Lists are borrowed slices supplied by the build program, so multiple native
 // sources/frameworks/libraries need no hidden builder heap.
 { print, println } = std.text.fmt
-{ Platform, host } = std.platform
-
+{ Platform, Os, Arch, Abi, host } = std.platform
 Build*: {
     host_: Platform,
     target_: Platform,
     host = (b: Build) Platform { b.host_ }
     target = (b: Build) Platform { b.target_ }
 }
-
 build_context* = () Build {
     p := host()
-    Build(host_: p, target_: p)
+    Build(
+        host_: p,
+        target_: p,
+    )
 }
-
 Target*: {
     name: string_view,
     root_: string_view,
@@ -25,33 +25,201 @@ Target*: {
     sources_: [string_view],
     frameworks_: [string_view],
     libraries_: [string_view],
-
-    root = (t: Target, p: string_view) Target { Target(name: t.name, root_: p, main_: t.main_, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
-    main = (t: Target, p: string_view) Target { Target(name: t.name, root_: t.root_, main_: p, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
-    out = (t: Target, p: string_view) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: p, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
-
-    // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
-    links = (t: Target, l: string_view) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: l, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
-    sources = (t: Target, xs: [string_view]) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: t.links_, sources_: xs, frameworks_: t.frameworks_, libraries_: t.libraries_) }
-    frameworks = (t: Target, xs: [string_view]) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: xs, libraries_: t.libraries_) }
-    libraries = (t: Target, xs: [string_view]) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: xs) }
-
-    emit_spec = (t: Target) void {
+    platform_: Platform,
+    root = (t: Target, p: string_view) Target {
+        Target(
+            name: t.name,
+            root_: p,
+            main_: t.main_,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+        )
+    }
+    main = (t: Target, p: string_view) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: p,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+        )
+    }
+    out = (t: Target, p: string_view) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: p,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+        )
+    }
+    target = (t: Target, p: Platform) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: p,
+        )
+    }
+    links = (t: Target, l: string_view) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: t.out_,
+            links_: l,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+        )
+    }
+    sources = (t: Target, xs: [string_view]) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: xs,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+        )
+    }
+    frameworks = (t: Target, xs: [string_view]) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: xs,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+        )
+    }
+    libraries = (t: Target, xs: [string_view]) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: xs,
+            platform_: t.platform_,
+        )
+    }
+    sources_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({ true => t.sources(xs), false => t }) }
+    frameworks_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({ true => t.frameworks(xs), false => t }) }
+    libraries_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({ true => t.libraries(xs), false => t }) }
+    emit_target = (t: Target) void {
+        // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
         // Six fixed lines: name, root, main, out, linker flags, compiler inputs.
         println(t.name)
         println(t.root_)
         println(t.main_)
         println(t.out_)
-        (t.links_ != "").match ({ true => { print("-l") print(t.links_) print(" ") }, false => { } })
-        t.libraries_.loop((h, i, lib) { print("-l") print(lib) print(" ") })
-        t.frameworks_.loop((h, i, framework) { print("-framework ") print(framework) print(" ") })
+        (t.links_ != "").match ({ true => {
+            print("-l")
+            print(t.links_)
+            print(" ")
+        }, false => { } })
+        t.libraries_.loop((h, i, lib) {
+            print("-l")
+            print(lib)
+            print(" ")
+        })
+        t.frameworks_.loop((h, i, framework) {
+            print("-framework ")
+            print(framework)
+            print(" ")
+        })
         println("")
-        t.sources_.loop((h, i, source) { print(source) print(" ") })
+        t.sources_.loop((h, i, source) {
+            print(source)
+            print(" ")
+        })
         println("")
+        println(build_os_code(t.platform_.os))
+        println(build_arch_code(t.platform_.arch))
+        println(build_abi_code(t.platform_.abi))
+    }
+    emit_spec = (t: Target) void {
+        // Compatibility: an older `build = (...) Target` is a one-target plan on the wire.
+        println(1)
+        t.emit_target()
     }
 }
-
+build_os_code = (os: Os) i32 {
+    os.match ({
+        .MacOS   => 1,
+        .Linux   => 2,
+        .Windows => 3,
+        .FreeBSD => 4,
+        _        => 0,
+    })
+}
+build_arch_code = (arch: Arch) i32 {
+    arch.match ({
+        .Arm64   => 1,
+        .X86_64  => 2,
+        .RiscV64 => 3,
+        .Wasm32  => 4,
+        _        => 0,
+    })
+}
+build_abi_code = (abi: Abi) i32 {
+    abi.match ({
+        .Darwin => 1,
+        .Gnu    => 2,
+        .Musl   => 3,
+        .Msvc   => 4,
+        .Wasi   => 5,
+        _       => 0,
+    })
+}
+Plan*: {
+    targets: [Target],
+    emit_spec = (p: Plan) void {
+        println(p.targets.len)
+        p.targets.loop((h, i, target) {
+            target.emit_target()
+        })
+    }
+}
+plan* = (targets: [Target]) Plan { Plan(targets: targets) }
 exe* = (name: string_view) Target {
     empty: [string_view] := []
-    Target(name: name, root_: "", main_: "", out_: "", links_: "pthread", sources_: empty, frameworks_: empty, libraries_: empty)
+    Target(
+        name: name,
+        root_: "",
+        main_: "",
+        out_: "",
+        links_: "pthread",
+        sources_: empty,
+        frameworks_: empty,
+        libraries_: empty,
+        platform_: host(),
+    )
 }

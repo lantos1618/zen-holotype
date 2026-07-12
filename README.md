@@ -151,6 +151,9 @@ CLI surface:
 zenc run prog.zen              # resolve std imports, type-check, emit C, link, run
 zenc build prog.zen -o p       # same, but stop at the linked binary
 zenc build --target js prog.zen -o p.js   # JS backend: write the JS floor + module to p.js
+zenc targets project/          # list the named outputs in a build.zen Plan
+zenc build --target app project/  # build one named output from the Plan
+zenc build --all project/      # build every output declared by the Plan
 zenc emit-js prog.zen          # JS backend: print the JS to stdout (`| node` to run)
 zenc check prog.zen            # resolve + type-check only, no binary (accepts library modules)
 zenc emit prog.zen             # print the generated C
