@@ -772,10 +772,10 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
     ) }) })
 }    // a single .zen file
 // ── build.zen mode: the build IS a Zen program. Append a main that prints its Target's spec, compile
-// + run it (capturing stdout to a file), parse the 5 fields back. Wins over zen.toml. ─────────────
+// + run it (capturing stdout to a file), parse the 6 fields back. Wins over zen.toml. ─────────────
 BUILDBIN = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".bin") }
 SPECFILE = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".txt") }
-BUILD_TAIL = () string_view { "\nmain = () i32 { build(Build(_: 0)).emit_spec()  0 }\n" }
+BUILD_TAIL = () string_view { "\nmain = () i32 { build(Build(os_: build_host_os())).emit_spec()  0 }\n" }
 // the [start,end) of line `idx` (0-based) in v; field idx of the emitted spec.
 line_start = (v: [u8], idx: i32, p: i64) i64 { (idx <= 0).match ({ true => p, false => (p >= v.len).match ({ true => p, false => v.line_start(idx - 1, v.bs_line_end(p, v.len) + 1) }) }) }
 spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) string_view {
@@ -790,6 +790,7 @@ parse_spec = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view) Spec {
     main := mp.spec_field(v, 2)
     out := mp.spec_field(v, 3)
     link := mp.spec_field(v, 4)
+    cc := mp.spec_field(v, 5)
     (eq(root, "") || eq(main, "")).match ({ true => {
         derr("zenc: build.zen: target is missing root/main\n")
         Spec(
@@ -802,8 +803,8 @@ parse_spec = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view) Spec {
     }, false => Spec(
         source: mp.join2(mp.join2(dir, root), main),
         out: eq(out, "").match ({ true => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }), false => mp.join2(dir, out) }),
-        ccflags: "",
-        links: eq(link, "").match ({ true => "", false => mp.link_flag(link) }),
+        ccflags: cc,
+        links: link,
         ok: true,
     ) })
 }

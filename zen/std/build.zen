@@ -1,86 +1,58 @@
-// std.build — the build IS a Zen program, not a TOML file.
-//
-// A project drops a `build.zen` next to its sources with a `build` fn:
-//
-//   { Build, Target, exe } = std.build
-//   build = (b: Build) Target {
-//       exe("manifest-demo")
-//           .root("src")
-//           .main("main.zen")
-//           .links("pthread")          // link -lpthread (the std.thread default; one lib per .links)
-//           .out("fixture-bin")
-//   }
-//
-// `exe` defaults `links_` to "pthread" so anything built through std.build can use std.thread
-// (real OS threads) out of the box; call `.links(...)` to override with a different single lib.
-//
-// `zenc build <dir>` runs that `build(b)` and links the Target it returns. No allocator threads
-// through the chain (the spec is plain data), so there is no hidden heap behind `exe`.
-{ println } = std.text.fmt
-// reserved builder context (carries nothing yet; future: target triple, profile, flags).
-Build*: {
-    _: i32,
+// std.build — project builds expressed as allocator-free Zen values.
+// Lists are borrowed slices supplied by the build program, so multiple native
+// sources/frameworks/libraries need no hidden builder heap.
+{ print, println } = std.text.fmt
+
+BuildOs*: MacOS | Linux | Other
+
+// Implemented by zenrt.c: 1 macOS, 2 Linux, 0 other.
+zen_build_host_os = () i32
+
+build_host_os* = () BuildOs {
+    zen_build_host_os().match ({ 1 => .MacOS, 2 => .Linux, _ => .Other })
 }
-// a configured executable target; each setter returns a fresh Target so the chain reads top-down.
+
+Build*: {
+    os_: BuildOs,
+    os = (b: Build) BuildOs { b.os_ }
+}
+
 Target*: {
     name: string_view,
     root_: string_view,
     main_: string_view,
     out_: string_view,
     links_: string_view,
-    root = (t: Target, p: string_view) Target {
-        Target(
-            name: t.name,
-            root_: p,
-            main_: t.main_,
-            out_: t.out_,
-            links_: t.links_,
-        )
-    }
-    main = (t: Target, p: string_view) Target {
-        Target(
-            name: t.name,
-            root_: t.root_,
-            main_: p,
-            out_: t.out_,
-            links_: t.links_,
-        )
-    }
-    out = (t: Target, p: string_view) Target {
-        Target(
-            name: t.name,
-            root_: t.root_,
-            main_: t.main_,
-            out_: p,
-            links_: t.links_,
-        )
-    }
-    links = (t: Target, l: string_view) Target {
-        Target(
-            name: t.name,
-            root_: t.root_,
-            main_: t.main_,
-            out_: t.out_,
-            links_: l,
-        )
-    }
+    sources_: [string_view],
+    frameworks_: [string_view],
+    libraries_: [string_view],
+
+    root = (t: Target, p: string_view) Target { Target(name: t.name, root_: p, main_: t.main_, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
+    main = (t: Target, p: string_view) Target { Target(name: t.name, root_: t.root_, main_: p, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
+    out = (t: Target, p: string_view) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: p, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
+
+    // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
+    links = (t: Target, l: string_view) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: l, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: t.libraries_) }
+    sources = (t: Target, xs: [string_view]) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: t.links_, sources_: xs, frameworks_: t.frameworks_, libraries_: t.libraries_) }
+    frameworks = (t: Target, xs: [string_view]) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: xs, libraries_: t.libraries_) }
+    libraries = (t: Target, xs: [string_view]) Target { Target(name: t.name, root_: t.root_, main_: t.main_, out_: t.out_, links_: t.links_, sources_: t.sources_, frameworks_: t.frameworks_, libraries_: xs) }
+
     emit_spec = (t: Target) void {
-        // emit the resolved spec the driver reads back: five lines, fixed order (empty line = unset).
+        // Six fixed lines: name, root, main, out, linker flags, compiler inputs.
         println(t.name)
         println(t.root_)
         println(t.main_)
         println(t.out_)
-        println(t.links_)
+        (t.links_ != "").match ({ true => { print("-l") print(t.links_) print(" ") }, false => { } })
+        t.libraries_.loop((h, i, lib) { print("-l") print(lib) print(" ") })
+        t.frameworks_.loop((h, i, framework) { print("-framework ") print(framework) print(" ") })
+        println("")
+        t.sources_.loop((h, i, source) { print(source) print(" ") })
+        println("")
     }
 }
-// start an executable target named `name`. `links_` defaults to "pthread" so std.thread works
-// out of the box; `.links(...)` overrides it.
+
 exe* = (name: string_view) Target {
-    Target(
-        name: name,
-        root_: "",
-        main_: "",
-        out_: "",
-        links_: "pthread",
-    )
+    empty: [string_view] := []
+    Target(name: name, root_: "", main_: "", out_: "", links_: "pthread", sources_: empty, frameworks_: empty, libraries_: empty)
 }

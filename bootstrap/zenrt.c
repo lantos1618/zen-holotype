@@ -38,6 +38,16 @@ char**  __zen_argv = 0;
  * range index is an empty string, not a crash. */
 int32_t zen_argc(void){ return __zen_argc; }
 const char* zen_argv_at(int32_t i){ return (i >= 0 && i < __zen_argc) ? __zen_argv[i] : ""; }
+/* std.build host selection: stable integer ABI kept below the Zen BuildOs enum. */
+int32_t zen_build_host_os(void){
+#if defined(__APPLE__)
+    return 1;
+#elif defined(__linux__)
+    return 2;
+#else
+    return 0;
+#endif
+}
 /* Weak stub so the zenc binary (whose weak main below is overridden by driver.c and never runs) still
  * links — a user program emits its own strong zen_main, which overrides this. */
 ZWEAK int32_t zen_main(void){ return 0; }
