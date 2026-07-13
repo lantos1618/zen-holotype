@@ -130,9 +130,8 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
     active := false
     resume: i64 := 0
     sv.loop((h, i, b) {
-        (i < resume).match ({
-            true  => { },
-            false => in_quotes.match ({
+        (i < resume == false).then({
+            in_quotes.match ({
                 true  => (b == '"').match ({
                     true  => (i + 1 < sv.len && sv[i + 1] == '"').match ({
                         true  => {
@@ -164,14 +163,12 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
                         },
                         false => (b == '\n').match ({
                             true  => {
-                                active.match ({
-                                    true => {
-                                        fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
-                                        rows = a.rbuf_push(rows, fields.fbuf_slice())
-                                        fields = a.fbuf_new()
-                                        sb = a.cnew()
-                                        active = false
-                                    },
+                                active.then({
+                                    fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
+                                    rows = a.rbuf_push(rows, fields.fbuf_slice())
+                                    fields = a.fbuf_new()
+                                    sb = a.cnew()
+                                    active = false
                                 })    // an inactive newline (blank line / trailing LF) adds no row
                                 resume = i + 1
                             },
@@ -188,17 +185,15 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
                         }),
                     }),
                 }),
-            }),
+            })
         })
     })
     out: Result<[[string_view]], IoError> := in_quotes.match ({
         true  => .Err(.Eof),
         false => {
-            active.match ({
-                true => {
-                    fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
-                    rows = a.rbuf_push(rows, fields.fbuf_slice())
-                },
+            active.then({
+                fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
+                rows = a.rbuf_push(rows, fields.fbuf_slice())
             })
             .Ok(rows.rbuf_slice())
         },
@@ -211,12 +206,9 @@ field_needs_quote = (s: string_view) bool {
     sv: [u8] := s.view()
     need := false
     sv.loop((h, i, b) {
-        (b == ',' || b == '"' || b == '\n' || b == '\r').match ({
-            true  => {
-                need = true
-                h.break
-            },
-            false => { },
+        (b == ',' || b == '"' || b == '\n' || b == '\r').then({
+            need = true
+            h.break
         })
     })
     need
@@ -246,10 +238,8 @@ write_rows*<A> = (a: MutPtr<A>, rows: [[string_view]]) Result<string_view, IoErr
     rows.loop((h, i, row) {
         r: [string_view] := row
         r.loop((h2, j, f) {
-            (j > 0).match ({
-                true => {
-                    out = out.push_in(a, ',').cok()
-                },
+            (j > 0).then({
+                out = out.push_in(a, ',').cok()
             })
             out = a.write_field(out, f)
         })

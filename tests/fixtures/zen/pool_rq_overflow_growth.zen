@@ -15,20 +15,14 @@ spin = (n: i64, s: i64) i64 { (n <= 0).match ({ true => s, false => spin(n - 1, 
 // each message costs a little work, keeping the lone worker busy while the queue fills.
 behave = (user: RawPtr<u8>, msg: i64) void {
     junk := spin(400, 0)
-    (junk >= 0).match ({
-        true  => {
-            atomic_add_i64(user, 1)
-        },
-        false => { },
+    (junk >= 0).then({
+        atomic_add_i64(user, 1)
     })
 }
 spawn_actors = (acts: RawPtr<u8>, i: i64) void {
-    (i < NACT).match ({
-        true  => {
-            acts.offset(i * 8).store_i64(pool_spawn(processed, 8, behave))
-            spawn_actors(acts, i + 1)
-        },
-        false => { },
+    (i < NACT).then({
+        acts.offset(i * 8).store_i64(pool_spawn(processed, 8, behave))
+        spawn_actors(acts, i + 1)
     })
 }
 // send ONE message to every actor: all NACT become runnable near-simultaneously.
@@ -43,12 +37,9 @@ send_all = (p: MutPtr<Pool>, acts: RawPtr<u8>, i: i64, ok: i64) i64 {
     })
 }
 free_actors = (acts: RawPtr<u8>, i: i64) void {
-    (i < NACT).match ({
-        true  => {
-            pool_actor_free(acts.offset(i * 8).load_i64().offset(0))
-            free_actors(acts, i + 1)
-        },
-        false => { },
+    (i < NACT).then({
+        pool_actor_free(acts.offset(i * 8).load_i64().offset(0))
+        free_actors(acts, i + 1)
     })
 }
 // one overflow iteration: returns 1 on pass (exactly-once), 0 on fail.

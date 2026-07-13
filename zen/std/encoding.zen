@@ -85,32 +85,26 @@ base64_encode*<A> = (a: MutPtr<A>, data: [u8]) string_view {
             }),
         })
         k = k + 1
-        (k == 3).match ({
-            true => {
-                out[oi] = b64_char(b0 >> 2)
-                out[oi + 1] = b64_char((b0 & 3) << 4 | b1 >> 4)
-                out[oi + 2] = b64_char((b1 & 15) << 2 | b2 >> 6)
-                out[oi + 3] = b64_char(b2 & 63)
-                oi = oi + 4
-                k = 0
-            },
-        })
-    })
-    (k == 1).match ({
-        true => {
-            out[oi] = b64_char(b0 >> 2)
-            out[oi + 1] = b64_char((b0 & 3) << 4)
-            out[oi + 2] = '='
-            out[oi + 3] = '='
-        },
-    })
-    (k == 2).match ({
-        true => {
+        (k == 3).then({
             out[oi] = b64_char(b0 >> 2)
             out[oi + 1] = b64_char((b0 & 3) << 4 | b1 >> 4)
-            out[oi + 2] = b64_char((b1 & 15) << 2)
-            out[oi + 3] = '='
-        },
+            out[oi + 2] = b64_char((b1 & 15) << 2 | b2 >> 6)
+            out[oi + 3] = b64_char(b2 & 63)
+            oi = oi + 4
+            k = 0
+        })
+    })
+    (k == 1).then({
+        out[oi] = b64_char(b0 >> 2)
+        out[oi + 1] = b64_char((b0 & 3) << 4)
+        out[oi + 2] = '='
+        out[oi + 3] = '='
+    })
+    (k == 2).then({
+        out[oi] = b64_char(b0 >> 2)
+        out[oi + 1] = b64_char((b0 & 3) << 4 | b1 >> 4)
+        out[oi + 2] = b64_char((b1 & 15) << 2)
+        out[oi + 3] = '='
     })
     out[olen] = 0
     cstr(out.ptr)
@@ -157,10 +151,8 @@ base64_decode*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
                                         }),
                                         false => {
                                             v := c.b64_val()
-                                            (v < 0).match ({
-                                                true => {
-                                                    bad = true
-                                                },
+                                            (v < 0).then({
+                                                bad = true
                                             })
                                             v
                                         },
@@ -179,31 +171,23 @@ base64_decode*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
                                                 },
                                                 false => {
                                                     // pos == 3: whole codeword read — emit (3 - pad) bytes for the last group.
-                                                    bad.match ({
-                                                        false => {
-                                                            nout := last.match ({
-                                                                true  => 3 - pad,
-                                                                false => 3,
-                                                            })
-                                                            (nout >= 1).match ({
-                                                                true => {
-                                                                    out[oi] = (s0 << 2 | s1 >> 4).to_u8()
-                                                                    oi = oi + 1
-                                                                },
-                                                            })
-                                                            (nout >= 2).match ({
-                                                                true => {
-                                                                    out[oi] = ((s1 & 15) << 4 | s2 >> 2).to_u8()
-                                                                    oi = oi + 1
-                                                                },
-                                                            })
-                                                            (nout >= 3).match ({
-                                                                true => {
-                                                                    out[oi] = ((s2 & 3) << 6 | val).to_u8()
-                                                                    oi = oi + 1
-                                                                },
-                                                            })
-                                                        },
+                                                    (bad == false).then({
+                                                        nout := last.match ({
+                                                            true  => 3 - pad,
+                                                            false => 3,
+                                                        })
+                                                        (nout >= 1).then({
+                                                            out[oi] = (s0 << 2 | s1 >> 4).to_u8()
+                                                            oi = oi + 1
+                                                        })
+                                                        (nout >= 2).then({
+                                                            out[oi] = ((s1 & 15) << 4 | s2 >> 2).to_u8()
+                                                            oi = oi + 1
+                                                        })
+                                                        (nout >= 3).then({
+                                                            out[oi] = ((s2 & 3) << 6 | val).to_u8()
+                                                            oi = oi + 1
+                                                        })
                                                     })
                                                 },
                                             }),

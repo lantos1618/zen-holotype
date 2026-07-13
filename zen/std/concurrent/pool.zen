@@ -136,14 +136,11 @@ pool_actor_ref* = (raw: RawPtr<u8>) RawPtr<u8> {
 // drop a handle: decrement the Arc refcount (atomic -1). The thread whose decrement returns 0 holds the
 // LAST reference and frees the block + the mailbox it owns + its mutex — exactly once, no UAF, no leak.
 pool_actor_unref* = (raw: RawPtr<u8>) void {
-    (atomic_add_i64(raw, 0 - 1) == 0).match ({
-        true  => {
-            a := actor_view(raw)
-            free(a.mbuf)
-            a.mbmu.destroy()
-            free(raw)
-        },
-        false => { },
+    (atomic_add_i64(raw, 0 - 1) == 0).then({
+        a := actor_view(raw)
+        free(a.mbuf)
+        a.mbmu.destroy()
+        free(raw)
     })
 }
 // the spawner releases its reference (the symmetric counterpart of pool_spawn). Same as pool_actor_unref;
@@ -171,7 +168,9 @@ Pool*: {
 pool_view* = (raw: RawPtr<u8>) MutPtr<Pool> { raw.slice(1)[0].addr() }    // guards rq + live + stop
 pool_raw* = (p: MutPtr<Pool>) RawPtr<u8> { p.selfraw }    // idle workers park here; `send` signals it when work arrives
 rq_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) void {
-    (p.rqtail - p.rqhead >= p.rqcap).match ({ true => rq_grow(p), false => { } })    // the owner thread waits here for quiescence (live == 0)
+    (p.rqtail - p.rqhead >= p.rqcap).then({
+        rq_grow(p)
+    })    // the owner thread waits here for quiescence (live == 0)
     // # of scheduled actors (runnable or running); 0 = quiescent (under mu)
     // shutdown flag: 1 = workers should exit when no work (under mu)
     // i64[nworkers]: messages processed per worker (proof of distribution)
@@ -206,12 +205,9 @@ rq_grow = (p: MutPtr<Pool>) void {
 }
 // copy live slot i (FIFO order from the old ring's head) into the new buffer's slot i.
 rq_copy = (p: MutPtr<Pool>, nbuf: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({
-        true  => {
-            nbuf.offset(i * 8).store_i64(p.rqbuf.offset((p.rqhead + i) % p.rqcap * 8).load_i64())
-            rq_copy(p, nbuf, i + 1, n)
-        },
-        false => { },
+    (i < n).then({
+        nbuf.offset(i * 8).store_i64(p.rqbuf.offset((p.rqhead + i) % p.rqcap * 8).load_i64())
+        rq_copy(p, nbuf, i + 1, n)
     })
 }
 rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
@@ -247,16 +243,13 @@ pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
         false => false,
     })
     a.mbmu.unlock()
-    won.match ({
-        true  => {
-            pool_actor_ref(actor)    // the run queue now OWNS a reference (the "scheduled" ref):
-            p.mu.lock()    // the actor cannot be freed while it is queued or running.
-            p.rq_push(actor)
-            p.live = p.live + 1
-            p.work_cv.signal()
-            p.mu.unlock()
-        },
-        false => { },
+    won.then({
+        pool_actor_ref(actor)    // the run queue now OWNS a reference (the "scheduled" ref):
+        p.mu.lock()    // the actor cannot be freed while it is queued or running.
+        p.rq_push(actor)
+        p.live = p.live + 1
+        p.work_cv.signal()
+        p.mu.unlock()
     })
     sent
 }
@@ -288,14 +281,11 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
                             saved := enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
                             crashed := __zen_actor_call(a.behavior, a.user, msg)    // run under the panic catch (isolation)
                             leave(saved)    // restore the worker's prior slot — runs even on a caught panic (trampoline returns normally)
-                            (crashed != 0).match ({
-                                true  => {
-                                    a.dead = 1    // the actor panicked (zen__panic already printed the reason); mark it dead
-                                    note := "zen: actor marked dead, pool continues\n"    // follow-up to zen__panic's reason line
-                                    nn := note.strlen()
-                                    STDERR_FD.write(note.slice(nn).ptr, nn)
-                                },
-                                false => { },
+                            (crashed != 0).then({
+                                a.dead = 1    // the actor panicked (zen__panic already printed the reason); mark it dead
+                                note := "zen: actor marked dead, pool continues\n"    // follow-up to zen__panic's reason line
+                                nn := note.strlen()
+                                STDERR_FD.write(note.slice(nn).ptr, nn)
                             })
                             drain_batch(a, count + 1)
                         },
@@ -326,7 +316,9 @@ run_quantum = (p: MutPtr<Pool>, actor: RawPtr<u8>) i64 {
             a.mbmu.unlock()
             p.mu.lock()
             p.live = p.live - 1
-            (p.live == 0).match ({ true => p.done_cv.broadcast() })
+            (p.live == 0).then({
+                p.done_cv.broadcast()
+            })
             p.mu.unlock()
             pool_actor_unref(actor)
         },
@@ -359,14 +351,11 @@ pool_next = (p: MutPtr<Pool>) RawPtr<u8> {
 // worker writes its slot → no contention), repeat until shutdown.
 worker_loop = (p: MutPtr<Pool>, wid: i64) void {
     actor := pool_next(p)
-    is_null(actor).match ({
-        true  => { },
-        false => {
-            n := run_quantum(p, actor)
-            slot := p.wstats.offset(wid * 8)
-            slot.store_i64(slot.load_i64() + n)
-            worker_loop(p, wid)
-        },
+    (is_null(actor) == false).then({
+        n := run_quantum(p, actor)
+        slot := p.wstats.offset(wid * 8)
+        slot.store_i64(slot.load_i64() + n)
+        worker_loop(p, wid)
     })
 }
 // non-capturing pthread body: arg → [pool_block_ptr, worker_id]; rebuild the pool view and run the loop.
@@ -413,46 +402,34 @@ pool_open* = (nworkers: i64, rqcap: i64) MutPtr<Pool> {
     p
 }
 zero_stats = (w: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({
-        true  => {
-            w.offset(i * 8).store_i64(0)
-            zero_stats(w, i + 1, n)
-        },
-        false => { },
+    (i < n).then({
+        w.offset(i * 8).store_i64(0)
+        zero_stats(w, i + 1, n)
     })
 }
 // spawn the worker pthreads. `handles` (i64[nworkers]) receives each JoinHandle.tid; `args`
 // (16 bytes/worker) holds each worker's [pool_raw, id] cell. Both are freed after join.
 start_workers = (pool_raw: RawPtr<u8>, handles: RawPtr<u8>, args: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({
-        true  => {
-            ac := args.offset(i * 16)
-            ac.store_i64(pool_raw)
-            ac.offset(8).store_i64(i)
-            h := spawn(worker_body, ac)
-            handles.offset(i * 8).store_i64(h.tid)
-            start_workers(pool_raw, handles, args, i + 1, n)
-        },
-        false => { },
+    (i < n).then({
+        ac := args.offset(i * 16)
+        ac.store_i64(pool_raw)
+        ac.offset(8).store_i64(i)
+        h := spawn(worker_body, ac)
+        handles.offset(i * 8).store_i64(h.tid)
+        start_workers(pool_raw, handles, args, i + 1, n)
     })
 }
 join_workers = (handles: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({
-        true  => {
-            join(JoinHandle(tid: handles.offset(i * 8).load_i64().offset(0)))
-            join_workers(handles, i + 1, n)
-        },
-        false => { },
+    (i < n).then({
+        join(JoinHandle(tid: handles.offset(i * 8).load_i64().offset(0)))
+        join_workers(handles, i + 1, n)
     })
 }
 // block the calling thread until the pool is quiescent (no scheduled actors). Caller holds p.mu.
 wait_quiescent = (p: MutPtr<Pool>) void {
-    (p.live == 0).match ({
-        true  => { },
-        false => {
-            p.done_cv.wait(p.mu)
-            wait_quiescent(p)
-        },
+    (p.live == 0 == false).then({
+        p.done_cv.wait(p.mu)
+        wait_quiescent(p)
     })
 }
 // drain-to-quiescence shutdown: wait until all enqueued work is processed, flag stop, wake every parked

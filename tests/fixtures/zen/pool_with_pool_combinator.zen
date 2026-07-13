@@ -8,12 +8,9 @@ acc := malloc(8)
 slots := malloc(NACT * 8)
 behave = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, msg) }
 send_n = (p: MutPtr<Pool>, a: RawPtr<u8>, k: i64) void {
-    (k < PERMSG).match ({
-        true  => {
-            p.pool_send(a, 2)
-            send_n(p, a, k + 1)
-        },
-        false => { },
+    (k < PERMSG).then({
+        p.pool_send(a, 2)
+        send_n(p, a, k + 1)
     })
 }
 body = (p: MutPtr<Pool>) i64 {
@@ -21,23 +18,17 @@ body = (p: MutPtr<Pool>) i64 {
     0
 }
 fill = (p: MutPtr<Pool>, i: i64) void {
-    (i < NACT).match ({
-        true  => {
-            a := pool_spawn(acc, PERMSG + 8, behave)
-            slots.offset(i * 8).store_i64(a)
-            send_n(p, a, 0)
-            fill(p, i + 1)
-        },
-        false => { },
+    (i < NACT).then({
+        a := pool_spawn(acc, PERMSG + 8, behave)
+        slots.offset(i * 8).store_i64(a)
+        send_n(p, a, 0)
+        fill(p, i + 1)
     })
 }
 free_all = (i: i64) void {
-    (i < NACT).match ({
-        true  => {
-            pool_actor_free(slots.offset(i * 8).load_i64().offset(0))
-            free_all(i + 1)
-        },
-        false => { },
+    (i < NACT).then({
+        pool_actor_free(slots.offset(i * 8).load_i64().offset(0))
+        free_all(i + 1)
     })
 }
 main = () i32 {

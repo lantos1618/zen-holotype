@@ -241,42 +241,30 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
     ok := true
     @while (i < n) {
         b := sv[i]
-        (ls && om_is_alpha(b)).match ({
-            true  => {
-                // identifier [i, e)
-                e := i
-                @while (e < n && om_is_alnum(sv[e])) {
-                    e = e + 1
+        (ls && om_is_alpha(b)).then({
+            // identifier [i, e)
+            e := i
+            @while (e < n && om_is_alnum(sv[e])) {
+                e = e + 1
+            }
+            // skip spaces/tabs, expect '='
+            q := e
+            @while (q < n && (sv[q] == ' ' || sv[q] == '\t')) {
+                q = q + 1
+            }
+            (q < n && sv[q] == '=').then({
+                // skip spaces/tabs, expect '('
+                q2 := q + 1
+                @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
+                    q2 = q2 + 1
                 }
-                // skip spaces/tabs, expect '='
-                q := e
-                @while (q < n && (sv[q] == ' ' || sv[q] == '\t')) {
-                    q = q + 1
-                }
-                (q < n && sv[q] == '=').match ({
-                    true  => {
-                        // skip spaces/tabs, expect '('
-                        q2 := q + 1
-                        @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
-                            q2 = q2 + 1
-                        }
-                        (q2 < n && sv[q2] == '(').match ({
-                            true  => {
-                                name := mp.substr(src, i, e - i).expect("harness: oom")
-                                contains(c, name).match ({
-                                    true  => { },
-                                    false => {
-                                        ok = false
-                                    },
-                                })
-                            },
-                            false => { },
-                        })
-                    },
-                    false => { },
+                (q2 < n && sv[q2] == '(').then({
+                    name := mp.substr(src, i, e - i).expect("harness: oom")
+                    (contains(c, name) == false).then({
+                        ok = false
+                    })
                 })
-            },
-            false => { },
+            })
         })
         ls = b == '\n'
         i = i + 1

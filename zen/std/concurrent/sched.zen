@@ -7,12 +7,9 @@ mark_alive = (flags: RawPtr<u8>, i: i64) void { flags.flag_slot(i).store_i64(1) 
 is_alive = (flags: RawPtr<u8>, i: i64) bool { flags.flag_slot(i).load_i64() == 1 }
 set_alive = (flags: RawPtr<u8>, i: i64, alive: i32) void { flags.flag_slot(i).store_i64(alive) }
 init_flags = (flags: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({
-        true  => {
-            flags.mark_alive(i)
-            flags.init_flags(i + 1, n)
-        },
-        false => { },
+    (i < n).then({
+        flags.mark_alive(i)
+        flags.init_flags(i + 1, n)
     })
 }
 tick = (coros: [Coro], flags: RawPtr<u8>, i: i64) i32 {
@@ -29,10 +26,11 @@ pass = (coros: [Coro], flags: RawPtr<u8>, i: i64, n: i64) i32 { (i < n).match ({
     true  => coros.tick(flags, i) + coros.pass(flags, i + 1, n),
     false => 0,
 }) }
-drive = (coros: [Coro], flags: RawPtr<u8>, n: i64) void { (coros.pass(flags, 0, n) > 0).match ({
-    true  => coros.drive(flags, n),
-    false => { },
-}) }
+drive = (coros: [Coro], flags: RawPtr<u8>, n: i64) void {
+    (coros.pass(flags, 0, n) > 0).then({
+        coros.drive(flags, n)
+    })
+}
 // The alive-flags buffer is allocated through the caller's allocator, so `run`/`run_in`
 // return Result<i32, IoError>: allocation failure stays in the value flow.
 run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError> {

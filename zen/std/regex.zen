@@ -137,12 +137,9 @@ peek2 = (cx: MutPtr<Cx>) u8 { (cx.pos + 1 < cx.plen).match ({
 }) }
 adv = (cx: MutPtr<Cx>) void { cx.pos = cx.pos + 1 }
 set_err = (cx: MutPtr<Cx>, code: i64) void {
-    (cx.err == E_NONE).match ({
-        true  => {
-            cx.err = code
-            cx.errpos = cx.pos
-        },
-        false => { },
+    (cx.err == E_NONE).then({
+        cx.err = code
+        cx.errpos = cx.pos
     })
 }
 // append an AST node, return its index.
@@ -352,11 +349,8 @@ parse_escape = (cx: MutPtr<Cx>) i64 {
 parse_class = (cx: MutPtr<Cx>) i64 {
     cx.adv()    // consume '['
     neg := cx.peek() == '^'
-    neg.match ({
-        true  => {
-            cx.adv()
-        },
-        false => { },
+    neg.then({
+        cx.adv()
     })
     start := cx.rc
     cx.parse_class_items(true)
@@ -366,25 +360,22 @@ parse_class = (cx: MutPtr<Cx>) i64 {
 // consume class items until the closing ']' (or end-of-pattern) — tail recursion, not a loop. `first`
 // lets a leading ']' be a literal ([]] / [^]]).
 parse_class_items = (cx: MutPtr<Cx>, first: bool) void {
-    (cx.err == E_NONE).match ({
-        true  => {
-            b := cx.peek()
-            (b == 0).match ({
+    (cx.err == E_NONE).then({
+        b := cx.peek()
+        (b == 0).match ({
+            true  => {
+                cx.set_err(E_UNTERMINATED_CLASS)
+            },
+            false => (b == ']' && first.match ({ true => false, false => true })).match ({
                 true  => {
-                    cx.set_err(E_UNTERMINATED_CLASS)
+                    cx.adv()
                 },
-                false => (b == ']' && first.match ({ true => false, false => true })).match ({
-                    true  => {
-                        cx.adv()
-                    },
-                    false => {
-                        cx.class_item()
-                        cx.parse_class_items(false)
-                    },
-                }),
-            })
-        },
-        false => { },
+                false => {
+                    cx.class_item()
+                    cx.parse_class_items(false)
+                },
+            }),
+        })
     })
 }
 class_item = (cx: MutPtr<Cx>) void {
@@ -494,9 +485,8 @@ compile_node = (cx: MutPtr<Cx>, ni: i64) void {
                         true  => {
                             e := cx.emit(OP_EOL, 0, 0, 0, 0)
                         },
-                        false => (n.op == N_EMPTY).match ({
-                            true  => { },
-                            false => (n.op == N_CAT).match ({
+                        false => (n.op == N_EMPTY == false).then({
+                            (n.op == N_CAT).match ({
                                 true  => {
                                     cx.compile_node(n.a)
                                     cx.compile_node(n.b)
@@ -527,19 +517,16 @@ compile_node = (cx: MutPtr<Cx>, ni: i64) void {
                                                 s := cx.emit(OP_SPLIT, 0, l1, 0, 0)
                                                 cx.set_y(s, cx.ic)
                                             },
-                                            false => (n.op == N_QUEST).match ({
-                                                true  => {
-                                                    s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
-                                                    cx.set_x(s, cx.ic)
-                                                    cx.compile_node(n.a)
-                                                    cx.set_y(s, cx.ic)
-                                                },
-                                                false => { },
+                                            false => (n.op == N_QUEST).then({
+                                                s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
+                                                cx.set_x(s, cx.ic)
+                                                cx.compile_node(n.a)
+                                                cx.set_y(s, cx.ic)
                                             }),
                                         }),
                                     }),
                                 }),
-                            }),
+                            })
                         }),
                     }),
                 }),
@@ -623,11 +610,8 @@ compile*<A> = (a: MutPtr<A>, pattern: string_view) Result<Regex, RegexError> {
             )
             cx := st.addr()
             root := cx.parse_alt()
-            (cx.pos < cx.plen).match ({
-                true  => {
-                    cx.set_err(E_UNEXPECTED_RPAREN)
-                },
-                false => { },
+            (cx.pos < cx.plen).then({
+                cx.set_err(E_UNEXPECTED_RPAREN)
             })
             (cx.err == E_NONE).match ({
                 true  => {
@@ -697,12 +681,9 @@ class_match = (re: Regex, cls: i64, b: u8) bool {
     cr := re.classes[cls]
     found := false
     re.ranges.sub(cr.start, cr.start + cr.count).loop((h, i, r) {
-        (b >= r.lo && b <= r.hi).match ({
-            true  => {
-                found = true
-                h.break
-            },
-            false => { },
+        (b >= r.lo && b <= r.hi).then({
+            found = true
+            h.break
         })
     })
     cr.neg.match ({
@@ -758,12 +739,9 @@ MatchRes*: {
 has_match = (re: Regex, clen: i64) bool {
     found := false
     re.clist.sub(0, clen).loop((h, i, pc) {
-        (re.insts[pc].op == OP_MATCH).match ({
-            true  => {
-                found = true
-                h.break
-            },
-            false => { },
+        (re.insts[pc].op == OP_MATCH).then({
+            found = true
+            h.break
         })
     })
     found
@@ -775,27 +753,17 @@ build_next = (re: Regex, sv: [u8], clen: i64, sp: i64, n: i64, gen: i64, b: u8) 
     re.clist.sub(0, clen).loop((h, i, pc) {
         inst := re.insts[pc]
         (inst.op == OP_CHAR).match ({
-            true  => (b == inst.c).match ({
-                true  => {
-                    nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                },
-                false => { },
+            true  => (b == inst.c).then({
+                nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
             }),
             false => (inst.op == OP_ANY).match ({
-                true  => (b == '\n').match ({
-                    true  => { },
-                    false => {
-                        nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                    },
+                true  => (b == '\n' == false).then({
+                    nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
                 }),
-                false => (inst.op == OP_CLASS).match ({
-                    true  => re.class_match(inst.cls, b).match ({
-                        true  => {
-                            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                        },
-                        false => { },
-                    }),
-                    false => { },
+                false => (inst.op == OP_CLASS).then({
+                    re.class_match(inst.cls, b).then({
+                        nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+                    })
                 }),
             }),
         })
@@ -813,11 +781,8 @@ match_from = (re: Regex, sv: [u8], start: i64, n: i64, gen0: i64) MatchRes {
     clen := re.add_thread(re.clist, 0, 0, start, n, gen)
     best: i64 := 0 - 1
     // column at sp == start (before consuming anything)
-    re.has_match(clen).match ({
-        true  => {
-            best = start
-        },
-        false => { },
+    re.has_match(clen).then({
+        best = start
     })
     sv.sub(start, n).loop((h, idx, b) {
         // consuming columns sp = start .. n-1 (iteration, never unbounded recursion). `.loop` over the
@@ -832,11 +797,8 @@ match_from = (re: Regex, sv: [u8], start: i64, n: i64, gen0: i64) MatchRes {
                 nlen := re.build_next(sv, clen, sp, n, gen, b)
                 re.copy_threads(nlen)
                 clen = nlen
-                re.has_match(clen).match ({
-                    true  => {
-                        best = sp + 1
-                    },
-                    false => { },
+                re.has_match(clen).then({
+                    best = sp + 1
                 })
             },
         })
@@ -1000,20 +962,14 @@ fill_matches = (re: Regex, sv: [u8], n: i64, out: [Match]) void {
             },
         })
     })
-    (done || pos > n).match ({
-        true  => { },
-        false => {
-            f := re.search_from(sv, pos, n, g)
-            f.has.match ({
-                true  => {
-                    out[idx] = Match(
-                        start: f.start,
-                        end: f.end,
-                    )
-                },
-                false => { },
-            })
-        },
+    ((done || pos > n) == false).then({
+        f := re.search_from(sv, pos, n, g)
+        f.has.then({
+            out[idx] = Match(
+                start: f.start,
+                end: f.end,
+            )
+        })
     })
 }
 // every non-overlapping match, allocated through `a`. Empty when there are none.

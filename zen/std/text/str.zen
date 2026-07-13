@@ -38,12 +38,9 @@ has_at = (sv: [u8], pv: [u8], at: i64) bool {
     ok := true
     pv.loop((h, i, b) {
         ok.match ({
-            true  => (sv[at + i] == b).match ({
-                true  => { },
-                false => {
-                    ok = false
-                    h.break
-                },
+            true  => (sv[at + i] == b == false).then({
+                ok = false
+                h.break
             }),
             false => {
                 h.break
@@ -66,12 +63,9 @@ find* = (s: string_view, needle: string_view) i64 {
                     true  => {
                         h.break
                     },
-                    false => sv.has_at(pv, i).match ({
-                        true  => {
-                            found = i
-                            h.break
-                        },
-                        false => { },
+                    false => sv.has_at(pv, i).then({
+                        found = i
+                        h.break
                     }),
                 })
             })
@@ -149,11 +143,9 @@ at* = (s: string_view, i: i64) u8 {
 ws_start = (v: [u8]) i64 {
     lo: i64 := v.len
     v.loop((h, i, b) {
-        b.is_space().match ({
-            false => {
-                lo = i
-                h.break
-            },
+        (b.is_space() == false).then({
+            lo = i
+            h.break
         })
     })
     lo
@@ -162,10 +154,8 @@ ws_start = (v: [u8]) i64 {
 ws_end = (v: [u8]) i64 {
     hi: i64 := 0
     v.loop((h, i, b) {
-        b.is_space().match ({
-            false => {
-                hi = i + 1
-            },
+        (b.is_space() == false).then({
+            hi = i + 1
         })
     })
     hi
@@ -236,23 +226,18 @@ split_in*<A> = (a: MutPtr<A>, s: string_view, sep: u8) [string_view] {
     sv := s.view()
     nf: i64 := 1
     sv.loop((h, i, b) {
-        (b == sep).match ({
-            true => {
-                nf = nf + 1
-            },
+        (b == sep).then({
+            nf = nf + 1
         })
     })
     out: [string_view] := a.nbuf("", nf)
     fi: i64 := 0    // next field slot
     start: i64 := 0
     sv.loop((h, i, b) {
-        (b == sep).match ({
-            true  => {
-                out[fi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current field's start offset
-                fi = fi + 1
-                start = i + 1
-            },
-            false => { },
+        (b == sep).then({
+            out[fi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current field's start offset
+            fi = fi + 1
+            start = i + 1
         })
     })
     out[fi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
@@ -270,11 +255,9 @@ words_in*<A> = (a: MutPtr<A>, s: string_view) [string_view] {
             true  => {
                 inw = false
             },
-            false => inw.match ({
-                false => {
-                    inw = true    // currently inside a word?
-                    nw = nw + 1
-                },
+            false => (inw == false).then({
+                inw = true    // currently inside a word?
+                nw = nw + 1
             }),
         })
     })
@@ -283,25 +266,19 @@ words_in*<A> = (a: MutPtr<A>, s: string_view) [string_view] {
     start: i64 := 0 - 1
     sv.loop((h, i, b) {
         b.is_space().match ({
-            true  => (start >= 0).match ({
-                true => {
-                    out[wi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current word's start offset, -1 when between words
-                    wi = wi + 1
-                    start = 0 - 1
-                },
+            true  => (start >= 0).then({
+                out[wi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current word's start offset, -1 when between words
+                wi = wi + 1
+                start = 0 - 1
             }),
-            false => (start < 0).match ({
-                true => {
-                    start = i
-                },
+            false => (start < 0).then({
+                start = i
             }),
         })
     })
-    (start >= 0).match ({
-        true => {
-            out[wi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
-            wi = wi + 1
-        },
+    (start >= 0).then({
+        out[wi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
+        wi = wi + 1
     })
     out
 }
@@ -381,10 +358,8 @@ join_in*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     pos: i64 := 0
     parts.loop((h, i, p) {
-        (i > 0).match ({
-            true => {
-                pos = out.copy_at(pos, sep)
-            },
+        (i > 0).then({
+            pos = out.copy_at(pos, sep)
         })
         pos = out.copy_at(pos, p)
     })
@@ -423,12 +398,9 @@ count_occ = (sv: [u8], fv: [u8]) i64 {
     cnt: i64 := 0
     nextpos: i64 := 0
     sv.loop((h, i, b) {
-        (i >= nextpos && i + fv.len <= sv.len && sv.has_at(fv, i)).match ({
-            true  => {
-                cnt = cnt + 1
-                nextpos = i + fv.len
-            },
-            false => { },
+        (i >= nextpos && i + fv.len <= sv.len && sv.has_at(fv, i)).then({
+            cnt = cnt + 1
+            nextpos = i + fv.len
         })
     })
     cnt
@@ -448,9 +420,8 @@ replace_in*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_vi
             pos: i64 := 0
             skip: i64 := 0
             sv.loop((h, i, b) {
-                (i < skip).match ({
-                    true  => { },
-                    false => (i + fv.len <= sv.len && sv.has_at(fv, i)).match ({
+                (i < skip == false).then({
+                    (i + fv.len <= sv.len && sv.has_at(fv, i)).match ({
                         true  => {
                             pos = out.copy_at(pos, to)    // bytes of an in-progress match to NOT copy verbatim
                             skip = i + fv.len
@@ -459,7 +430,7 @@ replace_in*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_vi
                             out[pos] = b
                             pos = pos + 1
                         },
-                    }),
+                    })
                 })
             })
             out[total] = 0
@@ -519,16 +490,15 @@ parse_int* = (s: string_view) i64 {
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
     sv.loop((h, i, b) {
-        (i < start).match ({
-            true  => { },
-            false => (b >= '0' && b <= '9').match ({
+        (i < start == false).then({
+            (b >= '0' && b <= '9').match ({
                 true  => {
                     acc = acc * 10 + (b - '0')
                 },
                 false => {
                     h.break
                 },
-            }),
+            })
         })
     })
     neg.match ({ true => 0 - acc, false => acc })
@@ -570,9 +540,8 @@ try_parse_int* = (s: string_view) Result<i64, ParseError> {
     bad: u8 := 0    // the first non-digit byte hit (0 = none)
     over := false
     sv.loop((h, i, b) {
-        (i < start).match ({
-            true  => { },
-            false => (b >= '0' && b <= '9').match ({
+        (i < start == false).then({
+            (b >= '0' && b <= '9').match ({
                 true  => {
                     d := b - '0'
                     (acc > I64_MAX_DIV10 || acc == I64_MAX_DIV10 && d > 7).match ({
@@ -590,7 +559,7 @@ try_parse_int* = (s: string_view) Result<i64, ParseError> {
                     bad = b
                     h.break
                 },
-            }),
+            })
         })
     })
     out: Result<i64, ParseError> := over.match ({

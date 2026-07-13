@@ -166,35 +166,32 @@ zo_par_worker = (arg: RawPtr<u8>) RawPtr<u8> {
 // commands are independent and write disjoint per-case files, so this is a pure fan-out/join — the only
 // shared state is the atomic work counter. Blocks until all cases have run.
 zo_par_run* = (cmds: [string_view], n: i64) void {
-    (n <= 0).match ({
-        true  => { },
-        false => {
-            m := Malloc(_: 0)
-            mp := m.addr()
-            w0 := mp.zo_nproc()
-            w := (w0 > n).match ({ true => n, false => w0 })    // never spawn more workers than cases
-            counter := malloc(8)
-            counter.store_i64(0)
-            arg := malloc(24)
-            arg.store_i64(cmds.ptr)
-            arg.offset(8).store_i64(n)
-            arg.offset(16).store_i64(counter)
-            handles := malloc(w * 8)
-            i: i64 := 0
-            @while (i < w) {
-                hh := thread.spawn(zo_par_worker, arg)
-                handles.offset(i * 8).store_i64(hh.tid)
-                i = i + 1
-            }
-            j: i64 := 0
-            @while (j < w) {
-                thread.join(thread.JoinHandle(tid: handles.offset(j * 8).load_i64().offset(0)))
-                j = j + 1
-            }
-            free(handles)
-            free(arg)
-            free(counter)
-        },
+    (n <= 0 == false).then({
+        m := Malloc(_: 0)
+        mp := m.addr()
+        w0 := mp.zo_nproc()
+        w := (w0 > n).match ({ true => n, false => w0 })    // never spawn more workers than cases
+        counter := malloc(8)
+        counter.store_i64(0)
+        arg := malloc(24)
+        arg.store_i64(cmds.ptr)
+        arg.offset(8).store_i64(n)
+        arg.offset(16).store_i64(counter)
+        handles := malloc(w * 8)
+        i: i64 := 0
+        @while (i < w) {
+            hh := thread.spawn(zo_par_worker, arg)
+            handles.offset(i * 8).store_i64(hh.tid)
+            i = i + 1
+        }
+        j: i64 := 0
+        @while (j < w) {
+            thread.join(thread.JoinHandle(tid: handles.offset(j * 8).load_i64().offset(0)))
+            j = j + 1
+        }
+        free(handles)
+        free(arg)
+        free(counter)
     })
 }
 // a VALUE case: `src` defines `test* = () iNN { … }`; the emitted program must compute (print) `want`.
@@ -273,10 +270,8 @@ run_diag* = (dc: DiagCase) bool {
             .Ok(txt) => {
                 all := true
                 dc.wants.loop((h, i, wnt) {
-                    txt.contains(wnt).match ({
-                        false => {
-                            all = false
-                        },
+                    (txt.contains(wnt) == false).then({
+                        all = false
                     })
                 })    // must REJECT
                 all
@@ -442,10 +437,8 @@ zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
             .Ok(txt) => {
                 all := true
                 dc.wants.loop((h, i, wnt) {
-                    txt.contains(wnt).match ({
-                        false => {
-                            all = false
-                        },
+                    (txt.contains(wnt) == false).then({
+                        all = false
                     })
                 })
                 all

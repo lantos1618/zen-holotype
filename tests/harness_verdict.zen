@@ -213,7 +213,7 @@ harness_verdict_run* = () i32 {
         kind: "",
     ), VerdictCase(
         src: "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }",
-        should_pass: true,
+        should_pass: false,
         kind: "",
     ), VerdictCase(
         src: "f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }",
@@ -1017,16 +1017,15 @@ harness_verdict_run* = () i32 {
     // `assert_nonnull` proves non-null (yields `MutPtr<T>`), so the subsequent load is accepted.
     // the `RawPtr<u8>` byte-buffer floor is EXEMPT — it derefs freely.
     // a non-null `Ptr<T>` / `MutPtr<T>` deref is unaffected by the nullability rule.
-    // A one-armed bool `.match` in STATEMENT position (a guard followed by more code) is LEGAL — the
-    // missing arm defaults to `{}`. The early `return` fires for the covered case and falls through otherwise.
-    // In VALUE position there is nothing for the missing branch to evaluate to → still rejected (exhaustiveness).
+    // A one-armed bool `.match` is non-exhaustive in every position. Intentional one-way effects use
+    // `.then({ ... })`; ordinary matches must spell `true` and `false` (or `_`) explicitly.
     // TPARAM-SCOPE accept (#68 slice 3): a user GLOBAL type named `T` — the tparam name of the stdlib
     // generic `print*<T>` — no longer poisons that generic. The tparam is fn-local (bind_tparams) and
     // shadows the global type inside its own body, so the generic body stays abstract/deferred and the
     // program type-checks (was: error pointing into fmt.zen with no attribution to the user file).
     // TPARAM-SCOPE reject-for-the-right-reason: passing that `T` VALUE where Display IS required is a
     // genuine trait-bound gap, reported at the USER call site (not leaked into stdlib) — soundness kept.
-    b := run_verdicts("verdict-kind (190)", [VerdictCase(
+    b := run_verdicts("verdict-kind (192)", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1132,8 +1131,16 @@ harness_verdict_run* = () i32 {
         kind: "undefined-name",
     ), VerdictCase(
         src: "f* = (b: bool) i32 {\n b.match({ false => { return 9 } })\n 7\n}\ntest* = () i32 { f(false) }",
-        should_pass: true,
-        kind: "",
+        should_pass: false,
+        kind: "exhaustiveness",
+    ), VerdictCase(
+        src: "set_once = (condition: bool) i32 {\n    value := 0\n    condition.match ({ true => { value = 1 } })\n    value\n}\ntest* = () i32 { set_once(true) }",
+        should_pass: false,
+        kind: "exhaustiveness",
+    ), VerdictCase(
+        src: "test* = () i32 {\n    max := 0\n    xs := [1, 3, 2]\n    xs.loop((h, i, x) { (x > max).match ({ true => { max = x } }) })\n    max\n}",
+        should_pass: false,
+        kind: "exhaustiveness",
     ), VerdictCase(
         src: "f* = (b: bool) i32 {\n b.match({ false => 9 })\n}\ntest* = () i32 { f(false) }",
         should_pass: false,
@@ -2141,9 +2148,8 @@ harness_verdict_run* = () i32 {
     // or_return with a DIFFERING Ok payload: accepted in consume positions (let/arg/mid-chain — only E
     // must match), still or-return in conditional positions (&& rhs, @while cond), and return-fit for
     // the degenerate bare `return f().or_return()`.
-    // statement-position one-armed bool guard now ACCEPTS (was the position-less undefined-name sentinel).
-    // value-position one-armed bool match now rejects for the RIGHT reason: a positioned exhaustiveness
-    // error (NOT the old position-less undefined-name path).
+    // One-armed bool matches reject with positioned exhaustiveness diagnostics in statement, value,
+    // and nested-loop positions. `.then({ ... })` is the explicit one-way spelling.
     // infinite-type: a struct/enum containing ITSELF by value has infinite size (the cc-error leak fix).
     // INDIRECTION breaks the cycle — `Ptr<T>` / `[T]` are finite, so these are accepted.
     a + b

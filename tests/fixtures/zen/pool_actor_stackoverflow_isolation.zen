@@ -33,7 +33,9 @@ behave = (user: RawPtr<u8>, msg: i64) void {
     (msg == 0).match ({
         true  => {
             d := depth(100000000)
-            (d < 0).match ({ true => atomic_add_i64(user, 1), false => { } })
+            (d < 0).then({
+                atomic_add_i64(user, 1)
+            })
         },
         false => {
             atomic_add_i64(user, 1)
@@ -41,30 +43,21 @@ behave = (user: RawPtr<u8>, msg: i64) void {
     })
 }
 send_n = (p: MutPtr<Pool>, a: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({
-        true  => {
-            p.pool_send(a, 1)
-            send_n(p, a, i + 1, n)
-        },
-        false => { },
+    (i < n).then({
+        p.pool_send(a, 1)
+        send_n(p, a, i + 1, n)
     })
 }
 spawn_all = (i: i64) void {
-    (i < NACT).match ({
-        true  => {
-            actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))
-            spawn_all(i + 1)
-        },
-        false => { },
+    (i < NACT).then({
+        actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))
+        spawn_all(i + 1)
     })
 }
 free_all = (i: i64) void {
-    (i < NACT).match ({
-        true  => {
-            pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
-            free_all(i + 1)
-        },
-        false => { },
+    (i < NACT).then({
+        pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
+        free_all(i + 1)
     })
 }
 main = () i32 {

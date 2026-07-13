@@ -41,9 +41,15 @@ init_context = (ctx: RawPtr<u8>, stack: RawPtr<u8>, link: RawPtr<u8>) void {
     ctx.offset(UC_LINK_OFF).store_i64(link)
 }
 spawn_cleanup<A> = (alloc: MutPtr<A>, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>, e: IoError) Result<Coro, IoError> {
-    stack.is_null().match ({ true => { }, false => alloc.release(stack) })
-    ctx.is_null().match ({ true => { }, false => alloc.release(ctx) })
-    lnk.is_null().match ({ true => { }, false => alloc.release(lnk) })
+    (stack.is_null() == false).then({
+        alloc.release(stack)
+    })
+    (ctx.is_null() == false).then({
+        alloc.release(ctx)
+    })
+    (lnk.is_null() == false).then({
+        alloc.release(lnk)
+    })
     err(e)
 }
 finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawPtr<u8>, work: () void) Result<Coro, IoError> {
@@ -93,11 +99,8 @@ destroy_in*<A> = (alloc: MutPtr<A>, c: Coro) void {
 }
 destroy*<A> = (alloc: MutPtr<A>, c: Coro) void { alloc.destroy_in(c) }
 checkpoint_current* = () void {
-    is_null(cur).match ({
-        true  => { },
-        false => {
-            flag = 1
-            swapcontext(cur, back)
-        },
+    (is_null(cur) == false).then({
+        flag = 1
+        swapcontext(cur, back)
     })
 }

@@ -101,14 +101,12 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
 // at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
 record_tparam = (a: MutPtr<Malloc>, src: string_view, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(sc.tok.start)
-            return PEnd(
-                count: i,
-                next: sc.next,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(sc.tok.start)
+        return PEnd(
+            count: i,
+            next: sc.next,
+        )
     })
     nm := a.lexeme(src, sc.tok)
     colon := src.scan(sc.next)    // peek: a `:` introduces a trait bound
@@ -195,15 +193,13 @@ fill_field_default = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field
 }
 fill_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     // Guard both field and default-method buffers.
-    (i >= buf.len || dn >= dbuf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return FieldsEnd(
-                count: i,
-                ndef: dn,
-                next: pos,
-            )
-        },
+    (i >= buf.len || dn >= dbuf.len).then({
+        perr_set_at(pos)
+        return FieldsEnd(
+            count: i,
+            ndef: dn,
+            next: pos,
+        )
     })
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
@@ -221,7 +217,9 @@ fill_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i3
                     false => {
                         // A no-trailing-comma field list closes on `}`; anything else (a stray token, or EOF on an
                         // unterminated `{ …`) is a positioned parse error, not a silent close (task: unclosed `{`).
-                        src.is_rbrace(after.tok).match ({ false => perr_set_at(after.tok.start) })
+                        (src.is_rbrace(after.tok) == false).then({
+                            perr_set_at(after.tok.start)
+                        })
                         FieldsEnd(
                             count: i + 1,
                             ndef: dn,
@@ -266,10 +264,8 @@ has_data_field = (fields: [Field]) bool {
 data_field_count = (fields: [Field]) i32 {
     n := 0
     fields.loop((h, i, f) {
-        f.field_is_method().match ({
-            false => {
-                n = n + 1
-            },
+        (f.field_is_method() == false).then({
+            n = n + 1
         })
     })
     n
@@ -278,12 +274,9 @@ data_fields = (a: MutPtr<Malloc>, fields: [Field]) [Field] {
     buf := a.field_buf()
     j := 0
     fields.loop((h, i, f) {
-        f.field_is_method().match ({
-            true  => { },
-            false => {
-                buf[j] = f
-                j = j + 1
-            },
+        (f.field_is_method() == false).then({
+            buf[j] = f
+            j = j + 1
         })
     })
     buf.take_fields(fields.data_field_count())
@@ -335,27 +328,23 @@ fill_variants = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [VariantDef
 }
 fill_variant = (a: MutPtr<Malloc>, src: string_view, nt: Scan, buf: [VariantDef], i: i32) PEnd {
     // Guard the variant buffer.
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(nt.tok.start)
-            return PEnd(
-                count: i,
-                next: nt.next,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(nt.tok.start)
+        return PEnd(
+            count: i,
+            next: nt.next,
+        )
     })
     // A variant NAME must be an identifier. Without this guard `lexeme` happily reads whatever
     // token sits here (a stray `|`, a literal, a mid-list empty `| |`) as a bogus variant name,
     // desyncing the parse and SILENTLY swallowing the following top-level decl (task #34, sibling
     // of #411). Mirror the .Eof branch: flag a positioned parse error and stop.
-    is_ident_tok(nt.tok).match ({
-        false => {
-            perr_set_at(nt.tok.start)
-            return PEnd(
-                count: i,
-                next: nt.next,
-            )
-        },
+    (is_ident_tok(nt.tok) == false).then({
+        perr_set_at(nt.tok.start)
+        return PEnd(
+            count: i,
+            next: nt.next,
+        )
     })
     nm := a.lexeme(src, nt.tok)
     pk := src.scan(nt.next)
@@ -537,12 +526,9 @@ exports_reset* = (a: MutPtr<Malloc>) void {
 }
 exports_get* = () [Param] { slice(exports_buf.ptr, exports_n) }
 note_export = (name: string_view) void {
-    (exports_n < exports_buf.len).match ({
-        true  => {
-            exports_buf[exports_n] = param(name, tvoid())
-            exports_n = exports_n + 1
-        },
-        false => { },
+    (exports_n < exports_buf.len).then({
+        exports_buf[exports_n] = param(name, tvoid())
+        exports_n = exports_n + 1
     })
 }
 // ── ALIAS-PREFIX registry (UFCS through module aliases) ──────────────────────────────────────────
@@ -567,20 +553,16 @@ alias_prefix_seen = (name: string_view) bool {
     f
 }
 note_alias_prefix* = (name: string_view) void {
-    (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).match ({
-        true  => {
-            alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
-            alias_prefix_n = alias_prefix_n + 1
-        },
-        false => { },
+    (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).then({
+        alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
+        alias_prefix_n = alias_prefix_n + 1
     })
 }
 // record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
 note_export_if_starred = (a: MutPtr<Malloc>, src: string_view, pos: i32) void {
     nt := src.scan(pos)
-    src.is_star(src.scan(nt.next).tok).match ({
-        true  => note_export(a.lexeme(src, nt.tok)),
-        false => { },
+    src.is_star(src.scan(nt.next).tok).then({
+        note_export(a.lexeme(src, nt.tok))
     })
 }
 // Imports carry no code, but their names become DImport records for the checker.
@@ -597,14 +579,12 @@ ImportEnd*: {
 }
 record_name = (a: MutPtr<Malloc>, src: string_view, sc: Scan, buf: [Param], i: i32) ImportEnd {
     // Guard the import-name buffer.
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(sc.tok.start)
-            return ImportEnd(
-                count: i,
-                next: sc.next,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(sc.tok.start)
+        return ImportEnd(
+            count: i,
+            next: sc.next,
+        )
     })
     buf[i] = param(a.lexeme(src, sc.tok), tvoid())
     a.fill_import_names(src, sc.next, buf, i + 1)
@@ -633,12 +613,10 @@ fill_import_names = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param]
 }
 fill_decls = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
     // Leave one slot for the syntax-error sentinel.
-    (i >= buf.len - 1).match ({
-        true => {
-            perr_set_at(pos)
-            buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
-            return i + 1
-        },
+    (i >= buf.len - 1).then({
+        perr_set_at(pos)
+        buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
+        return i + 1
     })
     sc := src.scan(pos)
     sc.tok.kind.match ({
@@ -697,10 +675,8 @@ fill_decl = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32)
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
 // class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
 global_decl = (a: MutPtr<Malloc>, nm: string_view, init: Ptr<Expr>, alias: bool, dpos: i32) Decl {
-    alias.match ({
-        true => {
-            return dglobal_alias_at(nm, tvoid(), init, dpos)
-        },
+    alias.then({
+        return dglobal_alias_at(nm, tvoid(), init, dpos)
     })    // `name = mod` → keep the `=` form for round-trip
     load(init).match ({
         .Call(c) => (eq(c.fn, "thread_local") && c.args.len == 1).match ({
@@ -801,15 +777,13 @@ fill_impl_methods = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl],
 }
 fill_impl_one = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: string_view, trname: string_view) ImplEnd {
     // Impl methods fill both decl and method-name buffers.
-    (i >= buf.len - 1 || m >= mbuf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return ImplEnd(
-                decls: i,
-                methods: m,
-                next: pos,
-            )
-        },
+    (i >= buf.len - 1 || m >= mbuf.len).then({
+        perr_set_at(pos)
+        return ImplEnd(
+            decls: i,
+            methods: m,
+            next: pos,
+        )
     })
     de := a.parse_decl_at(src, pos)
     cn := a.impl_cname_in(trname, tyname, de.func.name)
@@ -860,12 +834,9 @@ join_tparams = (a: MutPtr<Malloc>, outer: [Param], inner: [Param]) [Param] {
         n = n + 1
     })
     inner.loop((h, i, p) {
-        outer.param_names_has(p.name).match ({
-            true  => { },
-            false => {
-                buf[n] = p
-                n = n + 1
-            },
+        (outer.param_names_has(p.name) == false).then({
+            buf[n] = p
+            n = n + 1
         })
     })
     buf.take_params(n)
@@ -943,12 +914,9 @@ read_import_path = (a: MutPtr<Malloc>, src: string_view, pos: i32) ImportPath {
     )
 }
 path_copy_into = (src: string_view, from: i32, dst: RawPtr<u8>, i: i32, n: i32) void {
-    (i >= n).match ({
-        true  => { },
-        false => {
-            dst.offset(i).store(load(offset(src, from + i)))
-            src.path_copy_into(from, dst, i + 1, n)
-        },
+    (i >= n == false).then({
+        dst.offset(i).store(load(offset(src, from + i)))
+        src.path_copy_into(from, dst, i + 1, n)
     })
 }
 // ── implicit type parameters (M2): a free, short ALL-CAPS name (A, T, E, R, K, V, T1, …) used in a

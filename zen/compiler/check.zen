@@ -1059,13 +1059,10 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
             }),
             _            => "",
         })
-        is_empty(hit).match ({
-            true  => { },
-            false => {
-                second = (cnt == 1).match ({ true => hit, false => second })
-                first = (cnt == 0).match ({ true => hit, false => first })
-                cnt = cnt + 1
-            },
+        (is_empty(hit) == false).then({
+            second = (cnt == 1).match ({ true => hit, false => second })
+            first = (cnt == 0).match ({ true => hit, false => first })
+            cnt = cnt + 1
         })
     })
     AliasCands(
@@ -1078,10 +1075,8 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
 // fall back to coercible receivers (i32→i64, slice receivers). The count==1-else-ambiguity rule holds
 // per pass, so an exact unique winner is never masked by a coercible one.
 alias_ufcs_candidates* = (env: Env, fn: string_view, rty: Ty) AliasCands {
-    (rty.alias_recv_dispatchable() == false || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).match ({
-        true => {
-            return alias_cands_none()
-        },
+    (rty.alias_recv_dispatchable() == false || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).then({
+        return alias_cands_none()
     })
     exact := env.alias_cands_scan(fn, rty, true)
     (exact.count > 0).match ({ true => exact, false => env.alias_cands_scan(fn, rty, false) })
@@ -1722,18 +1717,14 @@ collect_varargs = (a: MutPtr<Malloc>, ps: [Param], args: [Expr]) [Expr] {
                     elem := ps[fixed].ty.vararg_elem()    // too few args: let the validator report arity
                     vbuf := a.cebuf(args.len - fixed)
                     args.loop((h, j, e) {
-                        (j >= fixed).match ({
-                            true => {
-                                vbuf[j - fixed] = e
-                            },
+                        (j >= fixed).then({
+                            vbuf[j - fixed] = e
                         })
                     })
                     out := a.cebuf(fixed + 1)
                     args.loop((h, j, e) {
-                        (j < fixed).match ({
-                            true => {
-                                out[j] = e
-                            },
+                        (j < fixed).then({
+                            out[j] = e
                         })
                     })
                     out[fixed] = slit(elem, vbuf)
@@ -1776,10 +1767,8 @@ is_fn_field_call = (env: Env, dn: string_view, args: [Expr]) bool {
 rewrite_fn_field_call = (a: MutPtr<Malloc>, env: Env, field: string_view, buf: [Expr]) Ptr<Expr> {
     rest := a.cebuf(buf.len - 1)
     buf.loop((h, i, e) {
-        (i > 0).match ({
-            true => {
-                rest[i - 1] = e
-            },
+        (i > 0).then({
+            rest[i - 1] = e
         })
     })
     letst := slet("__zclos_recv", a.cenode(member(buf[0].addr(), field)))
@@ -1830,13 +1819,10 @@ needs_ufcs_auto_ref = (env: Env, ps: [Param], arg0: Expr) bool {
     })
 }
 ufcs_auto_ref_arg0 = (a: MutPtr<Malloc>, env: Env, ps: [Param], buf: [Expr], pos: i32) void {
-    (buf.len > 0 && env.needs_ufcs_auto_ref(ps, buf[0])).match ({
-        true  => {
-            ab := a.cebuf(1)
-            ab[0] = buf[0]
-            buf[0] = load(a.cenode(call_at("addr", ab, pos)))
-        },
-        false => { },
+    (buf.len > 0 && env.needs_ufcs_auto_ref(ps, buf[0])).then({
+        ab := a.cebuf(1)
+        ab[0] = buf[0]
+        buf[0] = load(a.cenode(call_at("addr", ab, pos)))
     })
 }
 // `g(args)` where `g` is a LOCAL of by-value closure-struct type (lower_closures generated a struct
@@ -1875,7 +1861,9 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
     })
     // After args resolve: value→Ptr/MutPtr auto-ref on arg0 (UFCS MutPtr receivers like r.next()).
-    (ps.len == buf.len).match ({ true => a.ufcs_auto_ref_arg0(env, ps, buf, c.pos), false => { } })
+    (ps.len == buf.len).then({
+        a.ufcs_auto_ref_arg0(env, ps, buf, c.pos)
+    })
     cclos := env.clos_local_call_name(c.fn)
     env.is_slice_len_call(c.fn, buf).match ({
         true  => a.cenode(member(buf[0].addr(), "len")),
@@ -2023,36 +2011,27 @@ tag_const* = (a: MutPtr<Malloc>, ename: string_view, variant: string_view) strin
 }
 subj_tag = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     out := a.cenode(member(subj, "tag"))
-    ptr.match ({
-        true  => {
-            out = a.cenode(arrow(subj, "tag"))
-        },
-        false => { },
+    ptr.then({
+        out = a.cenode(arrow(subj, "tag"))
     })
     out
 }
 subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: string_view, ptr: bool) Ptr<Expr> {
     u := a.cenode(member(subj, "u"))
-    ptr.match ({
-        true  => {
-            u = a.cenode(arrow(subj, "u"))
-        },
-        false => { },
+    ptr.then({
+        u = a.cenode(arrow(subj, "u"))
     })
     a.cenode(member(u, variant))
 }
 arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
     body := a.branch_stmts(a.arm_env(env, t, ar), ar.body)
     out := body
-    eq(ar.bind, "").match ({
-        true  => { },
-        false => {
-            // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
-            // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
-            // generic call on it (`println(n)`) fails to monomorphize → link error. Same fix the or_return
-            // lowering already uses (slett with subj_variant_payload). Void payload type falls back to slet.
-            out = a.cons_stmt(slett(ar.bind, env.subj_variant_payload(t, ar.variant), a.subj_payload(m.subj, ar.variant, m.ptr)), body)
-        },
+    (eq(ar.bind, "") == false).then({
+        // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
+        // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
+        // generic call on it (`println(n)`) fails to monomorphize → link error. Same fix the or_return
+        // lowering already uses (slett with subj_variant_payload). Void payload type falls back to slet.
+        out = a.cons_stmt(slett(ar.bind, env.subj_variant_payload(t, ar.variant), a.subj_payload(m.subj, ar.variant, m.ptr)), body)
     })
     out
 }
@@ -2067,20 +2046,17 @@ cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
 // Build if/else chain over enum arms.
 lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
     out := no_stmts()
-    (i >= m.arms.len).match ({
-        true  => { },
-        false => {
-            ar := m.arms[i]
-            eq(ar.variant, "_").match ({
-                true  => {
-                    out = a.branch_stmts(env, ar.body)
-                },
-                false => {
-                    cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(a.tag_const(m.ename, ar.variant)))))
-                    out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
-                },
-            })
-        },
+    (i >= m.arms.len == false).then({
+        ar := m.arms[i]
+        eq(ar.variant, "_").match ({
+            true  => {
+                out = a.branch_stmts(env, ar.body)
+            },
+            false => {
+                cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(a.tag_const(m.ename, ar.variant)))))
+                out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
+            },
+        })
     })
     out
 }
@@ -2088,11 +2064,8 @@ lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
     t := env.infer_expr(m.subj)
     stmts := a.lower_match_arms(env, t, m, 0)
     out := sexpr(a.cenode(block(stmts)))
-    (stmts.len == 1).match ({
-        true  => {
-            out = stmts[0]
-        },
-        false => { },
+    (stmts.len == 1).then({
+        out = stmts[0]
     })
     out
 }
@@ -2121,7 +2094,9 @@ lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
             },
         }),
         .Cond(d)  => {
-            out = a.lower_cond_stmt(env, d)
+            // A one-armed `.match` must survive into validation so it cannot silently become an if with
+            // an invented no-op branch. `.then` and explicit two-arm matches carry oa=0 and lower normally.
+            out = (d.oa == 0).match ({ true => a.lower_cond_stmt(env, d), false => sexpr(e) })
         },
         _         => {
             out = sexpr(e)
@@ -3014,11 +2989,8 @@ bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], 
     nf := a.cebuf(cargs.len)
     nb := 0
     cargs.loop((h, i, ce) {
-        (i < params.len && (ce.arg_needs_bind() || pins[i].is_void_ty() == false)).match ({
-            true  => {
-                nb = nb + 1
-            },
-            false => { },
+        (i < params.len && (ce.arg_needs_bind() || pins[i].is_void_ty() == false)).then({
+            nb = nb + 1
         })
     })
     bb := a.sbuf(nb)
@@ -3061,17 +3033,11 @@ lit_pins = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], c
     buf := a.tbuf(params.len)
     params.loop((h, i, p) {
         buf[i] = tvoid()
-        (i < cargs.len && cargs[i].addr().is_lit_numeric() && p.ty.ty_mentions_any(tparams)).match ({
-            true  => {
-                t := a.subst_ty_in(tparams, targs, p.ty)
-                (t.is_void_ty() || t.ty_mentions_any(tparams)).match ({
-                    true  => { },
-                    false => {
-                        buf[i] = t
-                    },
-                })
-            },
-            false => { },
+        (i < cargs.len && cargs[i].addr().is_lit_numeric() && p.ty.ty_mentions_any(tparams)).then({
+            t := a.subst_ty_in(tparams, targs, p.ty)
+            (t.is_void_ty() || t.ty_mentions_any(tparams) == false).then({
+                buf[i] = t
+            })
         })
     })
     buf
@@ -3127,19 +3093,13 @@ needs_early_lift = (stmts: [Stmt]) bool {
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r) => {
-                (i != n - 1).match ({
-                    true  => {
-                        found = true
-                    },
-                    false => { },
+                (i != n - 1).then({
+                    found = true
                 })
             },
             .If(f)     => {
-                (f.then.body_has_return() || f.els.body_has_return()).match ({
-                    true  => {
-                        found = true
-                    },
-                    false => { },
+                (f.then.body_has_return() || f.els.body_has_return()).then({
+                    found = true
                 })
             },
             _          => { },
@@ -3162,11 +3122,8 @@ cat_stmts = (a: MutPtr<Malloc>, xs: [Stmt], ys: [Stmt]) [Stmt] {
 stmt_tail = (a: MutPtr<Malloc>, xs: [Stmt]) [Stmt] {
     buf := a.sbuf(xs.len - 1)
     xs.loop((h, i, s) {
-        (i > 0).match ({
-            true  => {
-                buf[i - 1] = s
-            },
-            false => { },
+        (i > 0).then({
+            buf[i - 1] = s
         })
     })
     buf
@@ -3239,11 +3196,8 @@ xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty,
 }
 xform_arm_env = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: string_view, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
     out := env
-    eq(ar.bind, "").match ({
-        true  => { },
-        false => {
-            out = a.vcons(ar.bind, a.xform_arm_payload(decls, idx, subj, ename, ar), env)
-        },
+    (eq(ar.bind, "") == false).then({
+        out = a.vcons(ar.bind, a.xform_arm_payload(decls, idx, subj, ename, ar), env)
     })
     out
 }
@@ -3253,13 +3207,10 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
         bind := ""
         ps := params
         xs := fargs
-        eq(ar.bind, "").match ({
-            true  => { },
-            false => {
-                bind = a.local_name_at(ar.bind, env, params.len)
-                ps = a.add_subst_param(params, ar.bind)
-                xs = a.add_subst_arg(fargs, bind)
-            },
+        (eq(ar.bind, "") == false).then({
+            bind = a.local_name_at(ar.bind, env, params.len)
+            ps = a.add_subst_param(params, ar.bind)
+            xs = a.add_subst_arg(fargs, bind)
         })
         br := arm(ar.variant, bind, ar.body)
         aenv := a.xform_arm_env(decls, idx, subj, ename, br, env)
@@ -3981,11 +3932,8 @@ xform_match = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: MatchData, p
     st := subj.light_ty(a, env, decls, idx)
     arms := a.xform_arms(decls, idx, st, m.ename, m.arms, params, fargs, env, exp)
     out := a.cenode(ematch(subj, m.ename, arms))
-    m.ptr.match ({
-        true  => {
-            out = a.cenode(ematchp(subj, m.ename, arms))
-        },
-        false => { },
+    m.ptr.then({
+        out = a.cenode(ematchp(subj, m.ename, arms))
     })
     out
 }
@@ -4105,11 +4053,8 @@ xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], id
     st.match ({
         .Let(l) => {
             ty := l.ty
-            l.ty.is_void_ty().match ({
-                true  => {
-                    ty = l.value.light_ty(a, env, decls, idx)
-                },
-                false => { },
+            l.ty.is_void_ty().then({
+                ty = l.value.light_ty(a, env, decls, idx)
             })
             out = a.vcons(a.local_name_at(l.name, env, params.len), ty, env)
         },
@@ -4150,11 +4095,8 @@ xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], pa
     xs := fargs
     body.loop((h, i, st) {
         want := tvoid()
-        (i == body.len - 1).match ({
-            true  => {
-                want = exp
-            },
-            false => { },
+        (i == body.len - 1).then({
+            want = exp
         })
         buf[i] = a.xform_stmt(decls, idx, st, ps, xs, e, want)
         e = a.xform_let_ext(e, st, decls, idx, ps)
@@ -4232,10 +4174,8 @@ default_expansion_count = (decls: [Decl]) i64 {
         d.match ({
             .DTraitDefault(td) => decls.loop((h2, j, e) {
                 e.match ({
-                    .DImpl(im) => (eq(im.trname, td.trname) && decls.def_provided(im.ty, td.trname, td.fn.name) == false).match ({
-                        true => {
-                            n = n + 1
-                        },
+                    .DImpl(im) => (eq(im.trname, td.trname) && decls.def_provided(im.ty, td.trname, td.fn.name) == false).then({
+                        n = n + 1
                     }),
                     _          => { },
                 })
@@ -4249,12 +4189,9 @@ emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [D
     k := j
     decls.loop((h, i, d) {
         d.match ({
-            .DImpl(im) => (eq(im.trname, td.trname) && decls.def_provided(im.ty, td.trname, td.fn.name) == false).match ({
-                true  => {
-                    buf[k] = dfunc(a.default_for_type(td, im.ty))
-                    k = k + 1
-                },
-                false => { },
+            .DImpl(im) => (eq(im.trname, td.trname) && decls.def_provided(im.ty, td.trname, td.fn.name) == false).then({
+                buf[k] = dfunc(a.default_for_type(td, im.ty))
+                k = k + 1
             }),
             _          => { },
         })
@@ -4668,13 +4605,11 @@ rc_tys_depth = (ts: [Ty]) i32 {
 rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     // a polymorphic-recursive self-call (deeper targs each step) would grow the worklist forever; drop
     // the absurdly-deep instance (a well-formed one is shallow) and never write past the buffer.
-    (1 + g.args.rc_tys_depth() > 24).match ({
-        true => {
-            return cnt
-        },
+    (1 + g.args.rc_tys_depth() > 24).then({
+        return cnt
     })
-    (cnt >= buf.len).match ({
-        true => panic("zenc: too many recursive-generic fn instances (rc_gbuf cap; raise it in compiler.check)"),
+    (cnt >= buf.len).then({
+        panic("zenc: too many recursive-generic fn instances (rc_gbuf cap; raise it in compiler.check)")
     })
     buf[cnt] = g
     cnt + 1
@@ -4872,11 +4807,9 @@ mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
             })
             k := decls.len
             buf.loop((h, i, g) {
-                (i < cnt).match ({
-                    true => {
-                        out[k] = base.rc_gen(g)
-                        k = k + 1
-                    },
+                (i < cnt).then({
+                    out[k] = base.rc_gen(g)
+                    k = k + 1
                 })
             })
             slice(out.ptr, k)
@@ -5128,11 +5061,9 @@ lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     n := load_i64(gcp)
     k := decls.len
     gen.loop((h, i, g) {
-        (i < n.to_i32()).match ({
-            true => {
-                out[k] = g
-                k = k + 1
-            },
+        (i < n.to_i32()).then({
+            out[k] = g
+            k = k + 1
         })
     })
     slice(out.ptr, k)
@@ -5457,11 +5388,9 @@ lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     n := load_i64(ccp) * 2
     k := decls.len
     gen.loop((h, i, g) {
-        (i < n.to_i32()).match ({
-            true => {
-                out[k] = g
-                k = k + 1
-            },
+        (i < n.to_i32()).then({
+            out[k] = g
+            k = k + 1
         })
     })
     slice(out.ptr, k)

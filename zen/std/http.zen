@@ -81,11 +81,9 @@ ieq = (x: string_view, y: string_view) bool {
         true  => {
             same := true
             xv.loop((h, i, b) {
-                (lower(b) == lower(yv[i])).match ({
-                    false => {
-                        same = false
-                        h.break
-                    },
+                (lower(b) == lower(yv[i]) == false).then({
+                    same = false
+                    h.break
                 })
             })
             same
@@ -97,11 +95,9 @@ ieq = (x: string_view, y: string_view) bool {
 lookup_header = (headers: [Header], name: string_view) Opt<string_view> {
     res: Opt<string_view> := .None
     headers.loop((h, i, hd) {
-        ieq(hd.name, name).match ({
-            true => {
-                res = .Some(hd.value)
-                h.break
-            },
+        ieq(hd.name, name).then({
+            res = .Some(hd.value)
+            h.break
         })
     })
     res
@@ -117,11 +113,9 @@ crlfcrlf = (v: [u8]) i64 {
             true  => {
                 h.break
             },
-            false => (v[i] == '\r' && v[i + 1] == '\n' && v[i + 2] == '\r' && v[i + 3] == '\n').match ({
-                true => {
-                    at = i
-                    h.break
-                },
+            false => (v[i] == '\r' && v[i + 1] == '\n' && v[i + 2] == '\r' && v[i + 3] == '\n').then({
+                at = i
+                h.break
             }),
         })
     })
@@ -188,25 +182,22 @@ collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], Http
     ), n)
     bad := false
     lines.loop((h, i, line) {
-        (i == 0).match ({
-            true  => { },
-            false => {
-                ci := line.find(":")
-                (ci < 0).match ({
-                    true  => {
-                        bad = true
-                        h.break
-                    },
-                    false => {
-                        nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
-                        val := a.trim(a.substr(line, ci + 1, line.view().len - (ci + 1)).expect("http: oom"))
-                        hs[i - 1] = Header(
-                            name: nm,
-                            value: val,
-                        )
-                    },
-                })
-            },
+        (i == 0 == false).then({
+            ci := line.find(":")
+            (ci < 0).match ({
+                true  => {
+                    bad = true
+                    h.break
+                },
+                false => {
+                    nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
+                    val := a.trim(a.substr(line, ci + 1, line.view().len - (ci + 1)).expect("http: oom"))
+                    hs[i - 1] = Header(
+                        name: nm,
+                        value: val,
+                    )
+                },
+            })
         })
     })
     bad.match ({ true => err(malformed("http: header line missing ':'")), false => ok(hs) })
@@ -311,12 +302,10 @@ build_request<A> = (a: MutPtr<A>, method: string_view, host: string_view, path: 
         sb = a.append_in(sb, hd.value).expect("http: oom")
         sb = a.crlf(sb)
     })
-    (body.view().len > 0).match ({
-        true => {
-            sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
-            sb = a.append_in(sb, a.integer(to_i64(body.view().len)).expect("http: oom").finish_in(a).expect("http: oom")).expect("http: oom")
-            sb = a.crlf(sb)
-        },
+    (body.view().len > 0).then({
+        sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
+        sb = a.append_in(sb, a.integer(to_i64(body.view().len)).expect("http: oom").finish_in(a).expect("http: oom")).expect("http: oom")
+        sb = a.crlf(sb)
     })
     sb = a.crlf(sb)    // blank line: end of headers
     sb = a.append_in(sb, body).expect("http: oom")

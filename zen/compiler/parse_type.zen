@@ -30,21 +30,17 @@ parse_err_kind := 0
 perr_set* = () void { parse_failed = 1 }
 // flag + record the failing token's source offset (first offset-bearing site wins).
 perr_set_at* = (off: i32) void {
-    (parse_err_off == 0).match ({
-        true => {
-            parse_err_off = off
-        },
+    (parse_err_off == 0).then({
+        parse_err_off = off
     })
     parse_failed = 1
 }
 // like perr_set_at, but tags the error kind as bad-binding (1) so parse_module plants the
 // `__bad_binding` sentinel and the checker reports `error[bad-binding]` instead of a generic KPARSE.
 perr_set_bad_at* = (off: i32) void {
-    (parse_err_off == 0).match ({
-        true => {
-            parse_err_off = off
-            parse_err_kind = 1
-        },
+    (parse_err_off == 0).then({
+        parse_err_off = off
+        parse_err_kind = 1
     })
     parse_failed = 1
 }
@@ -127,15 +123,11 @@ anon_has = (name: string_view) bool {
     found
 }
 register_anon* = (name: string_view, fields: [Field]) void {
-    (anon_n < anon_decls.len).match ({
-        true  => anon_has(name).match ({
-            true  => { },
-            false => {
-                anon_decls[anon_n] = sdef(name, fields)
-                anon_n = anon_n + 1
-            },
-        }),
-        false => { },
+    (anon_n < anon_decls.len).then({
+        (anon_has(name) == false).then({
+            anon_decls[anon_n] = sdef(name, fields)
+            anon_n = anon_n + 1
+        })
     })
 }
 // ── type tokens ──────────────────────────────────────────────────────────────────
@@ -310,14 +302,12 @@ parse_variant_payload* = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
     })
 }
 fill_payload_tys = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32) PEnd {
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return PEnd(
-                count: i,
-                next: pos,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(pos)
+        return PEnd(
+            count: i,
+            next: pos,
+        )
     })
     te := a.parse_ty(src, pos)
     buf[i] = field(a.payload_fname(i), te.ty)
@@ -325,7 +315,9 @@ fill_payload_tys = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field],
     src.is_comma(after.tok).match ({
         true  => a.fill_payload_tys(src, after.next, buf, i + 1),
         false => {
-            src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
+            (src.is_rparen(after.tok) == false).then({
+                perr_set_at(after.tok.start)
+            })
             PEnd(
                 count: i + 1,
                 next: after.next,
@@ -354,14 +346,12 @@ fill_anon_fields = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field],
 }
 fill_anon_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return PEnd(
-                count: i,
-                next: pos,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(pos)
+        return PEnd(
+            count: i,
+            next: pos,
+        )
     })
     nt := src.scan(pos)    // field name
     nm := a.lexeme(src, nt.tok)
@@ -462,14 +452,12 @@ parse_tyargs* = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyArgs {
     )
 }
 fill_tyargs = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PEnd {
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return PEnd(
-                count: i,
-                next: pos,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(pos)
+        return PEnd(
+            count: i,
+            next: pos,
+        )
     })    // `>`-terminated type list
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     te := a.parse_ty(src, pos)
@@ -507,14 +495,12 @@ fill_tys = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PE
 }
 fill_ty = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return PEnd(
-                count: i,
-                next: pos,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(pos)
+        return PEnd(
+            count: i,
+            next: pos,
+        )
     })
     te := a.parse_ty(src, pos)    // one parameter type
     buf[i] = te.ty
@@ -524,7 +510,9 @@ fill_ty = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PEn
         false => {
             // A function-type param list `(A, B) R` must close on ')'; a missing ')' is a parse error, not a
             // silent terminator (mirrors fill_payload_tys).
-            src.is_rparen(after.tok).match ({ false => perr_set_at(after.tok.start) })
+            (src.is_rparen(after.tok) == false).then({
+                perr_set_at(after.tok.start)
+            })
             PEnd(
                 count: i + 1,
                 next: after.next,
@@ -635,14 +623,12 @@ ellipsis_skip = (src: string_view, pos: i32) i32 {
 }
 fill_one = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).match ({
-        true => {
-            perr_set_at(pos)
-            return PEnd(
-                count: i,
-                next: pos,
-            )
-        },
+    (i >= buf.len).then({
+        perr_set_at(pos)
+        return PEnd(
+            count: i,
+            next: pos,
+        )
     })
     nt := src.scan(pos)    // param name
     nm := a.lexeme(src, nt.tok)
