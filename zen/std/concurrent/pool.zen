@@ -136,12 +136,15 @@ pool_actor_ref* = (raw: RawPtr<u8>) RawPtr<u8> {
 // drop a handle: decrement the Arc refcount (atomic -1). The thread whose decrement returns 0 holds the
 // LAST reference and frees the block + the mailbox it owns + its mutex — exactly once, no UAF, no leak.
 pool_actor_unref* = (raw: RawPtr<u8>) void {
-    (atomic_add_i64(raw, 0 - 1) == 0).match ({ true => {
-        a := actor_view(raw)
-        free(a.mbuf)
-        a.mbmu.destroy()
-        free(raw)
-    }, false => { } })
+    (atomic_add_i64(raw, 0 - 1) == 0).match ({
+        true  => {
+            a := actor_view(raw)
+            free(a.mbuf)
+            a.mbmu.destroy()
+            free(raw)
+        },
+        false => { },
+    })
 }
 // the spawner releases its reference (the symmetric counterpart of pool_spawn). Same as pool_actor_unref;
 // the name is kept for the existing call sites that "free" the actor after the pool has shut down.
@@ -203,10 +206,13 @@ rq_grow = (p: MutPtr<Pool>) void {
 }
 // copy live slot i (FIFO order from the old ring's head) into the new buffer's slot i.
 rq_copy = (p: MutPtr<Pool>, nbuf: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({ true => {
-        nbuf.offset(i * 8).store_i64(p.rqbuf.offset((p.rqhead + i) % p.rqcap * 8).load_i64())
-        rq_copy(p, nbuf, i + 1, n)
-    }, false => { } })
+    (i < n).match ({
+        true  => {
+            nbuf.offset(i * 8).store_i64(p.rqbuf.offset((p.rqhead + i) % p.rqcap * 8).load_i64())
+            rq_copy(p, nbuf, i + 1, n)
+        },
+        false => { },
+    })
 }
 rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
     a := p.rqbuf.offset(p.rqhead % p.rqcap * 8).load_i64().offset(0)
@@ -222,27 +228,36 @@ pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
     a := actor_view(actor)
     a.mbmu.lock()
     cur := actor_mb(a)
-    sent := cur.is_full().match ({ true => false, false => {
-        a.tail = cur.push(msg).tail
-        true
-    } })
+    sent := cur.is_full().match ({
+        true  => false,
+        false => {
+            a.tail = cur.push(msg).tail
+            true
+        },
+    })
     // flip scheduled false→true ONLY when we actually enqueued work; remember if WE won the transition.
     won := sent.match ({
-        true  => (a.sched == 0).match ({ true => {
-            a.sched = 1
-            true
-        }, false => false }),
+        true  => (a.sched == 0).match ({
+            true  => {
+                a.sched = 1
+                true
+            },
+            false => false,
+        }),
         false => false,
     })
     a.mbmu.unlock()
-    won.match ({ true => {
-        pool_actor_ref(actor)    // the run queue now OWNS a reference (the "scheduled" ref):
-        p.mu.lock()    // the actor cannot be freed while it is queued or running.
-        p.rq_push(actor)
-        p.live = p.live + 1
-        p.work_cv.signal()
-        p.mu.unlock()
-    }, false => { } })
+    won.match ({
+        true  => {
+            pool_actor_ref(actor)    // the run queue now OWNS a reference (the "scheduled" ref):
+            p.mu.lock()    // the actor cannot be freed while it is queued or running.
+            p.rq_push(actor)
+            p.live = p.live + 1
+            p.work_cv.signal()
+            p.mu.unlock()
+        },
+        false => { },
+    })
     sent
 }
 // drain up to QUANTUM messages, running `behavior` OUTSIDE the mailbox lock (so senders never block on
@@ -254,11 +269,14 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
             a.mbmu.lock()
             cur := actor_mb(a)
             has := cur.nonempty()
-            msg := has.match ({ true => {
-                m := cur.peek()
-                a.head = cur.advance().head
-                m
-            }, false => 0 })
+            msg := has.match ({
+                true  => {
+                    m := cur.peek()
+                    a.head = cur.advance().head
+                    m
+                },
+                false => 0,
+            })
             a.mbmu.unlock()
             has.match ({
                 true  => {
@@ -295,21 +313,24 @@ run_quantum = (p: MutPtr<Pool>, actor: RawPtr<u8>) i64 {
     processed := drain_batch(a, 0)
     a.mbmu.lock()
     remaining := a.tail - a.head
-    (remaining > 0).match ({ true => {
-        a.mbmu.unlock()    // still scheduled==1; give other actors a turn (fairness)
-        p.mu.lock()
-        p.rq_push(actor)
-        p.work_cv.signal()
-        p.mu.unlock()
-    }, false => {
-        a.sched = 0    // deschedule UNDER the mailbox lock (lost-wakeup fix)
-        a.mbmu.unlock()
-        p.mu.lock()
-        p.live = p.live - 1
-        (p.live == 0).match ({ true => p.done_cv.broadcast() })
-        p.mu.unlock()
-        pool_actor_unref(actor)
-    } })    // drop the run queue's "scheduled" ref (clone in pool_send);
+    (remaining > 0).match ({
+        true  => {
+            a.mbmu.unlock()    // still scheduled==1; give other actors a turn (fairness)
+            p.mu.lock()
+            p.rq_push(actor)
+            p.work_cv.signal()
+            p.mu.unlock()
+        },
+        false => {
+            a.sched = 0    // deschedule UNDER the mailbox lock (lost-wakeup fix)
+            a.mbmu.unlock()
+            p.mu.lock()
+            p.live = p.live - 1
+            (p.live == 0).match ({ true => p.done_cv.broadcast() })
+            p.mu.unlock()
+            pool_actor_unref(actor)
+        },
+    })    // drop the run queue's "scheduled" ref (clone in pool_send);
     // if this was the last handle, the actor frees here, safely.
     processed
 }
@@ -319,10 +340,13 @@ run_quantum = (p: MutPtr<Pool>, actor: RawPtr<u8>) i64 {
 pool_next_locked = (p: MutPtr<Pool>) RawPtr<u8> {
     (p.rqhead < p.rqtail).match ({
         true  => p.rq_pop(),
-        false => (p.stop != 0).match ({ true => null_ptr(), false => {
-            p.work_cv.wait(p.mu)    // atomically unlock mu, sleep, re-lock on wake
-            pool_next_locked(p)
-        } }),
+        false => (p.stop != 0).match ({
+            true  => null_ptr(),
+            false => {
+                p.work_cv.wait(p.mu)    // atomically unlock mu, sleep, re-lock on wake
+                pool_next_locked(p)
+            },
+        }),
     })
 }    // re-check predicate (guards spurious wakeups)
 pool_next = (p: MutPtr<Pool>) RawPtr<u8> {
@@ -335,12 +359,15 @@ pool_next = (p: MutPtr<Pool>) RawPtr<u8> {
 // worker writes its slot → no contention), repeat until shutdown.
 worker_loop = (p: MutPtr<Pool>, wid: i64) void {
     actor := pool_next(p)
-    is_null(actor).match ({ true => { }, false => {
-        n := run_quantum(p, actor)
-        slot := p.wstats.offset(wid * 8)
-        slot.store_i64(slot.load_i64() + n)
-        worker_loop(p, wid)
-    } })
+    is_null(actor).match ({
+        true  => { },
+        false => {
+            n := run_quantum(p, actor)
+            slot := p.wstats.offset(wid * 8)
+            slot.store_i64(slot.load_i64() + n)
+            worker_loop(p, wid)
+        },
+    })
 }
 // non-capturing pthread body: arg → [pool_block_ptr, worker_id]; rebuild the pool view and run the loop.
 worker_body = (arg: RawPtr<u8>) RawPtr<u8> {
@@ -386,35 +413,47 @@ pool_open* = (nworkers: i64, rqcap: i64) MutPtr<Pool> {
     p
 }
 zero_stats = (w: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({ true => {
-        w.offset(i * 8).store_i64(0)
-        zero_stats(w, i + 1, n)
-    }, false => { } })
+    (i < n).match ({
+        true  => {
+            w.offset(i * 8).store_i64(0)
+            zero_stats(w, i + 1, n)
+        },
+        false => { },
+    })
 }
 // spawn the worker pthreads. `handles` (i64[nworkers]) receives each JoinHandle.tid; `args`
 // (16 bytes/worker) holds each worker's [pool_raw, id] cell. Both are freed after join.
 start_workers = (pool_raw: RawPtr<u8>, handles: RawPtr<u8>, args: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({ true => {
-        ac := args.offset(i * 16)
-        ac.store_i64(pool_raw)
-        ac.offset(8).store_i64(i)
-        h := spawn(worker_body, ac)
-        handles.offset(i * 8).store_i64(h.tid)
-        start_workers(pool_raw, handles, args, i + 1, n)
-    }, false => { } })
+    (i < n).match ({
+        true  => {
+            ac := args.offset(i * 16)
+            ac.store_i64(pool_raw)
+            ac.offset(8).store_i64(i)
+            h := spawn(worker_body, ac)
+            handles.offset(i * 8).store_i64(h.tid)
+            start_workers(pool_raw, handles, args, i + 1, n)
+        },
+        false => { },
+    })
 }
 join_workers = (handles: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({ true => {
-        join(JoinHandle(tid: handles.offset(i * 8).load_i64().offset(0)))
-        join_workers(handles, i + 1, n)
-    }, false => { } })
+    (i < n).match ({
+        true  => {
+            join(JoinHandle(tid: handles.offset(i * 8).load_i64().offset(0)))
+            join_workers(handles, i + 1, n)
+        },
+        false => { },
+    })
 }
 // block the calling thread until the pool is quiescent (no scheduled actors). Caller holds p.mu.
 wait_quiescent = (p: MutPtr<Pool>) void {
-    (p.live == 0).match ({ true => { }, false => {
-        p.done_cv.wait(p.mu)
-        wait_quiescent(p)
-    } })
+    (p.live == 0).match ({
+        true  => { },
+        false => {
+            p.done_cv.wait(p.mu)
+            wait_quiescent(p)
+        },
+    })
 }
 // drain-to-quiescence shutdown: wait until all enqueued work is processed, flag stop, wake every parked
 // worker (the broadcast is under p.mu so it can't be lost), join the pthreads. After this returns the
@@ -442,10 +481,13 @@ pool_close* = (p: MutPtr<Pool>) void {
 // number of workers that processed at least one message (proof that work fanned across cores).
 workers_busy* = (p: MutPtr<Pool>) i64 { count_busy(p.wstats, 0, p.nworkers, 0) }
 count_busy = (w: RawPtr<u8>, i: i64, n: i64, acc: i64) i64 {
-    (i < n).match ({ true => count_busy(w, i + 1, n, (w.offset(i * 8).load_i64() > 0).match ({
-        true  => acc + 1,
+    (i < n).match ({
+        true  => count_busy(w, i + 1, n, (w.offset(i * 8).load_i64() > 0).match ({
+            true  => acc + 1,
+            false => acc,
+        })),
         false => acc,
-    })), false => acc })
+    })
 }
 // ── with_pool: the colorless parallel combinator (3rd driver, alongside with_sync/with_async) ──
 // Start M workers, run the SAME actor-spawning body across the pool, drain to quiescence, shut down,
@@ -482,8 +524,11 @@ drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
 pool_post* = (actor: RawPtr<u8>, msg: i64) bool {
     a := actor_view(actor)
     cur := actor_mb(a)
-    cur.is_full().match ({ true => false, false => {
-        a.tail = cur.push(msg).tail
-        true
-    } })
+    cur.is_full().match ({
+        true  => false,
+        false => {
+            a.tail = cur.push(msg).tail
+            true
+        },
+    })
 }

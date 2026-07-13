@@ -12,11 +12,14 @@ Arena*: {
         // Reject non-positive requests (mirrors Heap.acquire) and test the bound without
         // overflowing: `a.off + rounded` could wrap negative for a huge n and slip past a
         // naive `> a.cap` guard, so compare against the slack `a.cap - rounded` instead.
-        (n <= 0 || rounded < 0 || a.off > a.cap - rounded).match ({ true => null_ptr(), false => {
-            p := a.buf.offset(a.off)
-            a.off = a.off + rounded
-            p
-        } })
+        (n <= 0 || rounded < 0 || a.off > a.cap - rounded).match ({
+            true  => null_ptr(),
+            false => {
+                p := a.buf.offset(a.off)
+                a.off = a.off + rounded
+                p
+            },
+        })
     }
     reset = (a: MutPtr<Arena>) void { a.off = 0 }
     used = (a: Ptr<Arena>) i64 { a.off }
@@ -54,14 +57,20 @@ Arena.impl(Allocator, {
         // is in-bounds and preserves all of the caller's data (grow always asks for n > old size).
         old_off := a.off
         np := a.bump(n)
-        (np.is_null() || p.is_null()).match ({ true => np, false => {
-            avail := old_off - (to_i64(p) - to_i64(a.buf))
-            copy_len := (avail < n).match ({ true => avail, false => n })
-            (copy_len > 0).match ({ true => {
-                memcpy(np, p, copy_len)
-                np
-            }, false => np })
-        } })
+        (np.is_null() || p.is_null()).match ({
+            true  => np,
+            false => {
+                avail := old_off - (to_i64(p) - to_i64(a.buf))
+                copy_len := (avail < n).match ({ true => avail, false => n })
+                (copy_len > 0).match ({
+                    true  => {
+                        memcpy(np, p, copy_len)
+                        np
+                    },
+                    false => np,
+                })
+            },
+        })
     }
     release = (a: MutPtr<Arena>, p: RawPtr<u8>) void { }
 })

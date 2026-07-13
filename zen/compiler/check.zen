@@ -198,13 +198,16 @@ with_exp = (env: Env, t: Ty) Env {
 }
 clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
 let_exp = (env: Env, t: Ty) Env {
-    t.is_void_ty().match ({ true => env.clr_exp(), false => Env(
-        vars: env.vars,
-        decls: env.decls,
-        didx: env.didx,
-        exp: t,
-        a: env.a,
-    ) })
+    t.is_void_ty().match ({
+        true  => env.clr_exp(),
+        false => Env(
+            vars: env.vars,
+            decls: env.decls,
+            didx: env.didx,
+            exp: t,
+            a: env.a,
+        ),
+    })
 }
 // O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
 // remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
@@ -603,21 +606,27 @@ enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: strin
 }
 enum_inst_gen = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
     env.exp.match ({
-        .Generic(ge) => eq(ge.name, base).match ({ true => EnumInst(
-            base: base,
-            mty: ge.mangled,
-            targs: ge.args,
-        ), false => env.enum_inst_payload(g, base, variant, pty) }),
+        .Generic(ge) => eq(ge.name, base).match ({
+            true  => EnumInst(
+                base: base,
+                mty: ge.mangled,
+                targs: ge.args,
+            ),
+            false => env.enum_inst_payload(g, base, variant, pty),
+        }),
         _            => env.enum_inst_payload(g, base, variant, pty),
     })
 }
 enum_inst_of = (env: Env, base: string_view, variant: string_view, pty: Ty) EnumInst {
     g := env.decls.find_genenum(base)
-    eq(g.name, "").match ({ true => EnumInst(
-        base: base,
-        mty: base,
-        targs: no_tys(),
-    ), false => env.enum_inst_gen(g, base, variant, pty) })
+    eq(g.name, "").match ({
+        true  => EnumInst(
+            base: base,
+            mty: base,
+            targs: no_tys(),
+        ),
+        false => env.enum_inst_gen(g, base, variant, pty),
+    })
 }    // a non-generic enum
 enum_inst_mk = (env: Env, variant: string_view, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
 enum_inst_tag = (env: Env, variant: string_view) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
@@ -795,27 +804,30 @@ lam_body_targ_env = (env: Env, tparams: [Param], targs: [Ty], params: [Param], a
 lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
     pty.match ({
         .FnT(ft) => load(arg).match ({
-            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({ true => {
-                vars := env.vars
-                lm.params.loop((h, k, lp) {
-                    vars = env.a.vcons(lp.name, (k < ft.params.len).match ({
-                        true  => env.a.subst_ty_in(tparams, targs, ft.params[k]),
-                        false => tvoid(),
-                    }), vars)
-                })
-                env2 := Env(
-                    vars: vars,
-                    decls: env.decls,
-                    didx: env.didx,
-                    exp: tvoid(),
-                    a: env.a,
-                )
-                bty := env2.block_ty_from(lm.body, 0)
-                (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({
-                    true  => tvoid(),
-                    false => load(ft.ret).unify_ty(bty, tp),
-                })
-            }, false => tvoid() }),
+            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({
+                true  => {
+                    vars := env.vars
+                    lm.params.loop((h, k, lp) {
+                        vars = env.a.vcons(lp.name, (k < ft.params.len).match ({
+                            true  => env.a.subst_ty_in(tparams, targs, ft.params[k]),
+                            false => tvoid(),
+                        }), vars)
+                    })
+                    env2 := Env(
+                        vars: vars,
+                        decls: env.decls,
+                        didx: env.didx,
+                        exp: tvoid(),
+                        a: env.a,
+                    )
+                    bty := env2.block_ty_from(lm.body, 0)
+                    (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({
+                        true  => tvoid(),
+                        false => load(ft.ret).unify_ty(bty, tp),
+                    })
+                },
+                false => tvoid(),
+            }),
             _           => tvoid(),
         }),
         _        => tvoid(),
@@ -847,20 +859,26 @@ dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_v
     is_empty(found).match ({ true => fn, false => found })
 }
 dispatch_name = (env: Env, c: CallData) string_view {
-    (c.args.len > 0).match ({ true => {
-        rty := env.infer_expr(c.args[0].addr())
-        tyname := rty.dispatch_recv_name()
-        // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
-        // impl scan entirely (the common case for primitive/struct receivers).
-        dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
-            true  => c.fn,
-            false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname),
-        })
-        eq(dn, c.fn).match ({ true => {
-            cs := env.alias_ufcs_candidates(c.fn, rty)
-            (cs.count == 1).match ({ true => cs.first, false => c.fn })
-        }, false => dn })
-    }, false => c.fn })
+    (c.args.len > 0).match ({
+        true  => {
+            rty := env.infer_expr(c.args[0].addr())
+            tyname := rty.dispatch_recv_name()
+            // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
+            // impl scan entirely (the common case for primitive/struct receivers).
+            dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
+                true  => c.fn,
+                false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname),
+            })
+            eq(dn, c.fn).match ({
+                true  => {
+                    cs := env.alias_ufcs_candidates(c.fn, rty)
+                    (cs.count == 1).match ({ true => cs.first, false => c.fn })
+                },
+                false => dn,
+            })
+        },
+        false => c.fn,
+    })
 }
 dispatch_recv_name = (t: Ty) string_view {
     t.match ({
@@ -1041,11 +1059,14 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
             }),
             _            => "",
         })
-        is_empty(hit).match ({ true => { }, false => {
-            second = (cnt == 1).match ({ true => hit, false => second })
-            first = (cnt == 0).match ({ true => hit, false => first })
-            cnt = cnt + 1
-        } })
+        is_empty(hit).match ({
+            true  => { },
+            false => {
+                second = (cnt == 1).match ({ true => hit, false => second })
+                first = (cnt == 0).match ({ true => hit, false => first })
+                cnt = cnt + 1
+            },
+        })
     })
     AliasCands(
         count: cnt,
@@ -1299,11 +1320,14 @@ resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: string_view) Ptr<Ex
 // payload constructor with the baked-in constant; otherwise the bare tag.
 emit_tag_or_default = (a: MutPtr<Malloc>, env: Env, base: string_view, mty: string_view, targs: [Ty], variant: string_view) Ptr<Expr> {
     def := env.didx.idx_variant_default(env.decls, base, variant)
-    def.is_expr_null().match ({ true => a.cenode(mktagg(base, mty, targs, variant)), false => {
-        p := a.resolve_expr(env.clr_exp(), def)
-        p2 := a.restamp_enum_payload(env, base, targs, variant, p)
-        a.cenode(mkenumg(base, mty, targs, variant, p2))
-    } })
+    def.is_expr_null().match ({
+        true  => a.cenode(mktagg(base, mty, targs, variant)),
+        false => {
+            p := a.resolve_expr(env.clr_exp(), def)
+            p2 := a.restamp_enum_payload(env, base, targs, variant, p)
+            a.cenode(mkenumg(base, mty, targs, variant, p2))
+        },
+    })
 }
 // Keep concrete slice element types across re-resolve.
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty { existing.is_void_ty().match ({
@@ -1391,13 +1415,16 @@ exp_targs_for = (exp: Ty, base: string_view) [Ty] {
 // else infer each tparam by unifying its declared field types against the supplied field-value types.
 bare_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, inits: [FieldInit]) [Ty] {
     exp_args := env.exp.exp_targs_for(gsd.name)
-    (exp_args.len == gsd.tparams.len).match ({ true => exp_args, false => {
-        buf := a.tbuf(gsd.tparams.len)
-        gsd.tparams.loop((h, i, tp) {
-            buf[i] = env.struct_targ_one(gsd.fields, inits, tp.name)
-        })
-        buf
-    } })
+    (exp_args.len == gsd.tparams.len).match ({
+        true  => exp_args,
+        false => {
+            buf := a.tbuf(gsd.tparams.len)
+            gsd.tparams.loop((h, i, tp) {
+                buf[i] = env.struct_targ_one(gsd.fields, inits, tp.name)
+            })
+            buf
+        },
+    })
 }
 // A bare `Store(state: …)` literal of a GENERIC struct carries no type args; infer them so the instance
 // is mangled (mty) and discovered/emitted by compiler.mono, exactly like the explicit `Store<…>(…)` form.
@@ -1537,13 +1564,16 @@ gsubst = (pty: Ty, env: Env, g: GenericData) Ty {
     sub.match ({
         .Named(n) => {
             gsd := env.decls.gstruct_of(n)
-            is_empty(gsd.name).match ({ true => sub, false => {
-                tys := env.a.tbuf(gsd.tparams.len)
-                gsd.tparams.loop((h, i, tp) {
-                    tys[i] = env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name))
-                })
-                tgeneric(n, tys, env.a.mangle_str_in(n, tys))
-            } })
+            is_empty(gsd.name).match ({
+                true  => sub,
+                false => {
+                    tys := env.a.tbuf(gsd.tparams.len)
+                    gsd.tparams.loop((h, i, tp) {
+                        tys[i] = env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name))
+                    })
+                    tgeneric(n, tys, env.a.mangle_str_in(n, tys))
+                },
+            })
         },
         _         => sub,
     })
@@ -1655,10 +1685,13 @@ vararg_elem = (t: Ty) Ty {
 }
 // expected type for arg i: the element type T for any arg in a variadic param's collected tail.
 arg_exp_v = (ps: [Param], i: i32) Ty {
-    last_variadic(ps).match ({ true => {
-        fixed := ps.len - 1
-        (i < fixed).match ({ true => ps.arg_exp(i), false => ps[fixed].ty.vararg_elem() })
-    }, false => ps.arg_exp(i) })
+    last_variadic(ps).match ({
+        true  => {
+            fixed := ps.len - 1
+            (i < fixed).match ({ true => ps.arg_exp(i), false => ps[fixed].ty.vararg_elem() })
+        },
+        false => ps.arg_exp(i),
+    })
 }
 // resolve_module re-runs resolve_decl several times (resolve/inline passes), so collection must be
 // IDEMPOTENT: a call already lowered has exactly param-count args with a SliceLit in the variadic
@@ -1680,26 +1713,36 @@ already_collected = (ps: [Param], args: [Expr]) bool {
 }
 // rewrite `f(a, b, c)` with `f = (x: X, ys: ...Y)` into `f(a, [b, c])`: surplus args → one SliceLit.
 collect_varargs = (a: MutPtr<Malloc>, ps: [Param], args: [Expr]) [Expr] {
-    (last_variadic(ps) && ps.already_collected(args) == false).match ({ true => {
-        fixed := ps.len - 1
-        (args.len < fixed).match ({ true => args, false => {
-            elem := ps[fixed].ty.vararg_elem()    // too few args: let the validator report arity
-            vbuf := a.cebuf(args.len - fixed)
-            args.loop((h, j, e) {
-                (j >= fixed).match ({ true => {
-                    vbuf[j - fixed] = e
-                } })
+    (last_variadic(ps) && ps.already_collected(args) == false).match ({
+        true  => {
+            fixed := ps.len - 1
+            (args.len < fixed).match ({
+                true  => args,
+                false => {
+                    elem := ps[fixed].ty.vararg_elem()    // too few args: let the validator report arity
+                    vbuf := a.cebuf(args.len - fixed)
+                    args.loop((h, j, e) {
+                        (j >= fixed).match ({
+                            true => {
+                                vbuf[j - fixed] = e
+                            },
+                        })
+                    })
+                    out := a.cebuf(fixed + 1)
+                    args.loop((h, j, e) {
+                        (j < fixed).match ({
+                            true => {
+                                out[j] = e
+                            },
+                        })
+                    })
+                    out[fixed] = slit(elem, vbuf)
+                    out
+                },
             })
-            out := a.cebuf(fixed + 1)
-            args.loop((h, j, e) {
-                (j < fixed).match ({ true => {
-                    out[j] = e
-                } })
-            })
-            out[fixed] = slit(elem, vbuf)
-            out
-        } })
-    }, false => args })
+        },
+        false => args,
+    })
 }
 // The expected type for argument `i` of a (generic or plain) call. For a generic fn, the param type may
 // name a tparam (`x: T`); substituting the inferred type args gives the CONCRETE expected type, which
@@ -1733,9 +1776,11 @@ is_fn_field_call = (env: Env, dn: string_view, args: [Expr]) bool {
 rewrite_fn_field_call = (a: MutPtr<Malloc>, env: Env, field: string_view, buf: [Expr]) Ptr<Expr> {
     rest := a.cebuf(buf.len - 1)
     buf.loop((h, i, e) {
-        (i > 0).match ({ true => {
-            rest[i - 1] = e
-        } })
+        (i > 0).match ({
+            true => {
+                rest[i - 1] = e
+            },
+        })
     })
     letst := slet("__zclos_recv", a.cenode(member(buf[0].addr(), field)))
     callx := a.cenode(call("__zclos_recv", rest))
@@ -1772,21 +1817,27 @@ is_auto_ref_lvalue = (e: Expr) bool {
     })
 }
 needs_ufcs_auto_ref = (env: Env, ps: [Param], arg0: Expr) bool {
-    (ps.len > 0 && ps[0].ty.is_nonnull_ptr_ty()).match ({ true => {
-        want := ps[0].ty.pointee_of()
-        got := env.infer_expr(arg0.addr())
-        (want.is_void_ty() || got.is_void_ty() || got.is_ptr_ty_g()).match ({
-            true  => false,
-            false => got.ty_eq(want) && arg0.is_auto_ref_lvalue(),
-        })
-    }, false => false })
+    (ps.len > 0 && ps[0].ty.is_nonnull_ptr_ty()).match ({
+        true  => {
+            want := ps[0].ty.pointee_of()
+            got := env.infer_expr(arg0.addr())
+            (want.is_void_ty() || got.is_void_ty() || got.is_ptr_ty_g()).match ({
+                true  => false,
+                false => got.ty_eq(want) && arg0.is_auto_ref_lvalue(),
+            })
+        },
+        false => false,
+    })
 }
 ufcs_auto_ref_arg0 = (a: MutPtr<Malloc>, env: Env, ps: [Param], buf: [Expr], pos: i32) void {
-    (buf.len > 0 && env.needs_ufcs_auto_ref(ps, buf[0])).match ({ true => {
-        ab := a.cebuf(1)
-        ab[0] = buf[0]
-        buf[0] = load(a.cenode(call_at("addr", ab, pos)))
-    }, false => { } })
+    (buf.len > 0 && env.needs_ufcs_auto_ref(ps, buf[0])).match ({
+        true  => {
+            ab := a.cebuf(1)
+            ab[0] = buf[0]
+            buf[0] = load(a.cenode(call_at("addr", ab, pos)))
+        },
+        false => { },
+    })
 }
 // `g(args)` where `g` is a LOCAL of by-value closure-struct type (lower_closures generated a struct
 // `__clos_K` for it plus a call fn `__clos_K_call`) is an indirect closure call. Return the call-fn
@@ -1842,20 +1893,26 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
 // for the never-instantiated template itself — it stays the bare template name. This guard keeps
 // resolve_call idempotent across passes and unchanged for every non-recursive call.
 rec_dispatch = (env: Env, dn: string_view, fn: Func, args: [Expr], etargs: [Ty]) string_view {
-    (eq(fn.name, dn) && fn.params.len == args.len && fn.no_inline_gen_f()).match ({ true => {
-        m := env.a.mangle_semantic_in(dn, env.call_targs(fn, args, etargs))
-        (env.didx.func_idx.get(m, 0 - 1) >= 0).match ({ true => m, false => dn })
-    }, false => dn })
+    (eq(fn.name, dn) && fn.params.len == args.len && fn.no_inline_gen_f()).match ({
+        true  => {
+            m := env.a.mangle_semantic_in(dn, env.call_targs(fn, args, etargs))
+            (env.didx.func_idx.get(m, 0 - 1) >= 0).match ({ true => m, false => dn })
+        },
+        false => dn,
+    })
 }
 // Arm payload binds get their concrete payload type.
 arm_env* = (a: MutPtr<Malloc>, env: Env, t: Ty, ar: ArmData) Env {
-    eq(ar.bind, "").match ({ true => env, false => Env(
-        vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars),
-        decls: env.decls,
-        didx: env.didx,
-        exp: env.exp,
-        a: env.a,
-    ) })
+    eq(ar.bind, "").match ({
+        true  => env,
+        false => Env(
+            vars: a.vcons(ar.bind, env.subj_variant_payload(t, ar.variant), env.vars),
+            decls: env.decls,
+            didx: env.didx,
+            exp: env.exp,
+            a: env.a,
+        ),
+    })
 }
 resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
@@ -1945,14 +2002,17 @@ env_over = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt], upto: i64) Env {
 }
 relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
     n := stmts.len
-    (n == 0).match ({ true => stmts, false => {
-        buf := a.sbuf(n)
-        envT := a.env_over(env, stmts, n - 1)
-        stmts.loop((h, i, st) {
-            buf[i] = (i == n - 1).match ({ true => a.relower_tail_stmt(envT, st), false => st })
-        })
-        buf
-    } })
+    (n == 0).match ({
+        true  => stmts,
+        false => {
+            buf := a.sbuf(n)
+            envT := a.env_over(env, stmts, n - 1)
+            stmts.loop((h, i, st) {
+                buf[i] = (i == n - 1).match ({ true => a.relower_tail_stmt(envT, st), false => st })
+            })
+            buf
+        },
+    })
 }
 tag_const* = (a: MutPtr<Malloc>, ename: string_view, variant: string_view) string_view {
     s := a.gstr_string(64)
@@ -1963,16 +2023,22 @@ tag_const* = (a: MutPtr<Malloc>, ename: string_view, variant: string_view) strin
 }
 subj_tag = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     out := a.cenode(member(subj, "tag"))
-    ptr.match ({ true => {
-        out = a.cenode(arrow(subj, "tag"))
-    }, false => { } })
+    ptr.match ({
+        true  => {
+            out = a.cenode(arrow(subj, "tag"))
+        },
+        false => { },
+    })
     out
 }
 subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: string_view, ptr: bool) Ptr<Expr> {
     u := a.cenode(member(subj, "u"))
-    ptr.match ({ true => {
-        u = a.cenode(arrow(subj, "u"))
-    }, false => { } })
+    ptr.match ({
+        true  => {
+            u = a.cenode(arrow(subj, "u"))
+        },
+        false => { },
+    })
     a.cenode(member(u, variant))
 }
 arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
@@ -2022,9 +2088,12 @@ lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
     t := env.infer_expr(m.subj)
     stmts := a.lower_match_arms(env, t, m, 0)
     out := sexpr(a.cenode(block(stmts)))
-    (stmts.len == 1).match ({ true => {
-        out = stmts[0]
-    }, false => { } })
+    (stmts.len == 1).match ({
+        true  => {
+            out = stmts[0]
+        },
+        false => { },
+    })
     out
 }
 // Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
@@ -2043,11 +2112,14 @@ cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
 lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
     out := sexpr(e)
     load(e).match ({
-        .Match(m) => env.decls.match_lowerable(m).match ({ true => {
-            out = a.lower_match_stmt(env, m)
-        }, false => {
-            out = sexpr(e)
-        } }),
+        .Match(m) => env.decls.match_lowerable(m).match ({
+            true  => {
+                out = a.lower_match_stmt(env, m)
+            },
+            false => {
+                out = sexpr(e)
+            },
+        }),
         .Cond(d)  => {
             out = a.lower_cond_stmt(env, d)
         },
@@ -2123,11 +2195,14 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) 
                     true  => {
                         out = sexpr(a.resolve_expr(env, e))
                     },
-                    false => vtail.match ({ true => {
-                        out = sexpr(a.resolve_expr(env.clr_exp(), e))
-                    }, false => {
-                        out = a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))
-                    } }),
+                    false => vtail.match ({
+                        true  => {
+                            out = sexpr(a.resolve_expr(env.clr_exp(), e))
+                        },
+                        false => {
+                            out = a.lower_stmt_expr(env, a.resolve_expr(env.clr_exp(), e))
+                        },
+                    }),
                 }),
                 false => {
                     out = a.lower_stmt_expr(env, a.resolve_expr(env.disc_env(e), e))
@@ -2471,11 +2546,14 @@ orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]
 orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
     r := a.orx_rw_args(hbuf, base, n, c.args)
     ncall := a.recall(c, c.fn, r.args)
-    is_orx_hoist(c).match ({ true => {
-        nm := a.orx_name(base + r.n, c.pos)
-        hbuf[r.n] = slett_at(nm, tvoid(), ncall, c.pos)
-        orx_rw_mk(a.cenode(vref_at(nm, c.pos)), r.n + 1)
-    }, false => orx_rw_mk(ncall, r.n) })
+    is_orx_hoist(c).match ({
+        true  => {
+            nm := a.orx_name(base + r.n, c.pos)
+            hbuf[r.n] = slett_at(nm, tvoid(), ncall, c.pos)
+            orx_rw_mk(a.cenode(vref_at(nm, c.pos)), r.n + 1)
+        },
+        false => orx_rw_mk(ncall, r.n),
+    })
 }
 // a short-circuit rhs is conditionally evaluated: leave it for resolve_orx to wrap in place.
 orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
@@ -2607,19 +2685,22 @@ fill_orx = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i
         env2 = a.extend_env(a.extend_env(a.extend_env(env2, ls[0]), ls[1]), ls[2])
         oo = oo + 3
     })
-    st2.let_is_or_return().match ({ true => {
-        ls := a.lower_or_return(env2, st2)
-        buf[oo] = ls[0]
-        buf[oo + 1] = ls[1]
-        buf[oo + 2] = ls[2]
-        env2 = a.extend_env(a.extend_env(a.extend_env(env2, ls[0]), ls[1]), ls[2])
-        oo = oo + 3
-    }, false => {
-        resolved := a.resolve_stmt(env2, st2, i == body.len - 1, vtail)
-        buf[oo] = resolved
-        env2 = a.extend_env(env2, resolved)
-        oo = oo + 1
-    } })
+    st2.let_is_or_return().match ({
+        true  => {
+            ls := a.lower_or_return(env2, st2)
+            buf[oo] = ls[0]
+            buf[oo + 1] = ls[1]
+            buf[oo + 2] = ls[2]
+            env2 = a.extend_env(a.extend_env(a.extend_env(env2, ls[0]), ls[1]), ls[2])
+            oo = oo + 3
+        },
+        false => {
+            resolved := a.resolve_stmt(env2, st2, i == body.len - 1, vtail)
+            buf[oo] = resolved
+            env2 = a.extend_env(env2, resolved)
+            oo = oo + 1
+        },
+    })
     a.fill_stmts(env2, body, buf, i + 1, oo, vtail)
 }
 fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
@@ -2711,17 +2792,23 @@ pidx = (params: [Param], name: string_view, found: i32, i: i32) i32 {
 param_index = (params: [Param], name: string_view) i32 { params.pidx(name, 0 - 1, 0) }
 hide_param = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
     idx := params.param_index(name)
-    (idx < 0).match ({ true => params, false => {
-        buf := a.pbuf(params.len)
-        params.loop((h, i, p) {
-            buf[i] = eq(p.name, name).match ({ true => Param(
-                name: "",
-                ty: p.ty,
-                variadic: p.variadic,
-            ), false => p })
-        })
-        buf
-    } })
+    (idx < 0).match ({
+        true  => params,
+        false => {
+            buf := a.pbuf(params.len)
+            params.loop((h, i, p) {
+                buf[i] = eq(p.name, name).match ({
+                    true  => Param(
+                        name: "",
+                        ty: p.ty,
+                        variadic: p.variadic,
+                    ),
+                    false => p,
+                })
+            })
+            buf
+        },
+    })
 }
 local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String { (n <= 0).match ({
     true  => s,
@@ -2977,9 +3064,12 @@ lit_pins = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], c
         (i < cargs.len && cargs[i].addr().is_lit_numeric() && p.ty.ty_mentions_any(tparams)).match ({
             true  => {
                 t := a.subst_ty_in(tparams, targs, p.ty)
-                (t.is_void_ty() || t.ty_mentions_any(tparams)).match ({ true => { }, false => {
-                    buf[i] = t
-                } })
+                (t.is_void_ty() || t.ty_mentions_any(tparams)).match ({
+                    true  => { },
+                    false => {
+                        buf[i] = t
+                    },
+                })
             },
             false => { },
         })
@@ -3037,14 +3127,20 @@ needs_early_lift = (stmts: [Stmt]) bool {
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r) => {
-                (i != n - 1).match ({ true => {
-                    found = true
-                }, false => { } })
+                (i != n - 1).match ({
+                    true  => {
+                        found = true
+                    },
+                    false => { },
+                })
             },
             .If(f)     => {
-                (f.then.body_has_return() || f.els.body_has_return()).match ({ true => {
-                    found = true
-                }, false => { } })
+                (f.then.body_has_return() || f.els.body_has_return()).match ({
+                    true  => {
+                        found = true
+                    },
+                    false => { },
+                })
             },
             _          => { },
         })
@@ -3066,9 +3162,12 @@ cat_stmts = (a: MutPtr<Malloc>, xs: [Stmt], ys: [Stmt]) [Stmt] {
 stmt_tail = (a: MutPtr<Malloc>, xs: [Stmt]) [Stmt] {
     buf := a.sbuf(xs.len - 1)
     xs.loop((h, i, s) {
-        (i > 0).match ({ true => {
-            buf[i - 1] = s
-        }, false => { } })
+        (i > 0).match ({
+            true  => {
+                buf[i - 1] = s
+            },
+            false => { },
+        })
     })
     buf
 }
@@ -3140,9 +3239,12 @@ xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty,
 }
 xform_arm_env = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: string_view, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
     out := env
-    eq(ar.bind, "").match ({ true => { }, false => {
-        out = a.vcons(ar.bind, a.xform_arm_payload(decls, idx, subj, ename, ar), env)
-    } })
+    eq(ar.bind, "").match ({
+        true  => { },
+        false => {
+            out = a.vcons(ar.bind, a.xform_arm_payload(decls, idx, subj, ename, ar), env)
+        },
+    })
     out
 }
 xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: string_view, arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [ArmData] {
@@ -3151,11 +3253,14 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
         bind := ""
         ps := params
         xs := fargs
-        eq(ar.bind, "").match ({ true => { }, false => {
-            bind = a.local_name_at(ar.bind, env, params.len)
-            ps = a.add_subst_param(params, ar.bind)
-            xs = a.add_subst_arg(fargs, bind)
-        } })
+        eq(ar.bind, "").match ({
+            true  => { },
+            false => {
+                bind = a.local_name_at(ar.bind, env, params.len)
+                ps = a.add_subst_param(params, ar.bind)
+                xs = a.add_subst_arg(fargs, bind)
+            },
+        })
         br := arm(ar.variant, bind, ar.body)
         aenv := a.xform_arm_env(decls, idx, subj, ename, br, env)
         g := is_expr_null(ar.guard).match ({
@@ -3546,20 +3651,23 @@ lam_body_targ = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Para
 lam_body_one = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], pty: Ty, carg: Ptr<Expr>, tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     pty.match ({
         .FnT(ft) => load(carg).match ({
-            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({ true => {
-                e2 := env
-                lm.params.loop((h, k, lp) {
-                    e2 = a.vcons(lp.name, (k < ft.params.len).match ({
-                        true  => a.subst_ty_in(tparams, targs, ft.params[k]),
-                        false => tvoid(),
-                    }), e2)
-                })
-                bty := a.light_block_ty_from(lm.body, e2, decls, idx, 0)
-                (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({
-                    true  => tvoid(),
-                    false => load(ft.ret).unify_ty(bty, tp),
-                })
-            }, false => tvoid() }),
+            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({
+                true  => {
+                    e2 := env
+                    lm.params.loop((h, k, lp) {
+                        e2 = a.vcons(lp.name, (k < ft.params.len).match ({
+                            true  => a.subst_ty_in(tparams, targs, ft.params[k]),
+                            false => tvoid(),
+                        }), e2)
+                    })
+                    bty := a.light_block_ty_from(lm.body, e2, decls, idx, 0)
+                    (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({
+                        true  => tvoid(),
+                        false => load(ft.ret).unify_ty(bty, tp),
+                    })
+                },
+                false => tvoid(),
+            }),
             _           => tvoid(),
         }),
         _        => tvoid(),
@@ -3582,53 +3690,62 @@ impl_trait_targ = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tparams: [P
     found
 }
 impl_trait_targ_of = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tyname: string_view, tp: string_view) Ty {
-    is_empty(tyname).match ({ true => tvoid(), false => {
-        found := tvoid()
-        decls.loop((h, i, d) {
-            found = found.is_void_ty().match ({
-                true  => d.match ({
-                    .DImpl(im) => eq(im.ty, tyname).match ({
-                        true  => a.impl_trait_solve(decls, idx, im, tp),
-                        false => tvoid(),
+    is_empty(tyname).match ({
+        true  => tvoid(),
+        false => {
+            found := tvoid()
+            decls.loop((h, i, d) {
+                found = found.is_void_ty().match ({
+                    true  => d.match ({
+                        .DImpl(im) => eq(im.ty, tyname).match ({
+                            true  => a.impl_trait_solve(decls, idx, im, tp),
+                            false => tvoid(),
+                        }),
+                        _          => tvoid(),
                     }),
-                    _          => tvoid(),
-                }),
-                false => found,
+                    false => found,
+                })
             })
-        })
-        found
-    } })
+            found
+        },
+    })
 }
 impl_trait_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, tp: string_view) Ty {
     g := decls.gstruct_of(im.trname)
-    (is_empty(g.name) || g.tparams.has_tparam(tp) == false).match ({ true => tvoid(), false => {
-        found := tvoid()
-        g.fields.loop((h, i, f) {
-            found = found.is_void_ty().match ({
-                true  => a.impl_method_solve(decls, idx, im, f, tp),
-                false => found,
+    (is_empty(g.name) || g.tparams.has_tparam(tp) == false).match ({
+        true  => tvoid(),
+        false => {
+            found := tvoid()
+            g.fields.loop((h, i, f) {
+                found = found.is_void_ty().match ({
+                    true  => a.impl_method_solve(decls, idx, im, f, tp),
+                    false => found,
+                })
             })
-        })
-        found
-    } })
+            found
+        },
+    })
 }
 impl_method_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, f: Field, tp: string_view) Ty {
     f.ty.match ({
         .FnT(ft) => {
             mf := idx.idx_func(decls, a.impl_cname_in(im.trname, im.ty, f.name))
-            is_empty(mf.name).match ({ true => tvoid(), false => {
-                found := load(ft.ret).unify_ty(mf.ret, tp)
-                ft.params.loop((h, j, pt) {
-                    found = found.is_void_ty().match ({
-                        true  => (j < mf.params.len).match ({
-                            true  => pt.unify_ty(mf.params[j].ty, tp),
+            is_empty(mf.name).match ({
+                true  => tvoid(),
+                false => {
+                    found := load(ft.ret).unify_ty(mf.ret, tp)
+                    ft.params.loop((h, j, pt) {
+                        found = found.is_void_ty().match ({
+                            true  => (j < mf.params.len).match ({
+                                true  => pt.unify_ty(mf.params[j].ty, tp),
+                                false => found,
+                            }),
                             false => found,
-                        }),
-                        false => found,
+                        })
                     })
-                })
-                found
-            } })
+                    found
+                },
+            })
         },
         _        => tvoid(),
     })
@@ -3864,9 +3981,12 @@ xform_match = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: MatchData, p
     st := subj.light_ty(a, env, decls, idx)
     arms := a.xform_arms(decls, idx, st, m.ename, m.arms, params, fargs, env, exp)
     out := a.cenode(ematch(subj, m.ename, arms))
-    m.ptr.match ({ true => {
-        out = a.cenode(ematchp(subj, m.ename, arms))
-    }, false => { } })
+    m.ptr.match ({
+        true  => {
+            out = a.cenode(ematchp(subj, m.ename, arms))
+        },
+        false => { },
+    })
     out
 }
 xform_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
@@ -3985,9 +4105,12 @@ xform_let_ext = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], id
     st.match ({
         .Let(l) => {
             ty := l.ty
-            l.ty.is_void_ty().match ({ true => {
-                ty = l.value.light_ty(a, env, decls, idx)
-            }, false => { } })
+            l.ty.is_void_ty().match ({
+                true  => {
+                    ty = l.value.light_ty(a, env, decls, idx)
+                },
+                false => { },
+            })
             out = a.vcons(a.local_name_at(l.name, env, params.len), ty, env)
         },
         _       => { },
@@ -4027,9 +4150,12 @@ xform_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], pa
     xs := fargs
     body.loop((h, i, st) {
         want := tvoid()
-        (i == body.len - 1).match ({ true => {
-            want = exp
-        }, false => { } })
+        (i == body.len - 1).match ({
+            true  => {
+                want = exp
+            },
+            false => { },
+        })
         buf[i] = a.xform_stmt(decls, idx, st, ps, xs, e, want)
         e = a.xform_let_ext(e, st, decls, idx, ps)
         xs = a.xform_arg_shadow(decls, idx, xs, st, ps, e)
@@ -4137,22 +4263,25 @@ emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [D
 }
 expand_defaults = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     extra := decls.default_expansion_count()
-    (extra == 0).match ({ true => decls, false => {
-        buf := a.dbuf(decls.len + extra)
-        decls.loop((h, i, d) {
-            buf[i] = d
-        })
-        k := decls.len
-        decls.loop((h, i, d) {
-            d.match ({
-                .DTraitDefault(td) => {
-                    k = a.emit_defaults_for(decls, td, buf, k)
-                },
-                _                  => { },
+    (extra == 0).match ({
+        true  => decls,
+        false => {
+            buf := a.dbuf(decls.len + extra)
+            decls.loop((h, i, d) {
+                buf[i] = d
             })
-        })
-        buf
-    } })
+            k := decls.len
+            decls.loop((h, i, d) {
+                d.match ({
+                    .DTraitDefault(td) => {
+                        k = a.emit_defaults_for(decls, td, buf, k)
+                    },
+                    _                  => { },
+                })
+            })
+            buf
+        },
+    })
 }
 // Resolve module: defaults, resolve, inline templates, then re-resolve concrete inline residue.
 // Lambdas splice bodies back into their caller, so that re-resolve can expose more template calls
@@ -4539,9 +4668,11 @@ rc_tys_depth = (ts: [Ty]) i32 {
 rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     // a polymorphic-recursive self-call (deeper targs each step) would grow the worklist forever; drop
     // the absurdly-deep instance (a well-formed one is shallow) and never write past the buffer.
-    (1 + g.args.rc_tys_depth() > 24).match ({ true => {
-        return cnt
-    } })
+    (1 + g.args.rc_tys_depth() > 24).match ({
+        true => {
+            return cnt
+        },
+    })
     (cnt >= buf.len).match ({
         true => panic("zenc: too many recursive-generic fn instances (rc_gbuf cap; raise it in compiler.check)"),
     })
@@ -4602,15 +4733,21 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
     c2 := env.rc_col_es(buf, cnt, c.args)
     dn := env.dispatch_name(c)
     f := env.env_func(dn)
-    (eq(f.name, dn) && f.params.len == c.args.len && f.no_inline_gen_f()).match ({ true => {
-        targs := env.call_targs(f, c.args, c.targs)
-        m := env.a.mangle_semantic_in(dn, targs)
-        buf.rc_has(c2, m).match ({ true => c2, false => buf.rc_add(c2, GenericData(
-            name: dn,
-            args: targs,
-            mangled: m,
-        )) })
-    }, false => c2 })
+    (eq(f.name, dn) && f.params.len == c.args.len && f.no_inline_gen_f()).match ({
+        true  => {
+            targs := env.call_targs(f, c.args, c.targs)
+            m := env.a.mangle_semantic_in(dn, targs)
+            buf.rc_has(c2, m).match ({
+                true  => c2,
+                false => buf.rc_add(c2, GenericData(
+                    name: dn,
+                    args: targs,
+                    mangled: m,
+                )),
+            })
+        },
+        false => c2,
+    })
 }
 rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
     load(e).match ({
@@ -4726,20 +4863,25 @@ mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     )
     buf := a.rc_gbuf(4096)
     cnt := base.rc_expand(buf, base.rc_seed(buf, 0), 0)
-    (cnt == 0).match ({ true => decls, false => {
-        out := a.dbuf(decls.len + cnt)
-        decls.loop((h, i, d) {
-            out[i] = d
-        })
-        k := decls.len
-        buf.loop((h, i, g) {
-            (i < cnt).match ({ true => {
-                out[k] = base.rc_gen(g)
-                k = k + 1
-            } })
-        })
-        slice(out.ptr, k)
-    } })
+    (cnt == 0).match ({
+        true  => decls,
+        false => {
+            out := a.dbuf(decls.len + cnt)
+            decls.loop((h, i, d) {
+                out[i] = d
+            })
+            k := decls.len
+            buf.loop((h, i, g) {
+                (i < cnt).match ({
+                    true => {
+                        out[k] = base.rc_gen(g)
+                        k = k + 1
+                    },
+                })
+            })
+            slice(out.ptr, k)
+        },
+    })
 }
 // ── M1b: lift a NON-CAPTURING lambda LITERAL in a value position to a top-level function ──────────
 // A lambda stored in a struct field or returned can't be inline-spliced; lift its body to a generated
@@ -4877,13 +5019,16 @@ lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: string_vie
 lift_at = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], fnt: Ty, val: Ptr<Expr>) Ptr<Expr> {
     load(val).match ({
         .Lambda(lm) => fnt.match ({
-            .FnT(ft) => a.lift_liftable(decls, idx, lm).match ({ true => {
-                k := load_i64(gcp)
-                nm := a.lift_name(k)
-                gen[k.to_i32()] = a.lift_func_of(lm, ft, nm)
-                store_i64(gcp, k + 1)
-                a.cenode(vref(nm))
-            }, false => a.lift_rw_expr(decls, idx, gcp, gen, val) }),
+            .FnT(ft) => a.lift_liftable(decls, idx, lm).match ({
+                true  => {
+                    k := load_i64(gcp)
+                    nm := a.lift_name(k)
+                    gen[k.to_i32()] = a.lift_func_of(lm, ft, nm)
+                    store_i64(gcp, k + 1)
+                    a.cenode(vref(nm))
+                },
+                false => a.lift_rw_expr(decls, idx, gcp, gen, val),
+            }),
             _        => a.lift_rw_expr(decls, idx, gcp, gen, val),
         }),
         _           => a.lift_rw_expr(decls, idx, gcp, gen, val),
@@ -4983,10 +5128,12 @@ lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     n := load_i64(gcp)
     k := decls.len
     gen.loop((h, i, g) {
-        (i < n.to_i32()).match ({ true => {
-            out[k] = g
-            k = k + 1
-        } })
+        (i < n.to_i32()).match ({
+            true => {
+                out[k] = g
+                k = k + 1
+            },
+        })
     })
     slice(out.ptr, k)
 }
@@ -5310,10 +5457,12 @@ lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     n := load_i64(ccp) * 2
     k := decls.len
     gen.loop((h, i, g) {
-        (i < n.to_i32()).match ({ true => {
-            out[k] = g
-            k = k + 1
-        } })
+        (i < n.to_i32()).match ({
+            true => {
+                out[k] = g
+                k = k + 1
+            },
+        })
     })
     slice(out.ptr, k)
 }
@@ -5443,13 +5592,16 @@ invariant_ty_eq = (g: Ty, w: Ty) bool {
     })
 }
 invariant_tys_eq = (gs: [Ty], ws: [Ty]) bool {
-    (gs.len != ws.len).match ({ true => false, false => {
-        same := true
-        gs.loop((h, i, g) {
-            same = same && g.invariant_ty_eq(ws[i])
-        })
-        same
-    } })
+    (gs.len != ws.len).match ({
+        true  => false,
+        false => {
+            same := true
+            gs.loop((h, i, g) {
+                same = same && g.invariant_ty_eq(ws[i])
+            })
+            same
+        },
+    })
 }
 ty_eq* = (g: Ty, w: Ty) bool {
     g.match ({

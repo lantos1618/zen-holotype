@@ -36,9 +36,11 @@ lex_failed := 0
 lex_err_off := 0
 lerr_set = () void { lex_failed = 1 }
 lerr_set_at = (off: i32) void {
-    (lex_err_off == 0).match ({ true => {
-        lex_err_off = off
-    } })
+    (lex_err_off == 0).match ({
+        true => {
+            lex_err_off = off
+        },
+    })
     lex_failed = 1
 }
 lerr_reset* = () void {
@@ -77,12 +79,15 @@ skip_bc_d = (src: string_view, pos: i32, depth: i32, open: i32) i32 {
                     p = p + 2
                 },
                 false => (b == '*' && at(src, p + 1) == '/').match ({
-                    true  => (d == 1).match ({ true => {
-                        r = p + 2
-                    }, false => {
-                        d = d - 1
-                        p = p + 2
-                    } }),
+                    true  => (d == 1).match ({
+                        true  => {
+                            r = p + 2
+                        },
+                        false => {
+                            d = d - 1
+                            p = p + 2
+                        },
+                    }),
                     false => {
                         p = p + 1
                     },
@@ -104,11 +109,14 @@ skip = (src: string_view, pos: i32) i32 {
                 true  => {
                     p = src.skip_line(p + 2)
                 },
-                false => src.is_block_open(p).match ({ true => {
-                    p = src.skip_block_comment(p + 2)
-                }, false => {
-                    moving = false
-                } }),
+                false => src.is_block_open(p).match ({
+                    true  => {
+                        p = src.skip_block_comment(p + 2)
+                    },
+                    false => {
+                        moving = false
+                    },
+                }),
             }),
         })
     }
@@ -135,11 +143,14 @@ int_end = (src: string_view, pos: i32) i32 {
             true  => {
                 p = p + 1
             },
-            false => (at(src, p) == '_' && is_digit(at(src, p + 1))).match ({ true => {
-                p = p + 1
-            }, false => {
-                moving = false
-            } }),
+            false => (at(src, p) == '_' && is_digit(at(src, p + 1))).match ({
+                true  => {
+                    p = p + 1
+                },
+                false => {
+                    moving = false
+                },
+            }),
         })
     }
     p
@@ -152,11 +163,14 @@ hex_end = (src: string_view, pos: i32) i32 {
             true  => {
                 p = p + 1
             },
-            false => (at(src, p) == '_' && is_hex(at(src, p + 1))).match ({ true => {
-                p = p + 1
-            }, false => {
-                moving = false
-            } }),
+            false => (at(src, p) == '_' && is_hex(at(src, p + 1))).match ({
+                true  => {
+                    p = p + 1
+                },
+                false => {
+                    moving = false
+                },
+            }),
         })
     }
     p
@@ -169,11 +183,14 @@ bin_end = (src: string_view, pos: i32) i32 {
             true  => {
                 p = p + 1
             },
-            false => (at(src, p) == '_' && is_bin(at(src, p + 1))).match ({ true => {
-                p = p + 1
-            }, false => {
-                moving = false
-            } }),
+            false => (at(src, p) == '_' && is_bin(at(src, p + 1))).match ({
+                true  => {
+                    p = p + 1
+                },
+                false => {
+                    moving = false
+                },
+            }),
         })
     }
     p
@@ -186,11 +203,14 @@ oct_end = (src: string_view, pos: i32) i32 {
             true  => {
                 p = p + 1
             },
-            false => (at(src, p) == '_' && is_oct(at(src, p + 1))).match ({ true => {
-                p = p + 1
-            }, false => {
-                moving = false
-            } }),
+            false => (at(src, p) == '_' && is_oct(at(src, p + 1))).match ({
+                true  => {
+                    p = p + 1
+                },
+                false => {
+                    moving = false
+                },
+            }),
         })
     }
     p
@@ -218,22 +238,28 @@ num_end = (src: string_view, pos: i32) i32 {
 // immediately followed by an alphanumeric that is NOT a valid digit of the base (`0o9`, `0b19`,
 // `0xFFg`) — which the old scanner silently split into two tokens with the wrong value.
 radix_end = (src: string_view, ds: i32, e: i32) i32 {
-    (e == ds || is_alnum(at(src, e))).match ({ true => {
-        lerr_set_at(ds - 2)
-        e
-    }, false => e })
+    (e == ds || is_alnum(at(src, e))).match ({
+        true  => {
+            lerr_set_at(ds - 2)
+            e
+        },
+        false => e,
+    })
 }
 // scientific exponent: `[eE][+-]?[0-9]+` right after the mantissa. Returns the end past the
 // exponent when one is present, else `pos` unchanged — so `1e` (no digit) / `1einstein` /
 // `x.e` are NOT mis-consumed; the exponent only fuses when a digit actually follows.
 exp_end = (src: string_view, pos: i32) i32 {
-    (at(src, pos) == 'e' || at(src, pos) == 'E').match ({ true => {
-        p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({
-            true  => pos + 2,
-            false => pos + 1,
-        })
-        is_digit(at(src, p2)).match ({ true => src.int_end(p2), false => pos })
-    }, false => pos })
+    (at(src, pos) == 'e' || at(src, pos) == 'E').match ({
+        true  => {
+            p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({
+                true  => pos + 2,
+                false => pos + 1,
+            })
+            is_digit(at(src, p2)).match ({ true => src.int_end(p2), false => pos })
+        },
+        false => pos,
+    })
 }
 str_end = (src: string_view, pos: i32) i32 {
     p := pos    // pos just past the opening quote
@@ -248,11 +274,14 @@ str_end = (src: string_view, pos: i32) i32 {
                 true  => {
                     r = p + 1
                 },
-                false => (b == '\\').match ({ true => {
-                    p = p + 2
-                }, false => {
-                    p = p + 1
-                } }),
+                false => (b == '\\').match ({
+                    true  => {
+                        p = p + 2
+                    },
+                    false => {
+                        p = p + 1
+                    },
+                }),
             }),
         })
     }
@@ -341,14 +370,17 @@ scan_one = (src: string_view, pos: i32, b: u8) Scan {
 scan* = (src: string_view, pos0: i32) Scan {
     pos := src.skip(pos0)
     b := at(src, pos)
-    (b == '\0').match ({ true => Scan(
-        tok: Token(
-            kind: tok_eof(),
-            start: pos,
-            len: 0,
+    (b == '\0').match ({
+        true  => Scan(
+            tok: Token(
+                kind: tok_eof(),
+                start: pos,
+                len: 0,
+            ),
+            next: pos,
         ),
-        next: pos,
-    ), false => src.scan_one(pos, b) })
+        false => src.scan_one(pos, b),
+    })
 }
 // ── the stream, without materializing it ───────────────────────────────────────
 // scan iterated to Eof IS the token stream — pure and positional, so a consumer gets
@@ -449,12 +481,15 @@ count_comments* = (src: string_view) i32 {
                         esc = true
                         i = i + 1
                     },
-                    false => (b == '"').match ({ true => {
-                        in_str = false
-                        i = i + 1
-                    }, false => {
-                        i = i + 1
-                    } }),
+                    false => (b == '"').match ({
+                        true  => {
+                            in_str = false
+                            i = i + 1
+                        },
+                        false => {
+                            i = i + 1
+                        },
+                    }),
                 }),
             }),
             false => in_char.match ({
@@ -468,12 +503,15 @@ count_comments* = (src: string_view) i32 {
                             esc = true
                             i = i + 1
                         },
-                        false => (b == '\'').match ({ true => {
-                            in_char = false
-                            i = i + 1
-                        }, false => {
-                            i = i + 1
-                        } }),
+                        false => (b == '\'').match ({
+                            true  => {
+                                in_char = false
+                                i = i + 1
+                            },
+                            false => {
+                                i = i + 1
+                            },
+                        }),
                     }),
                 }),
                 false => (b == '/' && at(src, i + 1) == '/').match ({
@@ -491,12 +529,15 @@ count_comments* = (src: string_view) i32 {
                                 in_str = true
                                 i = i + 1
                             },
-                            false => (b == '\'').match ({ true => {
-                                in_char = true
-                                i = i + 1
-                            }, false => {
-                                i = i + 1
-                            } }),
+                            false => (b == '\'').match ({
+                                true  => {
+                                    in_char = true
+                                    i = i + 1
+                                },
+                                false => {
+                                    i = i + 1
+                                },
+                            }),
                         }),
                     }),
                 }),
@@ -510,9 +551,11 @@ line_is_blank_before = (src: string_view, s: i32) bool {
     p := s - 1
     blank := true
     @while (p >= 0 && at(src, p) != '\n') {
-        is_space(at(src, p)).match ({ false => {
-            blank = false
-        } })
+        is_space(at(src, p)).match ({
+            false => {
+                blank = false
+            },
+        })
         p = p - 1
     }
     blank
@@ -537,12 +580,15 @@ fill_comments* = (src: string_view, buf: [Comment], k0: i32) void {
                         esc = true
                         i = i + 1
                     },
-                    false => (b == '"').match ({ true => {
-                        in_str = false
-                        i = i + 1
-                    }, false => {
-                        i = i + 1
-                    } }),
+                    false => (b == '"').match ({
+                        true  => {
+                            in_str = false
+                            i = i + 1
+                        },
+                        false => {
+                            i = i + 1
+                        },
+                    }),
                 }),
             }),
             false => in_char.match ({
@@ -556,12 +602,15 @@ fill_comments* = (src: string_view, buf: [Comment], k0: i32) void {
                             esc = true
                             i = i + 1
                         },
-                        false => (b == '\'').match ({ true => {
-                            in_char = false
-                            i = i + 1
-                        }, false => {
-                            i = i + 1
-                        } }),
+                        false => (b == '\'').match ({
+                            true  => {
+                                in_char = false
+                                i = i + 1
+                            },
+                            false => {
+                                i = i + 1
+                            },
+                        }),
                     }),
                 }),
                 false => (b == '/' && at(src, i + 1) == '/').match ({
@@ -597,12 +646,15 @@ fill_comments* = (src: string_view, buf: [Comment], k0: i32) void {
                                 in_str = true
                                 i = i + 1
                             },
-                            false => (b == '\'').match ({ true => {
-                                in_char = true
-                                i = i + 1
-                            }, false => {
-                                i = i + 1
-                            } }),
+                            false => (b == '\'').match ({
+                                true  => {
+                                    in_char = true
+                                    i = i + 1
+                                },
+                                false => {
+                                    i = i + 1
+                                },
+                            }),
                         }),
                     }),
                 }),

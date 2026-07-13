@@ -24,9 +24,11 @@
 last_slash = (v: [u8]) i64 {
     idx: i64 := 0 - 1
     v.loop((h, i, b) {
-        (b == '/').match ({ true => {
-            idx = i
-        } })
+        (b == '/').match ({
+            true => {
+                idx = i
+            },
+        })
     })
     idx
 }
@@ -34,9 +36,11 @@ last_slash = (v: [u8]) i64 {
 last_dot = (v: [u8]) i64 {
     idx: i64 := 0 - 1
     v.loop((h, i, b) {
-        (b == '.').match ({ true => {
-            idx = i
-        } })
+        (b == '.').match ({
+            true => {
+                idx = i
+            },
+        })
     })
     idx
 }
@@ -44,11 +48,14 @@ last_dot = (v: [u8]) i64 {
 leading_dots = (v: [u8]) i64 {
     n: i64 := 0
     v.loop((h, i, b) {
-        (b == '.').match ({ true => {
-            n = i + 1
-        }, false => {
-            h.break
-        } })
+        (b == '.').match ({
+            true  => {
+                n = i + 1
+            },
+            false => {
+                h.break
+            },
+        })
     })
     n
 }
@@ -86,10 +93,13 @@ ext* = (p: string_view) string_view {
 dirname_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     v := p.view()
     i := v.last_slash()
-    (i < 0).match ({ true => a.substr_in(p, 0, 0), false => {
-        j := v.back_over_slashes(i)
-        (j == 0).match ({ true => a.substr_in(p, 0, 1), false => a.substr_in(p, 0, j) })
-    } })
+    (i < 0).match ({
+        true  => a.substr_in(p, 0, 0),
+        false => {
+            j := v.back_over_slashes(i)
+            (j == 0).match ({ true => a.substr_in(p, 0, 1), false => a.substr_in(p, 0, j) })
+        },
+    })
 }
 dirname*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.dirname_in(p) }
 // the basename with its extension removed. stem("dir/f.tar.gz") == "f.tar"; stem(".bashrc") == ".bashrc".
@@ -103,32 +113,41 @@ stem*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.stem_
 // is the builder empty / does it currently end with a separator?
 sb_empty = (sb: String) bool { sb.len == 0 }
 sb_ends_slash = (sb: String) bool {
-    (sb.len == 0).match ({ true => false, false => {
-        bv: [u8] := sb.ptr.slice(sb.len)
-        bv[sb.len - 1] == '/'
-    } })
+    (sb.len == 0).match ({
+        true  => false,
+        false => {
+            bv: [u8] := sb.ptr.slice(sb.len)
+            bv[sb.len - 1] == '/'
+        },
+    })
 }
 // fold parts into `acc`, POSIX-style: an absolute part RESETS the accumulation; otherwise the part is
 // appended with exactly one '/' unless `acc` already ends with one (so no doubled separators).
 join_fold*<A> = (a: MutPtr<A>, parts: [string_view], i: i64, acc: String) Result<String, IoError> {
-    (i >= parts.len).match ({ true => ok(acc), false => {
-        p := parts[i]
-        p.is_absolute().match ({
-            true  => {
-                fresh := a.new_in().or_return()
-                nacc := fresh.append_in(a, p).or_return()
-                a.join_fold(parts, i + 1, nacc)
-            },
-            false => (acc.sb_empty() || acc.sb_ends_slash()).match ({ true => {
-                nacc := acc.append_in(a, p).or_return()
-                a.join_fold(parts, i + 1, nacc)
-            }, false => {
-                withsep := acc.append_in(a, "/").or_return()
-                nacc := withsep.append_in(a, p).or_return()
-                a.join_fold(parts, i + 1, nacc)
-            } }),
-        })
-    } })
+    (i >= parts.len).match ({
+        true  => ok(acc),
+        false => {
+            p := parts[i]
+            p.is_absolute().match ({
+                true  => {
+                    fresh := a.new_in().or_return()
+                    nacc := fresh.append_in(a, p).or_return()
+                    a.join_fold(parts, i + 1, nacc)
+                },
+                false => (acc.sb_empty() || acc.sb_ends_slash()).match ({
+                    true  => {
+                        nacc := acc.append_in(a, p).or_return()
+                        a.join_fold(parts, i + 1, nacc)
+                    },
+                    false => {
+                        withsep := acc.append_in(a, "/").or_return()
+                        nacc := withsep.append_in(a, p).or_return()
+                        a.join_fold(parts, i + 1, nacc)
+                    },
+                }),
+            })
+        },
+    })
 }
 // join path components with '/'. join(["a","b","c"]) == "a/b/c"; an absolute component resets:
 // join(["a","/b"]) == "/b"; join([]) == "".
@@ -149,11 +168,14 @@ sep_before*<A> = (a: MutPtr<A>, sb: String, k: i64) Result<String, IoError> { (k
 }) }
 // emit kept components `keep[0..top]` into `sb`, '/'-separated (no leading slash — the caller seeds it).
 norm_build*<A> = (a: MutPtr<A>, parts: [string_view], keep: [i64], k: i64, top: i64, sb: String) Result<String, IoError> {
-    (k >= top).match ({ true => ok(sb), false => {
-        sep := a.sep_before(sb, k).or_return()
-        withc := sep.append_in(a, parts[keep[k]]).or_return()
-        a.norm_build(parts, keep, k + 1, top, withc)
-    } })
+    (k >= top).match ({
+        true  => ok(sb),
+        false => {
+            sep := a.sep_before(sb, k).or_return()
+            withc := sep.append_in(a, parts[keep[k]]).or_return()
+            a.norm_build(parts, keep, k + 1, top, withc)
+        },
+    })
 }
 // collapse '.', '..' and runs of '/'. normalize("a/./b/../c") == "a/c"; normalize("/a/../b") == "/b";
 // normalize("") == "."; normalize("/") == "/". A leading '..' is kept on a relative path
@@ -172,10 +194,12 @@ normalize_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
                     true  => {
                         top = top - 1
                     },
-                    false => abs.match ({ false => {
-                        keep[top] = i
-                        top = top + 1
-                    } }),
+                    false => abs.match ({
+                        false => {
+                            keep[top] = i
+                            top = top + 1
+                        },
+                    }),
                 }),
                 false => {
                     keep[top] = i

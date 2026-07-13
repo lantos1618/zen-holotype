@@ -38,22 +38,27 @@ bb_plain = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].not_word() }
 bb_dot = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].is_boundary_before() }
 // `\s` skip: advance past spaces/tabs/newlines/CRs, returning the next index (or len at EOF).
 skip_ws = (sv: [u8], j: i64) i64 {
-    (j >= sv.len).match ({ true => j, false => {
-        b := sv[j]
-        (b == ' ' || b == '\t' || b == '\n' || b == '\r').match ({
-            true  => sv.skip_ws(j + 1),
-            false => j,
-        })
-    } })
+    (j >= sv.len).match ({
+        true  => j,
+        false => {
+            b := sv[j]
+            (b == ' ' || b == '\t' || b == '\n' || b == '\r').match ({
+                true  => sv.skip_ws(j + 1),
+                false => j,
+            })
+        },
+    })
 }
 // do `nv`'s bytes appear at sv[at..]? (caller guards at + nv.len <= sv.len)
 tok_at = (sv: [u8], nv: [u8], at: i64) bool {
     ok := true
     nv.loop((h, i, b) {
-        (sv[at + i] == b).match ({ false => {
-            ok = false
-            h.break
-        } })
+        (sv[at + i] == b).match ({
+            false => {
+                ok = false
+                h.break
+            },
+        })
     })
     ok
 }
@@ -63,10 +68,13 @@ name_matches = (sv: [u8], i: i64, name: string_view) bool {
     nv := name.view()
     (i + nv.len > sv.len).match ({
         true  => false,
-        false => sv.tok_at(nv, i).match ({ true => {
-            j := sv.skip_ws(i + nv.len)
-            j < sv.len && sv[j] == '('
-        }, false => false }),
+        false => sv.tok_at(nv, i).match ({
+            true  => {
+                j := sv.skip_ws(i + nv.len)
+                j < sv.len && sv[j] == '('
+            },
+            false => false,
+        }),
     })
 }
 // the `\bNAME\b` tail: keyword `name` starts at sv[i] AND the byte after it is a word boundary (a
@@ -75,10 +83,13 @@ word_matches = (sv: [u8], i: i64, name: string_view) bool {
     nv := name.view()
     (i + nv.len > sv.len).match ({
         true  => false,
-        false => sv.tok_at(nv, i).match ({ true => {
-            p := i + nv.len
-            p >= sv.len || sv[p].not_word()
-        }, false => false }),
+        false => sv.tok_at(nv, i).match ({
+            true  => {
+                p := i + nv.len
+                p >= sv.len || sv[p].not_word()
+            },
+            false => false,
+        }),
     })
 }
 // the `@while\b` match anchored at i: literal `@while` followed by a word boundary (no before-anchor
@@ -87,10 +98,13 @@ atwhile_at = (sv: [u8], i: i64) bool {
     nv := "@while".view()
     (i + nv.len > sv.len).match ({
         true  => false,
-        false => sv.tok_at(nv, i).match ({ true => {
-            p := i + nv.len
-            p >= sv.len || sv[p].not_word()
-        }, false => false }),
+        false => sv.tok_at(nv, i).match ({
+            true  => {
+                p := i + nv.len
+                p >= sv.len || sv[p].not_word()
+            },
+            false => false,
+        }),
     })
 }
 // a pattern match anchored at index i. kind selects the regex shape:
@@ -117,19 +131,24 @@ file_has = (sv: [u8], name: string_view, kind: i64) bool {
     found := false
     in_comment := false
     sv.loop((h, i, b) {
-        (b == '\n').match ({ true => {
-            in_comment = false
-        } })
+        (b == '\n').match ({
+            true => {
+                in_comment = false
+            },
+        })
         in_comment.match ({
             true  => { },
             false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
                 true  => {
                     in_comment = true
                 },
-                false => sv.matches_kind_at(i, name, kind).match ({ true => {
-                    found = true
-                    h.break
-                }, false => { } }),
+                false => sv.matches_kind_at(i, name, kind).match ({
+                    true  => {
+                        found = true
+                        h.break
+                    },
+                    false => { },
+                }),
             }),
         })
     })
@@ -153,11 +172,14 @@ strip_comments_in = (mp: MutPtr<Malloc>, src: string_view) string_view {
             },
             false => in_comment.match ({
                 true  => { },
-                false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({ true => {
-                    in_comment = true
-                }, false => {
-                    s = s.push_in(mp, b).expect("harness: oom")
-                } }),
+                false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
+                    true  => {
+                        in_comment = true
+                    },
+                    false => {
+                        s = s.push_in(mp, b).expect("harness: oom")
+                    },
+                }),
             }),
         })
     })
@@ -166,11 +188,14 @@ strip_comments_in = (mp: MutPtr<Malloc>, src: string_view) string_view {
 // everything strictly AFTER the first occurrence of `m` (python `src.split(m,1)[1]`); "" if absent.
 after_marker = (mp: MutPtr<Malloc>, src: string_view, m: string_view) string_view {
     i := src.find(m)
-    (i < 0).match ({ true => "", false => {
-        sv := src.view()
-        start := i + m.view().len
-        mp.substr(src, start, sv.len - start).expect("harness: oom")
-    } })
+    (i < 0).match ({
+        true  => "",
+        false => {
+            sv := src.view()
+            start := i + m.view().len
+            mp.substr(src, start, sv.len - start).expect("harness: oom")
+        },
+    })
 }
 // everything strictly BEFORE the first occurrence of `m` (python `s.split(m,1)[0]`); all of `s` if
 // `m` is absent (python returns the whole string as the sole split field).
@@ -255,19 +280,24 @@ checkpoint_allowed = (path: string_view) bool { eq(path, "zen/std/concurrent/cor
 // — `{ … checkpoint_current … } = std.concurrent.coroutine` with the import target after the name.
 line_checkpoint_import = (line: string_view) bool {
     ci := line.find("checkpoint_current")
-    (ci < 0).match ({ true => false, false => {
-        si := line.find("std.concurrent.coroutine")
-        si > ci && line.contains("{") && line.contains("}")
-    } })
+    (ci < 0).match ({
+        true  => false,
+        false => {
+            si := line.find("std.concurrent.coroutine")
+            si > ci && line.contains("{") && line.contains("}")
+        },
+    })
 }
 has_checkpoint_import = (mp: MutPtr<Malloc>, clean: string_view) bool {
     lines := mp.split_in(clean, '\n')
     found := false
     lines.loop((h, i, line) {
-        line.line_checkpoint_import().match ({ true => {
-            found = true
-            h.break
-        } })
+        line.line_checkpoint_import().match ({
+            true => {
+                found = true
+                h.break
+            },
+        })
     })
     found
 }

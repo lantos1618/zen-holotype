@@ -268,28 +268,41 @@ format* = (template: string_view, args: [Arg]) i64 {
     start: i64 := 0    // start of the pending literal run
     skip: i64 := 0
     sv.loop((h, i, b) {
-        (i < skip).match ({ true => { }, false => {
-            pair := i + 1 < sv.len    // resume index (skips the 2nd byte of a `{}`/`{{`/`}}` pair)
-            ph := b == '{' && pair && sv[i + 1] == '}'
-            esc := pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')
-            (ph || esc).match ({ true => {
-                (i > start).match ({ true => {
-                    n = n + sv.write_run(start, i)
-                } })    // flush the literal run before the brace
-                ph.match ({ true => {
-                    n = n + args.write_arg_at(ai)
-                    ai = ai + 1
-                }, false => {
-                    n = n + sv.write_run(i, i + 1)
-                } })    // a `{{`/`}}` escape → one literal brace
-                skip = i + 2
-                start = i + 2
-            }, false => { } })
-        } })
+        (i < skip).match ({
+            true  => { },
+            false => {
+                pair := i + 1 < sv.len    // resume index (skips the 2nd byte of a `{}`/`{{`/`}}` pair)
+                ph := b == '{' && pair && sv[i + 1] == '}'
+                esc := pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')
+                (ph || esc).match ({
+                    true  => {
+                        (i > start).match ({
+                            true => {
+                                n = n + sv.write_run(start, i)
+                            },
+                        })    // flush the literal run before the brace
+                        ph.match ({
+                            true  => {
+                                n = n + args.write_arg_at(ai)
+                                ai = ai + 1
+                            },
+                            false => {
+                                n = n + sv.write_run(i, i + 1)
+                            },
+                        })    // a `{{`/`}}` escape → one literal brace
+                        skip = i + 2
+                        start = i + 2
+                    },
+                    false => { },
+                })
+            },
+        })
     })
-    (sv.len > start).match ({ true => {
-        n = n + sv.write_run(start, sv.len)
-    } })    // flush the trailing literal run
+    (sv.len > start).match ({
+        true => {
+            n = n + sv.write_run(start, sv.len)
+        },
+    })    // flush the trailing literal run
     n
 }
 // `format` plus a trailing newline — the println-shaped one-call interpolator.

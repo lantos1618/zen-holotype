@@ -111,15 +111,21 @@ Once*: {
     flag: RawPtr<u8>,
     mtx: Mutex,
     run = (o: Once, body: (RawPtr<u8>) void, arg: RawPtr<u8>) void {
-        (atomic_load_i64(o.flag) != 0).match ({ true => { }, false => {
-            o.mtx.lock()    // -> atomic i64 cell
-            // fast path: already initialised
-            (atomic_load_i64(o.flag) == 0).match ({ true => {
-                body(arg)    // re-check under the lock (another thread may have won)
-                atomic_store_i64(o.flag, 1)
-            }, false => { } })
-            o.mtx.unlock()
-        } })
+        (atomic_load_i64(o.flag) != 0).match ({
+            true  => { },
+            false => {
+                o.mtx.lock()    // -> atomic i64 cell
+                // fast path: already initialised
+                (atomic_load_i64(o.flag) == 0).match ({
+                    true  => {
+                        body(arg)    // re-check under the lock (another thread may have won)
+                        atomic_store_i64(o.flag, 1)
+                    },
+                    false => { },
+                })
+                o.mtx.unlock()
+            },
+        })
     }
     destroy = (o: Once) void {
         // free the flag cell and the backing mutex.

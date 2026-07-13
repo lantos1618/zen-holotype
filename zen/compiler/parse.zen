@@ -78,11 +78,14 @@ TParamEnd*: {
 }
 parse_tparams = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
     sc := src.scan(pos)
-    src.is_langle(sc.tok).match ({ true => a.parse_tparam_list(src, sc.next), false => TParamEnd(
-        names: a.no_tparams(),
-        count: 0,
-        next: pos,
-    ) })
+    src.is_langle(sc.tok).match ({
+        true  => a.parse_tparam_list(src, sc.next),
+        false => TParamEnd(
+            names: a.no_tparams(),
+            count: 0,
+            next: pos,
+        ),
+    })
 }
 parse_tparam_list = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
     buf := a.param_buf()
@@ -98,23 +101,28 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
 // at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
 record_tparam = (a: MutPtr<Malloc>, src: string_view, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).match ({ true => {
-        perr_set_at(sc.tok.start)
-        return PEnd(
-            count: i,
-            next: sc.next,
-        )
-    } })
+    (i >= buf.len).match ({
+        true => {
+            perr_set_at(sc.tok.start)
+            return PEnd(
+                count: i,
+                next: sc.next,
+            )
+        },
+    })
     nm := a.lexeme(src, sc.tok)
     colon := src.scan(sc.next)    // peek: a `:` introduces a trait bound
-    src.is_colon(colon.tok).match ({ true => {
-        tr := src.scan(colon.next)    // the bound trait name
-        buf[i] = param(nm, tnamed(a.lexeme(src, tr.tok)))
-        a.fill_tparams(src, tr.next, buf, i + 1)
-    }, false => {
-        buf[i] = param(nm, tvoid())
-        a.fill_tparams(src, sc.next, buf, i + 1)
-    } })
+    src.is_colon(colon.tok).match ({
+        true  => {
+            tr := src.scan(colon.next)    // the bound trait name
+            buf[i] = param(nm, tnamed(a.lexeme(src, tr.tok)))
+            a.fill_tparams(src, tr.next, buf, i + 1)
+        },
+        false => {
+            buf[i] = param(nm, tvoid())
+            a.fill_tparams(src, sc.next, buf, i + 1)
+        },
+    })
 }
 fill_tparams = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
@@ -166,11 +174,14 @@ fill_fields = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i
                 next: sc.next,
             )
         },
-        _    => src.is_rbrace(sc.tok).match ({ true => FieldsEnd(
-            count: i,
-            ndef: dn,
-            next: sc.next,
-        ), false => a.fill_field(src, pos, buf, i, dbuf, dn) }),
+        _    => src.is_rbrace(sc.tok).match ({
+            true  => FieldsEnd(
+                count: i,
+                ndef: dn,
+                next: sc.next,
+            ),
+            false => a.fill_field(src, pos, buf, i, dbuf, dn),
+        }),
     })
 }
 // Default methods store both the FnT requirement and the reusable body.
@@ -184,14 +195,16 @@ fill_field_default = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field
 }
 fill_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
     // Guard both field and default-method buffers.
-    (i >= buf.len || dn >= dbuf.len).match ({ true => {
-        perr_set_at(pos)
-        return FieldsEnd(
-            count: i,
-            ndef: dn,
-            next: pos,
-        )
-    } })
+    (i >= buf.len || dn >= dbuf.len).match ({
+        true => {
+            perr_set_at(pos)
+            return FieldsEnd(
+                count: i,
+                ndef: dn,
+                next: pos,
+            )
+        },
+    })
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     mk := src.decl_marker(pos)
@@ -253,9 +266,11 @@ has_data_field = (fields: [Field]) bool {
 data_field_count = (fields: [Field]) i32 {
     n := 0
     fields.loop((h, i, f) {
-        f.field_is_method().match ({ false => {
-            n = n + 1
-        } })
+        f.field_is_method().match ({
+            false => {
+                n = n + 1
+            },
+        })
     })
     n
 }
@@ -263,10 +278,13 @@ data_fields = (a: MutPtr<Malloc>, fields: [Field]) [Field] {
     buf := a.field_buf()
     j := 0
     fields.loop((h, i, f) {
-        f.field_is_method().match ({ true => { }, false => {
-            buf[j] = f
-            j = j + 1
-        } })
+        f.field_is_method().match ({
+            true  => { },
+            false => {
+                buf[j] = f
+                j = j + 1
+            },
+        })
     })
     buf.take_fields(fields.data_field_count())
 }
@@ -317,24 +335,28 @@ fill_variants = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [VariantDef
 }
 fill_variant = (a: MutPtr<Malloc>, src: string_view, nt: Scan, buf: [VariantDef], i: i32) PEnd {
     // Guard the variant buffer.
-    (i >= buf.len).match ({ true => {
-        perr_set_at(nt.tok.start)
-        return PEnd(
-            count: i,
-            next: nt.next,
-        )
-    } })
+    (i >= buf.len).match ({
+        true => {
+            perr_set_at(nt.tok.start)
+            return PEnd(
+                count: i,
+                next: nt.next,
+            )
+        },
+    })
     // A variant NAME must be an identifier. Without this guard `lexeme` happily reads whatever
     // token sits here (a stray `|`, a literal, a mid-list empty `| |`) as a bogus variant name,
     // desyncing the parse and SILENTLY swallowing the following top-level decl (task #34, sibling
     // of #411). Mirror the .Eof branch: flag a positioned parse error and stop.
-    is_ident_tok(nt.tok).match ({ false => {
-        perr_set_at(nt.tok.start)
-        return PEnd(
-            count: i,
-            next: nt.next,
-        )
-    } })
+    is_ident_tok(nt.tok).match ({
+        false => {
+            perr_set_at(nt.tok.start)
+            return PEnd(
+                count: i,
+                next: nt.next,
+            )
+        },
+    })
     nm := a.lexeme(src, nt.tok)
     pk := src.scan(nt.next)
     vd := a.variant_after(src, nm, nt, pk)
@@ -358,16 +380,19 @@ variant_after = (a: MutPtr<Malloc>, src: string_view, nm: string_view, nt: Scan,
                 next: vp.next,
             )
         },
-        false => src.is_eq1(pk.tok).match ({ true => {
-            de := a.parse_bxor(src, pk.next)
-            VDf(
-                vdf: vdef_default(nm, tvoid(), de.expr),
-                next: de.next,
-            )
-        }, false => VDf(
-            vdf: vdef(nm, tvoid()),
-            next: nt.next,
-        ) }),
+        false => src.is_eq1(pk.tok).match ({
+            true  => {
+                de := a.parse_bxor(src, pk.next)
+                VDf(
+                    vdf: vdef_default(nm, tvoid(), de.expr),
+                    next: de.next,
+                )
+            },
+            false => VDf(
+                vdf: vdef(nm, tvoid()),
+                next: nt.next,
+            ),
+        }),
     })
 }
 skip_to_colon = (src: string_view, pos: i32) i32 {
@@ -436,10 +461,13 @@ decl_is_global = (src: string_view, pos: i32) bool { src.is_walrus(src.decl_mark
 decl_is_typed_global = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
     (src.is_colon(m.tok) && m.tok.len == 1).match ({
-        true  => src.is_lbrace(src.scan(m.next).tok).match ({ true => false, false => {
-            te := a.parse_ty(src, m.next)
-            src.is_walrus(src.scan(te.next).tok)
-        } }),
+        true  => src.is_lbrace(src.scan(m.next).tok).match ({
+            true  => false,
+            false => {
+                te := a.parse_ty(src, m.next)
+                src.is_walrus(src.scan(te.next).tok)
+            },
+        }),
         false => false,
     })
 }
@@ -461,10 +489,13 @@ typed_global_end = (a: MutPtr<Malloc>, src: string_view, pos: i32) i32 {
 decl_is_module_alias = (src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
     src.is_eq_tok(m.tok).match ({
-        true  => is_ident_tok(src.scan(m.next).tok).match ({ true => {
-            end := src.skip_path(m.next)    // walk the bare/dotted path; land past its last ident
-            src.decl_path_at_boundary(src.scan(end).tok)
-        }, false => false }),
+        true  => is_ident_tok(src.scan(m.next).tok).match ({
+            true  => {
+                end := src.skip_path(m.next)    // walk the bare/dotted path; land past its last ident
+                src.decl_path_at_boundary(src.scan(end).tok)
+            },
+            false => false,
+        }),
         false => false,
     })
 }    // followed by a decl boundary, not a value-expr token
@@ -506,10 +537,13 @@ exports_reset* = (a: MutPtr<Malloc>) void {
 }
 exports_get* = () [Param] { slice(exports_buf.ptr, exports_n) }
 note_export = (name: string_view) void {
-    (exports_n < exports_buf.len).match ({ true => {
-        exports_buf[exports_n] = param(name, tvoid())
-        exports_n = exports_n + 1
-    }, false => { } })
+    (exports_n < exports_buf.len).match ({
+        true  => {
+            exports_buf[exports_n] = param(name, tvoid())
+            exports_n = exports_n + 1
+        },
+        false => { },
+    })
 }
 // ── ALIAS-PREFIX registry (UFCS through module aliases) ──────────────────────────────────────────
 // std.internal.resolve flattens `m = sibling` by prefixing sibling's decls with `m__`. The checker's
@@ -533,10 +567,13 @@ alias_prefix_seen = (name: string_view) bool {
     f
 }
 note_alias_prefix* = (name: string_view) void {
-    (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).match ({ true => {
-        alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
-        alias_prefix_n = alias_prefix_n + 1
-    }, false => { } })
+    (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).match ({
+        true  => {
+            alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
+            alias_prefix_n = alias_prefix_n + 1
+        },
+        false => { },
+    })
 }
 // record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
 note_export_if_starred = (a: MutPtr<Malloc>, src: string_view, pos: i32) void {
@@ -560,13 +597,15 @@ ImportEnd*: {
 }
 record_name = (a: MutPtr<Malloc>, src: string_view, sc: Scan, buf: [Param], i: i32) ImportEnd {
     // Guard the import-name buffer.
-    (i >= buf.len).match ({ true => {
-        perr_set_at(sc.tok.start)
-        return ImportEnd(
-            count: i,
-            next: sc.next,
-        )
-    } })
+    (i >= buf.len).match ({
+        true => {
+            perr_set_at(sc.tok.start)
+            return ImportEnd(
+                count: i,
+                next: sc.next,
+            )
+        },
+    })
     buf[i] = param(a.lexeme(src, sc.tok), tvoid())
     a.fill_import_names(src, sc.next, buf, i + 1)
 }
@@ -594,11 +633,13 @@ fill_import_names = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param]
 }
 fill_decls = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
     // Leave one slot for the syntax-error sentinel.
-    (i >= buf.len - 1).match ({ true => {
-        perr_set_at(pos)
-        buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
-        return i + 1
-    } })
+    (i >= buf.len - 1).match ({
+        true => {
+            perr_set_at(pos)
+            buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
+            return i + 1
+        },
+    })
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => i,
@@ -656,9 +697,11 @@ fill_decl = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32)
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
 // class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
 global_decl = (a: MutPtr<Malloc>, nm: string_view, init: Ptr<Expr>, alias: bool, dpos: i32) Decl {
-    alias.match ({ true => {
-        return dglobal_alias_at(nm, tvoid(), init, dpos)
-    } })    // `name = mod` → keep the `=` form for round-trip
+    alias.match ({
+        true => {
+            return dglobal_alias_at(nm, tvoid(), init, dpos)
+        },
+    })    // `name = mod` → keep the `=` form for round-trip
     load(init).match ({
         .Call(c) => (eq(c.fn, "thread_local") && c.args.len == 1).match ({
             true  => dglobal_tl_at(nm, tvoid(), a.enode(c.args[0]), dpos),
@@ -745,24 +788,29 @@ fill_impl_methods = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl],
         },
         _    => src.is_comma(sc.tok).match ({
             true  => a.fill_impl_methods(src, sc.next, buf, i, mbuf, m, tyname, trname),
-            false => src.is_rbrace(sc.tok).match ({ true => ImplEnd(
-                decls: i,
-                methods: m,
-                next: sc.next,
-            ), false => a.fill_impl_one(src, pos, buf, i, mbuf, m, tyname, trname) }),
+            false => src.is_rbrace(sc.tok).match ({
+                true  => ImplEnd(
+                    decls: i,
+                    methods: m,
+                    next: sc.next,
+                ),
+                false => a.fill_impl_one(src, pos, buf, i, mbuf, m, tyname, trname),
+            }),
         }),
     })
 }
 fill_impl_one = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: string_view, trname: string_view) ImplEnd {
     // Impl methods fill both decl and method-name buffers.
-    (i >= buf.len - 1 || m >= mbuf.len).match ({ true => {
-        perr_set_at(pos)
-        return ImplEnd(
-            decls: i,
-            methods: m,
-            next: pos,
-        )
-    } })
+    (i >= buf.len - 1 || m >= mbuf.len).match ({
+        true => {
+            perr_set_at(pos)
+            return ImplEnd(
+                decls: i,
+                methods: m,
+                next: pos,
+            )
+        },
+    })
     de := a.parse_decl_at(src, pos)
     cn := a.impl_cname_in(trname, tyname, de.func.name)
     buf[i] = dfunc(Func(
@@ -789,10 +837,13 @@ fill_func = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32)
     a.fill_decls(src, de.next, buf, i + 1)
 }
 fill_defaults = (a: MutPtr<Malloc>, trname: string_view, defaults: [Func], buf: [Decl], i: i32, j: i32) i32 {
-    (j == defaults.len).match ({ true => i, false => {
-        buf[i] = dtraitdef(trname, defaults[j])
-        a.fill_defaults(trname, defaults, buf, i + 1, j + 1)
-    } })
+    (j == defaults.len).match ({
+        true  => i,
+        false => {
+            buf[i] = dtraitdef(trname, defaults[j])
+            a.fill_defaults(trname, defaults, buf, i + 1, j + 1)
+        },
+    })
 }
 param_names_has = (ps: [Param], name: string_view) bool {
     found := false
@@ -809,26 +860,32 @@ join_tparams = (a: MutPtr<Malloc>, outer: [Param], inner: [Param]) [Param] {
         n = n + 1
     })
     inner.loop((h, i, p) {
-        outer.param_names_has(p.name).match ({ true => { }, false => {
-            buf[n] = p
-            n = n + 1
-        } })
+        outer.param_names_has(p.name).match ({
+            true  => { },
+            false => {
+                buf[n] = p
+                n = n + 1
+            },
+        })
     })
     buf.take_params(n)
 }
 fill_inherent_methods = (a: MutPtr<Malloc>, tyname: string_view, tparams: [Param], methods: [Func], buf: [Decl], i: i32, mbuf: [Param], j: i32) i32 {
-    (j == methods.len).match ({ true => i, false => {
-        f := methods[j]
-        buf[i] = dfunc(Func(
-            name: a.impl_cname_in(tyname, tyname, f.name),
-            params: f.params,
-            ret: f.ret,
-            tparams: a.join_tparams(tparams, f.tparams),
-            body: f.body,
-        ))
-        mbuf[j] = param(f.name, tvoid())
-        a.fill_inherent_methods(tyname, tparams, methods, buf, i + 1, mbuf, j + 1)
-    } })
+    (j == methods.len).match ({
+        true  => i,
+        false => {
+            f := methods[j]
+            buf[i] = dfunc(Func(
+                name: a.impl_cname_in(tyname, tyname, f.name),
+                params: f.params,
+                ret: f.ret,
+                tparams: a.join_tparams(tparams, f.tparams),
+                body: f.body,
+            ))
+            mbuf[j] = param(f.name, tvoid())
+            a.fill_inherent_methods(tyname, tparams, methods, buf, i + 1, mbuf, j + 1)
+        },
+    })
 }
 fill_inherent_struct = (a: MutPtr<Malloc>, se: StructEnd, buf: [Decl], i: i32) i32 {
     mbuf := a.param_buf()
@@ -843,13 +900,16 @@ fill_inherent_struct = (a: MutPtr<Malloc>, se: StructEnd, buf: [Decl], i: i32) i
 fill_struct = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
     se := a.parse_struct_at(src, pos)
     inherent := se.defaults.len > 0 && se.sd.fields.has_data_field()
-    ni := inherent.match ({ true => a.fill_inherent_struct(se, buf, i), false => {
-        buf[i] = (se.ntp > 0).match ({
-            true  => dgenstruct(gsdef_at(se.sd.name, se.tparams, se.sd.fields, se.sd.pos)),
-            false => dstruct(se.sd),
-        })
-        a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
-    } })
+    ni := inherent.match ({
+        true  => a.fill_inherent_struct(se, buf, i),
+        false => {
+            buf[i] = (se.ntp > 0).match ({
+                true  => dgenstruct(gsdef_at(se.sd.name, se.tparams, se.sd.fields, se.sd.pos)),
+                false => dstruct(se.sd),
+            })
+            a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
+        },
+    })
     a.fill_decls(src, se.next, buf, ni)
 }
 fill_import = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
@@ -883,10 +943,13 @@ read_import_path = (a: MutPtr<Malloc>, src: string_view, pos: i32) ImportPath {
     )
 }
 path_copy_into = (src: string_view, from: i32, dst: RawPtr<u8>, i: i32, n: i32) void {
-    (i >= n).match ({ true => { }, false => {
-        dst.offset(i).store(load(offset(src, from + i)))
-        src.path_copy_into(from, dst, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => { },
+        false => {
+            dst.offset(i).store(load(offset(src, from + i)))
+            src.path_copy_into(from, dst, i + 1, n)
+        },
+    })
 }
 // ── implicit type parameters (M2): a free, short ALL-CAPS name (A, T, E, R, K, V, T1, …) used in a
 //    param / field / payload TYPE position introduces the type parameter, so the `<A>` declaration list
@@ -980,10 +1043,13 @@ copy_tparams = (buf: [Param], tparams: [Param]) i32 {
 }
 // the exclusion set: every type a module declares or imports, by name.
 tv_add_name = (buf: [Param], cnt: i32, name: string_view) i32 {
-    (cnt < buf.len).match ({ true => {
-        buf[cnt] = param(name, tvoid())
-        cnt + 1
-    }, false => cnt })
+    (cnt < buf.len).match ({
+        true  => {
+            buf[cnt] = param(name, tvoid())
+            cnt + 1
+        },
+        false => cnt,
+    })
 }
 tv_add_names = (buf: [Param], cnt: i32, names: [Param]) i32 {
     c := cnt
@@ -1087,14 +1153,17 @@ desugar_trait_params = (a: MutPtr<Malloc>, traits: [Param], buf: [Param], cnt: i
     out := a.param_buf()
     n := cnt
     params.loop((h, i, p) {
-        traits.is_trait_param(p).match ({ true => {
-            nm := a.fresh_tparam_name(buf, n, 'A')
-            buf[n] = param(nm, p.ty)    // bound = Named(trait) = p.ty
-            n = n + 1
-            out[i] = param(p.name, a.mutptr_of(tnamed(nm)))
-        }, false => {
-            out[i] = p
-        } })
+        traits.is_trait_param(p).match ({
+            true  => {
+                nm := a.fresh_tparam_name(buf, n, 'A')
+                buf[n] = param(nm, p.ty)    // bound = Named(trait) = p.ty
+                n = n + 1
+                out[i] = param(p.name, a.mutptr_of(tnamed(nm)))
+            },
+            false => {
+                out[i] = p
+            },
+        })
     })
     TDesugar(
         params: out.take_params(params.len),
@@ -1185,12 +1254,15 @@ parse_module* = (a: MutPtr<Malloc>, src: string_view) [Decl] {
 append_anon_decls = (a: MutPtr<Malloc>, buf: [Decl], n: i32) i32 {
     i := n
     anon_decls_get().loop((h, j, sd) {
-        (i < buf.len - 1).match ({ true => {
-            buf[i] = dstruct(sd)
-            i = i + 1
-        }, false => {
-            perr_set()
-        } })
+        (i < buf.len - 1).match ({
+            true  => {
+                buf[i] = dstruct(sd)
+                i = i + 1
+            },
+            false => {
+                perr_set()
+            },
+        })
     })
     i
 }
@@ -1301,21 +1373,24 @@ named_span = (a: MutPtr<Malloc>, src: string_view, pos: i32, start: i32) DeclSpa
                         start: start,
                         next: a.parse_struct_at(src, pos).next,
                     ),
-                    false => src.decl_is_enum(pos).match ({ true => DeclSpan(
-                        name: nm,
-                        named: true,
-                        eof: false,
-                        is_type: true,
-                        start: start,
-                        next: a.parse_enum_at(src, pos).next,
-                    ), false => DeclSpan(
-                        name: nm,
-                        named: true,
-                        eof: false,
-                        is_type: false,
-                        start: start,
-                        next: a.parse_decl_at(src, pos).next,
-                    ) }),
+                    false => src.decl_is_enum(pos).match ({
+                        true  => DeclSpan(
+                            name: nm,
+                            named: true,
+                            eof: false,
+                            is_type: true,
+                            start: start,
+                            next: a.parse_enum_at(src, pos).next,
+                        ),
+                        false => DeclSpan(
+                            name: nm,
+                            named: true,
+                            eof: false,
+                            is_type: false,
+                            start: start,
+                            next: a.parse_decl_at(src, pos).next,
+                        ),
+                    }),
                 }),
             }),
         }),

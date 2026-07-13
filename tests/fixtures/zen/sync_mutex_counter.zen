@@ -16,12 +16,15 @@ COND_OFF := 16
 READY_OFF := 24
 // bump the shared counter `n` times with a PLAIN +1 under the mutex (the lock is what makes it safe).
 bump = (ctr: RawPtr<u8>, m: Mutex, n: i64) void {
-    (n <= 0).match ({ true => { }, false => {
-        m.lock()
-        store_i64(ctr, load_i64(ctr) + 1)    // plain read-modify-write — racy WITHOUT the lock
-        m.unlock()
-        bump(ctr, m, n - 1)
-    } })
+    (n <= 0).match ({
+        true  => { },
+        false => {
+            m.lock()
+            store_i64(ctr, load_i64(ctr) + 1)    // plain read-modify-write — racy WITHOUT the lock
+            m.unlock()
+            bump(ctr, m, n - 1)
+        },
+    })
 }
 // non-capturing thread body: unpack the shared cells from `arg` and run the protected bumps.
 worker = (arg: RawPtr<u8>) RawPtr<u8> {
@@ -42,10 +45,13 @@ waiter = (arg: RawPtr<u8>) RawPtr<u8> {
 }
 // re-check the predicate in a loop (guards against spurious wakeups).
 wait_ready = (c: CondVar, m: Mutex, ready: RawPtr<u8>) void {
-    (load_i64(ready) != 0).match ({ true => { }, false => {
-        c.wait(m)
-        wait_ready(c, m, ready)
-    } })
+    (load_i64(ready) != 0).match ({
+        true  => { },
+        false => {
+            c.wait(m)
+            wait_ready(c, m, ready)
+        },
+    })
 }
 main = () i32 {
     shared := malloc(32)

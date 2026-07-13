@@ -77,25 +77,32 @@ lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + 32, false => b 
 ieq = (x: string_view, y: string_view) bool {
     xv := x.view()
     yv := y.view()
-    (xv.len == yv.len).match ({ true => {
-        same := true
-        xv.loop((h, i, b) {
-            (lower(b) == lower(yv[i])).match ({ false => {
-                same = false
-                h.break
-            } })
-        })
-        same
-    }, false => false })
+    (xv.len == yv.len).match ({
+        true  => {
+            same := true
+            xv.loop((h, i, b) {
+                (lower(b) == lower(yv[i])).match ({
+                    false => {
+                        same = false
+                        h.break
+                    },
+                })
+            })
+            same
+        },
+        false => false,
+    })
 }
 // first header whose name case-insensitively equals `name`, or `.None`.
 lookup_header = (headers: [Header], name: string_view) Opt<string_view> {
     res: Opt<string_view> := .None
     headers.loop((h, i, hd) {
-        ieq(hd.name, name).match ({ true => {
-            res = .Some(hd.value)
-            h.break
-        } })
+        ieq(hd.name, name).match ({
+            true => {
+                res = .Some(hd.value)
+                h.break
+            },
+        })
     })
     res
 }
@@ -159,13 +166,16 @@ parse_status*<A> = (a: MutPtr<A>, line: string_view) Result<i32, HttpError> {
     toks := a.words(line)
     (toks.len < 2).match ({
         true  => err(malformed("http: status line has fewer than two tokens")),
-        false => toks[0].starts_with("HTTP/").match ({ true => {
-            code := toks[1].parse_int()
-            (code < 100 || code > 599).match ({
-                true  => err(malformed("http: status code out of range")),
-                false => ok(to_i32(code)),
-            })
-        }, false => err(malformed("http: status line does not start with HTTP/")) }),
+        false => toks[0].starts_with("HTTP/").match ({
+            true  => {
+                code := toks[1].parse_int()
+                (code < 100 || code > 599).match ({
+                    true  => err(malformed("http: status code out of range")),
+                    false => ok(to_i32(code)),
+                })
+            },
+            false => err(malformed("http: status line does not start with HTTP/")),
+        }),
     })
 }
 // every line after the status line -> a `[Header]`. Each must be `Name: value`; a colon-less line is a
@@ -257,15 +267,21 @@ append_range<A> = (a: MutPtr<A>, bv: [u8], start: i64, n: i64, sb: String) Strin
 // walk the chunked body: at `i` read the hex size line, append that many data bytes, skip the trailing
 // CRLF, and recurse; stop at the terminating 0-size chunk (or end of input).
 chunk_loop<A> = (a: MutPtr<A>, bv: [u8], i: i64, sb: String) String {
-    (i >= bv.len).match ({ true => sb, false => {
-        he := bv.hex_end(i)
-        size := bv.hex_val(i, he, 0)
-        data := bv.after_lf(he)    // past the size line's '\n'
-        (size == 0).match ({ true => sb, false => {
-            filled := a.append_range(bv, data, size, sb)
-            a.chunk_loop(bv, bv.after_lf(data + size), filled)
-        } })
-    } })
+    (i >= bv.len).match ({
+        true  => sb,
+        false => {
+            he := bv.hex_end(i)
+            size := bv.hex_val(i, he, 0)
+            data := bv.after_lf(he)    // past the size line's '\n'
+            (size == 0).match ({
+                true  => sb,
+                false => {
+                    filled := a.append_range(bv, data, size, sb)
+                    a.chunk_loop(bv, bv.after_lf(data + size), filled)
+                },
+            })
+        },
+    })
 }
 decode_chunked*<A> = (a: MutPtr<A>, body: string_view) string_view {
     bv := body.view()

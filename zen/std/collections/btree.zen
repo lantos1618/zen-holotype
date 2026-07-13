@@ -87,28 +87,37 @@ string_view.impl(Ord, {
 // first index in [lo, hi) whose key is NOT LESS THAN k (i.e. the insertion point that keeps `ks` sorted
 // and, when k is present, the index k already occupies). Standard binary search — O(log(hi - lo)).
 bt_lower_bound<K: Ord> = (ks: [K], lo: i64, hi: i64, k: K) i64 {
-    (lo >= hi).match ({ true => lo, false => {
-        mid := lo + (hi - lo) / 2
-        (ks[mid].cmp(k) < 0).match ({
-            true  => bt_lower_bound(ks, mid + 1, hi, k),
-            false => bt_lower_bound(ks, lo, mid, k),
-        })
-    } })
+    (lo >= hi).match ({
+        true  => lo,
+        false => {
+            mid := lo + (hi - lo) / 2
+            (ks[mid].cmp(k) < 0).match ({
+                true  => bt_lower_bound(ks, mid + 1, hi, k),
+                false => bt_lower_bound(ks, lo, mid, k),
+            })
+        },
+    })
 }
 // shift xs[pos .. i) up by one slot to open a hole at `pos` — writes xs[i] first, walking DOWN so no
 // live slot is clobbered before it is copied. Call with i == len (slot `len` must be in the cap view).
 bt_shift_up<T> = (xs: [T], pos: i64, i: i64) void {
-    (i <= pos).match ({ true => { }, false => {
-        xs[i] = xs[i - 1]
-        bt_shift_up(xs, pos, i - 1)
-    } })
+    (i <= pos).match ({
+        true  => { },
+        false => {
+            xs[i] = xs[i - 1]
+            bt_shift_up(xs, pos, i - 1)
+        },
+    })
 }
 // shift xs[pos+1 .. len) down by one slot, closing the hole at `pos` — walks UP. Call with i == pos.
 bt_shift_down<T> = (xs: [T], len: i64, i: i64) void {
-    (i >= len - 1).match ({ true => { }, false => {
-        xs[i] = xs[i + 1]
-        bt_shift_down(xs, len, i + 1)
-    } })
+    (i >= len - 1).match ({
+        true  => { },
+        false => {
+            xs[i] = xs[i + 1]
+            bt_shift_down(xs, len, i + 1)
+        },
+    })
 }
 BTreeMap*<K, V>: {
     keys: RawPtr<u8>,
@@ -173,12 +182,15 @@ BTreeMap*<K, V>: {
                         keys := next.keys()
                         vals := next.vals()
                         oldks.loop((h, i, k) {
-                            (i < m.len).match ({ true => {
-                                keys[i] = k
-                                vals[i] = oldvs[i]
-                            }, false => {
-                                h.break
-                            } })
+                            (i < m.len).match ({
+                                true  => {
+                                    keys[i] = k
+                                    vals[i] = oldvs[i]
+                                },
+                                false => {
+                                    h.break
+                                },
+                            })
                         })
                         a.release(m.keys)
                         a.release(m.vals)
@@ -202,43 +214,46 @@ BTreeMap*<K, V>: {
         // Open a hole at `pos` (shift the tail up), write the new pair, len+1. Grows first when full.
         k := k
         v := v
-        out: Result<BTreeMap<K, V>, IoError> := (m.len < m.cap).match ({ true => {
-            ks := m.keys_all()
-            vs := m.vals_all()
-            bt_shift_up(ks, pos, m.len)
-            bt_shift_up(vs, pos, m.len)
-            ks[pos] = k
-            vs[pos] = v
-            ok: Result<BTreeMap<K, V>, IoError> := .Ok(BTreeMap<K, V>(
-                keys: m.keys,
-                vals: m.vals,
-                len: m.len + 1,
-                cap: m.cap,
-            ))
-            ok
-        }, false => {
-            m.grow(a).match ({
-                .Ok(next) => {
-                    ks := next.keys_all()
-                    vs := next.vals_all()
-                    bt_shift_up(ks, pos, next.len)
-                    bt_shift_up(vs, pos, next.len)
-                    ks[pos] = k
-                    vs[pos] = v
-                    ok: Result<BTreeMap<K, V>, IoError> := .Ok(BTreeMap<K, V>(
-                        keys: next.keys,
-                        vals: next.vals,
-                        len: next.len + 1,
-                        cap: next.cap,
-                    ))
-                    ok
-                },
-                .Err(e)   => {
-                    err: Result<BTreeMap<K, V>, IoError> := .Err(e)
-                    err
-                },
-            })
-        } })
+        out: Result<BTreeMap<K, V>, IoError> := (m.len < m.cap).match ({
+            true  => {
+                ks := m.keys_all()
+                vs := m.vals_all()
+                bt_shift_up(ks, pos, m.len)
+                bt_shift_up(vs, pos, m.len)
+                ks[pos] = k
+                vs[pos] = v
+                ok: Result<BTreeMap<K, V>, IoError> := .Ok(BTreeMap<K, V>(
+                    keys: m.keys,
+                    vals: m.vals,
+                    len: m.len + 1,
+                    cap: m.cap,
+                ))
+                ok
+            },
+            false => {
+                m.grow(a).match ({
+                    .Ok(next) => {
+                        ks := next.keys_all()
+                        vs := next.vals_all()
+                        bt_shift_up(ks, pos, next.len)
+                        bt_shift_up(vs, pos, next.len)
+                        ks[pos] = k
+                        vs[pos] = v
+                        ok: Result<BTreeMap<K, V>, IoError> := .Ok(BTreeMap<K, V>(
+                            keys: next.keys,
+                            vals: next.vals,
+                            len: next.len + 1,
+                            cap: next.cap,
+                        ))
+                        ok
+                    },
+                    .Err(e)   => {
+                        err: Result<BTreeMap<K, V>, IoError> := .Err(e)
+                        err
+                    },
+                })
+            },
+        })
         out
     }
     insert<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<BTreeMap<K, V>, IoError> {
@@ -247,12 +262,15 @@ BTreeMap*<K, V>: {
         // before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value is overwritten
         // IN PLACE (visible through every header sharing this storage).
         pos := m.pos_of(k)
-        out: Result<BTreeMap<K, V>, IoError> := m.found_at(pos, k).match ({ true => {
-            vals := m.vals()
-            vals[pos] = v
-            ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
-            ok
-        }, false => m.insert_at(a, pos, k, v) })
+        out: Result<BTreeMap<K, V>, IoError> := m.found_at(pos, k).match ({
+            true  => {
+                vals := m.vals()
+                vals[pos] = v
+                ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
+                ok
+            },
+            false => m.insert_at(a, pos, k, v),
+        })
         out
     }
     remove<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, k: K) BTreeMap<K, V> {
@@ -261,18 +279,21 @@ BTreeMap*<K, V>: {
         // rebind (`m = m.remove(a, k)`): a stale header lies about len. `a` is accepted for signature
         // symmetry with the other owned ops; `remove` never reallocs.
         pos := m.pos_of(k)
-        m.found_at(pos, k).match ({ true => {
-            ks := m.keys()
-            vs := m.vals()
-            bt_shift_down(ks, m.len, pos)
-            bt_shift_down(vs, m.len, pos)
-            BTreeMap<K, V>(
-                keys: m.keys,
-                vals: m.vals,
-                len: m.len - 1,
-                cap: m.cap,
-            )
-        }, false => m })
+        m.found_at(pos, k).match ({
+            true  => {
+                ks := m.keys()
+                vs := m.vals()
+                bt_shift_down(ks, m.len, pos)
+                bt_shift_down(vs, m.len, pos)
+                BTreeMap<K, V>(
+                    keys: m.keys,
+                    vals: m.vals,
+                    len: m.len - 1,
+                    cap: m.cap,
+                )
+            },
+            false => m,
+        })
     }
     free<A> = (m: BTreeMap<K, V>, a: MutPtr<A>) void {
         a.release(m.keys)
@@ -284,11 +305,14 @@ BTreeMap*<K, V>: {
         ks := m.keys()
         vs := m.vals()
         ks.loop((h, i, k) {
-            (i < m.len).match ({ true => {
-                f(k, vs[i])
-            }, false => {
-                h.break
-            } })
+            (i < m.len).match ({
+                true  => {
+                    f(k, vs[i])
+                },
+                false => {
+                    h.break
+                },
+            })
         })
     }
     range = (m: BTreeMap<K, V>, lo: K, hi: K, f: (K, V) void) void {
@@ -298,17 +322,26 @@ BTreeMap*<K, V>: {
         ks := m.keys()
         vs := m.vals()
         ks.loop((h, i, k) {
-            (i < m.len).match ({ true => {
-                (k.cmp(hi) < 0).match ({ true => {
-                    (k.cmp(lo) < 0).match ({ true => { }, false => {
-                        f(k, vs[i])
-                    } })
-                }, false => {
+            (i < m.len).match ({
+                true  => {
+                    (k.cmp(hi) < 0).match ({
+                        true  => {
+                            (k.cmp(lo) < 0).match ({
+                                true  => { },
+                                false => {
+                                    f(k, vs[i])
+                                },
+                            })
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
+                },
+                false => {
                     h.break
-                } })
-            }, false => {
-                h.break
-            } })
+                },
+            })
         })
     }
 }
@@ -420,11 +453,14 @@ BTreeSet*<K>: {
                 )
                 keys := next.keys()
                 oldks.loop((h, i, k) {
-                    (i < s.len).match ({ true => {
-                        keys[i] = k
-                    }, false => {
-                        h.break
-                    } })
+                    (i < s.len).match ({
+                        true  => {
+                            keys[i] = k
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
                 a.release(s.keys)
                 ok: Result<BTreeSet<K>, IoError> := .Ok(next)
@@ -438,71 +474,83 @@ BTreeSet*<K>: {
     }
     insert_at<A> = (s: BTreeSet<K>, a: MutPtr<A>, pos: i64, k: K) Result<BTreeSet<K>, IoError> {
         k := k
-        out: Result<BTreeSet<K>, IoError> := (s.len < s.cap).match ({ true => {
-            ks := s.keys_all()
-            bt_shift_up(ks, pos, s.len)
-            ks[pos] = k
-            ok: Result<BTreeSet<K>, IoError> := .Ok(BTreeSet<K>(
-                keys: s.keys,
-                len: s.len + 1,
-                cap: s.cap,
-            ))
-            ok
-        }, false => {
-            s.grow(a).match ({
-                .Ok(next) => {
-                    ks := next.keys_all()
-                    bt_shift_up(ks, pos, next.len)
-                    ks[pos] = k
-                    ok: Result<BTreeSet<K>, IoError> := .Ok(BTreeSet<K>(
-                        keys: next.keys,
-                        len: next.len + 1,
-                        cap: next.cap,
-                    ))
-                    ok
-                },
-                .Err(e)   => {
-                    err: Result<BTreeSet<K>, IoError> := .Err(e)
-                    err
-                },
-            })
-        } })
+        out: Result<BTreeSet<K>, IoError> := (s.len < s.cap).match ({
+            true  => {
+                ks := s.keys_all()
+                bt_shift_up(ks, pos, s.len)
+                ks[pos] = k
+                ok: Result<BTreeSet<K>, IoError> := .Ok(BTreeSet<K>(
+                    keys: s.keys,
+                    len: s.len + 1,
+                    cap: s.cap,
+                ))
+                ok
+            },
+            false => {
+                s.grow(a).match ({
+                    .Ok(next) => {
+                        ks := next.keys_all()
+                        bt_shift_up(ks, pos, next.len)
+                        ks[pos] = k
+                        ok: Result<BTreeSet<K>, IoError> := .Ok(BTreeSet<K>(
+                            keys: next.keys,
+                            len: next.len + 1,
+                            cap: next.cap,
+                        ))
+                        ok
+                    },
+                    .Err(e)   => {
+                        err: Result<BTreeSet<K>, IoError> := .Err(e)
+                        err
+                    },
+                })
+            },
+        })
         out
     }
     insert<A> = (s: BTreeSet<K>, a: MutPtr<A>, k: K) Result<BTreeSet<K>, IoError> {
         // Insert if absent (allocation failure is a value). Already-present is a no-op (len unchanged).
         // RETURNS the updated set — always rebind. Mirrors BTreeMap.insert.
         pos := s.pos_of(k)
-        out: Result<BTreeSet<K>, IoError> := s.found_at(pos, k).match ({ true => {
-            ok: Result<BTreeSet<K>, IoError> := .Ok(s)
-            ok
-        }, false => s.insert_at(a, pos, k) })
+        out: Result<BTreeSet<K>, IoError> := s.found_at(pos, k).match ({
+            true  => {
+                ok: Result<BTreeSet<K>, IoError> := .Ok(s)
+                ok
+            },
+            false => s.insert_at(a, pos, k),
+        })
         out
     }
     remove<A> = (s: BTreeSet<K>, a: MutPtr<A>, k: K) BTreeSet<K> {
         // Remove k if present — close the gap, len-1, array stays sorted. Absent keys are a no-op.
         // RETURNS the updated set. `a` is accepted for signature symmetry; `remove` never reallocs.
         pos := s.pos_of(k)
-        s.found_at(pos, k).match ({ true => {
-            ks := s.keys()
-            bt_shift_down(ks, s.len, pos)
-            BTreeSet<K>(
-                keys: s.keys,
-                len: s.len - 1,
-                cap: s.cap,
-            )
-        }, false => s })
+        s.found_at(pos, k).match ({
+            true  => {
+                ks := s.keys()
+                bt_shift_down(ks, s.len, pos)
+                BTreeSet<K>(
+                    keys: s.keys,
+                    len: s.len - 1,
+                    cap: s.cap,
+                )
+            },
+            false => s,
+        })
     }
     free<A> = (s: BTreeSet<K>, a: MutPtr<A>) void { a.release(s.keys) }
     each = (s: BTreeSet<K>, f: (K) void) void {
         // Visit every element IN SORTED ORDER. `f` is invoked DIRECTLY in the loop body.
         ks := s.keys()
         ks.loop((h, i, k) {
-            (i < s.len).match ({ true => {
-                f(k)
-            }, false => {
-                h.break
-            } })
+            (i < s.len).match ({
+                true  => {
+                    f(k)
+                },
+                false => {
+                    h.break
+                },
+            })
         })
     }
     range = (s: BTreeSet<K>, lo: K, hi: K, f: (K) void) void {
@@ -510,17 +558,26 @@ BTreeSet*<K>: {
         // < lo, BREAK at the first >= hi. `f` is invoked DIRECTLY in the loop body.
         ks := s.keys()
         ks.loop((h, i, k) {
-            (i < s.len).match ({ true => {
-                (k.cmp(hi) < 0).match ({ true => {
-                    (k.cmp(lo) < 0).match ({ true => { }, false => {
-                        f(k)
-                    } })
-                }, false => {
+            (i < s.len).match ({
+                true  => {
+                    (k.cmp(hi) < 0).match ({
+                        true  => {
+                            (k.cmp(lo) < 0).match ({
+                                true  => { },
+                                false => {
+                                    f(k)
+                                },
+                            })
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
+                },
+                false => {
                     h.break
-                } })
-            }, false => {
-                h.break
-            } })
+                },
+            })
         })
     }
 }

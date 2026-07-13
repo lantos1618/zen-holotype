@@ -20,21 +20,27 @@ Vec*<T>: {
         // would otherwise return uninitialized junk from the spare capacity. Out-of-range PANICS (same
         // give-up contract as the compiler's OOB guard) rather than returning garbage. Signature stays
         // `T` — every existing caller with a valid index is unchanged. Need a recoverable read? `get_opt`.
-        (i < 0 || i >= v.len).match ({ true => {
-            panic("vec.get: index out of bounds")
-            // unreachable — panic aborts; the recursion only satisfies the arm's type.
-            v.get(i)
-        }, false => v.buf()[i] })
+        (i < 0 || i >= v.len).match ({
+            true  => {
+                panic("vec.get: index out of bounds")
+                // unreachable — panic aborts; the recursion only satisfies the arm's type.
+                v.get(i)
+            },
+            false => v.buf()[i],
+        })
     }
     get_opt = (v: Vec<T>, i: i64) Opt<T> {
         // Recoverable bounds-checked read: `.Some(x)` for i in [0, len), `.None` past the live end.
-        (i < 0 || i >= v.len).match ({ true => {
-            none: Opt<T> := .None
-            none
-        }, false => {
-            some: Opt<T> := .Some(v.buf()[i])
-            some
-        } })
+        (i < 0 || i >= v.len).match ({
+            true  => {
+                none: Opt<T> := .None
+                none
+            },
+            false => {
+                some: Opt<T> := .Some(v.buf()[i])
+                some
+            },
+        })
     }
     grow<A> = (v: Vec<T>, a: MutPtr<A>) Result<Vec<T>, IoError> {
         ncap := v.cap * 2 + 1
@@ -55,33 +61,36 @@ Vec*<T>: {
     }
     push<A> = (v: Vec<T>, a: MutPtr<A>, x: T) Result<Vec<T>, IoError> {
         x := x
-        out: Result<Vec<T>, IoError> := (v.len < v.cap).match ({ true => {
-            b := v.buf()
-            b[v.len] = x
-            vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
-                ptr: v.ptr,
-                len: v.len + 1,
-                cap: v.cap,
-            ))
-            vok
-        }, false => {
-            v.grow(a).match ({
-                .Ok(r)  => {
-                    b := r.buf()
-                    b[r.len] = x
-                    vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
-                        ptr: r.ptr,
-                        len: r.len + 1,
-                        cap: r.cap,
-                    ))
-                    vok
-                },
-                .Err(e) => {
-                    verr: Result<Vec<T>, IoError> := .Err(e)
-                    verr
-                },
-            })
-        } })
+        out: Result<Vec<T>, IoError> := (v.len < v.cap).match ({
+            true  => {
+                b := v.buf()
+                b[v.len] = x
+                vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
+                    ptr: v.ptr,
+                    len: v.len + 1,
+                    cap: v.cap,
+                ))
+                vok
+            },
+            false => {
+                v.grow(a).match ({
+                    .Ok(r)  => {
+                        b := r.buf()
+                        b[r.len] = x
+                        vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
+                            ptr: r.ptr,
+                            len: r.len + 1,
+                            cap: r.cap,
+                        ))
+                        vok
+                    },
+                    .Err(e) => {
+                        verr: Result<Vec<T>, IoError> := .Err(e)
+                        verr
+                    },
+                })
+            },
+        })
         out
     }
     free<A> = (v: Vec<T>, a: MutPtr<A>) void { a.release(v.ptr) }
@@ -110,10 +119,13 @@ Vec*<T>: {
         out: Opt<T> := .None
         vw: [T] := v.view()
         vw.loop((h, i, x) {
-            pred(x).match ({ true => {
-                out = .Some(x)
-                h.break
-            }, false => { } })
+            pred(x).match ({
+                true  => {
+                    out = .Some(x)
+                    h.break
+                },
+                false => { },
+            })
         })
         out
     }
@@ -187,34 +199,37 @@ empty*<T, A> = (a: MutPtr<A>) Result<Vec<T>, IoError> {
 }
 // a `Vec<T>` seeded from a slice (copies `xs`), its buffer acquired from `a`. T inferred from `xs`, A from `a`.
 of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError> {
-    (xs.len <= 0).match ({ true => {
-        vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
-            ptr: null_ptr(),
-            len: 0,
-            cap: 0,
-        ))
-        vok
-    }, false => {
-        a.try_acquire(xs.len * sizeof(T)).match ({
-            .Ok(p)  => {
-                v := Vec<T>(
-                    ptr: p,
-                    len: xs.len,
-                    cap: xs.len,
-                )
-                b := v.buf()
-                xs.loop((h, i, x) {
-                    b[i] = x
-                })
-                vok: Result<Vec<T>, IoError> := .Ok(v)
-                vok
-            },
-            .Err(e) => {
-                verr: Result<Vec<T>, IoError> := .Err(e)
-                verr
-            },
-        })
-    } })
+    (xs.len <= 0).match ({
+        true  => {
+            vok: Result<Vec<T>, IoError> := .Ok(Vec<T>(
+                ptr: null_ptr(),
+                len: 0,
+                cap: 0,
+            ))
+            vok
+        },
+        false => {
+            a.try_acquire(xs.len * sizeof(T)).match ({
+                .Ok(p)  => {
+                    v := Vec<T>(
+                        ptr: p,
+                        len: xs.len,
+                        cap: xs.len,
+                    )
+                    b := v.buf()
+                    xs.loop((h, i, x) {
+                        b[i] = x
+                    })
+                    vok: Result<Vec<T>, IoError> := .Ok(v)
+                    vok
+                },
+                .Err(e) => {
+                    verr: Result<Vec<T>, IoError> := .Err(e)
+                    verr
+                },
+            })
+        },
+    })
 }
 // ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
 // An ADDITIVE surface that removes allocator threading: `v := vec.new()` then `v.push(x)` — no `a`

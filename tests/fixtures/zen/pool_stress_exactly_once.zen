@@ -19,12 +19,15 @@ PA_ACTS := 8
 PA_PID := 16
 PA_OK := 24
 send_loop = (p: MutPtr<Pool>, acts: RawPtr<u8>, pid: i64, k: i64, ok: i64) i64 {
-    (k >= MSGS).match ({ true => ok, false => {
-        target := (pid + k) % NACT
-        a := acts.offset(target * 8).load_i64().offset(0)
-        sent := p.pool_send(a, 1)
-        send_loop(p, acts, pid, k + 1, sent.match ({ true => ok + 1, false => ok }))
-    } })
+    (k >= MSGS).match ({
+        true  => ok,
+        false => {
+            target := (pid + k) % NACT
+            a := acts.offset(target * 8).load_i64().offset(0)
+            sent := p.pool_send(a, 1)
+            send_loop(p, acts, pid, k + 1, sent.match ({ true => ok + 1, false => ok }))
+        },
+    })
 }
 producer = (arg: RawPtr<u8>) RawPtr<u8> {
     pool_raw := load_i64(arg.offset(PA_POOL)).offset(0)
@@ -36,34 +39,46 @@ producer = (arg: RawPtr<u8>) RawPtr<u8> {
     null_ptr()
 }
 spawn_actors = (acts: RawPtr<u8>, i: i64) void {
-    (i < NACT).match ({ true => {
-        acts.offset(i * 8).store_i64(pool_spawn(processed, NPROD * MSGS + 16, behave))
-        spawn_actors(acts, i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            acts.offset(i * 8).store_i64(pool_spawn(processed, NPROD * MSGS + 16, behave))
+            spawn_actors(acts, i + 1)
+        },
+        false => { },
+    })
 }
 free_actors = (acts: RawPtr<u8>, i: i64) void {
-    (i < NACT).match ({ true => {
-        pool_actor_free(acts.offset(i * 8).load_i64().offset(0))
-        free_actors(acts, i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            pool_actor_free(acts.offset(i * 8).load_i64().offset(0))
+            free_actors(acts, i + 1)
+        },
+        false => { },
+    })
 }
 start_prods = (pool_raw: RawPtr<u8>, acts: RawPtr<u8>, hs: RawPtr<u8>, ar: RawPtr<u8>, i: i64) void {
-    (i < NPROD).match ({ true => {
-        c := ar.offset(i * 32)
-        c.offset(PA_POOL).store_i64(pool_raw)
-        c.offset(PA_ACTS).store_i64(acts)
-        c.offset(PA_PID).store_i64(i)
-        c.offset(PA_OK).store_i64(0)
-        h := spawn(producer, c)
-        hs.offset(i * 8).store_i64(h.tid)
-        start_prods(pool_raw, acts, hs, ar, i + 1)
-    }, false => { } })
+    (i < NPROD).match ({
+        true  => {
+            c := ar.offset(i * 32)
+            c.offset(PA_POOL).store_i64(pool_raw)
+            c.offset(PA_ACTS).store_i64(acts)
+            c.offset(PA_PID).store_i64(i)
+            c.offset(PA_OK).store_i64(0)
+            h := spawn(producer, c)
+            hs.offset(i * 8).store_i64(h.tid)
+            start_prods(pool_raw, acts, hs, ar, i + 1)
+        },
+        false => { },
+    })
 }
 join_prods = (hs: RawPtr<u8>, ar: RawPtr<u8>, i: i64, acc: i64) i64 {
-    (i < NPROD).match ({ true => {
-        join(JoinHandle(tid: hs.offset(i * 8).load_i64().offset(0)))
-        join_prods(hs, ar, i + 1, acc + ar.offset(i * 32).offset(PA_OK).load_i64())
-    }, false => acc })
+    (i < NPROD).match ({
+        true  => {
+            join(JoinHandle(tid: hs.offset(i * 8).load_i64().offset(0)))
+            join_prods(hs, ar, i + 1, acc + ar.offset(i * 32).offset(PA_OK).load_i64())
+        },
+        false => acc,
+    })
 }
 // one stress iteration: returns 1 on pass, 0 on fail.
 iteration = () i64 {

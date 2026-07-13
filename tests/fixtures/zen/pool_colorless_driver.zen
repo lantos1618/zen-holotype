@@ -15,44 +15,62 @@ behave_sync = (user: RawPtr<u8>, msg: i64) void { store_i64(user, load_i64(user)
 behave_par = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, msg) }
 // ── SYNC driver: post messages, drain inline on this thread (no pool, no threads) ──
 post_loop = (a: RawPtr<u8>, k: i64) void {
-    (k < PERMSG).match ({ true => {
-        pool_post(a, k)
-        post_loop(a, k + 1)
-    }, false => { } })
+    (k < PERMSG).match ({
+        true  => {
+            pool_post(a, k)
+            post_loop(a, k + 1)
+        },
+        false => { },
+    })
 }
 sync_run = (i: i64) void {
-    (i < NACT).match ({ true => {
-        a := pool_spawn(sync_acc, PERMSG + 8, behave_sync)
-        post_loop(a, 0)
-        pool_drain_inline(a)
-        pool_actor_free(a)
-        sync_run(i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            a := pool_spawn(sync_acc, PERMSG + 8, behave_sync)
+            post_loop(a, 0)
+            pool_drain_inline(a)
+            pool_actor_free(a)
+            sync_run(i + 1)
+        },
+        false => { },
+    })
 }
 // ── PARALLEL driver: same payloads, sent through the pool, drained by workers ──
 send_loop = (p: MutPtr<Pool>, a: RawPtr<u8>, k: i64) void {
-    (k < PERMSG).match ({ true => {
-        p.pool_send(a, k)
-        send_loop(p, a, k + 1)
-    }, false => { } })
+    (k < PERMSG).match ({
+        true  => {
+            p.pool_send(a, k)
+            send_loop(p, a, k + 1)
+        },
+        false => { },
+    })
 }
 par_spawn = (i: i64) void {
-    (i < NACT).match ({ true => {
-        actors.offset(i * 8).store_i64(pool_spawn(par_acc, PERMSG + 16, behave_par))
-        par_spawn(i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            actors.offset(i * 8).store_i64(pool_spawn(par_acc, PERMSG + 16, behave_par))
+            par_spawn(i + 1)
+        },
+        false => { },
+    })
 }
 par_blast = (p: MutPtr<Pool>, i: i64) void {
-    (i < NACT).match ({ true => {
-        send_loop(p, actors.offset(i * 8).load_i64().offset(0), 0)
-        par_blast(p, i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            send_loop(p, actors.offset(i * 8).load_i64().offset(0), 0)
+            par_blast(p, i + 1)
+        },
+        false => { },
+    })
 }
 par_free = (i: i64) void {
-    (i < NACT).match ({ true => {
-        pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
-        par_free(i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
+            par_free(i + 1)
+        },
+        false => { },
+    })
 }
 main = () i32 {
     store_i64(sync_acc, 0)

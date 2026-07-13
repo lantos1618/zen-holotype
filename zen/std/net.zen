@@ -70,20 +70,29 @@ digit_val = (b: u8) i64 { to_i64(b - '0') }
 // std.fs's unbounded directory walk. `seen` guards against empty octets ("1..2", ".1", "1.").
 parse_octets = (v: [u8], i: i64, cell: RawPtr<u8>, octet: i64, count: i64, seen: bool) i64 {
     (i >= v.len).match ({
-        true  => (seen && count == 3 && octet <= 255).match ({ true => {
-            cell.offset(4 + count).store(to_u8(octet))
-            count + 1
-        }, false => 0 - 1 }),
+        true  => (seen && count == 3 && octet <= 255).match ({
+            true  => {
+                cell.offset(4 + count).store(to_u8(octet))
+                count + 1
+            },
+            false => 0 - 1,
+        }),
         false => {
             b := v[i]
             (b == '.').match ({
-                true  => (seen && count < 3 && octet <= 255).match ({ true => {
-                    cell.offset(4 + count).store(to_u8(octet))
-                    v.parse_octets(i + 1, cell, 0, count + 1, false)
-                }, false => 0 - 1 }),
-                false => (b >= '0' && b <= '9').match ({ true => {
-                    v.parse_octets(i + 1, cell, octet * 10 + digit_val(b), count, true)
-                }, false => 0 - 1 }),
+                true  => (seen && count < 3 && octet <= 255).match ({
+                    true  => {
+                        cell.offset(4 + count).store(to_u8(octet))
+                        v.parse_octets(i + 1, cell, 0, count + 1, false)
+                    },
+                    false => 0 - 1,
+                }),
+                false => (b >= '0' && b <= '9').match ({
+                    true  => {
+                        v.parse_octets(i + 1, cell, octet * 10 + digit_val(b), count, true)
+                    },
+                    false => 0 - 1,
+                }),
             })
         },
     })
@@ -91,13 +100,16 @@ parse_octets = (v: [u8], i: i64, cell: RawPtr<u8>, octet: i64, count: i64, seen:
 // parse `host` (a dotted-quad "a.b.c.d" or the literal "localhost") into the four sin_addr octets at
 // cell[4..8]; return false on a malformed address. "0.0.0.0" (INADDR_ANY) binds all interfaces.
 fill_ipv4 = (host: string_view, cell: RawPtr<u8>) bool {
-    eq(host, "localhost").match ({ true => {
-        cell.offset(4).store(127)
-        cell.offset(5).store(0)
-        cell.offset(6).store(0)
-        cell.offset(7).store(1)
-        true
-    }, false => host.view().parse_octets(0, cell, 0, 0, false) == 4 })
+    eq(host, "localhost").match ({
+        true  => {
+            cell.offset(4).store(127)
+            cell.offset(5).store(0)
+            cell.offset(6).store(0)
+            cell.offset(7).store(1)
+            true
+        },
+        false => host.view().parse_octets(0, cell, 0, 0, false) == 4,
+    })
 }
 // stamp family + port + address into a zeroed 16-byte cell; false if `host` is unparseable.
 fill_sockaddr = (cell: RawPtr<u8>, host: string_view, port: i32) bool {
@@ -125,24 +137,33 @@ serve* = (host: string_view, port: i32) Result<TcpListener, IoError> {
         false => {
             fd.set_reuse()
             cell := zeroed(SOCKADDR_LEN)
-            res: Result<TcpListener, IoError> := fill_sockaddr(cell, host, port).match ({ true => {
-                b := fd.bind(cell, to_i32(SOCKADDR_LEN))
-                cell.release()
-                (b < 0).match ({ true => {
+            res: Result<TcpListener, IoError> := fill_sockaddr(cell, host, port).match ({
+                true  => {
+                    b := fd.bind(cell, to_i32(SOCKADDR_LEN))
+                    cell.release()
+                    (b < 0).match ({
+                        true  => {
+                            fd.close()
+                            err(IoError.Errno(b))
+                        },
+                        false => {
+                            lr := fd.listen(BACKLOG)
+                            (lr < 0).match ({
+                                true  => {
+                                    fd.close()
+                                    err(IoError.Errno(lr))
+                                },
+                                false => ok(TcpListener(fd: fd)),
+                            })
+                        },
+                    })
+                },
+                false => {
+                    cell.release()
                     fd.close()
-                    err(IoError.Errno(b))
-                }, false => {
-                    lr := fd.listen(BACKLOG)
-                    (lr < 0).match ({ true => {
-                        fd.close()
-                        err(IoError.Errno(lr))
-                    }, false => ok(TcpListener(fd: fd)) })
-                } })
-            }, false => {
-                cell.release()
-                fd.close()
-                err(IoError.NotFound)
-            } })
+                    err(IoError.NotFound)
+                },
+            })
             res
         },
     })
@@ -154,11 +175,14 @@ local_port* = (l: TcpListener) i32 {
     lenc := zeroed(8)
     store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
     r := l.fd.getsockname(cell, lenc)
-    p := (r < 0).match ({ true => 0, false => {
-        hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
-        lo := to_i64(cell.offset(3).load())
-        to_i32(hi * 256 + lo)
-    } })
+    p := (r < 0).match ({
+        true  => 0,
+        false => {
+            hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
+            lo := to_i64(cell.offset(3).load())
+            to_i32(hi * 256 + lo)
+        },
+    })
     cell.release()
     lenc.release()
     p
@@ -175,22 +199,31 @@ close_listener* = (l: TcpListener) void { l.fd.close() }
 // or the failing step's errno. Blocking: connect returns once the handshake completes.
 dial* = (host: string_view, port: i32) Result<TcpConn, IoError> {
     fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
-    out: Result<TcpConn, IoError> := (fd < 0).match ({ true => err(IoError.Errno(fd)), false => {
-        cell := zeroed(SOCKADDR_LEN)
-        res: Result<TcpConn, IoError> := fill_sockaddr(cell, host, port).match ({ true => {
-            r := fd.connect(cell, to_i32(SOCKADDR_LEN))
-            cell.release()
-            (r < 0).match ({ true => {
-                fd.close()
-                err(IoError.Errno(r))
-            }, false => ok(TcpConn(fd: fd)) })
-        }, false => {
-            cell.release()
-            fd.close()
-            err(IoError.NotFound)
-        } })
-        res
-    } })
+    out: Result<TcpConn, IoError> := (fd < 0).match ({
+        true  => err(IoError.Errno(fd)),
+        false => {
+            cell := zeroed(SOCKADDR_LEN)
+            res: Result<TcpConn, IoError> := fill_sockaddr(cell, host, port).match ({
+                true  => {
+                    r := fd.connect(cell, to_i32(SOCKADDR_LEN))
+                    cell.release()
+                    (r < 0).match ({
+                        true  => {
+                            fd.close()
+                            err(IoError.Errno(r))
+                        },
+                        false => ok(TcpConn(fd: fd)),
+                    })
+                },
+                false => {
+                    cell.release()
+                    fd.close()
+                    err(IoError.NotFound)
+                },
+            })
+            res
+        },
+    })
     out
 }
 // read up to `n` bytes into the caller-owned `buf`; returns the count (0 = peer closed) or errno. The
@@ -205,13 +238,16 @@ recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<string_view, IoError> {
     a.try_acquire(n + 1).match ({
         .Ok(buf) => {
             r := c.fd.read(buf, n)
-            out: Result<string_view, IoError> := (r < 0).match ({ true => {
-                a.release(buf)
-                err(IoError.Errno(to_i32(r)))
-            }, false => {
-                buf.offset(r).store(0)
-                ok(cstr(buf))
-            } })
+            out: Result<string_view, IoError> := (r < 0).match ({
+                true  => {
+                    a.release(buf)
+                    err(IoError.Errno(to_i32(r)))
+                },
+                false => {
+                    buf.offset(r).store(0)
+                    ok(cstr(buf))
+                },
+            })
             out
         },
         .Err(e)  => err(e),
@@ -219,10 +255,13 @@ recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<string_view, IoError> {
 }
 // write ALL of `off..n` from `buf`, following short writes; returns the offset reached (== n on success).
 write_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
-    (off >= n).match ({ true => n, false => {
-        w := fd.write(buf.offset(off), n - off)
-        (w <= 0).match ({ true => off, false => fd.write_all(buf, off + w, n) })
-    } })
+    (off >= n).match ({
+        true  => n,
+        false => {
+            w := fd.write(buf.offset(off), n - off)
+            (w <= 0).match ({ true => off, false => fd.write_all(buf, off + w, n) })
+        },
+    })
 }
 // write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write.
 send* = (c: TcpConn, bytes: [u8]) Result<i64, IoError> {

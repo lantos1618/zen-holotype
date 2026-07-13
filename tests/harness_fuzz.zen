@@ -35,14 +35,17 @@ FZ_FULL := "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\
 // ── small builders (the value harness can't reach these; we build Zen source strings by hand) ─────
 // append a decimal integer VALUE (no leading zeros) — for generated type-cycle names.
 fz_app_int = (mp: MutPtr<Malloc>, s: String, n: i64) String {
-    (n < 10).match ({ true => {
-        d: u8 := ('0' + n).to_u8()
-        mp.push_in(s, d).expect("fuzz: oom")
-    }, false => {
-        s2 := mp.fz_app_int(s, n / 10)
-        d2: u8 := ('0' + (n - n / 10 * 10)).to_u8()
-        mp.push_in(s2, d2).expect("fuzz: oom")
-    } })
+    (n < 10).match ({
+        true  => {
+            d: u8 := ('0' + n).to_u8()
+            mp.push_in(s, d).expect("fuzz: oom")
+        },
+        false => {
+            s2 := mp.fz_app_int(s, n / 10)
+            d2: u8 := ('0' + (n - n / 10 * 10)).to_u8()
+            mp.push_in(s2, d2).expect("fuzz: oom")
+        },
+    })
 }
 // append `frag` n times — for N-deep unterminated blocks / parens / tyarg tails.
 fz_rep = (mp: MutPtr<Malloc>, s: String, frag: string_view, i: i64, n: i64) String {
@@ -53,14 +56,17 @@ fz_rep = (mp: MutPtr<Malloc>, s: String, frag: string_view, i: i64, n: i64) Stri
 }
 // "A0*: { f: A1 }\nA1*: { f: A2 }\n...A(n-1)*: { f: A0 }\n" — a by-value struct type cycle of length n.
 fz_cycle = (mp: MutPtr<Malloc>, s: String, i: i64, n: i64) String {
-    (i >= n).match ({ true => s, false => {
-        s1 := s.append_in(mp, "A").expect("fuzz: oom")
-        s2 := mp.fz_app_int(s1, i)
-        s3 := s2.append_in(mp, "*: { f: A").expect("fuzz: oom")
-        s4 := mp.fz_app_int(s3, (i + 1) % n)
-        s5 := s4.append_in(mp, " }\n").expect("fuzz: oom")
-        mp.fz_cycle(s5, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            s1 := s.append_in(mp, "A").expect("fuzz: oom")
+            s2 := mp.fz_app_int(s1, i)
+            s3 := s2.append_in(mp, "*: { f: A").expect("fuzz: oom")
+            s4 := mp.fz_app_int(s3, (i + 1) % n)
+            s5 := s4.append_in(mp, " }\n").expect("fuzz: oom")
+            mp.fz_cycle(s5, i + 1, n)
+        },
+    })
 }
 // push the first k bytes of `src` — yields an off-by-token truncation of a real program.
 fz_trunc_go = (mp: MutPtr<Malloc>, s: String, sv: [u8], i: i64, k: i64) String {
@@ -77,19 +83,25 @@ fz_trunc = (mp: MutPtr<Malloc>, src: string_view, k: i64) string_view {
 // ── input generators (deterministic via the seeded Rng) ───────────────────────────
 // token soup: n random tokens from `toks` joined by spaces.
 fz_soup = (mp: MutPtr<Malloc>, s: String, toks: [string_view], nt: i64, rp: MutPtr<Rng>, i: i64, n: i64) String {
-    (i >= n).match ({ true => s, false => {
-        tok := toks[rp.range(0, nt)]
-        s1 := s.append_in(mp, tok).expect("fuzz: oom")
-        s2 := s1.append_in(mp, " ").expect("fuzz: oom")
-        mp.fz_soup(s2, toks, nt, rp, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            tok := toks[rp.range(0, nt)]
+            s1 := s.append_in(mp, tok).expect("fuzz: oom")
+            s2 := s1.append_in(mp, " ").expect("fuzz: oom")
+            mp.fz_soup(s2, toks, nt, rp, i + 1, n)
+        },
+    })
 }
 // byte noise: n random printable bytes in [32, 126].
 fz_noise = (mp: MutPtr<Malloc>, s: String, rp: MutPtr<Rng>, i: i64, n: i64) String {
-    (i >= n).match ({ true => s, false => {
-        b: u8 := (' ' + rp.range(0, 95)).to_u8()
-        mp.fz_noise(mp.push_in(s, b).expect("fuzz: oom"), rp, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            b: u8 := (' ' + rp.range(0, 95)).to_u8()
+            mp.fz_noise(mp.push_in(s, b).expect("fuzz: oom"), rp, i + 1, n)
+        },
+    })
 }
 // grammar-aware malformed programs aimed at the recursion sites (cycles, unterminated nests, tyargs,
 // recursive generics, polymorphic-recursive types, truncations).
@@ -153,12 +165,15 @@ fz_batch = (mp: MutPtr<Malloc>, srcs: [string_view], n: i64) i32 {
     j: i64 := 0
     @while (j < n) {
         cn := mp.fz_crash_count(j)
-        (cn > 0).match ({ true => {
-            out("\n!! CRASH/HANG on input: ")
-            out(srcs[j])
-            out("\n")
-            crashes = crashes + cn
-        }, false => out(".") })
+        (cn > 0).match ({
+            true  => {
+                out("\n!! CRASH/HANG on input: ")
+                out(srcs[j])
+                out("\n")
+                crashes = crashes + cn
+            },
+            false => out("."),
+        })
         j = j + 1
     }
     free(base)

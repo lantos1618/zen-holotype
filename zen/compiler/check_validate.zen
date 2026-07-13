@@ -164,15 +164,18 @@ lit_binop = (op: string_view, l: i64, r: i64) LitVal {
                 v: l - r,
                 neg: l - r < 0,
             ),
-            false => eq(op, "*").match ({ true => LitVal(
-                ok: true,
-                v: l * r,
-                neg: l * r < 0,
-            ), false => LitVal(
-                ok: false,
-                v: 0,
-                neg: false,
-            ) }),
+            false => eq(op, "*").match ({
+                true  => LitVal(
+                    ok: true,
+                    v: l * r,
+                    neg: l * r < 0,
+                ),
+                false => LitVal(
+                    ok: false,
+                    v: 0,
+                    neg: false,
+                ),
+            }),
         }),
     })
 }
@@ -186,11 +189,14 @@ lit_val = (e: Ptr<Expr>) LitVal {
         .Bin(b) => {
             l := b.lhs.lit_val()
             r := b.rhs.lit_val()
-            (l.ok && r.ok).match ({ true => lit_binop(b.op, l.v, r.v), false => LitVal(
-                ok: false,
-                v: 0,
-                neg: false,
-            ) })
+            (l.ok && r.ok).match ({
+                true  => lit_binop(b.op, l.v, r.v),
+                false => LitVal(
+                    ok: false,
+                    v: 0,
+                    neg: false,
+                ),
+            })
         },
         _       => LitVal(
             ok: false,
@@ -290,13 +296,16 @@ gen_ptr_arg_fits = (g: Ty, w: Ty) bool {
 // Non-pointer generic params (`T`, `[T]`, `Vec<T>`) and args whose type is still unknown (residue in a
 // generic body) stay deferred to mono, exactly as before.
 tparam_shape_err = (env: Env, pty: Ty, ar: Expr) i32 {
-    pty.is_ptr_ty_g().match ({ true => {
-        argty := env.infer_expr(ar.addr())
-        env.unknown_ty(argty).match ({
-            true  => 0,
-            false => gen_ptr_arg_fits(argty, pty).match ({ true => 0, false => 1 }),
-        })
-    }, false => 0 })
+    pty.is_ptr_ty_g().match ({
+        true  => {
+            argty := env.infer_expr(ar.addr())
+            env.unknown_ty(argty).match ({
+                true  => 0,
+                false => gen_ptr_arg_fits(argty, pty).match ({ true => 0, false => 1 }),
+            })
+        },
+        false => 0,
+    })
 }
 // A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
 // remain invariant. This accepts `["a", "b"]` at a `[string_view]` call slot without allowing a
@@ -325,13 +334,16 @@ arg_err_at = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
             true  => env.tparam_shape_err(params[i].ty, ar),
             false => {
                 sv := env.slicelit_slot_verdict(ar, params[i].ty)
-                (sv >= 0).match ({ true => sv, false => {
-                    lv := ar.addr().lit_slot_verdict(params[i].ty)
-                    (lv >= 0).match ({
-                        true  => lv,
-                        false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty),
-                    })
-                } })
+                (sv >= 0).match ({
+                    true  => sv,
+                    false => {
+                        lv := ar.addr().lit_slot_verdict(params[i].ty)
+                        (lv >= 0).match ({
+                            true  => lv,
+                            false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty),
+                        })
+                    },
+                })
             },
         }),
         false => 0,
@@ -606,14 +618,17 @@ type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) boo
 // an unresolved / primitive / generic-passthrough targ defers (0), so plain generics never regress.
 bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
     tr := tp.tparam_bound()
-    is_empty(tr).match ({ true => 0, false => {
-        tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
-        // concrete type A binds to
-        (is_empty(tn) || env.decls.is_struct(tn) == false).match ({
-            true  => 0,
-            false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
-        })
-    } })
+    is_empty(tr).match ({
+        true  => 0,
+        false => {
+            tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
+            // concrete type A binds to
+            (is_empty(tn) || env.decls.is_struct(tn) == false).match ({
+                true  => 0,
+                false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
+            })
+        },
+    })
 }    // unresolved / not a concrete struct: defer
 bound_errs = (env: Env, f: Func, c: CallData) i32 {
     acc := 0
@@ -638,16 +653,19 @@ call_errs = (env: Env, c: CallData) i32 {
 // tparam stay lenient (generic FnT-param templates resolve those at mono). Without this, a wrong-arity
 // indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
 fnt_arg_err_at = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
-    (i < ptys.len).match ({ true => {
-        lv := ar.addr().lit_slot_verdict(ptys[i])
-        (lv >= 0).match ({
-            true  => lv,
-            false => env.unknown_ty(ptys[i]).match ({
-                true  => 0,
-                false => env.fit_err(env.infer_expr(ar.addr()), ptys[i]),
-            }),
-        })
-    }, false => 0 })
+    (i < ptys.len).match ({
+        true  => {
+            lv := ar.addr().lit_slot_verdict(ptys[i])
+            (lv >= 0).match ({
+                true  => lv,
+                false => env.unknown_ty(ptys[i]).match ({
+                    true  => 0,
+                    false => env.fit_err(env.infer_expr(ar.addr()), ptys[i]),
+                }),
+            })
+        },
+        false => 0,
+    })
 }
 fnt_arg_errs = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
@@ -674,10 +692,13 @@ check_args = (env: Env, args: [Expr]) i32 {
 }
 // A guarded arm's guard is checked in the arm's env (its pattern binding is in scope) and must be bool.
 guard_count = (env: Env, subjty: Ty, ar: ArmData) i32 {
-    is_expr_null(ar.guard).match ({ true => 0, false => {
-        aenv := env.a.arm_env(env, subjty, ar)
-        aenv.check_expr(ar.guard) + aenv.non_bool(ar.guard).match ({ true => 1, false => 0 })
-    } })
+    is_expr_null(ar.guard).match ({
+        true  => 0,
+        false => {
+            aenv := env.a.arm_env(env, subjty, ar)
+            aenv.check_expr(ar.guard) + aenv.non_bool(ar.guard).match ({ true => 1, false => 0 })
+        },
+    })
 }
 check_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
@@ -812,17 +833,20 @@ value_void_arm_err = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
 call_void_arm_errs = (env: Env, c: CallData) i32 {
     f := env.env_func(c.fn)
     acc := 0
-    eq(f.name, c.fn).match ({ true => {
-        c.args.loop((h, i, ar) {
-            acc = acc + (i < f.params.len).match ({
-                true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
-                    true  => 0,
-                    false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
-                }),
-                false => 0,
+    eq(f.name, c.fn).match ({
+        true  => {
+            c.args.loop((h, i, ar) {
+                acc = acc + (i < f.params.len).match ({
+                    true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
+                        true  => 0,
+                        false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
+                    }),
+                    false => 0,
+                })
             })
-        })
-    }, false => { } })
+        },
+        false => { },
+    })
     acc
 }
 // Early returns inside value-position block arms would be dropped by expression emission.
@@ -898,10 +922,13 @@ field_in = (fields: [Field], fname: string_view) Ty {
 field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
     fty := fields.field_in(fi.name)
     sv := env.slicelit_slot_verdict(load(fi.value), fty)
-    (sv >= 0).match ({ true => sv, false => {
-        lv := fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
-        (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(fi.value), fty) })
-    } })
+    (sv >= 0).match ({
+        true  => sv,
+        false => {
+            lv := fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
+            (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(fi.value), fty) })
+        },
+    })
 }
 init_err = (env: Env, fields: [Field], fi: FieldInit) i32 { fields.has_field(fi.name).match ({
     true  => env.field_fit_err(fields, fi),
@@ -974,14 +1001,23 @@ gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: F
         true  => env.a.subst_ty_in(tps, targs, fty),
         false => fty,
     })
-    tps.ty_mentions_tparam(cty).match ({ true => 0, false => {
-        sv := env.slicelit_slot_verdict(load(fi.value), cty)
-        (sv >= 0).match ({ true => sv, false => {
-            lv := fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
-            // a numeric literal must fit the field width
-            (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(fi.value), cty) })
-        } })
-    } })
+    tps.ty_mentions_tparam(cty).match ({
+        true  => 0,
+        false => {
+            sv := env.slicelit_slot_verdict(load(fi.value), cty)
+            (sv >= 0).match ({
+                true  => sv,
+                false => {
+                    lv := fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
+                    // a numeric literal must fit the field width
+                    (lv >= 0).match ({
+                        true  => lv,
+                        false => env.fit_err(env.infer_expr(fi.value), cty),
+                    })
+                },
+            })
+        },
+    })
 }    // a concrete field -> check the fit
 gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], inits: [FieldInit]) i32 {
     acc := 0
@@ -1214,17 +1250,23 @@ mkenum_err = (env: Env, ty: string_view, variant: string_view) i32 {
 // Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
 // Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
 enum_payload_err = (env: Env, mk: MakeEnumData) i32 {
-    is_empty(mk.ty).match ({ true => 0, false => {
-        pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
-        lv := mk.payload.lit_slot_verdict(pty)
-        (lv >= 0).match ({ true => lv, false => {
-            vt := env.infer_expr(mk.payload)
-            (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
-                true  => 0,
-                false => fits(vt, pty).match ({ true => 0, false => 1 }),
+    is_empty(mk.ty).match ({
+        true  => 0,
+        false => {
+            pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+            lv := mk.payload.lit_slot_verdict(pty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => {
+                    vt := env.infer_expr(mk.payload)
+                    (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
+                        true  => 0,
+                        false => fits(vt, pty).match ({ true => 0, false => 1 }),
+                    })
+                },
             })
-        } })
-    } })
+        },
+    })
 }
 // Every non-wildcard arm must name a declared variant.
 arm_known = (vs: [VariantDef], vname: string_view) bool {
@@ -1237,15 +1279,18 @@ arm_known = (vs: [VariantDef], vname: string_view) bool {
 unknown_arm_errs = (env: Env, m: MatchData) i32 {
     vs := env.decls.enum_variants(m.ename)
     n := 0
-    (vs.len == 0).match ({ true => 0, false => {
-        m.arms.loop((h, i, a) {
-            n = n + eq(a.variant, "_").match ({
-                true  => 0,
-                false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
+    (vs.len == 0).match ({
+        true  => 0,
+        false => {
+            m.arms.loop((h, i, a) {
+                n = n + eq(a.variant, "_").match ({
+                    true  => 0,
+                    false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
+                })
             })
-        })
-        n
-    } })
+            n
+        },
+    })
 }
 match_err = (env: Env, m: MatchData) i32 {
     base := m.arms.has_wildcard().match ({
@@ -1477,14 +1522,17 @@ sl_elem_fit = (env: Env, ety: Ty, it: Expr) i32 {
     (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).match ({ true => 0, false => env.fit_err(ity, ety) })
 }
 slicelit_err = (env: Env, items: [Expr]) i32 {
-    (items.len == 0).match ({ true => 0, false => {
-        ety := env.infer_expr(items[0].addr())
-        acc := 0
-        items.loop((h, i, it) {
-            acc = acc + env.sl_elem_fit(ety, it)
-        })
-        acc
-    } })
+    (items.len == 0).match ({
+        true  => 0,
+        false => {
+            ety := env.infer_expr(items[0].addr())
+            acc := 0
+            items.loop((h, i, it) {
+                acc = acc + env.sl_elem_fit(ety, it)
+            })
+            acc
+        },
+    })
 }
 // ── narrowed LOOP/lambda-body walk: undefined BARE NAMES only ────────────────────────────────
 // Loop bodies were never validated, so undefined names inside `.loop((h,i,v){…})` slipped past `check`
@@ -1511,13 +1559,16 @@ name_errors_merge = (l: NameErrors, r: NameErrors) NameErrors {
     )
 }
 name_error = (env: Env, name: string_view, pos: i32) NameErrors {
-    (pos > 0).match ({ true => {
-        n := env.var_err(name)
-        NameErrors(
-            count: n,
-            first_pos: (n == 0).match ({ true => 0, false => pos }),
-        )
-    }, false => name_errors_none() })
+    (pos > 0).match ({
+        true  => {
+            n := env.var_err(name)
+            NameErrors(
+                count: n,
+                first_pos: (n == 0).match ({ true => 0, false => pos }),
+            )
+        },
+        false => name_errors_none(),
+    })
 }
 name_errors_args = (env: Env, args: [Expr]) NameErrors {
     acc := name_errors_none()
@@ -1702,17 +1753,20 @@ idxset_err = (env: Env, x: IndexSetData) i32 {
 }
 // Annotated lets must fit their declared type; unannotated lets are inferred only.
 let_fit_err = (env: Env, l: LetData) i32 {
-    l.ty.is_void_ty().match ({ true => 0, false => {
-        vt := env.infer_expr(l.value)
-        lv := l.value.lit_slot_verdict(l.ty)
-        (lv >= 0).match ({
-            true  => lv,
-            false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
-                true  => 0,
-                false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
-            }),
-        })
-    } })
+    l.ty.is_void_ty().match ({
+        true  => 0,
+        false => {
+            vt := env.infer_expr(l.value)
+            lv := l.value.lit_slot_verdict(l.ty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
+                    true  => 0,
+                    false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
+                }),
+            })
+        },
+    })
 }
 // A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`.
 // An unbound tparam survives inference as void, so the let's stored (inferred) type becomes Box<void>,
@@ -1868,12 +1922,18 @@ alias_reach = (a: MutPtr<Malloc>, rest: Ptr<AliasList>, full: Ptr<AliasList>, na
         .AliasNil     => acc,
         .AliasCons(c) => {
             out := acc
-            (eq(c.x, name) && out.dead_has(c.y) == false).match ({ true => {
-                out = a.alias_reach(full, full, c.y, a.dead_cons(c.y, out))
-            }, false => { } })
-            (eq(c.y, name) && out.dead_has(c.x) == false).match ({ true => {
-                out = a.alias_reach(full, full, c.x, a.dead_cons(c.x, out))
-            }, false => { } })
+            (eq(c.x, name) && out.dead_has(c.y) == false).match ({
+                true  => {
+                    out = a.alias_reach(full, full, c.y, a.dead_cons(c.y, out))
+                },
+                false => { },
+            })
+            (eq(c.y, name) && out.dead_has(c.x) == false).match ({
+                true  => {
+                    out = a.alias_reach(full, full, c.x, a.dead_cons(c.x, out))
+                },
+                false => { },
+            })
             a.alias_reach(c.tail, full, name, out)
         },
     })
@@ -1889,34 +1949,40 @@ owner_base = (t: Ty) string_view {
     })
 }
 is_consume_method = (env: Env, c: CallData) bool {
-    (c.args.len > 0).match ({ true => {
-        base := env.infer_expr(c.args[0].addr()).owner_base()
-        eq(c.fn, "release").match ({
-            true  => eq(base, "Own"),
-            false => eq(c.fn, "release_in").match ({
+    (c.args.len > 0).match ({
+        true  => {
+            base := env.infer_expr(c.args[0].addr()).owner_base()
+            eq(c.fn, "release").match ({
+                true  => eq(base, "Own"),
+                false => eq(c.fn, "release_in").match ({
+                    true  => eq(base, "Own"),
+                    false => eq(c.fn, "drop").match ({
+                        true  => eq(base, "Rc") || eq(base, "Arc"),
+                        false => eq(c.fn, "drop_in").match ({
+                            true  => eq(base, "Rc") || eq(base, "Arc"),
+                            false => false,
+                        }),
+                    }),
+                }),
+            })
+        },
+        false => false,
+    })
+}
+is_default_owner_method = (env: Env, c: CallData) bool {
+    (c.args.len > 0).match ({
+        true  => {
+            base := env.infer_expr(c.args[0].addr()).owner_base()
+            eq(c.fn, "release").match ({
                 true  => eq(base, "Own"),
                 false => eq(c.fn, "drop").match ({
                     true  => eq(base, "Rc") || eq(base, "Arc"),
-                    false => eq(c.fn, "drop_in").match ({
-                        true  => eq(base, "Rc") || eq(base, "Arc"),
-                        false => false,
-                    }),
+                    false => false,
                 }),
-            }),
-        })
-    }, false => false })
-}
-is_default_owner_method = (env: Env, c: CallData) bool {
-    (c.args.len > 0).match ({ true => {
-        base := env.infer_expr(c.args[0].addr()).owner_base()
-        eq(c.fn, "release").match ({
-            true  => eq(base, "Own"),
-            false => eq(c.fn, "drop").match ({
-                true  => eq(base, "Rc") || eq(base, "Arc"),
-                false => false,
-            }),
-        })
-    }, false => false })
+            })
+        },
+        false => false,
+    })
 }
 recv_var_name = (c: CallData) string_view {
     (c.args.len > 0).match ({
@@ -1990,13 +2056,16 @@ send_consume = (env: Env, c: CallData) string_view {
 consume_depth = () i32 { 4 }    // interprocedural hop budget; deeper transitive consumes under-reject (safe)
 // does the KNOWN local fn `fn` consume its Own-typed param at index `pi`? (bounded interprocedural)
 fn_consumes_param = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
-    (depth <= 0).match ({ true => false, false => {
-        f := env.env_func(fn)
-        (eq(f.name, fn) && pi >= 0 && pi < f.params.len).match ({
-            true  => env.body_consumes_name(f.body, f.params[pi].name, depth),
-            false => false,
-        })
-    } })
+    (depth <= 0).match ({
+        true  => false,
+        false => {
+            f := env.env_func(fn)
+            (eq(f.name, fn) && pi >= 0 && pi < f.params.len).match ({
+                true  => env.body_consumes_name(f.body, f.params[pi].name, depth),
+                false => false,
+            })
+        },
+    })
 }
 // does `body` consume the local named `nm` on ANY path? (branch-may rule: a conditional consume counts)
 body_consumes_name = (env: Env, body: [Stmt], nm: string_view, depth: i32) bool {
@@ -2254,13 +2323,16 @@ body_frees_through_ptr = (env: Env, body: [Stmt], pname: string_view, depth: i32
 }
 // does the KNOWN local fn `fn` free the pointee of its pointer param at index `pi`? (bounded interprocedural)
 fn_frees_through_ptr = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
-    (depth <= 0).match ({ true => false, false => {
-        f := env.env_func(fn)
-        (eq(f.name, fn) && pi >= 0 && pi < f.params.len).match ({
-            true  => env.body_frees_through_ptr(f.body, f.params[pi].name, depth),
-            false => false,
-        })
-    } })
+    (depth <= 0).match ({
+        true  => false,
+        false => {
+            f := env.env_func(fn)
+            (eq(f.name, fn) && pi >= 0 && pi < f.params.len).match ({
+                true  => env.body_frees_through_ptr(f.body, f.params[pi].name, depth),
+                false => false,
+            })
+        },
+    })
 }
 // the CALL-SITE kill: for each bare-Var Own arg passed to an Own-typed, consuming param of a known
 // callee, mark that local dead (moved into the callee). Runs in own_step so both passes see the kill.
@@ -2274,18 +2346,24 @@ own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alia
                 (eq(ps[i].ty.owner_base(), "Own") && eq(env.infer_expr(ar.addr()).owner_base(), "Own") && env.fn_consumes_param(c.fn, i, consume_depth())).match ({
                     true  => {
                         nm := c.arg_var_name(i)
-                        nm.is_empty().match ({ true => { }, false => {
-                            out = a.dead_kill(out, al, nm)
-                        } })
+                        nm.is_empty().match ({
+                            true  => { },
+                            false => {
+                                out = a.dead_kill(out, al, nm)
+                            },
+                        })
                     },
                     false => { },
                 })
                 (is_owner_base(ps[i].ty.owner_ptr_base()) && env.fn_frees_through_ptr(c.fn, i, consume_depth())).match ({
                     true  => {
                         onm := env.addr_owner_var(ar.addr())
-                        onm.is_empty().match ({ true => { }, false => {
-                            out = a.dead_kill(out, al, onm)
-                        } })
+                        onm.is_empty().match ({
+                            true  => { },
+                            false => {
+                                out = a.dead_kill(out, al, onm)
+                            },
+                        })
                     },
                     false => { },
                 })
@@ -2348,15 +2426,20 @@ struct_field_move_src = (env: Env, fields: [Field], fi: FieldInit) string_view {
 // kill every source owner moved into an Own field of a CONCRETE struct literal.
 mkstruct_field_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, s: MakeStructData) Ptr<DeadList> {
     out := seen
-    env.env_is_struct(s.ty).match ({ true => {
-        fields := env.env_struct_fields(s.ty)
-        s.inits.loop((h, i, fi) {
-            nm := env.struct_field_move_src(fields, fi)
-            nm.is_empty().match ({ false => {
-                out = a.dead_kill(out, al, nm)
-            } })
-        })
-    }, false => { } })
+    env.env_is_struct(s.ty).match ({
+        true  => {
+            fields := env.env_struct_fields(s.ty)
+            s.inits.loop((h, i, fi) {
+                nm := env.struct_field_move_src(fields, fi)
+                nm.is_empty().match ({
+                    false => {
+                        out = a.dead_kill(out, al, nm)
+                    },
+                })
+            })
+        },
+        false => { },
+    })
     out
 }
 // kill every source owner moved into a slice-literal element (`[o]`): a bare `Own<T>` item is moved into
@@ -2365,9 +2448,11 @@ slicelit_elem_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr
     out := seen
     items.loop((h, i, it) {
         nm := env.own_moved_var(it.addr())
-        nm.is_empty().match ({ false => {
-            out = a.dead_kill(out, al, nm)
-        } })
+        nm.is_empty().match ({
+            false => {
+                out = a.dead_kill(out, al, nm)
+            },
+        })
     })
     out
 }
@@ -2375,9 +2460,11 @@ slicelit_elem_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr
 indexset_own_kill = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, v: Ptr<Expr>) Ptr<DeadList> {
     out := seen
     nm := env.own_moved_var(v)
-    nm.is_empty().match ({ false => {
-        out = a.dead_kill(out, al, nm)
-    } })
+    nm.is_empty().match ({
+        false => {
+            out = a.dead_kill(out, al, nm)
+        },
+    })
     out
 }
 own_expr_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
@@ -2415,17 +2502,22 @@ own_stmt_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
 // arm; counting it here too would double-report).
 own_struct_dupmove_err = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i32 {
     acc := 0
-    env.env_is_struct(s.ty).match ({ true => {
-        fields := env.env_struct_fields(s.ty)
-        d := a.dead_nil()
-        s.inits.loop((h, i, fi) {
-            nm := env.struct_field_move_src(fields, fi)
-            nm.is_empty().match ({ false => {
-                acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
-                d = a.dead_cons(nm, d)
-            } })
-        })
-    }, false => { } })
+    env.env_is_struct(s.ty).match ({
+        true  => {
+            fields := env.env_struct_fields(s.ty)
+            d := a.dead_nil()
+            s.inits.loop((h, i, fi) {
+                nm := env.struct_field_move_src(fields, fi)
+                nm.is_empty().match ({
+                    false => {
+                        acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
+                        d = a.dead_cons(nm, d)
+                    },
+                })
+            })
+        },
+        false => { },
+    })
     acc
 }
 // the same DOUBLE-MOVE for a slice literal (`[o, o]`).
@@ -2434,10 +2526,12 @@ own_slice_dupmove_err = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
     d := a.dead_nil()
     items.loop((h, i, it) {
         nm := env.own_moved_var(it.addr())
-        nm.is_empty().match ({ false => {
-            acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
-            d = a.dead_cons(nm, d)
-        } })
+        nm.is_empty().match ({
+            false => {
+                acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
+                d = a.dead_cons(nm, d)
+            },
+        })
     })
     acc
 }
@@ -2653,9 +2747,12 @@ alias_step = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<Ali
     rb := rebind_stmt_name(st)
     out := rb.is_empty().match ({ true => al, false => a.alias_drop(al, rb) })
     src := env.alias_src_name(st)
-    (rb.is_empty() == false && src.is_empty() == false && eq(rb, src) == false).match ({ true => {
-        out = a.alias_cons(rb, src, out)
-    }, false => { } })
+    (rb.is_empty() == false && src.is_empty() == false && eq(rb, src) == false).match ({
+        true  => {
+            out = a.alias_cons(rb, src, out)
+        },
+        false => { },
+    })
     out
 }
 // count an assign TARGET as a use only when it is NOT a bare local (a bare `p = …` is a rebind/revival,
@@ -2785,9 +2882,12 @@ own_dead_body = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alias
 own_dead_arms = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, subjty: Ty, arms: [ArmData]) Ptr<DeadList> {
     out := seen
     arms.loop((h, i, ar) {
-        expr_falls_through(ar.body).match ({ true => {
-            out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, al, ar.body), out)
-        }, false => { } })
+        expr_falls_through(ar.body).match ({
+            true  => {
+                out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, al, ar.body), out)
+            },
+            false => { },
+        })
     })
     out
 }
@@ -2811,16 +2911,20 @@ own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alias
         .Call(c)  => {
             out := seen
             fn := env.alloc_free_call_name(c)
-            fn.is_empty().match ({ false => {
-                out = a.dead_kill(out, al, fn)
-            } })
+            fn.is_empty().match ({
+                false => {
+                    out = a.dead_kill(out, al, fn)
+                },
+            })
             cn := env.is_consume_method(c).match ({
                 true  => c.recv_var_name(),
                 false => env.send_consume(c),
             })
-            cn.is_empty().match ({ false => {
-                out = a.dead_kill(out, al, cn)
-            } })
+            cn.is_empty().match ({
+                false => {
+                    out = a.dead_kill(out, al, cn)
+                },
+            })
             out
         },
         _         => seen,
@@ -2830,15 +2934,19 @@ own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>
     out := seen
     // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
     nm := env.consume_name(st)
-    nm.is_empty().match ({ false => {
-        out = a.dead_kill(out, al, nm)
-    } })
+    nm.is_empty().match ({
+        false => {
+            out = a.dead_kill(out, al, nm)
+        },
+    })
     // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead — and its
     //    whole alias class with it (every member names the SAME allocation).
     fn := env.alloc_free_stmt_name(st)
-    fn.is_empty().match ({ false => {
-        out = a.dead_kill(out, al, fn)
-    } })
+    fn.is_empty().match ({
+        false => {
+            out = a.dead_kill(out, al, fn)
+        },
+    })
     // 2b. branch-aware: descend into if/while bodies and statement-position matches/blocks so a free
     //     inside a branch enters the kill-set (conditionally dead → dead after the branch). Only branches
     //     that FALL THROUGH contribute; free-then-rebind within one branch nets to ALIVE via own_step.
@@ -2865,16 +2973,20 @@ own_step = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>
     out = a.own_stmt_struct_kills(env, out, al, st)
     // 2d. AFFINE COPY: `c := o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
     mv := env.own_move_src(st)
-    mv.is_empty().match ({ false => {
-        out = a.dead_kill(out, al, mv)
-    } })
+    mv.is_empty().match ({
+        false => {
+            out = a.dead_kill(out, al, mv)
+        },
+    })
     // 3. revival — a (re)bind of a local clears its dead state (ONLY that name: an alias of it stays
     //    dead). Runs LAST so `p = a.resize(p, n)` (free old p in step 2, then rebind p here) nets to
     //    ALIVE, while `q := a.resize(p, n)` leaves p dead (q != p).
     rb := rebind_stmt_name(st)
-    rb.is_empty().match ({ false => {
-        out = a.dead_remove(out, rb)
-    } })
+    rb.is_empty().match ({
+        false => {
+            out = a.dead_remove(out, rb)
+        },
+    })
     out
 }
 // ── FREE-IN-LOOP ─────────────────────────────────────────────────────────────────────────────────
@@ -3262,11 +3374,14 @@ diagnostic_strlit_width = (src: string_view, pos: i32, n: i32) i32 {
             true  => {
                 r = k
             },
-            false => (b == '"').match ({ true => {
-                r = k + 1
-            }, false => {
-                k = k + 1
-            } }),
+            false => (b == '"').match ({
+                true  => {
+                    r = k + 1
+                },
+                false => {
+                    k = k + 1
+                },
+            }),
         })
     }
     r
@@ -3543,30 +3658,36 @@ diagnostic_kind_name = (code: i32) string_view { code.diag_info().kind }
 diagnostic_message = (code: i32) string_view { code.diag_info().message }
 diagnostic_hint = (code: i32) string_view { code.diag_info().hint }
 check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
-    (packed == 0).match ({ true => check_diagnostic_none(), false => {
-        code := packed & 63
-        CheckDiagnostic(
-            code: code,
-            kind: code.diagnostic_kind_name(),
-            source_offset: packed >> 6,
-            span_width: 1,
-            count: count.positive_count(),
-            message: code.diagnostic_message(),
-            hint: code.diagnostic_hint(),
-        )
-    } })
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => {
+            code := packed & 63
+            CheckDiagnostic(
+                code: code,
+                kind: code.diagnostic_kind_name(),
+                source_offset: packed >> 6,
+                span_width: 1,
+                count: count.positive_count(),
+                message: code.diagnostic_message(),
+                hint: code.diagnostic_hint(),
+            )
+        },
+    })
 }
 check_diagnostic_from_source* = (src: string_view, packed: i32, count: i32) CheckDiagnostic {
     d := check_diagnostic_from_packed(packed, count)
-    (d.code == 0).match ({ true => d, false => CheckDiagnostic(
-        code: d.code,
-        kind: d.kind,
-        source_offset: d.source_offset,
-        span_width: src.diagnostic_span_width(d.source_offset),
-        count: d.count,
-        message: d.message,
-        hint: d.hint,
-    ) })
+    (d.code == 0).match ({
+        true  => d,
+        false => CheckDiagnostic(
+            code: d.code,
+            kind: d.kind,
+            source_offset: d.source_offset,
+            span_width: src.diagnostic_span_width(d.source_offset),
+            count: d.count,
+            message: d.message,
+            hint: d.hint,
+        ),
+    })
 }
 check_to_diagnostic* = (d: CheckDiagnostic) Diagnostic {
     Diagnostic(
@@ -3668,20 +3789,25 @@ kv_own_arms_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
 // struct literal reports KOWNERSHIP at the second-moved value's position (mirrors own_struct_dupmove_err).
 kv_own_struct_dupmove_kind = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i32 {
     acc := 0
-    env.env_is_struct(s.ty).match ({ true => {
-        fields := env.env_struct_fields(s.ty)
-        d := a.dead_nil()
-        s.inits.loop((h, i, fi) {
-            nm := env.struct_field_move_src(fields, fi)
-            nm.is_empty().match ({ false => {
-                acc = acc.kv_kor(d.dead_has(nm).match ({
-                    true  => KOWNERSHIP().kv_at(load(fi.value).expr_pos()),
-                    false => 0,
-                }))
-                d = a.dead_cons(nm, d)
-            } })
-        })
-    }, false => { } })
+    env.env_is_struct(s.ty).match ({
+        true  => {
+            fields := env.env_struct_fields(s.ty)
+            d := a.dead_nil()
+            s.inits.loop((h, i, fi) {
+                nm := env.struct_field_move_src(fields, fi)
+                nm.is_empty().match ({
+                    false => {
+                        acc = acc.kv_kor(d.dead_has(nm).match ({
+                            true  => KOWNERSHIP().kv_at(load(fi.value).expr_pos()),
+                            false => 0,
+                        }))
+                        d = a.dead_cons(nm, d)
+                    },
+                })
+            })
+        },
+        false => { },
+    })
     acc
 }
 kv_own_slice_dupmove_kind = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
@@ -3689,13 +3815,15 @@ kv_own_slice_dupmove_kind = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
     d := a.dead_nil()
     items.loop((h, i, it) {
         nm := env.own_moved_var(it.addr())
-        nm.is_empty().match ({ false => {
-            acc = acc.kv_kor(d.dead_has(nm).match ({
-                true  => KOWNERSHIP().kv_at(it.expr_pos()),
-                false => 0,
-            }))
-            d = a.dead_cons(nm, d)
-        } })
+        nm.is_empty().match ({
+            false => {
+                acc = acc.kv_kor(d.dead_has(nm).match ({
+                    true  => KOWNERSHIP().kv_at(it.expr_pos()),
+                    false => 0,
+                }))
+                d = a.dead_cons(nm, d)
+            },
+        })
     })
     acc
 }
@@ -3798,14 +3926,17 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
 // call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
 // specific `ambiguous method` enrichment still fires — this is a NO-method case only.
 undef_is_method = (env: Env, c: CallData) bool {
-    (c.args.len == 0).match ({ true => false, false => {
-        rty := env.infer_expr(c.args[0].addr())
-        tn := rty.recv_name()
-        (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
-            true  => false,
-            false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
-        })
-    } })
+    (c.args.len == 0).match ({
+        true  => false,
+        false => {
+            rty := env.infer_expr(c.args[0].addr())
+            tn := rty.recv_name()
+            (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
+                true  => false,
+                false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
+            })
+        },
+    })
 }
 // RECEIVER-TYPED UFCS DISPATCH (#68 slice 4). A method name like `find` is a flat free fn (`str.find`)
 // AND an impl method (`Vec.find`, `Set.find`, …) — one entry in the flat namespace. `xs.find(2)` on a
@@ -3821,19 +3952,22 @@ undef_is_method = (env: Env, c: CallData) bool {
 // one. When a receiver-typed impl/alias DOES fit, resolve_call already rewrote c.fn to it and we never get
 // here (is_trait_method on the mangled impl name is false), so real dispatch is untouched.
 recv_typed_miss = (env: Env, c: CallData) bool {
-    (c.args.len > 0 && env.decls.is_trait_method(c.fn)).match ({ true => {
-        f := env.env_func(c.fn)
-        (f.params.len > 0 && f.tparams.ty_mentions_tparam(f.params[0].ty) == false).match ({
-            true  => {
-                rty := env.infer_expr(c.args[0].addr())
-                (env.unknown_ty(rty) || rty.is_void_ty()).match ({
-                    true  => false,
-                    false => rty.fits(f.params[0].ty) == false,
-                })
-            },
-            false => false,
-        })
-    }, false => false })
+    (c.args.len > 0 && env.decls.is_trait_method(c.fn)).match ({
+        true  => {
+            f := env.env_func(c.fn)
+            (f.params.len > 0 && f.tparams.ty_mentions_tparam(f.params[0].ty) == false).match ({
+                true  => {
+                    rty := env.infer_expr(c.args[0].addr())
+                    (env.unknown_ty(rty) || rty.is_void_ty()).match ({
+                        true  => false,
+                        false => rty.fits(f.params[0].ty) == false,
+                    })
+                },
+                false => false,
+            })
+        },
+        false => false,
+    })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
     c.is_forbidden_raw_call().match ({
@@ -3989,9 +4123,11 @@ kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAN
 zty_generic = (a: MutPtr<Malloc>, g: GenericData) string_view {
     out := a.gstr_string(48).gstr_append(a, g.name).gstr_append(a, "<")
     g.args.loop((h, i, t) {
-        (i > 0).match ({ true => {
-            out = out.gstr_append(a, ", ")
-        } })
+        (i > 0).match ({
+            true => {
+                out = out.gstr_append(a, ", ")
+            },
+        })
         out = out.gstr_append(a, a.zty(t))
     })
     out.gstr_append(a, ">").gstr_finish(a)
@@ -4036,26 +4172,33 @@ denrich_valfit = (env: Env, want: Ty, v: Ptr<Expr>) string_view {
 // pointer param vs the (non-pointer / wrong-kind) argument. Empty when the arg is a fitting pointer or
 // its type is unknown (deferred), so it only speaks up on the genuine value-where-pointer-wanted case.
 denrich_tparam_shape = (env: Env, pty: Ty, v: Ptr<Expr>) string_view {
-    pty.is_ptr_ty_g().match ({ true => {
-        vt := env.infer_expr(v)
-        (env.unknown_ty(vt) || gen_ptr_arg_fits(vt, pty)).match ({
-            true  => "",
-            false => env.a.denrich_fit_msg(pty, vt),
-        })
-    }, false => "" })
+    pty.is_ptr_ty_g().match ({
+        true  => {
+            vt := env.infer_expr(v)
+            (env.unknown_ty(vt) || gen_ptr_arg_fits(vt, pty)).match ({
+                true  => "",
+                false => env.a.denrich_fit_msg(pty, vt),
+            })
+        },
+        false => "",
+    })
 }
 // A call arg at `off` whose parameter type is concrete (not a callee tparam) and that the arg does
 // not fit: name the parameter type vs the arg's inferred type. tparam-typed slots are skipped just
 // as arg_err_at skips them (the checker defers those to monomorphization).
 denrich_argfit_msg = (env: Env, c: CallData, off: i32) string_view {
-    (env.env_known_fn(c.fn) == false).match ({ true => {
-        return ""
-    } })
+    (env.env_known_fn(c.fn) == false).match ({
+        true => {
+            return ""
+        },
+    })
     f := env.env_func(c.fn)
     ps := env.env_params(c.fn)
-    (ps.len != c.args.len).match ({ true => {
-        return ""
-    } })
+    (ps.len != c.args.len).match ({
+        true => {
+            return ""
+        },
+    })
     res := ""
     c.args.loop((h, i, ar) {
         res = (is_empty(res) && ar.expr_pos() == off && i < ps.len).match ({
@@ -4157,9 +4300,11 @@ denrich_missing_tail = (a: MutPtr<Malloc>, decls: [Decl], tn: string_view, tr: s
 // bound, the requiring function, and the concretely missing methods. A bound naming NO declared
 // trait gets its own message (the generic one would send the user hunting for a phantom impl).
 denrich_bound_violation = (env: Env, f: Func, c: CallData, tp: Param) string_view {
-    (env.bound_err(f, c, tp) == 0).match ({ true => {
-        return ""
-    } })
+    (env.bound_err(f, c, tp) == 0).match ({
+        true => {
+            return ""
+        },
+    })
     a := env.a
     tr := tp.tparam_bound()
     tn := env.call_targ(f, c.args, tp.name).recv_name()
@@ -4178,9 +4323,11 @@ denrich_bound_msg = (env: Env, f: Func, c: CallData) string_view {
 // `b.render()` on a concrete receiver with no impl: name the receiver type, the trait that
 // declares the method, and what an impl must still provide.
 denrich_recv_msg = (env: Env, c: CallData) string_view {
-    (c.args.len == 0).match ({ true => {
-        return ""
-    } })
+    (c.args.len == 0).match ({
+        true => {
+            return ""
+        },
+    })
     a := env.a
     tn := env.infer_expr(c.args[0].addr()).recv_name()
     tr := env.decls.trait_declaring(c.fn)
@@ -4252,31 +4399,41 @@ denrich_dotted = (s: String, a: MutPtr<Malloc>, name: string_view, p: i32) Strin
     })
 }
 denrich_ambiguous_msg = (env: Env, c: CallData) string_view {
-    (c.args.len == 0).match ({ true => {
-        return ""
-    } })
+    (c.args.len == 0).match ({
+        true => {
+            return ""
+        },
+    })
     rty := env.infer_expr(c.args[0].addr())
     tyname := rty.dispatch_recv_name()
     cs := env.alias_ufcs_candidates(c.fn, rty)
-    (cs.count < 2).match ({ true => {
-        return ""
-    } })
+    (cs.count < 2).match ({
+        true => {
+            return ""
+        },
+    })
     a := env.a
     s := a.gstr_string(192).gstr_append(a, "ambiguous method `").gstr_append(a, c.fn).gstr_append(a, "` on `").gstr_append(a, tyname).gstr_append(a, "`: both `")
     s = s.denrich_dotted(a, cs.first, 0).gstr_append(a, "` and `").denrich_dotted(a, cs.second, 0).gstr_append(a, "` match the receiver")
-    (cs.count > 2).match ({ true => {
-        s = s.gstr_append(a, " (and more)")
-    }, false => { } })
+    (cs.count > 2).match ({
+        true  => {
+            s = s.gstr_append(a, " (and more)")
+        },
+        false => { },
+    })
     s = s.gstr_append(a, " - call it qualified, e.g. `").denrich_dotted(a, cs.first, 0).gstr_append(a, "(recv, ...)`")
     s.gstr_finish(a)
 }
 // ── integer-in-message helper: append a non-negative i64's decimal digits to a String (mirrors dnum) ──
 di_digit = (d: i64) u8 { load(offset("0123456789", d)) }
 gstr_i64 = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({ true => s.gstr_push(a, di_digit(n)), false => {
-        hs := s.gstr_i64(a, n / 10)
-        hs.gstr_push(a, di_digit(n % 10))
-    } })
+    (n < 10).match ({
+        true  => s.gstr_push(a, di_digit(n)),
+        false => {
+            hs := s.gstr_i64(a, n / 10)
+            hs.gstr_push(a, di_digit(n % 10))
+        },
+    })
 }
 // ── arity enrichment: name the expected vs the supplied argument count ─────────────────────────
 // The declared count comes from the callee (a known local fn's params, an intrinsic's fixed arity, or
@@ -4315,9 +4472,11 @@ denrich_exhaust_msg = (env: Env, m: MatchData) string_view {
 // receiver reads as a `recv.method()` UFCS call with no such method; name the receiver type + method,
 // phrased so it is true whether it was written `recv.method()` or `method(recv)`.
 denrich_undef_method_msg = (env: Env, c: CallData) string_view {
-    (c.args.len == 0).match ({ true => {
-        return ""
-    } })
+    (c.args.len == 0).match ({
+        true => {
+            return ""
+        },
+    })
     a := env.a
     tn := env.infer_expr(c.args[0].addr()).recv_name()
     (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
@@ -4477,9 +4636,11 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) string
             return ""
         },
     })
-    (code == KDUPFN()).match ({ true => {
-        return a.denrich_dupfn(decls, off)
-    } })
+    (code == KDUPFN()).match ({
+        true => {
+            return a.denrich_dupfn(decls, off)
+        },
+    })
     idx := a.build_decl_index(decls)
     res := ""
     decls.loop((h, i, d) {
@@ -4530,14 +4691,17 @@ kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
 }
 // mirrors slicelit_err: a slice-literal element whose type doesn't fit the first element's → KARGTYPE.
 kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
-    (items.len == 0).match ({ true => 0, false => {
-        ety := env.infer_expr(items[0].addr())
-        acc := 0
-        items.loop((h, i, it) {
-            acc = acc.kv_kor(env.sl_elem_fit(ety, it).kv_one(KARGTYPE()).kv_at(it.expr_pos()))
-        })
-        acc
-    } })
+    (items.len == 0).match ({
+        true  => 0,
+        false => {
+            ety := env.infer_expr(items[0].addr())
+            acc := 0
+            items.loop((h, i, it) {
+                acc = acc.kv_kor(env.sl_elem_fit(ety, it).kv_one(KARGTYPE()).kv_at(it.expr_pos()))
+            })
+            acc
+        },
+    })
 }
 // The narrowed walk above records both the full count and first failing position. The count and
 // diagnostic layers therefore share one AST traversal definition instead of maintaining parallel
@@ -4778,19 +4942,22 @@ ka_mcall_args = (a: MutPtr<Malloc>, mc: MethodCallData) [Expr] {
 // into an int slot is range-decided (so `id<i32>(5)` still fits); a lambda / still-unknown slot defers.
 ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i32, ar: Expr) i32 {
     (i < params.len).match ({
-        true  => tparams.ty_mentions_tparam(params[i].ty).match ({ true => {
-            ct := env.a.subst_ty_in(tparams, targs, params[i].ty)
-            (env.unknown_ty(ct) || ar.is_ctx_typed_arg() || ct.is_fnt()).match ({
-                true  => 0,
-                false => {
-                    lv := ar.addr().lit_slot_verdict(ct)
-                    (lv >= 0).match ({
-                        true  => lv,
-                        false => env.fit_err(env.infer_expr(ar.addr()), ct),
-                    })
-                },
-            })
-        }, false => 0 }),
+        true  => tparams.ty_mentions_tparam(params[i].ty).match ({
+            true  => {
+                ct := env.a.subst_ty_in(tparams, targs, params[i].ty)
+                (env.unknown_ty(ct) || ar.is_ctx_typed_arg() || ct.is_fnt()).match ({
+                    true  => 0,
+                    false => {
+                        lv := ar.addr().lit_slot_verdict(ct)
+                        (lv >= 0).match ({
+                            true  => lv,
+                            false => env.fit_err(env.infer_expr(ar.addr()), ct),
+                        })
+                    },
+                })
+            },
+            false => 0,
+        }),
         false => 0,
     })
 }
@@ -4826,16 +4993,19 @@ ka_lam_params = (a: MutPtr<Malloc>, lmps: [Param], fps: [Ty]) [Param] {
     buf
 }
 ka_lam_body_ty = (env: Env, lm: LambdaData, fps: [Ty]) Ty {
-    (lm.body.len == 0).match ({ true => tvoid(), false => {
-        benv := Env(
-            vars: env.a.params_env(env.a.ka_lam_params(lm.params, fps)),
-            decls: env.decls,
-            didx: env.didx,
-            exp: tvoid(),
-            a: env.a,
-        )
-        benv.ka_last_ty(lm.body[lm.body.len - 1])
-    } })
+    (lm.body.len == 0).match ({
+        true  => tvoid(),
+        false => {
+            benv := Env(
+                vars: env.a.params_env(env.a.ka_lam_params(lm.params, fps)),
+                decls: env.decls,
+                didx: env.didx,
+                exp: tvoid(),
+                a: env.a,
+            )
+            benv.ka_last_ty(lm.body[lm.body.len - 1])
+        },
+    })
 }
 ka_last_ty = (env: Env, st: Stmt) Ty {
     st.match ({
@@ -5176,13 +5346,16 @@ ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool
 // match resolves its arms under a cleared expected type, so the rebuild can't fire there either.
 // positioned mirror of guard_count: a non-bool arm guard is a KGUARDTYPE error at the arm's pattern pos.
 ko_guard_kind = (env: Env, tps: [Param], subjty: Ty, ar: ArmData) i32 {
-    is_expr_null(ar.guard).match ({ true => 0, false => {
-        aenv := env.a.arm_env(env, subjty, ar)
-        aenv.ko_expr_kind(tps, tbool(), ar.guard, true).kv_kor(aenv.non_bool(ar.guard).match ({
-            true  => KGUARDTYPE().kv_at(ar.pos),
-            false => 0,
-        }))
-    } })
+    is_expr_null(ar.guard).match ({
+        true  => 0,
+        false => {
+            aenv := env.a.arm_env(env, subjty, ar)
+            aenv.ko_expr_kind(tps, tbool(), ar.guard, true).kv_kor(aenv.non_bool(ar.guard).match ({
+                true  => KGUARDTYPE().kv_at(ar.pos),
+                false => 0,
+            }))
+        },
+    })
 }
 ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
@@ -5503,20 +5676,25 @@ check_module_unknown_type_name = (a: MutPtr<Malloc>, decls: [Decl]) string_view 
 unknown_type_message = (a: MutPtr<Malloc>, nm: string_view) string_view { a.gstr_string(48).gstr_append(a, "unknown type name `").gstr_append(a, nm).gstr_append(a, "`").gstr_finish(a) }
 check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     packed := a.check_module_unknown_type_kind(decls)
-    (packed == 0).match ({ true => {
-        return check_diagnostic_none()
-    } })
+    (packed == 0).match ({
+        true => {
+            return check_diagnostic_none()
+        },
+    })
     d := src.check_diagnostic_from_source(packed, 1)
     nm := a.check_module_unknown_type_name(decls)
-    is_empty(nm).match ({ true => d, false => CheckDiagnostic(
-        code: d.code,
-        kind: d.kind,
-        source_offset: d.source_offset,
-        span_width: d.span_width,
-        count: d.count,
-        message: a.unknown_type_message(nm),
-        hint: d.hint,
-    ) })
+    is_empty(nm).match ({
+        true  => d,
+        false => CheckDiagnostic(
+            code: d.code,
+            kind: d.kind,
+            source_offset: d.source_offset,
+            span_width: d.span_width,
+            count: d.count,
+            message: a.unknown_type_message(nm),
+            hint: d.hint,
+        ),
+    })
 }
 // ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
 // A by-value field/payload whose type is the enclosing type — directly (`Node: { next: Node }`,
@@ -5766,13 +5944,16 @@ mu_ret_is_self = (ret: Ty, p0: Ty) bool {
 // the `(Self, …) Self` / `(Self, …) Result<Self, E>` shape: first param and (Ok-unwrapped) return are
 // the SAME non-pointer, non-primitive type.
 mu_is_value_mold = (f: Func) bool {
-    (f.params.len == 0).match ({ true => false, false => {
-        p0 := f.params[0].ty
-        (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({
-            true  => f.ret.mu_ret_is_self(p0),
-            false => false,
-        })
-    } })
+    (f.params.len == 0).match ({
+        true  => false,
+        false => {
+            p0 := f.params[0].ty
+            (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({
+                true  => f.ret.mu_ret_is_self(p0),
+                false => false,
+            })
+        },
+    })
 }
 mu_methods_have = (methods: [Param], m: string_view) bool {
     f := false
@@ -5994,10 +6175,13 @@ kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
 }
 // append `packed` unless it is 0 (no error), a duplicate, or the buffer is full; return the new count.
 kdiag_add = (buf: [i32], cnt: i32, packed: i32) i32 {
-    (packed == 0 || cnt >= buf.len || buf.kdiag_seen(cnt, packed)).match ({ true => cnt, false => {
-        buf[cnt] = packed
-        cnt + 1
-    } })
+    (packed == 0 || cnt >= buf.len || buf.kdiag_seen(cnt, packed)).match ({
+        true  => cnt,
+        false => {
+            buf[cnt] = packed
+            cnt + 1
+        },
+    })
 }
 // one function's errors, per top-level statement (mirrors kv_check_func_kind but appends each stmt's
 // first error rather than folding to the first). The trailing-value check is anchored on the fn name.
@@ -6039,9 +6223,11 @@ check_module_batch* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) [Chec
     cnt := a.check_module_kind_all(decls, buf, 0)
     out := slice(a.acquire(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
     buf.loop((h, i, p) {
-        (i < to_i64(cnt)).match ({ true => {
-            out[i] = src.check_diagnostic_from_source(p, 1)
-        } })
+        (i < to_i64(cnt)).match ({
+            true => {
+                out[i] = src.check_diagnostic_from_source(p, 1)
+            },
+        })
     })
     out
 }
@@ -6197,9 +6383,11 @@ is_scope_param_ty = (t: Ty) bool {
 scope_params = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
     out := a.dead_nil()
     params.loop((h, i, p) {
-        p.ty.is_scope_param_ty().match ({ true => {
-            out = a.dead_cons(p.name, out)
-        } })
+        p.ty.is_scope_param_ty().match ({
+            true => {
+                out = a.dead_cons(p.name, out)
+            },
+        })
     })
     out
 }
@@ -6315,9 +6503,11 @@ block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadL
             .Return(r)   => {
                 f = a.expr_escapes(svars, d, r).match ({ true => true, false => f })
             },
-            .ExprStmt(e) => (i == stmts.len - 1).match ({ true => {
-                f = a.expr_escapes(svars, d, e).match ({ true => true, false => f })
-            } }),
+            .ExprStmt(e) => (i == stmts.len - 1).match ({
+                true => {
+                    f = a.expr_escapes(svars, d, e).match ({ true => true, false => f })
+                },
+            }),
             _            => { },
         })
         d = a.escape_step(svars, d, st)
@@ -6328,9 +6518,11 @@ block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadL
 escape_step = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     out := derived
     st.match ({
-        .Let(l) => svars.let_taints(derived, l.value).match ({ true => {
-            out = a.dead_cons(l.name, derived)
-        } }),
+        .Let(l) => svars.let_taints(derived, l.value).match ({
+            true => {
+                out = a.dead_cons(l.name, derived)
+            },
+        }),
         _       => { },
     })
     out
@@ -6623,13 +6815,16 @@ ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, item
 // its result; a callee that reads through the pointer and returns a fresh/copied value threads nothing.
 // does local fn `fn`'s return value derive from its param at index `pi`? (bounded interprocedural)
 ae_fn_returns_param = (a: MutPtr<Malloc>, decls: [Decl], fn: string_view, pi: i32, depth: i32) bool {
-    (depth <= 0).match ({ true => false, false => {
-        f := decls.the_func(fn)
-        (eq(f.name, "") == false && pi >= 0 && pi < f.params.len).match ({
-            true  => a.ae_ret_body(decls, f.body, f.params[pi].name, depth),
-            false => false,
-        })
-    } })
+    (depth <= 0).match ({
+        true  => false,
+        false => {
+            f := decls.the_func(fn)
+            (eq(f.name, "") == false && pi >= 0 && pi < f.params.len).match ({
+                true  => a.ae_ret_body(decls, f.body, f.params[pi].name, depth),
+                false => false,
+            })
+        },
+    })
 }
 // value position: does expr `e` yield the tracked param `name` (directly, forwarded, or via one hop)?
 ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], name: string_view, e: Ptr<Expr>, depth: i32) bool {
@@ -7009,15 +7204,18 @@ check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module
 }) }
 check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_send_rc_kind(decls)
-    (pos == 0).match ({ true => check_diagnostic_none(), false => CheckDiagnostic(
-        code: KOWNERSHIP(),
-        kind: "sendable",
-        source_offset: pos,
-        span_width: src.diagnostic_span_width(pos),
-        count: 1,
-        message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
-        hint: "use Arc<T> for a value shared between actors, or send a value/owned copy",
-    ) })
+    (pos == 0).match ({
+        true  => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KOWNERSHIP(),
+            kind: "sendable",
+            source_offset: pos,
+            span_width: src.diagnostic_span_width(pos),
+            count: 1,
+            message: "Rc<T> is not sendable across actors (its refcount is single-threaded)",
+            hint: "use Arc<T> for a value shared between actors, or send a value/owned copy",
+        ),
+    })
 }
 // ── SENDABILITY AS A TYPE CAPABILITY: `ref` (MutPtr<T>) is not sendable (rt-scoped-runtime.md §4) ──
 // The send-payload classifier, read off the payload's TYPE (Pony reference-capabilities, NOT a verb):
@@ -7408,18 +7606,21 @@ sx_hint = (code: i32) string_view {
 }
 check_module_scratch_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     packed := a.check_module_scratch_kind(decls)
-    (packed == 0).match ({ true => check_diagnostic_none(), false => {
-        code := packed & 63
-        pos := packed >> 6
-        w := src.diagnostic_span_width(pos)
-        CheckDiagnostic(
-            code: code,
-            kind: "scratch-escape",
-            source_offset: pos,
-            span_width: w,
-            count: 1,
-            message: a.sx_message(code, a.sx_subject(src, pos, w)),
-            hint: code.sx_hint(),
-        )
-    } })
+    (packed == 0).match ({
+        true  => check_diagnostic_none(),
+        false => {
+            code := packed & 63
+            pos := packed >> 6
+            w := src.diagnostic_span_width(pos)
+            CheckDiagnostic(
+                code: code,
+                kind: "scratch-escape",
+                source_offset: pos,
+                span_width: w,
+                count: 1,
+                message: a.sx_message(code, a.sx_subject(src, pos, w)),
+                hint: code.sx_hint(),
+            )
+        },
+    })
 }

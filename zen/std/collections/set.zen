@@ -91,20 +91,25 @@ Set*<T>: {
         bb: [u8] := s.bytes_of(b)
         eqf := true
         ab.loop((hh, i, x) {
-            (x == bb[i]).match ({ false => {
-                eqf = false
-            } })
+            (x == bb[i]).match ({
+                false => {
+                    eqf = false
+                },
+            })
         })
         eqf
     }
     find = (s: Set<T>, x: T) i64 {
         // O(1) average: write the query into the scratch slot, hash to a bucket, walk the chain comparing bytes.
-        (s.cap == 0).match ({ true => 0 - 1, false => {
-            sl := s.slots()
-            sl[s.cap] = x
-            ix := s.index()
-            s.schain(ix[s.shash(s.cap)])
-        } })
+        (s.cap == 0).match ({
+            true  => 0 - 1,
+            false => {
+                sl := s.slots()
+                sl[s.cap] = x
+                ix := s.index()
+                s.schain(ix[s.shash(s.cap)])
+            },
+        })
     }
     schain = (s: Set<T>, e: i64) i64 {
         (e < 0).match ({
@@ -131,11 +136,14 @@ Set*<T>: {
                         )
                         dst := next.slots()
                         olds.loop((h, i, e) {
-                            (i < s.len).match ({ true => {
-                                dst[i] = e
-                            }, false => {
-                                h.break
-                            } })
+                            (i < s.len).match ({
+                                true  => {
+                                    dst[i] = e
+                                },
+                                false => {
+                                    h.break
+                                },
+                            })
                         })
                         a.release(s.elems)
                         a.release(s.idx)
@@ -160,21 +168,27 @@ Set*<T>: {
         ix := s.index()
         cap := s.cap
         ix.loop((h, i, v) {
-            (i < cap).match ({ true => {
-                ix[i] = 0 - 1
-            }, false => {
-                h.break
-            } })
+            (i < cap).match ({
+                true  => {
+                    ix[i] = 0 - 1
+                },
+                false => {
+                    h.break
+                },
+            })
         })
         sl := s.slots()
         sl.loop((h, i, e) {
-            (i < s.len).match ({ true => {
-                b := s.shash(i)
-                ix[cap + i] = ix[b]
-                ix[b] = i
-            }, false => {
-                h.break
-            } })
+            (i < s.len).match ({
+                true  => {
+                    b := s.shash(i)
+                    ix[cap + i] = ix[b]
+                    ix[b] = i
+                },
+                false => {
+                    h.break
+                },
+            })
         })
         s
     }
@@ -190,35 +204,38 @@ Set*<T>: {
         // Append an element (caller has ensured it is absent) and link it into its bucket. Grows first when
         // full; a grow OOM is returned as .Err. Mirrors HMap.append.
         x := x
-        out: Result<Set<T>, IoError> := (s.len < s.cap).match ({ true => {
-            sl := s.slots()
-            sl[s.len] = x
-            ok: Result<Set<T>, IoError> := .Ok(Set<T>(
-                elems: s.elems,
-                idx: s.idx,
-                len: s.len + 1,
-                cap: s.cap,
-            ).link(s.len))
-            ok
-        }, false => {
-            s.grow(a).match ({
-                .Ok(next) => {
-                    sl := next.slots()
-                    sl[next.len] = x
-                    ok: Result<Set<T>, IoError> := .Ok(Set<T>(
-                        elems: next.elems,
-                        idx: next.idx,
-                        len: next.len + 1,
-                        cap: next.cap,
-                    ).link(next.len))
-                    ok
-                },
-                .Err(e)   => {
-                    err: Result<Set<T>, IoError> := .Err(e)
-                    err
-                },
-            })
-        } })
+        out: Result<Set<T>, IoError> := (s.len < s.cap).match ({
+            true  => {
+                sl := s.slots()
+                sl[s.len] = x
+                ok: Result<Set<T>, IoError> := .Ok(Set<T>(
+                    elems: s.elems,
+                    idx: s.idx,
+                    len: s.len + 1,
+                    cap: s.cap,
+                ).link(s.len))
+                ok
+            },
+            false => {
+                s.grow(a).match ({
+                    .Ok(next) => {
+                        sl := next.slots()
+                        sl[next.len] = x
+                        ok: Result<Set<T>, IoError> := .Ok(Set<T>(
+                            elems: next.elems,
+                            idx: next.idx,
+                            len: next.len + 1,
+                            cap: next.cap,
+                        ).link(next.len))
+                        ok
+                    },
+                    .Err(e)   => {
+                        err: Result<Set<T>, IoError> := .Err(e)
+                        err
+                    },
+                })
+            },
+        })
         out
     }
     add<A> = (s: Set<T>, a: MutPtr<A>, x: T) Result<Set<T>, IoError> {
@@ -227,10 +244,13 @@ Set*<T>: {
         // no-op (len unchanged). On grow the buffers are realloced, so any handle captured before this call
         // dangles (see the VALUE-MOLD CONTRACT above). Mirrors HMap.put.
         i := s.find(x)
-        out: Result<Set<T>, IoError> := (i < 0).match ({ true => s.append(a, x), false => {
-            ok: Result<Set<T>, IoError> := .Ok(s)
-            ok
-        } })
+        out: Result<Set<T>, IoError> := (i < 0).match ({
+            true  => s.append(a, x),
+            false => {
+                ok: Result<Set<T>, IoError> := .Ok(s)
+                ok
+            },
+        })
         out
     }
     remove<A> = (s: Set<T>, a: MutPtr<A>, x: T) Set<T> {
@@ -238,17 +258,20 @@ Set*<T>: {
         // (the last live element fills the hole) followed by a reindex; iteration order is NOT preserved. `a` is
         // accepted for signature symmetry with the other owned ops — `remove` never reallocs (it does not shrink).
         i := s.find(x)
-        out: Set<T> := (i < 0).match ({ true => s, false => {
-            sl := s.slots()
-            sl[i] = sl[s.len - 1]
-            next := Set<T>(
-                elems: s.elems,
-                idx: s.idx,
-                len: s.len - 1,
-                cap: s.cap,
-            )
-            next.reindex()
-        } })
+        out: Set<T> := (i < 0).match ({
+            true  => s,
+            false => {
+                sl := s.slots()
+                sl[i] = sl[s.len - 1]
+                next := Set<T>(
+                    elems: s.elems,
+                    idx: s.idx,
+                    len: s.len - 1,
+                    cap: s.cap,
+                )
+                next.reindex()
+            },
+        })
         out
     }
     free<A> = (s: Set<T>, a: MutPtr<A>) void {
@@ -274,11 +297,14 @@ Set*<T>: {
                         src := s.slots()
                         dst := next.slots()
                         src.loop((h, i, e) {
-                            (i < s.len).match ({ true => {
-                                dst[i] = e
-                            }, false => {
-                                h.break
-                            } })
+                            (i < s.len).match ({
+                                true  => {
+                                    dst[i] = e
+                                },
+                                false => {
+                                    h.break
+                                },
+                            })
                         })
                         ok: Result<Set<T>, IoError> := .Ok(next.reindex())
                         ok
@@ -301,11 +327,14 @@ Set*<T>: {
         // loop body so an inline lambda splices in (like map.each_pair / iter.each): `s.each((x){ … })`.
         sl := s.slots()
         sl.loop((h, i, e) {
-            (i < s.len).match ({ true => {
-                f(e)
-            }, false => {
-                h.break
-            } })
+            (i < s.len).match ({
+                true  => {
+                    f(e)
+                },
+                false => {
+                    h.break
+                },
+            })
         })
     }
 }
@@ -373,36 +402,45 @@ of*<T, A> = (a: MutPtr<A>, first: T) Result<Set<T>, IoError> {
 // add `e` to `r` only when `keep` — the Result-valued conditional-insert helper the folds below use.
 // Returns `r` unchanged when `keep` is false.
 add_if<T, A> = (a: MutPtr<A>, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> {
-    keep.match ({ true => r.add(a, e), false => {
-        same: Result<Set<T>, IoError> := .Ok(r)
-        same
-    } })
+    keep.match ({
+        true  => r.add(a, e),
+        false => {
+            same: Result<Set<T>, IoError> := .Ok(r)
+            same
+        },
+    })
 }
 // fold y's live elements into `r` (add-all), recursively; a per-element OOM threads out as .Err via
 // or_return (works inside this generic Result<Set<T>, …> body since #54 substitutes T in the Err guard).
 union_fold<T, A> = (a: MutPtr<A>, r: Set<T>, y: Set<T>, i: i64) Result<Set<T>, IoError> {
-    (i >= y.len).match ({ true => {
-        done: Result<Set<T>, IoError> := .Ok(r)
-        done
-    }, false => {
-        sl := y.slots()
-        nr := r.add(a, sl[i]).or_return()
-        a.union_fold(nr, y, i + 1)
-    } })
+    (i >= y.len).match ({
+        true  => {
+            done: Result<Set<T>, IoError> := .Ok(r)
+            done
+        },
+        false => {
+            sl := y.slots()
+            nr := r.add(a, sl[i]).or_return()
+            a.union_fold(nr, y, i + 1)
+        },
+    })
 }
 // fold x's live elements into `r`, adding each only when `y.has(e) == keep_when` (true for intersect,
 // false for difference); a per-element OOM threads out as .Err via or_return (#54).
 sift_fold<T, A> = (a: MutPtr<A>, r: Set<T>, x: Set<T>, y: Set<T>, i: i64, keep_when: bool) Result<Set<T>, IoError> {
-    (i >= x.len).match ({ true => {
-        done: Result<Set<T>, IoError> := .Ok(r)
-        done
-    }, false => {
-        sl := x.slots()
-        e := sl[i]
-        keep := y.has(e) == keep_when
-        nr := a.add_if(r, e, keep).or_return()
-        a.sift_fold(nr, x, y, i + 1, keep_when)
-    } })
+    (i >= x.len).match ({
+        true  => {
+            done: Result<Set<T>, IoError> := .Ok(r)
+            done
+        },
+        false => {
+            sl := x.slots()
+            e := sl[i]
+            keep := y.has(e) == keep_when
+            nr := a.add_if(r, e, keep).or_return()
+            a.sift_fold(nr, x, y, i + 1, keep_when)
+        },
+    })
 }
 // {x} ∪ {y}: a fresh set (buffers from `a`) holding every element of x and y. Starts as a clone of x, then
 // folds y in; the inputs are untouched. O(|x| + |y|). Allocation failure is a value.

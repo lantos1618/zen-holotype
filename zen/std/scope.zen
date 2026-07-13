@@ -19,16 +19,22 @@ Scope*<A>: {
     acquire = (s: MutPtr<Scope<A>>, n: i64) RawPtr<u8> { s.alloc.acquire(n) }
     tick = (s: MutPtr<Scope<A>>) void {
         // count down one checkpoint of budget (unlimited = stays negative, never reaches 0).
-        (s.budget > 0).match ({ true => {
-            s.budget = s.budget - 1
-        }, false => { } })
+        (s.budget > 0).match ({
+            true  => {
+                s.budget = s.budget - 1
+            },
+            false => { },
+        })
     }
     checkpoint = (s: MutPtr<Scope<A>>) Signal {
         // the suspension point, now cancellation-aware: budget exhausted => Stop, else tick + yield/no-op.
-        (s.budget == 0).match ({ true => .Stop(.Deadline), false => {
-            s.tick()
-            s.alloc.checkpoint()
-        } })
+        (s.budget == 0).match ({
+            true  => .Stop(.Deadline),
+            false => {
+                s.tick()
+                s.alloc.checkpoint()
+            },
+        })
     }
 }
 // open a SYNC scope over `backing`, run `body` with a Scope<SyncArena>, free the arena on exit.

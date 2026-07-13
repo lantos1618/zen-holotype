@@ -13,16 +13,19 @@ STDOUT := 1
 // write failure (broken pipe / EPIPE, full disk / ENOSPC) as a value instead of swallowing it. Callers
 // that want best-effort (println/print in std.text.fmt) discard the Result with `.or(0)`.
 out_write_all = (ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
-    out: Result<i64, IoError> := (len <= 0).match ({ true => ok(done), false => {
-        w := STDOUT.write(ptr, len)
-        (w < 0).match ({
-            true  => err(IoError.Errno(to_i32(w))),
-            false => (w == 0).match ({
-                true  => err(IoError.Eof),
-                false => out_write_all(ptr.offset(w), len - w, done + w),
-            }),
-        })
-    } })
+    out: Result<i64, IoError> := (len <= 0).match ({
+        true  => ok(done),
+        false => {
+            w := STDOUT.write(ptr, len)
+            (w < 0).match ({
+                true  => err(IoError.Errno(to_i32(w))),
+                false => (w == 0).match ({
+                    true  => err(IoError.Eof),
+                    false => out_write_all(ptr.offset(w), len - w, done + w),
+                }),
+            })
+        },
+    })
     out
 }
 // Writes a str to stdout without the trailing NUL. Returns `.Ok(byte count)` on success, or `.Err` on a
@@ -47,22 +50,28 @@ file_size = (fd: i32) i64 {
 }
 // Reads [off, n), handling short reads.
 fd_read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
-    (off >= n).match ({ true => n, false => {
-        r := fd.read(buf.offset(off), n - off)
-        (r <= 0).match ({ true => off, false => fd.fd_read_all(buf, off + r, n) })
-    } })
+    (off >= n).match ({
+        true  => n,
+        false => {
+            r := fd.read(buf.offset(off), n - off)
+            (r <= 0).match ({ true => off, false => fd.fd_read_all(buf, off + r, n) })
+        },
+    })
 }
 ENOMEM := 12
 read_file_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<string_view, IoError> {
     got := fd.fd_read_all(buf, 0, n)
     fd.close()
-    out: Result<string_view, IoError> := (got == n).match ({ true => {
-        buf.offset(n).store(0)
-        ok(cstr(buf))
-    }, false => {
-        a.release(buf)
-        err(IoError.Eof)
-    } })
+    out: Result<string_view, IoError> := (got == n).match ({
+        true  => {
+            buf.offset(n).store(0)
+            ok(cstr(buf))
+        },
+        false => {
+            a.release(buf)
+            err(IoError.Eof)
+        },
+    })
     out
 }
 read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<string_view, IoError> {
@@ -76,10 +85,13 @@ read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<string_view, IoError
 }
 read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<string_view, IoError> {
     n := fd.file_size()
-    out: Result<string_view, IoError> := (n < 0).match ({ true => {
-        fd.close()
-        err(IoError.Errno(0 - 1))
-    }, false => a.read_file_alloc(fd, n) })
+    out: Result<string_view, IoError> := (n < 0).match ({
+        true  => {
+            fd.close()
+            err(IoError.Errno(0 - 1))
+        },
+        false => a.read_file_alloc(fd, n),
+    })
     out
 }
 // Reads a whole file into an allocator-owned NUL-terminated buffer.
@@ -121,8 +133,11 @@ save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError> {
 // -1 (fork failure), 127 (command not found), and a real exit code were all indistinguishable before.
 shell* = (cmd: string_view) Result<i32, IoError> {
     st := cmd.system()
-    (st < 0).match ({ true => err(IoError.Errno(st)), false => {
-        sig := st & 127
-        ok((sig == 0).match ({ true => st >> 8 & 255, false => 128 + sig }))
-    } })
+    (st < 0).match ({
+        true  => err(IoError.Errno(st)),
+        false => {
+            sig := st & 127
+            ok((sig == 0).match ({ true => st >> 8 & 255, false => 128 + sig }))
+        },
+    })
 }

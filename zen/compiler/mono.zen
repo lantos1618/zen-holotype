@@ -58,14 +58,17 @@ mono_tbuf = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), 
 mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], payload: Ty) Ty {
     sub := a.subst_ty_in(tparams, args, payload)
     sub.match ({
-        .Named(n) => decls.is_genstruct_name(n).match ({ true => {
-            gsd := decls.find_genstruct(n)
-            tys := a.mono_tbuf(gsd.tparams.len)
-            gsd.tparams.loop((h, i, tp) {
-                tys[i] = a.subst_ty_in(tparams, args, tnamed(tp.name))
-            })
-            tgeneric(n, tys, a.mangle_str_in(n, tys))
-        }, false => sub }),
+        .Named(n) => decls.is_genstruct_name(n).match ({
+            true  => {
+                gsd := decls.find_genstruct(n)
+                tys := a.mono_tbuf(gsd.tparams.len)
+                gsd.tparams.loop((h, i, tp) {
+                    tys[i] = a.subst_ty_in(tparams, args, tnamed(tp.name))
+                })
+                tgeneric(n, tys, a.mangle_str_in(n, tys))
+            },
+            false => sub,
+        }),
         _         => sub,
     })
 }
@@ -145,9 +148,11 @@ add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     // turns the crash into bounded, finite work. The CAPACITY bound is different: a large VALID
     // program can have many distinct instances, and silently dropping one emits C that is missing a
     // struct/enum definition — so a full buffer fails LOUDLY instead.
-    (1 + g.args.tys_max_depth() > 24).match ({ true => {
-        return cnt
-    } })
+    (1 + g.args.tys_max_depth() > 24).match ({
+        true => {
+            return cnt
+        },
+    })
     (cnt >= buf.len).match ({
         true  => panic("zenc: too many distinct generic instances (mono_gbuf cap; raise it in compiler.mono)"),
         false => { },
@@ -232,28 +237,37 @@ collect_inits = (buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
     c
 }
 collect_makestruct = (buf: [GenericData], cnt: i32, m: MakeStructData) i32 {
-    c := (m.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData(
-        name: m.ty,
-        args: m.targs,
-        mangled: m.mty,
-    )), false => cnt })
+    c := (m.targs.len > 0).match ({
+        true  => buf.add_gen(cnt, GenericData(
+            name: m.ty,
+            args: m.targs,
+            mangled: m.mty,
+        )),
+        false => cnt,
+    })
     buf.collect_inits(c, m.inits)
 }
 // a generic enum CONSTRUCTOR carries its instance the same way a struct literal does (ty + targs + mty)
 collect_mkenum = (buf: [GenericData], cnt: i32, m: MakeEnumData) i32 {
-    c := (m.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData(
-        name: m.ty,
-        args: m.targs,
-        mangled: m.mty,
-    )), false => cnt })
+    c := (m.targs.len > 0).match ({
+        true  => buf.add_gen(cnt, GenericData(
+            name: m.ty,
+            args: m.targs,
+            mangled: m.mty,
+        )),
+        false => cnt,
+    })
     buf.collect_expr(c, load(m.payload))
 }
 collect_tag = (buf: [GenericData], cnt: i32, t: TagData) i32 {
-    (t.targs.len > 0).match ({ true => buf.add_gen(cnt, GenericData(
-        name: t.ty,
-        args: t.targs,
-        mangled: t.mty,
-    )), false => cnt })
+    (t.targs.len > 0).match ({
+        true  => buf.add_gen(cnt, GenericData(
+            name: t.ty,
+            args: t.targs,
+            mangled: t.mty,
+        )),
+        false => cnt,
+    })
 }
 collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
     e.match ({

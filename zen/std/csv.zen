@@ -71,11 +71,14 @@ fbuf_new<A> = (a: MutPtr<A>) FBuf {
 }
 fbuf_push<A> = (a: MutPtr<A>, fb: FBuf, x: string_view) FBuf {
     x := x
-    r := (fb.len < fb.cap).match ({ true => fb, false => FBuf(
-        ptr: a.resize(fb.ptr, (fb.cap * 2 + 1) * str_sz()),
-        len: fb.len,
-        cap: fb.cap * 2 + 1,
-    ) })
+    r := (fb.len < fb.cap).match ({
+        true  => fb,
+        false => FBuf(
+            ptr: a.resize(fb.ptr, (fb.cap * 2 + 1) * str_sz()),
+            len: fb.len,
+            cap: fb.cap * 2 + 1,
+        ),
+    })
     s: [string_view] := slice(r.ptr, r.cap)
     s[r.len] = x
     FBuf(
@@ -94,11 +97,14 @@ rbuf_new<A> = (a: MutPtr<A>) RBuf {
 }
 rbuf_push<A> = (a: MutPtr<A>, rb: RBuf, x: [string_view]) RBuf {
     x := x
-    r := (rb.len < rb.cap).match ({ true => rb, false => RBuf(
-        ptr: a.resize(rb.ptr, (rb.cap * 2 + 1) * row_sz()),
-        len: rb.len,
-        cap: rb.cap * 2 + 1,
-    ) })
+    r := (rb.len < rb.cap).match ({
+        true  => rb,
+        false => RBuf(
+            ptr: a.resize(rb.ptr, (rb.cap * 2 + 1) * row_sz()),
+            len: rb.len,
+            cap: rb.cap * 2 + 1,
+        ),
+    })
     s: [[string_view]] := slice(r.ptr, r.cap)
     s[r.len] = x
     RBuf(
@@ -205,26 +211,32 @@ field_needs_quote = (s: string_view) bool {
     sv: [u8] := s.view()
     need := false
     sv.loop((h, i, b) {
-        (b == ',' || b == '"' || b == '\n' || b == '\r').match ({ true => {
-            need = true
-            h.break
-        }, false => { } })
+        (b == ',' || b == '"' || b == '\n' || b == '\r').match ({
+            true  => {
+                need = true
+                h.break
+            },
+            false => { },
+        })
     })
     need
 }
 // append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
 write_field<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     sv: [u8] := s.view()
-    s.field_needs_quote().match ({ true => {
-        out: String := sb.push_in(a, '"').cok()
-        sv.loop((h, i, b) {
-            out = (b == '"').match ({
-                true  => out.push_in(a, '"').cok().push_in(a, '"').cok(),
-                false => out.push_in(a, b).cok(),
+    s.field_needs_quote().match ({
+        true  => {
+            out: String := sb.push_in(a, '"').cok()
+            sv.loop((h, i, b) {
+                out = (b == '"').match ({
+                    true  => out.push_in(a, '"').cok().push_in(a, '"').cok(),
+                    false => out.push_in(a, b).cok(),
+                })
             })
-        })
-        out.push_in(a, '"').cok()
-    }, false => sb.append_in(a, s).cok() })
+            out.push_in(a, '"').cok()
+        },
+        false => sb.append_in(a, s).cok(),
+    })
 }
 // Render `rows` to a single CSV view: fields joined by commas, records terminated by LF (including
 // a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
@@ -234,9 +246,11 @@ write_rows*<A> = (a: MutPtr<A>, rows: [[string_view]]) Result<string_view, IoErr
     rows.loop((h, i, row) {
         r: [string_view] := row
         r.loop((h2, j, f) {
-            (j > 0).match ({ true => {
-                out = out.push_in(a, ',').cok()
-            } })
+            (j > 0).match ({
+                true => {
+                    out = out.push_in(a, ',').cok()
+                },
+            })
             out = a.write_field(out, f)
         })
         out = out.push_in(a, '\n').cok()

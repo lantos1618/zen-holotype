@@ -19,38 +19,53 @@ actors := malloc(NACT * 8)
 // sibling-call / accumulator transform applies at any -O — each frame must persist. At depth 100,000,000
 // this exhausts the C stack and raises SIGSEGV (the worker's stack-overflow panic).
 depth = (n: i64) i64 {
-    (n == 0).match ({ true => 0, false => {
-        r := depth(n - 1)
-        (r < n).match ({ true => r + 1, false => n })
-    } })
+    (n == 0).match ({
+        true  => 0,
+        false => {
+            r := depth(n - 1)
+            (r < n).match ({ true => r + 1, false => n })
+        },
+    })
 }
 // One behavior for every actor: the poison msg (0) drives the runaway recursion (overflow → panic HERE,
 // isolating this actor); a live msg (1) bumps the shared accumulator by 1.
 behave = (user: RawPtr<u8>, msg: i64) void {
-    (msg == 0).match ({ true => {
-        d := depth(100000000)
-        (d < 0).match ({ true => atomic_add_i64(user, 1), false => { } })
-    }, false => {
-        atomic_add_i64(user, 1)
-    } })
+    (msg == 0).match ({
+        true  => {
+            d := depth(100000000)
+            (d < 0).match ({ true => atomic_add_i64(user, 1), false => { } })
+        },
+        false => {
+            atomic_add_i64(user, 1)
+        },
+    })
 }
 send_n = (p: MutPtr<Pool>, a: RawPtr<u8>, i: i64, n: i64) void {
-    (i < n).match ({ true => {
-        p.pool_send(a, 1)
-        send_n(p, a, i + 1, n)
-    }, false => { } })
+    (i < n).match ({
+        true  => {
+            p.pool_send(a, 1)
+            send_n(p, a, i + 1, n)
+        },
+        false => { },
+    })
 }
 spawn_all = (i: i64) void {
-    (i < NACT).match ({ true => {
-        actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))
-        spawn_all(i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            actors.offset(i * 8).store_i64(pool_spawn(acc, PERMSG + 16, behave))
+            spawn_all(i + 1)
+        },
+        false => { },
+    })
 }
 free_all = (i: i64) void {
-    (i < NACT).match ({ true => {
-        pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
-        free_all(i + 1)
-    }, false => { } })
+    (i < NACT).match ({
+        true  => {
+            pool_actor_free(actors.offset(i * 8).load_i64().offset(0))
+            free_all(i + 1)
+        },
+        false => { },
+    })
 }
 main = () i32 {
     store_i64(acc, 0)

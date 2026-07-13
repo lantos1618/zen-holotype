@@ -17,30 +17,39 @@ num_integer_len = (n: i64) i64 { (n < 0).match ({
     false => num_udigit_count(n),
 }) }
 num_write_udigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
-    (n < 10).match ({ true => {
-        p.offset(at).store('0' + n)
-        at + 1
-    }, false => {
-        next := num_write_udigits(p, at, n / 10)
-        p.offset(next).store('0' + n % 10)
-        next + 1
-    } })
+    (n < 10).match ({
+        true  => {
+            p.offset(at).store('0' + n)
+            at + 1
+        },
+        false => {
+            next := num_write_udigits(p, at, n / 10)
+            p.offset(next).store('0' + n % 10)
+            next + 1
+        },
+    })
 }
 num_write_ndigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
-    (n > 0 - 10).match ({ true => {
-        p.offset(at).store('0' + (0 - n))
-        at + 1
-    }, false => {
-        next := num_write_ndigits(p, at, n / 10)
-        p.offset(next).store('0' + (0 - n % 10))
-        next + 1
-    } })
+    (n > 0 - 10).match ({
+        true  => {
+            p.offset(at).store('0' + (0 - n))
+            at + 1
+        },
+        false => {
+            next := num_write_ndigits(p, at, n / 10)
+            p.offset(next).store('0' + (0 - n % 10))
+            next + 1
+        },
+    })
 }
 num_write_integer = (p: RawPtr<u8>, n: i64) i64 {
-    (n < 0).match ({ true => {
-        p.store('-')
-        num_write_ndigits(p, 1, n)
-    }, false => num_write_udigits(p, 0, n) })
+    (n < 0).match ({
+        true  => {
+            p.store('-')
+            num_write_ndigits(p, 1, n)
+        },
+        false => num_write_udigits(p, 0, n),
+    })
 }
 num_integer_from_ptr = (p: RawPtr<u8>, n: i64, cap: i64) String {
     String(
@@ -67,14 +76,17 @@ num_uudigit_count = (n: u64) i64 { (n < 10).match ({
     false => 1 + num_uudigit_count(n / 10),
 }) }
 num_uwrite_udigits = (p: RawPtr<u8>, at: i64, n: u64) i64 {
-    (n < 10).match ({ true => {
-        p.offset(at).store('0' + to_i64(n))
-        at + 1
-    }, false => {
-        next := num_uwrite_udigits(p, at, n / 10)
-        p.offset(next).store('0' + to_i64(n % 10))
-        next + 1
-    } })
+    (n < 10).match ({
+        true  => {
+            p.offset(at).store('0' + to_i64(n))
+            at + 1
+        },
+        false => {
+            next := num_uwrite_udigits(p, at, n / 10)
+            p.offset(next).store('0' + to_i64(n % 10))
+            next + 1
+        },
+    })
 }
 num_uinteger_from_ptr = (p: RawPtr<u8>, n: u64, cap: i64) String {
     String(
@@ -93,10 +105,13 @@ uinteger_in*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError> {
 uinteger*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError> { a.uinteger_in(n) }
 num_copy_text = (p: RawPtr<u8>, at: i64, s: string_view, i: i64) i64 {
     b := s.offset(i).load()
-    (b == '\0').match ({ true => at, false => {
-        p.offset(at).store(b)
-        num_copy_text(p, at + 1, s, i + 1)
-    } })
+    (b == '\0').match ({
+        true  => at,
+        false => {
+            p.offset(at).store(b)
+            num_copy_text(p, at + 1, s, i + 1)
+        },
+    })
 }
 num_text_len_at = (s: string_view, i: i64) i64 { (s.offset(i).load() == '\0').match ({
     true  => i,
@@ -104,20 +119,26 @@ num_text_len_at = (s: string_view, i: i64) i64 { (s.offset(i).load() == '\0').ma
 }) }
 num_text_len = (s: string_view) i64 { num_text_len_at(s, 0) }
 num_write_fpad = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
-    (w == 1).match ({ true => {
-        p.offset(at).store('0' + n % 10)
-        at + 1
-    }, false => {
-        next := num_write_fpad(p, at, n / 10, w - 1)
-        p.offset(next).store('0' + n % 10)
-        next + 1
-    } })
+    (w == 1).match ({
+        true  => {
+            p.offset(at).store('0' + n % 10)
+            at + 1
+        },
+        false => {
+            next := num_write_fpad(p, at, n / 10, w - 1)
+            p.offset(next).store('0' + n % 10)
+            next + 1
+        },
+    })
 }
 num_write_zeros = (p: RawPtr<u8>, at: i64, k: i64) i64 {
-    (k <= 0).match ({ true => at, false => {
-        p.offset(at).store('0')
-        num_write_zeros(p, at + 1, k - 1)
-    } })
+    (k <= 0).match ({
+        true  => at,
+        false => {
+            p.offset(at).store('0')
+            num_write_zeros(p, at + 1, k - 1)
+        },
+    })
 }
 // ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
 // Mirrors std.text.fmt's streaming f64 writer, but writes into the caller's buffer. A printed
@@ -178,36 +199,45 @@ num_write_ffixed = (p: RawPtr<u8>, at: i64, digs: i64, ndig: i64, e: i64) i64 {
             z := num_write_zeros(p, at + 2, 0 - e - 1)
             num_write_udigits(p, z, digs)
         },
-        false => (ndig <= e + 1).match ({ true => {
-            d := num_write_udigits(p, at, digs)
-            z := num_write_zeros(p, d, e + 1 - ndig)
-            p.offset(z).store('.')
-            p.offset(z + 1).store('0')
-            z + 2
-        }, false => {
-            fw := ndig - (e + 1)    // fractional digit count
-            d := num_write_udigits(p, at, digs / num_fpow10i(fw))
-            p.offset(d).store('.')
-            num_write_fpad(p, d + 1, digs % num_fpow10i(fw), fw)
-        } }),
+        false => (ndig <= e + 1).match ({
+            true  => {
+                d := num_write_udigits(p, at, digs)
+                z := num_write_zeros(p, d, e + 1 - ndig)
+                p.offset(z).store('.')
+                p.offset(z + 1).store('0')
+                z + 2
+            },
+            false => {
+                fw := ndig - (e + 1)    // fractional digit count
+                d := num_write_udigits(p, at, digs / num_fpow10i(fw))
+                p.offset(d).store('.')
+                num_write_fpad(p, d + 1, digs % num_fpow10i(fw), fw)
+            },
+        }),
     })
 }
 // scientific-notation body "d.ddd e±EE".
 num_write_fsci = (p: RawPtr<u8>, at: i64, digs: i64, ndig: i64, e: i64) i64 {
     p.offset(at).store('0' + digs / num_fpow10i(ndig - 1))
     p.offset(at + 1).store('.')
-    m := (ndig == 1).match ({ true => {
-        p.offset(at + 2).store('0')
-        at + 3
-    }, false => num_write_fpad(p, at + 2, digs % num_fpow10i(ndig - 1), ndig - 1) })
+    m := (ndig == 1).match ({
+        true  => {
+            p.offset(at + 2).store('0')
+            at + 3
+        },
+        false => num_write_fpad(p, at + 2, digs % num_fpow10i(ndig - 1), ndig - 1),
+    })
     p.offset(m).store('e')
-    (e < 0).match ({ true => {
-        p.offset(m + 1).store('-')
-        num_write_udigits(p, m + 2, 0 - e)
-    }, false => {
-        p.offset(m + 1).store('+')
-        num_write_udigits(p, m + 2, e)
-    } })
+    (e < 0).match ({
+        true  => {
+            p.offset(m + 1).store('-')
+            num_write_udigits(p, m + 2, 0 - e)
+        },
+        false => {
+            p.offset(m + 1).store('+')
+            num_write_udigits(p, m + 2, e)
+        },
+    })
 }
 // x is the non-negative magnitude: zero => "0.0"; else 15 sig digits trimmed, fixed for
 // e in [-4,14] and scientific outside it (so 6.022e23 / 1e-7 keep their digits).
@@ -254,10 +284,13 @@ num_write_float = (p: RawPtr<u8>, x: f64) i64 {
     sp := x.f64_special()
     sp.num_is_special_text().match ({
         true  => num_copy_text(p, 0, sp, 0),
-        false => (x < 0.0).match ({ true => {
-            p.store('-')
-            num_write_fabs_digits(p, 1, 0.0 - x)
-        }, false => num_write_fabs_digits(p, 0, x) }),
+        false => (x < 0.0).match ({
+            true  => {
+                p.store('-')
+                num_write_fabs_digits(p, 1, 0.0 - x)
+            },
+            false => num_write_fabs_digits(p, 0, x),
+        }),
     })
 }
 num_float_from_ptr = (p: RawPtr<u8>, x: f64, cap: i64) String {
@@ -327,39 +360,51 @@ parse_f64* = (s: string_view) Result<f64, ParseError> {
                         eseen_sign = true    // first offending byte (0 = none)
                         eneg = b == '-'
                     },
-                    false => (b >= '0' && b <= '9').match ({ true => {
-                        eval = eval * 10 + (b - '0')
-                        edig = edig + 1
-                    }, false => {
-                        bad = b
-                        h.break
-                    } }),
+                    false => (b >= '0' && b <= '9').match ({
+                        true  => {
+                            eval = eval * 10 + (b - '0')
+                            edig = edig + 1
+                        },
+                        false => {
+                            bad = b
+                            h.break
+                        },
+                    }),
                 }),
                 false => (b >= '0' && b <= '9').match ({
                     true  => {
                         dd: i64 := b - '0'
                         d := to_f64(dd)
-                        seen_dot.match ({ true => {
-                            fracdiv = fracdiv * 10.0
-                            mant = mant + d / fracdiv
-                        }, false => {
-                            mant = mant * 10.0 + d
-                        } })
+                        seen_dot.match ({
+                            true  => {
+                                fracdiv = fracdiv * 10.0
+                                mant = mant + d / fracdiv
+                            },
+                            false => {
+                                mant = mant * 10.0 + d
+                            },
+                        })
                         ndig = ndig + 1
                     },
                     false => (b == '.').match ({
-                        true  => seen_dot.match ({ true => {
-                            bad = b
-                            h.break
-                        }, false => {
-                            seen_dot = true
-                        } }),
-                        false => ((b == 'e' || b == 'E') && ndig > 0).match ({ true => {
-                            seen_e = true
-                        }, false => {
-                            bad = b
-                            h.break
-                        } }),
+                        true  => seen_dot.match ({
+                            true  => {
+                                bad = b
+                                h.break
+                            },
+                            false => {
+                                seen_dot = true
+                            },
+                        }),
+                        false => ((b == 'e' || b == 'E') && ndig > 0).match ({
+                            true  => {
+                                seen_e = true
+                            },
+                            false => {
+                                bad = b
+                                h.break
+                            },
+                        }),
                     }),
                 }),
             }),
@@ -369,12 +414,15 @@ parse_f64* = (s: string_view) Result<f64, ParseError> {
         true  => err(.Trailing(bad)),
         false => (ndig == 0).match ({
             true  => err(.NoDigits),
-            false => (seen_e && edig == 0).match ({ true => err(.NoDigits), false => {
-                exp := eneg.match ({ true => 0 - eval, false => eval })
-                val := mant * pf_pow10(exp)
-                r: f64 := neg.match ({ true => 0.0 - val, false => val })
-                ok(r)
-            } }),
+            false => (seen_e && edig == 0).match ({
+                true  => err(.NoDigits),
+                false => {
+                    exp := eneg.match ({ true => 0 - eval, false => eval })
+                    val := mant * pf_pow10(exp)
+                    r: f64 := neg.match ({ true => 0.0 - val, false => val })
+                    ok(r)
+                },
+            }),
         }),
     })
     out
@@ -401,23 +449,32 @@ parse_i64_radix* = (s: string_view, base: i64) Result<i64, ParseError> {
     nd: i64 := 0
     bad: u8 := 0
     sv.loop((h, i, b) {
-        (i < start).match ({ true => { }, false => {
-            dv := pf_digit_val(b)
-            (dv >= 0 && dv < base).match ({ true => {
-                acc = acc * base + dv
-                nd = nd + 1
-            }, false => {
-                bad = b
-                h.break
-            } })
-        } })
+        (i < start).match ({
+            true  => { },
+            false => {
+                dv := pf_digit_val(b)
+                (dv >= 0 && dv < base).match ({
+                    true  => {
+                        acc = acc * base + dv
+                        nd = nd + 1
+                    },
+                    false => {
+                        bad = b
+                        h.break
+                    },
+                })
+            },
+        })
     })
     out: Result<i64, ParseError> := (nd == 0).match ({
         true  => err(.NoDigits),
-        false => (bad != 0).match ({ true => err(.Trailing(bad)), false => {
-            v: i64 := neg.match ({ true => 0 - acc, false => acc })
-            ok(v)
-        } }),
+        false => (bad != 0).match ({
+            true  => err(.Trailing(bad)),
+            false => {
+                v: i64 := neg.match ({ true => 0 - acc, false => acc })
+                ok(v)
+            },
+        }),
     })
     out
 }

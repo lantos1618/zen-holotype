@@ -30,10 +30,13 @@
 // ── small integer renderer (byte-only, self-hosting) ──────────────────────────────────────────────
 jdigit = (d: i64) u8 { load(offset("0123456789", d)) }
 jint_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({ true => s.gstr_push(a, jdigit(n)), false => {
-        hs := s.jint_nat(a, n / 10)
-        hs.gstr_push(a, jdigit(n % 10))
-    } })
+    (n < 10).match ({
+        true  => s.gstr_push(a, jdigit(n)),
+        false => {
+            hs := s.jint_nat(a, n / 10)
+            hs.gstr_push(a, jdigit(n % 10))
+        },
+    })
 }
 jint = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({
     true  => s.gstr_append(a, "-").jint_neg(a, n),
@@ -41,10 +44,13 @@ jint = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({
 }) }
 // walk negatives directly so INT64_MIN doesn't overflow on `0 - n`
 jint_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n > 0 - 10).match ({ true => s.gstr_push(a, jdigit(0 - n)), false => {
-        hs := s.jint_neg(a, n / 10)
-        hs.gstr_push(a, jdigit(0 - n % 10))
-    } })
+    (n > 0 - 10).match ({
+        true  => s.gstr_push(a, jdigit(0 - n)),
+        false => {
+            hs := s.jint_neg(a, n / 10)
+            hs.gstr_push(a, jdigit(0 - n % 10))
+        },
+    })
 }
 // ── JS identifier safety: a Zen name that is a JS reserved word gets a `$` suffix (so a Zen fn named
 //    `default`/`new`/`class`/… is a legal JS name). Field/property names are NOT mangled (any string is
@@ -587,13 +593,16 @@ js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String 
     })
 }
 js_switch_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
-    (i >= arms.len).match ({ true => s, false => {
-        out := s.js_switch_case(a, arms[i], i == arms.len - 1)
-        eq(arms[i].variant, "_").match ({
-            true  => out,
-            false => out.js_switch_cases(a, arms, i + 1),
-        })
-    } })
+    (i >= arms.len).match ({
+        true  => s,
+        false => {
+            out := s.js_switch_case(a, arms[i], i == arms.len - 1)
+            eq(arms[i].variant, "_").match ({
+                true  => out,
+                false => out.js_switch_cases(a, arms, i + 1),
+            })
+        },
+    })
 }
 js_match_expr = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "(() => { const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_cases(a, m.arms, 0).gstr_append(a, "} })()") }
 // statement-position match: arms run as statements so a diverging arm's `return` propagates.
@@ -623,13 +632,16 @@ js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) St
     })
 }
 js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
-    (i >= arms.len).match ({ true => s, false => {
-        out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
-        eq(arms[i].variant, "_").match ({
-            true  => out,
-            false => out.js_switch_stmt_cases(a, arms, i + 1),
-        })
-    } })
+    (i >= arms.len).match ({
+        true  => s,
+        false => {
+            out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
+            eq(arms[i].variant, "_").match ({
+                true  => out,
+                false => out.js_switch_stmt_cases(a, arms, i + 1),
+            })
+        },
+    })
 }
 js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "{ const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_stmt_cases(a, m.arms, 0).gstr_append(a, "} }") }
 // a foreach loop -> an IIFE with a JS for-loop over the fat pointer's array/offset backing.
@@ -825,10 +837,13 @@ vw_reset = (a: MutPtr<Malloc>) void {
 }
 vw_get = () [Param] { slice(vw_buf.ptr, vw_n) }
 vw_note = (name: string_view, ty: Ty) void {
-    (vw_n < vw_buf.len).match ({ true => {
-        vw_buf[vw_n] = param(name, ty)
-        vw_n = vw_n + 1
-    }, false => { } })
+    (vw_n < vw_buf.len).match ({
+        true  => {
+            vw_buf[vw_n] = param(name, ty)
+            vw_n = vw_n + 1
+        },
+        false => { },
+    })
 }
 // last matching entry wins (an inner-scope shadow declared later overrides an earlier sibling).
 vw_lookup = (name: string_view) Ty {

@@ -241,31 +241,43 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
     ok := true
     @while (i < n) {
         b := sv[i]
-        (ls && om_is_alpha(b)).match ({ true => {
-            // identifier [i, e)
-            e := i
-            @while (e < n && om_is_alnum(sv[e])) {
-                e = e + 1
-            }
-            // skip spaces/tabs, expect '='
-            q := e
-            @while (q < n && (sv[q] == ' ' || sv[q] == '\t')) {
-                q = q + 1
-            }
-            (q < n && sv[q] == '=').match ({ true => {
-                // skip spaces/tabs, expect '('
-                q2 := q + 1
-                @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
-                    q2 = q2 + 1
+        (ls && om_is_alpha(b)).match ({
+            true  => {
+                // identifier [i, e)
+                e := i
+                @while (e < n && om_is_alnum(sv[e])) {
+                    e = e + 1
                 }
-                (q2 < n && sv[q2] == '(').match ({ true => {
-                    name := mp.substr(src, i, e - i).expect("harness: oom")
-                    contains(c, name).match ({ true => { }, false => {
-                        ok = false
-                    } })
-                }, false => { } })
-            }, false => { } })
-        }, false => { } })
+                // skip spaces/tabs, expect '='
+                q := e
+                @while (q < n && (sv[q] == ' ' || sv[q] == '\t')) {
+                    q = q + 1
+                }
+                (q < n && sv[q] == '=').match ({
+                    true  => {
+                        // skip spaces/tabs, expect '('
+                        q2 := q + 1
+                        @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
+                            q2 = q2 + 1
+                        }
+                        (q2 < n && sv[q2] == '(').match ({
+                            true  => {
+                                name := mp.substr(src, i, e - i).expect("harness: oom")
+                                contains(c, name).match ({
+                                    true  => { },
+                                    false => {
+                                        ok = false
+                                    },
+                                })
+                            },
+                            false => { },
+                        })
+                    },
+                    false => { },
+                })
+            },
+            false => { },
+        })
         ls = b == '\n'
         i = i + 1
     }
@@ -283,11 +295,14 @@ om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: string_view) string_view {
 }
 om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: string_view) bool {
     passed := mp.om_read_file(mp.zo_idpath("zo_acidrc", gid, ".txt")).starts_with("P")
-    passed.match ({ true => {
-        txt := mp.om_read_file(mp.zo_idpath("zo_acid", gid, ".c"))
-        src := mp.om_read_file(path)
-        txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false })
-    }, false => false })
+    passed.match ({
+        true  => {
+            txt := mp.om_read_file(mp.zo_idpath("zo_acid", gid, ".c"))
+            src := mp.om_read_file(path)
+            txt.starts_with(HEAD).match ({ true => mp.om_decls_survive(src, txt), false => false })
+        },
+        false => false,
+    })
 }
 harness_misc_acid = () i32 {
     m := Malloc(_: 0)
@@ -304,10 +319,13 @@ harness_misc_acid = () i32 {
     zo_par_run(cmds, n)
     fails := 0
     files.loop((h, i, f) {
-        mp.om_acid_ok(i, f).match ({ true => out("."), false => {
-            out("F")
-            fails = fails + 1
-        } })
+        mp.om_acid_ok(i, f).match ({
+            true  => out("."),
+            false => {
+                out("F")
+                fails = fails + 1
+            },
+        })
     })
     out("\n")
     free(base)
@@ -328,14 +346,17 @@ om_app2 = (mp: MutPtr<Malloc>, s: String, n: i32) String {
 }
 // append a decimal integer VALUE (no leading zeros) — for argument / arm constants.
 om_app_int = (mp: MutPtr<Malloc>, s: String, n: i32) String {
-    (n < 10).match ({ true => {
-        d: u8 := ('0' + n).to_u8()
-        mp.push_in(s, d).expect("harness: oom")
-    }, false => {
-        s2 := mp.om_app_int(s, n / 10)
-        d2: u8 := ('0' + (n - n / 10 * 10)).to_u8()
-        mp.push_in(s2, d2).expect("harness: oom")
-    } })
+    (n < 10).match ({
+        true  => {
+            d: u8 := ('0' + n).to_u8()
+            mp.push_in(s, d).expect("harness: oom")
+        },
+        false => {
+            s2 := mp.om_app_int(s, n / 10)
+            d2: u8 := ('0' + (n - n / 10 * 10)).to_u8()
+            mp.push_in(s2, d2).expect("harness: oom")
+        },
+    })
 }
 om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({
     true  => s,
@@ -343,52 +364,67 @@ om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String { (i == 0).match ({
 }) }
 // "p00: i32, p01: i32, ..." — param declarations
 om_decl_params = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({ true => s, false => {
-        s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "p").expect("harness: oom")
-        s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": i32").expect("harness: oom")
-        mp.om_decl_params(s4, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            s1 := mp.om_sep(s, i)
+            s2 := s1.append_in(mp, "p").expect("harness: oom")
+            s3 := mp.om_app2(s2, i)
+            s4 := s3.append_in(mp, ": i32").expect("harness: oom")
+            mp.om_decl_params(s4, i + 1, n)
+        },
+    })
 }
 // "0, 1, ..., 79" — call argument values
 om_call_args = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({ true => s, false => {
-        s1 := mp.om_sep(s, i)
-        s2 := mp.om_app_int(s1, i)
-        mp.om_call_args(s2, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            s1 := mp.om_sep(s, i)
+            s2 := mp.om_app_int(s1, i)
+            mp.om_call_args(s2, i + 1, n)
+        },
+    })
 }
 // "x00: i32, x01: i32, ..." — field declarations
 om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({ true => s, false => {
-        s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "x").expect("harness: oom")
-        s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": i32").expect("harness: oom")
-        mp.om_decl_fields(s4, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            s1 := mp.om_sep(s, i)
+            s2 := s1.append_in(mp, "x").expect("harness: oom")
+            s3 := mp.om_app2(s2, i)
+            s4 := s3.append_in(mp, ": i32").expect("harness: oom")
+            mp.om_decl_fields(s4, i + 1, n)
+        },
+    })
 }
 // "x00: 0, x01: 1, ..." — struct-literal field inits
 om_init_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({ true => s, false => {
-        s1 := mp.om_sep(s, i)
-        s2 := s1.append_in(mp, "x").expect("harness: oom")
-        s3 := mp.om_app2(s2, i)
-        s4 := s3.append_in(mp, ": ").expect("harness: oom")
-        s5 := mp.om_app_int(s4, i)
-        mp.om_init_fields(s5, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            s1 := mp.om_sep(s, i)
+            s2 := s1.append_in(mp, "x").expect("harness: oom")
+            s3 := mp.om_app2(s2, i)
+            s4 := s3.append_in(mp, ": ").expect("harness: oom")
+            s5 := mp.om_app_int(s4, i)
+            mp.om_init_fields(s5, i + 1, n)
+        },
+    })
 }
 // "0 => 0, 1 => 2, ..." — match arms (value i => 2*i)
 om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
-    (i >= n).match ({ true => s, false => {
-        s1 := mp.om_sep(s, i)
-        s2 := mp.om_app_int(s1, i)
-        s3 := s2.append_in(mp, " => ").expect("harness: oom")
-        s4 := mp.om_app_int(s3, i * 2)
-        mp.om_arms(s4, i + 1, n)
-    } })
+    (i >= n).match ({
+        true  => s,
+        false => {
+            s1 := mp.om_sep(s, i)
+            s2 := mp.om_app_int(s1, i)
+            s3 := s2.append_in(mp, " => ").expect("harness: oom")
+            s4 := mp.om_app_int(s3, i * 2)
+            mp.om_arms(s4, i + 1, n)
+        },
+    })
 }
 om_gen_many_params = (mp: MutPtr<Malloc>) string_view {
     s := mp.new_in().expect("harness: oom")
@@ -534,14 +570,20 @@ harness_misc_faithful = () i32 {
     out("\n")
     cfails := 0
     corpus.loop((h, i, rel) {
-        mp.om_corpus_idem(rel).match ({ true => out("."), false => {
-            out("F")
-            cfails = cfails + 1
-        } })
-        mp.om_corpus_emit_eq(rel).match ({ true => out("."), false => {
-            out("F")
-            cfails = cfails + 1
-        } })
+        mp.om_corpus_idem(rel).match ({
+            true  => out("."),
+            false => {
+                out("F")
+                cfails = cfails + 1
+            },
+        })
+        mp.om_corpus_emit_eq(rel).match ({
+            true  => out("."),
+            false => {
+                out("F")
+                cfails = cfails + 1
+            },
+        })
     })
     out("\n")
     f1 + cfails

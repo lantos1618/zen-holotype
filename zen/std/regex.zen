@@ -137,10 +137,13 @@ peek2 = (cx: MutPtr<Cx>) u8 { (cx.pos + 1 < cx.plen).match ({
 }) }
 adv = (cx: MutPtr<Cx>) void { cx.pos = cx.pos + 1 }
 set_err = (cx: MutPtr<Cx>, code: i64) void {
-    (cx.err == E_NONE).match ({ true => {
-        cx.err = code
-        cx.errpos = cx.pos
-    }, false => { } })
+    (cx.err == E_NONE).match ({
+        true  => {
+            cx.err = code
+            cx.errpos = cx.pos
+        },
+        false => { },
+    })
 }
 // append an AST node, return its index.
 mk_node = (cx: MutPtr<Cx>, op: i64, c: u8, cls: i64, a: i64, b: i64) i64 {
@@ -190,28 +193,34 @@ add_shorthand_ranges = (cx: MutPtr<Cx>, e: u8) void {
         true  => {
             cx.add_range('0', '9')
         },
-        false => (e == 'w' || e == 'W').match ({ true => {
-            cx.add_range('a', 'z')
-            cx.add_range('A', 'Z')
-            cx.add_range('0', '9')
-            cx.add_range('_', '_')
-        }, false => {
-            cx.add_range(' ', ' ')
-            cx.add_range('\t', '\t')
-            cx.add_range('\n', '\n')
-            cx.add_range('\r', '\r')
-        } }),
+        false => (e == 'w' || e == 'W').match ({
+            true  => {
+                cx.add_range('a', 'z')
+                cx.add_range('A', 'Z')
+                cx.add_range('0', '9')
+                cx.add_range('_', '_')
+            },
+            false => {
+                cx.add_range(' ', ' ')
+                cx.add_range('\t', '\t')
+                cx.add_range('\n', '\n')
+                cx.add_range('\r', '\r')
+            },
+        }),
     })
 }
 // ── recursive-descent parser: alt → concat → repeat → atom ──────────────────────
 // alt := concat ('|' concat)*   (tail recursion instead of a loop — match-only control flow)
 parse_alt = (cx: MutPtr<Cx>) i64 { cx.parse_alt_rest(cx.parse_concat()) }
 parse_alt_rest = (cx: MutPtr<Cx>, left: i64) i64 {
-    (cx.err == E_NONE && cx.peek() == '|').match ({ true => {
-        cx.adv()
-        right := cx.parse_concat()
-        cx.parse_alt_rest(cx.mk_node(N_ALT, 0, 0, left, right))
-    }, false => left })
+    (cx.err == E_NONE && cx.peek() == '|').match ({
+        true  => {
+            cx.adv()
+            right := cx.parse_concat()
+            cx.parse_alt_rest(cx.mk_node(N_ALT, 0, 0, left, right))
+        },
+        false => left,
+    })
 }
 // concat := repeat*   (stops at '|', ')', or end)
 concat_more = (cx: MutPtr<Cx>) bool {
@@ -245,10 +254,13 @@ parse_quant = (cx: MutPtr<Cx>, a: i64) i64 {
                 cx.adv()
                 cx.parse_quant(cx.mk_node(N_PLUS, 0, 0, a, 0))
             },
-            false => (b == '?').match ({ true => {
-                cx.adv()
-                cx.parse_quant(cx.mk_node(N_QUEST, 0, 0, a, 0))
-            }, false => a }),
+            false => (b == '?').match ({
+                true  => {
+                    cx.adv()
+                    cx.parse_quant(cx.mk_node(N_QUEST, 0, 0, a, 0))
+                },
+                false => a,
+            }),
         }),
     })
 }
@@ -259,11 +271,14 @@ parse_atom = (cx: MutPtr<Cx>) i64 {
         true  => {
             cx.adv()
             inner := cx.parse_alt()
-            (cx.peek() == ')').match ({ true => {
-                cx.adv()
-            }, false => {
-                cx.set_err(E_UNBALANCED)
-            } })
+            (cx.peek() == ')').match ({
+                true  => {
+                    cx.adv()
+                },
+                false => {
+                    cx.set_err(E_UNBALANCED)
+                },
+            })
             inner
         },
         false => (b == '[').match ({
@@ -290,14 +305,17 @@ parse_atom = (cx: MutPtr<Cx>) i64 {
                                     cx.set_err(E_UNEXPECTED_RPAREN)
                                     cx.mk_node(N_EMPTY, 0, 0, 0, 0)
                                 },
-                                false => (b == '*' || b == '+' || b == '?').match ({ true => {
-                                    cx.set_err(E_NOTHING_TO_REPEAT)
-                                    cx.adv()
-                                    cx.mk_node(N_EMPTY, 0, 0, 0, 0)
-                                }, false => {
-                                    cx.adv()
-                                    cx.mk_node(N_CHAR, b, 0, 0, 0)
-                                } }),
+                                false => (b == '*' || b == '+' || b == '?').match ({
+                                    true  => {
+                                        cx.set_err(E_NOTHING_TO_REPEAT)
+                                        cx.adv()
+                                        cx.mk_node(N_EMPTY, 0, 0, 0, 0)
+                                    },
+                                    false => {
+                                        cx.adv()
+                                        cx.mk_node(N_CHAR, b, 0, 0, 0)
+                                    },
+                                }),
                             }),
                         }),
                     }),
@@ -309,28 +327,37 @@ parse_atom = (cx: MutPtr<Cx>) i64 {
 parse_escape = (cx: MutPtr<Cx>) i64 {
     cx.adv()    // consume the backslash
     e := cx.peek()
-    (e == 0).match ({ true => {
-        cx.set_err(E_TRAILING_BACKSLASH)
-        cx.mk_node(N_EMPTY, 0, 0, 0, 0)
-    }, false => {
-        cx.adv()
-        is_class := e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S'
-        is_class.match ({ true => {
-            neg := e == 'D' || e == 'W' || e == 'S'
-            start := cx.rc
-            cx.add_shorthand_ranges(e)
-            cls := cx.mk_class(neg, start, cx.rc - start)
-            cx.mk_node(N_CLASS, 0, cls, 0, 0)
-        }, false => cx.mk_node(N_CHAR, esc_byte(e), 0, 0, 0) })
-    } })
+    (e == 0).match ({
+        true  => {
+            cx.set_err(E_TRAILING_BACKSLASH)
+            cx.mk_node(N_EMPTY, 0, 0, 0, 0)
+        },
+        false => {
+            cx.adv()
+            is_class := e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S'
+            is_class.match ({
+                true  => {
+                    neg := e == 'D' || e == 'W' || e == 'S'
+                    start := cx.rc
+                    cx.add_shorthand_ranges(e)
+                    cls := cx.mk_class(neg, start, cx.rc - start)
+                    cx.mk_node(N_CLASS, 0, cls, 0, 0)
+                },
+                false => cx.mk_node(N_CHAR, esc_byte(e), 0, 0, 0),
+            })
+        },
+    })
 }
 // class := '[' '^'? item* ']'
 parse_class = (cx: MutPtr<Cx>) i64 {
     cx.adv()    // consume '['
     neg := cx.peek() == '^'
-    neg.match ({ true => {
-        cx.adv()
-    }, false => { } })
+    neg.match ({
+        true  => {
+            cx.adv()
+        },
+        false => { },
+    })
     start := cx.rc
     cx.parse_class_items(true)
     cls := cx.mk_class(neg, start, cx.rc - start)
@@ -339,64 +366,88 @@ parse_class = (cx: MutPtr<Cx>) i64 {
 // consume class items until the closing ']' (or end-of-pattern) — tail recursion, not a loop. `first`
 // lets a leading ']' be a literal ([]] / [^]]).
 parse_class_items = (cx: MutPtr<Cx>, first: bool) void {
-    (cx.err == E_NONE).match ({ true => {
-        b := cx.peek()
-        (b == 0).match ({
-            true  => {
-                cx.set_err(E_UNTERMINATED_CLASS)
-            },
-            false => (b == ']' && first.match ({ true => false, false => true })).match ({ true => {
-                cx.adv()
-            }, false => {
-                cx.class_item()
-                cx.parse_class_items(false)
-            } }),
-        })
-    }, false => { } })
+    (cx.err == E_NONE).match ({
+        true  => {
+            b := cx.peek()
+            (b == 0).match ({
+                true  => {
+                    cx.set_err(E_UNTERMINATED_CLASS)
+                },
+                false => (b == ']' && first.match ({ true => false, false => true })).match ({
+                    true  => {
+                        cx.adv()
+                    },
+                    false => {
+                        cx.class_item()
+                        cx.parse_class_items(false)
+                    },
+                }),
+            })
+        },
+        false => { },
+    })
 }
 class_item = (cx: MutPtr<Cx>) void {
     b := cx.peek()
-    (b == '\\').match ({ true => {
-        cx.adv()
-        e := cx.peek()
-        (e == 0).match ({ true => {
-            cx.set_err(E_TRAILING_BACKSLASH)
-        }, false => {
+    (b == '\\').match ({
+        true  => {
             cx.adv()
-            is_class := e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S'
-            is_class.match ({ true => {
-                cx.add_shorthand_ranges(e)
-            }, false => {
-                cx.class_range_or_single(esc_byte(e))
-            } })
-        } })
-    }, false => {
-        cx.adv()
-        cx.class_range_or_single(b)
-    } })
+            e := cx.peek()
+            (e == 0).match ({
+                true  => {
+                    cx.set_err(E_TRAILING_BACKSLASH)
+                },
+                false => {
+                    cx.adv()
+                    is_class := e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S'
+                    is_class.match ({
+                        true  => {
+                            cx.add_shorthand_ranges(e)
+                        },
+                        false => {
+                            cx.class_range_or_single(esc_byte(e))
+                        },
+                    })
+                },
+            })
+        },
+        false => {
+            cx.adv()
+            cx.class_range_or_single(b)
+        },
+    })
 }
 // having read `lo`, either read `lo-hi` as a range or add `lo` alone.
 class_range_or_single = (cx: MutPtr<Cx>, lo: u8) void {
-    (cx.peek() == '-' && cx.peek2() != ']' && cx.peek2() != 0).match ({ true => {
-        cx.adv()    // consume '-'
-        hi := (cx.peek() == '\\').match ({ true => {
-            cx.adv()
-            eb := cx.peek()
-            cx.adv()
-            esc_byte(eb)
-        }, false => {
-            hb := cx.peek()
-            cx.adv()
-            hb
-        } })
-        (lo > hi).match ({ true => {
-            cx.set_err(E_BAD_RANGE)
-        }, false => {
-            cx.add_range(lo, hi)
-        } })
-    }, false => {
-        cx.add_range(lo, lo)
-    } })
+    (cx.peek() == '-' && cx.peek2() != ']' && cx.peek2() != 0).match ({
+        true  => {
+            cx.adv()    // consume '-'
+            hi := (cx.peek() == '\\').match ({
+                true  => {
+                    cx.adv()
+                    eb := cx.peek()
+                    cx.adv()
+                    esc_byte(eb)
+                },
+                false => {
+                    hb := cx.peek()
+                    cx.adv()
+                    hb
+                },
+            })
+            (lo > hi).match ({
+                true  => {
+                    cx.set_err(E_BAD_RANGE)
+                },
+                false => {
+                    cx.add_range(lo, hi)
+                },
+            })
+        },
+        false => {
+            cx.add_range(lo, lo)
+        },
+    })
 }
 // ── AST → NFA program (fall-through layout, absolute split/jmp targets) ──────────
 emit = (cx: MutPtr<Cx>, op: i64, c: u8, x: i64, y: i64, cls: i64) i64 {
@@ -476,12 +527,15 @@ compile_node = (cx: MutPtr<Cx>, ni: i64) void {
                                                 s := cx.emit(OP_SPLIT, 0, l1, 0, 0)
                                                 cx.set_y(s, cx.ic)
                                             },
-                                            false => (n.op == N_QUEST).match ({ true => {
-                                                s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
-                                                cx.set_x(s, cx.ic)
-                                                cx.compile_node(n.a)
-                                                cx.set_y(s, cx.ic)
-                                            }, false => { } }),
+                                            false => (n.op == N_QUEST).match ({
+                                                true  => {
+                                                    s := cx.emit(OP_SPLIT, 0, 0, 0, 0)
+                                                    cx.set_x(s, cx.ic)
+                                                    cx.compile_node(n.a)
+                                                    cx.set_y(s, cx.ic)
+                                                },
+                                                false => { },
+                                            }),
                                         }),
                                     }),
                                 }),
@@ -569,53 +623,62 @@ compile*<A> = (a: MutPtr<A>, pattern: string_view) Result<Regex, RegexError> {
             )
             cx := st.addr()
             root := cx.parse_alt()
-            (cx.pos < cx.plen).match ({ true => {
-                cx.set_err(E_UNEXPECTED_RPAREN)
-            }, false => { } })
-            (cx.err == E_NONE).match ({ true => {
-                cx.compile_node(root)
-                m := cx.emit(OP_MATCH, 0, 0, 0, 0)
-                ninst := cx.ic
-                a.release(np)    // the AST is only needed during compilation
-                lp := a.acquire(ninst * sizeof(i64))
-                mp := a.acquire(ninst * sizeof(i64))
-                spp := a.acquire(ninst * sizeof(i64))
-                (lp == null_ptr() || mp == null_ptr() || spp == null_ptr()).match ({ true => {
-                    a.release(lp)
-                    a.release(mp)
-                    a.release(spp)
+            (cx.pos < cx.plen).match ({
+                true  => {
+                    cx.set_err(E_UNEXPECTED_RPAREN)
+                },
+                false => { },
+            })
+            (cx.err == E_NONE).match ({
+                true  => {
+                    cx.compile_node(root)
+                    m := cx.emit(OP_MATCH, 0, 0, 0, 0)
+                    ninst := cx.ic
+                    a.release(np)    // the AST is only needed during compilation
+                    lp := a.acquire(ninst * sizeof(i64))
+                    mp := a.acquire(ninst * sizeof(i64))
+                    spp := a.acquire(ninst * sizeof(i64))
+                    (lp == null_ptr() || mp == null_ptr() || spp == null_ptr()).match ({
+                        true  => {
+                            a.release(lp)
+                            a.release(mp)
+                            a.release(spp)
+                            a.release(ip)
+                            a.release(cp)
+                            a.release(rp)
+                            oom: Result<Regex, RegexError> := .Err(.Oom)
+                            oom
+                        },
+                        false => {
+                            prog: [Inst] := slice(ip, ninst)
+                            cls_tab: [ClassRec] := slice(cp, cx.cc)
+                            rng_tab: [Range] := slice(rp, cx.rc)
+                            cl: [i64] := slice(lp, ninst)
+                            nl: [i64] := slice(mp, ninst)
+                            sn: [i64] := slice(spp, ninst)
+                            re := Regex(
+                                insts: prog,
+                                ninst: ninst,
+                                classes: cls_tab,
+                                ranges: rng_tab,
+                                clist: cl,
+                                nlist: nl,
+                                seen: sn,
+                            )
+                            good: Result<Regex, RegexError> := .Ok(re)
+                            good
+                        },
+                    })
+                },
+                false => {
+                    a.release(np)
                     a.release(ip)
                     a.release(cp)
                     a.release(rp)
-                    oom: Result<Regex, RegexError> := .Err(.Oom)
-                    oom
-                }, false => {
-                    prog: [Inst] := slice(ip, ninst)
-                    cls_tab: [ClassRec] := slice(cp, cx.cc)
-                    rng_tab: [Range] := slice(rp, cx.rc)
-                    cl: [i64] := slice(lp, ninst)
-                    nl: [i64] := slice(mp, ninst)
-                    sn: [i64] := slice(spp, ninst)
-                    re := Regex(
-                        insts: prog,
-                        ninst: ninst,
-                        classes: cls_tab,
-                        ranges: rng_tab,
-                        clist: cl,
-                        nlist: nl,
-                        seen: sn,
-                    )
-                    good: Result<Regex, RegexError> := .Ok(re)
-                    good
-                } })
-            }, false => {
-                a.release(np)
-                a.release(ip)
-                a.release(cp)
-                a.release(rp)
-                bad: Result<Regex, RegexError> := .Err(map_err_code(cx.err))
-                bad
-            } })
+                    bad: Result<Regex, RegexError> := .Err(map_err_code(cx.err))
+                    bad
+                },
+            })
         },
     })
 }
@@ -634,10 +697,13 @@ class_match = (re: Regex, cls: i64, b: u8) bool {
     cr := re.classes[cls]
     found := false
     re.ranges.sub(cr.start, cr.start + cr.count).loop((h, i, r) {
-        (b >= r.lo && b <= r.hi).match ({ true => {
-            found = true
-            h.break
-        }, false => { } })
+        (b >= r.lo && b <= r.hi).match ({
+            true  => {
+                found = true
+                h.break
+            },
+            false => { },
+        })
     })
     cr.neg.match ({
         true  => found.match ({ true => false, false => true }),
@@ -649,35 +715,38 @@ class_match = (re: Regex, cls: i64, b: u8) bool {
 // column. Returns the new length.
 add_thread = (re: Regex, list: [i64], len: i64, pc: i64, sp: i64, n: i64, gen: i64) i64 {
     sn := re.seen
-    (sn[pc] == gen).match ({ true => len, false => {
-        sn[pc] = gen
-        inst := re.insts[pc]
-        (inst.op == OP_JMP).match ({
-            true  => re.add_thread(list, len, inst.x, sp, n, gen),
-            false => (inst.op == OP_SPLIT).match ({
-                true  => {
-                    l2 := re.add_thread(list, len, inst.x, sp, n, gen)
-                    re.add_thread(list, l2, inst.y, sp, n, gen)
-                },
-                false => (inst.op == OP_BOL).match ({
-                    true  => (sp == 0).match ({
-                        true  => re.add_thread(list, len, pc + 1, sp, n, gen),
-                        false => len,
-                    }),
-                    false => (inst.op == OP_EOL).match ({
-                        true  => (sp == n).match ({
+    (sn[pc] == gen).match ({
+        true  => len,
+        false => {
+            sn[pc] = gen
+            inst := re.insts[pc]
+            (inst.op == OP_JMP).match ({
+                true  => re.add_thread(list, len, inst.x, sp, n, gen),
+                false => (inst.op == OP_SPLIT).match ({
+                    true  => {
+                        l2 := re.add_thread(list, len, inst.x, sp, n, gen)
+                        re.add_thread(list, l2, inst.y, sp, n, gen)
+                    },
+                    false => (inst.op == OP_BOL).match ({
+                        true  => (sp == 0).match ({
                             true  => re.add_thread(list, len, pc + 1, sp, n, gen),
                             false => len,
                         }),
-                        false => {
-                            list[len] = pc
-                            len + 1
-                        },
+                        false => (inst.op == OP_EOL).match ({
+                            true  => (sp == n).match ({
+                                true  => re.add_thread(list, len, pc + 1, sp, n, gen),
+                                false => len,
+                            }),
+                            false => {
+                                list[len] = pc
+                                len + 1
+                            },
+                        }),
                     }),
                 }),
-            }),
-        })
-    } })
+            })
+        },
+    })
 }
 // the end offset of the longest match ANCHORED at `start`, or -1 for none. `gen` is threaded so the
 // shared `seen` stamp never collides across calls (monotonic, never reset here).
@@ -689,10 +758,13 @@ MatchRes*: {
 has_match = (re: Regex, clen: i64) bool {
     found := false
     re.clist.sub(0, clen).loop((h, i, pc) {
-        (re.insts[pc].op == OP_MATCH).match ({ true => {
-            found = true
-            h.break
-        }, false => { } })
+        (re.insts[pc].op == OP_MATCH).match ({
+            true  => {
+                found = true
+                h.break
+            },
+            false => { },
+        })
     })
     found
 }
@@ -703,17 +775,26 @@ build_next = (re: Regex, sv: [u8], clen: i64, sp: i64, n: i64, gen: i64, b: u8) 
     re.clist.sub(0, clen).loop((h, i, pc) {
         inst := re.insts[pc]
         (inst.op == OP_CHAR).match ({
-            true  => (b == inst.c).match ({ true => {
-                nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-            }, false => { } }),
-            false => (inst.op == OP_ANY).match ({
-                true  => (b == '\n').match ({ true => { }, false => {
+            true  => (b == inst.c).match ({
+                true  => {
                     nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                } }),
-                false => (inst.op == OP_CLASS).match ({
-                    true  => re.class_match(inst.cls, b).match ({ true => {
+                },
+                false => { },
+            }),
+            false => (inst.op == OP_ANY).match ({
+                true  => (b == '\n').match ({
+                    true  => { },
+                    false => {
                         nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                    }, false => { } }),
+                    },
+                }),
+                false => (inst.op == OP_CLASS).match ({
+                    true  => re.class_match(inst.cls, b).match ({
+                        true  => {
+                            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+                        },
+                        false => { },
+                    }),
                     false => { },
                 }),
             }),
@@ -732,24 +813,33 @@ match_from = (re: Regex, sv: [u8], start: i64, n: i64, gen0: i64) MatchRes {
     clen := re.add_thread(re.clist, 0, 0, start, n, gen)
     best: i64 := 0 - 1
     // column at sp == start (before consuming anything)
-    re.has_match(clen).match ({ true => {
-        best = start
-    }, false => { } })
+    re.has_match(clen).match ({
+        true  => {
+            best = start
+        },
+        false => { },
+    })
     sv.sub(start, n).loop((h, idx, b) {
         // consuming columns sp = start .. n-1 (iteration, never unbounded recursion). `.loop` over the
         // remaining text bytes; each step advances the whole thread frontier by one byte.
-        (clen == 0).match ({ true => {
-            h.break
-        }, false => {
-            sp := start + idx
-            gen = gen + 1
-            nlen := re.build_next(sv, clen, sp, n, gen, b)
-            re.copy_threads(nlen)
-            clen = nlen
-            re.has_match(clen).match ({ true => {
-                best = sp + 1
-            }, false => { } })
-        } })
+        (clen == 0).match ({
+            true  => {
+                h.break
+            },
+            false => {
+                sp := start + idx
+                gen = gen + 1
+                nlen := re.build_next(sv, clen, sp, n, gen, b)
+                re.copy_threads(nlen)
+                clen = nlen
+                re.has_match(clen).match ({
+                    true  => {
+                        best = sp + 1
+                    },
+                    false => { },
+                })
+            },
+        })
     })
     MatchRes(
         end: best,
@@ -771,20 +861,26 @@ Found*: {
 }
 // try to anchor a match at `at`; fold the result into the running Found (only the FIRST hit sticks).
 try_at = (re: Regex, sv: [u8], at: i64, n: i64, acc: Found) Found {
-    acc.has.match ({ true => acc, false => {
-        mr := re.match_from(sv, at, n, acc.gen)
-        (mr.end >= 0).match ({ true => Found(
-            has: true,
-            start: at,
-            end: mr.end,
-            gen: mr.gen,
-        ), false => Found(
-            has: false,
-            start: 0,
-            end: 0,
-            gen: mr.gen,
-        ) })
-    } })
+    acc.has.match ({
+        true  => acc,
+        false => {
+            mr := re.match_from(sv, at, n, acc.gen)
+            (mr.end >= 0).match ({
+                true  => Found(
+                    has: true,
+                    start: at,
+                    end: mr.end,
+                    gen: mr.gen,
+                ),
+                false => Found(
+                    has: false,
+                    start: 0,
+                    end: 0,
+                    gen: mr.gen,
+                ),
+            })
+        },
+    })
 }
 search_from = (re: Regex, sv: [u8], from: i64, n: i64, gen0: i64) Found {
     acc := Found(
@@ -795,11 +891,14 @@ search_from = (re: Regex, sv: [u8], from: i64, n: i64, gen0: i64) Found {
     )
     sv.sub(from, n).loop((h, idx, b) {
         // starts from .. n-1 (iteration over the text, never unbounded recursion)
-        acc.has.match ({ true => {
-            h.break
-        }, false => {
-            acc = re.try_at(sv, from + idx, n, acc)
-        } })
+        acc.has.match ({
+            true  => {
+                h.break
+            },
+            false => {
+                acc = re.try_at(sv, from + idx, n, acc)
+            },
+        })
     })
     // the empty tail at start == n ($ / empty pattern), only if nothing matched earlier
     re.try_at(sv, n, n, acc)
@@ -811,16 +910,19 @@ find* = (re: Regex, s: string_view) Opt<Match> {
     n := sv.len
     re.zero_seen()
     f := re.search_from(sv, 0, n, 0)
-    f.has.match ({ true => {
-        r: Opt<Match> := .Some(Match(
-            start: f.start,
-            end: f.end,
-        ))
-        r
-    }, false => {
-        r: Opt<Match> := .None
-        r
-    } })
+    f.has.match ({
+        true  => {
+            r: Opt<Match> := .Some(Match(
+                start: f.start,
+                end: f.end,
+            ))
+            r
+        },
+        false => {
+            r: Opt<Match> := .None
+            r
+        },
+    })
 }
 // does the pattern occur anywhere in `s`?
 matches* = (re: Regex, s: string_view) bool {
@@ -841,23 +943,32 @@ count_matches = (re: Regex, sv: [u8], n: i64) i64 {
     g: i64 := 0
     done := false
     sv.loop((h, idx, b) {
-        (done || pos > n).match ({ true => {
-            h.break
-        }, false => {
-            f := re.search_from(sv, pos, n, g)
-            g = f.gen
-            f.has.match ({ true => {
-                c = c + 1
-                pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
-            }, false => {
-                done = true
-            } })
-        } })
+        (done || pos > n).match ({
+            true  => {
+                h.break
+            },
+            false => {
+                f := re.search_from(sv, pos, n, g)
+                g = f.gen
+                f.has.match ({
+                    true  => {
+                        c = c + 1
+                        pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
+                    },
+                    false => {
+                        done = true
+                    },
+                })
+            },
+        })
     })
-    (done || pos > n).match ({ true => c, false => {
-        f := re.search_from(sv, pos, n, g)
-        f.has.match ({ true => c + 1, false => c })
-    } })
+    (done || pos > n).match ({
+        true  => c,
+        false => {
+            f := re.search_from(sv, pos, n, g)
+            f.has.match ({ true => c + 1, false => c })
+        },
+    })
 }
 fill_matches = (re: Regex, sv: [u8], n: i64, out: [Match]) void {
     re.zero_seen()
@@ -866,32 +977,44 @@ fill_matches = (re: Regex, sv: [u8], n: i64, out: [Match]) void {
     g: i64 := 0
     done := false
     sv.loop((h, i, b) {
-        (done || pos > n).match ({ true => {
-            h.break
-        }, false => {
-            f := re.search_from(sv, pos, n, g)
-            g = f.gen
-            f.has.match ({ true => {
-                out[idx] = Match(
-                    start: f.start,
-                    end: f.end,
-                )
-                idx = idx + 1
-                pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
-            }, false => {
-                done = true
-            } })
-        } })
+        (done || pos > n).match ({
+            true  => {
+                h.break
+            },
+            false => {
+                f := re.search_from(sv, pos, n, g)
+                g = f.gen
+                f.has.match ({
+                    true  => {
+                        out[idx] = Match(
+                            start: f.start,
+                            end: f.end,
+                        )
+                        idx = idx + 1
+                        pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
+                    },
+                    false => {
+                        done = true
+                    },
+                })
+            },
+        })
     })
-    (done || pos > n).match ({ true => { }, false => {
-        f := re.search_from(sv, pos, n, g)
-        f.has.match ({ true => {
-            out[idx] = Match(
-                start: f.start,
-                end: f.end,
-            )
-        }, false => { } })
-    } })
+    (done || pos > n).match ({
+        true  => { },
+        false => {
+            f := re.search_from(sv, pos, n, g)
+            f.has.match ({
+                true  => {
+                    out[idx] = Match(
+                        start: f.start,
+                        end: f.end,
+                    )
+                },
+                false => { },
+            })
+        },
+    })
 }
 // every non-overlapping match, allocated through `a`. Empty when there are none.
 find_all*<A> = (re: Regex, a: MutPtr<A>, s: string_view) Result<[Match], IoError> {
