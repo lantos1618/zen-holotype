@@ -41,30 +41,39 @@ read_line*<A> = (a: MutPtr<A>) Result<Opt<string_view>, IoError> {
                 consumed = consumed + (r > 0).match ({ true => 1, false => 0 })
                 done = r <= 0 || cell[0] == '\n'
                 // builder-threaded push: every arm yields the String, so failure stays a value
-                s = (r > 0 && cell[0] != '\n').match ({ true => a.push_in(s, cell[0]).match ({
-                    .Ok(ns)  => ns,
-                    .Err(pe) => {
-                        failed = true
-                        ev = pe
-                        done = true
-                        s
-                    },
-                }), false => s })
+                s = (r > 0 && cell[0] != '\n').match ({
+                    true  => a.push_in(s, cell[0]).match ({
+                        .Ok(ns)  => ns,
+                        .Err(pe) => {
+                            failed = true
+                            ev = pe
+                            done = true
+                            s
+                        },
+                    }),
+                    false => s,
+                })
             }
-            out: Result<Opt<string_view>, IoError> := failed.match ({ true => {
-                s.free_in(a)
-                err(ev)
-            }, false => (consumed == 0).match ({ true => {
-                s.free_in(a)
-                none: Opt<string_view> := .None
-                ok(none)
-            }, false => s.finish_in(a).match ({
-                .Ok(line) => {
-                    some: Opt<string_view> := .Some(line)
-                    ok(some)
+            out: Result<Opt<string_view>, IoError> := failed.match ({
+                true  => {
+                    s.free_in(a)
+                    err(ev)
                 },
-                .Err(fe)  => err(fe),
-            }) }) })
+                false => (consumed == 0).match ({
+                    true  => {
+                        s.free_in(a)
+                        none: Opt<string_view> := .None
+                        ok(none)
+                    },
+                    false => s.finish_in(a).match ({
+                        .Ok(line) => {
+                            some: Opt<string_view> := .Some(line)
+                            ok(some)
+                        },
+                        .Err(fe)  => err(fe),
+                    }),
+                }),
+            })
             out
         },
     })
@@ -111,24 +120,30 @@ read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
                     failed = r < 0
                     ev = failed.match ({ true => read_failed(), false => ev })
                     done = r <= 0
-                    s = (r > 0).match ({ true => a.append_chunk(s, chunk, r).match ({
-                        .Ok(ns)  => ns,
-                        .Err(ae) => {
-                            failed = true
-                            ev = ae
-                            done = true
-                            s
-                        },
-                    }), false => s })
+                    s = (r > 0).match ({
+                        true  => a.append_chunk(s, chunk, r).match ({
+                            .Ok(ns)  => ns,
+                            .Err(ae) => {
+                                failed = true
+                                ev = ae
+                                done = true
+                                s
+                            },
+                        }),
+                        false => s,
+                    })
                 }
                 a.release(chunk)
-                out: Result<string_view, IoError> := failed.match ({ true => {
-                    s.free_in(a)
-                    err(ev)
-                }, false => s.finish_in(a).match ({
-                    .Ok(done) => ok(done),
-                    .Err(e)   => err(e),
-                }) })
+                out: Result<string_view, IoError> := failed.match ({
+                    true  => {
+                        s.free_in(a)
+                        err(ev)
+                    },
+                    false => s.finish_in(a).match ({
+                        .Ok(done) => ok(done),
+                        .Err(e)   => err(e),
+                    }),
+                })
                 out
             },
         }),

@@ -40,7 +40,10 @@ bb_dot = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].is_boundary_before() }
 skip_ws = (sv: [u8], j: i64) i64 {
     (j >= sv.len).match ({ true => j, false => {
         b := sv[j]
-        (b == ' ' || b == '\t' || b == '\n' || b == '\r').match ({ true => sv.skip_ws(j + 1), false => j })
+        (b == ' ' || b == '\t' || b == '\n' || b == '\r').match ({
+            true  => sv.skip_ws(j + 1),
+            false => j,
+        })
     } })
 }
 // do `nv`'s bytes appear at sv[at..]? (caller guards at + nv.len <= sv.len)
@@ -58,35 +61,55 @@ tok_at = (sv: [u8], nv: [u8], at: i64) bool {
 // is what rejects e.g. `mallocate` and distinguishes `load(` from `load_i64(`.
 name_matches = (sv: [u8], i: i64, name: string_view) bool {
     nv := name.view()
-    (i + nv.len > sv.len).match ({ true => false, false => sv.tok_at(nv, i).match ({ true => {
-        j := sv.skip_ws(i + nv.len)
-        j < sv.len && sv[j] == '('
-    }, false => false }) })
+    (i + nv.len > sv.len).match ({
+        true  => false,
+        false => sv.tok_at(nv, i).match ({ true => {
+            j := sv.skip_ws(i + nv.len)
+            j < sv.len && sv[j] == '('
+        }, false => false }),
+    })
 }
 // the `\bNAME\b` tail: keyword `name` starts at sv[i] AND the byte after it is a word boundary (a
 // non-word char or EOF). Used for the bare `break` / `continue` keywords (no trailing `(`).
 word_matches = (sv: [u8], i: i64, name: string_view) bool {
     nv := name.view()
-    (i + nv.len > sv.len).match ({ true => false, false => sv.tok_at(nv, i).match ({ true => {
-        p := i + nv.len
-        p >= sv.len || sv[p].not_word()
-    }, false => false }) })
+    (i + nv.len > sv.len).match ({
+        true  => false,
+        false => sv.tok_at(nv, i).match ({ true => {
+            p := i + nv.len
+            p >= sv.len || sv[p].not_word()
+        }, false => false }),
+    })
 }
 // the `@while\b` match anchored at i: literal `@while` followed by a word boundary (no before-anchor
 // — the `@` is a literal char in the pattern, not a `\b`).
 atwhile_at = (sv: [u8], i: i64) bool {
     nv := "@while".view()
-    (i + nv.len > sv.len).match ({ true => false, false => sv.tok_at(nv, i).match ({ true => {
-        p := i + nv.len
-        p >= sv.len || sv[p].not_word()
-    }, false => false }) })
+    (i + nv.len > sv.len).match ({
+        true  => false,
+        false => sv.tok_at(nv, i).match ({ true => {
+            p := i + nv.len
+            p >= sv.len || sv[p].not_word()
+        }, false => false }),
+    })
 }
 // a pattern match anchored at index i. kind selects the regex shape:
 //   0 = `\bNAME\s*\(`        (call, plain word boundary — `.NAME(` still matches, as in python)
 //   1 = `(?<!\.)\bNAME\s*\(` (call, boundary EXCLUDING a leading `.` — e.g. "raw addr")
 //   2 = `\bNAME\b`           (bare keyword — break / continue)
 //   _ = `@while\b`           (the literal @while token; `name` is ignored)
-matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool { (kind == 0).match ({ true => sv.bb_plain(i) && sv.name_matches(i, name), false => (kind == 1).match ({ true => sv.bb_dot(i) && sv.name_matches(i, name), false => (kind == 2).match ({ true => sv.bb_plain(i) && sv.word_matches(i, name), false => sv.atwhile_at(i) }) }) }) }
+matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool {
+    (kind == 0).match ({
+        true  => sv.bb_plain(i) && sv.name_matches(i, name),
+        false => (kind == 1).match ({
+            true  => sv.bb_dot(i) && sv.name_matches(i, name),
+            false => (kind == 2).match ({
+                true  => sv.bb_plain(i) && sv.word_matches(i, name),
+                false => sv.atwhile_at(i),
+            }),
+        }),
+    })
+}
 // does this file (a `[u8]` view of raw source) contain `pattern` of `kind` OUTSIDE a `//` line
 // comment? We track an in-comment flag (set at `//`, cleared at newline) — the same comment-stripping
 // python's `_code` does. Block comments and string literals are NOT special-cased (matching python).
@@ -97,12 +120,18 @@ file_has = (sv: [u8], name: string_view, kind: i64) bool {
         (b == '\n').match ({ true => {
             in_comment = false
         } })
-        in_comment.match ({ true => { }, false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({ true => {
-            in_comment = true
-        }, false => sv.matches_kind_at(i, name, kind).match ({ true => {
-            found = true
-            h.break
-        }, false => { } }) }) })
+        in_comment.match ({
+            true  => { },
+            false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
+                true  => {
+                    in_comment = true
+                },
+                false => sv.matches_kind_at(i, name, kind).match ({ true => {
+                    found = true
+                    h.break
+                }, false => { } }),
+            }),
+        })
     })
     found
 }
@@ -117,14 +146,20 @@ strip_comments_in = (mp: MutPtr<Malloc>, src: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
     in_comment := false
     sv.loop((h, i, b) {
-        (b == '\n').match ({ true => {
-            s = s.push_in(mp, b).expect("harness: oom")
-            in_comment = false
-        }, false => in_comment.match ({ true => { }, false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({ true => {
-            in_comment = true
-        }, false => {
-            s = s.push_in(mp, b).expect("harness: oom")
-        } }) }) })
+        (b == '\n').match ({
+            true  => {
+                s = s.push_in(mp, b).expect("harness: oom")
+                in_comment = false
+            },
+            false => in_comment.match ({
+                true  => { },
+                false => (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({ true => {
+                    in_comment = true
+                }, false => {
+                    s = s.push_in(mp, b).expect("harness: oom")
+                } }),
+            }),
+        })
     })
     mp.finish_in(s).expect("harness: oom")
 }
@@ -145,7 +180,10 @@ before_marker = (mp: MutPtr<Malloc>, s: string_view, m: string_view) string_view
 }
 // the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
 region = (mp: MutPtr<Malloc>, src: string_view, m1: string_view, m2: string_view) string_view { mp.before_marker(mp.after_marker(src, m1), m2) }
-not_contains = (s: string_view, needle: string_view) bool { s.contains(needle).match ({ true => false, false => true }) }
+not_contains = (s: string_view, needle: string_view) bool { s.contains(needle).match ({
+    true  => false,
+    false => true,
+}) }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -154,10 +192,16 @@ alloc_not_whitelisted = (path: string_view) bool { ne(path, "zen/std/mem/alloc.z
 // `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` anchored at i (kind 1 = dot-excluded boundary).
 file_has_raw_alloc = (sv: [u8]) bool { sv.file_has("malloc", 1) || sv.file_has("calloc", 1) || sv.file_has("realloc", 1) || sv.file_has("free", 1) }
 alloc_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
-    path.is_empty().match ({ true => true, false => mp.contents_in(path).match ({
-        .Ok(raw) => (raw.view().file_has_raw_alloc() && path.alloc_not_whitelisted()).match ({ true => false, false => true }),
-        .Err(e)  => true,
-    }) })
+    path.is_empty().match ({
+        true  => true,
+        false => mp.contents_in(path).match ({
+            .Ok(raw) => (raw.view().file_has_raw_alloc() && path.alloc_not_whitelisted()).match ({
+                true  => false,
+                false => true,
+            }),
+            .Err(e)  => true,
+        }),
+    })
 }
 alloc_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in(mp.zo_path("ob_files.txt")).match ({
@@ -180,10 +224,13 @@ alloc_suite = (mp: MutPtr<Malloc>) i32 {
 // alternation is equivalent to `\boffset\s*\(` for matching (both fire iff offset starts at a boundary).
 example_violation = (sv: [u8]) bool { sv.file_has("addr", 1) || sv.file_has("checkpoint_current", 0) || sv.file_has("@while", 3) || sv.file_has("break", 2) || sv.file_has("continue", 2) || sv.file_has("malloc", 0) || sv.file_has("load", 0) || sv.file_has("store", 0) || sv.file_has("load_i64", 0) || sv.file_has("store_i64", 0) || sv.file_has("atomic_add_i64", 0) || sv.file_has("offset", 0) || sv.file_has("null_ptr", 0) || sv.file_has("slice", 0) || sv.file_has("cstr", 0) || sv.file_has("sizeof", 0) }
 example_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
-    path.is_empty().match ({ true => true, false => mp.contents_in(path).match ({
-        .Ok(raw) => raw.view().example_violation().match ({ true => false, false => true }),
-        .Err(e)  => true,
-    }) })
+    path.is_empty().match ({
+        true  => true,
+        false => mp.contents_in(path).match ({
+            .Ok(raw) => raw.view().example_violation().match ({ true => false, false => true }),
+            .Err(e)  => true,
+        }),
+    })
 }
 example_suite = (mp: MutPtr<Malloc>) i32 {
     shell(mp.zo_cmd("find examples -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_examples.txt"))
@@ -225,14 +272,23 @@ has_checkpoint_import = (mp: MutPtr<Malloc>, clean: string_view) bool {
     found
 }
 checkpoint_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
-    path.is_empty().match ({ true => true, false => path.checkpoint_allowed().match ({ true => true, false => mp.contents_in(path).match ({
-        .Ok(raw) => {
-            has_call := raw.view().file_has("checkpoint_current", 0)
-            has_imp := raw.contains("checkpoint_current").match ({ true => mp.has_checkpoint_import(mp.strip_comments_in(raw)), false => false })
-            (has_call || has_imp).match ({ true => false, false => true })
-        },
-        .Err(e)  => true,
-    }) }) })
+    path.is_empty().match ({
+        true  => true,
+        false => path.checkpoint_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => {
+                    has_call := raw.view().file_has("checkpoint_current", 0)
+                    has_imp := raw.contains("checkpoint_current").match ({
+                        true  => mp.has_checkpoint_import(mp.strip_comments_in(raw)),
+                        false => false,
+                    })
+                    (has_call || has_imp).match ({ true => false, false => true })
+                },
+                .Err(e)  => true,
+            }),
+        }),
+    })
 }
 checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in(mp.zo_path("ob_files.txt")).match ({
@@ -257,10 +313,19 @@ atwhile_allowed = (path: string_view) bool { eq(path, "zen/compiler/lex.zen") ||
 // lexer/codegen/diagnostic scanners join for the same reason: a ~50KB string literal, a long numeric
 // literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
 atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
-    path.is_empty().match ({ true => true, false => path.atwhile_allowed().match ({ true => true, false => mp.contents_in(path).match ({
-        .Ok(raw) => raw.view().file_has("@while", 3).match ({ true => false, false => true }),
-        .Err(e)  => true,
-    }) }) })
+    path.is_empty().match ({
+        true  => true,
+        false => path.atwhile_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => raw.view().file_has("@while", 3).match ({
+                    true  => false,
+                    false => true,
+                }),
+                .Err(e)  => true,
+            }),
+        }),
+    })
 }
 atwhile_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in(mp.zo_path("ob_files.txt")).match ({

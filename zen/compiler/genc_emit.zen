@@ -13,11 +13,14 @@ digit = (d: i64) u8 { sbyte("0123456789", d) }
 // (the `.Int` literal site suffixes it `ULL`). The i64→u64 assignment reinterprets the bits; u64 `/`,`%`
 // walk the value in its full unsigned range (this also renders INT64_MIN correctly, as `0 - <2^63>`).
 gen_uint_nat = (s: String, alloc: MutPtr<Malloc>, n: u64) String {
-    (n < 10).match ({ true => s.gstr_push(alloc, digit(to_i64(n))), false => {
-        // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve (UAF)
-        hs := s.gen_uint_nat(alloc, n / 10)
-        hs.gstr_push(alloc, digit(to_i64(n % 10)))
-    } })
+    (n < 10).match ({
+        true  => s.gstr_push(alloc, digit(to_i64(n))),
+        false => {
+            // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve (UAF)
+            hs := s.gen_uint_nat(alloc, n / 10)
+            hs.gstr_push(alloc, digit(to_i64(n % 10)))
+        },
+    })
 }
 gen_int = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
     (n < 0).match ({ true => {
@@ -48,7 +51,10 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
         // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
         // computes, and the i32 store/cast narrows back.
-        .Int(n)         => s.gen_int(alloc, n).gstr_append(alloc, (n < 0).match ({ true => "ULL", false => "LL" })),
+        .Int(n)         => s.gen_int(alloc, n).gstr_append(alloc, (n < 0).match ({
+            true  => "ULL",
+            false => "LL",
+        })),
         .Byte(n)        => s.gen_int(alloc, n),
         .FloatLit(ft)   => s.gstr_append(alloc, ft),
         .Var(v)         => s.gstr_append(alloc, v.name),
@@ -82,10 +88,13 @@ gen_blockexpr = (s: String, alloc: MutPtr<Malloc>, b: BlockData) String {
     out.gstr_append(alloc, "})")
 }
 gen_block_one = (s: String, alloc: MutPtr<Malloc>, st: Stmt, last: bool) String {
-    last.match ({ true => st.match ({
-        .ExprStmt(e) => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
-        _            => s.gen_stmt(alloc, st),
-    }), false => s.gen_stmt(alloc, st) })
+    last.match ({
+        true  => st.match ({
+            .ExprStmt(e) => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
+            _            => s.gen_stmt(alloc, st),
+        }),
+        false => s.gen_stmt(alloc, st),
+    })
 }
 // `.tag` on a bare Tag node is the compile-time enum tag CONSTANT `<mty>_<variant>`; fold it to that
 // bare identifier instead of materializing the tag struct just to read its `.tag`. or_return's Err-guard
@@ -93,10 +102,13 @@ gen_block_one = (s: String, alloc: MutPtr<Malloc>, st: Stmt, last: bool) String 
 // re-manglable Tag node — subst_expr rewrites T→concrete when a generic body is inlined (#54) — while
 // the fold keeps the emitted spelling byte-identical to the old baked constant.
 member_is_tag_const = (m: MemberData) bool {
-    eq(m.field, "tag").match ({ true => load(m.obj).match ({
-        .Tag(t) => true,
-        _       => false,
-    }), false => false })
+    eq(m.field, "tag").match ({
+        true  => load(m.obj).match ({
+            .Tag(t) => true,
+            _       => false,
+        }),
+        false => false,
+    })
 }
 gen_tag_const = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>) String {
     load(obj).match ({
@@ -105,7 +117,18 @@ gen_tag_const = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>) String {
     })
 }
 // Loop handler fields `break`/`continue` emit C control flow; other fields emit normally.
-gen_member = (s: String, alloc: MutPtr<Malloc>, m: MemberData) String { eq(m.field, "break_zk").match ({ true => s.gstr_append(alloc, "break"), false => eq(m.field, "continue_zk").match ({ true => s.gstr_append(alloc, "continue"), false => m.member_is_tag_const().match ({ true => s.gen_tag_const(alloc, m.obj), false => s.gen_expr(alloc, m.obj).gstr_append(alloc, ".").gstr_append(alloc, m.field) }) }) }) }
+gen_member = (s: String, alloc: MutPtr<Malloc>, m: MemberData) String {
+    eq(m.field, "break_zk").match ({
+        true  => s.gstr_append(alloc, "break"),
+        false => eq(m.field, "continue_zk").match ({
+            true  => s.gstr_append(alloc, "continue"),
+            false => m.member_is_tag_const().match ({
+                true  => s.gen_tag_const(alloc, m.obj),
+                false => s.gen_expr(alloc, m.obj).gstr_append(alloc, ".").gstr_append(alloc, m.field),
+            }),
+        }),
+    })
+}
 gen_loop = (s: String, alloc: MutPtr<Malloc>, l: LoopData) String {
     out := s
     out = out.gstr_append(alloc, "({ __auto_type _seq = ")
@@ -142,11 +165,14 @@ gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
 // through `slice`/`acquire`), so this only affects user/test programs. Empty `[]` needs no backing.
 gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
     n := slice_count(sd.items)
-    (n == 0).match ({ true => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"), false => {
-        tn := alloc.ty_cname_in(sd.elem)
-        out := s.gstr_append(alloc, "({ ").gstr_append(alloc, tn).gstr_append(alloc, " _zsa[] = { ").gen_args(alloc, sd.items).gstr_append(alloc, " }; uint8_t* _zsp = malloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
-        out.gen_int(alloc, n).gstr_append(alloc, " }; })")
-    } })
+    (n == 0).match ({
+        true  => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"),
+        false => {
+            tn := alloc.ty_cname_in(sd.elem)
+            out := s.gstr_append(alloc, "({ ").gstr_append(alloc, tn).gstr_append(alloc, " _zsa[] = { ").gen_args(alloc, sd.items).gstr_append(alloc, " }; uint8_t* _zsp = malloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
+            out.gen_int(alloc, n).gstr_append(alloc, " }; })")
+        },
+    })
 }
 slice_count = (items: [Expr]) i32 {
     n := 0
@@ -169,23 +195,71 @@ gen_index = (s: String, alloc: MutPtr<Malloc>, ix: IndexData) String {
 // statement-expression (not a function-like macro) is used so operands that emit unparenthesized commas
 // — e.g. compound literals `(zslice){.ptr=…, .len=…}` — parse as real C instead of splitting macro args.
 // All other operators emit `(lhs op rhs)` unchanged.
-gen_bin = (s: String, alloc: MutPtr<Malloc>, b: BinData) String { eq(b.op, "/.").match ({ true => s.gstr_append(alloc, "(").gen_expr(alloc, b.lhs).gstr_append(alloc, " / ").gen_expr(alloc, b.rhs).gstr_append(alloc, ")"), false => eq(b.op, "/").match ({ true => s.gstr_append(alloc, "({ __auto_type _zdl = (").gen_expr(alloc, b.lhs).gstr_append(alloc, "); __auto_type _zdr = (").gen_expr(alloc, b.rhs).gstr_append(alloc, "); _Generic(_zdl + _zdr, double:(double)(_zdl/_zdr), float:(float)(_zdl/_zdr), unsigned int: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), default: zen__divz((int64_t)_zdl, (int64_t)_zdr)); })"), false => eq(b.op, "%").match ({ true => s.gstr_append(alloc, "({ __auto_type _zml = (").gen_expr(alloc, b.lhs).gstr_append(alloc, "); __auto_type _zmr = (").gen_expr(alloc, b.rhs).gstr_append(alloc, "); _Generic(_zml + _zmr, double:(int64_t)0, float:(int64_t)0, unsigned int: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), default: zen__modz((int64_t)_zml, (int64_t)_zmr)); })"), false => s.gstr_append(alloc, "(").gen_expr(alloc, b.lhs).gstr_append(alloc, " ").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_expr(alloc, b.rhs).gstr_append(alloc, ")") }) }) }) }
+gen_bin = (s: String, alloc: MutPtr<Malloc>, b: BinData) String {
+    eq(b.op, "/.").match ({
+        true  => s.gstr_append(alloc, "(").gen_expr(alloc, b.lhs).gstr_append(alloc, " / ").gen_expr(alloc, b.rhs).gstr_append(alloc, ")"),
+        false => eq(b.op, "/").match ({
+            true  => s.gstr_append(alloc, "({ __auto_type _zdl = (").gen_expr(alloc, b.lhs).gstr_append(alloc, "); __auto_type _zdr = (").gen_expr(alloc, b.rhs).gstr_append(alloc, "); _Generic(_zdl + _zdr, double:(double)(_zdl/_zdr), float:(float)(_zdl/_zdr), unsigned int: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), default: zen__divz((int64_t)_zdl, (int64_t)_zdr)); })"),
+            false => eq(b.op, "%").match ({
+                true  => s.gstr_append(alloc, "({ __auto_type _zml = (").gen_expr(alloc, b.lhs).gstr_append(alloc, "); __auto_type _zmr = (").gen_expr(alloc, b.rhs).gstr_append(alloc, "); _Generic(_zml + _zmr, double:(int64_t)0, float:(int64_t)0, unsigned int: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), default: zen__modz((int64_t)_zml, (int64_t)_zmr)); })"),
+                false => s.gstr_append(alloc, "(").gen_expr(alloc, b.lhs).gstr_append(alloc, " ").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_expr(alloc, b.rhs).gstr_append(alloc, ")"),
+            }),
+        }),
+    })
+}
 // Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to literal 0.
-gen_arg_at = (s: String, alloc: MutPtr<Malloc>, c: CallData, i: i32) String { (i < c.args.len).match ({ true => s.gen_expr(alloc, c.args[i].addr()), false => s.gstr_append(alloc, "0") }) }
+gen_arg_at = (s: String, alloc: MutPtr<Malloc>, c: CallData, i: i32) String {
+    (i < c.args.len).match ({
+        true  => s.gen_expr(alloc, c.args[i].addr()),
+        false => s.gstr_append(alloc, "0"),
+    })
+}
 EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | AtomicLoadI64 | AtomicStoreI64 | AtomicCasI64 | AtomicFence | Addr | AssertNonnull | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64 | Sizeof
 // map a sizeof type-arg name to its C type name. Primitives (i64→int64_t, bool→…) must NOT leak the
 // Zen keyword into C; struct names and already-substituted tparams (sizeof(T)→sizeof(Expr)) pass through.
 // The canonical string_* family and its migration aliases all share the Phase-1 `const char*` layout.
 sizeof_is_canonical_string = (n: string_view) bool { eq(n, "string_view") || eq(n, "string_cstr") || eq(n, "string_literal") }
-sizeof_base_cname = (n: string_view) string_view { eq(n, "i32").match ({ true => "int32_t", false => eq(n, "i64").match ({ true => "int64_t", false => eq(n, "u8").match ({ true => "uint8_t", false => eq(n, "f64").match ({ true => "double", false => eq(n, "bool").match ({ true => "bool", false => eq(n, "str").match ({ true => "const char*", false => eq(n, "Cstr").match ({ true => "const char*", false => eq(n, "text").match ({ true => "const char*", false => eq(n, "void").match ({ true => "void", false => n }) }) }) }) }) }) }) }) }) }
-sizeof_cname = (n: string_view) string_view { n.sizeof_is_canonical_string().match ({ true => "const char*", false => n.sizeof_base_cname() }) }
+sizeof_base_cname = (n: string_view) string_view {
+    eq(n, "i32").match ({
+        true  => "int32_t",
+        false => eq(n, "i64").match ({
+            true  => "int64_t",
+            false => eq(n, "u8").match ({
+                true  => "uint8_t",
+                false => eq(n, "f64").match ({
+                    true  => "double",
+                    false => eq(n, "bool").match ({
+                        true  => "bool",
+                        false => eq(n, "str").match ({
+                            true  => "const char*",
+                            false => eq(n, "Cstr").match ({
+                                true  => "const char*",
+                                false => eq(n, "text").match ({
+                                    true  => "const char*",
+                                    false => eq(n, "void").match ({ true => "void", false => n }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+sizeof_cname = (n: string_view) string_view { n.sizeof_is_canonical_string().match ({
+    true  => "const char*",
+    false => n.sizeof_base_cname(),
+}) }
 // `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
 gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     out := s.gstr_append(alloc, "sizeof(")
-    body := (c.args.len > 0).match ({ true => c.args[0].addr().match ({
-        .Var(v) => out.gstr_append(alloc, sizeof_cname(v.name)),
-        _       => out.gen_arg_at(alloc, c, 0),
-    }), false => out.gstr_append(alloc, "0") })
+    body := (c.args.len > 0).match ({
+        true  => c.args[0].addr().match ({
+            .Var(v) => out.gstr_append(alloc, sizeof_cname(v.name)),
+            _       => out.gen_arg_at(alloc, c, 0),
+        }),
+        false => out.gstr_append(alloc, "0"),
+    })
     body.gstr_append(alloc, ")")
 }
 call_kind = (name: string_view) EmitCallKind {
@@ -276,7 +350,12 @@ is_lvalue = (e: Ptr<Expr>) bool {
 // `(T){e}` would mis-init T's first FIELD with e), has the enclosing block's lifetime, and decays
 // to a `T*` pointing at element 0 — exactly the wanted address. typeof's operand is unevaluated,
 // so the inner expression runs exactly once (in the initializer).
-gen_addr = (s: String, alloc: MutPtr<Malloc>, c: CallData) String { (c.args.len > 0 && is_lvalue(c.args[0].addr())).match ({ true => s.gstr_append(alloc, "(&(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"), false => s.gstr_append(alloc, "((__typeof__(").gen_arg_at(alloc, c, 0).gstr_append(alloc, ")[1]){ ").gen_arg_at(alloc, c, 0).gstr_append(alloc, " })") }) }
+gen_addr = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
+    (c.args.len > 0 && is_lvalue(c.args[0].addr())).match ({
+        true  => s.gstr_append(alloc, "(&(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
+        false => s.gstr_append(alloc, "((__typeof__(").gen_arg_at(alloc, c, 0).gstr_append(alloc, ")[1]){ ").gen_arg_at(alloc, c, 0).gstr_append(alloc, " })"),
+    })
+}
 gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String { s.gstr_append(alloc, c.fn).gstr_append(alloc, "(").gen_args(alloc, c.args).gstr_append(alloc, ")") }
 gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     c.fn.call_kind().match ({
@@ -332,7 +411,10 @@ gen_sexpr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         .FloatLit(ft) => s.gstr_append(alloc, ft),
         .Var(v)       => s.gstr_append(alloc, v.name),
         .Bin(b)       => s.gstr_append(alloc, "(").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_sexpr(alloc, b.lhs).gstr_append(alloc, " ").gen_sexpr(alloc, b.rhs).gstr_append(alloc, ")"),
-        .Call(c)      => c.raw.match ({ true => s.gstr_append(alloc, "(@").gstr_append(alloc, c.fn).gen_sargs(alloc, c.args).gstr_append(alloc, ")"), false => s.gstr_append(alloc, "(").gstr_append(alloc, c.fn).gen_sargs(alloc, c.args).gstr_append(alloc, ")") }),
+        .Call(c)      => c.raw.match ({
+            true  => s.gstr_append(alloc, "(@").gstr_append(alloc, c.fn).gen_sargs(alloc, c.args).gstr_append(alloc, ")"),
+            false => s.gstr_append(alloc, "(").gstr_append(alloc, c.fn).gen_sargs(alloc, c.args).gstr_append(alloc, ")"),
+        }),
         .Lambda(lm)   => s.gen_lam_sexpr(alloc, lm),
         // NEVER emit a literal `?` placeholder — a silent drop that becomes invalid output. Fail loudly
         // on any expression kind this renderer doesn't handle so the gap surfaces instead of slipping through.
@@ -350,13 +432,31 @@ gen_lam_sexpr = (s: String, alloc: MutPtr<Malloc>, lm: LambdaData) String {
     })
     out.gstr_append(alloc, ")")
 }
-gen_cond = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { (blk_diverges(d.t) || blk_diverges(d.e)).match ({ true => s.gen_cond_div(alloc, d), false => s.gstr_append(alloc, "(").gen_expr(alloc, d.c).gstr_append(alloc, " ? ").gen_expr(alloc, d.t).gstr_append(alloc, " : ").gen_expr(alloc, d.e).gstr_append(alloc, ")") }) }
+gen_cond = (s: String, alloc: MutPtr<Malloc>, d: CondData) String {
+    (blk_diverges(d.t) || blk_diverges(d.e)).match ({
+        true  => s.gen_cond_div(alloc, d),
+        false => s.gstr_append(alloc, "(").gen_expr(alloc, d.c).gstr_append(alloc, " ? ").gen_expr(alloc, d.t).gstr_append(alloc, " : ").gen_expr(alloc, d.e).gstr_append(alloc, ")"),
+    })
+}
 // A value cond with a DIVERGING branch (its block ends in `return`) cannot be a `?:` — a void arm in
 // a conditional expression is invalid C, and the return must actually fire. Emit a statement-expr:
 // the non-diverging branch assigns `_out` (typed from it, unevaluated via __typeof__); the diverging
 // branch runs as statements and leaves the function. Both diverging → `_out` is a dead int.
-gen_cond_branch_div = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String { blk_diverges(e).match ({ true => s.gstr_append(alloc, "{ ").gen_expr(alloc, e).gstr_append(alloc, "; }"), false => s.gstr_append(alloc, "{ _out = ").gen_expr(alloc, e).gstr_append(alloc, "; }") }) }
-gen_cond_div_ty = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { blk_diverges(d.t).match ({ true => blk_diverges(d.e).match ({ true => s.gstr_append(alloc, "0"), false => s.gen_expr(alloc, d.e) }), false => s.gen_expr(alloc, d.t) }) }
+gen_cond_branch_div = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
+    blk_diverges(e).match ({
+        true  => s.gstr_append(alloc, "{ ").gen_expr(alloc, e).gstr_append(alloc, "; }"),
+        false => s.gstr_append(alloc, "{ _out = ").gen_expr(alloc, e).gstr_append(alloc, "; }"),
+    })
+}
+gen_cond_div_ty = (s: String, alloc: MutPtr<Malloc>, d: CondData) String {
+    blk_diverges(d.t).match ({
+        true  => blk_diverges(d.e).match ({
+            true  => s.gstr_append(alloc, "0"),
+            false => s.gen_expr(alloc, d.e),
+        }),
+        false => s.gen_expr(alloc, d.t),
+    })
+}
 gen_cond_div = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { s.gstr_append(alloc, "({ __typeof__(").gen_cond_div_ty(alloc, d).gstr_append(alloc, ") _out; if (").gen_expr(alloc, d.c).gstr_append(alloc, ") ").gen_cond_branch_div(alloc, d.t).gstr_append(alloc, " else ").gen_cond_branch_div(alloc, d.e).gstr_append(alloc, " _out; })") }
 // A non-printable byte as a 3-digit octal C escape `\ooo`. Octal (not `\xNN`) is used deliberately:
 // hex escapes are greedy in C and would swallow a following literal hex digit, whereas an octal escape
@@ -369,7 +469,27 @@ gen_oct_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String {
 // escapes (\n \r \t); printable ASCII (0x20..0x7E) passes through; every other byte — CR was the bug
 // (#50), plus \t, NUL, DEL and all non-printables/high bytes — is emitted as a 3-digit octal escape so
 // any byte value in a Zen string survives the emitted C literal verbatim.
-gen_escape_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.gstr_append(alloc, "\\\""), false => (b == '\\').match ({ true => s.gstr_append(alloc, "\\\\"), false => (b == '\n').match ({ true => s.gstr_append(alloc, "\\n"), false => (b == '\r').match ({ true => s.gstr_append(alloc, "\\r"), false => (b == '\t').match ({ true => s.gstr_append(alloc, "\\t"), false => (b >= ' ' && b <= '~').match ({ true => s.gstr_push(alloc, b), false => s.gen_oct_byte(alloc, b) }) }) }) }) }) }) }
+gen_escape_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String {
+    (b == '"').match ({
+        true  => s.gstr_append(alloc, "\\\""),
+        false => (b == '\\').match ({
+            true  => s.gstr_append(alloc, "\\\\"),
+            false => (b == '\n').match ({
+                true  => s.gstr_append(alloc, "\\n"),
+                false => (b == '\r').match ({
+                    true  => s.gstr_append(alloc, "\\r"),
+                    false => (b == '\t').match ({
+                        true  => s.gstr_append(alloc, "\\t"),
+                        false => (b >= ' ' && b <= '~').match ({
+                            true  => s.gstr_push(alloc, b),
+                            false => s.gen_oct_byte(alloc, b),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // a C string literal: `"` + each byte escaped + `"`
 gen_strlit = (s: String, alloc: MutPtr<Malloc>, v: string_view) String { s.gstr_append(alloc, "\"").gen_escape_from(alloc, v, 0).gstr_append(alloc, "\"") }
 // escape the str's bytes one by one (recursion to the NUL terminator). Avoiding view/slice keeps this
@@ -399,20 +519,44 @@ gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
 }
 // an arm's body: bind the payload (GCC __auto_type, so no payload type needed here), then the body
 gen_armbind = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "({ __auto_type ").gstr_append(alloc, a.bind).gstr_append(alloc, " = ").gstr_append(alloc, subj).gstr_append(alloc, sep).gstr_append(alloc, "u.").gstr_append(alloc, a.variant).gstr_append(alloc, "; ").gen_expr(alloc, a.body).gstr_append(alloc, "; })") }
-gen_armbody = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { is_empty(a.bind).match ({ true => s.gstr_append(alloc, "(").gen_expr(alloc, a.body).gstr_append(alloc, ")"), false => s.gen_armbind(alloc, subj, sep, a) }) }
+gen_armbody = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+    is_empty(a.bind).match ({
+        true  => s.gstr_append(alloc, "(").gen_expr(alloc, a.body).gstr_append(alloc, ")"),
+        false => s.gen_armbind(alloc, subj, sep, a),
+    })
+}
 // Type every arm through C's conditional operator so array arms decay, numeric arms widen, and exact
 // struct/scalar arms keep their type. __typeof__ evaluates none of these arm expressions. DIVERGING
 // arms (body ends in `return`) yield no value: they are skipped here (their block would type void and
 // poison the chain) and emitted as statements in gen_switch_body. All arms diverging → dead int _out.
-next_live_arm = (arms: [ArmData], i: i64) i64 { (i >= arms.len).match ({ true => arms.len, false => arms[i].body.blk_diverges().match ({ true => arms.next_live_arm(i + 1), false => i }) }) }
+next_live_arm = (arms: [ArmData], i: i64) i64 {
+    (i >= arms.len).match ({
+        true  => arms.len,
+        false => arms[i].body.blk_diverges().match ({
+            true  => arms.next_live_arm(i + 1),
+            false => i,
+        }),
+    })
+}
 gen_match_type_expr = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, arms: [ArmData], i: i64) String {
     j := arms.next_live_arm(i)
-    (j >= arms.len).match ({ true => s.gstr_append(alloc, "0"), false => (arms.next_live_arm(j + 1) >= arms.len).match ({ true => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, " : ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, ")"), false => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, " : ").gen_match_type_expr(alloc, subj, sep, arms, j + 1).gstr_append(alloc, ")") }) })
+    (j >= arms.len).match ({
+        true  => s.gstr_append(alloc, "0"),
+        false => (arms.next_live_arm(j + 1) >= arms.len).match ({
+            true  => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, " : ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, ")"),
+            false => s.gstr_append(alloc, "(1 ? ").gen_armbody(alloc, subj, sep, arms[j]).gstr_append(alloc, " : ").gen_match_type_expr(alloc, subj, sep, arms, j + 1).gstr_append(alloc, ")"),
+        }),
+    })
 }
 gen_match_out_decl = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, arms: [ArmData]) String { s.gstr_append(alloc, "__typeof__(").gen_match_type_expr(alloc, subj, sep, arms, 0).gstr_append(alloc, ") _out; ") }
 // a diverging arm's body runs for CONTROL FLOW only (its trailing `return` leaves the function) —
 // no `_out` assignment (its statement-expr would be void).
-gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { a.body.blk_diverges().match ({ true => s.gen_switch_stmt_body(alloc, subj, sep, a), false => s.gstr_append(alloc, "{ _out = ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } ") }) }
+gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+    a.body.blk_diverges().match ({
+        true  => s.gen_switch_stmt_body(alloc, subj, sep, a),
+        false => s.gstr_append(alloc, "{ _out = ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } "),
+    })
+}
 gen_switch_stmt_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "{ ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } ") }
 gen_switch_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData) String { s.gstr_append(alloc, "case ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant).gstr_append(alloc, ": ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
@@ -433,13 +577,19 @@ gen_switch_stmt_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep:
 gen_switch_arms = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, arms: [ArmData], i: i64) String {
     (i >= arms.len).match ({ true => s, false => {
         out := s.gen_switch_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
-        eq(arms[i].variant, "_").match ({ true => out, false => out.gen_switch_arms(alloc, subj, sep, ename, arms, i + 1) })
+        eq(arms[i].variant, "_").match ({
+            true  => out,
+            false => out.gen_switch_arms(alloc, subj, sep, ename, arms, i + 1),
+        })
     } })
 }
 gen_switch_stmt_arms = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, arms: [ArmData], i: i64) String {
     (i >= arms.len).match ({ true => s, false => {
         out := s.gen_switch_stmt_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
-        eq(arms[i].variant, "_").match ({ true => out, false => out.gen_switch_stmt_arms(alloc, subj, sep, ename, arms, i + 1) })
+        eq(arms[i].variant, "_").match ({
+            true  => out,
+            false => out.gen_switch_stmt_arms(alloc, subj, sep, ename, arms, i + 1),
+        })
     } })
 }
 // ── guarded matches: `if <guard>` on an arm, and/or duplicate variants (a guarded arm may fall through
@@ -458,30 +608,60 @@ arms_have_guard = (arms: [ArmData]) bool {
 }
 gen_garm_cond = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, a: ArmData) String {
     head := s.gstr_append(alloc, "if (!_gm")
-    tagged := eq(a.variant, "_").match ({ true => head, false => head.gstr_append(alloc, " && _subj").gstr_append(alloc, sep).gstr_append(alloc, "tag == ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant) })
+    tagged := eq(a.variant, "_").match ({
+        true  => head,
+        false => head.gstr_append(alloc, " && _subj").gstr_append(alloc, sep).gstr_append(alloc, "tag == ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant),
+    })
     tagged.gstr_append(alloc, ") { ")
 }
-gen_garm_bind = (s: String, alloc: MutPtr<Malloc>, sep: string_view, a: ArmData) String { is_empty(a.bind).match ({ true => s, false => s.gstr_append(alloc, "__auto_type ").gstr_append(alloc, a.bind).gstr_append(alloc, " = _subj").gstr_append(alloc, sep).gstr_append(alloc, "u.").gstr_append(alloc, a.variant).gstr_append(alloc, "; ") }) }
+gen_garm_bind = (s: String, alloc: MutPtr<Malloc>, sep: string_view, a: ArmData) String {
+    is_empty(a.bind).match ({
+        true  => s,
+        false => s.gstr_append(alloc, "__auto_type ").gstr_append(alloc, a.bind).gstr_append(alloc, " = _subj").gstr_append(alloc, sep).gstr_append(alloc, "u.").gstr_append(alloc, a.variant).gstr_append(alloc, "; "),
+    })
+}
 // a diverging body (ends in `return`) runs for control flow and never sets `_gm`; else assign `_out`
 // (value position) / just run (statement position) and mark matched.
-gen_garm_assign = (s: String, alloc: MutPtr<Malloc>, a: ArmData, valpos: bool) String { a.body.blk_diverges().match ({ true => s.gstr_append(alloc, "{ ").gen_expr(alloc, a.body).gstr_append(alloc, "; } "), false => valpos.match ({ true => s.gstr_append(alloc, "{ _out = (").gen_expr(alloc, a.body).gstr_append(alloc, "); _gm = 1; } "), false => s.gstr_append(alloc, "{ ").gen_expr(alloc, a.body).gstr_append(alloc, "; _gm = 1; } ") }) }) }
+gen_garm_assign = (s: String, alloc: MutPtr<Malloc>, a: ArmData, valpos: bool) String {
+    a.body.blk_diverges().match ({
+        true  => s.gstr_append(alloc, "{ ").gen_expr(alloc, a.body).gstr_append(alloc, "; } "),
+        false => valpos.match ({
+            true  => s.gstr_append(alloc, "{ _out = (").gen_expr(alloc, a.body).gstr_append(alloc, "); _gm = 1; } "),
+            false => s.gstr_append(alloc, "{ ").gen_expr(alloc, a.body).gstr_append(alloc, "; _gm = 1; } "),
+        }),
+    })
+}
 gen_garm = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, a: ArmData, valpos: bool) String {
     open := s.gen_garm_cond(alloc, sep, ename, a).gen_garm_bind(alloc, sep, a)
-    guarded := is_expr_null(a.guard).match ({ true => open, false => open.gstr_append(alloc, "if (").gen_expr(alloc, a.guard).gstr_append(alloc, ") ") })
+    guarded := is_expr_null(a.guard).match ({
+        true  => open,
+        false => open.gstr_append(alloc, "if (").gen_expr(alloc, a.guard).gstr_append(alloc, ") "),
+    })
     guarded.gen_garm_assign(alloc, a, valpos).gstr_append(alloc, "} ")
 }
-gen_garms = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, arms: [ArmData], i: i64, valpos: bool) String { (i >= arms.len).match ({ true => s, false => s.gen_garm(alloc, sep, ename, arms[i], valpos).gen_garms(alloc, sep, ename, arms, i + 1, valpos) }) }
+gen_garms = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, arms: [ArmData], i: i64, valpos: bool) String {
+    (i >= arms.len).match ({
+        true  => s,
+        false => s.gen_garm(alloc, sep, ename, arms[i], valpos).gen_garms(alloc, sep, ename, arms, i + 1, valpos),
+    })
+}
 gen_match_guarded = (s: String, alloc: MutPtr<Malloc>, m: MatchData, sep: string_view) String { s.gstr_append(alloc, "({ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; ").gen_match_out_decl(alloc, "_subj", sep, m.arms).gstr_append(alloc, "int _gm = 0; ").gen_garms(alloc, sep, m.ename, m.arms, 0, true).gstr_append(alloc, "_out; })") }
 gen_match_stmt_guarded = (s: String, alloc: MutPtr<Malloc>, m: MatchData, sep: string_view) String { s.gstr_append(alloc, "{ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; int _gm = 0; ").gen_garms(alloc, sep, m.ename, m.arms, 0, false).gstr_append(alloc, "}") }
 // the subject can be any expression, so bind it once to a temp. Enum matches emit as a switch inside a
 // GCC statement-expression; `__typeof__(first_arm)` gives us the result type without evaluating an arm.
 gen_match = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
     sep := m.ptr.match ({ true => "->", false => "." })
-    m.arms.arms_have_guard().match ({ true => s.gen_match_guarded(alloc, m, sep), false => s.gstr_append(alloc, "({ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; ").gen_match_out_decl(alloc, "_subj", sep, m.arms).gstr_append(alloc, "switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} _out; })") })
+    m.arms.arms_have_guard().match ({
+        true  => s.gen_match_guarded(alloc, m, sep),
+        false => s.gstr_append(alloc, "({ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; ").gen_match_out_decl(alloc, "_subj", sep, m.arms).gstr_append(alloc, "switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} _out; })"),
+    })
 }
 gen_match_stmt = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
     sep := m.ptr.match ({ true => "->", false => "." })
-    m.arms.arms_have_guard().match ({ true => s.gen_match_stmt_guarded(alloc, m, sep), false => s.gstr_append(alloc, "{ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_stmt_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} }") })
+    m.arms.arms_have_guard().match ({
+        true  => s.gen_match_stmt_guarded(alloc, m, sep),
+        false => s.gstr_append(alloc, "{ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_stmt_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} }"),
+    })
 }
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
 gen_expr_stmt = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
@@ -564,19 +744,31 @@ gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 // The Zen entry `main` is emitted as C `zen_main`; the OS-level `main(argc,argv)` lives in zenrt.c
 // (it stashes argv and calls zen_main). Every other function keeps its source name.
-c_func_name = (name: string_view) string_view { eq(name, "main").match ({ true => "zen_main", false => name }) }
+c_func_name = (name: string_view) string_view { eq(name, "main").match ({
+    true  => "zen_main",
+    false => name,
+}) }
 // `main = (sys: Sys) i32` — the capability entry: exactly one parameter typed `Sys`. When present, the
 // user's main is emitted under `zen_user_main` and a NILADIC `zen_main(void)` trampoline (below) calls
 // it with `std.sys.root()`, so the C boundary (zenrt.c) stays byte-identical to the `main = () i32` case.
 main_is_sys = (f: Func) bool {
-    eq(f.name, "main").match ({ true => (f.params.len == 1).match ({ true => f.params[0].ty.match ({
-        .Named(nm) => eq(nm, "Sys"),
-        _          => false,
-    }), false => false }), false => false })
+    eq(f.name, "main").match ({
+        true  => (f.params.len == 1).match ({
+            true  => f.params[0].ty.match ({
+                .Named(nm) => eq(nm, "Sys"),
+                _          => false,
+            }),
+            false => false,
+        }),
+        false => false,
+    })
 }
 // the C function name for `f`: `main` -> `zen_main`, unless it is the `(sys: Sys)` entry, whose user
 // body is emitted as `zen_user_main` (the `zen_main` trampoline is appended separately by gen_func).
-c_func_name_f = (f: Func) string_view { f.main_is_sys().match ({ true => "zen_user_main", false => c_func_name(f.name) }) }
+c_func_name_f = (f: Func) string_view { f.main_is_sys().match ({
+    true  => "zen_user_main",
+    false => c_func_name(f.name),
+}) }
 // a function signature `ret name(params)` — shared by the definition and the forward proto
 // the C name for a return type: a function-VALUE return (FnT) uses its precise typedef (M1c) so the
 // caller can call the result; everything else is the plain C type name.
@@ -610,23 +802,26 @@ gen_fnt_typedefs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
 }
 gen_func* = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     out := s.gen_sig(alloc, f)
-    f.main_is_sys().match ({ true => {
-        // `main = (sys: Sys) i32`: emit ONLY the user body as `zen_user_main(Sys sys)` (its own braces,
-        // no init prefix). The NILADIC `zen_main` trampoline that inits globals and feeds it the root
-        // capability is appended ONCE by genModuleIn (below), where the whole decl list is in scope — so
-        // it can name `root` correctly even when std.sys was reached through a namespace alias, which
-        // renames the module's value decls (`root` -> `<alias>__root`). zenrt.c calls `zen_main()`
-        // unchanged — the C boundary never sees `Sys`.
-        out = out.gstr_append(alloc, " ")
-        out = out.gen_func_body(alloc, f)
-    }, false => eq(f.name, "main").match ({ true => {
-        out = out.gstr_append(alloc, " { zen__init_globals(); ")
-        out = out.gen_func_body(alloc, f)
-        out = out.gstr_append(alloc, " }")
-    }, false => {
-        out = out.gstr_append(alloc, " ")
-        out = out.gen_func_body(alloc, f)
-    } }) })
+    f.main_is_sys().match ({
+        true  => {
+            // `main = (sys: Sys) i32`: emit ONLY the user body as `zen_user_main(Sys sys)` (its own braces,
+            // no init prefix). The NILADIC `zen_main` trampoline that inits globals and feeds it the root
+            // capability is appended ONCE by genModuleIn (below), where the whole decl list is in scope — so
+            // it can name `root` correctly even when std.sys was reached through a namespace alias, which
+            // renames the module's value decls (`root` -> `<alias>__root`). zenrt.c calls `zen_main()`
+            // unchanged — the C boundary never sees `Sys`.
+            out = out.gstr_append(alloc, " ")
+            out = out.gen_func_body(alloc, f)
+        },
+        false => eq(f.name, "main").match ({ true => {
+            out = out.gstr_append(alloc, " { zen__init_globals(); ")
+            out = out.gen_func_body(alloc, f)
+            out = out.gstr_append(alloc, " }")
+        }, false => {
+            out = out.gstr_append(alloc, " ")
+            out = out.gen_func_body(alloc, f)
+        } }),
+    })
     out
 }
 gen_func_body = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
@@ -642,15 +837,18 @@ gen_func_body = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
 // a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
 gen_proto = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
     out := s
-    d.is_template().match ({ true => { }, false => d.match ({
-        .DFunc(f)    => {
-            out = out.gen_sig(alloc, f).gstr_append(alloc, "; ")
-        },
-        .DForeign(f) => {
-            out = out.gen_sig(alloc, f).gstr_append(alloc, "; ")
-        },
-        _            => { },
-    }) })
+    d.is_template().match ({
+        true  => { },
+        false => d.match ({
+            .DFunc(f)    => {
+                out = out.gen_sig(alloc, f).gstr_append(alloc, "; ")
+            },
+            .DForeign(f) => {
+                out = out.gen_sig(alloc, f).gstr_append(alloc, "; ")
+            },
+            _            => { },
+        }),
+    })
     out
 }
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
@@ -724,23 +922,29 @@ struct_is_impld = (decls: [Decl], name: string_view) bool {
 // a trait-shaped struct (FnT fields) is treated as a trait — skipped in codegen — ONLY when it is an
 // actual trait (impl'd somewhere). A never-impl'd FnT-field struct is a closure record and IS emitted.
 emit_is_trait = (decls: [Decl], d: Decl) bool {
-    d.is_trait().match ({ true => d.match ({
-        .DStruct(sd) => decls.struct_is_impld(sd.name),
-        _            => false,
-    }), false => false })
+    d.is_trait().match ({
+        true  => d.match ({
+            .DStruct(sd) => decls.struct_is_impld(sd.name),
+            _            => false,
+        }),
+        false => false,
+    })
 }
 // forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
 gen_fwd = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], d: Decl) String {
     out := s
-    decls.emit_is_trait(d).match ({ true => { }, false => d.match ({
-        .DStruct(sd) => {
-            out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " ").gstr_append(alloc, sd.name).gstr_append(alloc, "; ")
-        },
-        .DEnum(ed)   => {
-            out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, ed.name).gstr_append(alloc, " ").gstr_append(alloc, ed.name).gstr_append(alloc, "; ")
-        },
-        _            => { },
-    }) })
+    decls.emit_is_trait(d).match ({
+        true  => { },
+        false => d.match ({
+            .DStruct(sd) => {
+                out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " ").gstr_append(alloc, sd.name).gstr_append(alloc, "; ")
+            },
+            .DEnum(ed)   => {
+                out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, ed.name).gstr_append(alloc, " ").gstr_append(alloc, ed.name).gstr_append(alloc, "; ")
+            },
+            _            => { },
+        }),
+    })
     out
 }
 // emit a top-level declaration (a function, a struct, an enum, or verbatim C)
@@ -830,7 +1034,18 @@ compute_idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
     cache[idx] = DepthMemo(d: r)
     r
 }
-idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 { (idx < 0).match ({ true => 0, false => (cache[idx].d >= 0).match ({ true => cache[idx].d, false => (cache[idx].d == 0 - 2).match ({ true => 0, false => decls.compute_idx_depth(cache, idx) }) }) }) }
+idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
+    (idx < 0).match ({
+        true  => 0,
+        false => (cache[idx].d >= 0).match ({
+            true  => cache[idx].d,
+            false => (cache[idx].d == 0 - 2).match ({
+                true  => 0,
+                false => decls.compute_idx_depth(cache, idx),
+            }),
+        }),
+    })
+}
 dmemo_buf = (a: MutPtr<Malloc>, n: i64) [DepthMemo] { slice(a.acquire(n * sizeof(DepthMemo)), n) }
 depth_cache = (a: MutPtr<Malloc>, decls: [Decl]) [DepthMemo] {
     c := a.dmemo_buf(decls.slen())
@@ -843,9 +1058,12 @@ gen_types_at = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], cache: [DepthMe
     out := s
     decls.loop((h, i, d) {
         d.match ({
-            .DStruct(sd) => decls.emit_is_trait(d).match ({ true => { }, false => (decls.idx_depth(cache, i) == k).match ({ true => {
-                out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
-            }, false => { } }) }),
+            .DStruct(sd) => decls.emit_is_trait(d).match ({
+                true  => { },
+                false => (decls.idx_depth(cache, i) == k).match ({ true => {
+                    out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                }, false => { } }),
+            }),
             .DEnum(ed)   => (decls.idx_depth(cache, i) == k).match ({ true => {
                 out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
             }, false => { } }),
@@ -865,15 +1083,18 @@ gen_types_upto = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], cache: [Depth
 gen_funcs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     out := s
     decls.loop((h, i, d) {
-        d.is_template().match ({ true => { }, false => d.match ({
-            .DFunc(f) => {
-                out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
-            },
-            .DRaw(c)  => {
-                out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
-            },
-            _         => { },
-        }) })
+        d.is_template().match ({
+            true  => { },
+            false => d.match ({
+                .DFunc(f) => {
+                    out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                },
+                .DRaw(c)  => {
+                    out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                },
+                _         => { },
+            }),
+        })
     })
     out
 }
@@ -886,7 +1107,10 @@ is_const_init = (e: Ptr<Expr>) bool {
         .StrLit(t)    => true,
         // `/` and `%` lower to a statement-expression (the div/mod guard), which is NOT a constant
         // expression — a `static T g = ({…})` global init is invalid C. Force those to runtime init.
-        .Bin(b)       => (eq(b.op, "/") || eq(b.op, "%")).match ({ true => false, false => b.lhs.is_const_init() && b.rhs.is_const_init() }),
+        .Bin(b)       => (eq(b.op, "/") || eq(b.op, "%")).match ({
+            true  => false,
+            false => b.lhs.is_const_init() && b.rhs.is_const_init(),
+        }),
         .Call(c)      => eq(c.fn, "null_ptr"),
         _             => false,
     })
@@ -896,11 +1120,14 @@ gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
     d.match ({
         .DGlobal(g) => {
             stor := g.tl.match ({ true => "static _Thread_local ", false => "static " })
-            g.init.is_const_init().match ({ true => {
-                out = out.gstr_append(alloc, stor).gstr_append(alloc, alloc.ty_cname_in(g.ty)).gstr_append(alloc, " ").gstr_append(alloc, g.name).gstr_append(alloc, " = ").gen_expr(alloc, g.init).gstr_append(alloc, "; ")
-            }, false => {
-                out = out.gstr_append(alloc, stor).gstr_append(alloc, alloc.ty_cname_in(g.ty)).gstr_append(alloc, " ").gstr_append(alloc, g.name).gstr_append(alloc, "; ")
-            } })
+            g.init.is_const_init().match ({
+                true  => {
+                    out = out.gstr_append(alloc, stor).gstr_append(alloc, alloc.ty_cname_in(g.ty)).gstr_append(alloc, " ").gstr_append(alloc, g.name).gstr_append(alloc, " = ").gen_expr(alloc, g.init).gstr_append(alloc, "; ")
+                },
+                false => {
+                    out = out.gstr_append(alloc, stor).gstr_append(alloc, alloc.ty_cname_in(g.ty)).gstr_append(alloc, " ").gstr_append(alloc, g.name).gstr_append(alloc, "; ")
+                },
+            })
         },
         _           => { },
     })
@@ -910,9 +1137,12 @@ gen_global_inits = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     out := s.gstr_append(alloc, "static void zen__init_globals(void) { ")
     decls.loop((h, i, d) {
         d.match ({
-            .DGlobal(g) => g.init.is_const_init().match ({ true => { }, false => {
-                out = out.gstr_append(alloc, g.name).gstr_append(alloc, " = ").gen_expr(alloc, g.init).gstr_append(alloc, "; ")
-            } }),
+            .DGlobal(g) => g.init.is_const_init().match ({
+                true  => { },
+                false => {
+                    out = out.gstr_append(alloc, g.name).gstr_append(alloc, " = ").gen_expr(alloc, g.init).gstr_append(alloc, "; ")
+                },
+            }),
             _           => { },
         })
     })
@@ -942,7 +1172,10 @@ sys_root_cname = (decls: [Decl]) string_view {
             .DFunc(f) => (f.params.len == 0 && f.ret.match ({
                 .Named(t) => eq(t, "Sys"),
                 _         => false,
-            }) && (eq(f.name, "root") || f.name.ends_with("__root"))).match ({ true => f.name, false => nm }),
+            }) && (eq(f.name, "root") || f.name.ends_with("__root"))).match ({
+                true  => f.name,
+                false => nm,
+            }),
             _         => nm,
         })
     })
@@ -974,7 +1207,10 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     // Append the niladic `zen_main` trampoline for the `main = (sys: Sys) i32` entry (its user body was
     // emitted as `zen_user_main`). Named here — not in gen_func — so `root` resolves to its real C name
     // even when std.sys was reached through a namespace alias (`sys__root`).
-    has_sys_main(decls).match ({ true => out.gstr_append(a, " int32_t zen_main(void){ zen__init_globals(); return zen_user_main(").gstr_append(a, sys_root_cname(decls)).gstr_append(a, "()); }"), false => out })
+    has_sys_main(decls).match ({
+        true  => out.gstr_append(a, " int32_t zen_main(void){ zen__init_globals(); return zen_user_main(").gstr_append(a, sys_root_cname(decls)).gstr_append(a, "()); }"),
+        false => out,
+    })
 }
 // Compatibility shim used by bootstrap/main.c; allocator-aware callers use genModuleIn.
 genModule* = (raw: [Decl]) String {

@@ -124,48 +124,79 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
     active := false
     resume: i64 := 0
     sv.loop((h, i, b) {
-        (i < resume).match ({ true => { }, false => in_quotes.match ({ true => (b == '"').match ({ true => (i + 1 < sv.len && sv[i + 1] == '"').match ({ true => {
-            sb = sb.push_in(a, '"').cok()    // "" inside a quoted field -> one literal quote
-            resume = i + 2
-        }, false => {
-            in_quotes = false    // a lone quote closes the field
-            resume = i + 1
-        } }), false => {
-            sb = sb.push_in(a, b).cok()    // commas / CR / LF are literal while quoted
-            resume = i + 1
-        } }), false => (b == '"').match ({ true => {
-            in_quotes = true
-            active = true
-            resume = i + 1
-        }, false => (b == ',').match ({ true => {
-            fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field
-            sb = a.cnew()
-            active = true
-            resume = i + 1
-        }, false => (b == '\n').match ({ true => {
-            active.match ({ true => {
-                fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
-                rows = a.rbuf_push(rows, fields.fbuf_slice())
-                fields = a.fbuf_new()
-                sb = a.cnew()
-                active = false
-            } })    // an inactive newline (blank line / trailing LF) adds no row
-            resume = i + 1
-        }, false => (b == '\r').match ({ true => {
-            resume = i + 1
-        }, false => {
-            sb = sb.push_in(a, b).cok()    // any other byte -> literal field content
-            active = true
-            resume = i + 1
-        } }) }) }) }) }) })
+        (i < resume).match ({
+            true  => { },
+            false => in_quotes.match ({
+                true  => (b == '"').match ({
+                    true  => (i + 1 < sv.len && sv[i + 1] == '"').match ({
+                        true  => {
+                            sb = sb.push_in(a, '"').cok()    // "" inside a quoted field -> one literal quote
+                            resume = i + 2
+                        },
+                        false => {
+                            in_quotes = false    // a lone quote closes the field
+                            resume = i + 1
+                        },
+                    }),
+                    false => {
+                        sb = sb.push_in(a, b).cok()    // commas / CR / LF are literal while quoted
+                        resume = i + 1
+                    },
+                }),
+                false => (b == '"').match ({
+                    true  => {
+                        in_quotes = true
+                        active = true
+                        resume = i + 1
+                    },
+                    false => (b == ',').match ({
+                        true  => {
+                            fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field
+                            sb = a.cnew()
+                            active = true
+                            resume = i + 1
+                        },
+                        false => (b == '\n').match ({
+                            true  => {
+                                active.match ({
+                                    true => {
+                                        fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
+                                        rows = a.rbuf_push(rows, fields.fbuf_slice())
+                                        fields = a.fbuf_new()
+                                        sb = a.cnew()
+                                        active = false
+                                    },
+                                })    // an inactive newline (blank line / trailing LF) adds no row
+                                resume = i + 1
+                            },
+                            false => (b == '\r').match ({
+                                true  => {
+                                    resume = i + 1
+                                },
+                                false => {
+                                    sb = sb.push_in(a, b).cok()    // any other byte -> literal field content
+                                    active = true
+                                    resume = i + 1
+                                },
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        })
     })
-    out: Result<[[string_view]], IoError> := in_quotes.match ({ true => .Err(.Eof), false => {
-        active.match ({ true => {
-            fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
-            rows = a.rbuf_push(rows, fields.fbuf_slice())
-        } })
-        .Ok(rows.rbuf_slice())
-    } })
+    out: Result<[[string_view]], IoError> := in_quotes.match ({
+        true  => .Err(.Eof),
+        false => {
+            active.match ({
+                true => {
+                    fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
+                    rows = a.rbuf_push(rows, fields.fbuf_slice())
+                },
+            })
+            .Ok(rows.rbuf_slice())
+        },
+    })
     out
 }
 // ── write_rows ─────────────────────────────────────────────────────────────────────
@@ -187,7 +218,10 @@ write_field<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     s.field_needs_quote().match ({ true => {
         out: String := sb.push_in(a, '"').cok()
         sv.loop((h, i, b) {
-            out = (b == '"').match ({ true => out.push_in(a, '"').cok().push_in(a, '"').cok(), false => out.push_in(a, b).cok() })
+            out = (b == '"').match ({
+                true  => out.push_in(a, '"').cok().push_in(a, '"').cok(),
+                false => out.push_in(a, b).cok(),
+            })
         })
         out.push_in(a, '"').cok()
     }, false => sb.append_in(a, s).cok() })

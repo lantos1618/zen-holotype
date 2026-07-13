@@ -34,14 +34,35 @@ write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError> {
     })
 }
 write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)).or(0) }
-write_uint = (n: i64) i64 { (n < 10).match ({ true => write_digit(n), false => write_uint(n / 10) + write_digit(n % 10) }) }
-write_neg_digits = (n: i64) i64 { (n > 0 - 10).match ({ true => write_digit(0 - n), false => write_neg_digits(n / 10) + write_digit(0 - n % 10) }) }
-write_int = (n: i64) i64 { (n < 0).match ({ true => "-".write_text() + write_neg_digits(n), false => write_uint(n) }) }
+write_uint = (n: i64) i64 { (n < 10).match ({
+    true  => write_digit(n),
+    false => write_uint(n / 10) + write_digit(n % 10),
+}) }
+write_neg_digits = (n: i64) i64 {
+    (n > 0 - 10).match ({
+        true  => write_digit(0 - n),
+        false => write_neg_digits(n / 10) + write_digit(0 - n % 10),
+    })
+}
+write_int = (n: i64) i64 { (n < 0).match ({
+    true  => "-".write_text() + write_neg_digits(n),
+    false => write_uint(n),
+}) }
 // Unsigned decimal for the full u64 range. n is typed u64 so `/` and `%` lower to
 // UNSIGNED C ops — values above i64 max (e.g. 18446744073709551615) print correctly,
 // unlike write_int which would treat the high bit as a sign.
-write_u64 = (n: u64) i64 { (n < 10).match ({ true => write_digit(to_i64(n)), false => write_u64(n / 10) + write_digit(to_i64(n % 10)) }) }
-write_fpad = (n: i64, w: i64) i64 { (w == 1).match ({ true => write_digit(n % 10), false => write_fpad(n / 10, w - 1) + write_digit(n % 10) }) }
+write_u64 = (n: u64) i64 {
+    (n < 10).match ({
+        true  => write_digit(to_i64(n)),
+        false => write_u64(n / 10) + write_digit(to_i64(n % 10)),
+    })
+}
+write_fpad = (n: i64, w: i64) i64 {
+    (w == 1).match ({
+        true  => write_digit(n % 10),
+        false => write_fpad(n / 10, w - 1) + write_digit(n % 10),
+    })
+}
 // ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
 //
 // A printed f64 round-trips for every value needing <= 15 significant digits — which is
@@ -54,7 +75,10 @@ write_fpad = (n: i64, w: i64) i64 { (w == 1).match ({ true => write_digit(n % 10
 //
 // decimal exponent E of finite x>0: the integer with x / 10^E in [1, 10).
 fexp_up = (x: f64, e: i64) i64 { (x < 10.0).match ({ true => e, false => fexp_up(x / 10.0, e + 1) }) }
-fexp_down = (x: f64, e: i64) i64 { (x >= 1.0).match ({ true => e, false => fexp_down(x * 10.0, e - 1) }) }
+fexp_down = (x: f64, e: i64) i64 { (x >= 1.0).match ({
+    true  => e,
+    false => fexp_down(x * 10.0, e - 1),
+}) }
 fexp = (x: f64) i64 { (x >= 1.0).match ({ true => fexp_up(x, 0), false => fexp_down(x, 0) }) }
 // 10^n as an EXACT f64 for 0 <= n <= 22 (every power of ten up to 10^22 is representable, so the
 // chained ×10 is exact — beyond 22 it would start rounding).
@@ -64,9 +88,20 @@ fpow10x = (n: i64) f64 { (n <= 0).match ({ true => 1.0, false => 10.0 * fpow10x(
 // overflows f64 to +inf (which made a*inf garbage for tiny magnitudes ~e-292 and below). Chunking
 // by exact 10^22 also minimizes rounding, so a true power of ten (1e-300) scales to exactly 10^15
 // and the carry below renormalizes it to "1.0e-300" instead of "9.99999999999999e-301".
-fscale_up = (a: f64, k: i64) f64 { (k <= 22).match ({ true => a * fpow10x(k), false => fscale_up(a * fpow10x(22), k - 22) }) }
-fscale_dn = (a: f64, k: i64) f64 { (k <= 22).match ({ true => a / fpow10x(k), false => fscale_dn(a / fpow10x(22), k - 22) }) }
-fsig = (a: f64, e: i64) i64 { (e >= 14).match ({ true => to_i64(fscale_dn(a, e - 14) + 0.5), false => to_i64(fscale_up(a, 14 - e) + 0.5) }) }
+fscale_up = (a: f64, k: i64) f64 { (k <= 22).match ({
+    true  => a * fpow10x(k),
+    false => fscale_up(a * fpow10x(22), k - 22),
+}) }
+fscale_dn = (a: f64, k: i64) f64 { (k <= 22).match ({
+    true  => a / fpow10x(k),
+    false => fscale_dn(a / fpow10x(22), k - 22),
+}) }
+fsig = (a: f64, e: i64) i64 {
+    (e >= 14).match ({
+        true  => to_i64(fscale_dn(a, e - 14) + 0.5),
+        false => to_i64(fscale_up(a, 14 - e) + 0.5),
+    })
+}
 // drop trailing zero digits of the significand (keep >= 1 digit), and count digits of n>=1.
 fstrip = (n: i64) i64 { (n % 10 == 0 && n >= 10).match ({ true => fstrip(n / 10), false => n }) }
 fndig = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + fndig(n / 10) }) }
@@ -74,34 +109,55 @@ fpow10i = (n: i64) i64 { (n <= 0).match ({ true => 1, false => 10 * fpow10i(n - 
 fzeros = (n: i64) i64 { (n <= 0).match ({ true => 0, false => write_digit(0) + fzeros(n - 1) }) }
 // fixed-notation body for significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).
 write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
-    (e < 0).match ({ true => "0.".write_text() + fzeros(0 - e - 1) + write_uint(digs), false => (ndig <= e + 1).match ({ true => write_uint(digs) + fzeros(e + 1 - ndig) + ".0".write_text(), false => {
-        fw := ndig - (e + 1)    // fractional digit count
-        write_uint(digs / fpow10i(fw)) + ".".write_text() + write_fpad(digs % fpow10i(fw), fw)
-    } }) })
+    (e < 0).match ({
+        true  => "0.".write_text() + fzeros(0 - e - 1) + write_uint(digs),
+        false => (ndig <= e + 1).match ({
+            true  => write_uint(digs) + fzeros(e + 1 - ndig) + ".0".write_text(),
+            false => {
+                fw := ndig - (e + 1)    // fractional digit count
+                write_uint(digs / fpow10i(fw)) + ".".write_text() + write_fpad(digs % fpow10i(fw), fw)
+            },
+        }),
+    })
 }
 // scientific-notation body "d.ddd e±EE".
 write_fsci = (digs: i64, ndig: i64, e: i64) i64 {
     msd := digs / fpow10i(ndig - 1)
     rest := digs % fpow10i(ndig - 1)
-    mant := write_digit(msd) + ".".write_text() + (ndig == 1).match ({ true => write_digit(0), false => write_fpad(rest, ndig - 1) })
+    mant := write_digit(msd) + ".".write_text() + (ndig == 1).match ({
+        true  => write_digit(0),
+        false => write_fpad(rest, ndig - 1),
+    })
     sgn := (e < 0).match ({ true => "e-".write_text(), false => "e+".write_text() })
     mant + sgn + write_uint((e < 0).match ({ true => 0 - e, false => e }))
 }
 // non-negative magnitude: zero prints "0.0"; otherwise 15 sig digits, trailing zeros
 // trimmed, in fixed notation for e in [-4,14] and scientific outside it.
 write_fabs_digits = (x: f64) i64 {
-    (x == 0.0).match ({ true => "0.0".write_text(), false => {
-        e0 := fexp(x)
-        d0 := fsig(x, e0)
-        e := (d0 >= 1000000000000000).match ({ true => e0 + 1, false => e0 })    // carry across 10^15
-        digs := fstrip((d0 >= 1000000000000000).match ({ true => d0 / 10, false => d0 }))
-        ndig := fndig(digs)
-        (e >= 0 - 4 && e < 15).match ({ true => write_ffixed(digs, ndig, e), false => write_fsci(digs, ndig, e) })
-    } })
+    (x == 0.0).match ({
+        true  => "0.0".write_text(),
+        false => {
+            e0 := fexp(x)
+            d0 := fsig(x, e0)
+            e := (d0 >= 1000000000000000).match ({ true => e0 + 1, false => e0 })    // carry across 10^15
+            digs := fstrip((d0 >= 1000000000000000).match ({ true => d0 / 10, false => d0 }))
+            ndig := fndig(digs)
+            (e >= 0 - 4 && e < 15).match ({
+                true  => write_ffixed(digs, ndig, e),
+                false => write_fsci(digs, ndig, e),
+            })
+        },
+    })
 }
 write_float = (x: f64) i64 {
     sp := x.f64_special()
-    (sp.at(0) != '\0').match ({ true => sp.write_text(), false => (x < 0.0).match ({ true => "-".write_text() + write_fabs_digits(0.0 - x), false => write_fabs_digits(x) }) })
+    (sp.at(0) != '\0').match ({
+        true  => sp.write_text(),
+        false => (x < 0.0).match ({
+            true  => "-".write_text() + write_fabs_digits(0.0 - x),
+            false => write_fabs_digits(x),
+        }),
+    })
 }
 // Display is the current type-directed print surface; real overload sets can replace the typed aliases later.
 print*<T> = (x: T) i64 { x.fmt_print() }
@@ -200,7 +256,10 @@ write_arg = (a: Arg) i64 {
 // write the template sub-run sv[lo..hi) verbatim (a borrowed view, no copy).
 write_run = (sv: [u8], lo: i64, hi: i64) i64 { out_bytes(slice(sv.ptr.offset(lo), hi - lo)).or(0) }
 // write the i-th arg, or nothing when the template has more `{}` than the slice has args.
-write_arg_at = (args: [Arg], i: i64) i64 { (i < args.len).match ({ true => write_arg(args[i]), false => 0 }) }
+write_arg_at = (args: [Arg], i: i64) i64 { (i < args.len).match ({
+    true  => write_arg(args[i]),
+    false => 0,
+}) }
 // splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
 format* = (template: string_view, args: [Arg]) i64 {
     sv := template.view()
@@ -344,7 +403,10 @@ f32.impl(Display, {
     }
 })
 bool.impl(Display, {
-    fmt_print = (b: bool) i64 { b.match ({ true => "true".write_text(), false => "false".write_text() }) }
+    fmt_print = (b: bool) i64 { b.match ({
+        true  => "true".write_text(),
+        false => "false".write_text(),
+    }) }
     fmt_println = (b: bool) i64 {
         b.fmt_print()
         newline()

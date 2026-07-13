@@ -54,24 +54,70 @@ dseg_eq = (user: string_view, up: i32, flat: string_view, fp: i32, ln: i32, i: i
 // the 1-based line in `user` whose text exactly equals flat[fp..fp+ln], else 0.
 duser_line_at = (user: string_view, up: i32, flat: string_view, fp: i32, ln: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
-    (ulen == ln && user.dseg_eq(up, flat, fp, ln, 0)).match ({ true => no, false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_at(up + ulen + 1, flat, fp, ln, no + 1) }) })
+    (ulen == ln && user.dseg_eq(up, flat, fp, ln, 0)).match ({
+        true  => no,
+        false => (user.at(up + ulen) == 0).match ({
+            true  => 0,
+            false => user.duser_line_at(up + ulen + 1, flat, fp, ln, no + 1),
+        }),
+    })
 }
 duser_line* = (user: string_view, flat: string_view, fp: i32, ln: i32) i32 { user.duser_line_at(0, flat, fp, ln, 1) }
 // ── alias-rewrite inverse: a flat line `…alias__name…` whose user form removed the inserted span.
 //    find the first `__` after leading whitespace; the removed span is [lead, j+2). ──
-dlead_ws = (s: string_view, p: i32, ln: i32, i: i32) i32 { (i >= ln).match ({ true => i, false => (s.at(p + i) == ' ' || s.at(p + i) == '\t').match ({ true => s.dlead_ws(p, ln, i + 1), false => i }) }) }
+dlead_ws = (s: string_view, p: i32, ln: i32, i: i32) i32 {
+    (i >= ln).match ({
+        true  => i,
+        false => (s.at(p + i) == ' ' || s.at(p + i) == '\t').match ({
+            true  => s.dlead_ws(p, ln, i + 1),
+            false => i,
+        }),
+    })
+}
 // first index >= lead+1 where flat[fp+j]=='_' && flat[fp+j+1]=='_' (j+1 < ln-1), else -1
-dfind_dunder = (flat: string_view, fp: i32, ln: i32, j: i32) i32 { (j + 1 >= ln - 1).match ({ true => 0 - 1, false => (flat.at(fp + j) == '_' && flat.at(fp + j + 1) == '_').match ({ true => j, false => flat.dfind_dunder(fp, ln, j + 1) }) }) }
+dfind_dunder = (flat: string_view, fp: i32, ln: i32, j: i32) i32 {
+    (j + 1 >= ln - 1).match ({
+        true  => 0 - 1,
+        false => (flat.at(fp + j) == '_' && flat.at(fp + j + 1) == '_').match ({
+            true  => j,
+            false => flat.dfind_dunder(fp, ln, j + 1),
+        }),
+    })
+}
 // user[up..up+ulen] == flat[fp..fp+flen] with [start,start+n) removed (lengths must match)
-dmatch_removed = (user: string_view, up: i32, ulen: i32, flat: string_view, fp: i32, flen: i32, start: i32, n: i32) bool { (start + n > flen || ulen != flen - n).match ({ true => false, false => user.dseg_eq(up, flat, fp, start, 0) && user.dseg_eq(up + start, flat, fp + start + n, flen - start - n, 0) }) }
+dmatch_removed = (user: string_view, up: i32, ulen: i32, flat: string_view, fp: i32, flen: i32, start: i32, n: i32) bool {
+    (start + n > flen || ulen != flen - n).match ({
+        true  => false,
+        false => user.dseg_eq(up, flat, fp, start, 0) && user.dseg_eq(up + start, flat, fp + start + n, flen - start - n, 0),
+    })
+}
 // flat byte offset within a line -> user column after removing [start,start+n)
-dremoved_col = (off: i32, start: i32, n: i32) i32 { (off < start).match ({ true => off + 1, false => (off < start + n).match ({ true => start + 1, false => off - n + 1 }) }) }
+dremoved_col = (off: i32, start: i32, n: i32) i32 {
+    (off < start).match ({
+        true  => off + 1,
+        false => (off < start + n).match ({ true => start + 1, false => off - n + 1 }),
+    })
+}
 // ── ns-normalize inverse: compare treating each `__` in the flat line as a single `.`. ──
 // user[up..] equals flat[fp..fp+flen] with every `__` collapsed to one char; returns user line len match.
-dseg_eq_ns = (user: string_view, up: i32, ui: i32, flat: string_view, fp: i32, fi: i32, flen: i32) bool { (fi == flen).match ({ true => user.at(up + ui) == 0 || user.at(up + ui) == '\n', false => (fi + 1 < flen && flat.at(fp + fi) == '_' && flat.at(fp + fi + 1) == '_').match ({ true => user.at(up + ui) == '.' && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 2, flen), false => user.at(up + ui) == flat.at(fp + fi) && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen) }) }) }
+dseg_eq_ns = (user: string_view, up: i32, ui: i32, flat: string_view, fp: i32, fi: i32, flen: i32) bool {
+    (fi == flen).match ({
+        true  => user.at(up + ui) == 0 || user.at(up + ui) == '\n',
+        false => (fi + 1 < flen && flat.at(fp + fi) == '_' && flat.at(fp + fi + 1) == '_').match ({
+            true  => user.at(up + ui) == '.' && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 2, flen),
+            false => user.at(up + ui) == flat.at(fp + fi) && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen),
+        }),
+    })
+}
 duser_line_ns_at = (user: string_view, up: i32, flat: string_view, fp: i32, flen: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
-    user.dseg_eq_ns(up, 0, flat, fp, 0, flen).match ({ true => no, false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_ns_at(up + ulen + 1, flat, fp, flen, no + 1) }) })
+    user.dseg_eq_ns(up, 0, flat, fp, 0, flen).match ({
+        true  => no,
+        false => (user.at(up + ulen) == 0).match ({
+            true  => 0,
+            false => user.duser_line_ns_at(up + ulen + 1, flat, fp, flen, no + 1),
+        }),
+    })
 }
 // flat offset -> column counting each `__` as one char
 dnorm_col = (flat: string_view, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
@@ -135,7 +181,13 @@ diag_user_span* = (flat: string_view, user: string_view, offset: i32, span_width
 // alias variant of duser_line: match each user line against flat[ls..ls+llen] with [lead,lead+rn) removed
 duser_line_alias_at = (user: string_view, up: i32, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
-    user.dmatch_removed(up, ulen, flat, ls, llen, lead, rn).match ({ true => no, false => (user.at(up + ulen) == 0).match ({ true => 0, false => user.duser_line_alias_at(up + ulen + 1, flat, ls, llen, lead, rn, no + 1) }) })
+    user.dmatch_removed(up, ulen, flat, ls, llen, lead, rn).match ({
+        true  => no,
+        false => (user.at(up + ulen) == 0).match ({
+            true  => 0,
+            false => user.duser_line_alias_at(up + ulen + 1, flat, ls, llen, lead, rn, no + 1),
+        }),
+    })
 }
 duser_line_alias = (user: string_view, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }
 // ── zen.toml manifest value lookup — moved out of the C driver (driver.c) ──────────────────────
@@ -152,11 +204,27 @@ mf_none = () MfSpan {
     )
 }
 mf_ws = (b: u8) bool { b == ' ' || b == '\t' }
-mf_skip_ws = (s: string_view, p: i32, e: i32) i32 { (p < e && s.at(p).mf_ws()).match ({ true => s.mf_skip_ws(p + 1, e), false => p }) }
+mf_skip_ws = (s: string_view, p: i32, e: i32) i32 { (p < e && s.at(p).mf_ws()).match ({
+    true  => s.mf_skip_ws(p + 1, e),
+    false => p,
+}) }
 // match `key` literally at p; return pos just past it, or -1
-mf_key_at = (s: string_view, p: i32, e: i32, key: string_view, k: i32) i32 { (key.at(k) == 0).match ({ true => p, false => (p < e && s.at(p) == key.at(k)).match ({ true => s.mf_key_at(p + 1, e, key, k + 1), false => 0 - 1 }) }) }
+mf_key_at = (s: string_view, p: i32, e: i32, key: string_view, k: i32) i32 {
+    (key.at(k) == 0).match ({
+        true  => p,
+        false => (p < e && s.at(p) == key.at(k)).match ({
+            true  => s.mf_key_at(p + 1, e, key, k + 1),
+            false => 0 - 1,
+        }),
+    })
+}
 // the closing-quote position from `i`, or -1
-mf_close = (s: string_view, i: i32, e: i32) i32 { (i >= e).match ({ true => 0 - 1, false => (s.at(i) == '"').match ({ true => i, false => s.mf_close(i + 1, e) }) }) }
+mf_close = (s: string_view, i: i32, e: i32) i32 {
+    (i >= e).match ({
+        true  => 0 - 1,
+        false => (s.at(i) == '"').match ({ true => i, false => s.mf_close(i + 1, e) }),
+    })
+}
 // parse one line [p,e) for `key = "value"` -> the value span, or mf_none
 mf_line = (s: string_view, p: i32, e: i32, key: string_view) MfSpan {
     i0 := s.mf_skip_ws(p, e)
@@ -182,7 +250,12 @@ mf_line = (s: string_view, p: i32, e: i32, key: string_view) MfSpan {
         len: ce - start,
     ) })
 }
-mf_line_end = (s: string_view, p: i32, len: i32) i32 { (p < len && s.at(p) != '\n' && s.at(p) != '\r').match ({ true => s.mf_line_end(p + 1, len), false => p }) }
+mf_line_end = (s: string_view, p: i32, len: i32) i32 {
+    (p < len && s.at(p) != '\n' && s.at(p) != '\r').match ({
+        true  => s.mf_line_end(p + 1, len),
+        false => p,
+    })
+}
 // scan `src` (length `len`) for `key`'s value, starting at line `p`. The driver calls with p=0.
 manifest_value_span* = (src: string_view, len: i32, key: string_view, p: i32) MfSpan {
     (p >= len).match ({ true => {
@@ -193,7 +266,10 @@ manifest_value_span* = (src: string_view, len: i32, key: string_view, p: i32) Mf
     (r.start >= 0).match ({ true => {
         return r
     } })
-    np := (e < len && src.at(e) == '\r' && e + 1 < len && src.at(e + 1) == '\n').match ({ true => e + 2, false => e + 1 })
+    np := (e < len && src.at(e) == '\r' && e + 1 < len && src.at(e + 1) == '\n').match ({
+        true  => e + 2,
+        false => e + 1,
+    })
     (e >= len).match ({ true => mf_none(), false => src.manifest_value_span(len, key, np) })
 }
 // ── error rendering (message line + source caret) — moved out of the C driver ──────────────────
@@ -264,17 +340,27 @@ render_diagnostic* = (a: MutPtr<Malloc>, in_path: string_view, user: string_view
         s = s.gstr_push(a, ':').dnum(a, line).gstr_push(a, ':').dnum(a, col)
     } })
     s = s.gstr_append(a, ": error[").gstr_append(a, kind).gstr_append(a, "]: ").gstr_append(a, message)
-    (count > 1).match ({ true => {
-        s = s.gstr_append(a, " (+").dnum(a, count - 1).gstr_append(a, " more error")
-        // no method chained after a .match (parser limitation): push the closing chars inside the arms
-        s = (count - 1 == 1).match ({ true => s.gstr_push(a, ')'), false => s.gstr_push(a, 's').gstr_push(a, ')') })
-    } })
+    (count > 1).match ({
+        true => {
+            s = s.gstr_append(a, " (+").dnum(a, count - 1).gstr_append(a, " more error")
+            // no method chained after a .match (parser limitation): push the closing chars inside the arms
+            s = (count - 1 == 1).match ({
+                true  => s.gstr_push(a, ')'),
+                false => s.gstr_push(a, 's').gstr_push(a, ')'),
+            })
+        },
+    })
     s = s.gstr_push(a, '\n')
-    (line > 0 && col > 0).match ({ true => {
-        ls := user.dline_off(line, 0)
-        width := (end_col >= col).match ({ true => end_col - col + 1, false => 1 })
-        s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
-        s = s.gstr_append(a, "  ").dput_blanks(a, user, ls, col, 0).dput_carets(a, width, 0).gstr_push(a, '\n')
-    } })
-    (hint.at(0) == 0).match ({ true => s.gstr_finish(a), false => s.gstr_append(a, "hint: ").gstr_append(a, hint).gstr_push(a, '\n').gstr_finish(a) })
+    (line > 0 && col > 0).match ({
+        true => {
+            ls := user.dline_off(line, 0)
+            width := (end_col >= col).match ({ true => end_col - col + 1, false => 1 })
+            s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
+            s = s.gstr_append(a, "  ").dput_blanks(a, user, ls, col, 0).dput_carets(a, width, 0).gstr_push(a, '\n')
+        },
+    })
+    (hint.at(0) == 0).match ({
+        true  => s.gstr_finish(a),
+        false => s.gstr_append(a, "hint: ").gstr_append(a, hint).gstr_push(a, '\n').gstr_finish(a),
+    })
 }

@@ -313,7 +313,10 @@ TraitDefData*: {
 Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(string_view) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)    // DRaw = verbatim C escape
 // Compiler-owned allocations flow through these shims so stripped bootstrap drivers that do not
 // flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
-acquire = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).match ({ true => null_ptr(), false => malloc(n) }) }
+acquire = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).match ({
+    true  => null_ptr(),
+    false => malloc(n),
+}) }
 resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 write_str = (dst: RawPtr<u8>, at: i64, t: string_view) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: string_view, i: i64) i64 {
@@ -562,10 +565,13 @@ block* = (stmts: [Stmt]) Expr { .Block(BlockData(stmts: stmts)) }
 // in .Return (the parser's implicit trailing return), but those never reach value positions intact —
 // the inliner's blockify strips the trailing return (ret_to_expr / cps_value) before splicing.
 stmts_diverge* = (stmts: [Stmt]) bool {
-    (stmts.len > 0).match ({ true => stmts[stmts.len - 1].match ({
-        .Return(r) => true,
-        _          => false,
-    }), false => false })
+    (stmts.len > 0).match ({
+        true  => stmts[stmts.len - 1].match ({
+            .Return(r) => true,
+            _          => false,
+        }),
+        false => false,
+    })
 }
 blk_diverges* = (e: Ptr<Expr>) bool {
     load(e).match ({
@@ -1224,7 +1230,24 @@ draw* = (c: string_view) Decl { .DRaw(c) }    // emit verbatim C: an attribute,
 // map a narrow int/float type name to its C type; any other name passes through unchanged.
 // the checker accepts i8/i16/u16/u32/u64/f32 but they reach genc as Named(name), so without
 // this they'd leak the Zen name (`u32`, `f32`, …) straight to cc as an unknown C type.
-width_cname* = (n: string_view) string_view { eq(n, "i8").match ({ true => "int8_t", false => eq(n, "i16").match ({ true => "int16_t", false => eq(n, "u16").match ({ true => "uint16_t", false => eq(n, "u32").match ({ true => "uint32_t", false => eq(n, "u64").match ({ true => "uint64_t", false => eq(n, "f32").match ({ true => "float", false => n }) }) }) }) }) }) }
+width_cname* = (n: string_view) string_view {
+    eq(n, "i8").match ({
+        true  => "int8_t",
+        false => eq(n, "i16").match ({
+            true  => "int16_t",
+            false => eq(n, "u16").match ({
+                true  => "uint16_t",
+                false => eq(n, "u32").match ({
+                    true  => "uint32_t",
+                    false => eq(n, "u64").match ({
+                        true  => "uint64_t",
+                        false => eq(n, "f32").match ({ true => "float", false => n }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // append a C type — recurses for pointers (`T*`), so it can't be a plain str-returning fn
 gen_ty* = (s: String, a: MutPtr<Malloc>, t: Ptr<Ty>) String {
     out := s

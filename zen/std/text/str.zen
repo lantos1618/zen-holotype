@@ -7,7 +7,10 @@
 { is_space } = std.text.bytes
 len* = (s: string_view) i64 { s.strlen() }
 is_empty* = (s: string_view) bool { (s.strlen() == 0).match ({ true => true, false => false }) }
-eq* = (a: string_view, b: string_view) bool { (a.strcmp(b) == 0).match ({ true => true, false => false }) }
+eq* = (a: string_view, b: string_view) bool { (a.strcmp(b) == 0).match ({
+    true  => true,
+    false => false,
+}) }
 ne* = (a: string_view, b: string_view) bool { a.eq(b).match ({ true => false, false => true }) }
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 view* = (s: string_view) [u8] { s.slice(s.strlen()) }
@@ -34,12 +37,15 @@ dup_bytes*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> { a.dup_byt
 has_at = (sv: [u8], pv: [u8], at: i64) bool {
     ok := true
     pv.loop((h, i, b) {
-        ok.match ({ true => (sv[at + i] == b).match ({ true => { }, false => {
-            ok = false
-            h.break
-        } }), false => {
-            h.break
-        } })
+        ok.match ({
+            true  => (sv[at + i] == b).match ({ true => { }, false => {
+                ok = false
+                h.break
+            } }),
+            false => {
+                h.break
+            },
+        })
     })
     ok
 }
@@ -51,12 +57,15 @@ find* = (s: string_view, needle: string_view) i64 {
     (pv.len == 0).match ({ true => 0, false => {
         found: i64 := 0 - 1
         sv.loop((h, i, b) {
-            (i + pv.len > sv.len).match ({ true => {
-                h.break
-            }, false => sv.has_at(pv, i).match ({ true => {
-                found = i
-                h.break
-            }, false => { } }) })
+            (i + pv.len > sv.len).match ({
+                true  => {
+                    h.break
+                },
+                false => sv.has_at(pv, i).match ({ true => {
+                    found = i
+                    h.break
+                }, false => { } }),
+            })
         })
         found
     } })
@@ -80,7 +89,12 @@ ends_with* = (s: string_view, suffix: string_view) bool {
 }
 // ── slicing & indexing ──────────────────────────────────────────────────────
 // pin `x` into [lo, hi] — the substr clamp
-pin = (x: i64, lo: i64, hi: i64) i64 { (x < lo).match ({ true => lo, false => (x > hi).match ({ true => hi, false => x }) }) }
+pin = (x: i64, lo: i64, hi: i64) i64 {
+    (x < lo).match ({
+        true  => lo,
+        false => (x > hi).match ({ true => hi, false => x }),
+    })
+}
 copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out.loop((h, i, b) {
         (i < m).match ({ true => {
@@ -177,13 +191,19 @@ rtrim*<A> = (a: MutPtr<A>, s: string_view) string_view { a.rtrim_in(s) }
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): like `ltrim`, dropping a prefix only
 // advances the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
 // it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
-trim_prefix* = (s: string_view, prefix: string_view) string_view { s.starts_with(prefix).match ({ true => cstr(s.view().ptr.offset(prefix.len())), false => s }) }
+trim_prefix* = (s: string_view, prefix: string_view) string_view { s.starts_with(prefix).match ({
+    true  => cstr(s.view().ptr.offset(prefix.len())),
+    false => s,
+}) }
 // strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
 // own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
 // trim_suffix("file.zen", ".zen") == "file".
 trim_suffix_in*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_view {
     n := s.len()
-    s.ends_with(suffix).match ({ true => a.substr_in(s, 0, n - suffix.len()).expect("std.text.str: allocation failed"), false => a.substr_in(s, 0, n).expect("std.text.str: allocation failed") })
+    s.ends_with(suffix).match ({
+        true  => a.substr_in(s, 0, n - suffix.len()).expect("std.text.str: allocation failed"),
+        false => a.substr_in(s, 0, n).expect("std.text.str: allocation failed"),
+    })
 }
 trim_suffix*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_view { a.trim_suffix_in(s, suffix) }
 // ── splitting: fields and words ───────────────────────────────────────────────
@@ -208,11 +228,14 @@ split_in*<A> = (a: MutPtr<A>, s: string_view, sep: u8) [string_view] {
     fi: i64 := 0    // next field slot
     start: i64 := 0
     sv.loop((h, i, b) {
-        (b == sep).match ({ true => {
-            out[fi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current field's start offset
-            fi = fi + 1
-            start = i + 1
-        }, false => { } })
+        (b == sep).match ({
+            true  => {
+                out[fi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current field's start offset
+                fi = fi + 1
+                start = i + 1
+            },
+            false => { },
+        })
     })
     out[fi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
     out
@@ -225,24 +248,32 @@ words_in*<A> = (a: MutPtr<A>, s: string_view) [string_view] {
     nw: i64 := 0    // word count = whitespace(or start)->non-whitespace transitions
     inw := false
     sv.loop((h, i, b) {
-        b.is_space().match ({ true => {
-            inw = false
-        }, false => inw.match ({ false => {
-            inw = true    // currently inside a word?
-            nw = nw + 1
-        } }) })
+        b.is_space().match ({
+            true  => {
+                inw = false
+            },
+            false => inw.match ({ false => {
+                inw = true    // currently inside a word?
+                nw = nw + 1
+            } }),
+        })
     })
     out: [string_view] := a.nbuf("", nw)
     wi: i64 := 0    // next word slot
     start: i64 := 0 - 1
     sv.loop((h, i, b) {
-        b.is_space().match ({ true => (start >= 0).match ({ true => {
-            out[wi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current word's start offset, -1 when between words
-            wi = wi + 1
-            start = 0 - 1
-        } }), false => (start < 0).match ({ true => {
-            start = i
-        } }) })
+        b.is_space().match ({
+            true  => (start >= 0).match ({
+                true => {
+                    out[wi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current word's start offset, -1 when between words
+                    wi = wi + 1
+                    start = 0 - 1
+                },
+            }),
+            false => (start < 0).match ({ true => {
+                start = i
+            } }),
+        })
     })
     (start >= 0).match ({ true => {
         out[wi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
@@ -376,24 +407,33 @@ count_occ = (sv: [u8], fv: [u8]) i64 {
 replace_in*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view) string_view {
     sv := s.view()
     fv := from.view()
-    (fv.len == 0).match ({ true => a.substr_in(s, 0, sv.len).expect("std.text.str: allocation failed"), false => {
-        cnt := sv.count_occ(fv)    // empty pattern: unchanged copy (no infinite loop)
-        total := sv.len + cnt * (to.len() - fv.len)
-        out: [u8] := a.acquire(total + 1).slice(total + 1)
-        pos: i64 := 0
-        skip: i64 := 0
-        sv.loop((h, i, b) {
-            (i < skip).match ({ true => { }, false => (i + fv.len <= sv.len && sv.has_at(fv, i)).match ({ true => {
-                pos = out.copy_at(pos, to)    // bytes of an in-progress match to NOT copy verbatim
-                skip = i + fv.len
-            }, false => {
-                out[pos] = b
-                pos = pos + 1
-            } }) })
-        })
-        out[total] = 0
-        cstr(out.ptr)
-    } })
+    (fv.len == 0).match ({
+        true  => a.substr_in(s, 0, sv.len).expect("std.text.str: allocation failed"),
+        false => {
+            cnt := sv.count_occ(fv)    // empty pattern: unchanged copy (no infinite loop)
+            total := sv.len + cnt * (to.len() - fv.len)
+            out: [u8] := a.acquire(total + 1).slice(total + 1)
+            pos: i64 := 0
+            skip: i64 := 0
+            sv.loop((h, i, b) {
+                (i < skip).match ({
+                    true  => { },
+                    false => (i + fv.len <= sv.len && sv.has_at(fv, i)).match ({
+                        true  => {
+                            pos = out.copy_at(pos, to)    // bytes of an in-progress match to NOT copy verbatim
+                            skip = i + fv.len
+                        },
+                        false => {
+                            out[pos] = b
+                            pos = pos + 1
+                        },
+                    }),
+                })
+            })
+            out[total] = 0
+            cstr(out.ptr)
+        },
+    })
 }
 replace*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view) string_view { a.replace_in(s, from, to) }
 // pad `s` to at least `width` bytes by prepending / appending `fill`; a longer `s` is copied unchanged.
@@ -441,11 +481,14 @@ parse_int* = (s: string_view) i64 {
     start: i64 := neg.match ({ true => 1, false => 0 })
     acc: i64 := 0
     sv.loop((h, i, b) {
-        (i < start).match ({ true => { }, false => (b >= '0' && b <= '9').match ({ true => {
-            acc = acc * 10 + (b - '0')
-        }, false => {
-            h.break
-        } }) })
+        (i < start).match ({
+            true  => { },
+            false => (b >= '0' && b <= '9').match ({ true => {
+                acc = acc * 10 + (b - '0')
+            }, false => {
+                h.break
+            } }),
+        })
     })
     neg.match ({ true => 0 - acc, false => acc })
 }
@@ -486,23 +529,32 @@ try_parse_int* = (s: string_view) Result<i64, ParseError> {
     bad: u8 := 0    // the first non-digit byte hit (0 = none)
     over := false
     sv.loop((h, i, b) {
-        (i < start).match ({ true => { }, false => (b >= '0' && b <= '9').match ({ true => {
-            d := b - '0'
-            (acc > I64_MAX_DIV10 || acc == I64_MAX_DIV10 && d > 7).match ({ true => {
-                over = true
-                h.break
+        (i < start).match ({
+            true  => { },
+            false => (b >= '0' && b <= '9').match ({ true => {
+                d := b - '0'
+                (acc > I64_MAX_DIV10 || acc == I64_MAX_DIV10 && d > 7).match ({ true => {
+                    over = true
+                    h.break
+                }, false => {
+                    acc = acc * 10 + d
+                    nd = nd + 1
+                } })
             }, false => {
-                acc = acc * 10 + d
-                nd = nd + 1
-            } })
-        }, false => {
-            bad = b
-            h.break
-        } }) })
+                bad = b
+                h.break
+            } }),
+        })
     })
-    out: Result<i64, ParseError> := over.match ({ true => err(e_overflow()), false => (nd == 0).match ({ true => err(e_nodigits()), false => (bad != 0).match ({ true => err(e_trailing(bad)), false => {
-        v: i64 := neg.match ({ true => 0 - acc, false => acc })
-        ok(v)
-    } }) }) })
+    out: Result<i64, ParseError> := over.match ({
+        true  => err(e_overflow()),
+        false => (nd == 0).match ({
+            true  => err(e_nodigits()),
+            false => (bad != 0).match ({ true => err(e_trailing(bad)), false => {
+                v: i64 := neg.match ({ true => 0 - acc, false => acc })
+                ok(v)
+            } }),
+        }),
+    })
     out
 }

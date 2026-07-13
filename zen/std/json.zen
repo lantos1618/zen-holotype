@@ -156,26 +156,51 @@ is_num_byte = (b: u8) bool { b >= '0' && b <= '9' || b == '-' || b == '+' || b =
 skip_ws = (sv: [u8], pos: i64) i64 {
     p: i64 := pos
     sv.loop((h, i, b) {
-        (i < p).match ({ true => { }, false => b.json_ws().match ({ true => {
-            p = i + 1
-        }, false => {
-            h.break
-        } }) })
+        (i < p).match ({
+            true  => { },
+            false => b.json_ws().match ({ true => {
+                p = i + 1
+            }, false => {
+                h.break
+            } }),
+        })
     })
     p
 }
 // ── string decoding (allocator-owned, escapes resolved) ───────────────────────
-hex_val = (b: u8) i64 { (b >= '0' && b <= '9').match ({ true => (b - '0').to_i64(), false => (b >= 'a' && b <= 'f').match ({ true => (b - 'a').to_i64() + 10, false => (b >= 'A' && b <= 'F').match ({ true => (b - 'A').to_i64() + 10, false => 0 - 1 }) }) }) }
+hex_val = (b: u8) i64 {
+    (b >= '0' && b <= '9').match ({
+        true  => (b - '0').to_i64(),
+        false => (b >= 'a' && b <= 'f').match ({
+            true  => (b - 'a').to_i64() + 10,
+            false => (b >= 'A' && b <= 'F').match ({
+                true  => (b - 'A').to_i64() + 10,
+                false => 0 - 1,
+            }),
+        }),
+    })
+}
 // the code point of the 4 hex digits at sv[at..at+4], or -1 if any byte is not hex.
 hex4 = (sv: [u8], at: i64) i64 {
     d0 := hex_val(sv[at])
     d1 := hex_val(sv[at + 1])
     d2 := hex_val(sv[at + 2])
     d3 := hex_val(sv[at + 3])
-    (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).match ({ true => 0 - 1, false => d0 * 4096 + d1 * 256 + d2 * 16 + d3 })
+    (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).match ({
+        true  => 0 - 1,
+        false => d0 * 4096 + d1 * 256 + d2 * 16 + d3,
+    })
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
-push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String { (cp < 128).match ({ true => sb.push_in(a, cp.to_u8()).jok(), false => (cp < 2048).match ({ true => sb.push_in(a, (192 | cp >> 6).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(), false => sb.push_in(a, (224 | cp >> 12).to_u8()).jok().push_in(a, (128 | cp >> 6 & 63).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok() }) }) }
+push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String {
+    (cp < 128).match ({
+        true  => sb.push_in(a, cp.to_u8()).jok(),
+        false => (cp < 2048).match ({
+            true  => sb.push_in(a, (192 | cp >> 6).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(),
+            false => sb.push_in(a, (224 | cp >> 12).to_u8()).jok().push_in(a, (128 | cp >> 6 & 63).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(),
+        }),
+    })
+}
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
 parse_string_raw<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<StrStep, JsonError> {
@@ -184,57 +209,105 @@ parse_string_raw<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Resul
     errpos: i64 := 0 - 1
     resume: i64 := pos + 1
     sv.loop((h, i, b) {
-        (i < resume).match ({ true => { }, false => (b == '"').match ({ true => {
-            endpos = i + 1
-            h.break
-        }, false => (b == '\\').match ({ true => (i + 1 >= sv.len).match ({ true => {
-            errpos = i
-            h.break
-        }, false => (sv[i + 1] == '"').match ({ true => {
-            sb = sb.push_in(a, '"').jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == '\\').match ({ true => {
-            sb = sb.push_in(a, '\\').jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == '/').match ({ true => {
-            sb = sb.push_in(a, '/').jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == 'n').match ({ true => {
-            sb = sb.push_in(a, '\n').jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == 't').match ({ true => {
-            sb = sb.push_in(a, '\t').jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == 'r').match ({ true => {
-            sb = sb.push_in(a, '\r').jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == 'b').match ({ true => {
-            sb = sb.push_in(a, 8.to_u8()).jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == 'f').match ({ true => {
-            sb = sb.push_in(a, 12.to_u8()).jok()
-            resume = i + 2
-        }, false => (sv[i + 1] == 'u').match ({ true => (i + 5 >= sv.len).match ({ true => {
-            errpos = i
-            h.break
-        }, false => {
-            cp := hex4(sv, i + 2)
-            (cp < 0).match ({ true => {
-                errpos = i
-                h.break
-            }, false => {
-                sb = a.push_utf8(sb, cp)
-                resume = i + 6
-            } })
-        } }), false => {
-            errpos = i
-            h.break
-        } }) }) }) }) }) }) }) }) }) }), false => {
-            sb = sb.push_in(a, b).jok()
-            resume = i + 1
-        } }) }) })
+        (i < resume).match ({
+            true  => { },
+            false => (b == '"').match ({
+                true  => {
+                    endpos = i + 1
+                    h.break
+                },
+                false => (b == '\\').match ({
+                    true  => (i + 1 >= sv.len).match ({
+                        true  => {
+                            errpos = i
+                            h.break
+                        },
+                        false => (sv[i + 1] == '"').match ({
+                            true  => {
+                                sb = sb.push_in(a, '"').jok()
+                                resume = i + 2
+                            },
+                            false => (sv[i + 1] == '\\').match ({
+                                true  => {
+                                    sb = sb.push_in(a, '\\').jok()
+                                    resume = i + 2
+                                },
+                                false => (sv[i + 1] == '/').match ({
+                                    true  => {
+                                        sb = sb.push_in(a, '/').jok()
+                                        resume = i + 2
+                                    },
+                                    false => (sv[i + 1] == 'n').match ({
+                                        true  => {
+                                            sb = sb.push_in(a, '\n').jok()
+                                            resume = i + 2
+                                        },
+                                        false => (sv[i + 1] == 't').match ({
+                                            true  => {
+                                                sb = sb.push_in(a, '\t').jok()
+                                                resume = i + 2
+                                            },
+                                            false => (sv[i + 1] == 'r').match ({
+                                                true  => {
+                                                    sb = sb.push_in(a, '\r').jok()
+                                                    resume = i + 2
+                                                },
+                                                false => (sv[i + 1] == 'b').match ({
+                                                    true  => {
+                                                        sb = sb.push_in(a, 8.to_u8()).jok()
+                                                        resume = i + 2
+                                                    },
+                                                    false => (sv[i + 1] == 'f').match ({
+                                                        true  => {
+                                                            sb = sb.push_in(a, 12.to_u8()).jok()
+                                                            resume = i + 2
+                                                        },
+                                                        false => (sv[i + 1] == 'u').match ({
+                                                            true  => (i + 5 >= sv.len).match ({
+                                                                true  => {
+                                                                    errpos = i
+                                                                    h.break
+                                                                },
+                                                                false => {
+                                                                    cp := hex4(sv, i + 2)
+                                                                    (cp < 0).match ({ true => {
+                                                                        errpos = i
+                                                                        h.break
+                                                                    }, false => {
+                                                                        sb = a.push_utf8(sb, cp)
+                                                                        resume = i + 6
+                                                                    } })
+                                                                },
+                                                            }),
+                                                            false => {
+                                                                errpos = i
+                                                                h.break
+                                                            },
+                                                        }),
+                                                    }),
+                                                }),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                    false => {
+                        sb = sb.push_in(a, b).jok()
+                        resume = i + 1
+                    },
+                }),
+            }),
+        })
     })
-    (endpos < 0).match ({ true => (errpos >= 0).match ({ true => err(.BadString(errpos)), false => err(.UnexpectedEof) }), false => sstep_ok(sb.finish_in(a).jfin(), endpos) })
+    (endpos < 0).match ({
+        true  => (errpos >= 0).match ({
+            true  => err(.BadString(errpos)),
+            false => err(.UnexpectedEof),
+        }),
+        false => sstep_ok(sb.finish_in(a).jfin(), endpos),
+    })
 }
 // ── scalar parsers ─────────────────────────────────────────────────────────────
 // match sv[pos..] against `word`; on success produce `v` at pos+len, else BadLiteral.
@@ -242,23 +315,29 @@ parse_lit = (sv: [u8], pos: i64, word: string_view, v: Value) Result<Step, JsonE
     wv := word.view()
     ok: bool := pos + wv.len <= sv.len
     wv.loop((h, i, b) {
-        ok.match ({ true => (sv[pos + i] == b).match ({ false => {
-            ok = false
-            h.break
-        } }), false => {
-            h.break
-        } })
+        ok.match ({
+            true  => (sv[pos + i] == b).match ({ false => {
+                ok = false
+                h.break
+            } }),
+            false => {
+                h.break
+            },
+        })
     })
     ok.match ({ true => step_ok(v, pos + wv.len), false => err(.BadLiteral(pos)) })
 }
 parse_number<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
     endp: i64 := pos
     sv.loop((h, i, b) {
-        (i < pos).match ({ true => { }, false => b.is_num_byte().match ({ true => {
-            endp = i + 1
-        }, false => {
-            h.break
-        } }) })
+        (i < pos).match ({
+            true  => { },
+            false => b.is_num_byte().match ({ true => {
+                endp = i + 1
+            }, false => {
+                h.break
+            } }),
+        })
     })
     n := endp - pos
     (n <= 0).match ({ true => err(.BadNumber(pos)), false => {
@@ -278,7 +357,13 @@ parse_str_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
 parse_array<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
-    (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == ']').match ({ true => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1), false => a.arr_loop(src, sv, p, depth, a.vbuf_new()) }) })
+    (p >= sv.len).match ({
+        true  => err(.UnexpectedEof),
+        false => (sv[p] == ']').match ({
+            true  => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1),
+            false => a.arr_loop(src, sv, p, depth, a.vbuf_new()),
+        }),
+    })
 }
 arr_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, vb: VBuf) Result<Step, JsonError> {
     a.parse_value(src, sv, p, depth + 1).match ({
@@ -286,32 +371,68 @@ arr_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, vb:
         .Ok(st) => {
             vb2 := a.vbuf_push(vb, st.v)
             q := sv.skip_ws(st.pos)
-            (q >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[q] == ',').match ({ true => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2), false => (sv[q] == ']').match ({ true => step_ok(.Arr(vb2.vbuf_slice()), q + 1), false => err(.Unexpected(q)) }) }) })
+            (q >= sv.len).match ({
+                true  => err(.UnexpectedEof),
+                false => (sv[q] == ',').match ({
+                    true  => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2),
+                    false => (sv[q] == ']').match ({
+                        true  => step_ok(.Arr(vb2.vbuf_slice()), q + 1),
+                        false => err(.Unexpected(q)),
+                    }),
+                }),
+            })
         },
     })
 }
 parse_object<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
     p := sv.skip_ws(pos + 1)
-    (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == '}').match ({ true => step_ok(.Obj(Object(entries: a.ebuf_new().ebuf_slice())), p + 1), false => a.obj_loop(src, sv, p, depth, a.ebuf_new()) }) })
+    (p >= sv.len).match ({
+        true  => err(.UnexpectedEof),
+        false => (sv[p] == '}').match ({
+            true  => step_ok(.Obj(Object(entries: a.ebuf_new().ebuf_slice())), p + 1),
+            false => a.obj_loop(src, sv, p, depth, a.ebuf_new()),
+        }),
+    })
 }
 obj_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, eb: EBuf) Result<Step, JsonError> {
-    (p >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[p] == '"').match ({ true => a.parse_string_raw(src, sv, p).match ({
-        .Err(e) => err(e),
-        .Ok(ks) => {
-            q := sv.skip_ws(ks.pos)
-            (q >= sv.len || sv[q] != ':').match ({ true => (q >= sv.len).match ({ true => err(.UnexpectedEof), false => err(.Unexpected(q)) }), false => a.parse_value(src, sv, q + 1, depth + 1).match ({
+    (p >= sv.len).match ({
+        true  => err(.UnexpectedEof),
+        false => (sv[p] == '"').match ({
+            true  => a.parse_string_raw(src, sv, p).match ({
                 .Err(e) => err(e),
-                .Ok(st) => {
-                    eb2 := a.ebuf_push(eb, Entry(
-                        key: ks.s,
-                        val: st.v,
-                    ))
-                    r := sv.skip_ws(st.pos)
-                    (r >= sv.len).match ({ true => err(.UnexpectedEof), false => (sv[r] == ',').match ({ true => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2), false => (sv[r] == '}').match ({ true => step_ok(.Obj(Object(entries: eb2.ebuf_slice())), r + 1), false => err(.Unexpected(r)) }) }) })
+                .Ok(ks) => {
+                    q := sv.skip_ws(ks.pos)
+                    (q >= sv.len || sv[q] != ':').match ({
+                        true  => (q >= sv.len).match ({
+                            true  => err(.UnexpectedEof),
+                            false => err(.Unexpected(q)),
+                        }),
+                        false => a.parse_value(src, sv, q + 1, depth + 1).match ({
+                            .Err(e) => err(e),
+                            .Ok(st) => {
+                                eb2 := a.ebuf_push(eb, Entry(
+                                    key: ks.s,
+                                    val: st.v,
+                                ))
+                                r := sv.skip_ws(st.pos)
+                                (r >= sv.len).match ({
+                                    true  => err(.UnexpectedEof),
+                                    false => (sv[r] == ',').match ({
+                                        true  => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2),
+                                        false => (sv[r] == '}').match ({
+                                            true  => step_ok(.Obj(Object(entries: eb2.ebuf_slice())), r + 1),
+                                            false => err(.Unexpected(r)),
+                                        }),
+                                    }),
+                                })
+                            },
+                        }),
+                    })
                 },
-            }) })
-        },
-    }), false => err(.Unexpected(p)) }) })
+            }),
+            false => err(.Unexpected(p)),
+        }),
+    })
 }
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
 parse_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64) Result<Step, JsonError> {
@@ -319,7 +440,28 @@ parse_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64
         p := sv.skip_ws(pos)
         (p >= sv.len).match ({ true => err(.UnexpectedEof), false => {
             b := sv[p]
-            b.is_num_start().match ({ true => a.parse_number(src, sv, p), false => (b == '{').match ({ true => a.parse_object(src, sv, p, depth), false => (b == '[').match ({ true => a.parse_array(src, sv, p, depth), false => (b == '"').match ({ true => a.parse_str_value(src, sv, p), false => (b == 't').match ({ true => parse_lit(sv, p, "true", .Bool(true)), false => (b == 'f').match ({ true => parse_lit(sv, p, "false", .Bool(false)), false => (b == 'n').match ({ true => parse_lit(sv, p, "null", .Null), false => err(.Unexpected(p)) }) }) }) }) }) }) })
+            b.is_num_start().match ({
+                true  => a.parse_number(src, sv, p),
+                false => (b == '{').match ({
+                    true  => a.parse_object(src, sv, p, depth),
+                    false => (b == '[').match ({
+                        true  => a.parse_array(src, sv, p, depth),
+                        false => (b == '"').match ({
+                            true  => a.parse_str_value(src, sv, p),
+                            false => (b == 't').match ({
+                                true  => parse_lit(sv, p, "true", .Bool(true)),
+                                false => (b == 'f').match ({
+                                    true  => parse_lit(sv, p, "false", .Bool(false)),
+                                    false => (b == 'n').match ({
+                                        true  => parse_lit(sv, p, "null", .Null),
+                                        false => err(.Unexpected(p)),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            })
         } })
     } })
 }
@@ -335,19 +477,45 @@ parse*<A> = (a: MutPtr<A>, s: string_view) Result<Value, JsonError> {
         },
         .Ok(st) => {
             p := sv.skip_ws(st.pos)
-            r: Result<Value, JsonError> := (p < sv.len).match ({ true => .Err(.TrailingGarbage(p)), false => .Ok(st.v) })
+            r: Result<Value, JsonError> := (p < sv.len).match ({
+                true  => .Err(.TrailingGarbage(p)),
+                false => .Ok(st.v),
+            })
             r
         },
     })
     out
 }
 // ── serialization ──────────────────────────────────────────────────────────────
-hex_digit = (n: i64) u8 { (n < 10).match ({ true => ('0'.to_i64() + n).to_u8(), false => ('a'.to_i64() + n - 10).to_u8() }) }
+hex_digit = (n: i64) u8 { (n < 10).match ({
+    true  => ('0'.to_i64() + n).to_u8(),
+    false => ('a'.to_i64() + n - 10).to_u8(),
+}) }
 write_u_esc<A> = (a: MutPtr<A>, sb: String, b: u8) String {
     bi := b.to_i64()
     sb.push_in(a, '\\').jok().push_in(a, 'u').jok().push_in(a, '0').jok().push_in(a, '0').jok().push_in(a, hex_digit(bi >> 4 & 15)).jok().push_in(a, hex_digit(bi & 15)).jok()
 }
-write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String { (b == '"').match ({ true => sb.push_in(a, '\\').jok().push_in(a, '"').jok(), false => (b == '\\').match ({ true => sb.push_in(a, '\\').jok().push_in(a, '\\').jok(), false => (b == '\n').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 'n').jok(), false => (b == '\t').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 't').jok(), false => (b == '\r').match ({ true => sb.push_in(a, '\\').jok().push_in(a, 'r').jok(), false => (b < 32).match ({ true => a.write_u_esc(sb, b), false => sb.push_in(a, b).jok() }) }) }) }) }) }) }
+write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String {
+    (b == '"').match ({
+        true  => sb.push_in(a, '\\').jok().push_in(a, '"').jok(),
+        false => (b == '\\').match ({
+            true  => sb.push_in(a, '\\').jok().push_in(a, '\\').jok(),
+            false => (b == '\n').match ({
+                true  => sb.push_in(a, '\\').jok().push_in(a, 'n').jok(),
+                false => (b == '\t').match ({
+                    true  => sb.push_in(a, '\\').jok().push_in(a, 't').jok(),
+                    false => (b == '\r').match ({
+                        true  => sb.push_in(a, '\\').jok().push_in(a, 'r').jok(),
+                        false => (b < 32).match ({
+                            true  => a.write_u_esc(sb, b),
+                            false => sb.push_in(a, b).jok(),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 write_str_lit<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     out: String := sb.push_in(a, '"').jok()
     sv := s.view()
@@ -382,7 +550,10 @@ write_obj<A> = (a: MutPtr<A>, sb: String, o: Object) String {
 write_value<A> = (a: MutPtr<A>, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null").jok(),
-        .Bool(b) => b.match ({ true => sb.append_in(a, "true").jok(), false => sb.append_in(a, "false").jok() }),
+        .Bool(b) => b.match ({
+            true  => sb.append_in(a, "true").jok(),
+            false => sb.append_in(a, "false").jok(),
+        }),
         .Num(n)  => sb.append_in(a, a.float_in(n).jok().finish_in(a).jfin()).jok(),
         .Str(s)  => a.write_str_lit(sb, s),
         .Arr(xs) => a.write_arr(sb, xs),
@@ -400,12 +571,15 @@ stringify*<A> = (a: MutPtr<A>, v: Value) string_view {
 obj_find* = (o: Object, key: string_view) i64 {
     found: i64 := 0 - 1
     o.entries.loop((h, i, e) {
-        (found < 0).match ({ true => eq(e.key, key).match ({ true => {
-            found = i
-            h.break
-        } }), false => {
-            h.break
-        } })
+        (found < 0).match ({
+            true  => eq(e.key, key).match ({ true => {
+                found = i
+                h.break
+            } }),
+            false => {
+                h.break
+            },
+        })
     })
     found
 }
@@ -476,13 +650,16 @@ obj_eq = (a: Object, b: Object) bool {
         ok: bool := true
         a.entries.loop((h, i, e) {
             j := b.obj_find(e.key)
-            (j < 0).match ({ true => {
-                ok = false
-                h.break
-            }, false => equals(e.val, b.entries[j].val).match ({ false => {
-                ok = false
-                h.break
-            } }) })
+            (j < 0).match ({
+                true  => {
+                    ok = false
+                    h.break
+                },
+                false => equals(e.val, b.entries[j].val).match ({ false => {
+                    ok = false
+                    h.break
+                } }),
+            })
         })
         ok
     } })

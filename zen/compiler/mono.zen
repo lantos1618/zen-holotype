@@ -99,12 +99,20 @@ is_genstruct_name = (decls: [Decl], name: string_view) bool {
 // HOLLOW decl. That is deliberate for the emit-only pipeline (the acid gate feeds real stdlib files
 // whose imported generics aren't loaded); the CHECKED pipeline rejects an undefined generic ctor
 // up front (check_validate's mkenum_err/KUNDEFINED), so a hollow decl never reaches a user build.
-mono_inst = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl { decls.is_genstruct_name(g.name).match ({ true => a.mono_struct(decls, g), false => a.mono_enum(decls, g) }) }
+mono_inst = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
+    decls.is_genstruct_name(g.name).match ({
+        true  => a.mono_struct(decls, g),
+        false => a.mono_enum(decls, g),
+    })
+}
 // discovery: scan all typed positions for generic instances, deduped by mangled name.
 has_mangled = (buf: [GenericData], cnt: i32, m: string_view) bool {
     found := false
     buf.loop((h, i, e) {
-        found = (i < cnt).match ({ true => eq(e.mangled, m).match ({ true => true, false => found }), false => found })
+        found = (i < cnt).match ({
+            true  => eq(e.mangled, m).match ({ true => true, false => found }),
+            false => found,
+        })
     })
     found
 }
@@ -140,13 +148,19 @@ add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     (1 + g.args.tys_max_depth() > 24).match ({ true => {
         return cnt
     } })
-    (cnt >= buf.len).match ({ true => panic("zenc: too many distinct generic instances (mono_gbuf cap; raise it in compiler.mono)"), false => { } })
+    (cnt >= buf.len).match ({
+        true  => panic("zenc: too many distinct generic instances (mono_gbuf cap; raise it in compiler.mono)"),
+        false => { },
+    })
     buf[cnt] = g
     cnt + 1
 }
 collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
     t.match ({
-        .Generic(g) => buf.has_mangled(cnt, g.mangled).match ({ true => cnt, false => buf.add_inst(cnt, g) }),
+        .Generic(g) => buf.has_mangled(cnt, g.mangled).match ({
+            true  => cnt,
+            false => buf.add_inst(cnt, g),
+        }),
         .Ptr(pd)    => buf.collect_ty(cnt, load(pd.pointee)),
         .Slice(e)   => buf.collect_ty(cnt, load(e)),
         _           => cnt,
@@ -191,7 +205,10 @@ collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
 // ── body walk: discover generic instances from struct LITERALS in expressions, not just from typed
 //    signatures. A `b := Box<i32>{…}` with no typed param/return still needs Box_i32 emitted. A
 //    MakeStruct with type args carries its instance (ty + targs + mangled mty); recurse everywhere. ──
-add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 { buf.has_mangled(cnt, g.mangled).match ({ true => cnt, false => buf.add_inst(cnt, g) }) }
+add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 { buf.has_mangled(cnt, g.mangled).match ({
+    true  => cnt,
+    false => buf.add_inst(cnt, g),
+}) }
 collect_exprs = (buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
     c := cnt
     xs.loop((h, i, x) {
@@ -310,7 +327,10 @@ expand_one = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, 
     nc := buf.collect_decl(count, a.mono_inst(decls, buf[i]))
     a.expand_insts(decls, buf, nc, i + 1)
 }
-expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 { (i >= count).match ({ true => count, false => a.expand_one(decls, buf, count, i) }) }
+expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 { (i >= count).match ({
+    true  => count,
+    false => a.expand_one(decls, buf, count, i),
+}) }
 // monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
 monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     ce := a.collect_insts(decls)

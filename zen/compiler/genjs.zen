@@ -35,7 +35,10 @@ jint_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
         hs.gstr_push(a, jdigit(n % 10))
     } })
 }
-jint = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({ true => s.gstr_append(a, "-").jint_neg(a, n), false => s.jint_nat(a, n) }) }
+jint = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({
+    true  => s.gstr_append(a, "-").jint_neg(a, n),
+    false => s.jint_nat(a, n),
+}) }
 // walk negatives directly so INT64_MIN doesn't overflow on `0 - n`
 jint_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
     (n > 0 - 10).match ({ true => s.gstr_push(a, jdigit(0 - n)), false => {
@@ -47,11 +50,38 @@ jint_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
 //    `default`/`new`/`class`/… is a legal JS name). Field/property names are NOT mangled (any string is
 //    a valid object key). Kept small — only the words that actually collide with Zen's identifier space.
 js_is_reserved = (n: string_view) bool { eq(n, "default") || eq(n, "new") || eq(n, "class") || eq(n, "function") || eq(n, "var") || eq(n, "let") || eq(n, "const") || eq(n, "this") || eq(n, "null") || eq(n, "delete") || eq(n, "in") || eq(n, "instanceof") || eq(n, "typeof") || eq(n, "void") || eq(n, "with") || eq(n, "super") || eq(n, "enum") || eq(n, "export") || eq(n, "import") || eq(n, "extends") || eq(n, "switch") || eq(n, "case") || eq(n, "yield") || eq(n, "await") || eq(n, "debugger") || eq(n, "finally") }
-jname = (s: String, a: MutPtr<Malloc>, n: string_view) String { js_is_reserved(n).match ({ true => s.gstr_append(a, n).gstr_append(a, "$"), false => s.gstr_append(a, n) }) }
+jname = (s: String, a: MutPtr<Malloc>, n: string_view) String {
+    js_is_reserved(n).match ({
+        true  => s.gstr_append(a, n).gstr_append(a, "$"),
+        false => s.gstr_append(a, n),
+    })
+}
 // ── JS string-literal escaping (byte by byte to the NUL) ──────────────────────────────────────────
 jbyte = (v: string_view, i: i64) u8 { load(offset(v, i)) }
-jesc_byte = (s: String, a: MutPtr<Malloc>, b: u8) String { (b == '"').match ({ true => s.gstr_append(a, "\\\""), false => (b == '\\').match ({ true => s.gstr_append(a, "\\\\"), false => (b == '\n').match ({ true => s.gstr_append(a, "\\n"), false => (b == '\r').match ({ true => s.gstr_append(a, "\\r"), false => (b == '\t').match ({ true => s.gstr_append(a, "\\t"), false => s.gstr_push(a, b) }) }) }) }) }) }
-jesc_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String { (jbyte(v, i) == 0).match ({ true => s, false => s.jesc_byte(a, jbyte(v, i)).jesc_from(a, v, i + 1) }) }
+jesc_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    (b == '"').match ({
+        true  => s.gstr_append(a, "\\\""),
+        false => (b == '\\').match ({
+            true  => s.gstr_append(a, "\\\\"),
+            false => (b == '\n').match ({
+                true  => s.gstr_append(a, "\\n"),
+                false => (b == '\r').match ({
+                    true  => s.gstr_append(a, "\\r"),
+                    false => (b == '\t').match ({
+                        true  => s.gstr_append(a, "\\t"),
+                        false => s.gstr_push(a, b),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+jesc_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
+    (jbyte(v, i) == 0).match ({
+        true  => s,
+        false => s.jesc_byte(a, jbyte(v, i)).jesc_from(a, v, i + 1),
+    })
+}
 jstrlit = (s: String, a: MutPtr<Malloc>, v: string_view) String { s.gstr_append(a, "__zr.str(\"").jesc_from(a, v, 0).gstr_append(a, "\")") }
 // ── expressions ───────────────────────────────────────────────────────────────────────────────────
 js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
@@ -89,13 +119,40 @@ js_slice_count = (items: [Expr]) i32 {
 // `.u` is genc's union-payload access baked by the checker's or_return / match-payload lowering
 // (`subj.u.Variant`). The JS enum has NO `u` level — it's a flat `{ tag, Variant }` — so `.u` erases
 // to identity: `subj.u.Ok` emits as `subj.Ok`. (`break_zk`/`continue_zk` are the loop-handler verbs.)
-js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String { eq(m.field, "break_zk").match ({ true => s.gstr_append(a, "break"), false => eq(m.field, "continue_zk").match ({ true => s.gstr_append(a, "continue"), false => eq(m.field, "u").match ({ true => s.js_expr(a, m.obj), false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field) }) }) }) }
+js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
+    eq(m.field, "break_zk").match ({
+        true  => s.gstr_append(a, "break"),
+        false => eq(m.field, "continue_zk").match ({
+            true  => s.gstr_append(a, "continue"),
+            false => eq(m.field, "u").match ({
+                true  => s.js_expr(a, m.obj),
+                false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field),
+            }),
+        }),
+    })
+}
 // `==`/`!=` -> strict; `/` and `%` route through the guarded floor helpers; all else `(lhs op rhs)`.
 // `==`/`!=` -> strict; INTEGER `/` and `%` route through the guarded floor (div-by-zero panics); the
 // checker's float-division marker `/.` emits NATIVE `/` so f64 follows IEEE (`0.0/0.0` -> NaN, never a
 // panic); all else `(lhs op rhs)`.
-js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String { eq(b.op, "/.").match ({ true => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " / ").js_expr(a, b.rhs).gstr_append(a, ")"), false => eq(b.op, "/").match ({ true => s.gstr_append(a, "__zr.div(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => eq(b.op, "%").match ({ true => s.gstr_append(a, "__zr.mod(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"), false => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " ").gstr_append(a, js_op(b.op)).gstr_append(a, " ").js_expr(a, b.rhs).gstr_append(a, ")") }) }) }) }
-js_op = (op: string_view) string_view { eq(op, "==").match ({ true => "===", false => eq(op, "!=").match ({ true => "!==", false => op }) }) }
+js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
+    eq(b.op, "/.").match ({
+        true  => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " / ").js_expr(a, b.rhs).gstr_append(a, ")"),
+        false => eq(b.op, "/").match ({
+            true  => s.gstr_append(a, "__zr.div(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"),
+            false => eq(b.op, "%").match ({
+                true  => s.gstr_append(a, "__zr.mod(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"),
+                false => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " ").gstr_append(a, js_op(b.op)).gstr_append(a, " ").js_expr(a, b.rhs).gstr_append(a, ")"),
+            }),
+        }),
+    })
+}
+js_op = (op: string_view) string_view {
+    eq(op, "==").match ({
+        true  => "===",
+        false => eq(op, "!=").match ({ true => "!==", false => op }),
+    })
+}
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
     out := s.gstr_append(a, "({ ")
     m.inits.loop((h, i, fi) {
@@ -113,20 +170,92 @@ js_args = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
     })
     out
 }
-js_arg_at = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String { (i < c.args.len).match ({ true => s.js_expr(a, c.args[i].addr()), false => s.gstr_append(a, "0") }) }
+js_arg_at = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String { (i < c.args.len).match ({
+    true  => s.js_expr(a, c.args[i].addr()),
+    false => s.gstr_append(a, "0"),
+}) }
 // intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)`.
-js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "__str_eq").match ({ true => s.gstr_append(a, "__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "__str_ne").match ({ true => s.gstr_append(a, "(!__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, "))"), false => eq(c.fn, "load").match ({ true => s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "store").match ({ true => s.gstr_append(a, "__zr.store(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "offset").match ({ true => s.gstr_append(a, "__zr.offset(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "slice").match ({ true => s.gstr_append(a, "__zr.slice(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "cstr").match ({ true => s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "null_ptr").match ({ true => s.gstr_append(a, "0"), false => eq(c.fn, "addr").match ({ true => s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "assert_nonnull").match ({ true => s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => s.js_call_intr2(a, c) }) }) }) }) }) }) }) }) }) }) }
+js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "__str_eq").match ({
+        true  => s.gstr_append(a, "__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
+        false => eq(c.fn, "__str_ne").match ({
+            true  => s.gstr_append(a, "(!__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, "))"),
+            false => eq(c.fn, "load").match ({
+                true  => s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+                false => eq(c.fn, "store").match ({
+                    true  => s.gstr_append(a, "__zr.store(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
+                    false => eq(c.fn, "offset").match ({
+                        true  => s.gstr_append(a, "__zr.offset(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
+                        false => eq(c.fn, "slice").match ({
+                            true  => s.gstr_append(a, "__zr.slice(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
+                            false => eq(c.fn, "cstr").match ({
+                                true  => s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+                                false => eq(c.fn, "null_ptr").match ({
+                                    true  => s.gstr_append(a, "0"),
+                                    false => eq(c.fn, "addr").match ({
+                                        true  => s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+                                        false => eq(c.fn, "assert_nonnull").match ({
+                                            true  => s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+                                            false => s.js_call_intr2(a, c),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // second tier of intrinsics (kept split so no single match nests too deep for the parser).
-js_call_intr2 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "to_i32").match ({ true => s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "to_i64").match ({ true => s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "to_u8").match ({ true => s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)"), false => eq(c.fn, "to_f64").match ({ true => s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))"), false => eq(c.fn, "load_i64").match ({ true => s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")"), false => eq(c.fn, "store_i64").match ({ true => s.gstr_append(a, "__zr.store_i64(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"), false => eq(c.fn, "sizeof").match ({ true => s.js_sizeof(a, c), false => s.js_dom_dispatch(a, c) }) }) }) }) }) }) }) }
+js_call_intr2 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "to_i32").match ({
+        true  => s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+        false => eq(c.fn, "to_i64").match ({
+            true  => s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+            false => eq(c.fn, "to_u8").match ({
+                true  => s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)"),
+                false => eq(c.fn, "to_f64").match ({
+                    true  => s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))"),
+                    false => eq(c.fn, "load_i64").match ({
+                        true  => s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+                        false => eq(c.fn, "store_i64").match ({
+                            true  => s.gstr_append(a, "__zr.store_i64(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
+                            false => eq(c.fn, "sizeof").match ({
+                                true  => s.js_sizeof(a, c),
+                                false => s.js_dom_dispatch(a, c),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.args.len > 0).match ({ true => c.args[0].addr().match ({
-        .Var(v) => s.gstr_append(a, "__zr.sizeof(\"").gstr_append(a, v.name).gstr_append(a, "\")"),
-        _       => s.gstr_append(a, "8"),
-    }), false => s.gstr_append(a, "8") })
+    (c.args.len > 0).match ({
+        true  => c.args[0].addr().match ({
+            .Var(v) => s.gstr_append(a, "__zr.sizeof(\"").gstr_append(a, v.name).gstr_append(a, "\")"),
+            _       => s.gstr_append(a, "8"),
+        }),
+        false => s.gstr_append(a, "8"),
+    })
 }
 js_call_raw = (s: String, a: MutPtr<Malloc>, c: CallData) String { s.jname(a, c.fn).gstr_append(a, "(").js_args(a, c.args).gstr_append(a, ")") }
 // std.platform's bodyless host floor is generated by each backend, never supplied by zenrt.
-js_call_default = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "zen_platform_host_os").match ({ true => s.gstr_append(a, "((typeof process !== 'undefined' && process.platform === 'darwin') ? 1 : (typeof process !== 'undefined' && process.platform === 'linux') ? 2 : (typeof process !== 'undefined' && process.platform === 'win32') ? 3 : 0)"), false => eq(c.fn, "zen_platform_host_arch").match ({ true => s.gstr_append(a, "((typeof process !== 'undefined' && process.arch === 'arm64') ? 1 : (typeof process !== 'undefined' && process.arch === 'x64') ? 2 : 0)"), false => eq(c.fn, "zen_platform_host_abi").match ({ true => s.gstr_append(a, "((typeof process !== 'undefined' && process.platform === 'darwin') ? 1 : (typeof process !== 'undefined' && process.platform === 'linux') ? 2 : (typeof process !== 'undefined' && process.platform === 'win32') ? 4 : 0)"), false => s.js_call_raw(a, c) }) }) }) }
+js_call_default = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "zen_platform_host_os").match ({
+        true  => s.gstr_append(a, "((typeof process !== 'undefined' && process.platform === 'darwin') ? 1 : (typeof process !== 'undefined' && process.platform === 'linux') ? 2 : (typeof process !== 'undefined' && process.platform === 'win32') ? 3 : 0)"),
+        false => eq(c.fn, "zen_platform_host_arch").match ({
+            true  => s.gstr_append(a, "((typeof process !== 'undefined' && process.arch === 'arm64') ? 1 : (typeof process !== 'undefined' && process.arch === 'x64') ? 2 : 0)"),
+            false => eq(c.fn, "zen_platform_host_abi").match ({
+                true  => s.gstr_append(a, "((typeof process !== 'undefined' && process.platform === 'darwin') ? 1 : (typeof process !== 'undefined' && process.platform === 'linux') ? 2 : (typeof process !== 'undefined' && process.platform === 'win32') ? 4 : 0)"),
+                false => s.js_call_raw(a, c),
+            }),
+        }),
+    })
+}
 // ── std.web.dom lowering: DOM stub CALLS → real browser JS ────────────────────────────────────────
 // dom.zen is the JS-target analog of std.c.libc: a header of BODYLESS typed stubs. genc lowers a
 // bodyless decl to a C prototype that libc defines; genjs lowers the CALL to the live browser API —
@@ -158,42 +287,322 @@ js_did = (s: String, a: MutPtr<Malloc>, c: CallData) String { s.js_dom_recv(a, c
 js_dfetch = (s: String, a: MutPtr<Malloc>, c: CallData) String { s.gstr_append(a, "fetch(").js_dom_str(a, c, 0).gstr_append(a, ")") }
 // tier 1 — JS global singletons (`document()`→`document`), the receiver-less `fetch`, and the inheritance
 // upcasts (each an identity: in JS an Element already IS a Node/EventTarget).
-js_dom_dispatch = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "document").match ({ true => s.js_dg(a, "document"), false => eq(c.fn, "window").match ({ true => s.js_dg(a, "window"), false => eq(c.fn, "console").match ({ true => s.js_dg(a, "console"), false => eq(c.fn, "fetch").match ({ true => s.js_dfetch(a, c), false => eq(c.fn, "node_target").match ({ true => s.js_did(a, c), false => eq(c.fn, "as_node").match ({ true => s.js_did(a, c), false => eq(c.fn, "as_event_target").match ({ true => s.js_did(a, c), false => eq(c.fn, "as_element").match ({ true => s.js_did(a, c), false => eq(c.fn, "text_node").match ({ true => s.js_did(a, c), false => eq(c.fn, "document_node").match ({ true => s.js_did(a, c), false => eq(c.fn, "window_target").match ({ true => s.js_did(a, c), false => eq(c.fn, "as_html").match ({ true => s.js_did(a, c), false => s.js_dom_d2(a, c) }) }) }) }) }) }) }) }) }) }) }) }) }
+js_dom_dispatch = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "document").match ({
+        true  => s.js_dg(a, "document"),
+        false => eq(c.fn, "window").match ({
+            true  => s.js_dg(a, "window"),
+            false => eq(c.fn, "console").match ({
+                true  => s.js_dg(a, "console"),
+                false => eq(c.fn, "fetch").match ({
+                    true  => s.js_dfetch(a, c),
+                    false => eq(c.fn, "node_target").match ({
+                        true  => s.js_did(a, c),
+                        false => eq(c.fn, "as_node").match ({
+                            true  => s.js_did(a, c),
+                            false => eq(c.fn, "as_event_target").match ({
+                                true  => s.js_did(a, c),
+                                false => eq(c.fn, "as_element").match ({
+                                    true  => s.js_did(a, c),
+                                    false => eq(c.fn, "text_node").match ({
+                                        true  => s.js_did(a, c),
+                                        false => eq(c.fn, "document_node").match ({
+                                            true  => s.js_did(a, c),
+                                            false => eq(c.fn, "window_target").match ({
+                                                true  => s.js_did(a, c),
+                                                false => eq(c.fn, "as_html").match ({
+                                                    true  => s.js_did(a, c),
+                                                    false => s.js_dom_d2(a, c),
+                                                }),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 2 — EventTarget + Event.
-js_dom_d2 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "add_event_listener").match ({ true => s.js_dm_sp(a, c, "addEventListener"), false => eq(c.fn, "remove_event_listener").match ({ true => s.js_dm_sp(a, c, "removeEventListener"), false => eq(c.fn, "dispatch_event").match ({ true => s.js_dm_p(a, c, "dispatchEvent"), false => eq(c.fn, "event_type").match ({ true => s.js_dp(a, c, "type"), false => eq(c.fn, "event_target").match ({ true => s.js_dp(a, c, "target"), false => eq(c.fn, "current_target").match ({ true => s.js_dp(a, c, "currentTarget"), false => eq(c.fn, "prevent_default").match ({ true => s.js_dm0(a, c, "preventDefault"), false => eq(c.fn, "stop_propagation").match ({ true => s.js_dm0(a, c, "stopPropagation"), false => s.js_dom_d3(a, c) }) }) }) }) }) }) }) }) }
+js_dom_d2 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "add_event_listener").match ({
+        true  => s.js_dm_sp(a, c, "addEventListener"),
+        false => eq(c.fn, "remove_event_listener").match ({
+            true  => s.js_dm_sp(a, c, "removeEventListener"),
+            false => eq(c.fn, "dispatch_event").match ({
+                true  => s.js_dm_p(a, c, "dispatchEvent"),
+                false => eq(c.fn, "event_type").match ({
+                    true  => s.js_dp(a, c, "type"),
+                    false => eq(c.fn, "event_target").match ({
+                        true  => s.js_dp(a, c, "target"),
+                        false => eq(c.fn, "current_target").match ({
+                            true  => s.js_dp(a, c, "currentTarget"),
+                            false => eq(c.fn, "prevent_default").match ({
+                                true  => s.js_dm0(a, c, "preventDefault"),
+                                false => eq(c.fn, "stop_propagation").match ({
+                                    true  => s.js_dm0(a, c, "stopPropagation"),
+                                    false => s.js_dom_d3(a, c),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 3 — Node.
-js_dom_d3 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "append_child").match ({ true => s.js_dm_p(a, c, "appendChild"), false => eq(c.fn, "remove_child").match ({ true => s.js_dm_p(a, c, "removeChild"), false => eq(c.fn, "insert_before").match ({ true => s.js_dm_pp(a, c, "insertBefore"), false => eq(c.fn, "replace_child").match ({ true => s.js_dm_pp(a, c, "replaceChild"), false => eq(c.fn, "clone_node").match ({ true => s.js_dm_p(a, c, "cloneNode"), false => eq(c.fn, "parent_node").match ({ true => s.js_dp(a, c, "parentNode"), false => eq(c.fn, "first_child").match ({ true => s.js_dp(a, c, "firstChild"), false => eq(c.fn, "next_sibling").match ({ true => s.js_dp(a, c, "nextSibling"), false => eq(c.fn, "child_nodes").match ({ true => s.js_dp(a, c, "childNodes"), false => eq(c.fn, "text_content").match ({ true => s.js_dp(a, c, "textContent"), false => eq(c.fn, "set_text_content").match ({ true => s.js_dw_s(a, c, "textContent"), false => s.js_dom_d4(a, c) }) }) }) }) }) }) }) }) }) }) }) }
+js_dom_d3 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "append_child").match ({
+        true  => s.js_dm_p(a, c, "appendChild"),
+        false => eq(c.fn, "remove_child").match ({
+            true  => s.js_dm_p(a, c, "removeChild"),
+            false => eq(c.fn, "insert_before").match ({
+                true  => s.js_dm_pp(a, c, "insertBefore"),
+                false => eq(c.fn, "replace_child").match ({
+                    true  => s.js_dm_pp(a, c, "replaceChild"),
+                    false => eq(c.fn, "clone_node").match ({
+                        true  => s.js_dm_p(a, c, "cloneNode"),
+                        false => eq(c.fn, "parent_node").match ({
+                            true  => s.js_dp(a, c, "parentNode"),
+                            false => eq(c.fn, "first_child").match ({
+                                true  => s.js_dp(a, c, "firstChild"),
+                                false => eq(c.fn, "next_sibling").match ({
+                                    true  => s.js_dp(a, c, "nextSibling"),
+                                    false => eq(c.fn, "child_nodes").match ({
+                                        true  => s.js_dp(a, c, "childNodes"),
+                                        false => eq(c.fn, "text_content").match ({
+                                            true  => s.js_dp(a, c, "textContent"),
+                                            false => eq(c.fn, "set_text_content").match ({
+                                                true  => s.js_dw_s(a, c, "textContent"),
+                                                false => s.js_dom_d4(a, c),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 4 — Element (part 1).
-js_dom_d4 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "element_id").match ({ true => s.js_dp(a, c, "id"), false => eq(c.fn, "set_id").match ({ true => s.js_dw_s(a, c, "id"), false => eq(c.fn, "tag_name").match ({ true => s.js_dp(a, c, "tagName"), false => eq(c.fn, "class_name").match ({ true => s.js_dp(a, c, "className"), false => eq(c.fn, "set_class_name").match ({ true => s.js_dw_s(a, c, "className"), false => eq(c.fn, "inner_html").match ({ true => s.js_dp(a, c, "innerHTML"), false => eq(c.fn, "set_inner_html").match ({ true => s.js_dw_s(a, c, "innerHTML"), false => eq(c.fn, "get_attribute").match ({ true => s.js_dm_s(a, c, "getAttribute"), false => eq(c.fn, "set_attribute").match ({ true => s.js_dm_ss(a, c, "setAttribute"), false => eq(c.fn, "remove_attribute").match ({ true => s.js_dm_s(a, c, "removeAttribute"), false => s.js_dom_d5(a, c) }) }) }) }) }) }) }) }) }) }) }
+js_dom_d4 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "element_id").match ({
+        true  => s.js_dp(a, c, "id"),
+        false => eq(c.fn, "set_id").match ({
+            true  => s.js_dw_s(a, c, "id"),
+            false => eq(c.fn, "tag_name").match ({
+                true  => s.js_dp(a, c, "tagName"),
+                false => eq(c.fn, "class_name").match ({
+                    true  => s.js_dp(a, c, "className"),
+                    false => eq(c.fn, "set_class_name").match ({
+                        true  => s.js_dw_s(a, c, "className"),
+                        false => eq(c.fn, "inner_html").match ({
+                            true  => s.js_dp(a, c, "innerHTML"),
+                            false => eq(c.fn, "set_inner_html").match ({
+                                true  => s.js_dw_s(a, c, "innerHTML"),
+                                false => eq(c.fn, "get_attribute").match ({
+                                    true  => s.js_dm_s(a, c, "getAttribute"),
+                                    false => eq(c.fn, "set_attribute").match ({
+                                        true  => s.js_dm_ss(a, c, "setAttribute"),
+                                        false => eq(c.fn, "remove_attribute").match ({
+                                            true  => s.js_dm_s(a, c, "removeAttribute"),
+                                            false => s.js_dom_d5(a, c),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 5 — Element (part 2) + HTMLElement.
-js_dom_d5 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "has_attribute").match ({ true => s.js_dm_s(a, c, "hasAttribute"), false => eq(c.fn, "class_list").match ({ true => s.js_dp(a, c, "classList"), false => eq(c.fn, "query_selector").match ({ true => s.js_dm_s(a, c, "querySelector"), false => eq(c.fn, "query_selector_all").match ({ true => s.js_dm_s(a, c, "querySelectorAll"), false => eq(c.fn, "remove").match ({ true => s.js_dm0(a, c, "remove"), false => eq(c.fn, "style").match ({ true => s.js_dp(a, c, "style"), false => eq(c.fn, "hidden").match ({ true => s.js_dp(a, c, "hidden"), false => eq(c.fn, "set_hidden").match ({ true => s.js_dw_p(a, c, "hidden"), false => eq(c.fn, "click").match ({ true => s.js_dm0(a, c, "click"), false => eq(c.fn, "focus").match ({ true => s.js_dm0(a, c, "focus"), false => eq(c.fn, "blur").match ({ true => s.js_dm0(a, c, "blur"), false => s.js_dom_d6(a, c) }) }) }) }) }) }) }) }) }) }) }) }
+js_dom_d5 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "has_attribute").match ({
+        true  => s.js_dm_s(a, c, "hasAttribute"),
+        false => eq(c.fn, "class_list").match ({
+            true  => s.js_dp(a, c, "classList"),
+            false => eq(c.fn, "query_selector").match ({
+                true  => s.js_dm_s(a, c, "querySelector"),
+                false => eq(c.fn, "query_selector_all").match ({
+                    true  => s.js_dm_s(a, c, "querySelectorAll"),
+                    false => eq(c.fn, "remove").match ({
+                        true  => s.js_dm0(a, c, "remove"),
+                        false => eq(c.fn, "style").match ({
+                            true  => s.js_dp(a, c, "style"),
+                            false => eq(c.fn, "hidden").match ({
+                                true  => s.js_dp(a, c, "hidden"),
+                                false => eq(c.fn, "set_hidden").match ({
+                                    true  => s.js_dw_p(a, c, "hidden"),
+                                    false => eq(c.fn, "click").match ({
+                                        true  => s.js_dm0(a, c, "click"),
+                                        false => eq(c.fn, "focus").match ({
+                                            true  => s.js_dm0(a, c, "focus"),
+                                            false => eq(c.fn, "blur").match ({
+                                                true  => s.js_dm0(a, c, "blur"),
+                                                false => s.js_dom_d6(a, c),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 6 — DOMTokenList + CSSStyleDeclaration + NodeList.
-js_dom_d6 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "class_add").match ({ true => s.js_dm_s(a, c, "add"), false => eq(c.fn, "class_remove").match ({ true => s.js_dm_s(a, c, "remove"), false => eq(c.fn, "class_toggle").match ({ true => s.js_dm_s(a, c, "toggle"), false => eq(c.fn, "class_contains").match ({ true => s.js_dm_s(a, c, "contains"), false => eq(c.fn, "set_property").match ({ true => s.js_dm_ss(a, c, "setProperty"), false => eq(c.fn, "get_property").match ({ true => s.js_dm_s(a, c, "getPropertyValue"), false => eq(c.fn, "remove_property").match ({ true => s.js_dm_s(a, c, "removeProperty"), false => eq(c.fn, "node_list_length").match ({ true => s.js_dp(a, c, "length"), false => eq(c.fn, "node_list_item").match ({ true => s.js_dm_p(a, c, "item"), false => s.js_dom_d7(a, c) }) }) }) }) }) }) }) }) }) }
+js_dom_d6 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "class_add").match ({
+        true  => s.js_dm_s(a, c, "add"),
+        false => eq(c.fn, "class_remove").match ({
+            true  => s.js_dm_s(a, c, "remove"),
+            false => eq(c.fn, "class_toggle").match ({
+                true  => s.js_dm_s(a, c, "toggle"),
+                false => eq(c.fn, "class_contains").match ({
+                    true  => s.js_dm_s(a, c, "contains"),
+                    false => eq(c.fn, "set_property").match ({
+                        true  => s.js_dm_ss(a, c, "setProperty"),
+                        false => eq(c.fn, "get_property").match ({
+                            true  => s.js_dm_s(a, c, "getPropertyValue"),
+                            false => eq(c.fn, "remove_property").match ({
+                                true  => s.js_dm_s(a, c, "removeProperty"),
+                                false => eq(c.fn, "node_list_length").match ({
+                                    true  => s.js_dp(a, c, "length"),
+                                    false => eq(c.fn, "node_list_item").match ({
+                                        true  => s.js_dm_p(a, c, "item"),
+                                        false => s.js_dom_d7(a, c),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 7 — Document.
-js_dom_d7 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "get_element_by_id").match ({ true => s.js_dm_s(a, c, "getElementById"), false => eq(c.fn, "document_query_selector").match ({ true => s.js_dm_s(a, c, "querySelector"), false => eq(c.fn, "document_query_selector_all").match ({ true => s.js_dm_s(a, c, "querySelectorAll"), false => eq(c.fn, "create_element").match ({ true => s.js_dm_s(a, c, "createElement"), false => eq(c.fn, "create_text_node").match ({ true => s.js_dm_s(a, c, "createTextNode"), false => eq(c.fn, "body").match ({ true => s.js_dp(a, c, "body"), false => eq(c.fn, "head").match ({ true => s.js_dp(a, c, "head"), false => s.js_dom_d8(a, c) }) }) }) }) }) }) }) }
+js_dom_d7 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "get_element_by_id").match ({
+        true  => s.js_dm_s(a, c, "getElementById"),
+        false => eq(c.fn, "document_query_selector").match ({
+            true  => s.js_dm_s(a, c, "querySelector"),
+            false => eq(c.fn, "document_query_selector_all").match ({
+                true  => s.js_dm_s(a, c, "querySelectorAll"),
+                false => eq(c.fn, "create_element").match ({
+                    true  => s.js_dm_s(a, c, "createElement"),
+                    false => eq(c.fn, "create_text_node").match ({
+                        true  => s.js_dm_s(a, c, "createTextNode"),
+                        false => eq(c.fn, "body").match ({
+                            true  => s.js_dp(a, c, "body"),
+                            false => eq(c.fn, "head").match ({
+                                true  => s.js_dp(a, c, "head"),
+                                false => s.js_dom_d8(a, c),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 8 — Window.
-js_dom_d8 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "alert").match ({ true => s.js_dm_s(a, c, "alert"), false => eq(c.fn, "window_document").match ({ true => s.js_dp(a, c, "document"), false => eq(c.fn, "location").match ({ true => s.js_dp(a, c, "location"), false => eq(c.fn, "set_timeout").match ({ true => s.js_dm_pp(a, c, "setTimeout"), false => eq(c.fn, "clear_timeout").match ({ true => s.js_dm_p(a, c, "clearTimeout"), false => eq(c.fn, "request_animation_frame").match ({ true => s.js_dm_p(a, c, "requestAnimationFrame"), false => s.js_dom_d9(a, c) }) }) }) }) }) }) }
+js_dom_d8 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "alert").match ({
+        true  => s.js_dm_s(a, c, "alert"),
+        false => eq(c.fn, "window_document").match ({
+            true  => s.js_dp(a, c, "document"),
+            false => eq(c.fn, "location").match ({
+                true  => s.js_dp(a, c, "location"),
+                false => eq(c.fn, "set_timeout").match ({
+                    true  => s.js_dm_pp(a, c, "setTimeout"),
+                    false => eq(c.fn, "clear_timeout").match ({
+                        true  => s.js_dm_p(a, c, "clearTimeout"),
+                        false => eq(c.fn, "request_animation_frame").match ({
+                            true  => s.js_dm_p(a, c, "requestAnimationFrame"),
+                            false => s.js_dom_d9(a, c),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // tier 9 — Location + Console. Final fall-through: an ordinary JS call (non-DOM name → unchanged emission).
-js_dom_d9 = (s: String, a: MutPtr<Malloc>, c: CallData) String { eq(c.fn, "href").match ({ true => s.js_dp(a, c, "href"), false => eq(c.fn, "set_href").match ({ true => s.js_dw_s(a, c, "href"), false => eq(c.fn, "reload").match ({ true => s.js_dm0(a, c, "reload"), false => eq(c.fn, "log").match ({ true => s.js_dm_s(a, c, "log"), false => eq(c.fn, "error").match ({ true => s.js_dm_s(a, c, "error"), false => eq(c.fn, "warn").match ({ true => s.js_dm_s(a, c, "warn"), false => eq(c.fn, "info").match ({ true => s.js_dm_s(a, c, "info"), false => s.js_call_default(a, c) }) }) }) }) }) }) }) }
+js_dom_d9 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    eq(c.fn, "href").match ({
+        true  => s.js_dp(a, c, "href"),
+        false => eq(c.fn, "set_href").match ({
+            true  => s.js_dw_s(a, c, "href"),
+            false => eq(c.fn, "reload").match ({
+                true  => s.js_dm0(a, c, "reload"),
+                false => eq(c.fn, "log").match ({
+                    true  => s.js_dm_s(a, c, "log"),
+                    false => eq(c.fn, "error").match ({
+                        true  => s.js_dm_s(a, c, "error"),
+                        false => eq(c.fn, "warn").match ({
+                            true  => s.js_dm_s(a, c, "warn"),
+                            false => eq(c.fn, "info").match ({
+                                true  => s.js_dm_s(a, c, "info"),
+                                false => s.js_call_default(a, c),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // ── match: value position -> an IIFE returning an arm value; statement position -> a real `switch` (so
 //    an arm's early `return` leaves the enclosing function, not just the IIFE). Enum tag is the variant
 //    NAME string; a payload binds `_subj.<Variant>`. The last arm (or a `_`) is `default`. ────────────
-js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String { is_empty(ar.bind).match ({ true => s.js_expr(a, ar.body), false => s.gstr_append(a, "(() => { const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; return ").js_expr(a, ar.body).gstr_append(a, "; })()") }) }
+js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+    is_empty(ar.bind).match ({
+        true  => s.js_expr(a, ar.body),
+        false => s.gstr_append(a, "(() => { const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; return ").js_expr(a, ar.body).gstr_append(a, "; })()"),
+    })
+}
 js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
-    eq(ar.variant, "_").match ({ true => s.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "), false => {
-        out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": return ").js_arm_body_expr(a, ar).gstr_append(a, "; ")
-        last.match ({ true => out.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "), false => out })
-    } })
+    eq(ar.variant, "_").match ({
+        true  => s.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "),
+        false => {
+            out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": return ").js_arm_body_expr(a, ar).gstr_append(a, "; ")
+            last.match ({
+                true  => out.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "),
+                false => out,
+            })
+        },
+    })
 }
 js_switch_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
     (i >= arms.len).match ({ true => s, false => {
         out := s.js_switch_case(a, arms[i], i == arms.len - 1)
-        eq(arms[i].variant, "_").match ({ true => out, false => out.js_switch_cases(a, arms, i + 1) })
+        eq(arms[i].variant, "_").match ({
+            true  => out,
+            false => out.js_switch_cases(a, arms, i + 1),
+        })
     } })
 }
 js_match_expr = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "(() => { const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_cases(a, m.arms, 0).gstr_append(a, "} })()") }
 // statement-position match: arms run as statements so a diverging arm's `return` propagates.
-js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData) String { is_empty(ar.bind).match ({ true => s.js_arm_stmt_body(a, ar.body), false => s.gstr_append(a, "{ const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; ").js_arm_stmt_body(a, ar.body).gstr_append(a, " }") }) }
+js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+    is_empty(ar.bind).match ({
+        true  => s.js_arm_stmt_body(a, ar.body),
+        false => s.gstr_append(a, "{ const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; ").js_arm_stmt_body(a, ar.body).gstr_append(a, " }"),
+    })
+}
 // a braced value-position body is a Block: splice its statements; otherwise it's a bare expr statement.
 js_arm_stmt_body = (s: String, a: MutPtr<Malloc>, body: Ptr<Expr>) String {
     load(body).match ({
@@ -202,15 +611,24 @@ js_arm_stmt_body = (s: String, a: MutPtr<Malloc>, body: Ptr<Expr>) String {
     })
 }
 js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
-    eq(ar.variant, "_").match ({ true => s.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "), false => {
-        out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": ").js_arm_stmt(a, ar).gstr_append(a, " break; ")
-        last.match ({ true => out.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "), false => out })
-    } })
+    eq(ar.variant, "_").match ({
+        true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "),
+        false => {
+            out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": ").js_arm_stmt(a, ar).gstr_append(a, " break; ")
+            last.match ({
+                true  => out.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "),
+                false => out,
+            })
+        },
+    })
 }
 js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
     (i >= arms.len).match ({ true => s, false => {
         out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
-        eq(arms[i].variant, "_").match ({ true => out, false => out.js_switch_stmt_cases(a, arms, i + 1) })
+        eq(arms[i].variant, "_").match ({
+            true  => out,
+            false => out.js_switch_stmt_cases(a, arms, i + 1),
+        })
     } })
 }
 js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String { s.gstr_append(a, "{ const _subj = ").js_expr(a, m.subj).gstr_append(a, "; switch (_subj.tag) { ").js_switch_stmt_cases(a, m.arms, 0).gstr_append(a, "} }") }
@@ -223,7 +641,10 @@ js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
 js_block_expr = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
     out := s.gstr_append(a, "(() => { ")
     b.stmts.loop((h, i, st) {
-        one := (i == b.stmts.len - 1).match ({ true => out.js_block_last(a, st), false => out.js_stmt(a, st) })
+        one := (i == b.stmts.len - 1).match ({
+            true  => out.js_block_last(a, st),
+            false => out.js_stmt(a, st),
+        })
         out = one.gstr_append(a, " ")
     })
     out.gstr_append(a, "})()")
@@ -285,7 +706,10 @@ js_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt]) String {
 }
 // ── declarations ──────────────────────────────────────────────────────────────────────────────────
 // a function; every param is a bare JS name (types erased). `main` becomes `zen_main`.
-js_func_name = (s: String, a: MutPtr<Malloc>, name: string_view) String { eq(name, "main").match ({ true => s.gstr_append(a, "zen_main"), false => s.jname(a, name) }) }
+js_func_name = (s: String, a: MutPtr<Malloc>, name: string_view) String { eq(name, "main").match ({
+    true  => s.gstr_append(a, "zen_main"),
+    false => s.jname(a, name),
+}) }
 js_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
@@ -312,9 +736,48 @@ int_width = (t: Ty) i32 {
         _         => 0,
     })
 }
-iw_named = (n: string_view) i32 { eq(n, "u16").match ({ true => 2, false => eq(n, "u32").match ({ true => 3, false => eq(n, "u64").match ({ true => 7, false => eq(n, "i16").match ({ true => 5, false => eq(n, "i8").match ({ true => 6, false => 0 }) }) }) }) }) }
-js_w_open = (s: String, a: MutPtr<Malloc>, w: i32) String { (w == 7).match ({ true => s.gstr_append(a, "__zr.u64(("), false => (w == 0).match ({ true => s, false => s.gstr_append(a, "((") }) }) }
-js_w_close = (s: String, a: MutPtr<Malloc>, w: i32) String { (w == 1).match ({ true => s.gstr_append(a, ") & 255)"), false => (w == 2).match ({ true => s.gstr_append(a, ") & 0xffff)"), false => (w == 3).match ({ true => s.gstr_append(a, ") >>> 0)"), false => (w == 4).match ({ true => s.gstr_append(a, ") | 0)"), false => (w == 5).match ({ true => s.gstr_append(a, ") << 16 >> 16)"), false => (w == 6).match ({ true => s.gstr_append(a, ") << 24 >> 24)"), false => (w == 7).match ({ true => s.gstr_append(a, "))"), false => s }) }) }) }) }) }) }) }
+iw_named = (n: string_view) i32 {
+    eq(n, "u16").match ({
+        true  => 2,
+        false => eq(n, "u32").match ({
+            true  => 3,
+            false => eq(n, "u64").match ({
+                true  => 7,
+                false => eq(n, "i16").match ({
+                    true  => 5,
+                    false => eq(n, "i8").match ({ true => 6, false => 0 }),
+                }),
+            }),
+        }),
+    })
+}
+js_w_open = (s: String, a: MutPtr<Malloc>, w: i32) String {
+    (w == 7).match ({
+        true  => s.gstr_append(a, "__zr.u64(("),
+        false => (w == 0).match ({ true => s, false => s.gstr_append(a, "((") }),
+    })
+}
+js_w_close = (s: String, a: MutPtr<Malloc>, w: i32) String {
+    (w == 1).match ({
+        true  => s.gstr_append(a, ") & 255)"),
+        false => (w == 2).match ({
+            true  => s.gstr_append(a, ") & 0xffff)"),
+            false => (w == 3).match ({
+                true  => s.gstr_append(a, ") >>> 0)"),
+                false => (w == 4).match ({
+                    true  => s.gstr_append(a, ") | 0)"),
+                    false => (w == 5).match ({
+                        true  => s.gstr_append(a, ") << 16 >> 16)"),
+                        false => (w == 6).match ({
+                            true  => s.gstr_append(a, ") << 24 >> 24)"),
+                            false => (w == 7).match ({ true => s.gstr_append(a, "))"), false => s }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // emit an expression coerced to width `w` (w == 0 emits the bare expression, byte-identical to before).
 // SPECIAL CASE — a 32-bit multiply: `a * b` at u32/i32 must use `Math.imul`, NOT `(a*b) & mask`. A JS
 // `number` is an f64, so a full-width 32×32 product (up to ~2^64) loses its low bits above 2^53 BEFORE
@@ -323,16 +786,27 @@ js_w_close = (s: String, a: MutPtr<Malloc>, w: i32) String { (w == 1).match ({ t
 // so it reproduces C's wrapping exactly. Only the OUTERMOST operator is rewritten; a multiply nested
 // under another operator whose own product exceeds 2^53 is a rarer edge (documented in bootstrap/zenrt.js
 // design notes). Narrower widths (≤16-bit) need no imul: their product never exceeds 2^32 < 2^53.
-js_expr_w = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, w: i32) String { js_is_mul32(load(e), w).match ({ true => s.js_mul32(a, load(e), w), false => s.js_w_open(a, w).js_expr(a, e).js_w_close(a, w) }) }
+js_expr_w = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, w: i32) String {
+    js_is_mul32(load(e), w).match ({
+        true  => s.js_mul32(a, load(e), w),
+        false => s.js_w_open(a, w).js_expr(a, e).js_w_close(a, w),
+    })
+}
 js_is_mul32 = (e: Expr, w: i32) bool {
-    (w == 3 || w == 4).match ({ true => e.match ({
-        .Bin(b) => eq(b.op, "*"),
-        _       => false,
-    }), false => false })
+    (w == 3 || w == 4).match ({
+        true  => e.match ({
+            .Bin(b) => eq(b.op, "*"),
+            _       => false,
+        }),
+        false => false,
+    })
 }
 js_mul32 = (s: String, a: MutPtr<Malloc>, e: Expr, w: i32) String {
     e.match ({
-        .Bin(b) => (w == 3).match ({ true => s.gstr_append(a, "((Math.imul(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")) >>> 0)"), false => s.gstr_append(a, "Math.imul(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")") }),
+        .Bin(b) => (w == 3).match ({
+            true  => s.gstr_append(a, "((Math.imul(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")) >>> 0)"),
+            false => s.gstr_append(a, "Math.imul(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"),
+        }),
         _       => s,
     })
 }
@@ -369,7 +843,10 @@ js_param_norms = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     ps.loop((h, i, p) {
         vw_note(p.name, p.ty)
         w := int_width(p.ty)
-        out = (w == 0).match ({ true => out, false => out.jname(a, p.name).gstr_append(a, " = ").js_w_open(a, w).jname(a, p.name).js_w_close(a, w).gstr_append(a, "; ") })
+        out = (w == 0).match ({
+            true  => out,
+            false => out.jname(a, p.name).gstr_append(a, " = ").js_w_open(a, w).jname(a, p.name).js_w_close(a, w).gstr_append(a, "; "),
+        })
     })
     out
 }
@@ -408,8 +885,14 @@ genJsModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
 }
 // functions only (globals already emitted first, so a global's init never forward-refs a fn body at TDZ).
 js_decl_fn = (s: String, a: MutPtr<Malloc>, d: Decl) String {
-    d.is_template().match ({ true => s, false => d.is_trait().match ({ true => s, false => d.match ({
-        .DFunc(f) => s.js_func(a, f),
-        _         => s,
-    }) }) })
+    d.is_template().match ({
+        true  => s,
+        false => d.is_trait().match ({
+            true  => s,
+            false => d.match ({
+                .DFunc(f) => s.js_func(a, f),
+                _         => s,
+            }),
+        }),
+    })
 }

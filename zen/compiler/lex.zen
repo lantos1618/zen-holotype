@@ -66,20 +66,29 @@ skip_bc_d = (src: string_view, pos: i32, depth: i32, open: i32) i32 {
     r := 0 - 1
     @while (r < 0) {
         b := at(src, p)    // resume pos once the OUTER `*/` closes; <0 while still scanning
-        (b == '\0').match ({ true => {
-            lerr_set_at(open)
-            r = p
-        }, false => (b == '/' && at(src, p + 1) == '*').match ({ true => {
-            d = d + 1
-            p = p + 2
-        }, false => (b == '*' && at(src, p + 1) == '/').match ({ true => (d == 1).match ({ true => {
-            r = p + 2
-        }, false => {
-            d = d - 1
-            p = p + 2
-        } }), false => {
-            p = p + 1
-        } }) }) })
+        (b == '\0').match ({
+            true  => {
+                lerr_set_at(open)
+                r = p
+            },
+            false => (b == '/' && at(src, p + 1) == '*').match ({
+                true  => {
+                    d = d + 1
+                    p = p + 2
+                },
+                false => (b == '*' && at(src, p + 1) == '/').match ({
+                    true  => (d == 1).match ({ true => {
+                        r = p + 2
+                    }, false => {
+                        d = d - 1
+                        p = p + 2
+                    } }),
+                    false => {
+                        p = p + 1
+                    },
+                }),
+            }),
+        })
     }
     r
 }    // unterminated — stop at NUL and FLAG it (positioned at the opening `/*`); iterative (a long comment must not recurse per byte)
@@ -87,15 +96,21 @@ skip = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
-        is_space(at(src, p)).match ({ true => {
-            p = p + 1
-        }, false => src.is_comment(p).match ({ true => {
-            p = src.skip_line(p + 2)
-        }, false => src.is_block_open(p).match ({ true => {
-            p = src.skip_block_comment(p + 2)
-        }, false => {
-            moving = false
-        } }) }) })
+        is_space(at(src, p)).match ({
+            true  => {
+                p = p + 1
+            },
+            false => src.is_comment(p).match ({
+                true  => {
+                    p = src.skip_line(p + 2)
+                },
+                false => src.is_block_open(p).match ({ true => {
+                    p = src.skip_block_comment(p + 2)
+                }, false => {
+                    moving = false
+                } }),
+            }),
+        })
     }
     p
 }    // a nested `/*`; iterative — a long whitespace/comment run must not recurse per byte
@@ -116,13 +131,16 @@ int_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
-        is_digit(at(src, p)).match ({ true => {
-            p = p + 1
-        }, false => (at(src, p) == '_' && is_digit(at(src, p + 1))).match ({ true => {
-            p = p + 1
-        }, false => {
-            moving = false
-        } }) })
+        is_digit(at(src, p)).match ({
+            true  => {
+                p = p + 1
+            },
+            false => (at(src, p) == '_' && is_digit(at(src, p + 1))).match ({ true => {
+                p = p + 1
+            }, false => {
+                moving = false
+            } }),
+        })
     }
     p
 }
@@ -130,13 +148,16 @@ hex_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
-        is_hex(at(src, p)).match ({ true => {
-            p = p + 1
-        }, false => (at(src, p) == '_' && is_hex(at(src, p + 1))).match ({ true => {
-            p = p + 1
-        }, false => {
-            moving = false
-        } }) })
+        is_hex(at(src, p)).match ({
+            true  => {
+                p = p + 1
+            },
+            false => (at(src, p) == '_' && is_hex(at(src, p + 1))).match ({ true => {
+                p = p + 1
+            }, false => {
+                moving = false
+            } }),
+        })
     }
     p
 }
@@ -144,13 +165,16 @@ bin_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
-        is_bin(at(src, p)).match ({ true => {
-            p = p + 1
-        }, false => (at(src, p) == '_' && is_bin(at(src, p + 1))).match ({ true => {
-            p = p + 1
-        }, false => {
-            moving = false
-        } }) })
+        is_bin(at(src, p)).match ({
+            true  => {
+                p = p + 1
+            },
+            false => (at(src, p) == '_' && is_bin(at(src, p + 1))).match ({ true => {
+                p = p + 1
+            }, false => {
+                moving = false
+            } }),
+        })
     }
     p
 }
@@ -158,13 +182,16 @@ oct_end = (src: string_view, pos: i32) i32 {
     p := pos
     moving := true
     @while (moving == true) {
-        is_oct(at(src, p)).match ({ true => {
-            p = p + 1
-        }, false => (at(src, p) == '_' && is_oct(at(src, p + 1))).match ({ true => {
-            p = p + 1
-        }, false => {
-            moving = false
-        } }) })
+        is_oct(at(src, p)).match ({
+            true  => {
+                p = p + 1
+            },
+            false => (at(src, p) == '_' && is_oct(at(src, p + 1))).match ({ true => {
+                p = p + 1
+            }, false => {
+                moving = false
+            } }),
+        })
     }
     p
 }
@@ -173,7 +200,18 @@ oct_end = (src: string_view, pos: i32) i32 {
 is_hex_prefix* = (src: string_view, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'x' || at(src, pos + 1) == 'X') }
 is_bin_prefix* = (src: string_view, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'b' || at(src, pos + 1) == 'B') }
 is_oct_prefix* = (src: string_view, pos: i32) bool { at(src, pos) == '0' && (at(src, pos + 1) == 'o' || at(src, pos + 1) == 'O') }
-num_end = (src: string_view, pos: i32) i32 { src.is_hex_prefix(pos).match ({ true => src.radix_end(pos + 2, src.hex_end(pos + 2)), false => src.is_bin_prefix(pos).match ({ true => src.radix_end(pos + 2, src.bin_end(pos + 2)), false => src.is_oct_prefix(pos).match ({ true => src.radix_end(pos + 2, src.oct_end(pos + 2)), false => src.int_end(pos + 1) }) }) }) }
+num_end = (src: string_view, pos: i32) i32 {
+    src.is_hex_prefix(pos).match ({
+        true  => src.radix_end(pos + 2, src.hex_end(pos + 2)),
+        false => src.is_bin_prefix(pos).match ({
+            true  => src.radix_end(pos + 2, src.bin_end(pos + 2)),
+            false => src.is_oct_prefix(pos).match ({
+                true  => src.radix_end(pos + 2, src.oct_end(pos + 2)),
+                false => src.int_end(pos + 1),
+            }),
+        }),
+    })
+}
 // Validate a `0x`/`0b`/`0o` radix literal. `ds` = first digit (just past the 2-char prefix), `e` =
 // end of the consumed base-digit run. Two malformings flag a positioned lexer error (caret at the
 // `0` of the prefix, ds-2): an EMPTY literal (no digit consumed, `0b`/`0o`/`0x`) and a digit-run
@@ -190,7 +228,10 @@ radix_end = (src: string_view, ds: i32, e: i32) i32 {
 // `x.e` are NOT mis-consumed; the exponent only fuses when a digit actually follows.
 exp_end = (src: string_view, pos: i32) i32 {
     (at(src, pos) == 'e' || at(src, pos) == 'E').match ({ true => {
-        p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({ true => pos + 2, false => pos + 1 })
+        p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({
+            true  => pos + 2,
+            false => pos + 1,
+        })
         is_digit(at(src, p2)).match ({ true => src.int_end(p2), false => pos })
     }, false => pos })
 }
@@ -199,15 +240,21 @@ str_end = (src: string_view, pos: i32) i32 {
     r := 0 - 1
     @while (r < 0) {
         b := at(src, p)    // resume pos once the closing `"` is consumed; <0 while still scanning
-        (b == '\0').match ({ true => {
-            r = p
-        }, false => (b == '"').match ({ true => {
-            r = p + 1
-        }, false => (b == '\\').match ({ true => {
-            p = p + 2
-        }, false => {
-            p = p + 1
-        } }) }) })
+        (b == '\0').match ({
+            true  => {
+                r = p
+            },
+            false => (b == '"').match ({
+                true  => {
+                    r = p + 1
+                },
+                false => (b == '\\').match ({ true => {
+                    p = p + 2
+                }, false => {
+                    p = p + 1
+                } }),
+            }),
+        })
     }
     r
 }    // unterminated — stop at NUL; ITERATIVE so a ~50KB string literal is O(n) iteration, not O(n) C-stack
@@ -217,7 +264,13 @@ char_end = (src: string_view, pos: i32) i32 {
     // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
     // position just past the closing quote. One char, or a `\.` escape.
     // pos = first byte inside the quotes
-    (b == '\'').match ({ true => pos + 1, false => (b == '\\').match ({ true => src.scan_quote_end(pos + 2), false => src.scan_quote_end(pos + 1) }) })
+    (b == '\'').match ({
+        true  => pos + 1,
+        false => (b == '\\').match ({
+            true  => src.scan_quote_end(pos + 2),
+            false => src.scan_quote_end(pos + 1),
+        }),
+    })
 }    // empty ''  → consume just the two quotes
 scan_quote_end = (src: string_view, pos: i32) i32 {
     // Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
@@ -233,7 +286,10 @@ scan_quote_end = (src: string_view, pos: i32) i32 {
 // zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
 two_op = (b0: u8, b1: u8) bool { b0 == ':' && b1 == '=' || b0 == '=' && b1 == '=' || b0 == '<' && b1 == '=' || b0 == '>' && b1 == '=' || b0 == '=' && b1 == '>' || b0 == '&' && b1 == '&' || b0 == '!' && b1 == '=' || b0 == '|' && b1 == '|' || b0 == '<' && b1 == '<' || b0 == '>' && b1 == '>' || b1 == '=' && (b0 == '+' || b0 == '-' || b0 == '*' || b0 == '/' || b0 == '%') }    // := ; the last clause adds the compound-assign ops `+= -= *= /= %=`
-sym_end = (src: string_view, pos: i32) i32 { two_op(at(src, pos), at(src, pos + 1)).match ({ true => pos + 2, false => pos + 1 }) }    // ==
+sym_end = (src: string_view, pos: i32) i32 { two_op(at(src, pos), at(src, pos + 1)).match ({
+    true  => pos + 2,
+    false => pos + 1,
+}) }    // ==
 mk = (k: TokKind, start: i32, end: i32) Scan {
     Scan(
         tok: Token(
@@ -259,12 +315,29 @@ num_tok = (src: string_view, pos: i32) Scan {
     // `xs[0].addr()` still scan as an Int + a `.` postfix; the exponent only fuses when a digit
     // follows `e`, so `x.e` / a var `e1` are untouched. Hex (`0x…`) never floats.
     nofloat := src.is_hex_prefix(pos) || src.is_bin_prefix(pos) || src.is_oct_prefix(pos)
-    has_frac := nofloat.match ({ true => false, false => at(src, e) == '.' && is_digit(at(src, e + 1)) })
+    has_frac := nofloat.match ({
+        true  => false,
+        false => at(src, e) == '.' && is_digit(at(src, e + 1)),
+    })
     me := has_frac.match ({ true => src.int_end(e + 1), false => e })
     end := nofloat.match ({ true => me, false => src.exp_end(me) })
     (has_frac || end > me).match ({ true => mk(.Float, pos, end), false => mk(.Int, pos, e) })
 }
-scan_one = (src: string_view, pos: i32, b: u8) Scan { is_alpha(b).match ({ true => mk(.Ident, pos, src.ident_end(pos + 1)), false => is_digit(b).match ({ true => src.num_tok(pos), false => (b == '"').match ({ true => mk(.Str, pos, src.str_end(pos + 1)), false => (b == '\'').match ({ true => mk(.Char, pos, src.char_end(pos + 1)), false => mk(.Sym, pos, src.sym_end(pos)) }) }) }) }) }
+scan_one = (src: string_view, pos: i32, b: u8) Scan {
+    is_alpha(b).match ({
+        true  => mk(.Ident, pos, src.ident_end(pos + 1)),
+        false => is_digit(b).match ({
+            true  => src.num_tok(pos),
+            false => (b == '"').match ({
+                true  => mk(.Str, pos, src.str_end(pos + 1)),
+                false => (b == '\'').match ({
+                    true  => mk(.Char, pos, src.char_end(pos + 1)),
+                    false => mk(.Sym, pos, src.sym_end(pos)),
+                }),
+            }),
+        }),
+    })
+}
 scan* = (src: string_view, pos0: i32) Scan {
     pos := src.skip(pos0)
     b := at(src, pos)
@@ -365,43 +438,70 @@ count_comments* = (src: string_view) i32 {
     esc := false
     @while (at(src, i) != '\0') {
         b := at(src, i)
-        in_str.match ({ true => esc.match ({ true => {
-            esc = false
-            i = i + 1
-        }, false => (b == '\\').match ({ true => {
-            esc = true
-            i = i + 1
-        }, false => (b == '"').match ({ true => {
-            in_str = false
-            i = i + 1
-        }, false => {
-            i = i + 1
-        } }) }) }), false => in_char.match ({ true => esc.match ({ true => {
-            esc = false
-            i = i + 1
-        }, false => (b == '\\').match ({ true => {
-            esc = true
-            i = i + 1
-        }, false => (b == '\'').match ({ true => {
-            in_char = false
-            i = i + 1
-        }, false => {
-            i = i + 1
-        } }) }) }), false => (b == '/' && at(src, i + 1) == '/').match ({ true => {
-            n = n + 1
-            i = src.skip_line(i + 2)
-        }, false => (b == '/' && at(src, i + 1) == '*').match ({ true => {
-            n = n + 1
-            i = src.skip_block_comment(i + 2)
-        }, false => (b == '"').match ({ true => {
-            in_str = true
-            i = i + 1
-        }, false => (b == '\'').match ({ true => {
-            in_char = true
-            i = i + 1
-        }, false => {
-            i = i + 1
-        } }) }) }) }) }) })
+        in_str.match ({
+            true  => esc.match ({
+                true  => {
+                    esc = false
+                    i = i + 1
+                },
+                false => (b == '\\').match ({
+                    true  => {
+                        esc = true
+                        i = i + 1
+                    },
+                    false => (b == '"').match ({ true => {
+                        in_str = false
+                        i = i + 1
+                    }, false => {
+                        i = i + 1
+                    } }),
+                }),
+            }),
+            false => in_char.match ({
+                true  => esc.match ({
+                    true  => {
+                        esc = false
+                        i = i + 1
+                    },
+                    false => (b == '\\').match ({
+                        true  => {
+                            esc = true
+                            i = i + 1
+                        },
+                        false => (b == '\'').match ({ true => {
+                            in_char = false
+                            i = i + 1
+                        }, false => {
+                            i = i + 1
+                        } }),
+                    }),
+                }),
+                false => (b == '/' && at(src, i + 1) == '/').match ({
+                    true  => {
+                        n = n + 1
+                        i = src.skip_line(i + 2)
+                    },
+                    false => (b == '/' && at(src, i + 1) == '*').match ({
+                        true  => {
+                            n = n + 1
+                            i = src.skip_block_comment(i + 2)
+                        },
+                        false => (b == '"').match ({
+                            true  => {
+                                in_str = true
+                                i = i + 1
+                            },
+                            false => (b == '\'').match ({ true => {
+                                in_char = true
+                                i = i + 1
+                            }, false => {
+                                i = i + 1
+                            } }),
+                        }),
+                    }),
+                }),
+            }),
+        })
     }
     n
 }
@@ -426,54 +526,87 @@ fill_comments* = (src: string_view, buf: [Comment], k0: i32) void {
     esc := false
     @while (at(src, i) != '\0') {
         b := at(src, i)
-        in_str.match ({ true => esc.match ({ true => {
-            esc = false
-            i = i + 1
-        }, false => (b == '\\').match ({ true => {
-            esc = true
-            i = i + 1
-        }, false => (b == '"').match ({ true => {
-            in_str = false
-            i = i + 1
-        }, false => {
-            i = i + 1
-        } }) }) }), false => in_char.match ({ true => esc.match ({ true => {
-            esc = false
-            i = i + 1
-        }, false => (b == '\\').match ({ true => {
-            esc = true
-            i = i + 1
-        }, false => (b == '\'').match ({ true => {
-            in_char = false
-            i = i + 1
-        }, false => {
-            i = i + 1
-        } }) }) }), false => (b == '/' && at(src, i + 1) == '/').match ({ true => {
-            e := src.skip_line(i + 2)
-            buf[k] = Comment(
-                start: i,
-                len: e - i,
-                trailing: src.line_is_blank_before(i).match ({ true => false, false => true }),
-            )
-            k = k + 1
-            i = e
-        }, false => (b == '/' && at(src, i + 1) == '*').match ({ true => {
-            e := src.skip_block_comment(i + 2)
-            buf[k] = Comment(
-                start: i,
-                len: e - i,
-                trailing: src.line_is_blank_before(i).match ({ true => false, false => true }),
-            )
-            k = k + 1
-            i = e
-        }, false => (b == '"').match ({ true => {
-            in_str = true
-            i = i + 1
-        }, false => (b == '\'').match ({ true => {
-            in_char = true
-            i = i + 1
-        }, false => {
-            i = i + 1
-        } }) }) }) }) }) })
+        in_str.match ({
+            true  => esc.match ({
+                true  => {
+                    esc = false
+                    i = i + 1
+                },
+                false => (b == '\\').match ({
+                    true  => {
+                        esc = true
+                        i = i + 1
+                    },
+                    false => (b == '"').match ({ true => {
+                        in_str = false
+                        i = i + 1
+                    }, false => {
+                        i = i + 1
+                    } }),
+                }),
+            }),
+            false => in_char.match ({
+                true  => esc.match ({
+                    true  => {
+                        esc = false
+                        i = i + 1
+                    },
+                    false => (b == '\\').match ({
+                        true  => {
+                            esc = true
+                            i = i + 1
+                        },
+                        false => (b == '\'').match ({ true => {
+                            in_char = false
+                            i = i + 1
+                        }, false => {
+                            i = i + 1
+                        } }),
+                    }),
+                }),
+                false => (b == '/' && at(src, i + 1) == '/').match ({
+                    true  => {
+                        e := src.skip_line(i + 2)
+                        buf[k] = Comment(
+                            start: i,
+                            len: e - i,
+                            trailing: src.line_is_blank_before(i).match ({
+                                true  => false,
+                                false => true,
+                            }),
+                        )
+                        k = k + 1
+                        i = e
+                    },
+                    false => (b == '/' && at(src, i + 1) == '*').match ({
+                        true  => {
+                            e := src.skip_block_comment(i + 2)
+                            buf[k] = Comment(
+                                start: i,
+                                len: e - i,
+                                trailing: src.line_is_blank_before(i).match ({
+                                    true  => false,
+                                    false => true,
+                                }),
+                            )
+                            k = k + 1
+                            i = e
+                        },
+                        false => (b == '"').match ({
+                            true  => {
+                                in_str = true
+                                i = i + 1
+                            },
+                            false => (b == '\'').match ({ true => {
+                                in_char = true
+                                i = i + 1
+                            }, false => {
+                                i = i + 1
+                            } }),
+                        }),
+                    }),
+                }),
+            }),
+        })
     }
 }

@@ -57,11 +57,14 @@ is_typed_let_here = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
     sc.tok.kind.match ({
         .Ident => {
             colon := src.scan(sc.next)
-            src.is_field_colon(colon.tok).match ({ true => {
-                te := a.parse_ty(src, colon.next)    // consume the type; te.next lands at ':=' or '='
-                op := src.scan(te.next)
-                src.is_assign(op.tok) || src.is_eq(op.tok)
-            }, false => false })
+            src.is_field_colon(colon.tok).match ({
+                true  => {
+                    te := a.parse_ty(src, colon.next)    // consume the type; te.next lands at ':=' or '='
+                    op := src.scan(te.next)
+                    src.is_assign(op.tok) || src.is_eq(op.tok)
+                },
+                false => false,
+            })
         },
         _      => false,
     })
@@ -79,7 +82,13 @@ is_eq = (src: string_view, t: Token) bool {
 // produces (`((elem*)(seq).ptr)[idx]`), so sassign stores through it directly.
 skip_place = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
-    src.is_dot(sc.tok).match ({ true => src.skip_place(src.scan(sc.next).next), false => src.is_lbracket(sc.tok).match ({ true => src.skip_place(src.skip_brackets(sc.next)), false => pos }) })
+    src.is_dot(sc.tok).match ({
+        true  => src.skip_place(src.scan(sc.next).next),
+        false => src.is_lbracket(sc.tok).match ({
+            true  => src.skip_place(src.skip_brackets(sc.next)),
+            false => pos,
+        }),
+    })
 }    // `.field` -> skip the dot and the field name
 is_set_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)    // `[ … ]` -> skip past the matching ']'
@@ -96,13 +105,19 @@ skip_brackets = (src: string_view, pos: i32) i32 {
             perr_set_at(pos)
             sc.next
         },    // unterminated '[': flag AT the end of the last real token, stop at EOF, don't recurse forever
-        _    => src.is_rbracket(sc.tok).match ({ true => sc.next, false => src.skip_brackets(sc.next) }),
+        _    => src.is_rbracket(sc.tok).match ({
+            true  => sc.next,
+            false => src.skip_brackets(sc.next),
+        }),
     })
 }
 is_idxset_here = (src: string_view, pos: i32) bool {
     nt := src.scan(pos)
     nt.tok.kind.match ({
-        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({ true => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok), false => false }),
+        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
+            true  => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
+            false => false,
+        }),
         _      => false,
     })
 }
@@ -121,7 +136,10 @@ is_compound_op = (src: string_view, t: Token) bool {
 is_compound_idxset_here = (src: string_view, pos: i32) bool {
     nt := src.scan(pos)
     nt.tok.kind.match ({
-        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({ true => src.is_compound_op(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok), false => false }),
+        .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
+            true  => src.is_compound_op(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
+            false => false,
+        }),
         _      => false,
     })
 }
@@ -143,12 +161,44 @@ is_return_kw = (src: string_view, t: Token) bool {
 }
 is_return_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)
-    src.is_return_kw(sc.tok).match ({ true => src.is_assign(src.scan(sc.next).tok).match ({ true => false, false => src.is_eq(src.scan(sc.next).tok).match ({ true => false, false => true }) }), false => false })
+    src.is_return_kw(sc.tok).match ({
+        true  => src.is_assign(src.scan(sc.next).tok).match ({
+            true  => false,
+            false => src.is_eq(src.scan(sc.next).tok).match ({ true => false, false => true }),
+        }),
+        false => false,
+    })
 }
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
 SKind*: SLet | SLetT | SIdx | SSet | SCIdx | SCSet | SWhile | SRet | SExpr
-stmt_kind = (a: MutPtr<Malloc>, src: string_view, pos: i32) SKind { a.is_typed_let_here(src, pos).match ({ true => .SLetT, false => src.is_let_here(pos).match ({ true => .SLet, false => src.is_idxset_here(pos).match ({ true => .SIdx, false => src.is_set_here(pos).match ({ true => .SSet, false => src.is_compound_idxset_here(pos).match ({ true => .SCIdx, false => src.is_compound_set_here(pos).match ({ true => .SCSet, false => src.is_while_here(pos).match ({ true => .SWhile, false => src.is_return_here(pos).match ({ true => .SRet, false => .SExpr }) }) }) }) }) }) }) }) }
+stmt_kind = (a: MutPtr<Malloc>, src: string_view, pos: i32) SKind {
+    a.is_typed_let_here(src, pos).match ({
+        true  => .SLetT,
+        false => src.is_let_here(pos).match ({
+            true  => .SLet,
+            false => src.is_idxset_here(pos).match ({
+                true  => .SIdx,
+                false => src.is_set_here(pos).match ({
+                    true  => .SSet,
+                    false => src.is_compound_idxset_here(pos).match ({
+                        true  => .SCIdx,
+                        false => src.is_compound_set_here(pos).match ({
+                            true  => .SCSet,
+                            false => src.is_while_here(pos).match ({
+                                true  => .SWhile,
+                                false => src.is_return_here(pos).match ({
+                                    true  => .SRet,
+                                    false => .SExpr,
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
 parse_stmts = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
@@ -164,17 +214,20 @@ parse_stmts = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     r
 }
 parse_stmts_inner = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
-    src.at_body_end(pos).match ({ true => a.snil(), false => a.stmt_kind(src, pos).match ({
-        .SLet   => a.parse_let_stmt(src, pos),    // an empty body `{ }` (a void no-op) — no statements
-        .SLetT  => a.parse_typed_let_stmt(src, pos),
-        .SIdx   => a.parse_idxset_stmt(src, pos),
-        .SSet   => a.parse_set_stmt(src, pos),
-        .SCIdx  => a.parse_comp_idxset_stmt(src, pos),
-        .SCSet  => a.parse_comp_set_stmt(src, pos),
-        .SWhile => a.parse_while_stmt(src, pos),
-        .SRet   => a.parse_return_stmt(src, pos),
-        .SExpr  => a.parse_ret_stmt(src, pos),
-    }) })
+    src.at_body_end(pos).match ({
+        true  => a.snil(),
+        false => a.stmt_kind(src, pos).match ({
+            .SLet   => a.parse_let_stmt(src, pos),    // an empty body `{ }` (a void no-op) — no statements
+            .SLetT  => a.parse_typed_let_stmt(src, pos),
+            .SIdx   => a.parse_idxset_stmt(src, pos),
+            .SSet   => a.parse_set_stmt(src, pos),
+            .SCIdx  => a.parse_comp_idxset_stmt(src, pos),
+            .SCSet  => a.parse_comp_set_stmt(src, pos),
+            .SWhile => a.parse_while_stmt(src, pos),
+            .SRet   => a.parse_return_stmt(src, pos),
+            .SExpr  => a.parse_ret_stmt(src, pos),
+        }),
+    })
 }
 // `name[i] = value` — an index assignment. The element type is left void; compiler.check fills it.
 parse_idxset_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
@@ -249,7 +302,10 @@ at_body_end = (src: string_view, pos: i32) bool {
 }
 parse_ret_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     r := a.parse_or(src, pos)
-    src.at_body_end(r.next).match ({ true => a.scons(sret(r.expr), a.snil()), false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next)) })
+    src.at_body_end(r.next).match ({
+        true  => a.scons(sret(r.expr), a.snil()),
+        false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next)),
+    })
 }    // final expression -> return
 parse_return_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     kw := src.scan(pos)    // a bare expr statement

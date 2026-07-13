@@ -240,10 +240,19 @@ run_verdict* = (vc: VerdictCase) bool {
     mp := m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
     rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
-    vc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(vc.kind).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
-        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-        .Err(e)  => false,
-    }) }) }) })
+    vc.should_pass.match ({
+        true  => rc == 0,
+        false => (rc == 0).match ({
+            true  => false,
+            false => is_empty(vc.kind).match ({
+                true  => true,
+                false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
+                    .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
+                    .Err(e)  => false,
+                }),
+            }),
+        }),
+    })
 }
 // DIAGNOSTIC: `zenc check` must reject (exit nonzero); capture the FULL diagnostic (stdout+stderr) and
 // require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
@@ -252,18 +261,21 @@ run_diag* = (dc: DiagCase) bool {
     mp := m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
     rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
-    (rc == 0).match ({ true => false, false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
-        .Ok(txt) => {
-            all := true
-            dc.wants.loop((h, i, wnt) {
-                txt.contains(wnt).match ({ false => {
-                    all = false
-                } })
-            })    // must REJECT
-            all
-        },
-        .Err(e)  => false,
-    }) })
+    (rc == 0).match ({
+        true  => false,
+        false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
+            .Ok(txt) => {
+                all := true
+                dc.wants.loop((h, i, wnt) {
+                    txt.contains(wnt).match ({ false => {
+                        all = false
+                    } })
+                })    // must REJECT
+                all
+            },
+            .Err(e)  => false,
+        }),
+    })
 }
 // the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
 // temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
@@ -353,10 +365,19 @@ zo_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VerdictCase) bool {
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
-    vc.should_pass.match ({ true => accepted, false => accepted.match ({ true => false, false => is_empty(vc.kind).match ({ true => true, false => mp.contents_in(mp.zo_idpath("chk", gid, ".txt")).match ({
-        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-        .Err(e)  => false,
-    }) }) }) })
+    vc.should_pass.match ({
+        true  => accepted,
+        false => accepted.match ({
+            true  => false,
+            false => is_empty(vc.kind).match ({
+                true  => true,
+                false => mp.contents_in(mp.zo_idpath("chk", gid, ".txt")).match ({
+                    .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
+                    .Err(e)  => false,
+                }),
+            }),
+        }),
+    })
 }
 // batch VERDICT runner + reporter: build (serial), run in parallel, check IN ORDER — same verdict as serial.
 run_verdicts* = (name: string_view, cs: [VerdictCase]) i32 {
@@ -399,18 +420,21 @@ zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
         .Ok(s)  => s.starts_with("F"),
         .Err(e) => false,
     })
-    rejected.match ({ true => mp.contents_in(mp.zo_idpath("do", gid, ".txt")).match ({
-        .Ok(txt) => {
-            all := true
-            dc.wants.loop((h, i, wnt) {
-                txt.contains(wnt).match ({ false => {
-                    all = false
-                } })
-            })
-            all
-        },
-        .Err(e)  => false,
-    }), false => false })
+    rejected.match ({
+        true  => mp.contents_in(mp.zo_idpath("do", gid, ".txt")).match ({
+            .Ok(txt) => {
+                all := true
+                dc.wants.loop((h, i, wnt) {
+                    txt.contains(wnt).match ({ false => {
+                        all = false
+                    } })
+                })
+                all
+            },
+            .Err(e)  => false,
+        }),
+        false => false,
+    })
 }
 // batch DIAGNOSTIC runner + reporter: build (serial), run in parallel, check IN ORDER — same verdict as serial.
 run_diags* = (name: string_view, cs: [DiagCase]) i32 {

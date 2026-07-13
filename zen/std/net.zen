@@ -69,18 +69,24 @@ digit_val = (b: u8) i64 { to_i64(b - '0') }
 // input. A dotted-quad host is short and bounded, so recursion (not iteration) is safe here — unlike
 // std.fs's unbounded directory walk. `seen` guards against empty octets ("1..2", ".1", "1.").
 parse_octets = (v: [u8], i: i64, cell: RawPtr<u8>, octet: i64, count: i64, seen: bool) i64 {
-    (i >= v.len).match ({ true => (seen && count == 3 && octet <= 255).match ({ true => {
-        cell.offset(4 + count).store(to_u8(octet))
-        count + 1
-    }, false => 0 - 1 }), false => {
-        b := v[i]
-        (b == '.').match ({ true => (seen && count < 3 && octet <= 255).match ({ true => {
+    (i >= v.len).match ({
+        true  => (seen && count == 3 && octet <= 255).match ({ true => {
             cell.offset(4 + count).store(to_u8(octet))
-            v.parse_octets(i + 1, cell, 0, count + 1, false)
-        }, false => 0 - 1 }), false => (b >= '0' && b <= '9').match ({ true => {
-            v.parse_octets(i + 1, cell, octet * 10 + digit_val(b), count, true)
-        }, false => 0 - 1 }) })
-    } })
+            count + 1
+        }, false => 0 - 1 }),
+        false => {
+            b := v[i]
+            (b == '.').match ({
+                true  => (seen && count < 3 && octet <= 255).match ({ true => {
+                    cell.offset(4 + count).store(to_u8(octet))
+                    v.parse_octets(i + 1, cell, 0, count + 1, false)
+                }, false => 0 - 1 }),
+                false => (b >= '0' && b <= '9').match ({ true => {
+                    v.parse_octets(i + 1, cell, octet * 10 + digit_val(b), count, true)
+                }, false => 0 - 1 }),
+            })
+        },
+    })
 }
 // parse `host` (a dotted-quad "a.b.c.d" or the literal "localhost") into the four sin_addr octets at
 // cell[4..8]; return false on a malformed address. "0.0.0.0" (INADDR_ANY) binds all interfaces.
@@ -114,29 +120,32 @@ set_reuse = (fd: i32) void {
 // accept queue is `BACKLOG` deep, or the first failing step's errno.
 serve* = (host: string_view, port: i32) Result<TcpListener, IoError> {
     fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
-    out: Result<TcpListener, IoError> := (fd < 0).match ({ true => err(IoError.Errno(fd)), false => {
-        fd.set_reuse()
-        cell := zeroed(SOCKADDR_LEN)
-        res: Result<TcpListener, IoError> := fill_sockaddr(cell, host, port).match ({ true => {
-            b := fd.bind(cell, to_i32(SOCKADDR_LEN))
-            cell.release()
-            (b < 0).match ({ true => {
-                fd.close()
-                err(IoError.Errno(b))
-            }, false => {
-                lr := fd.listen(BACKLOG)
-                (lr < 0).match ({ true => {
+    out: Result<TcpListener, IoError> := (fd < 0).match ({
+        true  => err(IoError.Errno(fd)),
+        false => {
+            fd.set_reuse()
+            cell := zeroed(SOCKADDR_LEN)
+            res: Result<TcpListener, IoError> := fill_sockaddr(cell, host, port).match ({ true => {
+                b := fd.bind(cell, to_i32(SOCKADDR_LEN))
+                cell.release()
+                (b < 0).match ({ true => {
                     fd.close()
-                    err(IoError.Errno(lr))
-                }, false => ok(TcpListener(fd: fd)) })
+                    err(IoError.Errno(b))
+                }, false => {
+                    lr := fd.listen(BACKLOG)
+                    (lr < 0).match ({ true => {
+                        fd.close()
+                        err(IoError.Errno(lr))
+                    }, false => ok(TcpListener(fd: fd)) })
+                } })
+            }, false => {
+                cell.release()
+                fd.close()
+                err(IoError.NotFound)
             } })
-        }, false => {
-            cell.release()
-            fd.close()
-            err(IoError.NotFound)
-        } })
-        res
-    } })
+            res
+        },
+    })
     out
 }
 // the ephemeral (or fixed) port the listener is bound to, read back via getsockname; 0 on failure.

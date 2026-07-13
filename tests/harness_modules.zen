@@ -164,10 +164,19 @@ run_mod_verdict* = (mc: ModVerdictCase) bool {
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
-    mc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(mc.needle).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_mods_chk.txt")).match ({
-        .Ok(txt) => txt.contains(mc.needle),
-        .Err(e)  => false,
-    }) }) }) })
+    mc.should_pass.match ({
+        true  => rc == 0,
+        false => (rc == 0).match ({
+            true  => false,
+            false => is_empty(mc.needle).match ({
+                true  => true,
+                false => mp.contents_in(mp.zo_path("zo_mods_chk.txt")).match ({
+                    .Ok(txt) => txt.contains(mc.needle),
+                    .Err(e)  => false,
+                }),
+            }),
+        }),
+    })
 }
 // EMIT: build the project, `zenc emit <entry>`; must succeed and the C must hold every `present`
 // substring and none of the `absent` ones.
@@ -178,23 +187,26 @@ run_mod_emit* = (mc: ModEmitCase) bool {
     entry := mp.join2(mp.mod_dir(), mc.entry)
     cmd := mp.join3("./zenc emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
-        .Err(e)  => false,
-        .Ok(txt) => {
-            bad := 0
-            mc.present.loop((h, i, s) {
-                txt.contains(s).match ({ false => {
-                    bad = bad + 1
-                } })
-            })
-            mc.absent.loop((h, i, s) {
-                txt.contains(s).match ({ true => {
-                    bad = bad + 1
-                } })
-            })
-            bad == 0
-        },
-    }), false => false })
+    (rc == 0).match ({
+        true  => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
+            .Err(e)  => false,
+            .Ok(txt) => {
+                bad := 0
+                mc.present.loop((h, i, s) {
+                    txt.contains(s).match ({ false => {
+                        bad = bad + 1
+                    } })
+                })
+                mc.absent.loop((h, i, s) {
+                    txt.contains(s).match ({ true => {
+                        bad = bad + 1
+                    } })
+                })
+                bad == 0
+            },
+        }),
+        false => false,
+    })
 }
 // DOC: `zenc doc <module>`; must succeed and contain every `present` substring.
 run_mod_doc* = (mc: ModDocCase) bool {
@@ -202,18 +214,21 @@ run_mod_doc* = (mc: ModDocCase) bool {
     mp := m.addr()
     cmd := mp.join3("./zenc doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
-        .Err(e)  => false,
-        .Ok(txt) => {
-            bad := 0
-            mc.present.loop((h, i, s) {
-                txt.contains(s).match ({ false => {
-                    bad = bad + 1
-                } })
-            })
-            bad == 0
-        },
-    }), false => false })
+    (rc == 0).match ({
+        true  => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
+            .Err(e)  => false,
+            .Ok(txt) => {
+                bad := 0
+                mc.present.loop((h, i, s) {
+                    txt.contains(s).match ({ false => {
+                        bad = bad + 1
+                    } })
+                })
+                bad == 0
+            },
+        }),
+        false => false,
+    })
 }
 // STDIN: pipe `src` into `./zenc` (no file arg → the source→C filter / sibling-from-stdin path).
 // should_succeed => exit 0 else != 0; combined stdout+stderr must contain every `present` substring.
@@ -223,18 +238,21 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
     save(mp.zo_path("zo_mods_stdin.zen"), mc.src, len(mc.src))
     rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("harness: shell")
     ok_rc := mc.should_succeed.match ({ true => rc == 0, false => rc != 0 })
-    ok_rc.match ({ true => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
-        .Err(e)  => false,
-        .Ok(txt) => {
-            bad := 0
-            mc.present.loop((h, i, s) {
-                txt.contains(s).match ({ false => {
-                    bad = bad + 1
-                } })
-            })
-            bad == 0
-        },
-    }), false => false })
+    ok_rc.match ({
+        true  => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
+            .Err(e)  => false,
+            .Ok(txt) => {
+                bad := 0
+                mc.present.loop((h, i, s) {
+                    txt.contains(s).match ({ false => {
+                        bad = bad + 1
+                    } })
+                })
+                bad == 0
+            },
+        }),
+        false => false,
+    })
 }
 // ── PARALLEL module runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────────────
 // Same three-phase shape as the single-file harness_lib runners, but each case gets its OWN project dir
@@ -282,10 +300,19 @@ mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
-    mc.should_pass.match ({ true => accepted, false => accepted.match ({ true => false, false => is_empty(mc.needle).match ({ true => true, false => mp.contents_in(mp.mod_chk_path(gid)).match ({
-        .Ok(txt) => txt.contains(mc.needle),
-        .Err(e)  => false,
-    }) }) }) })
+    mc.should_pass.match ({
+        true  => accepted,
+        false => accepted.match ({
+            true  => false,
+            false => is_empty(mc.needle).match ({
+                true  => true,
+                false => mp.contents_in(mp.mod_chk_path(gid)).match ({
+                    .Ok(txt) => txt.contains(mc.needle),
+                    .Err(e)  => false,
+                }),
+            }),
+        }),
+    })
 }
 // batch runners + reporters: build+write (serial), run in parallel, check IN ORDER — same verdict as serial.
 run_mod_values = (name: string_view, cs: [ModValCase]) i32 {
@@ -323,7 +350,18 @@ DeepCase: {
     base_files: [ModFile],
     kind: i32,
 }
-deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: string_view) string_view { (kind == 0).match ({ true => mp.deep_src_table(dir), false => (kind == 1).match ({ true => mp.deep_src_parsed(dir), false => (kind == 2).match ({ true => mp.deep_src_check(dir), false => mp.deep_src_check_all(dir) }) }) }) }
+deep_driver_src = (mp: MutPtr<Malloc>, kind: i32, dir: string_view) string_view {
+    (kind == 0).match ({
+        true  => mp.deep_src_table(dir),
+        false => (kind == 1).match ({
+            true  => mp.deep_src_parsed(dir),
+            false => (kind == 2).match ({
+                true  => mp.deep_src_check(dir),
+                false => mp.deep_src_check_all(dir),
+            }),
+        }),
+    })
+}
 deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
     mp.contents_in(mp.mod_rc_path(gid)).match ({
         .Ok(s)  => try_parse_int(s).match ({
@@ -399,23 +437,26 @@ mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
-    passed.match ({ true => mp.contents_in(mp.mod_emit_path(gid)).match ({
-        .Err(e)  => false,
-        .Ok(txt) => {
-            bad := 0
-            mc.present.loop((h, i, s) {
-                txt.contains(s).match ({ false => {
-                    bad = bad + 1
-                } })
-            })
-            mc.absent.loop((h, i, s) {
-                txt.contains(s).match ({ true => {
-                    bad = bad + 1
-                } })
-            })
-            bad == 0
-        },
-    }), false => false })
+    passed.match ({
+        true  => mp.contents_in(mp.mod_emit_path(gid)).match ({
+            .Err(e)  => false,
+            .Ok(txt) => {
+                bad := 0
+                mc.present.loop((h, i, s) {
+                    txt.contains(s).match ({ false => {
+                        bad = bad + 1
+                    } })
+                })
+                mc.absent.loop((h, i, s) {
+                    txt.contains(s).match ({ true => {
+                        bad = bad + 1
+                    } })
+                })
+                bad == 0
+            },
+        }),
+        false => false,
+    })
 }
 run_mod_emits = (name: string_view, cs: [ModEmitCase]) i32 {
     out(name)

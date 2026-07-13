@@ -3,9 +3,10 @@
 // the registry storage and releases it after emitting the graph.
 { print, println } = std.text.fmt
 { Platform, Os, Arch, Abi, host } = std.platform
-{ malloc, free } = std.mem.alloc
+{ Malloc } = std.mem.alloc
 { panic } = std.core.result
 Build*: {
+    alloc_: Malloc,
     host_: Platform,
     target_: Platform,
     targets_: [Target],
@@ -14,10 +15,13 @@ Build*: {
     target = (b: Ptr<Build>) Platform { b.target_ }
     exe = (b: Ptr<Build>, name: string_view) Target { exe(name).target(b.target_) }
     install = (b: MutPtr<Build>, target: Target) void {
-        (b.count_ >= b.targets_.len).match ({ true => panic("std.build: target capacity exceeded"), false => {
-            b.targets_[b.count_] = target
-            b.count_ = b.count_ + 1
-        } })
+        (b.count_ >= b.targets_.len).match ({
+            true  => panic("std.build: target capacity exceeded"),
+            false => {
+                b.targets_[b.count_] = target
+                b.count_ = b.count_ + 1
+            },
+        })
     }
     emit_spec = (b: Ptr<Build>) void {
         println(b.count_)
@@ -26,12 +30,14 @@ Build*: {
             target.emit_target()
         })
     }
-    deinit = (b: MutPtr<Build>) void { free(b.targets_.ptr) }
+    deinit = (b: MutPtr<Build>) void { b.alloc_.addr().release(b.targets_.ptr) }
 }
 build_context* = () Build {
+    a := Malloc(_: 0)
     p := host()
-    slots: [Target] := slice(assert_nonnull(malloc(256 * sizeof(Target))), 256)
+    slots: [Target] := slice(assert_nonnull(a.addr().acquire(256 * sizeof(Target))), 256)
     Build(
+        alloc_: a,
         host_: p,
         target_: p,
         targets_: slots,
@@ -152,9 +158,18 @@ Target*: {
             platform_: t.platform_,
         )
     }
-    sources_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({ true => t.sources(xs), false => t }) }
-    frameworks_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({ true => t.frameworks(xs), false => t }) }
-    libraries_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({ true => t.libraries(xs), false => t }) }
+    sources_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({
+        true  => t.sources(xs),
+        false => t,
+    }) }
+    frameworks_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({
+        true  => t.frameworks(xs),
+        false => t,
+    }) }
+    libraries_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({
+        true  => t.libraries(xs),
+        false => t,
+    }) }
     emit_target = (t: Target) void {
         // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
         // Six fixed lines: name, root, main, out, linker flags, compiler inputs.

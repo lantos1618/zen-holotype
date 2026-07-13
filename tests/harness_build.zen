@@ -72,13 +72,22 @@ run_fixture* = (fc: FixtureCase) bool {
     mp := m.addr()
     save(mp.zo_path("zob_out.txt"), "", 0)
     bc := shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("harness: shell")
-    (bc == 0).match ({ true => {
-        rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
-        (rc == 0).match ({ true => fc.check_out.match ({ true => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
-            .Ok(got) => eq(got, fc.want_out),    // exit code mismatch => fail
-            .Err(e)  => false,
-        }), false => true }), false => false })
-    }, false => false })
+    (bc == 0).match ({
+        true  => {
+            rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
+            (rc == 0).match ({
+                true  => fc.check_out.match ({
+                    true  => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
+                        .Ok(got) => eq(got, fc.want_out),    // exit code mismatch => fail
+                        .Err(e)  => false,
+                    }),
+                    false => true,
+                }),
+                false => false,
+            })
+        },
+        false => false,
+    })
 }    // exit-only fixture: matched
 // ── PARALLEL build/emit/doc runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────
 // Same three-phase shape as harness_lib's parallel runners: build a self-contained per-case command that
@@ -102,16 +111,25 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
-    built.match ({ true => {
-        z: string_view := ""
-        zob := mp.zo_idpath("zob", gid, "")
-        o := mp.zo_idpath("zobout", gid, ".txt")
-        rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
-        (rc == 0).match ({ true => fc.check_out.match ({ true => mp.contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
-            .Ok(got) => eq(got, fc.want_out),
-            .Err(e)  => false,
-        }), false => true }), false => false })
-    }, false => false })
+    built.match ({
+        true  => {
+            z: string_view := ""
+            zob := mp.zo_idpath("zob", gid, "")
+            o := mp.zo_idpath("zobout", gid, ".txt")
+            rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
+            (rc == 0).match ({
+                true  => fc.check_out.match ({
+                    true  => mp.contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
+                        .Ok(got) => eq(got, fc.want_out),
+                        .Err(e)  => false,
+                    }),
+                    false => true,
+                }),
+                false => false,
+            })
+        },
+        false => false,
+    })
 }
 // batch BUILD runner + reporter: build the fixtures IN PARALLEL (the cc-heavy step), then run+check them
 // SERIALLY (thread-spawning concurrency fixtures must not be oversubscribed). Byte-identical verdict.
@@ -168,10 +186,13 @@ run_emit* = (ec: EmitCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     rc := shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
-        .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
-        .Err(e)  => false,
-    }), false => false })
+    (rc == 0).match ({
+        true  => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
+            .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
+            .Err(e)  => false,
+        }),
+        false => false,
+    })
 }
 emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) string_view {
     z: string_view := ""
@@ -184,10 +205,13 @@ emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
-    passed.match ({ true => mp.contents_in(mp.zo_idpath("zoeemit", gid, ".c")).match ({
-        .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
-        .Err(e)  => false,
-    }), false => false })
+    passed.match ({
+        true  => mp.contents_in(mp.zo_idpath("zoeemit", gid, ".c")).match ({
+            .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
+            .Err(e)  => false,
+        }),
+        false => false,
+    })
 }
 run_emits* = (name: string_view, cs: [EmitCase]) i32 {
     out(name)
@@ -217,10 +241,13 @@ run_doc* = (dc: DocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     rc := shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
-        .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
-        .Err(e)  => false,
-    }), false => false })
+    (rc == 0).match ({
+        true  => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
+            .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
+            .Err(e)  => false,
+        }),
+        false => false,
+    })
 }
 doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) string_view {
     z: string_view := ""
@@ -233,10 +260,13 @@ doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
-    passed.match ({ true => mp.contents_in(mp.zo_idpath("zoedoc", gid, ".txt")).match ({
-        .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
-        .Err(e)  => false,
-    }), false => false })
+    passed.match ({
+        true  => mp.contents_in(mp.zo_idpath("zoedoc", gid, ".txt")).match ({
+            .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
+            .Err(e)  => false,
+        }),
+        false => false,
+    })
 }
 run_docs* = (name: string_view, cs: [DocCase]) i32 {
     out(name)
@@ -838,11 +868,6 @@ harness_build_run* = () i32 {
     ), FixtureCase(
         path: "tests/fixtures/zen/vec_growth_resizes.zen",
         want_exit: "21",
-        want_out: "",
-        check_out: false,
-    ), FixtureCase(
-        path: "tests/fixtures/zen/decl_cap_2000.zen",
-        want_exit: "99",
         want_out: "",
         check_out: false,
     ), FixtureCase(
@@ -1756,6 +1781,9 @@ harness_build_run* = () i32 {
     )])
     // ── (j) procedural tests (project mode, fmt idempotency, help/version, bad-file, sibling, emit-eq) ─
     sh := run_shells("build shell", [ShellCase(
+        name: "decl_cap_2000_generated",
+        cmd: "f=$ZT/decl_cap_2000.zen && : >$f && i=0 && while test $i -lt 2000; do printf 'f%s = () i32 { %s }\\n' \"$i\" \"$((i % 100))\" >>$f; i=$((i + 1)); done && printf 'main = () i32 { f1999() }\\n' >>$f && ./zenc build $f -o $ZT/decl_cap_2000 >/dev/null 2>&1 && { $ZT/decl_cap_2000; test \"$?\" = 99; }",
+    ), ShellCase(
         name: "run_forwards_args",
         cmd: "./zenc run tests/fixtures/zen/echo_args.zen alpha beta 'g z' > $ZT/zargs.txt 2>/dev/null && printf '3\\nalpha\\nbeta\\ng z\\n' | cmp -s - $ZT/zargs.txt",
     ), ShellCase(

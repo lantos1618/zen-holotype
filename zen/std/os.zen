@@ -30,8 +30,14 @@ getEnv* = (name: string_view) string_view {
 // set_env(name, value): create/overwrite the variable. unset_env(name): remove it. Both return
 // true on success (a clean bool over libc's 0/-1, the getEnv-style wrapping). The env owns the copy,
 // so `value` need not outlive the call.
-set_env* = (name: string_view, value: string_view) bool { (setenv(name, value, 1) == 0).match ({ true => true, false => false }) }
-unset_env* = (name: string_view) bool { (unsetenv(name) == 0).match ({ true => true, false => false }) }
+set_env* = (name: string_view, value: string_view) bool { (setenv(name, value, 1) == 0).match ({
+    true  => true,
+    false => false,
+}) }
+unset_env* = (name: string_view) bool { (unsetenv(name) == 0).match ({
+    true  => true,
+    false => false,
+}) }
 // copy each argv slot into `out[i..]` (the strings are argv-backed, stable for the process lifetime,
 // so this borrows them — no per-string copy, only the backbone is owned).
 fill_argv = (out: [string_view], i: i32, n: i32) void {
@@ -58,11 +64,24 @@ args*<A> = (a: MutPtr<A>) Result<[string_view], IoError> {
     })
 }
 // has_flag(tok): is the exact token `tok` present anywhere in argv? (e.g. os.has_flag("--verbose"))
-flag_at = (tok: string_view, i: i32) bool { (i >= zen_argc()).match ({ true => false, false => eq(zen_argv_at(i), tok).match ({ true => true, false => flag_at(tok, i + 1) }) }) }
+flag_at = (tok: string_view, i: i32) bool {
+    (i >= zen_argc()).match ({
+        true  => false,
+        false => eq(zen_argv_at(i), tok).match ({ true => true, false => flag_at(tok, i + 1) }),
+    })
+}
 has_flag* = (tok: string_view) bool { flag_at(tok, 0) }
 // flag_str(key): the argv token that follows the first exact `key` (the `--key value` shape), or ""
 // when `key` is absent or is the last token (no value follows). (e.g. os.flag_str("--out"))
-flag_str_at = (key: string_view, i: i32) string_view { (i + 1 >= zen_argc()).match ({ true => "", false => eq(zen_argv_at(i), key).match ({ true => zen_argv_at(i + 1), false => flag_str_at(key, i + 1) }) }) }
+flag_str_at = (key: string_view, i: i32) string_view {
+    (i + 1 >= zen_argc()).match ({
+        true  => "",
+        false => eq(zen_argv_at(i), key).match ({
+            true  => zen_argv_at(i + 1),
+            false => flag_str_at(key, i + 1),
+        }),
+    })
+}
 flag_str* = (key: string_view) string_view { flag_str_at(key, 0) }
 // FOLLOW-UP (later wave): `--key=value` splitting, a positional collector (`positionals(a) [string_view]`),
 // and a typed `parse(a, T)` that fills a struct of flags. Kept out here to stay small — has_flag /

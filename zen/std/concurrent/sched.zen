@@ -19,21 +19,30 @@ tick = (coros: [Coro], flags: RawPtr<u8>, i: i64) i32 {
         alive
     }, false => 0 })
 }
-pass = (coros: [Coro], flags: RawPtr<u8>, i: i64, n: i64) i32 { (i < n).match ({ true => coros.tick(flags, i) + coros.pass(flags, i + 1, n), false => 0 }) }
-drive = (coros: [Coro], flags: RawPtr<u8>, n: i64) void { (coros.pass(flags, 0, n) > 0).match ({ true => coros.drive(flags, n), false => { } }) }
+pass = (coros: [Coro], flags: RawPtr<u8>, i: i64, n: i64) i32 { (i < n).match ({
+    true  => coros.tick(flags, i) + coros.pass(flags, i + 1, n),
+    false => 0,
+}) }
+drive = (coros: [Coro], flags: RawPtr<u8>, n: i64) void { (coros.pass(flags, 0, n) > 0).match ({
+    true  => coros.drive(flags, n),
+    false => { },
+}) }
 // The alive-flags buffer is allocated through the caller's allocator, so `run`/`run_in`
 // return Result<i32, IoError>: allocation failure stays in the value flow.
 run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError> {
     n := coros.len
-    out: Result<i32, IoError> := (n <= 0).match ({ true => ok(0), false => alloc.try_acquire(n * 8).match ({
-        .Ok(flags) => {
-            flags.init_flags(0, n)
-            coros.drive(flags, n)
-            alloc.release(flags)
-            ok(0)
-        },
-        .Err(e)    => err(e),
-    }) })
+    out: Result<i32, IoError> := (n <= 0).match ({
+        true  => ok(0),
+        false => alloc.try_acquire(n * 8).match ({
+            .Ok(flags) => {
+                flags.init_flags(0, n)
+                coros.drive(flags, n)
+                alloc.release(flags)
+                ok(0)
+            },
+            .Err(e)    => err(e),
+        }),
+    })
     out
 }
 run*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError> { alloc.run_in(coros) }

@@ -34,36 +34,42 @@ find*<T> = (xs: [T], pred: (T) bool) Opt<T> {
     out
 }
 map_in*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError> {
-    (xs.len <= 0).match ({ true => {
-        empty: [U] := slice(null_ptr(), 0)
-        ok(empty)
-    }, false => a.try_acquire(xs.len * sizeof(U)).match ({
-        .Ok(p)  => {
-            out: [U] := p.slice(xs.len)
-            xs.loop((h, i, x) {
-                out[i] = f(x)
-            })
-            ok(out)
+    (xs.len <= 0).match ({
+        true  => {
+            empty: [U] := slice(null_ptr(), 0)
+            ok(empty)
         },
-        .Err(e) => err(e),
-    }) })
+        false => a.try_acquire(xs.len * sizeof(U)).match ({
+            .Ok(p)  => {
+                out: [U] := p.slice(xs.len)
+                xs.loop((h, i, x) {
+                    out[i] = f(x)
+                })
+                ok(out)
+            },
+            .Err(e) => err(e),
+        }),
+    })
 }
 filter_in*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError> {
-    (xs.len <= 0).match ({ true => {
-        empty: [T] := slice(null_ptr(), 0)
-        ok(empty)
-    }, false => a.try_acquire(xs.len * sizeof(T)).match ({
-        .Ok(p)  => {
-            buf: [T] := p.slice(xs.len)
-            n := 0
-            xs.loop((h, i, x) {
-                buf[n] = x
-                n = n + keep(x).match ({ true => 1, false => 0 })
-            })
-            ok(slice(buf[0].addr(), n))
+    (xs.len <= 0).match ({
+        true  => {
+            empty: [T] := slice(null_ptr(), 0)
+            ok(empty)
         },
-        .Err(e) => err(e),
-    }) })
+        false => a.try_acquire(xs.len * sizeof(T)).match ({
+            .Ok(p)  => {
+                buf: [T] := p.slice(xs.len)
+                n := 0
+                xs.loop((h, i, x) {
+                    buf[n] = x
+                    n = n + keep(x).match ({ true => 1, false => 0 })
+                })
+                ok(slice(buf[0].addr(), n))
+            },
+            .Err(e) => err(e),
+        }),
+    })
 }
 // In-place insertion sort of a mutable `[T]`, ordered by the comparator `less(a, b)` (true when
 // `a` must come before `b`). Allocates nothing — it permutes `xs` directly. Stable. O(n^2), which is
@@ -78,15 +84,18 @@ sort*<T> = (xs: [T], less: (T, T) bool) void {
             // Inner pass: sink element at j = i - k leftward while it precedes its neighbour. The break
             // closes the inner loop only (its own handler `hi`), leaving the outer pass running.
             j := i - k
-            (j <= 0).match ({ true => {
-                hi.break
-            }, false => less(xs[j], xs[j - 1]).match ({ true => {
-                tmp := xs[j]
-                xs[j] = xs[j - 1]
-                xs[j - 1] = tmp
-            }, false => {
-                hi.break
-            } }) })
+            (j <= 0).match ({
+                true  => {
+                    hi.break
+                },
+                false => less(xs[j], xs[j - 1]).match ({ true => {
+                    tmp := xs[j]
+                    xs[j] = xs[j - 1]
+                    xs[j - 1] = tmp
+                }, false => {
+                    hi.break
+                } }),
+            })
         })
     })
 }

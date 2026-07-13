@@ -41,10 +41,13 @@ decode_exit = (status: i64) i64 {
 // returns NULL at end-of-stream; each non-NULL chunk is a NUL-terminated str appended onto `s`.
 drain<A> = (a: MutPtr<A>, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
     got := chunk.fgets(to_i32(CHUNK), f)
-    (got == null_ptr()).match ({ true => ok(s), false => a.append_in(s, cstr(chunk)).match ({
-        .Ok(ns) => a.drain(f, chunk, ns),
-        .Err(e) => err(e),
-    }) })
+    (got == null_ptr()).match ({
+        true  => ok(s),
+        false => a.append_in(s, cstr(chunk)).match ({
+            .Ok(ns) => a.drain(f, chunk, ns),
+            .Err(e) => err(e),
+        }),
+    })
 }
 // Read the whole pipe into an owned str, close/reap the child, and pair the stdout with its exit code.
 // Split out of `run` so the popen NULL-guard stays a one-liner.
@@ -76,10 +79,13 @@ capture<A> = (a: MutPtr<A>, f: RawPtr<u8>) Result<Output, IoError> {
                         .Ok(text) => {
                             a.release(chunk)
                             status := to_i64(f.pclose())
-                            (status < 0).match ({ true => err(IoError.Errno(0 - 1)), false => ok(Output(
-                                stdout: text,
-                                exit: status.decode_exit(),
-                            )) })
+                            (status < 0).match ({
+                                true  => err(IoError.Errno(0 - 1)),
+                                false => ok(Output(
+                                    stdout: text,
+                                    exit: status.decode_exit(),
+                                )),
+                            })
                         },
                     }),
                 })
@@ -102,6 +108,9 @@ run*<A> = (a: MutPtr<A>, cmd: string_view) Result<Output, IoError> {
 run_ok*<A> = (a: MutPtr<A>, cmd: string_view) Result<string_view, IoError> {
     a.run(cmd).match ({
         .Err(e) => err(e),
-        .Ok(o)  => (o.exit == 0).match ({ true => ok(o.stdout), false => err(IoError.Errno(to_i32(o.exit))) }),
+        .Ok(o)  => (o.exit == 0).match ({
+            true  => ok(o.stdout),
+            false => err(IoError.Errno(to_i32(o.exit))),
+        }),
     })
 }

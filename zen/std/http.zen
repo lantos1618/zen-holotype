@@ -106,12 +106,17 @@ lookup_header = (headers: [Header], name: string_view) Opt<string_view> {
 crlfcrlf = (v: [u8]) i64 {
     at: i64 := 0 - 1
     v.loop((h, i, b) {
-        (i + 4 > v.len).match ({ true => {
-            h.break
-        }, false => (v[i] == '\r' && v[i + 1] == '\n' && v[i + 2] == '\r' && v[i + 3] == '\n').match ({ true => {
-            at = i
-            h.break
-        } }) })
+        (i + 4 > v.len).match ({
+            true  => {
+                h.break
+            },
+            false => (v[i] == '\r' && v[i + 1] == '\n' && v[i + 2] == '\r' && v[i + 3] == '\n').match ({
+                true => {
+                    at = i
+                    h.break
+                },
+            }),
+        })
     })
     at
 }
@@ -121,27 +126,30 @@ crlfcrlf = (v: [u8]) i64 {
 // decoded body) come from `a`; an allocation failure panics (`expect`), matching std.text.str.
 parse_response*<A> = (a: MutPtr<A>, raw: string_view) Result<Response, HttpError> {
     sep := raw.view().crlfcrlf()
-    out: Result<Response, HttpError> := (sep < 0).match ({ true => err(malformed("http: no CRLFCRLF header terminator")), false => {
-        head := a.substr(raw, 0, sep).expect("http: oom")
-        rl := raw.view().len
-        body_raw := a.substr(raw, sep + 4, rl - (sep + 4)).expect("http: oom")
-        lines := a.split(head, '\n')    // each line still carries a trailing '\r'
-        res: Result<Response, HttpError> := a.parse_status(lines[0]).match ({
-            .Err(e)     => .Err(e),
-            .Ok(status) => {
-                hres: Result<Response, HttpError> := a.collect_headers(lines).match ({
-                    .Err(e)      => .Err(e),
-                    .Ok(headers) => .Ok(Response(
-                        status: status,
-                        headers: headers,
-                        body: a.decide_body(headers, body_raw),
-                    )),
-                })
-                hres
-            },
-        })
-        res
-    } })
+    out: Result<Response, HttpError> := (sep < 0).match ({
+        true  => err(malformed("http: no CRLFCRLF header terminator")),
+        false => {
+            head := a.substr(raw, 0, sep).expect("http: oom")
+            rl := raw.view().len
+            body_raw := a.substr(raw, sep + 4, rl - (sep + 4)).expect("http: oom")
+            lines := a.split(head, '\n')    // each line still carries a trailing '\r'
+            res: Result<Response, HttpError> := a.parse_status(lines[0]).match ({
+                .Err(e)     => .Err(e),
+                .Ok(status) => {
+                    hres: Result<Response, HttpError> := a.collect_headers(lines).match ({
+                        .Err(e)      => .Err(e),
+                        .Ok(headers) => .Ok(Response(
+                            status: status,
+                            headers: headers,
+                            body: a.decide_body(headers, body_raw),
+                        )),
+                    })
+                    hres
+                },
+            })
+            res
+        },
+    })
     out
 }
 // status line -> the numeric code. `HTTP/1.1 200 OK` -> 200. `words` drops the trailing CR with the
@@ -149,10 +157,16 @@ parse_response*<A> = (a: MutPtr<A>, raw: string_view) Result<Response, HttpError
 // with a code in the 100..599 range.
 parse_status*<A> = (a: MutPtr<A>, line: string_view) Result<i32, HttpError> {
     toks := a.words(line)
-    (toks.len < 2).match ({ true => err(malformed("http: status line has fewer than two tokens")), false => toks[0].starts_with("HTTP/").match ({ true => {
-        code := toks[1].parse_int()
-        (code < 100 || code > 599).match ({ true => err(malformed("http: status code out of range")), false => ok(to_i32(code)) })
-    }, false => err(malformed("http: status line does not start with HTTP/")) }) })
+    (toks.len < 2).match ({
+        true  => err(malformed("http: status line has fewer than two tokens")),
+        false => toks[0].starts_with("HTTP/").match ({ true => {
+            code := toks[1].parse_int()
+            (code < 100 || code > 599).match ({
+                true  => err(malformed("http: status code out of range")),
+                false => ok(to_i32(code)),
+            })
+        }, false => err(malformed("http: status line does not start with HTTP/")) }),
+    })
 }
 // every line after the status line -> a `[Header]`. Each must be `Name: value`; a colon-less line is a
 // malformed response. Name and value are both trimmed (the value of its leading space and trailing CR).
@@ -164,20 +178,26 @@ collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], Http
     ), n)
     bad := false
     lines.loop((h, i, line) {
-        (i == 0).match ({ true => { }, false => {
-            ci := line.find(":")
-            (ci < 0).match ({ true => {
-                bad = true
-                h.break
-            }, false => {
-                nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
-                val := a.trim(a.substr(line, ci + 1, line.view().len - (ci + 1)).expect("http: oom"))
-                hs[i - 1] = Header(
-                    name: nm,
-                    value: val,
-                )
-            } })
-        } })
+        (i == 0).match ({
+            true  => { },
+            false => {
+                ci := line.find(":")
+                (ci < 0).match ({
+                    true  => {
+                        bad = true
+                        h.break
+                    },
+                    false => {
+                        nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
+                        val := a.trim(a.substr(line, ci + 1, line.view().len - (ci + 1)).expect("http: oom"))
+                        hs[i - 1] = Header(
+                            name: nm,
+                            value: val,
+                        )
+                    },
+                })
+            },
+        })
     })
     bad.match ({ true => err(malformed("http: header line missing ':'")), false => ok(hs) })
 }
@@ -185,7 +205,10 @@ collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], Http
 // else trim to `Content-Length` when present, else take the read-to-EOF remainder verbatim.
 decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) string_view {
     lookup_header(headers, "Transfer-Encoding").match ({
-        .Some(te) => a.to_lower(te).contains("chunked").match ({ true => a.decode_chunked(body_raw), false => body_raw }),
+        .Some(te) => a.to_lower(te).contains("chunked").match ({
+            true  => a.decode_chunked(body_raw),
+            false => body_raw,
+        }),
         .None     => lookup_header(headers, "Content-Length").match ({
             .Some(cl) => a.substr(body_raw, 0, cl.parse_int()).expect("http: oom"),
             .None     => body_raw,
@@ -194,13 +217,32 @@ decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) strin
 }
 // ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
 is_hex = (b: u8) bool { b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F' }
-hex_digit = (b: u8) i64 { (b >= '0' && b <= '9').match ({ true => to_i64(b - '0'), false => (b >= 'a' && b <= 'f').match ({ true => to_i64(b - 'a' + 10), false => to_i64(b - 'A' + 10) }) }) }
+hex_digit = (b: u8) i64 {
+    (b >= '0' && b <= '9').match ({
+        true  => to_i64(b - '0'),
+        false => (b >= 'a' && b <= 'f').match ({
+            true  => to_i64(b - 'a' + 10),
+            false => to_i64(b - 'A' + 10),
+        }),
+    })
+}
 // first index at/after `i` that is not a hex digit (the end of a chunk-size field).
-hex_end = (bv: [u8], i: i64) i64 { (i < bv.len && is_hex(bv[i])).match ({ true => bv.hex_end(i + 1), false => i }) }
+hex_end = (bv: [u8], i: i64) i64 { (i < bv.len && is_hex(bv[i])).match ({
+    true  => bv.hex_end(i + 1),
+    false => i,
+}) }
 // fold the hex digits bv[i..e] into an integer size.
-hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 { (i >= e).match ({ true => acc, false => bv.hex_val(i + 1, e, acc * 16 + hex_digit(bv[i])) }) }
+hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 { (i >= e).match ({
+    true  => acc,
+    false => bv.hex_val(i + 1, e, acc * 16 + hex_digit(bv[i])),
+}) }
 // index just past the next '\n' at/after `i` (one line terminator), or `bv.len` if none remains.
-after_lf = (bv: [u8], i: i64) i64 { (i >= bv.len).match ({ true => bv.len, false => (bv[i] == '\n').match ({ true => i + 1, false => bv.after_lf(i + 1) }) }) }
+after_lf = (bv: [u8], i: i64) i64 {
+    (i >= bv.len).match ({
+        true  => bv.len,
+        false => (bv[i] == '\n').match ({ true => i + 1, false => bv.after_lf(i + 1) }),
+    })
+}
 // append bv[start .. start+n] (clamped to the view) onto the builder `sb`.
 append_range<A> = (a: MutPtr<A>, bv: [u8], start: i64, n: i64, sb: String) String {
     avail := bv.len - start
@@ -253,11 +295,13 @@ build_request<A> = (a: MutPtr<A>, method: string_view, host: string_view, path: 
         sb = a.append_in(sb, hd.value).expect("http: oom")
         sb = a.crlf(sb)
     })
-    (body.view().len > 0).match ({ true => {
-        sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
-        sb = a.append_in(sb, a.integer(to_i64(body.view().len)).expect("http: oom").finish_in(a).expect("http: oom")).expect("http: oom")
-        sb = a.crlf(sb)
-    } })
+    (body.view().len > 0).match ({
+        true => {
+            sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
+            sb = a.append_in(sb, a.integer(to_i64(body.view().len)).expect("http: oom").finish_in(a).expect("http: oom")).expect("http: oom")
+            sb = a.crlf(sb)
+        },
+    })
     sb = a.crlf(sb)    // blank line: end of headers
     sb = a.append_in(sb, body).expect("http: oom")
     a.finish_in(sb).expect("http: oom")
@@ -267,7 +311,10 @@ READ_CHUNK := 4096    // per-recv buffer size for draining the response
 // `Connection: close` guarantees EOF once the full response has arrived. Recursive (no imperative loop).
 read_loop<A> = (a: MutPtr<A>, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
     recv_into(c, buf, READ_CHUNK).match ({
-        .Ok(nr) => (nr <= 0).match ({ true => sb, false => a.read_loop(c, buf, a.append_range(buf.slice(nr), 0, nr, sb)) }),
+        .Ok(nr) => (nr <= 0).match ({
+            true  => sb,
+            false => a.read_loop(c, buf, a.append_range(buf.slice(nr), 0, nr, sb)),
+        }),
         .Err(e) => sb,
     })
 }

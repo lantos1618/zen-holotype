@@ -156,17 +156,23 @@ do_drop<T> = (r: Rc<T>) void {
 child*<T> = (child: Rc<T>, t: MutPtr<Tracer>) void { visit_child(child.base, t) }
 // Collector passes operate on erased blocks; payload work goes through blk_trace/blk_drop.
 visit_child = (cb: RawPtr<u8>, t: MutPtr<Tracer>) void {
-    (t.op == OP_MARK).match ({ true => {
-        hset_count(cb, hcount(cb) - 1)
-        cc_mark(cb)
-    }, false => (t.op == OP_SCAN).match ({ true => {
-        cc_scan(cb)
-    }, false => (t.op == OP_SCAN_BLACK).match ({ true => {
-        hset_count(cb, hcount(cb) + 1)
-        cc_scan_black(cb)
-    }, false => {
-        cc_gather(cb)
-    } }) }) })
+    (t.op == OP_MARK).match ({
+        true  => {
+            hset_count(cb, hcount(cb) - 1)
+            cc_mark(cb)
+        },
+        false => (t.op == OP_SCAN).match ({
+            true  => {
+                cc_scan(cb)
+            },
+            false => (t.op == OP_SCAN_BLACK).match ({ true => {
+                hset_count(cb, hcount(cb) + 1)
+                cc_scan_black(cb)
+            }, false => {
+                cc_gather(cb)
+            } }),
+        }),
+    })
 }
 cc_mark = (b: RawPtr<u8>) void {
     (hcolor(b) == GRAY).match ({ true => { }, false => {
@@ -227,13 +233,16 @@ set_kid* = (parent: Rc<Node>, child: Rc<Node>) void {
 drive_roots = (rs: RawPtr<u8>, op: i32, i: i64) void {
     (i < rs.list_len()).match ({ true => {
         b := rs.list_get(i)
-        (op == OP_MARK).match ({ true => {
-            cc_mark(b)
-        }, false => (op == OP_SCAN).match ({ true => {
-            cc_scan(b)
-        }, false => {
-            cc_gather(b)
-        } }) })
+        (op == OP_MARK).match ({
+            true  => {
+                cc_mark(b)
+            },
+            false => (op == OP_SCAN).match ({ true => {
+                cc_scan(b)
+            }, false => {
+                cc_gather(b)
+            } }),
+        })
         drive_roots(rs, op, i + 1)
     }, false => { } })
 }

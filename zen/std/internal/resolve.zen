@@ -15,18 +15,37 @@
 { render_diagnostic } = compiler.diagnostic
 { getEnv } = std.os
 is_ws = (b: u8) bool { b == ' ' || b == '\t' }
-lstrip = (s: string_view, p: i32) i32 { at(s, p).is_ws().match ({ true => s.lstrip(p + 1), false => p }) }
+lstrip = (s: string_view, p: i32) i32 { at(s, p).is_ws().match ({
+    true  => s.lstrip(p + 1),
+    false => p,
+}) }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
 // `has_import_marker` then confirms a real `} = std./compiler./user` follows, so relaxing the
 // space requirement here can't mis-classify a plain `{` block.
 opens_import = (s: string_view, p: i32) bool { s.at(p) == '{' && (s.at(p + 1) == ' ' || s.at(p + 1).is_alpha() || s.at(p + 1) == '_') }
 import_marker_from = (s: string_view, p: i32) i32 {
     b := s.at(p)
-    (b == 0).match ({ true => 0 - 1, false => (b == '}').match ({ true => s.marker_after_close(p + 1), false => s.import_marker_from(p + 1) }) })
+    (b == 0).match ({
+        true  => 0 - 1,
+        false => (b == '}').match ({
+            true  => s.marker_after_close(p + 1),
+            false => s.import_marker_from(p + 1),
+        }),
+    })
 }
-marker_after_close = (s: string_view, p: i32) i32 { (s.at(p) == ' ').match ({ true => s.marker_after_close(p + 1), false => s.is_any_marker_at(p).match ({ true => p, false => 0 - 1 }) }) }
+marker_after_close = (s: string_view, p: i32) i32 {
+    (s.at(p) == ' ').match ({
+        true  => s.marker_after_close(p + 1),
+        false => s.is_any_marker_at(p).match ({ true => p, false => 0 - 1 }),
+    })
+}
 has_import_marker = (s: string_view, p: i32) bool { s.import_marker_from(p) >= 0 }
-resolve_span_eq = (s: string_view, p: i32, lit: string_view, i: i32) bool { (lit.at(i) == 0).match ({ true => true, false => s.at(p + i) == lit.at(i) && s.resolve_span_eq(p, lit, i + 1) }) }
+resolve_span_eq = (s: string_view, p: i32, lit: string_view, i: i32) bool {
+    (lit.at(i) == 0).match ({
+        true  => true,
+        false => s.at(p + i) == lit.at(i) && s.resolve_span_eq(p, lit, i + 1),
+    })
+}
 is_std_marker_at = (s: string_view, p: i32) bool { s.resolve_span_eq(p, "= std.", 0) }
 is_compiler_marker_at = (s: string_view, p: i32) bool { s.resolve_span_eq(p, "= compiler.", 0) }
 is_marker_at = (s: string_view, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
@@ -57,7 +76,15 @@ next_line = (s: string_view, p: i32) i32 {
     }, false => { } })
     pos
 }
-strip_count* = (s: string_view, p: i32, n: i32) i32 { (s.at(p) == 0).match ({ true => n, false => s.is_import_line(p).match ({ true => s.strip_count(s.import_end(p), n), false => s.strip_count(s.next_line(p), n + 1) }) }) }
+strip_count* = (s: string_view, p: i32, n: i32) i32 {
+    (s.at(p) == 0).match ({
+        true  => n,
+        false => s.is_import_line(p).match ({
+            true  => s.strip_count(s.import_end(p), n),
+            false => s.strip_count(s.next_line(p), n + 1),
+        }),
+    })
+}
 // Position of the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that starts
 // at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total with
 // constant stack.
@@ -82,11 +109,14 @@ append_span = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, e: i32) S
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < p).match ({ true => { }, false => (ii >= e || b == 0).match ({ true => {
-            h.break
-        }, false => {
-            cur = cur.rpush(a, b)
-        } }) })
+        (ii < p).match ({
+            true  => { },
+            false => (ii >= e || b == 0).match ({ true => {
+                h.break
+            }, false => {
+                cur = cur.rpush(a, b)
+            } }),
+        })
     })
     cur
 }
@@ -104,12 +134,15 @@ copy_line_comment = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) Rew
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0 || b == '\n').match ({ true => {
-            h.break
-        }, false => {
-            cur = cur.rpush(a, b)
-            pos = pos + 1
-        } }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0 || b == '\n').match ({ true => {
+                h.break
+            }, false => {
+                cur = cur.rpush(a, b)
+                pos = pos + 1
+            } }),
+        })
     })
     RewriteSkip(
         out: cur,
@@ -122,16 +155,22 @@ copy_block_comment = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) Re
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => (b == '*' && s.at(ii + 1) == '/').match ({ true => {
-            cur = cur.rpush(a, '*').rpush(a, '/')
-            pos = ii + 2
-            h.break
-        }, false => {
-            cur = cur.rpush(a, b)
-            pos = pos + 1
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => (b == '*' && s.at(ii + 1) == '/').match ({ true => {
+                    cur = cur.rpush(a, '*').rpush(a, '/')
+                    pos = ii + 2
+                    h.break
+                }, false => {
+                    cur = cur.rpush(a, b)
+                    pos = pos + 1
+                } }),
+            }),
+        })
     })
     RewriteSkip(
         out: cur,
@@ -146,19 +185,28 @@ copy_literal = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) RewriteS
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => {
-            cur = cur.rpush(a, b)
-            pos = pos + 1
-            esc.match ({ true => {
-                esc = false
-            }, false => (b == '\\').match ({ true => {
-                esc = true
-            }, false => (ii > p && b == q).match ({ true => {
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({ true => {
                 h.break
-            }, false => { } }) }) })
-        } }) })
+            }, false => {
+                cur = cur.rpush(a, b)
+                pos = pos + 1
+                esc.match ({
+                    true  => {
+                        esc = false
+                    },
+                    false => (b == '\\').match ({
+                        true  => {
+                            esc = true
+                        },
+                        false => (ii > p && b == q).match ({ true => {
+                            h.break
+                        }, false => { } }),
+                    }),
+                })
+            } }),
+        })
     })
     RewriteSkip(
         out: cur,
@@ -172,14 +220,20 @@ strip_into = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, first: boo
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => s.is_import_line(pos).match ({ true => {
-            pos = s.import_end(pos)
-        }, false => {
-            e := s.line_end(pos)
-            cur = is_first.match ({ true => cur.rappend_span(a, s, pos, e), false => cur.rpush(a, 10).rappend_span(a, s, pos, e) })
-            is_first = false
-            pos = s.next_line(pos)
-        } }) })
+        (ii < pos).match ({
+            true  => { },
+            false => s.is_import_line(pos).match ({ true => {
+                pos = s.import_end(pos)
+            }, false => {
+                e := s.line_end(pos)
+                cur = is_first.match ({
+                    true  => cur.rappend_span(a, s, pos, e),
+                    false => cur.rpush(a, 10).rappend_span(a, s, pos, e),
+                })
+                is_first = false
+                pos = s.next_line(pos)
+            } }),
+        })
     })
     cur
 }
@@ -188,19 +242,33 @@ concat_files* = (out: String, a: MutPtr<Malloc>, left: string_view, right: strin
 STD_MARKER_LEN := 6
 COMPILER_MARKER_LEN := 11
 USER_MARKER_LEN := 2
-module_name_pos = (s: string_view, p: i32) i32 { s.is_std_marker_at(p).match ({ true => p + STD_MARKER_LEN, false => s.is_compiler_marker_at(p).match ({ true => p + COMPILER_MARKER_LEN, false => s.is_user_marker_at(p).match ({ true => p + USER_MARKER_LEN, false => s.module_name_pos(p + 1) }) }) }) }
+module_name_pos = (s: string_view, p: i32) i32 {
+    s.is_std_marker_at(p).match ({
+        true  => p + STD_MARKER_LEN,
+        false => s.is_compiler_marker_at(p).match ({
+            true  => p + COMPILER_MARKER_LEN,
+            false => s.is_user_marker_at(p).match ({
+                true  => p + USER_MARKER_LEN,
+                false => s.module_name_pos(p + 1),
+            }),
+        }),
+    })
+}
 take_name = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
     pos := p
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => s.at(pos).is_alnum().match ({ true => {
-            cur = cur.rpush(a, s.at(pos))
-            pos = pos + 1
-        }, false => {
-            h.break
-        } }) })
+        (ii < pos).match ({
+            true  => { },
+            false => s.at(pos).is_alnum().match ({ true => {
+                cur = cur.rpush(a, s.at(pos))
+                pos = pos + 1
+            }, false => {
+                h.break
+            } }),
+        })
     })
     cur
 }
@@ -211,41 +279,77 @@ take_module_path = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) Stri
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => s.at(pos).is_alnum().match ({ true => {
-            cur = cur.rpush(a, s.at(pos))
-            pos = pos + 1
-        }, false => (s.at(pos) == '.').match ({ true => {
-            cur = cur.rpush(a, '/')
-            pos = pos + 1
-        }, false => {
-            h.break
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => s.at(pos).is_alnum().match ({
+                true  => {
+                    cur = cur.rpush(a, s.at(pos))
+                    pos = pos + 1
+                },
+                false => (s.at(pos) == '.').match ({ true => {
+                    cur = cur.rpush(a, '/')
+                    pos = pos + 1
+                }, false => {
+                    h.break
+                } }),
+            }),
+        })
     })
     cur
 }
 import_id = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
-    s.is_std_marker_at(p).match ({ true => {
-        base := cur.rappend(a, "std/")
-        cur = base.take_module_path(a, s, p + STD_MARKER_LEN)
-    }, false => s.is_compiler_marker_at(p).match ({ true => {
-        base := cur.rappend(a, "compiler/")
-        cur = base.take_module_path(a, s, p + COMPILER_MARKER_LEN)
-    }, false => s.is_user_marker_at(p).match ({ true => {
-        base := cur.rappend(a, "u/")
-        cur = base.take_name(a, s, p + USER_MARKER_LEN)
-    }, false => {
-        cur = cur.import_id(a, s, p + 1)
-    } }) }) })
+    s.is_std_marker_at(p).match ({
+        true  => {
+            base := cur.rappend(a, "std/")
+            cur = base.take_module_path(a, s, p + STD_MARKER_LEN)
+        },
+        false => s.is_compiler_marker_at(p).match ({
+            true  => {
+                base := cur.rappend(a, "compiler/")
+                cur = base.take_module_path(a, s, p + COMPILER_MARKER_LEN)
+            },
+            false => s.is_user_marker_at(p).match ({ true => {
+                base := cur.rappend(a, "u/")
+                cur = base.take_name(a, s, p + USER_MARKER_LEN)
+            }, false => {
+                cur = cur.import_id(a, s, p + 1)
+            } }),
+        }),
+    })
     cur
 }
 id_is_user = (id: String) bool { id.len >= 2 && id.res_sbyte(0) == 'u' && id.res_sbyte(1) == '/' }
 id_is_std_io_c = (id: String) bool { id.len == 8 && id.res_sbyte(0) == 's' && id.res_sbyte(1) == 't' && id.res_sbyte(2) == 'd' && id.res_sbyte(3) == '/' && id.res_sbyte(4) == 'i' && id.res_sbyte(5) == 'o' && id.res_sbyte(6) == '/' && id.res_sbyte(7) == 'c' }
 // String-backed line set: `name\n` entries, scanned without per-name allocation.
 res_sbyte = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
-line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool { (j == m).match ({ true => set.res_sbyte(i) == '\n', false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({ true => set.line_eq(i + 1, name, j + 1, m), false => false }) }) }
-seen_scan = (set: String, name: String, i: i64) bool { (i >= set.len).match ({ true => false, false => set.line_eq(i, name, 0, name.len).match ({ true => true, false => set.seen_scan(name, set.snext_line(i)) }) }) }
-snext_line = (set: String, i: i64) i64 { (i >= set.len).match ({ true => set.len, false => (set.res_sbyte(i) == '\n').match ({ true => i + 1, false => set.snext_line(i + 1) }) }) }
+line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
+    (j == m).match ({
+        true  => set.res_sbyte(i) == '\n',
+        false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
+            true  => set.line_eq(i + 1, name, j + 1, m),
+            false => false,
+        }),
+    })
+}
+seen_scan = (set: String, name: String, i: i64) bool {
+    (i >= set.len).match ({
+        true  => false,
+        false => set.line_eq(i, name, 0, name.len).match ({
+            true  => true,
+            false => set.seen_scan(name, set.snext_line(i)),
+        }),
+    })
+}
+snext_line = (set: String, i: i64) i64 {
+    (i >= set.len).match ({
+        true  => set.len,
+        false => (set.res_sbyte(i) == '\n').match ({
+            true  => i + 1,
+            false => set.snext_line(i + 1),
+        }),
+    })
+}
 seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
 add_name* = (set: String, a: MutPtr<Malloc>, name: String) String { set.rappend_string(a, name).rpush(a, 10) }
 // O(1)-average presence set over the shadow-rename pass's symbol keys, replacing the newline-delimited
@@ -316,11 +420,14 @@ mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
     cur := out
     bs: [u8] := id.bytes()
     bs.loop((h, idx, b) {
-        (idx < i).match ({ true => { }, false => (b == '/').match ({ true => {
-            cur = cur.gstr_push(a, '.')
-        }, false => {
-            cur = cur.gstr_push(a, b)
-        } }) })
+        (idx < i).match ({
+            true  => { },
+            false => (b == '/').match ({ true => {
+                cur = cur.gstr_push(a, '.')
+            }, false => {
+                cur = cur.gstr_push(a, b)
+            } }),
+        })
     })
     cur
 }
@@ -394,12 +501,15 @@ string_eq_str = (name: String, s: string_view) bool {
     ok := true
     bs: [u8] := name.bytes()
     bs.loop((h, i, b) {
-        ok.match ({ true => (s.at(to_i32(i)) == b).match ({ true => { }, false => {
-            ok = false
-            h.break
-        } }), false => {
-            h.break
-        } })
+        ok.match ({
+            true  => (s.at(to_i32(i)) == b).match ({ true => { }, false => {
+                ok = false
+                h.break
+            } }),
+            false => {
+                h.break
+            },
+        })
     })
     ok && s.at(to_i32(name.len)) == 0
 }
@@ -476,7 +586,7 @@ eprint = (s: string_view) i64 {
     write(2, v.ptr, v.len)
 }
 // ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
-// The namespace-closure loader (load_ns_closure_graph[_table] ↔ collect_ns_*) follows `m = pkg.mod`
+// The namespace-closure loader (load_ns_closure_graph_table ↔ collect_ns_*_table) follows `m = pkg.mod`
 // alias edges with no seen-set, so a self-referential or cyclic alias (`a = a`, or a→b→a) recurses
 // forever and overflows the C stack (SIGSEGV). A nesting counter bounds it: real dependency chains
 // are a handful deep (the whole compiler is well under the cap), so this never fires on acyclic input
@@ -513,11 +623,14 @@ copy_id_dotted = (out: String, a: MutPtr<Malloc>, id: String, i: i64) String {
     cur := out
     bs: [u8] := id.bytes()
     bs.loop((h, idx, b) {
-        (idx < i).match ({ true => { }, false => (b == '/').match ({ true => {
-            cur = cur.rpush(a, '.')
-        }, false => {
-            cur = cur.rpush(a, b)
-        } }) })
+        (idx < i).match ({
+            true  => { },
+            false => (b == '/').match ({ true => {
+                cur = cur.rpush(a, '.')
+            }, false => {
+                cur = cur.rpush(a, b)
+            } }),
+        })
     })
     cur
 }
@@ -545,15 +658,34 @@ fail_unknown_module = (a: MutPtr<Malloc>, inpath: string_view, id: String, path:
 // end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
 dotted_path_end = (s: string_view, p: i32) i32 {
     e := s.res_ident_end(p)
-    (s.at(e) == '.' && s.at(e + 1).is_alpha()).match ({ true => s.dotted_path_end(e + 1), false => e })
+    (s.at(e) == '.' && s.at(e + 1).is_alpha()).match ({
+        true  => s.dotted_path_end(e + 1),
+        false => e,
+    })
 }
 // `= <ident>.<ident>…` where the head segment is neither `std` nor `compiler`.
-is_dotted_user_marker_at = (s: string_view, p: i32) bool { (s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.res_ident_end(p + 2)) == '.' && s.at(s.res_ident_end(p + 2) + 1).is_alpha()).match ({ true => s.is_marker_at(p).match ({ true => false, false => true }), false => false }) }
-dotted_marker_after = (s: string_view, p: i32) i32 { (s.at(p) == ' ').match ({ true => s.dotted_marker_after(p + 1), false => s.is_dotted_user_marker_at(p).match ({ true => p, false => 0 - 1 }) }) }
+is_dotted_user_marker_at = (s: string_view, p: i32) bool {
+    (s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.res_ident_end(p + 2)) == '.' && s.at(s.res_ident_end(p + 2) + 1).is_alpha()).match ({
+        true  => s.is_marker_at(p).match ({ true => false, false => true }),
+        false => false,
+    })
+}
+dotted_marker_after = (s: string_view, p: i32) i32 {
+    (s.at(p) == ' ').match ({
+        true  => s.dotted_marker_after(p + 1),
+        false => s.is_dotted_user_marker_at(p).match ({ true => p, false => 0 - 1 }),
+    })
+}
 // within ONE line: position of a `= a.b` marker after the import's closing `}`, else -1.
 dotted_marker_from = (s: string_view, p: i32) i32 {
     b := s.at(p)
-    (b == 0 || b == '\n').match ({ true => 0 - 1, false => (b == '}').match ({ true => s.dotted_marker_after(p + 1), false => s.dotted_marker_from(p + 1) }) })
+    (b == 0 || b == '\n').match ({
+        true  => 0 - 1,
+        false => (b == '}').match ({
+            true  => s.dotted_marker_after(p + 1),
+            false => s.dotted_marker_from(p + 1),
+        }),
+    })
 }
 fail_dotted_import = (a: MutPtr<Malloc>, inpath: string_view, src: string_view, p: i32) i32 {
     e := src.dotted_path_end(p)
@@ -571,7 +703,10 @@ scan_dotted_imports = (a: MutPtr<Malloc>, inpath: string_view, src: string_view)
         ii := to_i32(i)
         (ii < pos).match ({ true => { }, false => {
             ls := src.lstrip(pos)
-            mk := src.opens_import(ls).match ({ true => src.dotted_marker_from(ls), false => 0 - 1 })
+            mk := src.opens_import(ls).match ({
+                true  => src.dotted_marker_from(ls),
+                false => 0 - 1,
+            })
             (mk >= 0).match ({ true => {
                 a.fail_dotted_import(inpath, src, mk + 2)
             }, false => { } })
@@ -604,17 +739,23 @@ import_edge_count_from = (src: string_view, p: i32, n: i32) i32 {
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (src.is_import_line(pos) || src.is_ns_line(pos)).match ({ true => {
-            count = count + 1
-            pos = src.edge_next(pos)
-        }, false => {
-            pos = src.next_line(pos)
-        } }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (src.is_import_line(pos) || src.is_ns_line(pos)).match ({ true => {
+                count = count + 1
+                pos = src.edge_next(pos)
+            }, false => {
+                pos = src.next_line(pos)
+            } }),
+        })
     })
     count
 }
 import_edge_count* = (src: string_view) i32 { src.import_edge_count_from(0, 0) }
-edge_next = (src: string_view, p: i32) i32 { src.is_import_line(p).match ({ true => src.import_end(p), false => src.next_line(p) }) }
+edge_next = (src: string_view, p: i32) i32 { src.is_import_line(p).match ({
+    true  => src.import_end(p),
+    false => src.next_line(p),
+}) }
 edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
         .Ok(p)  => ok(slice(p, n)),
@@ -642,13 +783,22 @@ copy_name_to = (buf: RawPtr<u8>, start: i64, s: string_view, p: i32, cap: i64) i
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (cur >= cap - 1 || s.at(pos).is_alnum().match ({ true => false, false => true })).match ({ true => {
-            h.break
-        }, false => {
-            buf.offset(cur).store(s.at(pos))
-            cur = cur + 1
-            pos = pos + 1
-        } }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (cur >= cap - 1 || s.at(pos).is_alnum().match ({
+                true  => false,
+                false => true,
+            })).match ({
+                true  => {
+                    h.break
+                },
+                false => {
+                    buf.offset(cur).store(s.at(pos))
+                    cur = cur + 1
+                    pos = pos + 1
+                },
+            }),
+        })
     })
     cur
 }
@@ -658,23 +808,43 @@ copy_module_path_to = (buf: RawPtr<u8>, start: i64, s: string_view, p: i32, cap:
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (cur >= cap - 1).match ({ true => {
-            h.break
-        }, false => s.at(pos).is_alnum().match ({ true => {
-            buf.offset(cur).store(s.at(pos))
-            cur = cur + 1
-            pos = pos + 1
-        }, false => (s.at(pos) == '.').match ({ true => {
-            buf.offset(cur).store('/')
-            cur = cur + 1
-            pos = pos + 1
-        }, false => {
-            h.break
-        } }) }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (cur >= cap - 1).match ({
+                true  => {
+                    h.break
+                },
+                false => s.at(pos).is_alnum().match ({
+                    true  => {
+                        buf.offset(cur).store(s.at(pos))
+                        cur = cur + 1
+                        pos = pos + 1
+                    },
+                    false => (s.at(pos) == '.').match ({ true => {
+                        buf.offset(cur).store('/')
+                        cur = cur + 1
+                        pos = pos + 1
+                    }, false => {
+                        h.break
+                    } }),
+                }),
+            }),
+        })
     })
     cur
 }
-write_import_id_at = (buf: RawPtr<u8>, s: string_view, p: i32, cap: i64) i64 { s.is_std_marker_at(p).match ({ true => buf.copy_module_path_to(buf.copy_lit_to(0, "std/", cap), s, p + STD_MARKER_LEN, cap), false => s.is_compiler_marker_at(p).match ({ true => buf.copy_module_path_to(buf.copy_lit_to(0, "compiler/", cap), s, p + COMPILER_MARKER_LEN, cap), false => s.is_user_marker_at(p).match ({ true => buf.copy_name_to(buf.copy_lit_to(0, "u/", cap), s, p + USER_MARKER_LEN, cap), false => 0 }) }) }) }
+write_import_id_at = (buf: RawPtr<u8>, s: string_view, p: i32, cap: i64) i64 {
+    s.is_std_marker_at(p).match ({
+        true  => buf.copy_module_path_to(buf.copy_lit_to(0, "std/", cap), s, p + STD_MARKER_LEN, cap),
+        false => s.is_compiler_marker_at(p).match ({
+            true  => buf.copy_module_path_to(buf.copy_lit_to(0, "compiler/", cap), s, p + COMPILER_MARKER_LEN, cap),
+            false => s.is_user_marker_at(p).match ({
+                true  => buf.copy_name_to(buf.copy_lit_to(0, "u/", cap), s, p + USER_MARKER_LEN, cap),
+                false => 0,
+            }),
+        }),
+    })
+}
 import_id_alloc<A> = (a: MutPtr<A>, s: string_view, p: i32) Result<string_view, IoError> {
     a.try_acquire(EDGE_MODULE_CAP).match ({
         .Ok(buf) => {
@@ -712,22 +882,25 @@ ns_qualifier_alloc<A> = (a: MutPtr<A>, s: string_view, p: i32) Result<string_vie
 edge_from_line<A> = (a: MutPtr<A>, src: string_view, p: i32) Result<ImportEdge, IoError> {
     ns := src.is_ns_line(p)
     a.import_id_alloc(src, p).match ({
-        .Ok(mod) => ns.match ({ true => a.ns_qualifier_alloc(src, p).match ({
-            .Ok(alias) => ok(ImportEdge(
+        .Ok(mod) => ns.match ({
+            true  => a.ns_qualifier_alloc(src, p).match ({
+                .Ok(alias) => ok(ImportEdge(
+                    module: mod,
+                    alias: alias,
+                    namespace: ns,
+                    start: p,
+                    next: src.edge_next(p),
+                )),
+                .Err(e)    => err(e),
+            }),
+            false => ok(ImportEdge(
                 module: mod,
-                alias: alias,
+                alias: "",
                 namespace: ns,
                 start: p,
                 next: src.edge_next(p),
             )),
-            .Err(e)    => err(e),
-        }), false => ok(ImportEdge(
-            module: mod,
-            alias: "",
-            namespace: ns,
-            start: p,
-            next: src.edge_next(p),
-        )) }),
+        }),
         .Err(e)  => err(e),
     })
 }
@@ -742,22 +915,25 @@ fill_import_edges<A> = (a: MutPtr<A>, src: string_view, p: i32, out: [ImportEdge
             h.break
         }, false => {
             ii := to_i32(n)
-            (ii < pos).match ({ true => { }, false => (src.is_import_line(pos) || src.is_ns_line(pos)).match ({ true => {
-                a.edge_from_line(src, pos).match ({
-                    .Ok(edge) => {
-                        out[idx] = edge
-                        idx = idx + 1
-                        pos = src.edge_next(pos)
-                    },
-                    .Err(e)   => {
-                        failed = true
-                        last_err = e
-                        h.break
-                    },
-                })
-            }, false => {
-                pos = src.next_line(pos)
-            } }) })
+            (ii < pos).match ({
+                true  => { },
+                false => (src.is_import_line(pos) || src.is_ns_line(pos)).match ({ true => {
+                    a.edge_from_line(src, pos).match ({
+                        .Ok(edge) => {
+                            out[idx] = edge
+                            idx = idx + 1
+                            pos = src.edge_next(pos)
+                        },
+                        .Err(e)   => {
+                            failed = true
+                            last_err = e
+                            h.break
+                        },
+                    })
+                }, false => {
+                    pos = src.next_line(pos)
+                } }),
+            })
         } })
     })
     failed.match ({ true => err(last_err), false => ok(out) })
@@ -833,7 +1009,10 @@ module_path = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, id: S
     out.gstr_finish(a)
 }
 guard_module = (a: MutPtr<Malloc>, progdir: string_view, inpath: string_view, id: String, path: string_view) i32 {
-    (id.id_is_user() && progdir.at(0) == 0).match ({ true => a.fail_no_progdir(inpath, id), false => 0 })
+    (id.id_is_user() && progdir.at(0) == 0).match ({
+        true  => a.fail_no_progdir(inpath, id),
+        false => 0,
+    })
     file_exists(path).match ({ true => 0, false => a.fail_unknown_module(inpath, id, path) })
 }
 module_count_one = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, st: ModuleCount) ModuleCount {
@@ -908,101 +1087,46 @@ module_table* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inp
     graph := a.module_graph(mainsrc)
     a.module_table_graph(root, progdir, inpath, mainsrc, graph)
 }
-// Legacy transitive loader; table-based resolve_program below is the checked path.
-load_closure* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, c: Closure) Closure {
-    c.seen.seen_name(id).match ({ true => c, false => {
-        path := a.module_path(root, progdir, id)
-        a.guard_module(progdir, inpath, id, path)
-        src := a.read_module(inpath, path)
-        graph := a.module_graph(src)
-        u2 := id.id_is_user().match ({ true => a.user_decls_from_symbols(c.useen, graph.symbols, 0, id, inpath), false => c.useen })
-        c2 := Closure(
-            seen: a.madd_name(c.seen, id),
-            out: c.out,
-            useen: u2,
-        )
-        c3 := a.load_import_graph(root, progdir, inpath, src, graph, id.id_is_user(), c2)
-        ns := a.collect_ns_graph(root, progdir, inpath, src, graph, a.ns_scan(c3))
-        body := ns.c.out.strip_ns_into(a, src, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, false)
-        Closure(
-            seen: ns.c.seen,
-            out: body,
-            useen: ns.c.useen,
-        )
-    } })
-}
-load_import_edges = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, edges: [ImportEdge], i: i64, validate: bool, c: Closure) Closure {
-    cur := c
-    edges.loop((h, idx, edge) {
-        (idx < i).match ({ true => { }, false => edge.namespace.match ({ true => { }, false => {
-            id := edge.edge_id_in(a)
-            cur = a.load_closure(root, progdir, inpath, id, cur)
-            validate.match ({ true => a.check_import_names(root, progdir, inpath, src, edge.start, id), false => 0 })
-        } }) })
-    })
-    cur
-}
-load_import_graph = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, graph: ModuleGraph, validate: bool, c: Closure) Closure { a.load_import_edges(root, progdir, inpath, src, graph.imports, 0, validate, c) }
-load_ns_edge = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, edge: ImportEdge, st: NsScan) NsScan {
-    modid := edge.edge_id_in(a)
-    alias := edge.edge_alias_in(a)
-    path := a.module_path(root, progdir, modid)
-    a.guard_module(progdir, inpath, modid, path)
-    msrc := a.read_module(inpath, path)
-    graph := a.module_graph(msrc)
-    names := graph.value_decl_names_in(a)
-    all := graph.all_decl_names_in(a)
-    c2 := a.load_ns_closure_graph(root, progdir, inpath, modid, alias, msrc, graph, st.c)
-    q2 := a.madd_name(st.quals, alias)
-    qn2 := st.qnames.add_qual_names(a, alias, names, 0)
-    sqn2 := st.strip_qnames.add_qual_names(a, alias, all, 0)
-    saq2 := modid.id_is_std_io_c().match ({ true => a.madd_name(st.strip_all_quals, alias), false => st.strip_all_quals })
-    NsScan(
-        quals: q2,
-        qnames: qn2,
-        strip_qnames: sqn2,
-        strip_all_quals: saq2,
-        c: c2,
-    )
-}
-collect_ns_graph = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, graph: ModuleGraph, st: NsScan) NsScan { a.collect_ns_edges(root, progdir, inpath, src, graph.imports, 0, st) }
-collect_ns_edges = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, edges: [ImportEdge], i: i64, st: NsScan) NsScan {
-    cur := st
-    edges.loop((h, idx, edge) {
-        (idx < i).match ({ true => { }, false => edge.namespace.match ({ true => {
-            cur = a.load_ns_edge(root, progdir, inpath, src, edge, cur)
-        }, false => { } }) })
-    })
-    cur
-}
 load_closure_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view, id: String, c: Closure) Closure {
-    c.seen.seen_name(id).match ({ true => c, false => {
-        entry := table.module_id(id)
-        graph := entry.graph
-        u2 := id.id_is_user().match ({ true => a.user_decls_from_symbols(c.useen, graph.symbols, 0, id, inpath), false => c.useen })
-        c2 := Closure(
-            seen: a.madd_name(c.seen, id),
-            out: c.out,
-            useen: u2,
-        )
-        c3 := a.load_import_graph_table(table, inpath, entry.source, graph, id.id_is_user(), c2)
-        ns := a.collect_ns_graph_table(table, inpath, entry.source, graph, a.ns_scan(c3))
-        body := ns.c.out.strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, false)
-        Closure(
-            seen: ns.c.seen,
-            out: body,
-            useen: ns.c.useen,
-        )
-    } })
+    c.seen.seen_name(id).match ({
+        true  => c,
+        false => {
+            entry := table.module_id(id)
+            graph := entry.graph
+            u2 := id.id_is_user().match ({
+                true  => a.user_decls_from_symbols(c.useen, graph.symbols, 0, id, inpath),
+                false => c.useen,
+            })
+            c2 := Closure(
+                seen: a.madd_name(c.seen, id),
+                out: c.out,
+                useen: u2,
+            )
+            c3 := a.load_import_graph_table(table, inpath, entry.source, graph, id.id_is_user(), c2)
+            ns := a.collect_ns_graph_table(table, inpath, entry.source, graph, a.ns_scan(c3))
+            body := ns.c.out.strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, false)
+            Closure(
+                seen: ns.c.seen,
+                out: body,
+                useen: ns.c.useen,
+            )
+        },
+    })
 }
 load_import_edges_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view, src: string_view, edges: [ImportEdge], i: i64, validate: bool, c: Closure) Closure {
     cur := c
     edges.loop((h, idx, edge) {
-        (idx < i).match ({ true => { }, false => edge.namespace.match ({ true => { }, false => {
-            id := edge.edge_id_in(a)
-            cur = a.load_closure_table(table, inpath, id, cur)
-            validate.match ({ true => table.check_import_names_table(a, src, edge.start, id, inpath), false => 0 })
-        } }) })
+        (idx < i).match ({
+            true  => { },
+            false => edge.namespace.match ({ true => { }, false => {
+                id := edge.edge_id_in(a)
+                cur = a.load_closure_table(table, inpath, id, cur)
+                validate.match ({
+                    true  => table.check_import_names_table(a, src, edge.start, id, inpath),
+                    false => 0,
+                })
+            } }),
+        })
     })
     cur
 }
@@ -1018,7 +1142,10 @@ load_ns_edge_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view
     q2 := a.madd_name(st.quals, alias)
     qn2 := st.qnames.add_qual_names(a, alias, names, 0)
     sqn2 := st.strip_qnames.add_qual_names(a, alias, all, 0)
-    saq2 := modid.id_is_std_io_c().match ({ true => a.madd_name(st.strip_all_quals, alias), false => st.strip_all_quals })
+    saq2 := modid.id_is_std_io_c().match ({
+        true  => a.madd_name(st.strip_all_quals, alias),
+        false => st.strip_all_quals,
+    })
     NsScan(
         quals: q2,
         qnames: qn2,
@@ -1030,9 +1157,12 @@ load_ns_edge_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view
 collect_ns_edges_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view, src: string_view, edges: [ImportEdge], i: i64, st: NsScan) NsScan {
     cur := st
     edges.loop((h, idx, edge) {
-        (idx < i).match ({ true => { }, false => edge.namespace.match ({ true => {
-            cur = a.load_ns_edge_table(table, inpath, src, edge, cur)
-        }, false => { } }) })
+        (idx < i).match ({
+            true  => { },
+            false => edge.namespace.match ({ true => {
+                cur = a.load_ns_edge_table(table, inpath, src, edge, cur)
+            }, false => { } }),
+        })
     })
     cur
 }
@@ -1044,14 +1174,20 @@ provided_head_count = (src: string_view, p: i32, n: i32) i32 {
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == '}' || b == 0).match ({ true => {
-            h.break
-        }, false => b.is_alpha().match ({ true => {
-            count = count + 1
-            pos = src.res_ident_end(pos)
-        }, false => {
-            pos = pos + 1
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == '}' || b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => b.is_alpha().match ({ true => {
+                    count = count + 1
+                    pos = src.res_ident_end(pos)
+                }, false => {
+                    pos = pos + 1
+                } }),
+            }),
+        })
     })
     count
 }
@@ -1061,20 +1197,26 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: string_view, p: i32, n: i3
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => src.is_import_line(pos).match ({ true => {
-            count = src.provided_head_count(src.lstrip(pos) + 1, count)
-            pos = src.import_end(pos)
-        }, false => src.is_ns_line(pos).match ({ true => {
-            pos = src.next_line(pos)
-        }, false => {
-            sp := a.decl_span(src, pos)
-            (sp.eof || sp.next <= pos).match ({ true => {
-                h.break
-            }, false => {
-                count = sp.named.match ({ true => count + 1, false => count })
-                pos = sp.next
-            } })
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => src.is_import_line(pos).match ({
+                true  => {
+                    count = src.provided_head_count(src.lstrip(pos) + 1, count)
+                    pos = src.import_end(pos)
+                },
+                false => src.is_ns_line(pos).match ({ true => {
+                    pos = src.next_line(pos)
+                }, false => {
+                    sp := a.decl_span(src, pos)
+                    (sp.eof || sp.next <= pos).match ({ true => {
+                        h.break
+                    }, false => {
+                        count = sp.named.match ({ true => count + 1, false => count })
+                        pos = sp.next
+                    } })
+                } }),
+            }),
+        })
     })
     count
 }
@@ -1130,35 +1272,41 @@ fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: string_view, p: i32, out: [Pro
             h.break
         }, false => {
             ii := to_i32(n)
-            (ii < pos).match ({ true => { }, false => (b == '}' || b == 0).match ({ true => {
-                h.break
-            }, false => b.is_alpha().match ({ true => {
-                ie := src.res_ident_end(pos)
-                alloc.symbol_name_alloc(src, pos, ie, true).match ({
-                    .Ok(name) => {
-                        out[idx] = ProvidedSymbol(
-                            name: name,
-                            start: pos,
-                            next: ie,
-                            decl_start: pos,
-                            decl_next: ie,
-                            imported: true,
-                            foreign: false,
-                            is_type: false,
-                            is_pub: false,
-                        )
-                        idx = idx + 1
-                        pos = ie
-                    },
-                    .Err(e)   => {
-                        failed = true
-                        last_err = e
+            (ii < pos).match ({
+                true  => { },
+                false => (b == '}' || b == 0).match ({
+                    true  => {
                         h.break
                     },
-                })
-            }, false => {
-                pos = pos + 1
-            } }) }) })
+                    false => b.is_alpha().match ({ true => {
+                        ie := src.res_ident_end(pos)
+                        alloc.symbol_name_alloc(src, pos, ie, true).match ({
+                            .Ok(name) => {
+                                out[idx] = ProvidedSymbol(
+                                    name: name,
+                                    start: pos,
+                                    next: ie,
+                                    decl_start: pos,
+                                    decl_next: ie,
+                                    imported: true,
+                                    foreign: false,
+                                    is_type: false,
+                                    is_pub: false,
+                                )
+                                idx = idx + 1
+                                pos = ie
+                            },
+                            .Err(e)   => {
+                                failed = true
+                                last_err = e
+                                h.break
+                            },
+                        })
+                    }, false => {
+                        pos = pos + 1
+                    } }),
+                }),
+            })
         } })
     })
     failed.match ({ true => err(last_err), false => ok(idx) })
@@ -1174,41 +1322,14 @@ fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_
             h.break
         }, false => {
             ii := to_i32(n)
-            (ii < pos).match ({ true => { }, false => src.is_import_line(pos).match ({ true => {
-                alloc.fill_head_symbols_in(src, src.lstrip(pos) + 1, out, idx).match ({
-                    .Ok(next) => {
-                        idx = next
-                        pos = src.import_end(pos)
-                    },
-                    .Err(e)   => {
-                        failed = true
-                        last_err = e
-                        h.break
-                    },
-                })
-            }, false => src.is_ns_line(pos).match ({ true => {
-                pos = src.next_line(pos)
-            }, false => {
-                sp := a.decl_span(src, pos)
-                (sp.eof || sp.next <= pos).match ({ true => {
-                    h.break
-                }, false => {
-                    sp.named.match ({ true => {
-                        ie := src.res_ident_end(sp.start)
-                        alloc.symbol_name_alloc(src, sp.start, ie, false).match ({
-                            .Ok(name) => {
-                                out[idx] = ProvidedSymbol(
-                                    name: name,
-                                    start: sp.start,
-                                    next: ie,
-                                    decl_start: sp.start,
-                                    decl_next: sp.next,
-                                    imported: false,
-                                    foreign: src.is_foreign_span(sp.start, sp.next),
-                                    is_type: sp.is_type,
-                                    is_pub: src.at(ie) == '*',
-                                )
-                                idx = idx + 1
+            (ii < pos).match ({
+                true  => { },
+                false => src.is_import_line(pos).match ({
+                    true  => {
+                        alloc.fill_head_symbols_in(src, src.lstrip(pos) + 1, out, idx).match ({
+                            .Ok(next) => {
+                                idx = next
+                                pos = src.import_end(pos)
                             },
                             .Err(e)   => {
                                 failed = true
@@ -1216,10 +1337,43 @@ fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_
                                 h.break
                             },
                         })
-                    }, false => { } })
-                    pos = sp.next
-                } })
-            } }) }) })
+                    },
+                    false => src.is_ns_line(pos).match ({ true => {
+                        pos = src.next_line(pos)
+                    }, false => {
+                        sp := a.decl_span(src, pos)
+                        (sp.eof || sp.next <= pos).match ({ true => {
+                            h.break
+                        }, false => {
+                            sp.named.match ({ true => {
+                                ie := src.res_ident_end(sp.start)
+                                alloc.symbol_name_alloc(src, sp.start, ie, false).match ({
+                                    .Ok(name) => {
+                                        out[idx] = ProvidedSymbol(
+                                            name: name,
+                                            start: sp.start,
+                                            next: ie,
+                                            decl_start: sp.start,
+                                            decl_next: sp.next,
+                                            imported: false,
+                                            foreign: src.is_foreign_span(sp.start, sp.next),
+                                            is_type: sp.is_type,
+                                            is_pub: src.at(ie) == '*',
+                                        )
+                                        idx = idx + 1
+                                    },
+                                    .Err(e)   => {
+                                        failed = true
+                                        last_err = e
+                                        h.break
+                                    },
+                                })
+                            }, false => { } })
+                            pos = sp.next
+                        } })
+                    } }),
+                }),
+            })
         } })
     })
     failed.match ({ true => err(last_err), false => ok(out) })
@@ -1238,7 +1392,12 @@ module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view) Mo
         symbols: a.provided_symbols_in(alloc, src).expect("std.internal.resolve: allocation failed"),
     )
 }
-name_prefix_eq = (raw: string_view, wanted: string_view, i: i32, e: i32) bool { (i == e).match ({ true => true, false => raw.at(i) == wanted.at(i) && raw.name_prefix_eq(wanted, i + 1, e) }) }
+name_prefix_eq = (raw: string_view, wanted: string_view, i: i32, e: i32) bool {
+    (i == e).match ({
+        true  => true,
+        false => raw.at(i) == wanted.at(i) && raw.name_prefix_eq(wanted, i + 1, e),
+    })
+}
 escaped_name_eq = (raw: string_view, wanted: string_view) bool {
     e := raw.res_ident_end(0)
     raw.is_c_kw_name_span(0, e) && raw.name_prefix_eq(wanted, 0, e) && wanted.at(e) == '_' && wanted.at(e + 1) == 'z' && wanted.at(e + 2) == 'k' && wanted.at(e + 3) == 0
@@ -1266,25 +1425,44 @@ has_symbol = (symbols: [ProvidedSymbol], name: string_view) bool {
     })
     found
 }
-span_has_byte = (s: string_view, p: i32, e: i32, b: u8) bool { (p >= e).match ({ true => false, false => (s.at(p) == b).match ({ true => true, false => s.span_has_byte(p + 1, e, b) }) }) }
-is_foreign_span = (s: string_view, p: i32, e: i32) bool { s.span_has_byte(p, e, '=') && s.span_has_byte(p, e, '{').match ({ true => false, false => true }) }
+span_has_byte = (s: string_view, p: i32, e: i32, b: u8) bool {
+    (p >= e).match ({
+        true  => false,
+        false => (s.at(p) == b).match ({ true => true, false => s.span_has_byte(p + 1, e, b) }),
+    })
+}
+is_foreign_span = (s: string_view, p: i32, e: i32) bool { s.span_has_byte(p, e, '=') && s.span_has_byte(p, e, '{').match ({
+    true  => false,
+    false => true,
+}) }
 symbol_name_in = (s: ProvidedSymbol, a: MutPtr<Malloc>) String { a.gstr_string(s.name.view().len + 1).gstr_append(a, s.name) }
-symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool { (include_imported || s.imported.match ({ true => false, false => true })) && (include_foreign || s.foreign.match ({ true => false, false => true })) }
+symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool {
+    (include_imported || s.imported.match ({ true => false, false => true })) && (include_foreign || s.foreign.match ({
+        true  => false,
+        false => true,
+    }))
+}
 symbol_names_into = (set: String, a: MutPtr<Malloc>, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
     cur := set
     symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => sym.symbol_allowed(include_imported, include_foreign).match ({ true => {
-            cur = cur.rappend(a, sym.name).rpush(a, 10)
-        }, false => { } }) })
+        (idx < i).match ({
+            true  => { },
+            false => sym.symbol_allowed(include_imported, include_foreign).match ({ true => {
+                cur = cur.rappend(a, sym.name).rpush(a, 10)
+            }, false => { } }),
+        })
     })
     cur
 }
 symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
     cur := set
     symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => sym.symbol_allowed(include_imported, include_foreign).match ({ true => {
-            cur = a.madd_str_name(cur, sym.name)
-        }, false => { } }) })
+        (idx < i).match ({
+            true  => { },
+            false => sym.symbol_allowed(include_imported, include_foreign).match ({ true => {
+                cur = a.madd_str_name(cur, sym.name)
+            }, false => { } }),
+        })
     })
     cur
 }
@@ -1292,9 +1470,18 @@ symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol
 value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64) String {
     cur := set
     symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => (sym.symbol_allowed(false, false) && sym.is_type.match ({ true => false, false => true })).match ({ true => {
-            cur = a.madd_str_name(cur, sym.name)
-        }, false => { } }) })
+        (idx < i).match ({
+            true  => { },
+            false => (sym.symbol_allowed(false, false) && sym.is_type.match ({
+                true  => false,
+                false => true,
+            })).match ({
+                true  => {
+                    cur = a.madd_str_name(cur, sym.name)
+                },
+                false => { },
+            }),
+        })
     })
     cur
 }
@@ -1304,23 +1491,37 @@ value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [Provided
 imported_value_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur := m
     symbols.loop((h, idx, sym) {
-        (sym.imported && sym.is_type.match ({ true => false, false => true })).match ({ true => {
-            cur = cur.rset_add(a, sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed"))
-        }, false => { } })
+        (sym.imported && sym.is_type.match ({ true => false, false => true })).match ({
+            true  => {
+                cur = cur.rset_add(a, sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed"))
+            },
+            false => { },
+        })
     })
     cur
 }
 value_symbol_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur := m
     symbols.loop((h, idx, sym) {
-        (sym.symbol_allowed(false, false) && sym.is_type.match ({ true => false, false => true })).match ({ true => {
-            cur = cur.rset_add_str(a, sym.name)
-        }, false => { } })
+        (sym.symbol_allowed(false, false) && sym.is_type.match ({ true => false, false => true })).match ({
+            true  => {
+                cur = cur.rset_add_str(a, sym.name)
+            },
+            false => { },
+        })
     })
     cur
 }
 alias_decl_names = (a: MutPtr<Malloc>, src: string_view) String { a.module_graph(src).decl_names_in(a) }
-span_eq_lit = (s: string_view, p: i32, e: i32, lit: string_view, i: i32) bool { (p + i == e).match ({ true => lit.at(i) == 0, false => (lit.at(i) == 0).match ({ true => false, false => s.at(p + i) == lit.at(i) && s.span_eq_lit(p, e, lit, i + 1) }) }) }
+span_eq_lit = (s: string_view, p: i32, e: i32, lit: string_view, i: i32) bool {
+    (p + i == e).match ({
+        true  => lit.at(i) == 0,
+        false => (lit.at(i) == 0).match ({
+            true  => false,
+            false => s.at(p + i) == lit.at(i) && s.span_eq_lit(p, e, lit, i + 1),
+        }),
+    })
+}
 span_eq_name = (s: string_view, p: i32, e: i32, lit: string_view) bool { s.span_eq_lit(p, e, lit, 0) }
 is_c_kw_name_span = (s: string_view, p: i32, e: i32) bool { s.span_eq_name(p, e, "double") || s.span_eq_name(p, e, "short") || s.span_eq_name(p, e, "long") || s.span_eq_name(p, e, "int") || s.span_eq_name(p, e, "char") || s.span_eq_name(p, e, "float") || s.span_eq_name(p, e, "unsigned") || s.span_eq_name(p, e, "signed") || s.span_eq_name(p, e, "union") || s.span_eq_name(p, e, "struct") || s.span_eq_name(p, e, "enum") || s.span_eq_name(p, e, "typedef") || s.span_eq_name(p, e, "static") || s.span_eq_name(p, e, "extern") || s.span_eq_name(p, e, "const") || s.span_eq_name(p, e, "volatile") || s.span_eq_name(p, e, "register") || s.span_eq_name(p, e, "auto") || s.span_eq_name(p, e, "inline") || s.span_eq_name(p, e, "restrict") || s.span_eq_name(p, e, "if") || s.span_eq_name(p, e, "else") || s.span_eq_name(p, e, "for") || s.span_eq_name(p, e, "while") || s.span_eq_name(p, e, "do") || s.span_eq_name(p, e, "switch") || s.span_eq_name(p, e, "case") || s.span_eq_name(p, e, "default") || s.span_eq_name(p, e, "goto") || s.span_eq_name(p, e, "void") || s.span_eq_name(p, e, "continue") || s.span_eq_name(p, e, "break") }
 mimport_name_span = (a: MutPtr<Malloc>, flat: string_view, p: i32, e: i32) String { a.mappend_span(a.gstr_string(16), flat, p, e) }
@@ -1332,10 +1533,6 @@ mimport_head_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String
     }, false => { } })
     out
 }
-check_import_names = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, p: i32, id: String) i32 {
-    graph := a.module_graph(a.read_module(inpath, a.module_path(root, progdir, id)))
-    src.check_head(a, src.lstrip(p) + 1, graph.symbols, id, inpath)
-}
 check_import_names_table = (table: ModuleTable, a: MutPtr<Malloc>, src: string_view, p: i32, id: String, inpath: string_view) i32 {
     entry := table.module_id(id)
     src.check_head(a, src.lstrip(p) + 1, entry.graph.symbols, id, inpath)
@@ -1345,42 +1542,83 @@ check_head = (src: string_view, a: MutPtr<Malloc>, p: i32, provided: [ProvidedSy
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == '}' || b == 0).match ({ true => {
-            h.break
-        }, false => b.is_alpha().match ({ true => {
-            ie := src.res_ident_end(pos)
-            raw := a.mimport_name_span(src, pos, ie)
-            hd := a.mimport_head_name(src, pos, ie)
-            nm := hd.gstr_finish(a)
-            provided.has_symbol(nm).match ({ true => 0, false => a.fail_unknown_name(inpath, raw, id) })
-            pos = ie
-        }, false => {
-            pos = pos + 1
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == '}' || b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => b.is_alpha().match ({ true => {
+                    ie := src.res_ident_end(pos)
+                    raw := a.mimport_name_span(src, pos, ie)
+                    hd := a.mimport_head_name(src, pos, ie)
+                    nm := hd.gstr_finish(a)
+                    provided.has_symbol(nm).match ({
+                        true  => 0,
+                        false => a.fail_unknown_name(inpath, raw, id),
+                    })
+                    pos = ie
+                }, false => {
+                    pos = pos + 1
+                } }),
+            }),
+        })
     })
     0
 }
 // `useen` entries are `key\tORIGIN_ID\n`: the dedup key plus the id of the module that FIRST
 // provided that name, so a later redefinition can name BOTH modules in the diagnostic. Only
 // user_symbol_seen reads/writes useen, so this richer format stays internal to these helpers.
-useen_key_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool { (j == m).match ({ true => set.res_sbyte(i) == '\t', false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({ true => set.useen_key_eq(i + 1, name, j + 1, m), false => false }) }) }
-useen_tab = (set: String, i: i64) i64 { (i >= set.len || set.res_sbyte(i) == '\n').match ({ true => i, false => (set.res_sbyte(i) == '\t').match ({ true => i + 1, false => set.useen_tab(i + 1) }) }) }
-useen_line_origin = (out: String, a: MutPtr<Malloc>, set: String, i: i64) String { (i >= set.len || set.res_sbyte(i) == '\n').match ({ true => out, false => out.rpush(a, set.res_sbyte(i)).useen_line_origin(a, set, i + 1) }) }
+useen_key_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
+    (j == m).match ({
+        true  => set.res_sbyte(i) == '\t',
+        false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
+            true  => set.useen_key_eq(i + 1, name, j + 1, m),
+            false => false,
+        }),
+    })
+}
+useen_tab = (set: String, i: i64) i64 {
+    (i >= set.len || set.res_sbyte(i) == '\n').match ({
+        true  => i,
+        false => (set.res_sbyte(i) == '\t').match ({ true => i + 1, false => set.useen_tab(i + 1) }),
+    })
+}
+useen_line_origin = (out: String, a: MutPtr<Malloc>, set: String, i: i64) String {
+    (i >= set.len || set.res_sbyte(i) == '\n').match ({
+        true  => out,
+        false => out.rpush(a, set.res_sbyte(i)).useen_line_origin(a, set, i + 1),
+    })
+}
 // Origin id of `key` in `useen`, or an empty String if `key` has not been registered yet.
-useen_origin = (a: MutPtr<Malloc>, useen: String, key: String, i: i64) String { (i >= useen.len).match ({ true => a.gstr_string(1), false => useen.useen_key_eq(i, key, 0, key.len).match ({ true => useen_line_origin(a.gstr_string(24), a, useen, useen.useen_tab(i)), false => a.useen_origin(useen, key, useen.snext_line(i)) }) }) }
+useen_origin = (a: MutPtr<Malloc>, useen: String, key: String, i: i64) String {
+    (i >= useen.len).match ({
+        true  => a.gstr_string(1),
+        false => useen.useen_key_eq(i, key, 0, key.len).match ({
+            true  => useen_line_origin(a.gstr_string(24), a, useen, useen.useen_tab(i)),
+            false => a.useen_origin(useen, key, useen.snext_line(i)),
+        }),
+    })
+}
 useen_add = (a: MutPtr<Malloc>, useen: String, key: String, id: String) String { useen.rappend_string(a, key).rpush(a, '\t').rappend_string(a, id).rpush(a, 10) }
 user_symbol_seen = (a: MutPtr<Malloc>, useen: String, s: ProvidedSymbol, id: String, inpath: string_view) String {
     key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
     origin := a.useen_origin(useen, key, 0)
-    (origin.len > 0).match ({ true => a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin), false => 0 })
+    (origin.len > 0).match ({
+        true  => a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin),
+        false => 0,
+    })
     a.useen_add(useen, key, id)
 }
 user_decls_from_symbols = (a: MutPtr<Malloc>, useen: String, symbols: [ProvidedSymbol], i: i64, id: String, inpath: string_view) String {
     cur := useen
     symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => sym.imported.match ({ true => { }, false => {
-            cur = a.user_symbol_seen(cur, sym, id, inpath)
-        } }) })
+        (idx < i).match ({
+            true  => { },
+            false => sym.imported.match ({ true => { }, false => {
+                cur = a.user_symbol_seen(cur, sym, id, inpath)
+            } }),
+        })
     })
     cur
 }
@@ -1400,30 +1638,44 @@ fui_scan = (out: String, a: MutPtr<Malloc>, src: string_view, p: i32) String {
     done := false
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
-        done.match ({ true => {
-            h.break
-        }, false => (src.at(pos) == 0).match ({ true => {
-            h.break
-        }, false => src.is_import_line(pos).match ({ true => {
-            mk := src.import_marker_from(src.lstrip(pos))
-            src.is_user_marker_at(mk).match ({ true => {
-                cur = cur.take_name(a, src, mk + USER_MARKER_LEN)
-                done = true
+        done.match ({
+            true  => {
                 h.break
-            }, false => {
-                pos = src.import_end(pos)
-            } })
-        }, false => {
-            pos = src.next_line(pos)
-        } }) }) })
+            },
+            false => (src.at(pos) == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => src.is_import_line(pos).match ({ true => {
+                    mk := src.import_marker_from(src.lstrip(pos))
+                    src.is_user_marker_at(mk).match ({ true => {
+                        cur = cur.take_name(a, src, mk + USER_MARKER_LEN)
+                        done = true
+                        h.break
+                    }, false => {
+                        pos = src.import_end(pos)
+                    } })
+                }, false => {
+                    pos = src.next_line(pos)
+                } }),
+            }),
+        })
     })
     cur
 }
 // Per-name dedup keeps user shadowing visible for validation. Repo-internal
 // std/compiler entry modules may own a natural export name over dependency
 // closures, because their dependencies are implementation details.
-res_ident_end = (flat: string_view, p: i32) i32 { flat.at(p).is_alnum().match ({ true => flat.res_ident_end(p + 1), false => p }) }
-import_name_span = (out: String, a: MutPtr<Malloc>, flat: string_view, p: i32, e: i32) String { (p == e).match ({ true => out, false => out.rpush(a, flat.at(p)).import_name_span(a, flat, p + 1, e) }) }
+res_ident_end = (flat: string_view, p: i32) i32 { flat.at(p).is_alnum().match ({
+    true  => flat.res_ident_end(p + 1),
+    false => p,
+}) }
+import_name_span = (out: String, a: MutPtr<Malloc>, flat: string_view, p: i32, e: i32) String {
+    (p == e).match ({
+        true  => out,
+        false => out.rpush(a, flat.at(p)).import_name_span(a, flat, p + 1, e),
+    })
+}
 append_to_nul = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
     bs: [u8] := s.view()
@@ -1434,25 +1686,53 @@ append_to_nul = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String 
     })
     cur
 }
-path_has_at = (s: string_view, p: i32, lit: string_view, i: i32) bool { (lit.at(i) == 0).match ({ true => true, false => (s.at(p + i) == 0).match ({ true => false, false => s.at(p + i) == lit.at(i) && s.path_has_at(p, lit, i + 1) }) }) }
-path_contains_from = (s: string_view, p: i32, lit: string_view) bool { (s.at(p) == 0).match ({ true => lit.at(0) == 0, false => s.path_has_at(p, lit, 0).match ({ true => true, false => s.path_contains_from(p + 1, lit) }) }) }
+path_has_at = (s: string_view, p: i32, lit: string_view, i: i32) bool {
+    (lit.at(i) == 0).match ({
+        true  => true,
+        false => (s.at(p + i) == 0).match ({
+            true  => false,
+            false => s.at(p + i) == lit.at(i) && s.path_has_at(p, lit, i + 1),
+        }),
+    })
+}
+path_contains_from = (s: string_view, p: i32, lit: string_view) bool {
+    (s.at(p) == 0).match ({
+        true  => lit.at(0) == 0,
+        false => s.path_has_at(p, lit, 0).match ({
+            true  => true,
+            false => s.path_contains_from(p + 1, lit),
+        }),
+    })
+}
 path_contains = (s: string_view, lit: string_view) bool { s.path_contains_from(0, lit) }
 internal_source_path = (path: string_view) bool { path.path_contains("/zen/std/") || path.path_contains("zen/std/") || path.path_contains("/zen/compiler/") || path.path_contains("zen/compiler/") }
 main_symbol_names = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, bodystart: i64, bodyend: i64) String {
     cur := set
     symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => sym.imported.match ({ true => { }, false => {
-            key := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            inmain := sym.start >= bodystart && sym.start < bodyend
-            cur = (inmain && cur.seen_name(key).match ({ true => false, false => true })).match ({ true => a.madd_name(cur, key), false => cur })
-        } }) })
+        (idx < i).match ({
+            true  => { },
+            false => sym.imported.match ({
+                true  => { },
+                false => {
+                    key := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                    inmain := sym.start >= bodystart && sym.start < bodyend
+                    cur = (inmain && cur.seen_name(key).match ({ true => false, false => true })).match ({
+                        true  => a.madd_name(cur, key),
+                        false => cur,
+                    })
+                },
+            }),
+        })
     })
     cur
 }
 dedup_decls* = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64) string_view { a.dedup_decls_mode(flat, bodystart, bodyend, false) }
 dedup_decls_mode = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64, allow_main_shadow: bool) string_view {
     symbols := a.module_graph(flat).symbols
-    main_names := allow_main_shadow.match ({ true => a.main_symbol_names(a.gstr_string(256), symbols, 0, bodystart, bodyend), false => a.gstr_string(64) })
+    main_names := allow_main_shadow.match ({
+        true  => a.main_symbol_names(a.gstr_string(256), symbols, 0, bodystart, bodyend),
+        false => a.gstr_string(64),
+    })
     hs := a.dedup_symbols(a.gstr_string(4096), flat, symbols, 0, 0, a.gstr_string(256), a.gstr_string(64), main_names, bodystart, bodyend, allow_main_shadow)
     hs.gstr_finish(a)
 }
@@ -1462,19 +1742,43 @@ dedup_symbols = (a: MutPtr<Malloc>, out: String, flat: string_view, symbols: [Pr
     seen := set
     main_seen := mainset
     symbols.loop((h, idx, sym) {
-        (idx < i).match ({ true => { }, false => sym.imported.match ({ true => { }, false => {
-            nm := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            inmain := sym.start >= bodystart && sym.start < bodyend
-            shadow := allow_main_shadow && inmain.match ({ true => false, false => true }) && main_names.seen_name(nm)
-            keep := shadow.match ({ true => false, false => inmain.match ({ true => true, false => seen.seen_name(nm).match ({ true => main_seen.seen_name(nm), false => true }) }) })
-            cur = cur.rappend_span(a, flat, pos, sym.decl_start)
-            keep.match ({ true => {
-                cur = cur.rappend_span(a, flat, sym.decl_start, sym.decl_next)
-            }, false => { } })
-            seen = shadow.match ({ true => seen, false => seen.seen_name(nm).match ({ true => seen, false => a.madd_name(seen, nm) }) })
-            main_seen = inmain.match ({ true => a.madd_name(main_seen, nm), false => main_seen })
-            pos = sym.decl_next
-        } }) })
+        (idx < i).match ({
+            true  => { },
+            false => sym.imported.match ({
+                true  => { },
+                false => {
+                    nm := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                    inmain := sym.start >= bodystart && sym.start < bodyend
+                    shadow := allow_main_shadow && inmain.match ({ true => false, false => true }) && main_names.seen_name(nm)
+                    keep := shadow.match ({
+                        true  => false,
+                        false => inmain.match ({
+                            true  => true,
+                            false => seen.seen_name(nm).match ({
+                                true  => main_seen.seen_name(nm),
+                                false => true,
+                            }),
+                        }),
+                    })
+                    cur = cur.rappend_span(a, flat, pos, sym.decl_start)
+                    keep.match ({ true => {
+                        cur = cur.rappend_span(a, flat, sym.decl_start, sym.decl_next)
+                    }, false => { } })
+                    seen = shadow.match ({
+                        true  => seen,
+                        false => seen.seen_name(nm).match ({
+                            true  => seen,
+                            false => a.madd_name(seen, nm),
+                        }),
+                    })
+                    main_seen = inmain.match ({
+                        true  => a.madd_name(main_seen, nm),
+                        false => main_seen,
+                    })
+                    pos = sym.decl_next
+                },
+            }),
+        })
     })
     cur.append_to_nul(a, flat, pos)
 }
@@ -1486,7 +1790,12 @@ dedup_symbols = (a: MutPtr<Malloc>, out: String, flat: string_view, symbols: [Pr
 // `Heap.impl(Allocator)` → duplicate `impl_Allocator_Heap_*` functions. A trait has at most one impl per
 // (canonical) type, so two blocks with the same `<receiver>.<trait>` key are redundant copies: keep the
 // first, drop the rest. Distinct impls (different receiver OR trait) get distinct keys and all survive.
-impl_lparen = (s: string_view, p: i32) i32 { (s.at(p) == 0).match ({ true => p, false => (s.at(p) == '(').match ({ true => p + 1, false => s.impl_lparen(p + 1) }) }) }
+impl_lparen = (s: string_view, p: i32) i32 {
+    (s.at(p) == 0).match ({
+        true  => p,
+        false => (s.at(p) == '(').match ({ true => p + 1, false => s.impl_lparen(p + 1) }),
+    })
+}
 impl_key_in = (a: MutPtr<Malloc>, s: string_view, p: i32) String {
     re := s.res_ident_end(p)    // receiver ident `Heap`
     ts := s.lstrip(s.impl_lparen(re))    // first arg of `.impl(` — the trait
@@ -1528,7 +1837,13 @@ dedup_impls_into = (a: MutPtr<Malloc>, out: String, flat: string_view, p: i32, s
 // are prefixed the same way, so two modules can export the same short name.
 is_ns_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
-    (p == ls).match ({ true => s.at(ls).is_alnum().match ({ true => s.is_any_marker_at(s.lstrip(s.res_ident_end(ls))), false => false }), false => false })
+    (p == ls).match ({
+        true  => s.at(ls).is_alnum().match ({
+            true  => s.is_any_marker_at(s.lstrip(s.res_ident_end(ls))),
+            false => false,
+        }),
+        false => false,
+    })
 }
 ns_qualifier* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     ls := s.lstrip(p)
@@ -1557,16 +1872,22 @@ alias_hit = (s: string_view, p: i32, ie: i32, names: String, nm: String) bool {
     names.seen_name(nm) && rewrite_member
 }
 rewrite_alias_copy = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, names: String, alias: String) String {
-    s.line_comment_at(p).match ({ true => {
-        sk := out.copy_line_comment(a, s, p)
-        sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
-    }, false => s.block_comment_at(p).match ({ true => {
-        sk := out.copy_block_comment(a, s, p)
-        sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
-    }, false => s.quoted_at(p).match ({ true => {
-        sk := out.copy_literal(a, s, p)
-        sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
-    }, false => out.rpush(a, s.at(p)).rewrite_alias_names(a, s, p + 1, names, alias) }) }) })
+    s.line_comment_at(p).match ({
+        true  => {
+            sk := out.copy_line_comment(a, s, p)
+            sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
+        },
+        false => s.block_comment_at(p).match ({
+            true  => {
+                sk := out.copy_block_comment(a, s, p)
+                sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
+            },
+            false => s.quoted_at(p).match ({ true => {
+                sk := out.copy_literal(a, s, p)
+                sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
+            }, false => out.rpush(a, s.at(p)).rewrite_alias_names(a, s, p + 1, names, alias) }),
+        }),
+    })
 }
 rewrite_alias_names = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, names: String, alias: String) String {
     cur := out
@@ -1574,29 +1895,53 @@ rewrite_alias_names = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, n
     bs: [u8] := s.str_bytes()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => s.line_comment_at(pos).match ({ true => {
-            sk := cur.copy_line_comment(a, s, pos)
-            cur = sk.out
-            pos = sk.next
-        }, false => s.block_comment_at(pos).match ({ true => {
-            sk := cur.copy_block_comment(a, s, pos)
-            cur = sk.out
-            pos = sk.next
-        }, false => s.quoted_at(pos).match ({ true => {
-            sk := cur.copy_literal(a, s, pos)
-            cur = sk.out
-            pos = sk.next
-        }, false => (b.is_alpha() && (pos == 0 || s.at(pos - 1).is_alnum().match ({ true => false, false => true }))).match ({ true => {
-            ie := s.res_ident_end(pos)
-            nm := a.mimport_name_span(s, pos, ie)
-            cur = s.alias_hit(pos, ie, names, nm).match ({ true => cur.alias_name(a, alias, nm), false => cur.rappend_span(a, s, pos, ie) })
-            pos = ie
-        }, false => {
-            cur = cur.rpush(a, b)
-            pos = pos + 1
-        } }) }) }) }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => s.line_comment_at(pos).match ({
+                    true  => {
+                        sk := cur.copy_line_comment(a, s, pos)
+                        cur = sk.out
+                        pos = sk.next
+                    },
+                    false => s.block_comment_at(pos).match ({
+                        true  => {
+                            sk := cur.copy_block_comment(a, s, pos)
+                            cur = sk.out
+                            pos = sk.next
+                        },
+                        false => s.quoted_at(pos).match ({
+                            true  => {
+                                sk := cur.copy_literal(a, s, pos)
+                                cur = sk.out
+                                pos = sk.next
+                            },
+                            false => (b.is_alpha() && (pos == 0 || s.at(pos - 1).is_alnum().match ({
+                                true  => false,
+                                false => true,
+                            }))).match ({
+                                true  => {
+                                    ie := s.res_ident_end(pos)
+                                    nm := a.mimport_name_span(s, pos, ie)
+                                    cur = s.alias_hit(pos, ie, names, nm).match ({
+                                        true  => cur.alias_name(a, alias, nm),
+                                        false => cur.rappend_span(a, s, pos, ie),
+                                    })
+                                    pos = ie
+                                },
+                                false => {
+                                    cur = cur.rpush(a, b)
+                                    pos = pos + 1
+                                },
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        })
     })
     cur
 }
@@ -1609,28 +1954,18 @@ alias_module_body = (a: MutPtr<Malloc>, src: string_view, graph: ModuleGraph, al
     note_alias_prefix(a.gstr_string(16).rappend_string(a, alias).gstr_finish(a))
     a.gstr_string(4096).rewrite_alias_names(a, body, 0, names, alias)
 }
-line_name = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String { (i >= names.len || names.res_sbyte(i) == '\n').match ({ true => out, false => out.rpush(a, names.res_sbyte(i)).line_name(a, names, i + 1) }) }
+line_name = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String {
+    (i >= names.len || names.res_sbyte(i) == '\n').match ({
+        true  => out,
+        false => out.rpush(a, names.res_sbyte(i)).line_name(a, names, i + 1),
+    })
+}
 add_qual_name = (set: String, a: MutPtr<Malloc>, alias: String, name: String) String { set.rappend_string(a, alias).rpush(a, '.').rappend_string(a, name).rpush(a, 10) }
 add_qual_names = (set: String, a: MutPtr<Malloc>, alias: String, names: String, i: i64) String {
     (i >= names.len).match ({ true => set, false => {
         nm := line_name(a.gstr_string(16), a, names, i)
         set.add_qual_name(a, alias, nm).add_qual_names(a, alias, names, names.snext_line(i))
     } })
-}
-load_ns_closure_graph = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, alias: String, src: string_view, graph: ModuleGraph, c: Closure) Closure {
-    (ns_depth > NS_DEPTH_CAP).match ({ true => {
-        a.fail_import_cycle(inpath, id)
-    } })    // cyclic alias — exit cleanly, never recurse to overflow
-    ns_depth = ns_depth + 1
-    c2 := a.load_import_graph(root, progdir, inpath, src, graph, id.id_is_user(), c)
-    ns := a.collect_ns_graph(root, progdir, inpath, src, graph, a.ns_scan(c2))
-    body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
-    ns_depth = ns_depth - 1
-    Closure(
-        seen: ns.c.seen,
-        out: ns.c.out.rpush(a, 10).rappend_string(a, body),
-        useen: ns.c.useen,
-    )
 }
 load_ns_closure_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view, id: String, alias: String, src: string_view, graph: ModuleGraph, c: Closure) Closure {
     (ns_depth > NS_DEPTH_CAP).match ({ true => {
@@ -1647,15 +1982,12 @@ load_ns_closure_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: st
         useen: ns.c.useen,
     )
 }
-load_ns_closure = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, alias: String, src: string_view, c: Closure) Closure {
-    graph := a.module_graph(src)
-    a.load_ns_closure_graph(root, progdir, inpath, id, alias, src, graph, c)
+is_qual_access = (s: string_view, a: MutPtr<Malloc>, p: i32, ie: i32, quals: String) bool {
+    (s.at(ie) == '.' && s.at(ie + 1).is_alpha()).match ({
+        true  => quals.seen_name(a.mimport_name_span(s, p, ie)),
+        false => false,
+    })
 }
-collect_ns* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, src: string_view, p: i32, st: NsScan) NsScan {
-    graph := a.module_graph(src)
-    a.collect_ns_graph(root, progdir, inpath, src, graph, st)
-}
-is_qual_access = (s: string_view, a: MutPtr<Malloc>, p: i32, ie: i32, quals: String) bool { (s.at(ie) == '.' && s.at(ie + 1).is_alpha()).match ({ true => quals.seen_name(a.mimport_name_span(s, p, ie)), false => false }) }
 qualified_name = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, ie: i32) String { out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, ie + 1, s.res_ident_end(ie + 1)) }
 rewrite_quals = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
     cur := out
@@ -1663,43 +1995,73 @@ rewrite_quals = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, quals: 
     bs: [u8] := s.str_bytes()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => s.line_comment_at(pos).match ({ true => {
-            sk := cur.copy_line_comment(a, s, pos)
-            cur = sk.out
-            pos = sk.next
-        }, false => s.block_comment_at(pos).match ({ true => {
-            sk := cur.copy_block_comment(a, s, pos)
-            cur = sk.out
-            pos = sk.next
-        }, false => s.quoted_at(pos).match ({ true => {
-            sk := cur.copy_literal(a, s, pos)
-            cur = sk.out
-            pos = sk.next
-        }, false => (b.is_alpha() && (pos == 0 || s.at(pos - 1).is_alnum().match ({ true => false, false => true }))).match ({ true => {
-            ie := s.res_ident_end(pos)
-            s.is_qual_access(a, pos, ie, quals).match ({ true => {
-                alias := a.mimport_name_span(s, pos, ie)
-                qn := qualified_name(a.gstr_string(32), a, s, pos, ie)
-                me := s.res_ident_end(ie + 1)
-                qnames.seen_name(qn).match ({ true => {
-                    cur = cur.rappend_span(a, s, pos, ie).rappend(a, "__")
-                    pos = ie + 1
-                }, false => (strip_qnames.seen_name(qn) || strip_all_quals.seen_name(alias)).match ({ true => {
-                    pos = ie + 1
-                }, false => {
-                    cur = cur.rappend_span(a, s, pos, me)
-                    pos = me
-                } }) })
-            }, false => {
-                cur = cur.rappend_span(a, s, pos, ie)
-                pos = ie
-            } })
-        }, false => {
-            cur = cur.rpush(a, b)
-            pos = pos + 1
-        } }) }) }) }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => s.line_comment_at(pos).match ({
+                    true  => {
+                        sk := cur.copy_line_comment(a, s, pos)
+                        cur = sk.out
+                        pos = sk.next
+                    },
+                    false => s.block_comment_at(pos).match ({
+                        true  => {
+                            sk := cur.copy_block_comment(a, s, pos)
+                            cur = sk.out
+                            pos = sk.next
+                        },
+                        false => s.quoted_at(pos).match ({
+                            true  => {
+                                sk := cur.copy_literal(a, s, pos)
+                                cur = sk.out
+                                pos = sk.next
+                            },
+                            false => (b.is_alpha() && (pos == 0 || s.at(pos - 1).is_alnum().match ({
+                                true  => false,
+                                false => true,
+                            }))).match ({
+                                true  => {
+                                    ie := s.res_ident_end(pos)
+                                    s.is_qual_access(a, pos, ie, quals).match ({
+                                        true  => {
+                                            alias := a.mimport_name_span(s, pos, ie)
+                                            qn := qualified_name(a.gstr_string(32), a, s, pos, ie)
+                                            me := s.res_ident_end(ie + 1)
+                                            qnames.seen_name(qn).match ({
+                                                true  => {
+                                                    cur = cur.rappend_span(a, s, pos, ie).rappend(a, "__")
+                                                    pos = ie + 1
+                                                },
+                                                false => (strip_qnames.seen_name(qn) || strip_all_quals.seen_name(alias)).match ({
+                                                    true  => {
+                                                        pos = ie + 1
+                                                    },
+                                                    false => {
+                                                        cur = cur.rappend_span(a, s, pos, me)
+                                                        pos = me
+                                                    },
+                                                }),
+                                            })
+                                        },
+                                        false => {
+                                            cur = cur.rappend_span(a, s, pos, ie)
+                                            pos = ie
+                                        },
+                                    })
+                                },
+                                false => {
+                                    cur = cur.rpush(a, b)
+                                    pos = pos + 1
+                                },
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        })
     })
     cur
 }
@@ -1710,16 +2072,25 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, f
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => s.is_import_line(pos).match ({ true => {
-            pos = s.import_end(pos)
-        }, false => s.is_ns_line(pos).match ({ true => {
-            pos = s.next_line(pos)
-        }, false => {
-            e := s.line_end(pos)
-            cur = is_first.match ({ true => cur.rappend_span(a, s, pos, e), false => cur.rpush(a, 10).rappend_span(a, s, pos, e) })
-            is_first = false
-            pos = s.next_line(pos)
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => s.is_import_line(pos).match ({
+                true  => {
+                    pos = s.import_end(pos)
+                },
+                false => s.is_ns_line(pos).match ({ true => {
+                    pos = s.next_line(pos)
+                }, false => {
+                    e := s.line_end(pos)
+                    cur = is_first.match ({
+                        true  => cur.rappend_span(a, s, pos, e),
+                        false => cur.rpush(a, 10).rappend_span(a, s, pos, e),
+                    })
+                    is_first = false
+                    pos = s.next_line(pos)
+                } }),
+            }),
+        })
     })
     cur
 }
@@ -1728,7 +2099,10 @@ strip_ns_into* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, quals:
     raw := hs.gstr_finish(a)
     (raw.at(0) == 0).match ({ true => out, false => {
         base := first.match ({ true => out, false => out.rpush(a, 10) })
-        (quals.len == 0).match ({ true => base.rappend(a, raw), false => base.rewrite_quals(a, raw, 0, quals, qnames, strip_qnames, strip_all_quals) })
+        (quals.len == 0).match ({
+            true  => base.rappend(a, raw),
+            false => base.rewrite_quals(a, raw, 0, quals, qnames, strip_qnames, strip_all_quals),
+        })
     } })
 }
 module_body = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view, entry: ModuleEntry) string_view {
@@ -1776,7 +2150,10 @@ alias_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl
     body := hs.gstr_finish(a)
     a.parse_module(body)
 }
-root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] { edge.namespace.match ({ true => a.alias_edge_decls(p, edge), false => p.module(edge.module).decls }) }
+root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] { edge.namespace.match ({
+    true  => a.alias_edge_decls(p, edge),
+    false => p.module(edge.module).decls,
+}) }
 module_link_count* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) i64 {
     n := 0
     m.graph.imports.loop((h, i, edge) {
@@ -1830,22 +2207,33 @@ check_all_parsed_modules_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
 // aliases skip the qualified scan: their qualifiers are stripped wholesale (strip_all_quals), the
 // module is a raw libc surface. ZEN_VIS_REPORT=1 downgrades the error to a report-only sweep (print
 // every violation, never exit) — the migration mode used to prove the tree clean before enforcing.
-vis_report_mode = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).match ({ true => false, false => true }) }
+vis_report_mode = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).match ({
+    true  => false,
+    false => true,
+}) }
 // 1-based line number of byte `p` (loop over the source slice, not recursion: sources are large).
 vis_line_of = (s: string_view, p: i32) i32 {
     n := 1
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
-        (to_i32(i) >= p).match ({ true => {
-            h.break
-        }, false => (b == '\n').match ({ true => {
-            n = n + 1
-        }, false => { } }) })
+        (to_i32(i) >= p).match ({
+            true  => {
+                h.break
+            },
+            false => (b == '\n').match ({ true => {
+                n = n + 1
+            }, false => { } }),
+        })
     })
     n
 }
 // start of the line containing `p` (backward scan; lines are short, recursion is bounded).
-vis_bol = (s: string_view, p: i32) i32 { (p <= 0).match ({ true => 0, false => (s.at(p - 1) == '\n').match ({ true => p, false => s.vis_bol(p - 1) }) }) }
+vis_bol = (s: string_view, p: i32) i32 {
+    (p <= 0).match ({
+        true  => 0,
+        false => (s.at(p - 1) == '\n').match ({ true => p, false => s.vis_bol(p - 1) }),
+    })
+}
 vis_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, width: i32, name: String, id: String, report: bool) i32 {
     line := src.vis_line_of(pos)
     col := pos - src.vis_bol(pos) + 1
@@ -1866,10 +2254,16 @@ vis_symbol_private = (symbols: [ProvidedSymbol], name: string_view) bool {
     priv := false
     found := false
     symbols.loop((h, i, s) {
-        found.match ({ true => { }, false => s.symbol_matches(name).match ({ true => {
-            found = true
-            priv = s.imported.match ({ true => false, false => s.is_pub.match ({ true => false, false => true }) })
-        }, false => { } }) })
+        found.match ({
+            true  => { },
+            false => s.symbol_matches(name).match ({ true => {
+                found = true
+                priv = s.imported.match ({
+                    true  => false,
+                    false => s.is_pub.match ({ true => false, false => true }),
+                })
+            }, false => { } }),
+        })
     })
     priv
 }
@@ -1879,18 +2273,30 @@ vis_check_head = (a: MutPtr<Malloc>, path: string_view, src: string_view, p: i32
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == '}' || b == 0).match ({ true => {
-            h.break
-        }, false => b.is_alpha().match ({ true => {
-            ie := src.res_ident_end(pos)
-            hd := a.mimport_head_name(src, pos, ie)
-            target.symbols.vis_symbol_private(hd.gstr_finish(a)).match ({ true => {
-                a.vis_fail(path, src, pos, ie - pos, a.mimport_name_span(src, pos, ie), id, report)
-            }, false => { } })
-            pos = ie
-        }, false => {
-            pos = pos + 1
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == '}' || b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => b.is_alpha().match ({
+                    true  => {
+                        ie := src.res_ident_end(pos)
+                        hd := a.mimport_head_name(src, pos, ie)
+                        target.symbols.vis_symbol_private(hd.gstr_finish(a)).match ({
+                            true  => {
+                                a.vis_fail(path, src, pos, ie - pos, a.mimport_name_span(src, pos, ie), id, report)
+                            },
+                            false => { },
+                        })
+                        pos = ie
+                    },
+                    false => {
+                        pos = pos + 1
+                    },
+                }),
+            }),
+        })
     })
     0
 }
@@ -1900,14 +2306,20 @@ vis_skip_block = (s: string_view, p: i32) i32 {
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => (b == '*' && s.at(ii + 1) == '/').match ({ true => {
-            pos = ii + 2
-            h.break
-        }, false => {
-            pos = ii + 1
-        } }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => (b == '*' && s.at(ii + 1) == '/').match ({ true => {
+                    pos = ii + 2
+                    h.break
+                }, false => {
+                    pos = ii + 1
+                } }),
+            }),
+        })
     })
     pos
 }
@@ -1919,23 +2331,40 @@ vis_skip_lit = (s: string_view, p: i32) i32 {
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => {
-            pos = pos + 1
-            esc.match ({ true => {
-                esc = false
-            }, false => (b == '\\').match ({ true => {
-                esc = true
-            }, false => (ii > p && b == q).match ({ true => {
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({ true => {
                 h.break
-            }, false => { } }) }) })
-        } }) })
+            }, false => {
+                pos = pos + 1
+                esc.match ({
+                    true  => {
+                        esc = false
+                    },
+                    false => (b == '\\').match ({
+                        true  => {
+                            esc = true
+                        },
+                        false => (ii > p && b == q).match ({ true => {
+                            h.break
+                        }, false => { } }),
+                    }),
+                })
+            } }),
+        })
     })
     pos
 }
 // s[p..e) == w, byte-exact (idents are short; recursion is bounded).
-vis_span_eq_at = (s: string_view, p: i32, e: i32, w: String, j: i64) bool { (p + to_i32(j) == e).match ({ true => j == w.len, false => (j < w.len && s.at(p + to_i32(j)) == w.res_sbyte(j)).match ({ true => s.vis_span_eq_at(p, e, w, j + 1), false => false }) }) }
+vis_span_eq_at = (s: string_view, p: i32, e: i32, w: String, j: i64) bool {
+    (p + to_i32(j) == e).match ({
+        true  => j == w.len,
+        false => (j < w.len && s.at(p + to_i32(j)) == w.res_sbyte(j)).match ({
+            true  => s.vis_span_eq_at(p, e, w, j + 1),
+            false => false,
+        }),
+    })
+}
 // alias-qualified uses `alias.name` in `src`: `name` must be exported by the aliased module.
 // Comment/string spans are skipped; the ident-boundary + dot shape mirrors rewrite_quals exactly,
 // so anything the rewriter WOULD have resolved is what gets visibility-checked.
@@ -1944,38 +2373,74 @@ vis_scan_quals = (a: MutPtr<Malloc>, path: string_view, src: string_view, alias:
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => src.line_comment_at(pos).match ({ true => {
-            pos = src.next_line(pos)
-        }, false => src.block_comment_at(pos).match ({ true => {
-            pos = src.vis_skip_block(pos)
-        }, false => src.quoted_at(pos).match ({ true => {
-            pos = src.vis_skip_lit(pos)
-        }, false => (b.is_alpha() && (pos == 0 || src.at(pos - 1).is_alnum().match ({ true => false, false => true }))).match ({ true => {
-            ie := src.res_ident_end(pos)
-            (src.vis_span_eq_at(pos, ie, alias, 0) && src.at(ie) == '.' && src.at(ie + 1).is_alpha()).match ({ true => {
-                me := src.res_ident_end(ie + 1)
-                nm := a.mimport_name_span(src, ie + 1, me)
-                target.symbols.vis_symbol_private(nm.gstr_finish(a)).match ({ true => {
-                    a.vis_fail(path, src, ie + 1, me - ie - 1, a.mimport_name_span(src, ie + 1, me), id, report)
-                }, false => { } })
-                pos = me
-            }, false => {
-                pos = ie
-            } })
-        }, false => {
-            pos = pos + 1
-        } }) }) }) }) }) })
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => src.line_comment_at(pos).match ({
+                    true  => {
+                        pos = src.next_line(pos)
+                    },
+                    false => src.block_comment_at(pos).match ({
+                        true  => {
+                            pos = src.vis_skip_block(pos)
+                        },
+                        false => src.quoted_at(pos).match ({
+                            true  => {
+                                pos = src.vis_skip_lit(pos)
+                            },
+                            false => (b.is_alpha() && (pos == 0 || src.at(pos - 1).is_alnum().match ({
+                                true  => false,
+                                false => true,
+                            }))).match ({
+                                true  => {
+                                    ie := src.res_ident_end(pos)
+                                    (src.vis_span_eq_at(pos, ie, alias, 0) && src.at(ie) == '.' && src.at(ie + 1).is_alpha()).match ({
+                                        true  => {
+                                            me := src.res_ident_end(ie + 1)
+                                            nm := a.mimport_name_span(src, ie + 1, me)
+                                            target.symbols.vis_symbol_private(nm.gstr_finish(a)).match ({
+                                                true  => {
+                                                    a.vis_fail(path, src, ie + 1, me - ie - 1, a.mimport_name_span(src, ie + 1, me), id, report)
+                                                },
+                                                false => { },
+                                            })
+                                            pos = me
+                                        },
+                                        false => {
+                                            pos = ie
+                                        },
+                                    })
+                                },
+                                false => {
+                                    pos = pos + 1
+                                },
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        })
     })
     0
 }
 vis_enforce_edge = (a: MutPtr<Malloc>, table: ModuleTable, path: string_view, src: string_view, edge: ImportEdge, report: bool) i32 {
     id := edge.edge_id_in(a)
-    table.has_id(id).match ({ true => {
-        entry := table.module_id(id)
-        edge.namespace.match ({ true => id.id_is_std_io_c().match ({ true => 0, false => a.vis_scan_quals(path, src, edge.edge_alias_in(a), entry.graph, id, report) }), false => a.vis_check_head(path, src, edge.start, entry.graph, id, report) })
-    }, false => 0 })
+    table.has_id(id).match ({
+        true  => {
+            entry := table.module_id(id)
+            edge.namespace.match ({
+                true  => id.id_is_std_io_c().match ({
+                    true  => 0,
+                    false => a.vis_scan_quals(path, src, edge.edge_alias_in(a), entry.graph, id, report),
+                }),
+                false => a.vis_check_head(path, src, edge.start, entry.graph, id, report),
+            })
+        },
+        false => 0,
+    })
 }
 enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
     table.modules.loop((h, i, entry) {
@@ -2014,13 +2479,16 @@ shadow_rename_set = (a: MutPtr<Malloc>, flat: string_view, mainsrc: string_view,
     syms.loop((h, i, s) {
         (s.imported || s.foreign || s.is_type).match ({ true => { }, false => {
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            (s.decl_start >= lo && s.decl_start < hi).match ({ true => mainseen.rset_has(key).match ({ true => {
-                maindup = maindup.rset_add(a, key)
-            }, false => {
-                mainseen = mainseen.rset_add(a, key)
-            } }), false => nonmain.rset_has(key).match ({ true => { }, false => {
-                nonmain = nonmain.rset_add(a, key)
-            } }) })
+            (s.decl_start >= lo && s.decl_start < hi).match ({
+                true  => mainseen.rset_has(key).match ({ true => {
+                    maindup = maindup.rset_add(a, key)
+                }, false => {
+                    mainseen = mainseen.rset_add(a, key)
+                } }),
+                false => nonmain.rset_has(key).match ({ true => { }, false => {
+                    nonmain = nonmain.rset_add(a, key)
+                } }),
+            })
         } })
     })
     // `out` stays the newline-delimited String the rewrite consumes; `outset` is its O(1) `fresh` mirror.
@@ -2030,14 +2498,23 @@ shadow_rename_set = (a: MutPtr<Malloc>, flat: string_view, mainsrc: string_view,
         (s.imported || s.foreign || s.is_type).match ({ true => { }, false => {
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
             inmain := s.decl_start >= lo && s.decl_start < hi
-            once := mainseen.rset_has(key) && maindup.rset_has(key).match ({ true => false, false => true })
+            once := mainseen.rset_has(key) && maindup.rset_has(key).match ({
+                true  => false,
+                false => true,
+            })
             unimported := imported.rset_has(key).match ({ true => false, false => true })
-            free := allnames.rset_has(a.shadow_mangled(key)).match ({ true => false, false => true })
+            free := allnames.rset_has(a.shadow_mangled(key)).match ({
+                true  => false,
+                false => true,
+            })
             fresh := outset.rset_has(key).match ({ true => false, false => true })
-            (inmain && once && nonmain.rset_has(key) && unimported && free && fresh).match ({ true => {
-                out = a.madd_name(out, key)
-                outset = outset.rset_add(a, key)
-            }, false => { } })
+            (inmain && once && nonmain.rset_has(key) && unimported && free && fresh).match ({
+                true  => {
+                    out = a.madd_name(out, key)
+                    outset = outset.rset_add(a, key)
+                },
+                false => { },
+            })
         } })
     })
     out
@@ -2049,24 +2526,30 @@ ShadowFlat*: {
 // Given the pre-dedup flat, rename the user's colliding decls in the body region [lo,hi) and return the
 // rewritten flat plus the shifted body end. `enable` is false for internal sources (byte-identical no-op).
 shadow_flat = (a: MutPtr<Malloc>, pre: string_view, mainsrc: string_view, lo: i64, hi: i64, enable: bool) ShadowFlat {
-    enable.match ({ true => {
-        names := a.shadow_rename_set(pre, mainsrc, lo, hi)
-        (names.len == 0).match ({ true => ShadowFlat(
+    enable.match ({
+        true  => {
+            names := a.shadow_rename_set(pre, mainsrc, lo, hi)
+            (names.len == 0).match ({
+                true  => ShadowFlat(
+                    flat: pre,
+                    bodyend: hi,
+                ),
+                false => {
+                    main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
+                    rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
+                    nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
+                    ShadowFlat(
+                        flat: nf,
+                        bodyend: lo + rewS.len,
+                    )
+                },
+            })
+        },
+        false => ShadowFlat(
             flat: pre,
             bodyend: hi,
-        ), false => {
-            main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
-            rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
-            nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
-            ShadowFlat(
-                flat: nf,
-                bodyend: lo + rewS.len,
-            )
-        } })
-    }, false => ShadowFlat(
-        flat: pre,
-        bodyend: hi,
-    ) })
+        ),
+    })
 }
 // ── MODULE-ALIAS NAME-COLLISION ATTRIBUTION (#66a) ───────────────────────────────────────────────
 // A module alias `alias = std.x.y` flattens y's value decls under an `alias__` prefix, INCLUDING the
@@ -2087,11 +2570,14 @@ res_line_of = (src: string_view, off: i32) i32 {
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii >= off).match ({ true => {
-            h.break
-        }, false => (b == '\n').match ({ true => {
-            no = no + 1
-        }, false => { } }) })
+        (ii >= off).match ({
+            true  => {
+                h.break
+            },
+            false => (b == '\n').match ({ true => {
+                no = no + 1
+            }, false => { } }),
+        })
     })
     no
 }
@@ -2100,24 +2586,41 @@ res_col_of = (src: string_view, off: i32) i32 {
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii >= off).match ({ true => {
-            h.break
-        }, false => (b == '\n').match ({ true => {
-            ls = ii + 1
-        }, false => { } }) })
+        (ii >= off).match ({
+            true  => {
+                h.break
+            },
+            false => (b == '\n').match ({ true => {
+                ls = ii + 1
+            }, false => { } }),
+        })
     })
     off - ls + 1
 }
-res_udec = (out: String, a: MutPtr<Malloc>, n: i32) String { (n < 10).match ({ true => out.gstr_push(a, ('0'.to_i64() + to_i64(n)).to_u8()), false => out.res_udec(a, n / 10).gstr_push(a, ('0'.to_i64() + to_i64(n % 10)).to_u8()) }) }
+res_udec = (out: String, a: MutPtr<Malloc>, n: i32) String {
+    (n < 10).match ({
+        true  => out.gstr_push(a, ('0'.to_i64() + to_i64(n)).to_u8()),
+        false => out.res_udec(a, n / 10).gstr_push(a, ('0'.to_i64() + to_i64(n % 10)).to_u8()),
+    })
+}
 // index just past the matching `>` of a `<...>` generic list starting at `p` (the `<`). Method decl
 // headers carry only flat lists (`<A>`, `<A, B>`), so a scan to the first `>` is exact.
-skip_to_gt = (s: string_view, p: i32) i32 { (s.at(p) == 0 || s.at(p) == '>').match ({ true => p + 1, false => s.skip_to_gt(p + 1) }) }
-after_generics = (s: string_view, j: i32) i32 { (s.at(j) == '<').match ({ true => s.skip_to_gt(j + 1), false => j }) }
+skip_to_gt = (s: string_view, p: i32) i32 { (s.at(p) == 0 || s.at(p) == '>').match ({
+    true  => p + 1,
+    false => s.skip_to_gt(p + 1),
+}) }
+after_generics = (s: string_view, j: i32) i32 { (s.at(j) == '<').match ({
+    true  => s.skip_to_gt(j + 1),
+    false => j,
+}) }
 // is the text at name-end `ie` the head of a fn decl — `<...>? *? = (` ?
 is_fn_decl_after = (s: string_view, ie: i32) bool {
     j0 := s.after_generics(ie)
     j := (s.at(j0) == '*').match ({ true => j0 + 1, false => j0 })
-    (s.at(j) == ' ').match ({ true => s.at(j + 1) == '=' && s.at(j + 2) == ' ' && s.at(j + 3) == '(', false => s.at(j) == '=' && s.at(j + 1) == ' ' && s.at(j + 2) == '(' })
+    (s.at(j) == ' ').match ({
+        true  => s.at(j + 1) == '=' && s.at(j + 2) == ' ' && s.at(j + 3) == '(',
+        false => s.at(j) == '=' && s.at(j + 1) == ' ' && s.at(j + 2) == '(',
+    })
 }
 // Newline-separated set of INDENTED fn-decl names in `src` that also appear in `topnames` (the
 // module's top-level value decls) — i.e. every type method whose name shadows a top-level fn. Empty
@@ -2128,21 +2631,24 @@ split_names = (a: MutPtr<Malloc>, src: string_view, topnames: String) String {
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => {
-            ls := src.lstrip(pos)
-            (ls > pos && src.at(ls).is_alpha()).match ({ true => {
-                ie := src.res_ident_end(ls)
-                src.is_fn_decl_after(ie).match ({ true => {
-                    nm := a.mimport_name_span(src, ls, ie)
-                    topnames.seen_name(nm).match ({ true => {
-                        out = a.madd_name(out, nm)
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({ true => {
+                h.break
+            }, false => {
+                ls := src.lstrip(pos)
+                (ls > pos && src.at(ls).is_alpha()).match ({ true => {
+                    ie := src.res_ident_end(ls)
+                    src.is_fn_decl_after(ie).match ({ true => {
+                        nm := a.mimport_name_span(src, ls, ie)
+                        topnames.seen_name(nm).match ({ true => {
+                            out = a.madd_name(out, nm)
+                        }, false => { } })
                     }, false => { } })
                 }, false => { } })
-            }, false => { } })
-            pos = src.next_line(pos)
-        } }) })
+                pos = src.next_line(pos)
+            } }),
+        })
     })
     out
 }
@@ -2154,21 +2660,24 @@ has_method_call_of = (a: MutPtr<Malloc>, src: string_view, names: String) String
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
-        (ii < pos).match ({ true => { }, false => (b == 0).match ({ true => {
-            h.break
-        }, false => {
-            (b == '.' && src.at(ii + 1).is_alpha()).match ({ true => {
-                ie := src.res_ident_end(ii + 1)
-                (src.at(ie) == '(').match ({ true => {
-                    nm := a.mimport_name_span(src, ii + 1, ie)
-                    names.seen_name(nm).match ({ true => {
-                        out = nm
-                        h.break
+        (ii < pos).match ({
+            true  => { },
+            false => (b == 0).match ({ true => {
+                h.break
+            }, false => {
+                (b == '.' && src.at(ii + 1).is_alpha()).match ({ true => {
+                    ie := src.res_ident_end(ii + 1)
+                    (src.at(ie) == '(').match ({ true => {
+                        nm := a.mimport_name_span(src, ii + 1, ie)
+                        names.seen_name(nm).match ({ true => {
+                            out = nm
+                            h.break
+                        }, false => { } })
                     }, false => { } })
                 }, false => { } })
-            }, false => { } })
-            pos = ii + 1
-        } }) })
+                pos = ii + 1
+            } }),
+        })
     })
     out
 }
@@ -2218,7 +2727,10 @@ fail_alias_collision = (a: MutPtr<Malloc>, inpath: string_view, mainsrc: string_
     // detail: which other module pulls the same names in unqualified, and the shared name that breaks
     d0 := l1.gstr_append(a, "  `")
     d1 := a.mappend_id_str_dotted(d0, edge.module).gstr_append(a, "` is also imported unqualified by `")
-    d2 := eq(importer, "").match ({ true => d1.gstr_append(a, "your program"), false => a.mappend_id_str_dotted(d1, importer) })
+    d2 := eq(importer, "").match ({
+        true  => d1.gstr_append(a, "your program"),
+        false => a.mappend_id_str_dotted(d1, importer),
+    })
     d3 := d2.gstr_append(a, "`, and its method `")
     d4 := a.mappend_string(d3, split).gstr_append(a, "` shares a name with a top-level function; the alias renames the method (to `")
     d5 := d4.gstr_append(a, edge.alias).gstr_append(a, "__")
@@ -2255,7 +2767,10 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
-    inpath.internal_source_path().match ({ true => 0, false => a.check_alias_collisions(table, graph, mainsrc, inpath) })
+    inpath.internal_source_path().match ({
+        true  => 0,
+        false => a.check_alias_collisions(table, graph, mainsrc, inpath),
+    })
     ns := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
     nsl := ns.c.out.len
     body := ns.c.out.strip_ns_into(a, mainsrc, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, ns.c.out.len == 0)
@@ -2265,7 +2780,10 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
         useen: ns.c.useen,
     ))
     internal := inpath.internal_source_path()
-    sf := a.shadow_flat(cN.out.gstr_finish(a), mainsrc, nsl, body.len, internal.match ({ true => false, false => true }))
+    sf := a.shadow_flat(cN.out.gstr_finish(a), mainsrc, nsl, body.len, internal.match ({
+        true  => false,
+        false => true,
+    }))
     flat := a.dedup_impls(a.dedup_decls_mode(sf.flat, nsl, sf.bodyend, internal))
     ResolvedProgram(
         table: table,
