@@ -136,15 +136,17 @@ n := c.get().id
 c.release_in(heap.addr())
 ```
 
-## Not Yet Enforced
+## Partly Enforced; Remaining Work
 
-These are still open design/compiler work:
+The compiler now enforces pointer direction, typed-raw null checks, nested type
+invariance, local alias/consume flow, loop/branch UAF checks, and several escape
+and sendability rules. These are still open:
 
-- branch-sensitive ownership flow;
-- alias tracking across assignments, parameters, slices, and fields;
-- pointer lifetimes and borrow scopes;
-- `Ptr` / `MutPtr` / `RawPtr` capability enforcement;
-- non-null `Ptr<T>` versus nullable option/raw pointer discipline;
+- complete branch-sensitive/interprocedural ownership flow;
+- alias tracking through arbitrary parameters, slices, fields, and generic wrappers;
+- general pointer lifetimes and borrow scopes beyond the current escape passes;
+- branch-refined null proofs (today `assert_nonnull` carries the proof in the type);
+- sound nullability for the permissive `RawPtr<u8>` allocator/FFI floor;
 - full thread-safety traits (the move-on-send and deep-immutability send rules
   above are enforced; a general `Send`/`Sync`-style capability layer is not);
 - guaranteed destructor coverage for every owning type.

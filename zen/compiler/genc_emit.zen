@@ -1,7 +1,7 @@
 // compiler.genc_emit — C emission over the shared genc AST. Pipeline: genc -> mono -> genc_emit.
 { String } = std.text.string
 { view, is_empty, eq, ends_with } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, blk_diverges, is_expr_null, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, is_template, is_trait, call, lit, arm, block, blk_diverges, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
@@ -122,12 +122,22 @@ gen_tag_const = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>) String {
         _       => s,
     })
 }
-// Loop handler fields `break`/`continue` emit C control flow; other fields emit normally.
+// Loop control is an EXPRESSION in the AST (it can sit inside a value-match arm), so a bare C
+// `break`/`continue` is both mistargeted by an intervening match switch and unusable in expression
+// position. The resolved handler is a unique local Var: jump to that loop's labels from a typed GNU
+// statement-expression. The dead `0` gives __typeof__/conditional arm typing an ordinary value.
+gen_loop_label = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String {
+    load(obj).match ({
+        .Var(v) => s.gstr_append(alloc, v.name).gstr_append(alloc, suffix),
+        _       => s.gstr_append(alloc, "zen__invalid_loop_handler"),
+    })
+}
+gen_loop_jump = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String { s.gstr_append(alloc, "({ goto ").gen_loop_label(alloc, obj, suffix).gstr_append(alloc, "; 0; })") }
 gen_member = (s: String, alloc: MutPtr<Malloc>, m: MemberData) String {
     eq(m.field, "break_zk").match ({
-        true  => s.gstr_append(alloc, "break"),
+        true  => s.gen_loop_jump(alloc, m.obj, "__break"),
         false => eq(m.field, "continue_zk").match ({
-            true  => s.gstr_append(alloc, "continue"),
+            true  => s.gen_loop_jump(alloc, m.obj, "__continue"),
             false => m.member_is_tag_const().match ({
                 true  => s.gen_tag_const(alloc, m.obj),
                 false => s.gen_expr(alloc, m.obj).gstr_append(alloc, ".").gstr_append(alloc, m.field),
@@ -137,7 +147,10 @@ gen_member = (s: String, alloc: MutPtr<Malloc>, m: MemberData) String {
 }
 gen_loop = (s: String, alloc: MutPtr<Malloc>, l: LoopData) String {
     out := s
-    out = out.gstr_append(alloc, "({ __auto_type _seq = ")
+    // GNU local labels are scoped to this statement-expression. Generic inlining may clone a loop
+    // (and therefore its handler spelling) multiple times in one C function; ordinary labels would
+    // collide function-wide and could bind a jump to the wrong clone.
+    out = out.gstr_append(alloc, "({ __label__ ").gstr_append(alloc, l.h).gstr_append(alloc, "__break, ").gstr_append(alloc, l.h).gstr_append(alloc, "__continue; __auto_type _seq = ")
     out = out.gen_expr(alloc, l.seq)
     out = out.gstr_append(alloc, "; for (int64_t ")
     out = out.gstr_append(alloc, l.idx)
@@ -155,7 +168,8 @@ gen_loop = (s: String, alloc: MutPtr<Malloc>, l: LoopData) String {
     out = out.gstr_append(alloc, l.idx)
     out = out.gstr_append(alloc, "]; ")
     out = out.gen_loop_body(alloc, l.body)
-    out.gstr_append(alloc, " } 0; })")
+    out = out.gstr_append(alloc, " ").gstr_append(alloc, l.h).gstr_append(alloc, "__continue: ; } ")
+    out.gstr_append(alloc, l.h).gstr_append(alloc, "__break: ; 0; })")
 }
 gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
     out := s
@@ -531,6 +545,15 @@ gen_armbody = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_
         false => s.gen_armbind(alloc, subj, sep, a),
     })
 }
+// Statement matches must keep recursively-discarded arm bodies in statement context. Otherwise a
+// nested void match is lowered by gen_match as a value and attempts to declare an impossible `void _out`.
+gen_armbind_stmt = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "{ __auto_type ").gstr_append(alloc, a.bind).gstr_append(alloc, " = ").gstr_append(alloc, subj).gstr_append(alloc, sep).gstr_append(alloc, "u.").gstr_append(alloc, a.variant).gstr_append(alloc, "; ").gen_expr_stmt(alloc, a.body).gstr_append(alloc, " }") }
+gen_armbody_stmt = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+    is_empty(a.bind).match ({
+        true  => s.gen_expr_stmt(alloc, a.body),
+        false => s.gen_armbind_stmt(alloc, subj, sep, a),
+    })
+}
 // Type every arm through C's conditional operator so array arms decay, numeric arms widen, and exact
 // struct/scalar arms keep their type. __typeof__ evaluates none of these arm expressions. DIVERGING
 // arms (body ends in `return`) yield no value: they are skipped here (their block would type void and
@@ -563,7 +586,7 @@ gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: str
         false => s.gstr_append(alloc, "{ _out = ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } "),
     })
 }
-gen_switch_stmt_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "{ ").gen_armbody(alloc, subj, sep, a).gstr_append(alloc, "; break; } ") }
+gen_switch_stmt_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "{ ").gen_armbody_stmt(alloc, subj, sep, a).gstr_append(alloc, " break; } ") }
 gen_switch_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData) String { s.gstr_append(alloc, "case ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant).gstr_append(alloc, ": ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_stmt_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData) String { s.gstr_append(alloc, "case ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant).gstr_append(alloc, ": ").gen_switch_stmt_body(alloc, subj, sep, a) }
@@ -610,84 +633,29 @@ gen_switch_stmt_arms = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep
         },
     })
 }
-// ── guarded matches: `if <guard>` on an arm, and/or duplicate variants (a guarded arm may fall through
-// to a later same-variant arm) ─ can't be a C `switch` (duplicate `case`s, and fall-through-on-false).
-// They lower to a linear if-ladder over a `_gm` ("guard-matched") flag: each arm is one independent
-// `if (!_gm && <tag test>) { <bind> [if (<guard>)] <assign>; _gm = 1; }`, so a guard-false arm leaves
-// `_gm` 0 and the next arm's test runs (fall-through). `_gm`/`_subj`/`_out` are scoped by the enclosing
-// `({ })`/`{ }`, so nested guarded matches get their own. Unguarded matches keep the switch below,
-// byte-for-byte, so nothing that lacks a guard changes.
-arms_have_guard = (arms: [ArmData]) bool {
-    f := false
-    arms.loop((h, i, a) {
-        f = a.guard.is_expr_null().match ({ true => f, false => true })
-    })
-    f
-}
-gen_garm_cond = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, a: ArmData) String {
-    head := s.gstr_append(alloc, "if (!_gm")
-    tagged := eq(a.variant, "_").match ({
-        true  => head,
-        false => head.gstr_append(alloc, " && _subj").gstr_append(alloc, sep).gstr_append(alloc, "tag == ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant),
-    })
-    tagged.gstr_append(alloc, ") { ")
-}
-gen_garm_bind = (s: String, alloc: MutPtr<Malloc>, sep: string_view, a: ArmData) String {
-    is_empty(a.bind).match ({
-        true  => s,
-        false => s.gstr_append(alloc, "__auto_type ").gstr_append(alloc, a.bind).gstr_append(alloc, " = _subj").gstr_append(alloc, sep).gstr_append(alloc, "u.").gstr_append(alloc, a.variant).gstr_append(alloc, "; "),
-    })
-}
-// a diverging body (ends in `return`) runs for control flow and never sets `_gm`; else assign `_out`
-// (value position) / just run (statement position) and mark matched.
-gen_garm_assign = (s: String, alloc: MutPtr<Malloc>, a: ArmData, valpos: bool) String {
-    a.body.blk_diverges().match ({
-        true  => s.gstr_append(alloc, "{ ").gen_expr(alloc, a.body).gstr_append(alloc, "; } "),
-        false => valpos.match ({
-            true  => s.gstr_append(alloc, "{ _out = (").gen_expr(alloc, a.body).gstr_append(alloc, "); _gm = 1; } "),
-            false => s.gstr_append(alloc, "{ ").gen_expr(alloc, a.body).gstr_append(alloc, "; _gm = 1; } "),
-        }),
-    })
-}
-gen_garm = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, a: ArmData, valpos: bool) String {
-    open := s.gen_garm_cond(alloc, sep, ename, a).gen_garm_bind(alloc, sep, a)
-    guarded := is_expr_null(a.guard).match ({
-        true  => open,
-        false => open.gstr_append(alloc, "if (").gen_expr(alloc, a.guard).gstr_append(alloc, ") "),
-    })
-    guarded.gen_garm_assign(alloc, a, valpos).gstr_append(alloc, "} ")
-}
-gen_garms = (s: String, alloc: MutPtr<Malloc>, sep: string_view, ename: string_view, arms: [ArmData], i: i64, valpos: bool) String {
-    (i >= arms.len).match ({
-        true  => s,
-        false => s.gen_garm(alloc, sep, ename, arms[i], valpos).gen_garms(alloc, sep, ename, arms, i + 1, valpos),
-    })
-}
-gen_match_guarded = (s: String, alloc: MutPtr<Malloc>, m: MatchData, sep: string_view) String { s.gstr_append(alloc, "({ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; ").gen_match_out_decl(alloc, "_subj", sep, m.arms).gstr_append(alloc, "int _gm = 0; ").gen_garms(alloc, sep, m.ename, m.arms, 0, true).gstr_append(alloc, "_out; })") }
-gen_match_stmt_guarded = (s: String, alloc: MutPtr<Malloc>, m: MatchData, sep: string_view) String { s.gstr_append(alloc, "{ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; int _gm = 0; ").gen_garms(alloc, sep, m.ename, m.arms, 0, false).gstr_append(alloc, "}") }
 // the subject can be any expression, so bind it once to a temp. Enum matches emit as a switch inside a
 // GCC statement-expression; `__typeof__(first_arm)` gives us the result type without evaluating an arm.
 gen_match = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
     sep := m.ptr.match ({ true => "->", false => "." })
-    m.arms.arms_have_guard().match ({
-        true  => s.gen_match_guarded(alloc, m, sep),
-        false => s.gstr_append(alloc, "({ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; ").gen_match_out_decl(alloc, "_subj", sep, m.arms).gstr_append(alloc, "switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} _out; })"),
-    })
+    s.gstr_append(alloc, "({ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; ").gen_match_out_decl(alloc, "_subj", sep, m.arms).gstr_append(alloc, "switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} _out; })")
 }
 gen_match_stmt = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
     sep := m.ptr.match ({ true => "->", false => "." })
-    m.arms.arms_have_guard().match ({
-        true  => s.gen_match_stmt_guarded(alloc, m, sep),
-        false => s.gstr_append(alloc, "{ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_stmt_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} }"),
-    })
+    s.gstr_append(alloc, "{ __auto_type _subj = ").gen_expr(alloc, m.subj).gstr_append(alloc, "; switch (_subj").gstr_append(alloc, sep).gstr_append(alloc, "tag) { ").gen_switch_stmt_arms(alloc, "_subj", sep, m.ename, m.arms, 0).gstr_append(alloc, "} }")
 }
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
 gen_expr_stmt = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
         .Match(m) => s.gen_match_stmt(alloc, m),
+        .Cond(d)  => s.gen_cond_stmt(alloc, d),
+        .Block(b) => s.gen_block(alloc, b.stmts),
         _         => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
     })
 }
+// A discarded boolean match has no common result type requirement. Emit it as control flow and keep
+// both branches in statement context; this matters when one branch is a loop jump and the other is an
+// assignment (their expression values deliberately have unrelated C types).
+gen_cond_stmt = (s: String, alloc: MutPtr<Malloc>, d: CondData) String { s.gstr_append(alloc, "if (").gen_expr(alloc, d.c).gstr_append(alloc, ") { ").gen_expr_stmt(alloc, d.t).gstr_append(alloc, " } else { ").gen_expr_stmt(alloc, d.e).gstr_append(alloc, " }") }
 gen_void_return = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
         .Match(m) => s.gen_match_stmt(alloc, m).gstr_append(alloc, " return;"),

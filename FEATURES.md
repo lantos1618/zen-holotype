@@ -25,10 +25,14 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   (lowered to C tagged unions).
 - **Slices** — `[T]`, a `(ptr, len)` view (lowers to `struct { T* ptr; int64_t len; }`).
   `[a, b, c]` literals, `xs[i]` indexing, `xs.len`. Iterated with the element-form `loop`.
-- **Pointers:** the parser accepts `Ptr<T>`, `MutPtr<T>`, and `RawPtr<T>`, and the backend
-  erases them to plain C pointers. The checker currently treats those spellings as one
-  pointer type with invariant pointee equality; `fits()` also handles integer widening
-  (`u8 ≤ i32 ≤ i64`). Full pointer-direction and nullability enforcement is still pending.
+- **Pointers:** `Ptr<T>` is a non-null read-only borrow, `MutPtr<T>` is a non-null writable
+  borrow, and `RawPtr<T>` is the nullable FFI form. All three lower to plain C pointers, but
+  their kinds remain distinct in checking and generic-instance identity. `MutPtr<T>` widens
+  to `Ptr<T>`; nested pointer, slice, and generic arguments are invariant. `RawPtr<u8>` is the
+  deliberately permissive allocator/FFI floor (and the type of `null_ptr()`). Typed raw pointers
+  require proof, but the byte floor remains an explicit unsafe boundary. Read-only provenance is
+  preserved through `assert_nonnull` and `.addr()`, every store/atomic write is
+  direction-checked, and a writable `[T]` cannot be built with `slice(Ptr<T>, len)`.
 - **Generics:** `Box<T>`, bounded `<T: Area>` — unification + **monomorphization** to
   concrete C.
 - **Traits & impls (keyword-free):** a trait is a record of method signatures
@@ -47,7 +51,8 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
 - `match` with **literal patterns** (`i32`/`bool`), **payload binding** (`.Circle(v) => v`),
   exhaustiveness, and wildcards — the source-level branching form, usable as an expression
   or a statement. The C backend may lower checked matches to `?:` or `if`/`else`
-  internally; Zen source does not have an `if` statement.
+  internally; Zen source does not have an `if` statement or match guard. An exact `if`
+  token reports `error[no-if]` with the boolean `.match` replacement.
 - **`loop`** — postfix slice iteration: `xs.loop((h, i, x) { … })` iterates a slice's
   elements. The backend also has an internal structured `@while(cond) { … }` form, lowered
   to a C `for`; Zen source does not expose `while`/`for`.
@@ -67,7 +72,8 @@ compiler is structured, [ARCHITECTURE](ARCHITECTURE.md); for where it's headed,
   trait-bound methods identically to the free-call form, and chains (`5.inc().dbl()`).
 - **Visibility** is a glued `*` on the name — `Vec*: { … }`, `area* = () { … }`, `Area*: { … }` —
   not a `pub` keyword (the [VISION](VISION.md) `name[*]` slot, made real). It marks the intended
-  public surface; full cross-module privacy enforcement is still pending.
+  public surface. Checked module loading enforces it for destructured values, qualified values, and
+  qualified types with `error[private-name]`; the raw flat-module emitter has no module boundary.
 
 ## Foreign bindings, errors & FFI memory
 The boundary to C, and what's on each side of it, kept explicit. A program is built from
@@ -284,8 +290,8 @@ shapes coexist:
 
 ## Modules & imports
 - An import is a destructuring of a module path — `{ a, b } = std.X` binds `a`, `b` from
-  `zen/std/X.zen`. Visibility is the glued `*` marker on public names; resolver-level
-  privacy errors are still pending.
+  `zen/std/X.zen`. Visibility is the glued `*` marker on public names; the checked resolver rejects
+  imports or qualified uses of unstarred declarations as `error[private-name]`.
 - `zenc check`, `zenc build`, and `zenc run` resolve `std` imports from disk before parsing:
   **`zen/std/internal/resolve.zen`** follows the program's import edges, gathers the transitive
   closure of `zen/std/*.zen` modules, strips the import lines, and concatenates each body

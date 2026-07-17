@@ -436,8 +436,18 @@ harness_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
-        path: "tests/fixtures/zen/return_guard_match_err.zen",
+        path: "tests/fixtures/zen/return_statement_match_err.zen",
         want_exit: "61",
+        want_out: "",
+        check_out: false,
+    ), FixtureCase(
+        path: "tests/fixtures/zen/match_loop_control_emit.zen",
+        want_exit: "0",
+        want_out: "1\n3\n45\n4\n",
+        check_out: true,
+    ), FixtureCase(
+        path: "tests/fixtures/zen/parser_rejects_match_guard.zen",
+        want_exit: "0",
         want_out: "",
         check_out: false,
     ), FixtureCase(
@@ -626,7 +636,8 @@ harness_build_run* = () i32 {
         want_out: "",
         check_out: false,
     )])
-    // return inside match arms (the manual unwrap-or-propagate idiom): guard-match `return err(e)`
+    // return inside match arms (the manual unwrap-or-propagate idiom): a statement-position
+    // match arm can `return err(e)`
     // + value-position diverging arms, nested/loop/bool/both-arms/generic variants — all
     // VALUE-verified on both the Ok and Err paths.
     // params shadow top-level names: closure param `f` + top-level `f` in one flattened program.
@@ -1032,7 +1043,11 @@ harness_build_run* = () i32 {
     ), VerdictCase(
         src: "main = () i32 { if (1 < 2) { return 9 } 7 }\n",
         should_pass: false,
-        kind: "undefined-name",
+        kind: "no-if",
+    ), VerdictCase(
+        src: "// `if` in prose is not syntax\nmain = () i32 { word := \"if\"  gift := 42  gift }\n",
+        should_pass: true,
+        kind: "",
     ), VerdictCase(
         src: "main = () i32 { 1 < 2 }\n",
         should_pass: false,
@@ -1111,7 +1126,7 @@ harness_build_run* = () i32 {
         kind: "undefined-name",
     )])
     // a well-typed program checks ok; a std-importing one resolves + checks ok.
-    // source-level `if` is not a Zen construct: `if` parses as an undefined name.
+    // source-level `if` is not a Zen construct: error[no-if] teaches the `.match` replacement.
     // ill-typed: bool is not <: i32 in return position.
     // mixed enum-match arm result types (int vs str / int vs bool) => return-fit.
     // undefined name in value / arg position.
@@ -1535,6 +1550,15 @@ harness_build_run* = () i32 {
     // a STRUCT METHOD named like an intrinsic is hoisted under a mangled `impl_…` name — allowed.
     // ── (g) POSITIONED diagnostics: kind + file:line:col + caret + message + hint ─────────────────
     dg := run_diags("build diagnostics", [DiagCase(
+        src: "if (true) { 1 }\n",
+        wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`"],
+    ), DiagCase(
+        src: "main = () i32 {\n    if (1 < 2) { 1 } else { 0 }\n}\n",
+        wants: [":2:5: error[no-if]: `if` is not part of Zen; conditional control flow uses `.match`", "      if (1 < 2) { 1 } else { 0 }", "      ^~", "hint: replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body"],
+    ), DiagCase(
+        src: "Box: Val(i32) | Empty\nmain = () i32 {\n    b: Box := .Val(1)\n    b.match ({\n        .Val(v) if v > 0 => 1,\n        .Val(v) => 2,\n        .Empty => 0,\n    })\n}\n",
+        wants: [":5:17: error[no-if]", "          .Val(v) if v > 0 => 1,", "hint: replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`"],
+    ), DiagCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         wants: [":7:22: error[arm-value]: match arm yields no value, but the match result is used as a value", "  .Err(e) => { done = true },", "^~~~", "hint: end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm"],
     ), DiagCase(
@@ -1552,6 +1576,12 @@ harness_build_run* = () i32 {
     ), DiagCase(
         src: "f = (x: i32) i32 { x }\nmain = () i32 { f(\"s\") }\n",
         wants: [":2:19: error[arg-type]: expected `i32`, got `string_literal`", "  main = () i32 { f(\"s\") }", "                    ^~~", "hint: check the argument type or add an explicit conversion at the call site"],
+    ), DiagCase(
+        src: "take = (p: MutPtr<i32>) i32 { 0 }\nmain = () i32 {\n    x: i32 := 1\n    ro: Ptr<i32> := x.addr()\n    take(ro)\n}\n",
+        wants: [":5:10: error[arg-type]: expected `MutPtr<i32>`, got `Ptr<i32>`", "      take(ro)", "           ^~", "hint: check the argument type or add an explicit conversion at the call site"],
+    ), DiagCase(
+        src: "Box*<T>: { v: T }\ntake = (b: Box<MutPtr<i32>>) i32 { 0 }\nmain = () i32 {\n    x: i32 := 1\n    ro: Ptr<i32> := x.addr()\n    b := Box<Ptr<i32>>(v: ro)\n    take(b)\n}\n",
+        wants: [":7:10: error[arg-type]: expected `Box<MutPtr<i32>>`, got `Box<Ptr<i32>>`", "      take(b)", "           ^", "hint: check the argument type or add an explicit conversion at the call site"],
     ), DiagCase(
         src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { })\n",
         wants: [":3:1: error[conformance]: impl does not satisfy the trait", "  Point.impl(Show, { })", "  ^~~~~", "hint: define every required trait method with the exact receiver, parameter, and return types"],
@@ -1883,8 +1913,17 @@ harness_build_run* = () i32 {
         name: "fmt_none_before_paren",
         cmd: "cp tests/fixtures/fmt/none_before_paren_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/none_before_paren_formatted.zen && ! grep -Fq \".None(\" $ZT/zfmt.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
     ), ShellCase(
-        name: "fmt_guards",
-        cmd: "cp tests/fixtures/fmt/guards_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/guards_formatted.zen && grep -Fq \".Val(v) if v > 10 => \" $ZT/zfmt.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+        name: "fmt_nested_matches",
+        cmd: "cp tests/fixtures/fmt/nested_matches_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/nested_matches_formatted.zen && grep -Fq \".Val(v) => (v > 10).match\" $ZT/zfmt.zen && ! grep -Fq \" if \" $ZT/zfmt.zen && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+    ), ShellCase(
+        name: "fmt_rejects_if_with_match_hint",
+        cmd: "printf 'main = () i32 {\\n    if (1 < 2) { 1 } else { 0 }\\n}\\n' > $ZT/zfmt_if.zen && { ./zenc fmt $ZT/zfmt_if.zen >$ZT/zfmt_if_o.txt 2>$ZT/zfmt_if_e.txt; test \"$?\" = 1; } && grep -Fq \"error[no-if]\" $ZT/zfmt_if_e.txt && grep -Fq \"cond.match ({ true => yes, false => no })\" $ZT/zfmt_if_e.txt",
+    ), ShellCase(
+        name: "checked_emitters_reject_match_guard",
+        cmd: "printf 'Box: Val(i32) | Empty\\nmain = () i32 { Box.Val(1).match ({ .Val(v) if v > 0 => 1, .Val(v) => 2, .Empty => 0 }) }\\n' > $ZT/zguard.zen && { ./zenc emit $ZT/zguard.zen >$ZT/zguard.c 2>$ZT/zguard_c_e.txt; test \"$?\" = 1; } && test ! -s $ZT/zguard.c && grep -Fq \"error[no-if]\" $ZT/zguard_c_e.txt && { ./zenc emit-js $ZT/zguard.zen >$ZT/zguard.js 2>$ZT/zguard_js_e.txt; test \"$?\" = 1; } && test ! -s $ZT/zguard.js && grep -Fq \"error[no-if]\" $ZT/zguard_js_e.txt",
+    ), ShellCase(
+        name: "js_match_loop_control",
+        cmd: "./zenc build --target js tests/fixtures/zen/match_loop_control_emit.zen -o $ZT/zmatchctl.js 2>/dev/null && node $ZT/zmatchctl.js >$ZT/zmatchctl_o.txt 2>$ZT/zmatchctl_e.txt && printf '1\\n3\\n45\\n4\\n' | cmp -s - $ZT/zmatchctl_o.txt",
     ), ShellCase(
         name: "fmt_control_bytes",
         cmd: "cp tests/fixtures/fmt/control_bytes_unformatted.zen $ZT/zfmt.zen && { ./zenc fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/control_bytes_formatted.zen && grep -Fq 'a\\rb' $ZT/zfmt.zen && test \"$(tr -cd '\\r' < $ZT/zfmt.zen | wc -c)\" = 0 && ./zenc fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zenc fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",

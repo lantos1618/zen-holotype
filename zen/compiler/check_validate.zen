@@ -1,7 +1,8 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
-{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, GenericData, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstring_view, tnamed, tptr, tptr_k, tslice, tvoid, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, GenericData, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstring_view, tnamed, tptr, tptr_k, tslice, tvoid, k_raw_ptr, k_mut_ptr, ptr_kw, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
+{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, write_thru_readonly, lvalue_writes_readonly, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Token, scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
 { Map, of } = std.collections.map    // DeclIndex fields are Map<i64>; .get/.put are UFCS methods, not imports
@@ -349,13 +350,6 @@ arg_err_at = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
         false => 0,
     })
 }
-arg_type_errs = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) {
-        acc = acc + env.arg_err_at(tps, params, i, ar)
-    })
-    acc
-}
 names_has = (names: [Param], fn: string_view) bool {
     found := false
     names.loop((h, i, n) {
@@ -497,64 +491,28 @@ shadow_not_callable = (env: Env, fn: string_view) bool {
     t := env.var_or_global(fn)
     (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
 }
-// Intrinsic arity must be checked before emission.
-check_call = (env: Env, c: CallData) i32 {
-    c.is_forbidden_raw_call().match ({
-        true  => 1,
-        false => env.is_unresolved_trait_call(c).match ({
-            true  => 0,
-            false => env.shadows_toplevel(c.fn).match ({
-                true  => env.var_or_global(c.fn).is_fnt().match ({
-                    true  => env.fnval_call_errs(c),
-                    false => env.shadow_not_callable(c.fn).match ({ true => 1, false => 0 }),
-                }),
-                false => env.env_known_fn(c.fn).match ({
-                    true  => env.call_errs(c),
-                    false => c.fn.is_intrinsic().match ({
-                        true  => (c.args.len == c.fn.intrinsic_arity()).match ({
-                            true  => 0,
-                            false => 1,
-                        }),
-                        false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({
-                            true  => env.trait_recv_missing(c).match ({ true => 1, false => 0 }),
-                            false => env.var_or_global(c.fn).is_fnt().match ({
-                                true  => env.fnval_call_errs(c),
-                                false => 1,
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
-    })
-}
+is_write_intrinsic = (fn: string_view) bool { eq(fn, "store") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
+// Slices are writable views, so constructing one from Ptr<T> would launder read-only memory just as
+// directly as a store. RawPtr and MutPtr retain the explicitly writable paths.
 store_writes_readonly = (env: Env, c: CallData) bool {
-    (eq(c.fn, "store") && c.args.len == 2).match ({
+    ((c.fn.is_write_intrinsic() || eq(c.fn, "slice")) && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(),
         false => false,
     })
 }
-store_mut_err = (env: Env, c: CallData) i32 { env.store_writes_readonly(c).match ({
-    true  => 1,
-    false => 0,
-}) }
 store_mut_kind = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({
     true  => KPTRWRITE(),
     false => 0,
 }), c.pos) }
 // every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
-is_deref_intrinsic = (fn: string_view) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_load_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
+is_deref_intrinsic = (fn: string_view) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "slice") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_load_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
 derefs_nullable = (env: Env, c: CallData) bool {
     (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(),
         false => false,
     })
 }
-null_deref_err = (env: Env, c: CallData) i32 { env.derefs_nullable(c).match ({
-    true  => 1,
-    false => 0,
-}) }
 // Generic UFCS trait calls may need to defer even if a top-level fn has the same name.
 // `@malloc` is not a magic allocator; use an ordinary foreign function or allocator API.
 // Calls: local signatures are checked; imported/deferred trait names are accepted; unknowns reject.
@@ -576,10 +534,6 @@ assert_nonnull_badarg = (env: Env, c: CallData) bool {
         false => false,
     })
 }
-assert_nonnull_err = (env: Env, c: CallData) i32 { env.assert_nonnull_badarg(c).match ({
-    true  => 1,
-    false => 0,
-}) }
 assert_nonnull_kind = (env: Env, c: CallData) i32 {
     kv_at(env.assert_nonnull_badarg(c).match ({ true => KARGTYPE(), false => 0 }), (c.args.len >= 1).match ({
         true  => c.args[0].expr_pos().pos_or(c.pos),
@@ -637,17 +591,6 @@ bound_errs = (env: Env, f: Func, c: CallData) i32 {
     })
     acc
 }
-call_errs = (env: Env, c: CallData) i32 {
-    f := env.env_func(c.fn)
-    ps := env.env_params(c.fn)
-    (ps.len == c.args.len).match ({
-        true  => f.is_imported_generic().match ({
-            true  => 0,
-            false => env.arg_type_errs(f.tparams, ps, c.args),
-        }),
-        false => 1,
-    })
-}
 // An INDIRECT call through a fn-value (`f := g  f(x)`, or an FnT parameter `f`): check the arg COUNT
 // against the FnT's params, then each CONCRETE param's arg type. Param positions typed by an unbound
 // tparam stay lenient (generic FnT-param templates resolve those at mono). Without this, a wrong-arity
@@ -666,46 +609,6 @@ fnt_arg_err_at = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
         },
         false => 0,
     })
-}
-fnt_arg_errs = (env: Env, ptys: [Ty], args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) {
-        acc = acc + env.fnt_arg_err_at(ptys, i, ar)
-    })
-    acc
-}
-fnval_call_errs = (env: Env, c: CallData) i32 {
-    env.var_or_global(c.fn).match ({
-        .FnT(ft) => (ft.params.len == c.args.len).match ({
-            true  => env.fnt_arg_errs(ft.params, c.args),
-            false => 1,
-        }),
-        _        => 1,
-    })
-}
-check_args = (env: Env, args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) {
-        acc = acc + env.check_expr(ar.addr())
-    })
-    acc
-}
-// A guarded arm's guard is checked in the arm's env (its pattern binding is in scope) and must be bool.
-guard_count = (env: Env, subjty: Ty, ar: ArmData) i32 {
-    is_expr_null(ar.guard).match ({
-        true  => 0,
-        false => {
-            aenv := env.a.arm_env(env, subjty, ar)
-            aenv.check_expr(ar.guard) + aenv.non_bool(ar.guard).match ({ true => 1, false => 0 })
-        },
-    })
-}
-check_arms = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
-    acc := 0
-    arms.loop((h, i, ar) {
-        acc = acc + env.a.arm_env(env, subjty, ar).check_expr(ar.body) + env.guard_count(subjty, ar)
-    })
-    acc
 }
 match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
     out := tvoid()
@@ -763,14 +666,6 @@ arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
         true  => 0,
         false => want.result_compatible(got).match ({ true => 0, false => 1 }),
     })
-}
-match_arm_result_errs = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
-    want := env.match_result_ty(subjty, arms)
-    acc := 0
-    arms.loop((h, i, ar) {
-        acc = acc + env.arm_result_err(subjty, want, ar)
-    })
-    acc
 }
 // ── value-consumed match/cond arms must each yield a value ──────────────────────────────
 // A match/cond CONSUMED AS A VALUE (let/assign RHS, return operand, call argument, index-set
@@ -863,20 +758,6 @@ expr_drops_return = (e: Ptr<Expr>) i32 {
         .Block(b) => b.stmts.early_returns().match ({ true => 1, false => 0 }),
         _         => 0,
     })
-}
-arm_return_errs = (arms: [ArmData]) i32 {
-    acc := 0
-    arms.loop((h, i, ar) {
-        acc = acc + ar.body.expr_drops_return()
-    })
-    acc
-}
-check_inits = (env: Env, inits: [FieldInit]) i32 {
-    acc := 0
-    inits.loop((h, i, fi) {
-        acc = acc + env.check_expr(fi.value)
-    })
-    acc
 }
 // Struct literals check known fields and value fits; imported/generic literals stay lenient.
 no_fields = () [Field] { slice(null_ptr(), 0) }
@@ -1150,21 +1031,17 @@ enum_variants = (decls: [Decl], ename: string_view) [VariantDef] {
     })
     found
 }
-// A GUARDED arm does NOT complete coverage: its guard may fail, so control can fall through to the next
-// arm. Exhaustiveness therefore ignores guarded arms — a variant covered ONLY by guarded arms is still
-// "missing", and a guarded `_` is not the catch-all. So a guarded-only match without an unguarded
-// fallback (`_`, bind-all, or all-variants-unguarded) is rejected non-exhaustive, as before.
 has_wildcard = (arms: [ArmData]) bool {
     f := false
     arms.loop((h, i, a) {
-        f = (eq(a.variant, "_") && is_expr_null(a.guard)).match ({ true => true, false => f })
+        f = eq(a.variant, "_").match ({ true => true, false => f })
     })
     f
 }
 arm_covers = (arms: [ArmData], vname: string_view) bool {
     f := false
     arms.loop((h, i, a) {
-        f = (eq(a.variant, vname) && is_expr_null(a.guard)).match ({ true => true, false => f })
+        f = eq(a.variant, vname).match ({ true => true, false => f })
     })
     f
 }
@@ -1182,7 +1059,7 @@ exhaustive_err = (env: Env, m: MatchData) i32 {
         false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
     })
 }
-// the NAME of the first declared variant the arms do not cover (unguarded), else "" — the uncovered
+// the NAME of the first declared variant the arms do not cover, else "" — the uncovered
 // variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
 first_missing_variant = (variants: [VariantDef], arms: [ArmData]) string_view {
     r := ""
@@ -1191,16 +1068,10 @@ first_missing_variant = (variants: [VariantDef], arms: [ArmData]) string_view {
     })
     r
 }
-// A later same-variant arm is a duplicate only when an EARLIER arm of that variant is UNGUARDED — an
-// unguarded arm already covers the variant, so anything after it is dead. Two guarded `.Some` arms (or a
-// guarded `.Some` followed by an unguarded `.Some`) are legitimate: the earlier guard may fall through.
 dup_before = (arms: [ArmData], vname: string_view, upto: i32) bool {
     f := false
     arms.loop((h, i, a) {
-        f = (i < upto && eq(a.variant, vname) && is_expr_null(a.guard)).match ({
-            true  => true,
-            false => f,
-        })
+        f = (i < upto && eq(a.variant, vname)).match ({ true => true, false => f })
     })
     f
 }
@@ -1286,13 +1157,6 @@ unknown_arm_errs = (env: Env, m: MatchData) i32 {
             n
         },
     })
-}
-match_err = (env: Env, m: MatchData) i32 {
-    base := m.arms.has_wildcard().match ({
-        true  => m.arms.dup_arm_errs(),
-        false => env.exhaustive_err(m) + m.arms.dup_arm_errs(),
-    })
-    base + env.unknown_arm_errs(m)
 }
 // Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: string_view) bool {
@@ -1434,27 +1298,6 @@ index_err = (env: Env, ix: IndexData) i32 { (env.non_slice(ix.seq) || env.non_nu
     true  => 1,
     false => 0,
 }) }
-// Value-position blocks recurse into statement expressions; full env-threading stays in check_body.
-check_block_stmt = (env: Env, st: Stmt) i32 {
-    st.match ({
-        .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l) + env.let_needannot_err(l) + env.value_void_arm_err(l.ty, l.value),
-        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x) + env.assign_ptr_write_err(x) + env.value_void_arm_err(env.infer_expr(x.target), x.value),
-        .Return(r)   => env.check_expr(r) + env.ret_err(r) + env.value_void_arm_err(env.exp, r),
-        .ExprStmt(e) => env.check_expr(e),
-        .If(f)       => env.check_expr(f.c),
-        .While(w)    => env.check_expr(w.c),
-        .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value) + env.idxset_err(x) + env.idxset_ptr_write_err(x) + env.value_void_arm_err(x.elem, x.value),
-    })
-}
-check_block = (env: Env, stmts: [Stmt]) i32 {
-    acc := 0
-    e := env
-    stmts.loop((h, i, st) {
-        acc = acc + e.check_block_stmt(st)
-        e = e.a.extend_env(e, st)
-    })
-    acc
-}
 // Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
 var_err = (env: Env, name: string_view) i32 {
     (eq(name, "true") || eq(name, "false") || env.is_bound(name) || env.env_known_fn(name) || env.decls.is_imported(name) || env.decls.is_trait_method(name) || name.is_intrinsic() || env.decls.is_tag_const(env.a, name)).match ({
@@ -1515,19 +1358,6 @@ is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: string_view) bool {
 sl_elem_fit = (env: Env, ety: Ty, it: Expr) i32 {
     ity := env.infer_expr(it.addr())
     (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).match ({ true => 0, false => env.fit_err(ity, ety) })
-}
-slicelit_err = (env: Env, items: [Expr]) i32 {
-    (items.len == 0).match ({
-        true  => 0,
-        false => {
-            ety := env.infer_expr(items[0].addr())
-            acc := 0
-            items.loop((h, i, it) {
-                acc = acc + env.sl_elem_fit(ety, it)
-            })
-            acc
-        },
-    })
 }
 // ── narrowed LOOP/lambda-body walk: bare names + structural bool exhaustiveness ───────────────
 // Loop bodies are intentionally not fully type-checked before generic specialization. This walk reports
@@ -1646,44 +1476,6 @@ name_errors_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) NameErrors {
     })
     acc
 }
-lck_expr = (env: Env, e: Ptr<Expr>) i32 { env.name_errors_expr(e).count }
-lck_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 { a.name_errors_body(env, body).count }
-check_expr = (env: Env, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Call(c)        => env.check_call(c) + env.store_mut_err(c) + env.null_deref_err(c) + env.assert_nonnull_err(c) + env.call_void_arm_errs(c) + eq(c.fn, "sizeof").match ({
-            true  => 0,
-            false => env.check_args(c.args),
-        }),
-        .SliceLit(sd)   => env.slicelit_err(sd.items),
-        .Index(ix)      => env.check_expr(ix.seq) + env.check_expr(ix.idx) + env.index_err(ix),
-        .Bin(b)         => env.check_expr(b.lhs) + env.check_expr(b.rhs) + env.operand_err(b),
-        .Cond(d)        => env.check_expr(d.c) + env.check_expr(d.t) + env.check_expr(d.e) + d.t.expr_drops_return() + d.e.expr_drops_return() + env.cond_result_err(d) + d.cond_onearm_err(),
-        .Member(m)      => env.check_expr(m.obj) + env.member_err(m.obj, m.field),
-        .Arrow(ar)      => env.check_expr(ar.obj) + env.member_err(ar.obj, ar.field),
-        .Match(m)       => {
-            subjty := env.infer_expr(m.subj)
-            env.check_expr(m.subj) + env.check_arms(subjty, m.arms) + env.match_err(m) + env.match_arm_result_errs(subjty, m.arms) + arm_return_errs(m.arms)
-        },
-        .MakeEnum(mk)   => env.check_expr(mk.payload) + env.mkenum_err(mk.ty, mk.variant) + env.enum_payload_err(mk),
-        .Tag(t)         => env.mkenum_err(t.ty, t.variant),
-        .MakeStruct(sd) => env.check_inits(sd.inits) + env.makestruct_err(sd),
-        .Block(b)       => env.check_block(b.stmts),
-        .Var(v)         => env.var_err(v.name),
-        // A lowered foreach/loop: WALK the sequence and body (in the loop's element/index/handler binding
-        // env) for UNDEFINED BARE NAMES. `.loop((h,i,v){…})` is THE iteration construct, so most newcomer
-        // logic — and most undefined-name bugs — live here; skipping it let them reach cc as raw C / linker
-        // errors. NARROWED to bare-name resolution (see lck_expr): fit/arg-type and call-NAME/field checks
-        // stay deferred inside loops, because generic templates carry method calls on unbound type params
-        // (`actor.receive`) and str↔text narrowings that are valid pre-mono but unresolvable here.
-        .Loop(l)        => env.lck_expr(l.seq) + env.a.lck_body(env.a.loop_env(env, l), l.body),
-        // A Lambda that SURVIVES resolution is a lambda used as a value the inliner couldn't splice:
-        // a directly-passed HOF lambda is inlined away and a local-bound one is now spliced too (the
-        // alias lowering), so a remaining Lambda was stored in a field / returned — no first-class
-        // representation; reject it cleanly instead of leaking `zen__unlowered_lambda` into the C.
-        .Lambda(lm)     => 1,
-        _               => 0,
-    })
-}
 // Return/assign/index-set checks only reject concrete mismatches.
 ret_err = (env: Env, r: Ptr<Expr>) i32 {
     rt := env.infer_expr(r)
@@ -1716,29 +1508,6 @@ assign_err = (env: Env, x: AssignData) i32 {
 // (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
 // direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
 // ultimately passes through a read-only `Ptr<T>`.
-is_any_ptr = (t: Ty) bool { t.ptr_kind_of() >= 0 }
-// `obj` is the receiver of a field/index write. If obj is itself a pointer, the write DEREFS it →
-// reject iff that pointer is read-only (a MutPtr/RawPtr permits it). Otherwise obj is a value lvalue
-// (a field / index / local) whose storage may live inside a read-only deref further up — recurse.
-// The recursion stops at the FIRST pointer indirection: an inner field that is itself a pointer means
-// we write through THAT pointer (its own kind decides), never the chain root.
-write_thru_readonly = (env: Env, obj: Ptr<Expr>) bool {
-    ot := env.infer_expr(obj)
-    ot.is_any_ptr().match ({
-        true  => ot.is_readonly_ptr_ty(),
-        false => env.lvalue_writes_readonly(obj),
-    })
-}
-// A write-target lvalue mutates through a read-only `Ptr<T>` when its member/index chain bottoms at
-// (or threads through) a read-only pointer with no writable pointer indirection in between.
-lvalue_writes_readonly = (env: Env, target: Ptr<Expr>) bool {
-    load(target).match ({
-        .Member(m) => env.write_thru_readonly(m.obj),
-        .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty(),
-        .Index(ix) => env.write_thru_readonly(ix.seq),
-        _          => false,
-    })
-}
 assign_ptr_write_err = (env: Env, x: AssignData) i32 { env.lvalue_writes_readonly(x.target).match ({
     true  => 1,
     false => 0,
@@ -1804,48 +1573,6 @@ let_needannot_err = (env: Env, l: LetData) i32 { l.ty.ty_has_void_targ().match (
     true  => 1,
     false => 0,
 }) }
-check_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
-    st.match ({
-        .Let(l)      => env.check_expr(l.value) + env.let_fit_err(l) + env.let_needannot_err(l) + env.value_void_arm_err(l.ty, l.value),
-        .Assign(x)   => env.check_expr(x.target) + env.check_expr(x.value) + env.assign_err(x) + env.assign_ptr_write_err(x) + env.value_void_arm_err(env.infer_expr(x.target), x.value),
-        .Return(r)   => env.check_expr(r) + env.ret_err(r) + env.value_void_arm_err(env.exp, r),
-        .ExprStmt(e) => env.check_expr(e),
-        .If(f)       => env.check_expr(f.c) + a.check_body(env, f.then) + a.check_body(env, f.els),
-        .While(w)    => env.check_expr(w.c) + a.check_body(env, w.body),
-        .IndexSet(x) => env.check_expr(x.seq) + env.check_expr(x.idx) + env.check_expr(x.value) + env.idxset_err(x) + env.idxset_ptr_write_err(x) + env.value_void_arm_err(x.elem, x.value),
-    })
-}
-// Thread lets into the validating environment.
-check_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
-    acc := 0
-    e := env
-    body.loop((h, i, st) {
-        acc = acc + a.check_stmt(e, st)
-        e = a.extend_env(e, st)
-    })
-    acc
-}
-// a non-void function must YIELD a value: its body's last statement must be a value (a trailing
-// expression or an explicit return), and that value must fit the return type. A body that is empty,
-// or ends in a let/assign/loop (which produce no value), leaves the return indeterminate — Python
-// rejects it ("void ⊀ i32"). Sound: a void return type, or a trailing expr the checker can't infer,
-// is skipped (ret_err's own leniency).
-trailing_err = (env: Env, body: [Stmt]) i32 {
-    env.exp.is_void_ty().match ({
-        true  => 0,
-        false => (body.len == 0).match ({
-            true  => 1,
-            false => env.last_stmt_err(body[body.len - 1]),
-        }),
-    })
-}    // a void fn: any body is fine
-last_stmt_err = (env: Env, st: Stmt) i32 {
-    st.match ({
-        .ExprStmt(e) => env.ret_err(e) + env.value_void_arm_err(env.exp, e),    // empty body, non-void return -> no value
-        .Return(r)   => 0,    // a trailing expr must fit the return type
-        _            => 1,
-    })
-}    // an explicit return is checked in check_stmt
 DeadList: DeadNil | DeadCons(DeadCell)    // let/assign/while/if/index-set produce no value
 // Raw ownership validation runs before resolve_module in the CLI, while source-level
 // allocator-explicit `o.release_in(a)` / `r.drop_in(a)` calls still exist. After generic inlining those calls
@@ -2464,36 +2191,8 @@ own_stmt_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
 }
 // the DOUBLE-MOVE error: the same owner moved into TWO Own fields of one struct literal (`Two(a: o, b: o)`)
 // — the second move is a use-after-consume. Threads a FRESH in-literal kill-set so it counts ONLY the
-// intra-literal duplicate (a binding already dead before the statement is caught by own_expr_err's .Var
-// arm; counting it here too would double-report).
-own_struct_dupmove_err = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i32 {
-    acc := 0
-    env.env_is_struct(s.ty).then({
-        fields := env.env_struct_fields(s.ty)
-        d := a.dead_nil()
-        s.inits.loop((h, i, fi) {
-            nm := env.struct_field_move_src(fields, fi)
-            (nm.is_empty() == false).then({
-                acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
-                d = a.dead_cons(nm, d)
-            })
-        })
-    })
-    acc
-}
-// the same DOUBLE-MOVE for a slice literal (`[o, o]`).
-own_slice_dupmove_err = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
-    acc := 0
-    d := a.dead_nil()
-    items.loop((h, i, it) {
-        nm := env.own_moved_var(it.addr())
-        (nm.is_empty() == false).then({
-            acc = acc + d.dead_has(nm).match ({ true => 1, false => 0 })
-            d = a.dead_cons(nm, d)
-        })
-    })
-    acc
-}
+// Intra-literal duplicate tracking is separate from the already-dead binding check so the positioned
+// visitor reports the second move once, at the value that performs it.
 // AFFINE COPY: `c := o` / `c = o` where `o` is `Own<T>` MOVES o — a bare struct copy does NOT bump the
 // refcount (only `.clone()` does), so both names free the ONE allocation → double-free. c becomes the
 // live owner; o's binding dies (later use of o → use-after-consume). `c := o.clone()` is a Call, not a
@@ -2713,69 +2412,10 @@ alias_step = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<Ali
 }
 // count an assign TARGET as a use only when it is NOT a bare local (a bare `p = …` is a rebind/revival,
 // not a read of `p`; a compound `arr[i] = …` / `m.f = …` reads the base/index, so still check those).
-own_assign_target_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, t: Ptr<Expr>) i32 {
-    load(t).match ({
-        .Var(v) => 0,
-        _       => a.own_expr_err(env, seen, al, t),
-    })
-}
 kv_own_assign_target_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, t: Ptr<Expr>) i32 {
     load(t).match ({
         .Var(v) => 0,
         _       => a.kv_own_expr_kind(env, seen, al, t),
-    })
-}
-own_args_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, args: [Expr]) i32 {
-    acc := 0
-    args.loop((h, i, ar) {
-        acc = acc + a.own_expr_err(env, seen, al, ar.addr())
-    })
-    acc
-}
-own_inits_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, inits: [FieldInit]) i32 {
-    acc := 0
-    inits.loop((h, i, fi) {
-        acc = acc + a.own_expr_err(env, seen, al, fi.value)
-    })
-    acc
-}
-own_arms_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, subjty: Ty, arms: [ArmData]) i32 {
-    acc := 0
-    arms.loop((h, i, ar) {
-        acc = acc + a.own_expr_err(a.arm_env(env, subjty, ar), seen, al, ar.body)
-    })
-    acc
-}
-own_expr_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Var(v)        => seen.dead_has(v.name).match ({ true => 1, false => 0 }),
-        .Call(c)       => a.own_args_err(env, seen, al, c.args) + env.is_default_owner_method(c).match ({
-            true  => 1,
-            false => 0,
-        }),
-        .Index(ix)     => a.own_expr_err(env, seen, al, ix.seq) + a.own_expr_err(env, seen, al, ix.idx),
-        .Bin(b)        => a.own_expr_err(env, seen, al, b.lhs) + a.own_expr_err(env, seen, al, b.rhs),
-        .Cond(d)       => a.own_expr_err(env, seen, al, d.c) + a.own_expr_err(env, seen, al, d.t) + a.own_expr_err(env, seen, al, d.e),
-        .Member(m)     => a.own_expr_err(env, seen, al, m.obj),
-        .Arrow(ar)     => a.own_expr_err(env, seen, al, ar.obj),
-        .Match(m)      => a.own_expr_err(env, seen, al, m.subj) + a.own_arms_err(env, seen, al, env.infer_expr(m.subj), m.arms),
-        .MakeEnum(mk)  => a.own_expr_err(env, seen, al, mk.payload),
-        .MakeStruct(s) => a.own_inits_err(env, seen, al, s.inits) + a.own_struct_dupmove_err(env, s),
-        .SliceLit(sd)  => a.own_args_err(env, seen, al, sd.items) + a.own_slice_dupmove_err(env, sd.items),
-        .Loop(l)       => a.own_expr_err(env, seen, al, l.seq) + a.own_body_err(env, seen, al, l.body) + a.loop_outer_frees(env, seen, al, l),
-        .Block(b)      => a.own_body_err(env, seen, al, b.stmts),
-        _              => 0,
-    })
-}
-own_stmt_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) i32 {
-    st.match ({
-        .Let(l)      => a.own_expr_err(env, seen, al, l.value),
-        .Assign(x)   => a.own_assign_target_err(env, seen, al, x.target) + a.own_expr_err(env, seen, al, x.value),
-        .Return(r)   => a.own_expr_err(env, seen, al, r),
-        .ExprStmt(e) => a.own_expr_err(env, seen, al, e),
-        .If(f)       => a.own_expr_err(env, seen, al, f.c) + a.own_body_err(env, seen, al, f.then) + a.own_body_err(env, seen, al, f.els),
-        .While(w)    => a.own_expr_err(env, seen, al, w.c) + a.own_body_err(env, seen, al, w.body) + a.loop_body_outer_frees(env, seen, al, w.body, a.dead_nil()),
-        .IndexSet(x) => a.own_expr_err(env, seen, al, x.seq) + a.own_expr_err(env, seen, al, x.idx) + a.own_expr_err(env, seen, al, x.value),
     })
 }
 consume_name = (env: Env, st: Stmt) string_view {
@@ -2821,7 +2461,7 @@ expr_falls_through = (e: Ptr<Expr>) bool {
     })
 }
 // net dead-set after a (possibly branching) statement body — threads own_step + alias_step + env
-// exactly like own_body_err / kv_own_body_kind, but returns the final kill-set instead of an error count.
+// Follow the same environment/alias steps as the ownership diagnostic walk, but return the final kill-set.
 own_dead_body = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) Ptr<DeadList> {
     e := env
     d := seen
@@ -2989,50 +2629,12 @@ loop_body_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
     a.count_loop_freed(net, seen, a.loop_lets(binds, body), a.dead_nil())
 }
 loop_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, l: LoopData) i32 { a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil())))) }
-own_body_err = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) i32 {
-    acc := 0
-    e := env
-    d := seen
-    al2 := al
-    body.loop((h, i, st) {
-        acc = a.own_stmt_err(e, d, al2, st) + acc
-        d = a.own_step(e, d, al2, st)
-        al2 = a.alias_step(e, al2, st)
-        e = a.extend_env(e, st)
-    })
-    acc
-}
-own_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
-        vars: a.params_env(f.params),
-        decls: decls,
-        didx: idx,
-        exp: f.ret,
-        a: a,
-    )
-    a.own_body_err(env, a.dead_nil(), a.alias_nil(), f.body)
-}
-check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc := 0
-    idx := a.build_decl_index(decls)
-    decls.loop((h, i, d) {
-        acc = acc + d.match ({
-            .DFunc(f) => a.own_check_func(decls, idx, f),
-            _         => 0,
-        })
-    })
-    acc
-}
-check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
-        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
-        decls: decls,
-        didx: idx,
-        exp: f.ret,
-        a: a,
-    )
-    a.check_body(env, f.body) + env.trailing_err(f.body)
-}
+// Compatibility verdict API. The positioned diagnostic visitor below is authoritative; keeping a
+// second count-only AST walk made every new rule land twice and invited count/kind drift.
+check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_ownership_kind(decls) == 0).match ({
+    true  => 0,
+    false => 1,
+}) }
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
 // MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
 // for the implementing type); im.methods is the names this impl provides, and the impl's actual
@@ -3127,26 +2729,6 @@ method_err = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
         _        => 0,
     })
 }
-trait_conformance = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
-    acc := 0
-    sd.fields.loop((h, i, f) {
-        acc = acc + a.method_err(decls, im, f)
-    })
-    acc
-}
-impl_errs = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
-    acc := 0
-    decls.loop((h, i, d) {
-        acc = acc + d.match ({
-            .DStruct(sd) => eq(sd.name, im.trname).match ({
-                true  => a.trait_conformance(decls, im, sd),
-                false => 0,
-            }),
-            _            => 0,
-        })
-    })
-    acc
-}
 // Two top-level decls with the same FUNCTION name emit colliding C definitions (cc "redefinition" /
 // "conflicting types") — the self-hosted backend mangles only generic-type instances, not plain fns,
 // so two `f`s (or two trait impls of one method) both emit `… f(…)`. Reject the second. Zen has no
@@ -3173,42 +2755,16 @@ fn_dup_before = (decls: [Decl], name: string_view, upto: i64) bool {
     })
     f
 }
-dup_name_errs = (decls: [Decl]) i32 {
-    n := 0
-    decls.loop((h, i, d) {
-        nm := d.fn_name_of()
-        n = is_empty(nm).match ({
-            true  => n,
-            false => decls.fn_dup_before(nm, i).match ({ true => n + 1, false => n }),
-        })
-    })
-    n
-}
-check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc := decls.dup_name_errs()
-    idx := a.build_decl_index(decls)
-    decls.loop((h, i, d) {
-        acc = acc + d.match ({
-            .DFunc(f)   => a.check_func(decls, idx, f),
-            .DImpl(im)  => a.impl_errs(decls, im),
-            .DGlobal(g) => (eq(g.name, "__syntax_error") || eq(g.name, "__bad_binding")).match ({
-                true  => 1,
-                false => 0,
-            }),
-            _           => 0,
-        })
-    })
-    acc
-}
+// Compatibility verdict API: 0 = clean, 1 = rejected. Detailed callers consume `check_module_kind`,
+// `check_module_batch`, or a structured diagnostic, so the old parallel count traversal is redundant.
+check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_kind(decls) == 0).match ({
+    true  => 0,
+    false => 1,
+}) }
 // ════════════════════════════════════════════════════════════════════════════════════════
-// ── DIAGNOSTIC ERROR KINDS (Diagnostics arc) ────────────────────────────────────────────
-// check_module returns an error COUNT; a reject pins WHETHER but not WHY. This parallel layer
-// re-walks the same resolved AST in the same traversal order and reports the KIND code of the
-// FIRST error — so a CHECK-KIND binary (check_module_kind below) can prove a reject is for the
-// RIGHT reason. It reuses every predicate from the count layer (same is_*_err logic), only
-// swapping each "+ 1" for "this error's kind". Zero new judgments → the count and the kind
-// agree exactly (kind != 0 iff count > 0). These are DISTINCT functions (kv_*/…_kind suffix);
-// they never touch check_module/check_linked, so the harness's count exit code is untouched.
+// ── DIAGNOSTIC ERROR KINDS (authoritative validation traversal) ─────────────────────────
+// Validators return a packed first-error kind and source position. Batch mode uses the same expression
+// and statement visitors with a collecting sink; compatibility verdict APIs reduce this result to 0/1.
 //
 // Kind codes (small fixed set the task names). KNONE=0 means "no error".
 KNONE = () i32 { 0 }
@@ -3232,7 +2788,7 @@ KUNKNOWNTYPE = () i32 { 17 }    // a type annotation names a type that is not de
 KLAMBDAVALUE = () i32 { 18 }    // a lambda used as a value the inliner can't splice (stored/returned)
 KMUSTUSE = () i32 { 19 }    // a value-mold `(Self,…) Self` self-mutation whose result is discarded
 KNEEDANNOT = () i32 { 20 }    // an unannotated let whose inferred type leaves a tparam uninferred (-> T=void)
-KPTRWRITE = () i32 { 21 }    // a store() through a read-only `Ptr<T>` (use `MutPtr<T>` to write)
+KPTRWRITE = () i32 { 21 }    // a write or writable-view construction through read-only `Ptr<T>`
 KINFINITETYPE = () i32 { 22 }    // a struct/enum that contains ITSELF by value (transitively) — infinite size
 KNULLDEREF = () i32 { 23 }    // a load/store/offset through a nullable `RawPtr<T>` (T != u8) not proven non-null
 KNOTCALLABLE = () i32 { 24 }    // a call whose target name IS defined but holds a non-function value (a scalar/struct), so it cannot be called
@@ -3241,9 +2797,9 @@ KVBREAK = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase
 KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
 KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
-KGUARDTYPE = () i32 { 37 }    // a match-arm `if <guard>` whose guard expression is not a bool (33-36 are the custom channels, so 37 is the next free packed code)
 KMETHODNOTFOUND = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
 KBOOLARM = () i32 { 39 }    // a bool `.match` omits true/false (or `_`); use an explicit arm or `.then` for a one-way effect
+KNOIF = () i32 { 40 }    // source contains the forbidden `if` token; Zen uses bool `.match` for conditional control flow
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -3291,12 +2847,60 @@ check_diagnostic_none* = () CheckDiagnostic {
     CheckDiagnostic(
         code: 0,
         kind: "ok",
-        source_offset: 0,
+        source_offset: 0 - 1,
         span_width: 0,
         count: 0,
         message: "",
         hint: "",
     )
+}
+// Zen deliberately has no source-level `if`, including contextual match-arm guards. Scan the lexical
+// token stream (rather than raw bytes) so comments, string literals, `gift`, and other containing names
+// remain ordinary source. The first exact identifier token wins and anchors error[no-if] on its two
+// bytes. Internal Stmt.If nodes are compiler-owned lowering and never pass through this source scan.
+is_if_token = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Ident => t.len == 2 && src.at(t.start) == 'i' && src.at(t.start + 1) == 'f',
+        _      => false,
+    })
+}
+first_if_offset = (src: string_view) i32 {
+    pos := 0
+    found := 0 - 1
+    done := false
+    @while (done.match ({ true => false, false => true })) {
+        sc := src.scan(pos)
+        sc.tok.kind.match ({
+            .Eof => {
+                done = true
+            },
+            _    => src.is_if_token(sc.tok).match ({
+                true  => {
+                    found = sc.tok.start
+                    done = true
+                },
+                false => {
+                    pos = sc.next
+                },
+            }),
+        })
+    }
+    found
+}
+check_module_no_if_diagnostic_from_source* = (src: string_view) CheckDiagnostic {
+    pos := src.first_if_offset()
+    (pos < 0).match ({
+        true  => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KNOIF(),
+            kind: "no-if",
+            source_offset: pos,
+            span_width: 2,
+            count: 1,
+            message: "`if` is not part of Zen; conditional control flow uses `.match`",
+            hint: "replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body",
+        ),
+    })
 }
 positive_count = (n: i32) i32 { (n < 1).match ({ true => 1, false => n }) }
 diagnostic_width_from = (src: string_view, pos: i32, n: i32) i32 {
@@ -3544,30 +3148,23 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                         message: "top-level `=` binding is neither a module alias nor a function",
                                                                                                                                         hint: "use `:=` for a value global (`k := 5`); a single `=` at top level is only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
                                                                                                                                     ),
-                                                                                                                                    false => (code == 37).match ({
+                                                                                                                                    false => (code == 38).match ({
                                                                                                                                         true  => DiagInfo(
-                                                                                                                                            kind: "guard-type",
-                                                                                                                                            message: "match arm guard must be a bool",
-                                                                                                                                            hint: "make the `if` guard a boolean expression (e.g. a comparison); the arm is taken only when its pattern matches AND the guard is true",
+                                                                                                                                            kind: "method-not-found",
+                                                                                                                                            message: "no method with this name on the receiver type",
+                                                                                                                                            hint: "define the method (a top-level `fn` whose first parameter is the receiver, called `recv.method(...)`), or check the method name",
                                                                                                                                         ),
-                                                                                                                                        false => (code == 38).match ({
+                                                                                                                                        false => (code == 39).match ({
                                                                                                                                             true  => DiagInfo(
-                                                                                                                                                kind: "method-not-found",
-                                                                                                                                                message: "no method with this name on the receiver type",
-                                                                                                                                                hint: "define the method (a top-level `fn` whose first parameter is the receiver, called `recv.method(...)`), or check the method name",
+                                                                                                                                                kind: "exhaustiveness",
+                                                                                                                                                message: "boolean match does not handle both outcomes",
+                                                                                                                                                hint: "add the missing `true`, `false`, or `_` arm; for an intentional one-way effect, use `condition.then({ ... })`",
                                                                                                                                             ),
-                                                                                                                                            false => (code == 39).match ({
-                                                                                                                                                true  => DiagInfo(
-                                                                                                                                                    kind: "exhaustiveness",
-                                                                                                                                                    message: "boolean match does not handle both outcomes",
-                                                                                                                                                    hint: "add the missing `true`, `false`, or `_` arm; for an intentional one-way effect, use `condition.then({ ... })`",
-                                                                                                                                                ),
-                                                                                                                                                false => DiagInfo(
-                                                                                                                                                    kind: "type",
-                                                                                                                                                    message: "type error",
-                                                                                                                                                    hint: "",
-                                                                                                                                                ),
-                                                                                                                                            }),
+                                                                                                                                            false => DiagInfo(
+                                                                                                                                                kind: "type",
+                                                                                                                                                message: "type error",
+                                                                                                                                                hint: "",
+                                                                                                                                            ),
                                                                                                                                         }),
                                                                                                                                     }),
                                                                                                                                 }),
@@ -3611,11 +3208,12 @@ check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
         true  => check_diagnostic_none(),
         false => {
             code := packed & 63
+            has_pos := packed > 63
             CheckDiagnostic(
                 code: code,
                 kind: code.diagnostic_kind_name(),
-                source_offset: packed >> 6,
-                span_width: 1,
+                source_offset: has_pos.match ({ true => packed >> 6, false => 0 - 1 }),
+                span_width: has_pos.match ({ true => 1, false => 0 }),
                 count: count.positive_count(),
                 message: code.diagnostic_message(),
                 hint: code.diagnostic_hint(),
@@ -3631,7 +3229,10 @@ check_diagnostic_from_source* = (src: string_view, packed: i32, count: i32) Chec
             code: d.code,
             kind: d.kind,
             source_offset: d.source_offset,
-            span_width: src.diagnostic_span_width(d.source_offset),
+            span_width: (d.source_offset < 0).match ({
+                true  => 0,
+                false => src.diagnostic_span_width(d.source_offset),
+            }),
             count: d.count,
             message: d.message,
             hint: d.hint,
@@ -3838,7 +3439,7 @@ check_module_ownership_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
-// ── a CALL: arity vs arg-type vs undefined ── mirrors check_call/call_errs, but distinguishes WHY.
+// ── a CALL: authoritative arity, argument-type, and undefined-name classification.
 // arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
 kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
     acc := 0
@@ -3848,7 +3449,7 @@ kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
     acc
 }
 // a known local fn: wrong arity → KARITY; right arity but a mistyped CONCRETE arg → KARGTYPE. Slots
-// typed by the callee's own tparams are skipped, mirroring call_errs (so count and kind stay in agreement).
+// typed by the callee's own tparams are skipped until monomorphization.
 // (Trait-BOUND violations are caught by the separate pre-inline bound pass, since local generic calls
 // are inlined away before this resolved-decls pass runs.)
 kv_call_errs_kind = (env: Env, c: CallData) i32 {
@@ -4040,7 +3641,19 @@ kv_makestruct_kind = (env: Env, m: MakeStructData) i32 {
     })))
 }
 // member access caret on the receiver object (a Var/Call survives resolve).
-kv_member_kind = (env: Env, obj: Ptr<Expr>, field: string_view, pos: i32) i32 { env.member_err(obj, field).kv_one(KSTRUCTFIELD()).kv_at(pos.pos_or(load(obj).expr_pos())) }
+kv_nullable_obj_kind = (env: Env, obj: Ptr<Expr>, pos: i32) i32 {
+    env.infer_expr(obj).is_nullable_ptr_ty().match ({
+        true  => KNULLDEREF().kv_at(pos.pos_or(load(obj).expr_pos())),
+        false => 0,
+    })
+}
+kv_member_kind = (env: Env, obj: Ptr<Expr>, field: string_view, pos: i32) i32 { env.kv_nullable_obj_kind(obj, pos).kv_kor(env.member_err(obj, field).kv_one(KSTRUCTFIELD()).kv_at(pos.pos_or(load(obj).expr_pos()))) }
+kv_match_null_kind = (env: Env, m: MatchData) i32 {
+    env.infer_expr(m.subj).is_nullable_ptr_ty().match ({
+        true  => KNULLDEREF().kv_at(load(m.subj).expr_pos()),
+        false => 0,
+    })
+}
 // a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
 // matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
 arms_first_pos = (arms: [ArmData]) i32 { (arms.len == 0).match ({ true => 0, false => arms[0].pos }) }
@@ -4087,7 +3700,7 @@ zty* = (a: MutPtr<Malloc>, t: Ty) string_view {
         .Generic(g)    => a.zty_generic(g),
         .FnT(ft)       => "fn",
         .Slice(e)      => a.gstr_string(24).gstr_append(a, "[").gstr_append(a, a.zty(load(e))).gstr_append(a, "]").gstr_finish(a),
-        .Ptr(pd)       => a.gstr_string(24).gstr_append(a, "Ptr<").gstr_append(a, a.zty(load(pd.pointee))).gstr_append(a, ">").gstr_finish(a),
+        .Ptr(pd)       => a.gstr_string(24).gstr_append(a, ptr_kw(pd.kind)).gstr_append(a, "<").gstr_append(a, a.zty(load(pd.pointee))).gstr_append(a, ">").gstr_finish(a),
     })
 }
 desc_or* = (x: string_view, y: string_view) string_view { is_empty(x).match ({
@@ -4608,7 +4221,7 @@ kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     })
     acc
 }
-// mirrors slicelit_err: a slice-literal element whose type doesn't fit the first element's → KARGTYPE.
+// A slice-literal element whose type doesn't fit the first element's produces KARGTYPE.
 kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
     (items.len == 0).match ({
         true  => 0,
@@ -4633,7 +4246,7 @@ lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     r := a.name_errors_body(env, body)
     (r.first_pos > 0).match ({ true => r.first_kind.kv_at(r.first_pos), false => 0 })
 }
-// mirrors check_expr exactly: same node order, same sub-error precedence, kind codes instead of counts.
+// Authoritative expression validation: node order defines first-error precedence.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(env.null_deref_kind(c)).kv_kor(env.assert_nonnull_kind(c)).kv_kor(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos)).kv_kor(eq(c.fn, "sizeof").match ({
@@ -4648,7 +4261,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field, ar.pos)),
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
-            env.kv_check_expr_kind(m.subj).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
+            env.kv_check_expr_kind(m.subj).kv_kor(env.kv_match_null_kind(m)).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
         },
         .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())).kv_kor(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
@@ -4672,7 +4285,7 @@ kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
     ip := x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())
     env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(ip).kv_kor(env.idxset_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ip))
 }
-// mirrors check_stmt: the statement's sub-expressions, then its own fit check.
+// Authoritative statement validation: sub-expressions precede the statement-level fit check.
 kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)).kv_kor(env.kv_let_needannot_kind(l)).kv_kor(env.kv_value_void_arm_kind(l.ty, l.value)),
@@ -4710,18 +4323,6 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
             false => env.kv_last_stmt_kind(body[body.len - 1]),
         }),
     })
-}
-kv_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
-        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
-        decls: decls,
-        didx: idx,
-        exp: f.ret,
-        a: a,
-    )
-    // a fall-through trailing error may have no statement position (a let binding loses its pos through
-    // resolve); anchor it on the function name so the diagnostic is always located.
-    a.kv_check_body_kind(env, f.body).kv_kor(env.kv_trailing_kind(f.body).kv_at(f.pos))
 }
 // ── bounded-generics enforcement over RAW (pre-inline) decls ─────────────────────────────
 // Local generic calls are INLINED during resolve_module, so by check_module time the call site is
@@ -4880,12 +4481,6 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
         false => 0,
     })
 }
-is_lambda_arg = (e: Expr) bool {
-    e.match ({
-        .Lambda(lm) => true,
-        _           => false,
-    })
-}
 // args whose CONCRETE type is fixed by context, not by standalone inference: a lambda (FnT, checked
 // separately), and a BARE enum constructor / tag `.Variant(…)` — its enum is chosen by the expected
 // param type during mono (e.g. `.Num(7)` may be `Tok` or `Expr`), so inferring it here mis-rejects.
@@ -4969,7 +4564,7 @@ ka_lambda_at = (env: Env, ftparams: [Param], targs: [Ty], params: [Param], i: i3
 // typing to monomorphization (a bare `.Variant` / cross-enum residue resolves only there). The closure
 // arity/return check (R5) runs regardless, since HOF closures rarely carry turbofish.
 // A right-arity LOCAL generic call is INLINED during resolve_module, so the post-inline call check
-// (call_errs → arg_err_at) never sees it — arg-type safety of its CONCRETE (non-tparam) slots was
+// The ordinary resolved-call path never sees it, so argument-type safety of its CONCRETE slots was
 // therefore off for EVERY generic callee (and the whole stdlib threads `MutPtr<A>`, so it is
 // generic). Re-arm it HERE, on the pre-inline call site, reusing the SAME arg_err_at the accepted
 // non-generic path uses: it skips tparam-mentioning slots (deferred to mono) and checks only the
@@ -5261,25 +4856,12 @@ ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool
     })
     acc
 }
-// arm BODIES are always conditional (only the taken arm evaluates) — and a statement-position
-// match resolves its arms under a cleared expected type, so the rebuild can't fire there either.
-// positioned mirror of guard_count: a non-bool arm guard is a KGUARDTYPE error at the arm's pattern pos.
-ko_guard_kind = (env: Env, tps: [Param], subjty: Ty, ar: ArmData) i32 {
-    is_expr_null(ar.guard).match ({
-        true  => 0,
-        false => {
-            aenv := env.a.arm_env(env, subjty, ar)
-            aenv.ko_expr_kind(tps, tbool(), ar.guard, true).kv_kor(aenv.non_bool(ar.guard).match ({
-                true  => KGUARDTYPE().kv_at(ar.pos),
-                false => 0,
-            }))
-        },
-    })
-}
+// Arm bodies are always conditional (only the selected arm evaluates), and a statement-position
+// match resolves its arms under a cleared expected type, so the rebuild cannot fire there either.
 ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true)).kv_kor(env.ko_guard_kind(tps, subjty, ar))
+        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
     })
     acc
 }
@@ -5872,13 +5454,6 @@ mu_is_value_mold = (f: Func) bool {
         },
     })
 }
-mu_methods_have = (methods: [Param], m: string_view) bool {
-    f := false
-    methods.loop((h, i, p) {
-        f = eq(p.name, m).match ({ true => true, false => f })
-    })
-    f
-}
 // the hoisted inherent func `impl_<Ty>_<Ty>_<m>` (fill_inherent_methods), looked up O(1) via the index.
 mu_func_value_mold = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, ty: string_view, m: string_view) bool {
     cname := a.impl_cname_in(ty, ty, m)
@@ -6053,26 +5628,15 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
     })
     acc
 }
-// the KIND of the FIRST error check_module would have counted, in the same order: dup-fn names
-// first, then each decl's body (DFunc) / impl (DImpl). Returns KNONE (0) for an accepting module.
-// A CHECK-KIND binary reads this; check_module's COUNT is untouched, so the harness's verdict path
-// (which exits with the count) keeps working unchanged.
+// Return the first packed diagnostic from the same collector used by batch mode. A one-slot sink
+// preserves first-error behavior without maintaining a second module/function traversal.
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc := decls.kv_dup_name_kind()
-    idx := a.build_decl_index(decls)
-    decls.loop((h, i, d) {
-        acc = acc.kv_kor(d.match ({
-            .DFunc(f)   => a.kv_check_func_kind(decls, idx, f),
-            .DImpl(im)  => a.kv_impl_kind(decls, im),
-            .DGlobal(g) => parse_sentinel_kind(g.name, g.init),
-            _           => 0,
-        }))
-    })
-    acc
+    buf: [i32] := slice(a.acquire(sizeof(i32)), 1)
+    cnt := a.check_module_kind_all(decls, buf, 0)
+    (cnt == 0).match ({ true => 0, false => buf[0] })
 }
 // ── BATCH diagnostics (report ALL type errors, not just the first) ──────────────────────────────
-// The kind layer above folds to the FIRST error via kv_kor; batch mode instead APPENDS each unit's
-// first error into a fixed-cap packed buffer, recovering at natural boundaries — one error per
+// Append each unit's first error into a fixed-cap packed buffer, recovering at natural boundaries — one error per
 // top-level statement inside a function, then per decl across the module. The inner recursion is
 // unchanged (still first-error within a statement / expression), so a single root cause never
 // cascades: after a statement errs we resume at the next statement, after a decl at the next decl.
@@ -6100,8 +5664,7 @@ kdiag_add = (buf: [i32], cnt: i32, packed: i32) i32 {
         },
     })
 }
-// one function's errors, per top-level statement (mirrors kv_check_func_kind but appends each stmt's
-// first error rather than folding to the first). The trailing-value check is anchored on the fn name.
+// One function's errors, per top-level statement. The trailing-value check is anchored on the fn name.
 kv_check_func_kind_all = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, buf: [i32], cnt: i32) i32 {
     env := Env(
         vars: a.bind_tparams(a.params_env(f.params), f.tparams),
@@ -6163,7 +5726,7 @@ check_module_parse_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], 
     packed := decls.check_module_parse_kind()
     (packed == 0).match ({
         true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, a.check_module(decls)),
+        false => src.check_diagnostic_from_source(packed, 1),
     })
 }
 // the __syntax_error sentinel carries the failing token's byte offset in its Int init value (0 = none);
@@ -6193,28 +5756,28 @@ check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
-        false => check_diagnostic_from_packed(packed, a.check_module(decls)),
+        false => check_diagnostic_from_packed(packed, 1),
     })
 }
 check_module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_ownership_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
-        false => check_diagnostic_from_packed(packed, a.check_module_ownership(decls)),
+        false => check_diagnostic_from_packed(packed, 1),
     })
 }
 check_module_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, a.check_module(decls)),
+        false => src.check_diagnostic_from_source(packed, 1),
     })
 }
 check_module_ownership_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     packed := a.check_module_ownership_kind(decls)
     (packed == 0).match ({
         true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, a.check_module_ownership(decls)),
+        false => src.check_diagnostic_from_source(packed, 1),
     })
 }
 module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic { a.check_module_diagnostic(decls).check_to_diagnostic() }
@@ -6436,87 +5999,8 @@ escape_step = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, 
     })
     out
 }
-// returns-only statement walker: a `return <escaping>` ANYWHERE (incl. inside statement-position
-// match/cond/loop/block arms) is a hazard; trailing arm values in statement position are DISCARDED.
-escape_stmts_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
-    acc := 0
-    d := derived
-    body.loop((h, i, st) {
-        acc = acc + a.escape_stmt_err(svars, d, st)
-        d = a.escape_step(svars, d, st)
-    })
-    acc
-}
-escape_stmt_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
-    st.match ({
-        .Return(r)   => a.expr_escapes(svars, derived, r).match ({ true => 1, false => 0 }),
-        .If(f)       => a.escape_stmts_err(svars, derived, f.then) + a.escape_stmts_err(svars, derived, f.els),
-        .While(w)    => a.escape_stmts_err(svars, derived, w.body),
-        .ExprStmt(e) => a.escape_expr_stmt_err(svars, derived, e),
-        _            => 0,
-    })
-}
-// descend into a statement-position match/cond/loop/block to find escaping `return`s in its arms.
-escape_expr_stmt_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Match(m) => a.escape_match_arms_err(svars, derived, m.arms),
-        .Cond(d)  => a.escape_expr_stmt_err(svars, derived, d.t) + a.escape_expr_stmt_err(svars, derived, d.e),
-        .Block(b) => a.escape_stmts_err(svars, derived, b.stmts),
-        .Loop(l)  => a.escape_stmts_err(svars, derived, l.body),
-        _         => 0,
-    })
-}
-escape_match_arms_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) i32 {
-    acc := 0
-    arms.loop((h, i, ar) {
-        acc = acc + a.escape_arm_stmts_err(svars, derived, ar.body)
-    })
-    acc
-}
-escape_arm_stmts_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: Ptr<Expr>) i32 {
-    load(body).match ({
-        .Block(b) => a.escape_stmts_err(svars, derived, b.stmts),
-        _         => 0,
-    })
-}
-// a trailing value-expression that escapes counts once (returns are handled in escape_stmt_err).
-escape_trailing_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
-    st.match ({
-        .ExprStmt(e) => a.expr_escapes(svars, derived, e).match ({ true => 1, false => 0 }),
-        _            => 0,
-    })
-}
-escape_body_err = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
-    acc := 0
-    d := derived
-    body.loop((h, i, st) {
-        acc = acc + a.escape_stmt_err(svars, d, st)
-        d = a.escape_step(svars, d, st)
-    })
-    acc + (body.len == 0).match ({
-        true  => 0,
-        false => a.escape_trailing_err(svars, d, body[body.len - 1]),
-    })
-}
-escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
-    svars := a.scope_params(f.params)
-    svars.match ({
-        .DeadNil     => 0,
-        .DeadCons(c) => a.escape_body_err(svars, a.dead_nil(), f.body),
-    })
-}
-check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc := 0
-    decls.loop((h, i, d) {
-        acc = acc + d.match ({
-            .DFunc(f) => a.escape_check_func(f),
-            _         => 0,
-        })
-    })
-    acc
-}
-// kind/position pass: the source offset of the FIRST escaping return/trailing (0 = none).
-// returns-only kind walker (mirrors escape_stmts_err): no trailing-value check.
+// Authoritative kind/position pass: the source offset of the FIRST escaping return/trailing
+// (0 = none). Statement-position arms inspect returns only; their trailing values are discarded.
 kv_escape_stmts = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
     d := derived
@@ -6598,18 +6082,23 @@ check_module_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
+// Compatibility verdict. The positioned traversal above is authoritative; a parallel exact-count
+// walk duplicated every scope-escape rule and made the diagnostic traverse each function twice.
+check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_escape_kind(decls) == 0).match ({
+    true  => 0,
+    false => 1,
+}) }
 check_module_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
-    n := a.check_module_escape(decls)
-    (n == 0).match ({
+    pos := a.check_module_escape_kind(decls)
+    (pos == 0).match ({
         true  => check_diagnostic_none(),
         false => {
-            pos := a.check_module_escape_kind(decls)
             CheckDiagnostic(
                 code: KESCAPE(),
                 kind: "scope-escape",
                 source_offset: pos,
                 span_width: src.diagnostic_span_width(pos),
-                count: n.positive_count(),
+                count: 1,
                 message: "value from scope `s` escapes its scope (its arena is freed on scope exit)",
                 hint: "do not return a pointer from `s.acquire(...)`; copy the value out, or allocate in an outer scope",
             )

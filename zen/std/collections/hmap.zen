@@ -425,10 +425,10 @@ empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
         },
     })
 }
-// an `HMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from
-// the seed pair (Zen has no call-site type args), so this one CHAINS:
-//   m := hmap.of(a, k, v).expect("of")
-of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
+// Internal three-argument construction path. Its module-specific name must stay unique after std
+// modules are flattened: a bare `of` can otherwise bind std.mem.raw's two-argument constructor when
+// an entry imports std.sys before this module.
+hmap_seed_in<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
     a.try_acquire(sizeof(K)).match ({
         .Ok(kp) => {
             a.try_acquire(sizeof(V)).match ({
@@ -470,6 +470,10 @@ of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoErr
         },
     })
 }
+// an `HMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from
+// the seed pair (Zen has no call-site type args), so this one CHAINS:
+//   m := hmap.of(a, k, v).expect("of")
+of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> { hmap_seed_in(a, seed_key, seed_val) }
 // ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
 // The allocator-free twin of `HMap<K, V>`, in the exact `AVec<T>` mold (see std.collections.vec for the
 // full rationale). `AHMap<K, V>` STORES the narrow allocator captured at construction (the ambient rt
@@ -552,7 +556,7 @@ new*<K, V> = () AHMap<K, V> {
 // draw. (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
 from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
     da := a
-    ih: HMap<K, V> := of(da.addr(), k, v).expect("hmap.from: out of memory")
+    ih: HMap<K, V> := hmap_seed_in(da.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
         inner: ih,
         alloc: a,
@@ -564,7 +568,7 @@ from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
 // allocator-threaded seed constructor.)
 from*<K, V> = (k: K, v: V) AHMap<K, V> {
     a := dyn_heap()
-    ih: HMap<K, V> := of(a.addr(), k, v).expect("hmap.from: out of memory")
+    ih: HMap<K, V> := hmap_seed_in(a.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
         inner: ih,
         alloc: a,

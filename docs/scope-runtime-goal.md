@@ -35,7 +35,8 @@ The unanimous *missing* piece was cancellation: `checkpoint` must return a value
 - Generics are introduced by USE: a free capital in a param/field type (`a: MutPtr<A>`) is the type param.
   The `<A>` declaration list becomes optional, then unnecessary. Type *application* (`Scope<A>`, `Vec<Job>`) keeps brackets.
 - Cleanup attaches to a scope and is drained by the OWNER combinator (`with`), structurally above every exit,
-  so an early `.Err` return cannot skip it. `.or_return()` desugars to a guard-match (no `?` keyword).
+  so an early `.Err` return cannot skip it. `.or_return()` lowers to an internal result-tag
+  check and early return (no source `if`, match-arm guard, or `?` keyword).
 
 ## Milestones (ordered by risk × value; green byte-exact fixpoint after each)
 - **M0 — de-slop the raw-C floor.** Funnel scattered bodyless libc decls (malloc/free/realloc in raw.zen+alloc.zen,
