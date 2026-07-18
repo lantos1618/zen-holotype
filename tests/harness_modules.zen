@@ -1177,6 +1177,14 @@ harness_modules_run* = () i32 {
     // the same fmt import must still compile — the check fires only on the split-name + bare-import pair.
     // HMap's internal seed constructor must not bind std.mem.raw.of after transitive flattening.
     // These sources differ only in import order; both orders must accept.
+    // OWNERSHIP THROUGH A NAMESPACE BIND (last three cases): a sibling's consuming verb fn (`drop`
+    // over an Rc) called QUALIFIED (`reslib.drop(r, a)`) flattens to `reslib__drop(r, a)` — the
+    // consume matchers accept the `…__verb` alias suffix (sx_named), so the use-after-drop is
+    // error[ownership] exactly like the brace-import spelling of the SAME program (the two import
+    // styles must agree; regression pin for the bare-`eq` matcher hole). The zero-over-reject
+    // control: an ns-aliased fn merely NAMED `release` (`mathlib__release` after flatten) over
+    // NON-owner args must stay legal — the suffix match still gates on the first argument's
+    // Own/Rc/Arc type, so plain code never trips the consume matchers.
     d := run_mod_verdicts("modules verdict (cross-module check / loader errors)", [ModVerdictCase(
         files: [ModFile(
             name: "p.zen",
@@ -1796,6 +1804,39 @@ harness_modules_run* = () i32 {
         ), ModFile(
             name: "p.zen",
             src: "{ shown } = mid\nmain = () i32 { shown(1) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "reslib.zen",
+            src: "{ Rc } = std.mem.rc\ndrop* = (r: Rc<i32>, a: MutPtr<Heap>) void { r.drop_in(a) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "reslib = reslib\nrc = std.mem.rc\n{ expect } = std.core.result\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  r := rc.new_in(a, 5).expect(\"rc\")\n  reslib.drop(r, a)\n  to_i32(r.get())\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[ownership]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "reslib.zen",
+            src: "{ Rc } = std.mem.rc\ndrop* = (r: Rc<i32>, a: MutPtr<Heap>) void { r.drop_in(a) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ drop } = reslib\nrc = std.mem.rc\n{ expect } = std.core.result\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc := halloc.gpa()\n  a := alloc.addr()\n  r := rc.new_in(a, 5).expect(\"rc\")\n  drop(r, a)\n  to_i32(r.get())\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[ownership]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "mathlib.zen",
+            src: "release* = (x: i64, y: i64) i64 { x + y }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "mathlib = mathlib\nmain = () i32 {\n  s := mathlib.release(20, 22)\n  to_i32(s) - 42\n}\n",
         )],
         entry: "p.zen",
         should_pass: true,
