@@ -5,17 +5,8 @@
 // committed compiler's import loader (std.internal.resolve) + cross-module type-checker (check_linked)
 // are exercised end-to-end — the dimension the flat harness structurally cannot reach.
 //
-// It ports the FULL cross-module pytest suites (see PARITY map at the bottom):
-//   tests/test_user_imports.py      — sibling/namespace import loading + value + loader-error quality
-//                                       + the std.internal.resolve public API (import_edges / provided_symbols /
-//                                       module_graph / dedup_decls / strip_ns_into / resolve_program_data /
-//                                       resolve_parsed_program / check_parsed_program), driven as Zen programs
-//                                       run via `zenc run` (exit code == observable result), INCLUDING the
-//                                       recursion-depth / stack-growth stress cases (sources generated in-Zen).
-//   tests/test_modules_oracle.py    — cross-module arity/arg-type rejection ("the net is not hollow")
-//   tests/test_resolver_oracle.py   — name-clash namespacing + transitive re-export, as real projects
-//   tests/test_resolver_fixes.py    — the resolver triple-fix + unknown-type / must-use / lambda / value-mold
-//                                       driver checks, all through `zenc check`/`run`/`emit`/`doc`.
+// It covers sibling/namespace loading, privacy, collisions, transitive imports, cross-module typing,
+// loader diagnostics, the std.internal.resolve public API, and generated stack/size boundaries.
 //
 // CUSTOM RUNNER: a ModValCase / ModVerdictCase / ModEmitCase carries `files: [ModFile]` (name + source).
 // The runner `mkdir`s a fresh temp dir, `save`s each file, then drives the committed `./zenc`:
@@ -72,8 +63,6 @@ ModStdinCase*: {
     should_succeed: bool,
     present: [string_view],
 }
-// this run's private project dir (trailing slash), unique per process so concurrent runs never clash.
-mod_dir = (mp: MutPtr<Malloc>) string_view { mp.zo_path("zo_mods/") }
 // concat two / three strings through an allocator-owned String (no fixed-buffer assumptions).
 join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
@@ -134,67 +123,6 @@ gen_repeat = (mp: MutPtr<Malloc>, chunk: string_view, n: i32) string_view {
         i = i + 1
     }
     mp.finish_in(s).expect("harness: oom")
-}
-// fresh temp project dir, then every file written into it (paths are mod_dir + basename).
-write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
-    shell(mp.zo_cmd("rm -rf $ZT/zo_mods && mkdir -p $ZT/zo_mods"))
-    files.loop((h, i, f) {
-        p := mp.join2(mp.mod_dir(), f.name)
-        save(p, f.src, len(f.src))
-    })
-}
-// VALUE: build the project, `zenc run <entry>`, compare its exit code to `want`.
-run_mod_value* = (mc: ModValCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    mp.write_files(mc.files)
-    entry := mp.join2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zenc run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
-    // `shell` now returns the DECODED exit code (WEXITSTATUS, or 128 + signal). A build/loader failure
-    // surfaces as rc != 0.
-    rc == mc.want
-}
-// VERDICT: build the project, `zenc check <entry>`. should_pass => rc 0; else rc != 0 and (if `needle`
-// non-empty) the captured diagnostic must contain `needle`.
-run_mod_verdict* = (mc: ModVerdictCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    mp.write_files(mc.files)
-    entry := mp.join2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zenc check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
-    mc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(mc.needle).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_mods_chk.txt")).match ({
-        .Ok(txt) => txt.contains(mc.needle),
-        .Err(e)  => false,
-    }) }) }) })
-}
-// EMIT: build the project, `zenc emit <entry>`; must succeed and the C must hold every `present`
-// substring and none of the `absent` ones.
-run_mod_emit* = (mc: ModEmitCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    mp.write_files(mc.files)
-    entry := mp.join2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zenc emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
-        .Err(e)  => false,
-        .Ok(txt) => {
-            bad := 0
-            mc.present.loop((h, i, s) {
-                txt.contains(s).match ({ false => {
-                    bad = bad + 1
-                } })
-            })
-            mc.absent.loop((h, i, s) {
-                txt.contains(s).match ({ true => {
-                    bad = bad + 1
-                } })
-            })
-            bad == 0
-        },
-    }), false => false })
 }
 // DOC: `zenc doc <module>`; must succeed and contain every `present` substring.
 run_mod_doc* = (mc: ModDocCase) bool {
@@ -288,7 +216,7 @@ mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
     }) }) }) })
 }
 // batch runners + reporters: build+write (serial), run in parallel, check IN ORDER — same verdict as serial.
-run_mod_values = (name: string_view, cs: [ModValCase]) i32 {
+run_mod_values* = (name: string_view, cs: [ModValCase]) i32 {
     out(name)
     out("\n")
     m := Malloc(_: 0)
@@ -312,8 +240,7 @@ run_mod_values = (name: string_view, cs: [ModValCase]) i32 {
     free(base)
     fails
 }
-// PARALLEL deep-loader runner. The deep-loader driver sources USED to bake the one shared `mod_dir()`,
-// forcing serial execution; now each case gets its OWN gid-namespaced project dir and the driver's baked
+// PARALLEL deep-loader runner. Each case gets its own gid-namespaced project dir and the driver's baked
 // progdir points at THAT dir (deep_driver_src(kind, dir)), so the cases are disjoint and run concurrently.
 // Each driver's `zenc run` cc-compiles the whole resolver (~20s), so overlapping the 3 cases across the
 // pool is the single biggest harness speedup. Every case wants exit 0 (`.to_exit()` on the assertion).
@@ -1061,10 +988,7 @@ harness_modules_run* = () i32 {
     // ── UFCS through module aliases: x.f(a) resolves to alias__f by receiver type ────────────
     // `g = geo` + `g.Point(…).scale(2).norm1()` — the method chain resolves without flat imports.
     // `s = std.text.str` + `name.eq(…)` / `name.len()` — std fns as methods through the alias.
-    // ── sibling import loading (test_user_imports) ──────────────────────────────────────────
-    // ── namespace binds `x = mod` + qualified `x.fn()` (test_user_imports) ───────────────────
-    // ── import-head spacing variants all resolve the sibling (test_modules_oracle) ───────────
-    // ── std-export name collisions resolved by namespace binding (test_user_imports) ─────────
+    // ── sibling imports, namespace binds, import spacing, and std-export collisions ──────────
     // std.core.slice.dup / std.text.str.dup_bytes — two same-named exports, namespace-qualified.
     // ── audit C2: a TYPE reached via a module ALIAS keeps ONE canonical C identity ────────────
     // A qualified-alias type ref (`str.ParseError`) must mangle to the SAME C struct as the bare
@@ -1081,12 +1005,11 @@ harness_modules_run* = () i32 {
     // std.text.string + std.concurrent.actor coexist without a bare `new_in` arity collision (BUG #4).
     // std.core.slice dup/node_in coexist with std.text.str (loaded via fmt) without a dup_in collision (COLLIDE-1).
     // std.concurrent.cown buf/file vs sibling buf/file.
-    // ── name-clash namespacing + transitive re-export as REAL projects (test_resolver_oracle) ─
-    // ── test_resolver_fixes.py — driver-level run cases ──────────────────────────────────────
+    // ── name-clash namespacing, transitive re-export, and driver-level run cases ──────────────
     // bug 2: namespace bind `c = std.io.c` + qualified call compiles AND runs.
     // the renamed std.internal.ast builders (dupx/eqx) actually run.
     // std.internal.ast's decl buffer uses an explicit allocator (Counting allocator observes the acquire/release).
-    // ── std.internal.resolve PUBLIC API, driven as Zen programs via `zenc run` (test_user_imports) ──
+    // ── std.internal.resolve public API, driven as Zen programs via `zenc run` ────────────────
     // import_edges: structured edges with module/alias/namespace/start/next.
     // import_edges (Result): an allocator that fails after K acquires returns .Err; with enough budget, .Ok.
     // provided_symbols: imported / foreign / type / fn symbols with precise spans.
@@ -1715,14 +1638,12 @@ harness_modules_run* = () i32 {
     // flat `{ hidden } = vv`, qualified `m.hidden(…)`, and a qualified private TYPE all reject;
     // exported names accept via both forms; a name the module itself imports stays importable
     // (transitive re-export — visibility is decided at the defining module).
-    // ── the net is NOT hollow: cross-module calls are arity/arg-type checked (test_modules_oracle) ──
-    // ── transitive / clash rejections (test_resolver_oracle) ─────────────────────────────────
-    // ── namespace-bound diagnostics keep the USER source span (test_user_imports) ────────────
-    // ── loader-error QUALITY: clean messages, not raw linker spew (test_user_imports) ────────
-    // ── sibling name COLLISIONS reject with origin + hint (test_user_imports) ────────────────
+    // ── cross-module calls are arity/type checked; transitive/clash cases reject ──────────────
+    // ── namespace diagnostics keep user spans; loader errors stay above raw linker spew ──────
+    // ── sibling name collisions reject with origin and hint ──────────────────────────────────
     // the collision diagnostic NAMES the origin module + the redefining module.
     // C-keyword symbol-key collision (struct vs struct_zk) is still caught.
-    // ── test_resolver_fixes.py — driver-level check cases ────────────────────────────────────
+    // ── driver-level resolver check cases ────────────────────────────────────────────────────
     // bug 1: co-imports whose closures share generic decls (new<T>, release<T>*, dup<T>) check clean.
     // generic-heavy modules check clean on their own.
     // bug 3: multi-line impl bodies (runtime) + multi-line imports (ast) resolve clean.
@@ -1816,7 +1737,7 @@ harness_modules_run* = () i32 {
     // namespace-bound calls are rewritten to module-qualified C symbols before cgen.
     // the namespace rewriter preserves string literals + comments (only real calls rewritten).
     // a large namespace-bound compiler module emits the qualified symbol without overflow.
-    // import-head spacing variants all emit the resolved sibling call (test_modules_oracle).
+    // Import-head spacing variants all emit the resolved sibling call.
     dc := run_mod_docs("modules doc (exported signatures)", [ModDocCase(
         module: "std.concurrent.actor",
         present: ["spawn*<A, M, ActorT>", "cell*<A, M>"],
@@ -1836,7 +1757,7 @@ harness_modules_run* = () i32 {
     // ── deep-loader PUBLIC API: resolve_program_data / resolve_parsed_program / check_parsed_program ──
     // These drive the loader's INTERNAL structures (the module_table, per-module ParsedProgram AST
     // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
-    // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
+    // progdir is the case's private module directory (baked into the generated driver); root is "."
     // because the harness runs `./zenc` from the repo root, so std resolves relative to the cwd.
     dl := run_mod_deep("modules value (deep loader API: resolve_program_data / parsed_program / check)", [DeepCase(
         base_files: [ModFile(
@@ -1899,8 +1820,8 @@ harness_modules_run* = () i32 {
     v + d + e + dc + sd + dl
 }
 // ── deep-loader driver builders (paths injected at runtime) ──────────────────────────────────────
-// Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and
-// the entry inpath (mod_dir already ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
+// Each returns a full `zenc run` driver program with the case directory baked in as the progdir and
+// entry path (the directory ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
 // root is "." (the harness's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
 deep_src_table = (mp: MutPtr<Malloc>, dir: string_view) string_view {
     z: string_view := ""
@@ -1936,53 +1857,3 @@ esc_nl = (mp: MutPtr<Malloc>, s: string_view) string_view {
     mp.finish_in(out).expect("harness: oom")
 }
 edges700_esc = (mp: MutPtr<Malloc>, s: string_view) string_view { mp.esc_nl(s) }
-// ════════════════════════════════════════════════════════════════════════════════════════════════
-// PARITY MAP — what the deleted/kept pytest cross-module suites map to here.
-//
-// tests/test_resolver_fixes.py  → FULLY PORTED → DELETED. Every test fn is a black-box `zenc
-//   check`/`run`/`doc` over a small program, so each became a ModVerdictCase / ModValCase / ModDocCase:
-//     generic_decl_co_imports(fmt+rc,vec+rc,fmt+arc,fmt+drop), generic_heavy_module_alone(io.c,cown),
-//     ns_bind_qualified_call_runs(c=std.io.c→37), std_runtime/std_ast imports_clean, std_actor standalone
-//     + spawn/cell doc, user_shadow_of_imported_std_name(dup), import_vs_import_collision(first-wins),
-//     std_ast_builders_usable, std_ast_decl_buffer_uses_explicit_allocator, undefined-type
-//     (annotation/return/local-let/nested-let), value-mold must-use (discard reject / rebind / tail),
-//     defined+imported types not flagged, lambda (hof-arg / field-lift / capturing-reject / returned-lift).
-//
-// tests/test_modules_oracle.py  → user-facing PORTED → DELETED. The "net is not hollow" verdicts
-//   (wrong-arity/arg-type reject, correct accept, slice.len no-misdispatch) + the 4 import-head spacing
-//   variants (now ModEmitCase asserting the resolved sibling C) cover its CLI behavior. The two
-//   parametrized invariants — test_module_typechecks_against_its_imports / test_bootstrap_sources_typecheck
-//   — drive _oracle.check_linked, a PYTHON harness that layers synthetic module headers; that invariant is
-//   not a CLI behavior but is enforced every build (the committed zenc is compiled from the whole stdlib,
-//   so any cross-module type error breaks the bootstrap) — dropped as Python-harness impl-detail.
-//   test_modules_oracle_has_no_python_frontend_dependency is moot in a zero-Python repo.
-//
-// tests/test_user_imports.py    → FULLY PORTED → DELETED. Everything is ported here:
-//   sibling/two-module/namespace-bind/same-name/same-type/cycle loads; the std-export collision suite
-//   (slice.buf/dup, bytes.at, str.at, alloc.default, num.integer/float+Result, collections.of, vec.Vec<T>,
-//   runtime.sync/async, actor.cell, string+actor coexist, slice+str dup coexist, cown.buf/file, ownership
-//   ctors); loader-error quality + collision origin/hint; emit resolution-before-cgen + literal/comment
-//   preservation; the std.internal.resolve PUBLIC API as `zenc run` programs (import_edges,
-//   provided_symbols_in, symbol_key_in, module_graph_in, strip_ns_into — all Result-always) INCLUDING the stack-growth
-//   stress (240/120/260 decls, 700 edges, 220 symbols, 3500-call rewrite — sources generated in-Zen); and
-//   stdin no-program-dir mode. The THREE deep-loader tests — resolve_program_data /
-//   resolve_parsed_program / check_parsed_program (module_table, parsed-program AST boundary, graph-linked
-//   check) — ARE NOW PORTED as the `dl` batch above (driver programs with this run's mod_dir baked in as
-//   progdir and root "." = the harness's repo-root cwd). The heap-layout-sensitive resolve_program_data bug
-//   the prior port cited ("unknown module 'left'" with more downstream string constants) no longer
-//   reproduces on the committed compiler — all three drivers pass reliably via `zenc run`.
-//   (Also covered-by-equivalent, not separately ported: the 81-file edge fan-out ≡ the 700-edge in-string
-//   stress; the long-line / many-line / large-literal strip_ns variants ≡ the 3500-call rewrite stress.)
-//
-// tests/test_resolver_oracle.py → user-facing PORTED → DELETED. Its user-observable cases (name-clash
-//   resolves to the imported module + wrong-call rejected, transitive re-export + arity) ARE ported
-//   (sm.thing, base→mid→app Pt). The bulk — module_graph / topo_order / reachable / split_decls /
-//   bootstrap-manifest-scc / the per-module namespaced-resolver check / the naive-flat-concat
-//   false-positive control — asserted on tests/_resolver.py, a PYTHON reimplementation of the resolver's
-//   graph/topo/splitter, NOT on the compiler: there is no CLI surface for "the Python harness's internal
-//   data structure", so they are not black-box-portable. The one real invariant among them —
-//   every std module type-checks through its transitive imports (0 cross-module errors) — is enforced
-//   every build: the committed zenc is compiled from the whole stdlib, so any cross-module type error
-//   breaks the bootstrap (CI's `make harness` gate). Nothing user-observable is lost by deleting the
-//   Python reimplementation and the tests that assert on it.
-// ════════════════════════════════════════════════════════════════════════════════════════════════

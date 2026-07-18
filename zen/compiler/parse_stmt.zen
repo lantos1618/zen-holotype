@@ -9,7 +9,7 @@
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
 { enode, lexeme, is_op, is_dot, is_field_colon, op_str, parse_atom, parse_or, parse_or_nested } = compiler.parse_expr
-{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, perr_set_at, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
+{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set, perr_set_at, perr_set_if_at, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
@@ -145,6 +145,16 @@ is_return_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)
     src.is_return_kw(sc.tok).match ({ true => src.is_assign(src.scan(sc.next).tok).match ({ true => false, false => src.is_eq(src.scan(sc.next).tok).match ({ true => false, false => true }) }), false => false })
 }
+// `if` at the beginning of a statement gets a teaching diagnostic. Match-arm guards are unaffected:
+// their `if` follows a pattern inside parse_expr rather than beginning a statement.
+is_if_here = (src: string_view, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Ident => src.tok_eq(sc.tok, "if"),
+        _      => false,
+    })
+}
+note_if_here = (src: string_view, pos: i32) void { src.is_if_here(pos).match ({ true => perr_set_if_at(src.scan(pos).tok.start), false => { } }) }
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
 SKind*: SLet | SLetT | SIdx | SSet | SCIdx | SCSet | SWhile | SRet | SExpr
@@ -164,6 +174,7 @@ parse_stmts = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     r
 }
 parse_stmts_inner = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
+    src.note_if_here(pos)
     src.at_body_end(pos).match ({ true => a.snil(), false => a.stmt_kind(src, pos).match ({
         .SLet   => a.parse_let_stmt(src, pos),    // an empty body `{ }` (a void no-op) — no statements
         .SLetT  => a.parse_typed_let_stmt(src, pos),
@@ -345,6 +356,7 @@ parse_block_inner = (a: MutPtr<Malloc>, src: string_view, pos: i32) BlockEnd {
 // same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare
 // statement. An explicit `return <expr>` (SRet) IS allowed inside a block (a guard arm's body).
 block_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) BlockEnd {
+    src.note_if_here(pos)
     a.stmt_kind(src, pos).match ({
         .SLet   => a.block_let(src, pos),
         .SLetT  => a.block_typed_let(src, pos),

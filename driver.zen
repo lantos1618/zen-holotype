@@ -1,6 +1,5 @@
-// driver.zen — the zenc CLI, in Zen. Dispatches on the command line and drives the compiler
-// (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
-// once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
+// driver.zen — the zenc CLI. Dispatches commands and drives resolve -> parse -> check -> emit/link.
+// Its `main` is emitted as zen_main and entered through the runtime floor's weak OS main.
 { arg, argc, getEnv } = std.os
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
@@ -219,7 +218,7 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
         },
     })
 }
-// ── genjs backend (task #46): Zen AST -> JavaScript. `emit-js` checks then emits the floor
+// ── genjs backend: Zen AST -> JavaScript. `emit-js` checks then emits the floor
 // (bootstrap/zenrt.js) + the module JS; `build --target js` writes the same to a .js file. Additive:
 // it reuses the exact resolve/parse/check pipeline, only swapping genModuleIn for genJsModuleIn. ──
 js_floor = (mp: MutPtr<Malloc>, root: string_view) string_view {
@@ -440,7 +439,7 @@ read_fd_all = (fd: i32, buf: RawPtr<u8>, off: i64, cap: i64) i64 {
     r := fd.read(buf.offset(off), cap - off)
     (r <= 0).match ({ true => off, false => (off + r >= cap).match ({ true => cap, false => read_fd_all(fd, buf, off + r, cap) }) })
 }
-// ── --build-self: regenerate the seed (ported from bootstrap/driver.c build_self) ─────────────────
+// ── --build-self: regenerate the seed ────────────────────────────────────────────────────────────
 BS_HEAD = () string_view { "typedef struct { void* ptr; int64_t len; } zslice; " }
 BS_HEAD_REPL = () string_view { "#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n" }
 bs_is_space = (b: u8) bool { (b == ' ').match ({ true => true, false => (b == '\t').match ({ true => true, false => (b == '\n').match ({ true => true, false => (b == '\r').match ({ true => true, false => (b == 11).match ({ true => true, false => b == 12 }) }) }) }) }) }
@@ -560,7 +559,7 @@ build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view) i32 
         },
     })
 }
-// ── doc: a module's public decls + their leading doc comments (ported from driver.c doc_source) ───
+// ── doc: a module's public declarations plus their leading doc comments ──────────────────────────
 ends_zen = (s: string_view) bool {
     v: [u8] := s.view()
     v.len >= 4 && v[v.len - 4] == '.' && v[v.len - 3] == 'z' && v[v.len - 2] == 'e' && v[v.len - 1] == 'n'

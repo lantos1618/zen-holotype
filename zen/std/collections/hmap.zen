@@ -1,10 +1,10 @@
 // std.collections.hmap — `HMap<K, V>`, the FULLY GENERIC associative map: any key type K that
 // implements the `Hash` trait below, any value type V. The generic twin of std.collections.map's
-// str-keyed `Map<T>` (which the compiler consumes and which stays as-is);
+// string_view-keyed `Map<T>` (which the compiler consumes and which stays as-is);
 // same allocator threading, open-hash index, and grow strategy — plus `delete`, which it lacks.
 //
 // KEYS ARE TRAIT-DISPATCHED. `Hash` declares `hash` (key → i64) and `heq` (key equality); impls
-// for i64/i32/u8/str ship right here, so scalar and string keys work out of the box. A STRUCT key
+// for i64/i32/u8/string_view ship right here, so scalar and string keys work out of the box. A STRUCT key
 // is one impl away — combine the field hashes with `mix`:
 //
 //   Pt: { x: i64, y: i64 }
@@ -22,7 +22,7 @@
 // K/V appear only in its RETURN type, which inference can't reach through a `.expect` chain —
 // pin them with a two-step annotation instead:
 //
-//   r: Result<HMap<str, i64>, IoError> := hmap.empty(a)
+//   r: Result<HMap<string_view, i64>, IoError> := hmap.empty(a)
 //   m := r.expect("empty")
 //   m = m.put(a, "the", 1).expect("put")      // insert — grows through alloc when full
 //   m = m.put(a, "the", 9).expect("put")      // upsert — same key overwrites in place
@@ -38,8 +38,8 @@
 // HEADS (entry index or -1), the next `cap` are per-entry NEXT links — rebuilt on grow.
 //
 // Layout: two PARALLEL buffers of `cap` slots (`keys` holds K's, `vals` holds V's, both BY VALUE)
-// plus `len` live entries and the index. A str key stores the borrowed pointer (str is a pointer
-// type), so it must outlive the map — same rule as Map<T>.
+// plus `len` live entries and the index. A string_view key borrows its bytes, so they must outlive
+// the map — the same rule as Map<T>.
 //
 // DELETE is swap-remove: the last entry moves into the freed slot and both chains are re-linked in
 // place — O(chain) work, no allocation, no tombstones. len shrinks and the slot is REUSED by the
@@ -350,7 +350,7 @@ HMap*<K, V>: {
 // a zero-entry `HMap<K, V>` with capacity for one entry (so `put` has a slot before the first
 // grow; growth is 1→3→7→15…). K/V appear only in the return type, so pin them with a TWO-STEP
 // annotation (a one-line `.expect` chain can't reach them — see the header comment):
-//   r: Result<HMap<str, i64>, IoError> := hmap.empty(a)
+//   r: Result<HMap<string_view, i64>, IoError> := hmap.empty(a)
 //   m := r.expect("empty")
 empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
     a.try_acquire(sizeof(K)).match ({
@@ -435,18 +435,16 @@ of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoErr
         },
     })
 }
-// ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
+// ── STORED-ALLOCATOR FORM (process-heap default) ─────────────────────────────────────────────────
 // The allocator-free twin of `HMap<K, V>`, in the exact `AVec<T>` mold (see std.collections.vec for the
-// full rationale). `AHMap<K, V>` STORES the narrow allocator captured at construction (the ambient rt
-// narrowed to a `DynAlloc`) and draws every later allocation (grow, free) from THAT allocator — it never
-// re-reads `current()` per op, so an AHMap is safe to outlive the scope it was born in (re-reading would
-// cross-allocator-free on grow).
+// full rationale). `new()` stores `dyn_heap()`; `new_in(a)` stores the caller's `DynAlloc`, and every
+// later grow/free uses that same value. A custom allocator's raw `state` must outlive the AHMap.
 // Everything above (the explicit `HMap<K, V>` + `of(a, …)`/`m.put(a, k, v)`/`m.free(a)` forms) is
-// UNCHANGED; this section only adds new names on a new type. This is ALSO the user-facing ambient MAP:
-// `AHMap<str, V>` is the generic equivalent of the str-keyed `Map<T>` (which stays compiler-internal).
+// unchanged; this section adds allocator-storing names on a new type. This is also the user-facing map:
+// `AHMap<string_view, V>` is the generic equivalent of the string_view-keyed `Map<T>` (which stays compiler-internal).
 //
-//   m := hmap.from("the", 1)           // seed one pair; K/V inferred → AHMap<str, i32>, chains
-//   m  = m.put("cat", 2)               // no allocator — bytes from the stored rt
+//   m := hmap.from("the", 1)           // seed one pair; K/V inferred → AHMap<string_view, i32>, chains
+//   m  = m.put("cat", 2)               // no allocator argument — uses the stored DynAlloc
 //   m  = m.put("the", 9)               // upsert
 //   m.get("the")                       // Opt<i32>: .Some(9)
 //   m.get_or("dog", 0)                 // 0
@@ -454,9 +452,9 @@ of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoErr
 //   m.each((k, v){ ... })   n := m.len()
 //   m.free()
 //
-//   e: hmap.AHMap<str, i64> := hmap.new()   // empty; K/V from the annotation (nothing to infer)
+//   e: hmap.AHMap<string_view, i64> := hmap.new()   // empty; K/V from the annotation (nothing to infer)
 //
-// Ambient ops are FAIL-FAST on OOM (`.expect`); the explicit `HMap` API keeps allocation failure as a
+// Allocator-free-call-site ops are fail-fast on OOM (`.expect`); the explicit `HMap` API keeps failure as a
 // `Result<_, IoError>` value.
 AHMap*<K, V>: {
     inner: HMap<K, V>,
@@ -489,8 +487,8 @@ AHMap*<K, V>: {
     }
 }
 // EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-entry `AHMap<K, V>` bound to
-// a caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw (docs/runtime-design.md:
-// explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
+// a caller-supplied narrow allocator (`a: DynAlloc`), with no implicit process-heap selection. The
+// default `new()` below is a one-line shim — the single
 // process-heap draw (`dyn_heap()`) on the hmap construction path.
 new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
     da := a
@@ -500,8 +498,8 @@ new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
         alloc: a,
     )
 }
-// a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
-// annotation: `e: AHMap<str, i64> := hmap.new()`. The process heap is drawn ONCE here (as a DynAlloc)
+// a zero-entry process-heap `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
+// annotation: `e: AHMap<string_view, i64> := hmap.new()`. The process heap is drawn ONCE here (as a DynAlloc)
 // and stored. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
 // std.text.string's generic `new_in<A>(MutPtr<A>)` once both flatten together; qualified `hmap.new_in`
 // stays the external real path).
@@ -513,8 +511,8 @@ new*<K, V> = () AHMap<K, V> {
         alloc: a,
     )
 }
-// EXPLICIT-allocator seed constructor: an `AHMap<K, V>` bound to `a`, seeded with one pair. No ambient
-// draw. (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
+// Explicit-allocator seed constructor: an `AHMap<K, V>` bound to `a`, seeded with one pair. It performs
+// no implicit allocator selection. (There is no pair-slice literal, so it takes the pair directly.)
 from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
     da := a
     ih: HMap<K, V> := of(da.addr(), k, v).expect("hmap.from: out of memory")
@@ -523,7 +521,7 @@ from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
         alloc: a,
     )
 }
-// an ambient `AHMap<K, V>` seeded with one pair. Narrow the process heap once; `from_in`'s body is inlined
+// a process-heap `AHMap<K, V>` seeded with one pair. Capture `dyn_heap()` once; `from_in`'s body is inlined
 // (no bare `from_in` call — same string-`new_in` collision avoidance). K/V are inferred from the seed,
 // so this CHAINS: `m := hmap.from(k, v)`. (Named `from`, not `of`, since module `of` is the explicit
 // allocator-threaded seed constructor.)

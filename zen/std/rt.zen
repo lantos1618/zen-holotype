@@ -1,23 +1,22 @@
-// std.rt — the ambient runtime capability (rt foundation slice; docs/rt-scoped-runtime.md §2b).
+// std.rt — the still-live ambient runtime capability (see STATUS.md for the transition state).
 //
-// `Rt` reifies "the scope you run in": for THIS slice it carries the allocator vtable (mem);
-// sched/gc land in M3/M4 (see the note on the `ready` field). The ambient rt is a THREAD-LOCAL
-// default singleton — trivial programs need ZERO setup (heap alloc), injectable at boundaries.
+// `Rt` reifies the allocator/runtime context a body runs in. The ambient rt is a thread-local
+// default singleton: trivial programs need no setup, while boundaries may inject a custom value.
 //
 // Surface (import as `rt = std.rt`, then `rt.current()` / `rt.with(...)` / `rt.alloc(n)`):
 //   rt.current()         -> Rt      read the ambient thread-local rt (process default when unset)
 //   rt.with(custom, body) -> R      save-set-restore the ambient rt around a lexical block
-//   rt.set_default(rt)              M3: pick the WHOLE program's rt ONCE, at the top of main (see below)
+//   rt.set_default(rt)              pick the whole program's rt once, before worker spawn
 //   rt.default()         -> Rt      the process-wide default rt (heap unless set_default was called)
 //   rt.alloc(n)          -> RawPtr  allocate n bytes via the AMBIENT rt (no allocator threading)
 //   rt.resize(p, n)      -> RawPtr  grow/shrink via the ambient rt
 //   rt.release(p)                   free via the ambient rt
 //   rt.heap_rt()         -> Rt      the built-in heap vtable (malloc/free), also for injection
 //
-// M3 (docs/rt-m3-notes.md): the ambient default has TWO layers. `default_rt` is a PROCESS global — the
+// The ambient default has TWO layers. `default_rt` is a PROCESS global — the
 // runtime a program picks once via `rt.set_default(...)` at the top of main; every unset thread (main +
 // pool workers) honors it, so a whole PARALLEL program can run under an arena. The thread-local `slot`
-// is the per-actor override the pool sets around each behavior (M4). `current()` = slot when set, else
+// is the per-actor override the pool sets around each behavior. `current()` = slot when set, else
 // the process default. `set_default` is startup-only: it PANICS if called after the first spawn.
 //
 // WHY thread-local, not a true global: the pool runs different actors on different OS workers
@@ -25,15 +24,13 @@
 // behavior the wrong actor's heap. The default init (`slot = heap_rt()`) runs once on the main
 // thread (in zen__init_globals). A FRESH worker thread sees a zero-initialized slot, so `ready == 0`
 // is the sentinel that means "nothing injected here" and `current()` falls back to the process default.
-// M4 is the injection hook: the pool sets the ambient rt per-actor the same way it sets the
-// current-actor thread-local today.
+// The pool uses this slot to inject the actor's runtime around each behavior call.
 { malloc, realloc, free, DynAlloc, dyn_of } = std.mem.alloc
 { panic } = std.core.result
 // The runtime capability value. The three fn-pointer fields are the allocator vtable (Self erased
-// to RawPtr<u8> state, so any allocator plugs in without generic threading — the M3 trait-object
-// shape). `state` is the allocator instance data (null for heap). `ready` is the init sentinel:
+// to RawPtr<u8> state, so any allocator plugs in without generic threading). `state` is the allocator
+// instance data (null for heap). `ready` is the init sentinel:
 // 1 = a real Rt; 0 = a zero-init thread-local slot on a fresh worker => use the heap default.
-// sched/gc policy fields join here in M3/M4 (the `Rt` bundle grows; the surface below is stable).
 Rt*: {
     mem_acquire: (RawPtr<u8>, i64) RawPtr<u8>,
     mem_resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>,
@@ -69,7 +66,7 @@ mem_rt* = (acquire: (RawPtr<u8>, i64) RawPtr<u8>, resize: (RawPtr<u8>, RawPtr<u8
         ready: 1,
     )
 }
-// ── M3: the process-wide DEFAULT rt (docs/rt-m3-notes.md) ─────────────────────────────────────────
+// ── process-wide DEFAULT rt ───────────────────────────────────────────────────────────────────────
 // `default_rt` is a PROCESS global (NOT thread-local): it is the runtime a program picks ONCE, at the
 // top of `main`, and every unset thread — the main thread AND every pool worker — honors it. Heap by
 // default, so a program that never opts in is byte-identical. It replaces the two hardcoded `heap_rt()`
@@ -114,7 +111,7 @@ with*<R> = (custom: Rt, body: () R) R {
     slot = saved
     out
 }
-// M4 hook (docs/rt-scoped-runtime.md §2b): explicit save-set-restore on the ambient slot, WITHOUT a
+// Pool-actor hook: explicit save-set-restore on the ambient slot, WITHOUT a
 // closure. `with` above takes a niladic callback, but the pool calls an actor's behavior through a raw
 // `(RawPtr<u8>, i64) void` fn-ptr in a hot worker loop — there is no closure to hand it. So the pool
 // does `saved := rt.enter(a.rt); a.behavior(a.user, msg); rt.leave(saved)` around each behavior run,
@@ -144,8 +141,8 @@ release* = (p: RawPtr<u8>) void {
 }
 // Narrow an Rt to JUST its allocator capability (a `DynAlloc` value): keep acquire/resize/release +
 // state, drop sched/gc/ready. This is the bridge the ambient collections cross ONCE at construction —
-// they then store the narrow `DynAlloc`, not the whole `Rt` bundle (docs/runtime-design.md
-// attenuation: a container takes the narrowest capability it needs, an Allocator, never the world).
+// they then store the narrow `DynAlloc`, not the whole `Rt` bundle: a container takes the narrowest
+// capability it needs, an Allocator, never the world (see MEMORY_MODEL.md).
 dyn_of_rt* = (r: Rt) DynAlloc { dyn_of(r.mem_acquire, r.mem_resize, r.mem_release, r.state) }
 // The AMBIENT allocator, narrowed: read `current()` ONCE and hand back a `DynAlloc`. This is the single
 // ambient draw on the ambient-container construction path; every later container op allocates through

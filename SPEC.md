@@ -1,540 +1,353 @@
-# Zen Language Spec
+# Zen language contract
 
-This is the current-state spec for the self-hosted `zenc` compiler in this
-repository. It describes behavior implemented by the code and covered by tests,
-not every long-term idea in [VISION.md](VISION.md).
+This document describes syntax and behavior accepted by the shipping checked CLI. It is not a list
+of aspirations. Compiler source and executable tests remain the final authority; implementation
+status and proposed changes belong in [STATUS.md](STATUS.md).
 
-The strongest executable references are the Zen-native harness (no Python):
+## Source and declarations
 
-- [tests/harness.zen](tests/harness.zen) — entry that sums category fail counts.
-- [tests/harness_build.zen](tests/harness_build.zen) — CLI, examples, fixtures, diagnostics.
-- [tests/harness_verdict.zen](tests/harness_verdict.zen) — accept/reject + `error[kind]` pins.
-- [tests/harness_value.zen](tests/harness_value.zen) — stdout value cases.
-- [tests/harness_modules.zen](tests/harness_modules.zen) — imports / resolver / std coverage.
-- [tests/harness_boundaries.zen](tests/harness_boundaries.zen) — raw primitive boundaries.
-- [tests/harness_fuzz.zen](tests/harness_fuzz.zen) — malformed-input crash resistance.
-
-## Source Files
-
-A Zen source file is UTF-8 text containing top-level declarations and import
-heads. `//` starts a line comment. The lexer also handles nested block comments
-and treats unterminated comments/strings as parse errors instead of silently
-truncating valid source.
-
-Checked user commands are:
-
-```sh
-zenc check   <file.zen|project-dir>
-zenc build   <file.zen|project-dir> [-o out]        # C backend (default)
-zenc build   <file.zen> --target js [-o out.js]     # JS backend (compiler.genjs)
-zenc run     <file.zen|project-dir>
-zenc emit    <file.zen>                              # checked C
-zenc emit-js <file.zen>                              # checked JS floor + module
-```
-
-`zenc emit <file.zen>` resolves imports and namespace binds before writing C, so
-its output matches the source shape that `build` and `run` compile. Plain
-`zenc file.zen` remains a lower-level flat-module C emitter. It does not load
-`std` imports or validate a user program the way the file-based commands do.
-
-## Declarations
-
-Top-level declarations are one of:
+A source file is byte-oriented UTF-8 text containing top-level imports and declarations. Identifiers
+are currently ASCII-style names; string data can contain UTF-8 bytes. Line comments use `//`; block
+comments use `/* ... */` and may nest.
 
 ```zen
-name* = (a: i32, b: i32) i32 { a + b }    // public function
-helper = () i32 { 1 }                      // private function
-foreign = (n: i64) RawPtr<u8>              // bodyless C extern
-counter := 0                               // mutable module global
-Point*: { x: i32, y: i32 }                 // struct
-Shape*: Circle(i32) | Square(i32) | Dot    // enum
-Box<T>*: { value: T }                      // generic struct
-Opt<T>*: Some(T) | None                    // generic enum
+{ println } = std.text.fmt        // destructuring import
+fmt = std.text.fmt                // namespace bind
+
+LIMIT* := 100                     // public value global
+Point*: { x: i32, y: i32 }        // public type
+Colour*: Red | Green | Blue       // public enum
+
+add* = (a: i32, b: i32) i32 {    // public function
+    a + b
+}
+
+native_read* = (fd: i32, p: RawPtr<u8>, n: i64) i64
 ```
 
-`*` is a glued visibility marker on the declaration name. It is used by docs and
-module export intent. Full privacy enforcement is still pending.
+`*` makes the declaration importable from another module. Private declarations remain available
+inside their file and produce `error[private-name]` if imported.
 
-Function bodies return their trailing expression. `return expr` is supported as
-an early return statement, but early returns inside value-position block/match
-arms are rejected because they would be dropped by expression emission.
+`:=` defines a value global or local. A top-level `=` is reserved for a function or a module bind;
+using it for an ordinary value produces `error[bad-binding]`.
 
-Bodyless functions are foreign declarations. The backend emits C prototypes and
-the system linker supplies the body.
-
-The program entry point is `main`, in one of two shapes:
-
-```zen
-main = () i32 { ... }            // niladic entry
-main = (sys: Sys) i32 { ... }    // capability entry (std.sys)
-```
-
-For the capability entry, the compiler renames the user body to `zen_user_main`
-and emits a niladic `zen_main` trampoline that calls it with `std.sys.root()`, so
-the C boundary (`zenrt.c`) is byte-identical to the niladic case. `Sys`
-(`std.sys`) bundles narrow capabilities — `heap()` (the process `Allocator`),
-`stdout()`/`stderr()` (`Writer`s), `env()`, `clock()`, `fs()` — and the intended
-style is attenuation: a function takes the narrowest capability it needs (a
-`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` returns
-`Result<i64, IoError>`; `write_or_panic` is the fatal script sink. Ambient `println` remains
-best-effort during migration (`docs/sys-phase2-print-writer.md`).
+A bodyless function declaration is an external signature. It contributes a callable signature to
+checking and expects a target/link definition only if the program uses it. It is not yet a Zen
+forward declaration paired with a later same-named body: duplicate top-level definitions are an
+error, and the compiler does not perform whole-project definition completeness checking.
 
 ## Types
 
-Implemented scalar and structural types:
+Built-in scalar types are:
+
+- signed integers: `i8`, `i16`, `i32`, `i64`;
+- unsigned integers: `u8`, `u16`, `u32`, `u64`;
+- floating point: `f32`, `f64`;
+- `bool` and `void`.
+
+Integer literals are range-checked in a typed slot. Decimal, hexadecimal (`0x`), binary (`0b`),
+octal (`0o`), and `_` digit separators are supported. Float literals support decimal fractions and
+scientific notation. There is no general implicit signed/unsigned mixing; unsafe comparisons such
+as negative signed values against wide unsigned values are rejected.
+
+Other type forms:
 
 ```zen
-i32 i64 u8 f64 bool void
-string_literal string_cstr string_view
-Ptr<T> MutPtr<T> RawPtr<T>
-[T]
-(A, B) C
-Name
-Name<T, U>
+[T]                         // pointer + length slice
+Ptr<T>                      // non-null read-only pointer
+MutPtr<T>                   // non-null writable pointer
+RawPtr<T>                   // nullable/raw FFI pointer
+(i32, string_view) bool     // function type
+Box<T>                      // generic instance
 ```
 
-The three canonical non-owning string types express provenance:
-`string_literal` is static literal storage, `string_cstr` is a borrowed
-NUL-terminated pointer, and `string_view` is the general readable borrow. They
-currently lower to `const char*`; a true `(ptr, len)` view is Phase 2 of
-[STRING_TYPES.md](STRING_TYPES.md). The parser still accepts `text`, `Cstr`, and
-`str` as migration aliases, while formatting and diagnostics use the canonical
-names. The owned growable buffer remains `String`. `[T]` is a fat slice with a
-pointer and length. Function types are parameter types for inline templates and
-closure arguments.
+`MutPtr<T>` can be used where a read-only `Ptr<T>` is expected. A `Ptr<T>` cannot be used where
+`MutPtr<T>` is expected. A nullable `RawPtr<T>` cannot satisfy a non-null slot; use
+`assert_nonnull(raw)` to panic on null and obtain `MutPtr<T>`. `RawPtr<u8>` is the trusted raw byte
+floor and has looser intrinsic rules. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
 
-Current pointer status: the parser accepts `Ptr<T>`, `MutPtr<T>`, and
-`RawPtr<T>`, but the checker/backend currently collapse them to one pointer
-shape and enforce invariant pointee equality. Direction and nullability are a
-language goal, not a fully enforced current guarantee.
+### String provenance
 
-Integer literals are context-sensitive. They fit numeric slots when in range and
-default to `i32` unless the value requires `i64`. `u8 <= i32 <= i64` widening is
-accepted. Explicit casts exist as intrinsics such as `to_i32`, `to_i64`,
-`to_u8`, and `to_f64`.
+Zen keeps three non-owning string provenances:
 
-## Expressions And Statements
+| Type | Meaning |
+|---|---|
+| `string_literal` | Immutable compiler/static literal storage. |
+| `string_cstr` | NUL-terminated external or allocated storage. |
+| `string_view` | Read-only string view used by ordinary APIs. |
 
-Core expressions:
+The parser still accepts migration aliases `text`, `Cstr`, and `str` respectively. Formatting and
+diagnostics use canonical names. `String` in `std.text.string` is a separate allocator-backed,
+growable owned buffer. Slices and aggregates remain invariant; read-only trait lookup normalizes the
+three non-owning provenances to the `string_view` receiver.
+
+## Functions, values, and calls
 
 ```zen
-1
-1.5
-'a'
-"text"
-x
-x + y
-f(a, b)
-x.f(a, b)
-Point(x: 1, y: 2)
-.Some(3)
-xs[i]
-[1, 2, 3]
-value.match({ pattern => expr, _ => fallback })
+mul = (a: i32, b: i32) i32 { a * b }
+identity<T> = (x: T) T { x }
+main = () i32 {
+    n := mul(6, 7)
+    n.to_i64()               // UFCS: to_i64(n)
+    0
+}
 ```
 
-Statements:
+The last expression is the implicit return value. `return value` exits early. A return type may be
+omitted where inference can determine it; public APIs should generally spell it out.
+
+`receiver.method(args...)` is UFCS. The checker resolves inherent methods, trait methods, and
+top-level functions by receiver type. A name bound in the local scope shadows a same-named top-level
+function.
+
+Function-typed parameters are supported. The current closure boundary is:
+
+| Form | Status |
+|---|---|
+| Lambda passed directly to a generic/HOF call, including local captures | Supported by inlining. |
+| Local binding of a callable lambda | Supported where it can be spliced/resolved. |
+| Non-capturing lambda stored in a function-typed field or returned | Supported by top-level lift. |
+| Returned lambda capturing enclosing function parameters | Supported as a by-value generated closure record. |
+| Escaping lambda that captures an arbitrary local, including a capturing field value | Rejected with `error[lambda-value]`. |
+
+Zen does not currently have tuple syntax. Use a named record when returning multiple values.
+
+## Expressions and operators
+
+Core expressions include literals, variables, calls, UFCS calls, struct/enum construction, field
+access, indexing, slices, lambdas, blocks, and `.match`.
+
+From low to high precedence, binary operators group as:
+
+1. `||`
+2. `&&`
+3. comparisons: `== != < <= > >=`
+4. `|`
+5. `^`
+6. `&`
+7. `<< >>`
+8. `+ -`
+9. `* / %`
+
+Bitwise operators therefore bind more tightly than comparisons. Parenthesize when mixing them.
+`|` is both the current enum-variant separator in a type declaration and bitwise OR in a value
+expression. Changing enums to comma separation is proposed but not shipped.
+
+Assignments are statements:
 
 ```zen
-x := value       // local let
-x: T := value    // typed local let
-x = value        // assignment
-obj.field = v    // field assignment
-xs[i] = v        // slice element assignment
-expr             // expression statement, trailing expression returns
-return expr      // early return
-@while(cond) { } // compiler/substrate primitive, not public style
+x := 1
+x: i64 := 1
+x = x + 1
+obj.field = value
+items[index] = value
 ```
 
-Source-level branching is `.match`. `if`, `for`, and ordinary `while` are not
-source syntax. The C backend may lower checked matches to C `switch`, `if`, or
-ternary expressions as target details.
+## Control flow
 
-`loop` is the public slice iteration form:
+There is no ordinary `if`, `for`, or source-level `while` statement. An attempted `if (...)` is
+rejected with a teaching diagnostic. Branch on the value:
 
 ```zen
-xs.loop((h, i, x) {
-    (x == 0).match({
-        true  => { h.break },
-        false => {}
+abs = (n: i32) i32 {
+    (n < 0).match ({
+        true  => 0 - n,
+        false => n,
+    })
+}
+```
+
+Enum and literal matches use the same form:
+
+```zen
+Opt<T>: Some(T) | None
+
+unwrap_or = (o: Opt<i32>, fallback: i32) i32 {
+    o.match ({
+        .Some(v) => v,
+        .None    => fallback,
+    })
+}
+```
+
+A value-producing match must be exhaustive. `_` is the catch-all. Duplicate variants, unknown
+variants, incompatible arm values, and non-boolean guards are errors.
+
+The current grammar permits an optional guard inside an arm:
+
+```zen
+n.match ({
+    value if value > 10 => "large",
+    _                    => "small",
+})
+```
+
+This is the only public context in which the `if` token is currently accepted. Its inconsistency
+with the no-`if` goal is tracked in [STATUS.md](STATUS.md); documentation must not pretend it is
+already removed.
+
+For a side effect that only runs on true, `std.core.bool.then` is a library helper:
+
+```zen
+{ then } = std.core.bool
+
+ready.then(() {
+    start()
+})
+```
+
+It returns `void`; value decisions still use `.match`.
+
+Public collection iteration uses `loop`:
+
+```zen
+items.loop((h, i, item) {
+    (item == 0).match ({
+        true  => h.break,
+        false => consume(item),
     })
 })
 ```
 
-Raw `break`, `continue`, and `yield` are not public control flow. Loop control
-is routed through the loop handle.
+`@while` exists as a compiler/runtime substrate primitive and is restricted by boundary tests. It is
+not the public iteration style.
 
-UFCS is part of call syntax: `x.f(a)` parses as `f(x, a)`. The checker can route
-that call to receiver-specific inherent or trait methods.
+## Records, enums, traits, and generics
 
-For read-only trait lookup, all three non-owning string provenances dispatch
-through the canonical `string_view` receiver. Thus one `string_view.impl(Trait,
-{ ... })` serves literals, C strings, and views; this lookup normalization does
-not weaken their value conversions or aggregate invariance.
-
-## Structs, Enums, Match
-
-Structs are product types:
+Records are product types:
 
 ```zen
-Point*: { x: i32, y: i32 }
+Point*: {
+    x: i32,
+    y: i32,
+}
+
 p := Point(x: 3, y: 4)
-p.x
 ```
 
-Enums are tagged sums:
+Enums are tagged sums. Variants can be empty, carry one value, or carry a named anonymous record
+payload. Matches over enum values are exhaustiveness-checked.
+
+A trait is a record of required method signatures; there are no `trait` or `impl` keywords:
 
 ```zen
-Shape*: Circle(i32) | Square(i32) | Dot
-area = (s: Shape) i32 {
-    s.match({
-        .Circle(r) => r * r * 3,
-        .Square(w) => w * w,
-        .Dot => 0
-    })
+Area*: {
+    area: (Ptr<Self>) i32,
 }
-```
-
-Enum matches must be exhaustive unless they include `_`. Duplicate arms and
-unknown variants are type errors.
-
-## Traits, Impls, Methods
-
-A trait is a record of method requirements. There are no `trait`, `impl`, or
-`for` keywords:
-
-```zen
-Area*: { area: (Ptr<Self>) i32 }
-Circle*: { r: i32 }
-
+Circle*: {
+    radius: i32,
+}
 Circle.impl(Area, {
-    area = (c: Ptr<Circle>) i32 { 3 * c.r * c.r }
+    area = (c: Ptr<Circle>) i32 { 3 * c.radius * c.radius }
 })
 ```
 
-An impl must define every required method with the exact receiver, parameter,
-and return types after substituting `Self` with the implementing type. Trait
-default bodies are allowed in method-record fields and are materialized for
-impls that omit them. The sole receiver-normalization exception is the read-only
-string family described above.
-
-Data structs can also own inherent methods inside their record body:
+An implementation must provide every required method with a compatible signature after substituting
+`Self`. Trait records may supply default method bodies. Generic bounds use `T: Trait`:
 
 ```zen
-Box<T>*: {
-    value: T
-    get = (b: Box<T>) T { b.value }
-}
+measure<T: Area> = (value: Ptr<T>) i32 { value.area() }
 ```
 
-Inherent methods are dispatched by receiver type, so two types can both expose
-`score` without colliding at the source call site.
+Generic records, enums, and functions are monomorphized for concrete uses. Explicit call-site type
+arguments use `function<Type>(args)`. A type argument after UFCS, such as `value.id<i32>()`, is not
+currently parsed; write `id<i32>(value)`.
 
-## Generics
+## Modules and visibility
 
-Generic structs and enums are monomorphized per concrete use. Generic functions
-infer type arguments from call arguments and expected types where available.
-
-```zen
-Box<T>*: { value: T }
-wrap<T> = (x: T) Box<T> { Box<T>(value: x) }
-```
-
-Generic functions with function-typed parameters are inline templates. Closure
-arguments such as `(a, x) { a + x }` are inlined at the call site; no runtime
-function pointer is emitted for that template path.
-
-Generic inference is still growing. The current tree proves `ReplyRef<T>.send`
-works generically in actor flows, but broader inference coverage remains a
-roadmap item.
-
-## Imports And Modules
-
-Imports destructure a module path:
+Destructuring imports bring selected public names into scope:
 
 ```zen
-{ println } = std.text.fmt
+{ println, format } = std.text.fmt
 { helper } = util
-c = std.io.c
-left = left
 ```
 
-Checked CLI modes call the self-hosted loader before parsing. The loader:
-
-- resolves `std.X`, `compiler.X`, and sibling user modules from disk;
-- follows transitive imports;
-- strips import heads;
-- concatenates each module body once;
-- deduplicates top-level names with deterministic first-definition behavior.
-
-Namespace binds (`alias = std.X`, `alias = sibling`) are the checked-loader path
-for same-short-name modules. The loader prefixes the bound module's direct
-exports and rewrites qualified uses, so two sibling modules can both export
-`thing` or `Box` and a program can call `left.thing()` and `right.thing()` in
-the same file.
-
-`std.internal.resolve` also exposes structured import-edge values for resolver
-work:
+Namespace binds qualify direct exports:
 
 ```zen
-ImportEdge*: { module: string_view, alias: string_view, namespace: bool, start: i32, next: i32 }
-ProvidedSymbol*: { name: string_view, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
-ModuleGraph*: { imports: [ImportEdge], symbols: [ProvidedSymbol] }
-ModuleEntry*: { id: string_view, path: string_view, source: string_view, graph: ModuleGraph }
-ModuleTable*: { modules: [ModuleEntry] }
-ResolvedProgram*: { table: ModuleTable, flat: string_view, body_start: i64, body_end: i64 }
-ParsedModule*: { id: string_view, path: string_view, source: string_view, body: string_view, graph: ModuleGraph, decls: [Decl] }
-ParsedProgram*: { resolved: ResolvedProgram, modules: [ParsedModule], flat_decls: [Decl] }
+fmt = std.text.fmt
+util = util
+
+fmt.println(util.helper())
 ```
 
-`import_edges(a, src)` scans destructuring imports and namespace binds into
-source-order edges such as `std/text/fmt` or `u/helper`, preserving the source
-byte span for each edge. It only needs the `Allocator` trait, so callers can
-back the edge slice and each edge's normalized `module`/`alias` strings with
-heap, arena, or a custom allocator. `try_import_edges(a, src)` returns
-`Result<[ImportEdge], IoError>` and reports allocation failure for the edge
-slice, module strings, or alias strings. The checked loader uses these edges to
-load destructuring dependencies and namespace-bound modules.
-`provided_symbols_in(scratch, alloc, src)` scans a module into source-order
-provided names, including import re-export heads and declarations. Parser
-boundary checks still need `scratch: Ptr<Malloc>`, but the returned symbol slice
-and normalized `name` strings are backed by the caller allocator, so callers can
-use a heap, arena, or custom allocator for the data they keep. The compatibility
-`provided_symbols(scratch, src)` wrapper uses the scratch allocator for both.
-`start`/`next` span the provided name; `decl_start`/`decl_next` span the whole
-declaration for real declarations, while import-head symbols use the head name
-span. `imported` marks import-head re-exports; `foreign` marks bodyless foreign
-declarations. The checked loader uses those symbols to validate `{ name } =
-module` heads, build namespace alias rewrite sets, and detect duplicate
-top-level user-module definitions. The final flat per-name dedup pass also
-consumes those declaration spans instead of re-scanning declarations.
-`module_graph_in(scratch, alloc, src)` returns both slices in one value, with
-imports and symbols backed by `alloc`. `module_graph(scratch, src)` is the
-compatibility wrapper. Both expose
-`import_count`, `symbol_count`, and `has(name)` helpers; it is the current
-structured resolver boundary that later AST/module-table loading can replace
-without changing callers.
-`module_table(a, root, progdir, inpath, src)` builds the transitive module
-table used by the checked loader, including namespace-bound modules and their
-own dependencies. The checked loader now validates import heads and loads
-namespace/import closures from this table instead of re-reading and re-scanning
-module files during flattening.
-`resolve_program_data(a, root, progdir, inpath, src)` returns that table together
-with the compatibility flat source string and main-body span; `resolve_program`
-is the older string-returning wrapper used by the current C CLI.
-`resolve_parsed_program(a, root, progdir, inpath, src)` parses each table entry
-into a `ParsedModule` with the loader directives stripped from `body`, while
-also exposing `flat_decls` for the compatibility path. This is the current
-compiler-facing bridge toward per-module AST checking. `root_link_decls(a,
-program)` builds the root module's import library from direct graph edges:
-namespace binds contribute alias-shaped declarations such as `left__thing`,
-while destructuring imports contribute plain declarations such as `plain`.
-`check_parsed_program(a, program)` checks the root parsed module against those
-graph-built import signatures using the checker link path.
+Resolution rules in checked CLI modes:
 
-This is still a source-text flattening loader at the parse/check boundary, not
-the final AST/symbol-table module system. Destructuring imports still share a
-flat short-name space.
+- `std.foo.bar` loads `zen/std/foo/bar.zen` relative to `ZEN_ROOT`/the compiler;
+- `compiler.foo` loads `zen/compiler/foo.zen`;
+- a bare local module such as `util` loads `util.zen` beside the entry source;
+- local dotted paths are rejected with an explicit diagnostic;
+- transitive imports, cycles, missing names, duplicate definitions, privacy, and namespace aliases
+  are checked;
+- the current CLI still emits through a deterministic flattened compatibility program, although the
+  resolver also builds module tables and parsed-module structures internally.
 
-Project directories can contain `zen.toml`:
+There is no installed package registry, dependency solver, registered source-root table, or nested
+local module path yet. A project manifest chooses the entry root; it does not make arbitrary
+`src/some/package.zen` paths importable by package name.
+
+Project directories use `zen.toml` or a higher-priority `build.zen`. The manifest contract is:
 
 ```toml
-package = "hello"
-root = "src"
-main = "main.zen"
-out = "hello"
-ccflags = "native.c"
+package = "name"              # metadata only today
+kind = "executable"           # optional: executable or library
+root = "src"                  # required
+main = "main.zen"             # required
+out = "program"               # optional
+ccflags = "native.c"          # optional C linker/compiler input
+link = "pthread"              # optional single -l library
 ```
 
-`check`/`build`/`run <project-dir>` resolve `<root>/<main>`, use `out` for
-build output when `-o` is omitted, and pass `ccflags` through to `cc`.
+`check` accepts a library entry without `main`. `build` and `run` reject `kind = "library"` because
+the compiler does not yet emit a library archive.
 
-## Memory And Ownership
+## Results, optional values, and panic
 
-The language currently exposes explicit memory primitives and library-level
-ownership types:
-
-- raw intrinsics: `@addr`, `@load`, `@store`, `offset`, `slice`, `cstr`,
-  `sizeof`, `load_i64`, `store_i64`, `atomic_add_i64`, `null_ptr`;
-- `std.mem.alloc`: `Allocator`, `Heap`, `Malloc`, namespace-bound
-  `default`, `try_acquire`, `try_resize`;
-- `std.mem.arena`: `Arena`, namespace-bound `new_in` and `try_new_in`;
-- `std.core.slice`: allocator-first `buf`, `dup`, `node`, `concat`, their `_in`
-  aliases, and fallible `try_*` variants for allocator-backed slice storage;
-- `std.mem.own`: `Own<T>` plus `Drop`, with `new_in` and `try_new_in`;
-- `std.mem.rc`: `Rc<T>`, with `new_in` and `try_new_in`;
-- `std.mem.arc`: atomic `Arc<T>`, with `new_in` and `try_new_in`;
-- `std.mem.trace`: tracing/cycle-collection substrate.
-
-Allocator-threaded std APIs make allocation visible in signatures. Examples:
-`vec.of(a, [1, 2])`, `v.push(a, x)`, `vec.try_of(a, [1, 2])`, `v.try_push(a, x)`,
-`maps.of(a, "k", 1)`, `m.try_put(a, "k", 2)`, `maps.try_of(a, "k", 1)`,
-`a.try_map_in([1, 2], (x) { x + 1 })`, `arena.new_in(a, 1024)`,
-`slice.dup(a, [1, 2])`, `a.try_dup_in([1, 2])`, `own.new_in(a, value)`, `rc.try_new_in(a, value)`,
-`actor.cell(a, 16)`, and `cell.reply(a)` — the actor constructors return `Result`
-directly; there is no separate `try_*` doubling.
-
-Current safety status: these APIs exist and are tested, and the checker rejects
-same-body local use after `Own<T>.release_in(...)`, `Rc<T>.drop_in(...)`, or
-`Arc<T>.drop_in(...)`. The full model is documented in
-[MEMORY_MODEL.md](MEMORY_MODEL.md). Branch-sensitive ownership flow, pointer
-direction/nullability, and lifetime checking remain roadmap items.
-
-## Errors And Results
-
-The stdlib fast/fallible API policy is documented in
-[ERROR_POLICY.md](ERROR_POLICY.md).
-
-Zen has no exceptions and no unwinding. Fallible library APIs return values:
+Zen has no exceptions or language unwinding. Recoverable failure is a value:
 
 ```zen
 Result<T, E>: Ok(T) | Err(E)
 Opt<T>: Some(T) | None
-IoError*: NotFound | Denied | Eof | Errno(i32)
 ```
 
-Callers branch with `.match`, propagate with `.or_return()` (unwrap `.Ok`, or
-early-return the `.Err` from the enclosing `Result`-returning function), and
-give up on invariants with `.expect("...")` / `.expect_some("...")` (unwrap or
-panic with the mandatory message). `std.core.result` also provides sentinel-lifting
-helpers such as `ok_if` and `ok_ptr`, the combinators `or` / `or_else` /
-`map_err`, and `panic` as an explicit abort for invariants (framed as
-`zen: panic: <msg>` on stderr, matching the runtime's div-zero/OOB panics).
+`.match` handles either enum. On `Result`, `.or_return()` unwraps `.Ok` or returns the same `.Err`
+from the enclosing compatible `Result` function. It is not an `Opt` operator. `.expect(message)` and
+`.expect_some(message)` convert an impossible failure into explicit `panic`.
 
-The stdlib still has fast paths, raw sentinel APIs, and `Result` APIs. The
-current policy documents which paths are intended to be recoverable; moving that
-from convention to checker-enforced effects and ownership rules remains a
-roadmap item.
+Fallible allocating and IO APIs should return `Result`. Fast/raw helpers may expose sentinel values
+at a trusted boundary. `panic` is for violated invariants and process-fatal paths; pooled actor
+workers install a catch boundary so a behavior panic or worker stack overflow kills that actor rather
+than the whole pool. Main and cooperative inline actor drains do not have that isolation boundary.
 
-## Diagnostics
+Integer division by zero/overflow, modulo by zero, slice out-of-bounds, and failed
+`assert_nonnull` panic through the runtime floor.
 
-Checked CLI errors report:
+## Entry points, backends, and tools
 
-- source path;
-- mapped line and column when available;
-- stable error kind, such as `error[undefined-name]`;
-- human message;
-- source-line range marker when the source maps cleanly;
-- hint.
+Executable entry points are:
 
-The checker exposes
-`CheckDiagnostic { code, kind, source_offset, span_width, count, message, hint }` for
-checked CLI modes and `Diagnostic { code, kind, span: SourceSpan, count, message, hint }`
-as a first-class Zen value. The CLI maps source offsets back to the user's file and
-renders the source range. Current spans cover the identifier at the reported offset when
-one is available; richer multi-diagnostic flows remain roadmap work.
+```zen
+main = () i32 { 0 }
+```
 
-## Concurrency
+or, after importing `Sys`:
 
-Concurrency support is stdlib-level today:
+```zen
+{ Sys } = std.sys
+main = (sys: Sys) i32 {
+    writer := sys.stderr()
+    writer.write_or_panic("starting\n")
+    0
+}
+```
 
-- `std.concurrent.coroutine`: coroutine substrate over context switching;
-  `spawn` / `spawn_in` return `Result<Coro, IoError>` and clean up partial
-  stack/context allocation before returning `.Err`;
-- `std.concurrent.runtime`: sync/async runtime and colorless `checkpoint`,
-  with namespace-bound `runtime.sync` / `runtime.async` constructors;
-- `std.concurrent.sched`: small scheduler, with `try_run` / `try_run_in`
-  for fallible scheduler flag allocation;
-- `std.concurrent.actor`: cooperative typed actors (inline drain on the caller
-  thread) — `Receiver<M>`, `ActorRef<M>`, `ReplyRef<T>`, `ActorEngine<M>`,
-  `ActorCell<M>`, and `ActorHandle<M, ActorT>`. `run` / `request` / `ask` are
-  same-thread; not scheduled on the pool.
-- `std.concurrent.pool_actor`: parallel typed actors on `std.concurrent.pool`
-  (`PooledHandle`, `spawn_actor`, typed `send`). Requires a concrete trampoline
-  stub per `(Msg, ActorT)` until the compiler can address generic instantiations.
-- `std.concurrent.cown`: owned FFI-handle examples, with namespace-bound
-  `cown.buf` / `cown.try_buf` / `cown.file` / `cown.file_in` spellings;
-- `std.concurrent.pool`: a multi-threaded actor pool that runs actors across N OS
-  cores on real pthreads + atomics (one global mutex-guarded run queue; work-stealing
-  deques are roadmap); `std.thread` / `std.sync` are the OS-thread and locking floor
-  beneath it.
+The compiler supplies `std.sys.root()` only to the one-argument form. Libraries should accept the
+narrow capability they require (`Writer`, `Fs`, `Allocator`) instead of `Sys`.
 
-Public code should call runtime/actor APIs rather than raw coroutine checkpoint
-primitives. Actor draining checkpoints internally, while allocator parameters
-only own actor queues and reply storage. Actor messages are typed enums and
-receivers implement `Receiver<M>` through
-`Type.impl(Receiver<M>, { receive = ... })`.
+The C backend is the bootstrap and complete execution path. The JavaScript backend walks the same
+checked/monomorphized AST and supports a substantial computational subset plus browser DOM bindings;
+some 64-bit, pointer-aliasing, native IO, and concurrency behavior remains target-limited.
 
-Two concurrency safety guarantees are enforced, not just documented:
-
-- **Sendability (move-on-send).** The checker's SENDABILITY pass
-  (`compiler.check_validate`) kills the sender's binding when an owned `Own<T>` is
-  passed into a `send`, so the sender cannot keep using memory the receiving actor
-  now owns (a later use is `error[ownership]`). A `Ptr<T>` is sendable only when
-  `T` is deeply immutable; `Arc<T>` is the shared-sendable path. A companion
-  scratch-escape pass keeps actor-local scratch from escaping across a send.
-- **Panic isolation.** A `panic` inside one actor's behavior (div-zero, OOB, null
-  deref, or stack overflow) unwinds into a per-worker catch in `zenrt.c` and kills
-  that one actor; the worker and the rest of the pool continue.
-
-Note: `std.concurrent.runtime`'s colorless `checkpoint` and the ambient runtime
-(`std.rt`, `std.scope`) are an experiment, not the shipped model. The current
-direction threads capabilities explicitly (allocators, and a `Sys` at the entry);
-reworking the ambient runtime toward "ambient-within-scope, explicit-at-boundary"
-is a roadmap item; the current runtime source of truth is
-`docs/runtime-design.md`.
-
-`ActorEngine<M>` owns the internal queue state. `ActorCell<M>` is the
-lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,
-drives a receiver through `await_reply`, wraps request/reply flows through
-`request`, and frees the engine storage through `free`. Actor cells infer
-their message type from typed destinations such as
-`cell_r: Result<actor.ActorCell<Msg>, IoError> := actor.cell(heap.addr(), 16)`,
-then unwrap with `cell_r.expect("cell allocation")` (or keep the failure in the
-value flow with `.match` / `.or_return()`), where `actor` is a namespace bind
-for `std.concurrent.actor` and `heap` may come from namespace-bound
-`alloc.gpa()` (`alloc = std.mem.heap`).
-`ActorHandle<M, ActorT>` is the higher-level stateful actor wrapper for the
-**cooperative** path. A program creates one with
-`actor.spawn(heap.addr(), 16, ActorState(...))`, which returns
-`Result<ActorHandle<M, ActorT>, IoError>`.
-It sends typed messages with `handle.tell(message)`, drains its owned state with
-`handle.run()` (inline on the caller), wraps request/reply flows through
-`handle.request(...)`, and releases storage with `handle.free(heap.addr())`.
-For parallel typed actors on the pool, use `std.concurrent.pool_actor` instead
-(see `examples/pool_actor_demo.zen`).
-`request` creates the `ReplyRef<T>`, calls a request callback that returns the
-typed message, for example `(reply) { .GetStats(reply) }`, enqueues it, drains
-the receiver, awaits the reply, and releases the reply storage. The lower-level
-`ask` method remains available for callbacks that need side effects before
-draining. The allocating entry points — `actor.spawn`, `actor.cell`,
-`actor.engine`, and `cell.reply` — all return `Result` and clean up partial
-allocation before returning `.Err`; there are no separate `try_*` variants.
-
-## Backends
-
-The C backend (`compiler.genc` / `genc_emit`) is the shipping/bootstrap backend. It lowers the
-checked, monomorphized AST to C and invokes `cc` for `build`/`run`. C is the intentional
-intermediate/bootstrap target.
-
-A second backend, `compiler.genjs`, walks the **same** post-monomorphization `[Decl]` AST and
-emits JavaScript (Node/browser) over a small linear-memory floor (`bootstrap/zenrt.js`). It is
-driven by `zenc emit-js <file>` and `zenc build --target js <file> [-o out]`, and covers the
-computational subset — full i64 / 64-bit bitwise (needs BigInt) and scalar aliasing through
-`MutPtr<i32>` (needs boxed refs) are deferred. New target = new walk over the checked AST; the
-kernel does not re-check.
-
-## Tooling
-
-`zenc fmt [--check] <file.zen>` exists and is conservative: it preserves line
-comments, block comments, strings, and char literals while normalizing brace
-indentation/trailing whitespace, and is tested for idempotence. It is not yet a
-full AST pretty-printer.
-
-`zenc doc <std.mod|file.zen>` lists public declaration heads and adjacent `//`
-docs. It is a first-pass docs command, not a rich documentation generator.
-
-## Test Map
-
-| Spec area | Primary tests |
-|---|---|
-| CLI build/run/check/project manifest | [tests/harness_build.zen](tests/harness_build.zen) |
-| Examples | [tests/harness_build.zen](tests/harness_build.zen) |
-| Lexer/parser/bootstrap/fixpoint | [tests/harness.zen](tests/harness.zen) (`fixpoint` suite) |
-| Accepted/rejected core language behavior | [tests/harness_verdict.zen](tests/harness_verdict.zen), [tests/harness_value.zen](tests/harness_value.zen) |
-| Crash-resistance fuzzing (malformed input) | [tests/harness_fuzz.zen](tests/harness_fuzz.zen) |
-| Traits and impl conformance | [tests/harness_verdict.zen](tests/harness_verdict.zen) |
-| Imports and resolver behavior | [tests/harness_modules.zen](tests/harness_modules.zen) |
-| Std module import coverage | [tests/harness_modules.zen](tests/harness_modules.zen) |
-| Raw primitive boundaries | [tests/harness_boundaries.zen](tests/harness_boundaries.zen) |
-| Formatter and docs commands | [tests/harness_build.zen](tests/harness_build.zen) |
+`zenc fmt` is a faithful AST pretty-printer with comment anchoring and idempotence tests. `zenc doc`
+is intentionally small: it prints public declaration heads and adjacent `//` documentation, not a
+full documentation model.

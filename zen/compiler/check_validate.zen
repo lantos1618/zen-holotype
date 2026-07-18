@@ -1203,10 +1203,10 @@ check_expr = (env: Env, e: Ptr<Expr>) i32 {
         // stay deferred inside loops, because generic templates carry method calls on unbound type params
         // (`actor.receive`) and str↔text narrowings that are valid pre-mono but unresolvable here.
         .Loop(l)        => env.lck_expr(l.seq) + env.a.lck_body(env.a.loop_env(env, l), l.body),
-        // A Lambda that SURVIVES resolution is a lambda used as a value the inliner couldn't splice:
-        // a directly-passed HOF lambda is inlined away and a local-bound one is now spliced too (the
-        // alias lowering), so a remaining Lambda was stored in a field / returned — no first-class
-        // representation; reject it cleanly instead of leaking `zen__unlowered_lambda` into the C.
+        // A Lambda that SURVIVES resolution is a capturing value form the supported lowerings could
+        // not represent. Direct HOF lambdas are inlined, non-capturing field/return lambdas are lifted,
+        // and returned lambdas may capture enclosing parameters by value. Reject the remaining forms
+        // cleanly instead of leaking `zen__unlowered_lambda` into the C backend.
         .Lambda(lm)     => 1,
         _               => 0,
     })
@@ -1948,7 +1948,7 @@ tys_reach_mutptr = (decls: [Decl], tys: [Ty], depth: i32) bool {
     f
 }
 // ── THE MODE (effect-family) LATTICE — the aliasing effect a type carries, DERIVED not stored ──
-// (docs/effects-as-types-design.md §2). One `mode_of(decls, t)` fact feeds every consumer of the
+// (documented in MEMORY_MODEL.md). One `mode_of(decls, t)` fact feeds every consumer of the
 // aliasing effect; no Env/Ty change (`decls` is already an Env field). Spelled as i32 consts, like
 // `k_ptr()`/`k_mut_ptr()` in genc. The four Pony reference-capabilities, in Zen's spelling:
 //   owned  (iso) — unique, movable, sendable         (an `Own<T>` wrapper)
@@ -1959,7 +1959,7 @@ md_owned* = () i32 { 0 }
 md_frozen* = () i32 { 1 }
 md_mut* = () i32 { 2 }
 md_read* = () i32 { 3 }
-// Derive the mode of a type, EXACTLY per the design doc's four-arm rule. `Own<T>` short-circuits first
+// Derive the mode of a type with the four cases above. `Own<T>` short-circuits first
 // (opaque capability, stopped in ty_reaches_mutptr at sm_is_opaque_cap); a top-level MutPtr is `mut`;
 // otherwise the deep immutability walk decides frozen (reaches no MutPtr) vs read (reaches one behind a
 // readonly surface). Pure function of `(decls, Ty)` — no program point, so it classifies but does NOT
@@ -2481,6 +2481,7 @@ KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no va
 KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
 KGUARDTYPE = () i32 { 37 }    // a match-arm `if <guard>` whose guard expression is not a bool (33-36 are the custom channels, so 37 is the next free packed code)
 KMETHODNOTFOUND = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
+KIFSTATEMENT = () i32 { 39 }    // statement-position `if`; Zen branches with value `.match`
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -2682,8 +2683,8 @@ diag_info = (code: i32) DiagInfo {
                                                                         false => (code == 18).match ({
                                                                             true => DiagInfo(
                                                                                 kind: "lambda-value",
-                                                                                message: "a lambda can only be used directly as a call argument",
-                                                                                hint: "pass the lambda directly to its consumer, or bind a named top-level function instead (no first-class lambda values yet)",
+                                                                                message: "this capturing lambda cannot escape as a function value",
+                                                                                hint: "non-capturing lambdas and returned lambdas that capture function parameters can be values; otherwise pass the lambda directly, or use a named top-level function",
                                                                             ),
                                                                             false => (code == 19).match ({
                                                                                 true => DiagInfo(
@@ -2781,11 +2782,18 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                                 message: "no method with this name on the receiver type",
                                                                                                                                                 hint: "define the method (a top-level `fn` whose first parameter is the receiver, called `recv.method(...)`), or check the method name",
                                                                                                                                             ),
-                                                                                                                                            false => DiagInfo(
-                                                                                                                                                kind: "type",
-                                                                                                                                                message: "type error",
-                                                                                                                                                hint: "",
-                                                                                                                                            ),
+                                                                                                                                            false => (code == 39).match ({
+                                                                                                                                                true => DiagInfo(
+                                                                                                                                                    kind: "if-statement",
+                                                                                                                                                    message: "`if` statements are not part of Zen",
+                                                                                                                                                    hint: "branch on the value with `.match`, e.g. `cond.match ({ true => ..., false => ... })`",
+                                                                                                                                                ),
+                                                                                                                                                false => DiagInfo(
+                                                                                                                                                    kind: "type",
+                                                                                                                                                    message: "type error",
+                                                                                                                                                    hint: "",
+                                                                                                                                                ),
+                                                                                                                                            }),
                                                                                                                                         }),
                                                                                                                                     }),
                                                                                                                                 }),
@@ -2840,18 +2848,32 @@ check_diagnostic_from_packed* = (packed: i32, count: i32) CheckDiagnostic {
 }
 check_diagnostic_from_source* = (src: string_view, packed: i32, count: i32) CheckDiagnostic {
     d := check_diagnostic_from_packed(packed, count)
-    (d.code == 0).match ({
-        true => d,
-        false => CheckDiagnostic(
-            code: d.code,
-            kind: d.kind,
-            source_offset: d.source_offset,
-            span_width: src.diagnostic_span_width(d.source_offset),
-            count: d.count,
-            message: d.message,
-            hint: d.hint,
-        ),
-    })
+    (d.code == 0).match ({ true => d, false => {
+        width := src.diagnostic_span_width(d.source_offset)
+        // `if (...) { ... }` reaches the checker as an unresolved call named `if_zk` because
+        // C-keyword mangling happens at the lexeme boundary. Keep the ordinary undefined-name
+        // code internally, but give source `if` the language-specific teaching diagnostic.
+        (d.code == KUNDEFINED() && width == 2 && src.at(d.source_offset) == 'i' && src.at(d.source_offset + 1) == 'f').match ({
+            true => CheckDiagnostic(
+                code: d.code,
+                kind: "if-statement",
+                source_offset: d.source_offset,
+                span_width: width,
+                count: d.count,
+                message: "`if` statements are not part of Zen",
+                hint: "branch on the value with `.match`, e.g. `cond.match ({ true => ..., false => ... })`",
+            ),
+            false => CheckDiagnostic(
+                code: d.code,
+                kind: d.kind,
+                source_offset: d.source_offset,
+                span_width: width,
+                count: d.count,
+                message: d.message,
+                hint: d.hint,
+            ),
+        })
+    } })
 }
 check_to_diagnostic* = (d: CheckDiagnostic) Diagnostic {
     Diagnostic(
@@ -4958,7 +4980,7 @@ kparse_kind = (init: Ptr<Expr>) i32 {
 // the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
 kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
-parse_sentinel_kind = (nm: string_view, init: Ptr<Expr>) i32 { eq(nm, "__syntax_error").match ({ true => init.kparse_kind(), false => eq(nm, "__bad_binding").match ({ true => init.kbadbind_kind(), false => 0 }) }) }
+parse_sentinel_kind = (nm: string_view, init: Ptr<Expr>) i32 { eq(nm, "__syntax_error").match ({ true => init.kparse_kind(), false => eq(nm, "__bad_binding").match ({ true => init.kbadbind_kind(), false => eq(nm, "__if_statement").match ({ true => KIFSTATEMENT().kv_at(init.kparse_off()), false => 0 }) }) }) }
 check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
     packed := a.check_module_kind(decls)
     (packed == 0).match ({ true => check_diagnostic_none(), false => check_diagnostic_from_packed(packed, a.check_module(decls)) })
@@ -4993,7 +5015,7 @@ check_linked_kind* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     })
     a.check_module_kind(world)
 }
-// ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
+// ── cross-module signature headers ──────────────────────────────────────────────────────────────
 // The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
 // every function becomes a bodyless DForeign (structs/enums pass through). Checking a file against
 // another module's header puts the imported names in `the_func`'s reach, so a cross-module call is
@@ -5786,7 +5808,7 @@ check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
         ),
     })
 }
-// ── SENDABILITY AS A TYPE CAPABILITY: `ref` (MutPtr<T>) is not sendable (rt-scoped-runtime.md §4) ──
+// ── SENDABILITY AS A TYPE CAPABILITY: `ref` (MutPtr<T>) is not sendable ──────────────────────────
 // The send-payload classifier, read off the payload's TYPE (Pony reference-capabilities, NOT a verb):
 //   value — no pointers, copied → sendable (zero ceremony);
 //   val   — readonly `Ptr<T>` (= Pony `box`, deeply immutable) → sendable + aliasable;
@@ -5879,9 +5901,8 @@ check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl
         ),
     })
 }
-// ── M1 slice 1 (rt-scoped-runtime): SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────
-// docs/rt-scoped-runtime.md M1: memory that must not cross an actor boundary, crossing it — the
-// judged-FATAL v1 hole (cross-actor UAF, docs/rt-design-judge-ruling-2026-07.md hole 1: memory in
+// ── SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────────────────────────────────────
+// Memory that must not cross an actor boundary, crossing it: the fatal cross-actor UAF shape (memory in
 // the SPAWNER's scratch handed to an actor that outlives it). Two rules, enforced lexically +
 // name-based over the RAW pre-desugar decls (driver-only, the send-Rc pass's shape):
 //   1. send-payload: the payload of an actor send (`send` / `pool_send`, last argument) must not
@@ -6090,7 +6111,7 @@ check_module_scratch_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc
 }
 check_module_scratch* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_scratch_kind(decls) == 0).match ({ true => 0, false => 1 }) }
-// name the value in the message (teach-the-fix, spec §5): copy the identifier the caret points at
+// Name the value in the teaching diagnostic: copy the identifier the caret points at
 // out of the source; a non-identifier anchor (a slice literal's first item, a synthesized pos)
 // falls back to a generic subject.
 sx_push_name = (s: String, a: MutPtr<Malloc>, src: string_view, pos: i32, i: i32, w: i32) String { (i >= w).match ({ true => s, false => sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w) }) }
@@ -6099,7 +6120,7 @@ sx_message = (a: MutPtr<Malloc>, code: i32, subject: string_view) string_view {
     tail := (code == KSCRATCHSEND()).match ({ true => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)", false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)" })
     a.gstr_string(256).gstr_append(a, subject).gstr_append(a, tail).gstr_finish(a)
 }
-sx_hint = (code: i32) string_view { (code == KSCRATCHSEND()).match ({ true => "construct inside the actor, or promote with `.share(alloc)` (Arc) / `.give(alloc)` (iso move) — see docs/two-memory-design.md", false => "construct inside the actor, promote with `.share(alloc)` / `.give(alloc)`, or pass state as plain values — see docs/two-memory-design.md" }) }
+sx_hint = (code: i32) string_view { (code == KSCRATCHSEND()).match ({ true => "construct inside the actor, move an owning value from shared storage, or share immutable state with `std.mem.arc`", false => "construct inside the actor, or copy plain values into actor-owned/shared storage before the boundary" }) }
 check_module_scratch_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     packed := a.check_module_scratch_kind(decls)
     (packed == 0).match ({ true => check_diagnostic_none(), false => {

@@ -1,278 +1,179 @@
-# zen
+# Zen
 
-**zen** is a small, **self-hosted** compiler for a [Zen](https://github.com/lantos1618/zenlang)-flavoured
-language. The compiler is written in Zen, compiles itself, and has **two backends** over one
-shared AST: **C** (`genc`, the default and the intentional bootstrap target — not a
-host-language fallback) and **JavaScript** (`genjs`, run under `node`). There is **no Python
-and no tree-sitter** in the build path: `cc` builds the `zenc` binary from committed C — a
-161-line hand-written runtime floor (`bootstrap/zenrt.c`) is the only C not emitted by the
-compiler — and `zenc` re-emits that C byte-for-byte (a deterministic **fixpoint**).
+Zen is a small self-hosted language and compiler. The compiler is written in Zen, emits C or
+JavaScript from one checked AST, and can reproduce its committed C bootstrap byte-for-byte.
 
-It is a real-but-rough compiler: the core (self-hosting, FFI, generics, traits, a memory
-model, a multicore actor runtime) is well ahead of the user-facing surface and stdlib
-breadth. Treat it as a working language you can read and hack on, not a finished product.
+It is usable, but not finished. The C path, core type system, formatter, diagnostics, project
+initializer, standard library, and actor pool all work. Packages, the JavaScript backend, ownership
+analysis, and the runtime surface still have explicit limits. [STATUS.md](STATUS.md) is the honest
+feature and roadmap ledger.
 
-The guiding idea: **pin down what every value _is_ with type structure, and you lock out
-everything it isn't.** A type is a closed door; "checking" is confirming the key fits the
-lock. The compiler applies this to names, functions, generics, numeric fits, and — now —
-pointer direction and nullability.
+## Start here
 
-## A taste
+The C toolchain needs a POSIX-like host, `make`, and `cc`. Node is optional for the JavaScript
+backend.
+
+```sh
+make
+./zenc run examples/hello.zen
+```
+
+Output:
+
+```text
+hello, zen
+42
+```
+
+Create a project with the initializer embedded in the compiler binary:
+
+```sh
+./zenc init hello --bin
+./zenc run hello
+
+./zenc init arithmetic --lib
+./zenc check arithmetic
+```
+
+Omit `--bin`/`--lib` to choose interactively. `init` creates missing directories but never
+overwrites its manifest, build file, or generated source.
+
+## A small program
 
 ```zen
-// hello.zen — imports, output, an exit code.
 { println } = std.text.fmt
-
+classify = (n: i32) string_view { (n > 10).match ({ true => "large", false => "small" }) }
 main = () i32 {
-    println("hello, zen")
-    println(6 * 7)
+    println(classify(42))
     0
 }
 ```
 
-```sh
-$ zenc run examples/hello.zen
-hello, zen
-42
-```
+Zen has no ordinary `if` statement. Branch on a value with `.match`; writing `if (...)` produces an
+`error[if-statement]` diagnostic that points to `.match`. The current parser still accepts
+`pattern if guard => ...` inside match arms. That remaining use of `if` is tracked as a language
+consistency issue in [STATUS.md](STATUS.md).
 
-The **same program** emits JavaScript and runs under `node` — the two backends share the
-checked AST, so a program that type-checks lowers to either target:
+The core surface is deliberately compact:
 
-```sh
-$ zenc emit-js examples/hello.zen | node
-hello, zen
-42
-```
+- records are product types: `Point: { x: i32, y: i32 }`;
+- enums are sum types: `Opt<T>: Some(T) | None`;
+- functions and declarations use `name = value`; `*` marks a public declaration;
+- `.match` handles bools, literals, and enums;
+- `x.f(a)` is UFCS for `f(x, a)` and also drives receiver-aware method lookup;
+- generics are monomorphized and traits are records of required method signatures;
+- fallible operations return `Result<T, E>`; `.or_return()` propagates `.Err` by value;
+- `Ptr<T>`, `MutPtr<T>`, and `RawPtr<T>` preserve read/write/nullability distinctions in the
+  checker while lowering to ordinary target pointers;
+- heap-backed values take an allocator explicitly, although a still-live legacy `std.rt` ambient
+  allocator surface has not yet been retired.
 
-A little more of the working surface — enums with payloads, traits dispatched by receiver
-(UFCS), `.match`-only control flow, generics, and `Result` with early return:
+See [SPEC.md](SPEC.md) for current syntax and [MEMORY_MODEL.md](MEMORY_MODEL.md) for the exact safety
+guarantees and their boundaries.
 
-```zen
-{ println } = std.text.fmt
-{ Result, IoError } = std.core.result
+## Commands
 
-Shape*: Circle(i32) | Rect(RectDims) | Unit
-RectDims*: { w: i32, h: i32 }
-
-Area*: { area: (Ptr<Self>) i32 }          // a trait is a record of signatures
-Circle*: { r: i32 }
-Circle.impl(Area, {                       // an impl is `Type.impl(Trait, { ... })`
-    area = (c: Ptr<Circle>) i32 { 3 * c.r * c.r }
-})
-
-shape_area = (s: Shape) i32 {
-    s.match ({                            // a value-position match IS the conditional
-        .Circle(r) => 3 * r * r,
-        .Rect(d)   => d.w * d.h,
-        .Unit      => 0,
-    })
-}
-
-checked_div = (n: i32, d: i32) Result<i32, IoError> {
-    (d == 0).match ({ true => .Err(.NotFound), false => .Ok(n / d) })
-}
-half_of = (n: i32) Result<i32, IoError> {
-    q := checked_div(n, 2).or_return()    // unwrap .Ok, or propagate the .Err by value
-    .Ok(q + 1)
-}
-```
-
-See **[`examples/`](examples/)** (`hello`, `tour`, `shapes`, `stats`, `str_ops_demo`,
-`json_demo`, `store_demo`, `actor_demo`, `pool_actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
-every one runs with `zenc run examples/<name>.zen`.
-
-## The language
-
-- **`.match`-only control flow.** No `if`/`while`/`for` and no exceptions or stack
-  unwinding. A `.match` on an enum/bool is the conditional; recursion + the `loop` construct
-  cover iteration. With literal patterns on `i32`/`bool` and recursion the language is
-  Turing-complete (`fact`/`fib` compile and run).
-- **Errors are values.** A fallible call returns `Result<T, E>` (`.Ok`/`.Err`); an optional
-  is `Opt<T>` (`.Some`/`.None`). `.match` *is* the catch; `.or_return()` / `return .Err(e)`
-  propagate by value. `panic` is the explicit, greppable abort — never the default path.
-- **Distinct pointer types, checker-enforced.** `Ptr<T>` (read-only, non-null),
-  `MutPtr<T>` (writable, non-null), and `RawPtr<T>` (the nullable raw floor). Writing
-  through a `Ptr<T>` is a `ptr-write` error; dereferencing a nullable `RawPtr<T>` that
-  hasn't been proven non-null is a `null-deref` error (prove it with `assert_nonnull`, which
-  yields a `MutPtr<T>`); omitting a non-null pointer field from a struct literal is rejected.
-- **Generics, traits, enums, structs.** Generic data types (`Box<T>`) and functions
-  (`id<T>`) are monomorphized to concrete C; type args are inferred by unification. Traits
-  are keyword-free records of signatures with `Type.impl(Trait, { ... })`; a `<T: Trait>`
-  bound dispatches to the concrete impl and an unsatisfied bound is a type error. User enums
-  are `|`-separated variants with optional payloads, lowered to C tagged unions.
-- **Other surface.** Return-type inference (omit the type, inferred from the body across
-  calls); UFCS method chains (`x.f(a)`); `*` marks a declaration public; `x := v`
-  let-bindings; slices `[T]`; arithmetic/comparison/logical operators, plus bitwise
-  `& | ^ << >>`. In a type declaration (`Colour: Red | Green`), `|` separates enum variants;
-  in a value expression (`read | create`), the same glyph is bitwise OR.
-- **Literals.** Decimal, hex `0x`, binary `0b`, octal `0o`, digit separators
-  `1_000_000`, and floats with e-notation `6.022e23`.
-- **Capabilities at the entry point.** `main` can take the root capability explicitly —
-  `main = (sys: Sys) i32` — and hand out *narrow* capabilities from it: `sys.stdout()` /
-  `sys.stderr()` yield a `Writer`, `sys.heap()` an `Allocator`, plus `env`/`clock`/`fs`. A
-  library takes the narrowest capability it needs (a `Writer`, not the world). The niladic
-  `main = () i32` still works — the compiler feeds it `std.sys.root()` through a trampoline,
-  so the C boundary is unchanged. There is no ambient global runtime.
-- **Memory is explicit and allocator-threaded.** Heap-backed `String`/`Vec` take an
-  allocator from program setup (`m := halloc.gpa()`); there is no hidden heap. The checker
-  rejects use-after-`release`/`drop` for `Own`/`Rc`/`Arc`. See **[MEMORY_MODEL.md](MEMORY_MODEL.md)**.
-- **Metaprogramming as values.** Build an AST with `std.internal.ast` and emit it with
-  `compiler.genc.genModule` — no `@emit` pragma.
-
-## The standard library
-
-Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
-
-| area | modules |
+| Command | Behavior |
 |---|---|
-| core | `std.core.{result, ptr, slice, bool}`; `std.sys` (the root capability) |
-| collections | `std.collections.{vec, map, hmap, set, iter}` |
-| text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
-| memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
-| concurrent | `std.concurrent.{actor, pool_actor, pool, sched, runtime, coroutine, cown, ring}` — cooperative typed actors (`actor`) vs parallel typed actors on the pool (`pool_actor` + trampoline); pool is one global run queue (work-stealing deques are roadmap) |
-| io / os | `std.io.{c, file, stdin}`, `std.fs`, `std.os` (argv/env), `std.process`, `std.sync`, `std.atomic`, `std.thread` |
-| data / encoding | `std.json`, `std.csv`, `std.encoding` (base64/hex), `std.path` |
-| net / web | `std.net` (sockets), `std.web.dom` |
-| misc | `std.math`, `std.time`, `std.rand`, `std.log`, `std.testing` |
+| `zenc init [path] [--bin\|--lib]` | Create an executable or check-only library project. |
+| `zenc check <file-or-project>` | Resolve imports and type-check; no `main` required. |
+| `zenc run <file-or-project> [args...]` | Check, emit C, compile, and run. |
+| `zenc build <file-or-project> [-o path]` | Check, emit C, and link an executable. |
+| `zenc emit <file>` | Check and write generated C to stdout. |
+| `zenc emit-js <file>` | Check and write the JS runtime floor plus program to stdout. |
+| `zenc build --target js <file> [-o path]` | Write a JavaScript program; default output is `a.js`. |
+| `zenc fmt [--check] <file>` | Format in place, or fail if formatting is needed. |
+| `zenc fmt --stdout <file>` | Format to stdout without changing the file. |
+| `zenc doc <std.module\|file.zen>` | Print public declaration heads and adjacent line docs. |
+| `zenc --version` | Print the compiler version. |
 
-## Build & run
+`cat flat.zen | zenc` and `zenc flat.zen` are low-level source-to-C filters. They do not load imports
+or run the checked CLI pipeline; use `emit`, `check`, `build`, or `run` for normal source files.
 
-The compiler is the `zenc` binary; `cc` builds it from committed C, nothing else needed.
+The binary locates `zen/std`, `zen/compiler`, and `bootstrap` relative to itself. Set `ZEN_ROOT` to a
+checkout root when running a relocated binary.
 
-```sh
-make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zenc
-```
+## Projects and imports
 
-(The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zenc`
-works too and is what CI invokes.)
-
-CLI surface:
-
-```sh
-zenc init hello --bin          # create an executable project (omit flags for prompts)
-zenc init math --lib           # create a checkable library project
-zenc run prog.zen              # resolve std imports, type-check, emit C, link, run
-zenc build prog.zen -o p       # same, but stop at the linked binary
-zenc build --target js prog.zen -o p.js   # JS backend: write the JS floor + module to p.js
-zenc emit-js prog.zen          # JS backend: print the JS to stdout (`| node` to run)
-zenc check prog.zen            # resolve + type-check only, no binary (accepts library modules)
-zenc emit prog.zen             # print the generated C
-zenc doc std.text.fmt          # render a module's doc surface
-zenc fmt prog.zen              # format a source file in place
-zenc --version                 # zenc 0.2.0-dev (self-hosted; zen driver)
-cat prog.zen | zenc            # low-level filter: one already-flat module -> C on stdout
-```
-
-`run`/`build`/`emit-js` require `main` (either `main = () i32` or `main = (sys: Sys) i32`);
-`check` accepts modules without `main`. The
-checked modes (`run`/`build`/`check`/`emit`) run the self-hosted module loader
-(`zen/std/internal/resolve.zen`) first, so `{ ... } = std.X` imports resolve from disk and
-the program is flattened before parsing. The bare-filter form (`cat file.zen | zenc`)
-expects already-flat source and does no import loading or checking — use `zenc emit` for
-real files with imports.
-
-`init` is built into the standalone compiler; its templates do not depend on files from the
-compiler checkout. `zenc init` prompts for a path and for executable versus library, while
-`--bin`/`--lib` make it non-interactive. It can initialize an existing directory without touching
-unrelated files, but never overwrites `zen.toml`, `build.zen`, or the generated entry source.
-
-`check`/`build`/`run` also accept a project directory containing `zen.toml`:
+`zenc init` writes a `zen.toml` project:
 
 ```toml
 package = "hello"
-kind    = "executable"  # optional; "executable" (default) or "library"
-root    = "src"
-main    = "main.zen"
-out     = "hello"
-ccflags = "native.c"     # passed through to cc (extra sources / flags)
+kind = "executable"
+root = "src"
+main = "main.zen"
+out = "hello"
 ```
 
-Library projects are source projects in this first version: `zenc check my_library` validates one,
-but `zenc` does not yet emit a library archive. `build`/`run` reject a manifest whose
-`kind = "library"` rather than silently producing the runtime's empty fallback executable.
+`root` and `main` are required. `kind` is `executable` by default or `library`; library projects can
+currently be checked but not archived or linked. `out`, `ccflags`, and one `link` library are
+optional. `package` is metadata today; resolution does not consume it.
 
-**Regenerate the committed C** after editing any bootstrap compiler source (the manifest is
-`bootstrap/sources.txt`, checked against the resolver graph's SCC order):
+A `build.zen` beside the manifest takes precedence and computes an executable target in Zen:
+
+```zen
+{ Build, Target, exe } = std.build
+build = (b: Build) Target { exe("hello").root("src").main("main.zen").out("hello") }
+```
+
+Imports expose public declarations from standard, compiler, or local modules:
+
+```zen
+{ println } = std.text.fmt
+fmt = std.text.fmt
+{ double } = helper
+helper_ns = helper
+```
+
+`std.*` and `compiler.*` use dotted paths. A local import names one sibling file next to the entry
+source: `helper` loads `helper.zen`. Nested local paths such as `some.package` and registered package
+roots are not implemented yet. Namespace binds such as `helper_ns = helper` permit
+`helper_ns.double(21)`, but the shipping CLI still has a compatibility flattening boundary rather
+than a finished package/symbol-table linker.
+
+## Build, test, and bootstrap
 
 ```sh
-make -f bootstrap/Makefile regen       # zenc --build-self bootstrap/zenc.gen.c .
-git diff --quiet bootstrap/zenc.gen.c  # the fixpoint: regenerated C must be byte-identical
+make                 # build ./zenc from committed C
+make docs-check      # enforce the canonical doc set and validate local links
+make harness-fast    # inner-loop value/verdict subset
+make harness         # full Zen-native harness
+make regen           # regenerate bootstrap/zenc.gen.c after compiler changes
 ```
 
-**Tests.** The Zen-native harness (no Python — the repo has zero `.py` files):
+`make regen` must leave a byte fixpoint:
 
 ```sh
-make harness            # the Zen-native harness (tests/harness.zen); exit code = failing-case count
-make harness-fast       # value + verdict smoke subset (~20s) for the inner loop
+make regen
+cp bootstrap/zenc.gen.c /tmp/zenc.before.c
+make regen
+cmp /tmp/zenc.before.c bootstrap/zenc.gen.c
 ```
 
-## Diagnostics
+The full harness covers compilation, runtime values, rejects, diagnostics, modules, projects,
+formatting, both backends, stdlib behavior, fuzzing, architectural boundaries, and the bootstrap
+fixpoint. It is broad but structurally overgrown; the measured test assessment and simplification
+plan are in [STATUS.md](STATUS.md).
 
-Checked-mode errors carry `file:line:col`, a stable error kind, a source-line caret, and a
-hint:
+## Repository map
 
-```
-$ zenc check prog.zen
-zenc: prog.zen:4:13: error[arity]: wrong number of arguments
-      println(add(1))
-              ^~~
-hint: check the callee signature and pass exactly the declared parameters
-```
-
-## How it works
-
-```
-                                                    ┌─ genc_emit.zen ─► C  ─► cc   (default)
- lex.zen ─tokens─► parse_*.zen ─► genc AST ─► check.zen ─┤
-                                                    └─ genjs.zen     ─► JS ─► node
- (every compiler stage is ordinary Zen, in zen/compiler/)
-```
-
-The loader inserts every declaration at its path into one namespace, then the checker
-resolves references, infers each body, and runs `fits(given, want)` at each call — the one
-relation behind name resolution, numeric widening, structural type equality, pointer
-direction/nullability, and trait-bound satisfaction. Checked structure then lowers to a
-backend: C (pointers erase to plain C pointers) or JavaScript — the two are walks over the
-*same* checked AST, so neither re-checks. Fed its **own** sources, `zenc` re-emits the
-committed `bootstrap/zenc.gen.c` byte-for-byte.
-
-## Caveats
-
-This is rough around the edges. Known limits worth flagging up front:
-
-- The stdlib is thin and uneven; APIs shift.
-- Heterogeneous varargs don't exist (`...T` is single-type) — `format`/`formatln` take an
-  explicit `[Arg]` slice (`arg_int`, `arg_str`, ...) rather than printf-style varargs.
-- No closures and no source-level `if`/loop sugar by design (`.match` + `loop` + recursion).
-- The bare-filter mode is intentionally minimal (no import loading, no checking).
-- Identity is **nominal**: a type *is* its path, and you write each pointer's direction and
-  nullability down.
-
-## Layout
-
-| path | role |
+| Path | Role |
 |---|---|
-| `zen/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `string_view` |
-| `zen/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
-| `zen/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
-| `zen/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
-| `zen/compiler/genjs.zen` | the JavaScript backend — a second walk over the same checked AST |
-| `zen/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
-| `zen/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
-| `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
-| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (161-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
-| `examples/` | runnable single-file programs |
-| `tests/` | the Zen-native harness (`harness.zen`) + fixtures |
+| `driver.zen` | CLI, project handling, diagnostics, compilation, `fmt`, `doc`, and `init`. |
+| `zen/compiler/` | Lexer, parser, semantic passes, shared AST, formatter, C and JS emitters. |
+| `zen/std/` | Standard library, runtime surfaces, collections, IO, memory, and concurrency. |
+| `bootstrap/` | Committed generated C, C/JS runtime floors, source manifest, and build rules. |
+| `examples/` | Runnable C examples plus the browser-only DOM example. |
+| `tests/` | Zen-native harness and fixtures. |
 
-## More docs
+The maintained documents are intentionally few:
 
-**[SPEC.md](SPEC.md)** (language behavior) ·
-**[FEATURES.md](FEATURES.md)** (full inventory) ·
-**[MEMORY_MODEL.md](MEMORY_MODEL.md)** (ownership / allocator rules) ·
-**[ERROR_POLICY.md](ERROR_POLICY.md)** (Result/error contract) ·
-**[ARCHITECTURE.md](ARCHITECTURE.md)** (compiler structure) ·
-**[VISION.md](VISION.md)** (the why) · **[CHANGELOG.md](CHANGELOG.md)** (history).
+- [SPEC.md](SPEC.md): current language and module contract;
+- [MEMORY_MODEL.md](MEMORY_MODEL.md): enforced memory, pointer, escape, and send rules;
+- [ARCHITECTURE.md](ARCHITECTURE.md): compiler, bootstrap, runtime, and test architecture;
+- [STATUS.md](STATUS.md): goals, feature/test coverage, live limits, and ordered next work;
+- [bootstrap/README.md](bootstrap/README.md): local bootstrap operations;
+- [examples/README.md](examples/README.md): example catalog.
 
-Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight into typed
-objects) and the syntax of [zenlang](https://github.com/lantos1618/zenlang).
+Historical plans, judge reports, research dumps, completed repro essays, and duplicated feature
+inventories were removed from the live tree. Git history remains their archive.

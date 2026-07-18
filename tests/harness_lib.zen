@@ -31,6 +31,7 @@
 { expect } = std.core.result
 { integer_in } = std.text.num
 { getpid } = std.c.libc
+{ getEnv } = std.os
 thread = std.thread    // NAMESPACED: std.thread.join collides in the flat namespace with std.text.str.join / std.path.join
 // ── PER-RUN UNIQUE TEMP NAMESPACE (concurrency safety) ────────────────────────────────────────────
 // `make harness` is run concurrently all the time (parallel agents). The hazard is shared `/tmp`
@@ -108,7 +109,8 @@ zo_cleanup* = () i32 {
 // Per-case path uniqueness (the #1 hazard the old fixed /tmp names created under parallelism) comes from
 // the case's suite-local index `gid`: sources at `<$ZT>/<pfx><gid>.zen`, and value cases compile into a
 // PRIVATE include dir `<$ZT>/d<gid>/` so the runner's fixed `#include "zo_body.c"` never collides.
-NWORKERS_FALLBACK := 8    // used only if `nproc` can't be read
+NWORKERS_FALLBACK := 8    // used if `nproc` can't be read
+NWORKERS_DEFAULT_MAX := 8    // default memory bound; ZEN_TEST_JOBS is an explicit override
 // integer → allocator-owned str (decimal), for building per-case paths/commands.
 zo_itoa* = (mp: MutPtr<Malloc>, n: i64) string_view { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
 // concat a list of pieces through an allocator-owned String.
@@ -122,18 +124,24 @@ zo_join* = (mp: MutPtr<Malloc>, parts: [string_view]) string_view {
 // an ABSOLUTE per-case scratch path `<zo_dir>/<prefix><gid><suffix>` (used by BOTH the Zen-side save and
 // the shell command, so no `$ZT` interpolation is needed — the command is fully self-contained).
 zo_idpath* = (mp: MutPtr<Malloc>, prefix: string_view, gid: i64, suffix: string_view) string_view { mp.zo_join([mp.zo_dir(), "/", prefix, mp.zo_itoa(gid), suffix]) }
-// how many worker threads to fan out over: `nproc` (subprocess pipelines are cc-bound, so ≈ #cores),
-// clamped ≥ 1, falling back to NWORKERS_FALLBACK if nproc can't be read/parsed. `tr -d` strips the
-// trailing newline so try_parse_int (which refuses a trailing non-digit) accepts it.
+// how many worker threads to fan out over. The automatic value is `nproc`, clamped to 1..8 so the
+// number of concurrent compiler/cc processes remains predictable on a large host. ZEN_TEST_JOBS=N
+// is an explicit positive override. `tr -d` strips the newline for strict integer parsing.
 zo_nproc = (mp: MutPtr<Malloc>) i64 {
     shell(mp.zo_cmd("nproc | tr -d '\\n' > $ZT/zo_nproc.txt 2>/dev/null"))
-    mp.contents_in(mp.zo_path("zo_nproc.txt")).match ({
+    detected := mp.contents_in(mp.zo_path("zo_nproc.txt")).match ({
         .Ok(s)  => try_parse_int(s).match ({
             .Ok(v)  => (v < 1).match ({ true => 1, false => v }),
             .Err(e) => NWORKERS_FALLBACK,
         }),
         .Err(e) => NWORKERS_FALLBACK,
     })
+    automatic := (detected > NWORKERS_DEFAULT_MAX).match ({ true => NWORKERS_DEFAULT_MAX, false => detected })
+    requested := getEnv("ZEN_TEST_JOBS")
+    is_empty(requested).match ({ true => automatic, false => try_parse_int(requested).match ({
+        .Ok(v)  => (v < 1).match ({ true => 1, false => v }),
+        .Err(e) => automatic,
+    }) })
 }
 // worker's inner loop: claim the next index with a fetch-add (atomic_add returns the NEW value, so the
 // claimed index is NEW-1), run its command, repeat until all indices are taken. `@while` (not recursion)
@@ -159,7 +167,7 @@ zo_par_worker = (arg: RawPtr<u8>) RawPtr<u8> {
     zo_par_loop(cmds, n, counter)
     null_ptr()
 }
-// Phase B: run every command string across up to `nproc` worker threads (never more than #cases). The
+// Phase B: run every command across the configured worker count (never more than #cases). The
 // commands are independent and write disjoint per-case files, so this is a pure fan-out/join — the only
 // shared state is the atomic work counter. Blocks until all cases have run.
 zo_par_run* = (cmds: [string_view], n: i64) void {
@@ -232,38 +240,6 @@ run_value* = (vc: VCase) bool {
         .Ok(got) => eq(got, vc.want),
         .Err(e)  => false,
     })
-}
-// VERDICT: `zenc check` exits 0 on accept, non-zero on reject (it prints exactly one diagnostic, so
-// `contains("error[<kind>]")` is equivalent to matching the first-error kind).
-run_verdict* = (vc: VerdictCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
-    vc.should_pass.match ({ true => rc == 0, false => (rc == 0).match ({ true => false, false => is_empty(vc.kind).match ({ true => true, false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
-        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-        .Err(e)  => false,
-    }) }) }) })
-}
-// DIAGNOSTIC: `zenc check` must reject (exit nonzero); capture the FULL diagnostic (stdout+stderr) and
-// require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
-run_diag* = (dc: DiagCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
-    (rc == 0).match ({ true => false, false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
-        .Ok(txt) => {
-            all := true
-            dc.wants.loop((h, i, wnt) {
-                txt.contains(wnt).match ({ false => {
-                    all = false
-                } })
-            })    // must REJECT
-            all
-        },
-        .Err(e)  => false,
-    }) })
 }
 // the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
 // temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
@@ -346,7 +322,7 @@ zo_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     rc := mp.zo_idpath("rc", gid, ".txt")
     mp.zo_join([z, "if ./zenc check ", v, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-// VERDICT per-case check (Phase C): identical logic to run_verdict — accept(P) vs reject(F), and when
+// VERDICT per-case check (Phase C): accept(P) vs reject(F), and when
 // rejecting with a non-empty `kind`, the captured diagnostic must contain `error[<kind>]`.
 zo_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VerdictCase) bool {
     accepted := mp.contents_in(mp.zo_idpath("rc", gid, ".txt")).match ({
@@ -392,7 +368,7 @@ zo_diag_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     rc := mp.zo_idpath("drc", gid, ".txt")
     mp.zo_join([z, "if ./zenc check ", v, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-// DIAGNOSTIC per-case check (Phase C): identical logic to run_diag — must reject (F) AND the diagnostic
+// DIAGNOSTIC per-case check (Phase C): must reject (F) AND the diagnostic
 // must contain every `wants` substring.
 zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
     rejected := mp.contents_in(mp.zo_idpath("drc", gid, ".txt")).match ({

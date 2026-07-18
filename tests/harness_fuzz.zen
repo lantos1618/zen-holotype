@@ -11,14 +11,12 @@
 // SIGABRT) and WITHOUT hanging. The only failures here are real robustness bugs.
 //
 // ── HOW A CRASH IS DETECTED ─────────────────────────────────────────────────────────────────────
-// `std.io.file.shell` is libc gpa(): it returns the raw wait STATUS of `/bin/sh -c <cmd>`, not a
-// bare exit code. Each input is run under a `timeout 10` wrapper, so:
-//   * a clean exit (accept rc 0 / reject rc 1) -> status = rc << 8, (status & 0x7f) == 0, code < 124
-//   * a HANG (timeout fires)                  -> timeout exits 124  -> code == 124            => CRASH
-//   * a SIGNAL (segfault/abort under timeout)  -> timeout exits 128+sig -> code >= 128          => CRASH
-//   * a direct signal to the shell             -> (status & 0x7f) != 0                          => CRASH
-// `zenc check`/`emit` only ever exit 0 or 1 on these inputs, so `code >= 124` cleanly separates a
-// crash/hang from any clean reject. (Verified adversarially: segv->139, hang->124, reject->1.)
+// Each probe runs under `timeout 60`. Inside the worker shell, `$?` is already the decoded exit code:
+//   * clean accept/reject -> 0/1
+//   * timeout            -> 124
+//   * signal             -> 128 + signal
+// `zenc check`/`emit` only exit 0 or 1 cleanly on these inputs, so code >= 124 separates a crash or
+// hang from a clean reject. (Verified adversarially: segv->139, hang->124, reject->1.)
 //
 // Helpers are `fz_`-prefixed so they never collide on the flat-import flatten with std/harness_lib/etc.
 { run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib

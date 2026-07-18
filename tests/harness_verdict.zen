@@ -1,13 +1,12 @@
 // tests/harness_verdict.zen — the FULL VERDICT + KIND corpus for the Zen-native correctness harness
-// (the self-hosted replacement for the pytest verdict harness). Ported verbatim from
-// tests/_oracle_corpus.py: VERDICT_CASES (188, accept/reject) + VERDICT_KIND_CASES (83, a reject
-// pinned by its first-error KIND). `zenc check src` must accept (should_pass=true) or reject
+// (the self-hosted replacement for the former pytest verdict harness). `zenc check src` must accept
+// (should_pass=true) or reject
 // (false); a non-empty `kind` (e.g. "arity") makes the harness require `error[<kind>]` in the
 // rejection diagnostic (reject-for-the-right-reason). The harness wraps the bare kind label.
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = harness_lib
 harness_verdict_run* = () i32 {
-    a := run_verdicts("verdict (469)", [VerdictCase(
+    a := run_verdicts("verdict", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -1026,7 +1025,7 @@ harness_verdict_run* = () i32 {
     // program type-checks (was: error pointing into fmt.zen with no attribution to the user file).
     // TPARAM-SCOPE reject-for-the-right-reason: passing that `T` VALUE where Display IS required is a
     // genuine trait-bound gap, reported at the USER call site (not leaked into stdlib) — soundness kept.
-    b := run_verdicts("verdict-kind (190)", [VerdictCase(
+    b := run_verdicts("verdict-kind", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1143,13 +1142,9 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "undefined-name",
     ), VerdictCase(
-        src: "f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }",
+        src: "f* = (v: i32) i32 {\n if v > 100 => 3\n 0\n}\ntest* = () i32 { f(101) }",
         should_pass: false,
-        kind: "undefined-name",
-    ), VerdictCase(
-        src: "f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }",
-        should_pass: false,
-        kind: "undefined-name",
+        kind: "if-statement",
     ), VerdictCase(
         src: "test* = () i32 { xs := [1, 2, 3]  xs.loop((h, i, v) { undefined_here  {} })  0 }",
         should_pass: false,
@@ -1980,7 +1975,7 @@ harness_verdict_run* = () i32 {
     // generic enum: Result.Bogus must reject (enum_variants covers DGenEnum).
     // census: undefined module member in a UFCS chain (os.env) — positioned reject at check, not cc ICE.
     // MutPtr param mismatch on a non-lvalue literal — gate at check, not cc ICE.
-    // BRICK 1 discriminating PAIR (docs/effects-as-types-design.md §4): identical program modulo the
+    // Sendability-mode discriminating PAIR: identical program modulo the
     // pointer KIND at one nested leaf. A deeply-frozen `Outer→Inner→scalars` payload (mode `frozen`,
     // reaches no MutPtr) is ACCEPTED — the runtime twin is send_frozen_payload_accepted.zen.
     // …the SAME shape with Inner's leaf turned `MutPtr<i32>` reaches a MutPtr (mode `read`), so the
@@ -2041,7 +2036,7 @@ harness_verdict_run* = () i32 {
     // The DEGENERATE return-direct shape with a mismatched Ok payload: `return f().or_return()`
     // unwraps bool then returns it bare from a Result<i32,E> fn — rejected by the post-lowering
     // return-fit scan (not or-return: the propagation itself is fine, the leftover value isn't).
-    // M1 slice 1 (rt-scoped-runtime, docs/rt-scoped-runtime.md): spawner scratch must not cross an
+    // Spawner scratch must not cross an
     // actor boundary. Rejects (error[scratch-escape]): a send whose enum payload carries a local
     // `a.acquire(…)` pointer; a send of a slice-literal-backed struct (stack storage); spawn state
     // embedding a local acquire pointer (the judges' `Counter(seen: <spawner-local>)` repro), bound
@@ -2050,7 +2045,7 @@ harness_verdict_run* = () i32 {
     // Accepts (no over-rejection): plain-value sends, Arc-wrapped sends
     // (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
     // plain-value `Room(n: 7)` spawn state.
-    // M2 (rt-scoped-runtime §4): sendability is a TYPE capability. Rejects (error[sendable]): a send
+    // Sendability is a TYPE capability. Rejects (error[sendable]): a send
     // whose payload carries a `MutPtr<T>` (Pony `ref` — mutable + aliasable → cross-actor race), both
     // DIRECTLY and DEEP (a readonly `Ptr<Outer>` whose Outer struct reachably holds a `MutPtr` field —
     // `val` is deep). Accepts: a readonly `Ptr<T>` (`val`) payload, and a `Ptr<Outer>` whose reachable

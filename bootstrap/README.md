@@ -1,43 +1,53 @@
-# bootstrap — the self-hosted Zen compiler, as a Python-free binary
+# Bootstrap
 
-The Zen compiler is written in Zen: `zen/compiler/lex.zen` (lexer),
-`zen/compiler/parse.zen` (parser), `zen/compiler/check.zen` (resolver + validator),
-and `zen/compiler/genc.zen` (C backend). This directory holds everything needed to build
-it into a standalone `zenc` binary **without Python**:
+The compiler is Zen source. This directory contains the generated artifacts and small target floors
+needed to build it with a host C compiler and no Python.
 
-| file          | what it is                                                            |
-|---------------|-----------------------------------------------------------------------|
-| `zenc.gen.c`  | the compiler `.zen` sources, compiled to C by the toolchain itself (generated) |
-| `zenrt.h/.c`  | the ~200-line C runtime floor: growable `String`, `eq`/`is_empty`, `heap`, OS shims, actor panic isolation |
-| `sources.txt` | the graph/SCC-checked manifest of Zen sources used to regenerate `zenc.gen.c` |
-| `Makefile`    | `zenc:` builds the binary, `regen:` regenerates `zenc.gen.c` with it — NO Python |
+| File | Role |
+|---|---|
+| `zenc.gen.c` | Committed C emitted from the compiler source graph plus `driver.zen`. |
+| `zenrt.h` / `zenrt.c` | Hand-written C process, OS, thread, and panic-isolation floor. |
+| `zenrt.js` | JavaScript runtime floor used by `emit-js`/the JS build target. |
+| `sources.txt` | Graph/SCC-checked source order for self-regeneration. |
+| `Makefile` | Build, regenerate, harness, and seed-merge helpers. |
 
-There is no separate `main.c` — the CLI is `driver.zen`, compiled into `zenc.gen.c`.
-The binary is `cc bootstrap/{zenc.gen.c,zenrt.c}`.
+There is no separate C driver. `driver.zen` is emitted into `zenc.gen.c` and supplies `zen_main`.
 
-## Build & run
+## Build
 
-```sh
-make -f bootstrap/Makefile zenc   # cc bootstrap/{zenc.gen.c,zenrt.c} -o zenc
-./zenc path/to/flat.zen > out.c  # plain emit mode; see ../README.md for check/build/run
-```
-
-## The fixpoint
-
-`zenc` reads Zen and emits C. Fed its **own** graph-listed Zen sources, it emits
-byte-for-byte the C in `zenc.gen.c` — the compiler reproduces itself. The Zen-native
-oracle (`tests/harness.zen`, `fixpoint` suite) builds the binary from the committed C
-and checks that reproduction. The modules oracle checks that `sources.txt` matches the
-resolver graph's SCC order.
-
-## After editing a compiler source
-
-`zenc.gen.c` is generated, so regenerate it whenever you change a source listed in
-`bootstrap/sources.txt`, including
-`zen/compiler/{genc*,lex,parse*,check*}.zen`, `zen/compiler/check_validate.zen`,
-`driver.zen`, or std modules the compiler imports.
-The regen runs with **zero Python** — the binary regenerates its own source via `--build-self`:
+From the repository root:
 
 ```sh
-make -f bootstrap/Makefile regen   # builds zenc, then: ./zenc --build-self bootstrap/zenc.gen.c .
+make
 ```
+
+or directly:
+
+```sh
+make -f bootstrap/Makefile zenc
+```
+
+The real output target is `./zenc`; an unchanged build is an mtime no-op. If `ccache` is available it
+is used for the large generated translation unit, unless `CC` is explicitly set.
+
+## Regenerate and prove the fixpoint
+
+After changing `driver.zen`, `zen/compiler/*`, or a std module in `sources.txt`:
+
+```sh
+make regen
+cp bootstrap/zenc.gen.c /tmp/zenc.fixpoint.c
+make regen
+cmp /tmp/zenc.fixpoint.c bootstrap/zenc.gen.c
+```
+
+`regen` writes a PID-specific temporary and replaces `zenc.gen.c` only when bytes changed. A second
+run must be identical. The full harness also contains a fixpoint suite and verifies that
+`sources.txt` agrees with the resolver graph order. `make docs-check` verifies the deliberate
+seven-file documentation inventory and every local Markdown link.
+
+Generated C is an artifact, not a merge authority. Register the local merge driver with
+`make setup-git`; after resolving source changes, `make resolve-seed` regenerates and stages the seed.
+
+See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the pipeline and [../STATUS.md](../STATUS.md) for
+current limits.

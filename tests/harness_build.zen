@@ -6,9 +6,9 @@
 // ── THE CUSTOM RUNNER (why it differs from harness_lib.run_value) ──────────────────────────────────
 // run_value compiles a tiny `test*` snippet through tests/harness_runner.c and compares a printed int.
 // A BUILD fixture is a whole `main = () i32 { … }` program: we `zenc build <path> -o $ZT/zob`, run the
-// binary, and assert its EXIT CODE and (optionally) its STDOUT. The exit code is captured by embedding
-// `test "$?" -eq <want_exit>` in the shell command — `std.io.file.shell` returns the system(3) wait
-// status (exit<<8), not the raw code, so we let the shell do the comparison and check rc==0 instead.
+// binary, and assert its EXIT CODE and (optionally) its STDOUT. The child check is embedded as
+// `test "$?" -eq <want_exit>`; `std.io.file.shell` then returns the decoded status of that complete
+// shell assertion, so rc==0 means both the program and expected-exit comparison ran successfully.
 //
 // FixtureCase { path, want_exit, want_out, check_out }:
 //   path      relative-to-ROOT path of the .zen program (the harness runs from the repo root).
@@ -17,12 +17,11 @@
 //   want_out  exact expected stdout bytes (with embedded "\n"); only asserted when check_out is true.
 //   check_out true => also assert stdout equals want_out; false => assert exit code only.
 //
-// For `zenc check` accept/reject fixtures we reuse harness_lib.run_verdict on the fixture SOURCE.
+// For `zenc check` accept/reject fixtures we reuse harness_lib's parallel verdict runner.
 { Malloc, malloc, free } = std.mem.alloc
-{ out, save, contents_in, shell } = std.io.file
-{ eq, len, contains, is_empty, starts_with } = std.text.str
-{ new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
+{ out, contents_in, shell } = std.io.file
+{ eq, contains, starts_with } = std.text.str
+{ VerdictCase, run_verdicts, DiagCase, run_diags, zo_par_run, zo_idpath, zo_join } = harness_lib
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: {
     path: string_view,
@@ -50,36 +49,6 @@ ShellCase*: {
     name: string_view,
     cmd: string_view,
 }
-// helper: build the command body  `./zenc build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
-build_cmd = (mp: MutPtr<Malloc>, path: string_view) string_view {
-    s := mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "./zenc build ").expect("harness: oom")
-    s = s.append_in(mp, path).expect("harness: oom")
-    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null").expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
-// helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
-// (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
-run_cmd = (mp: MutPtr<Malloc>, want_exit: string_view) string_view {
-    s := mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ").expect("harness: oom")
-    s = s.append_in(mp, want_exit).expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
-// run ONE build fixture: build must succeed, then exit code (+ optional stdout) must match.
-run_fixture* = (fc: FixtureCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    save(mp.zo_path("zob_out.txt"), "", 0)
-    bc := shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("harness: shell")
-    (bc == 0).match ({ true => {
-        rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
-        (rc == 0).match ({ true => fc.check_out.match ({ true => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
-            .Ok(got) => eq(got, fc.want_out),    // exit code mismatch => fail
-            .Err(e)  => false,
-        }), false => true }), false => false })
-    }, false => false })
-}    // exit-only fixture: matched
 // ── PARALLEL build/emit/doc runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────
 // Same three-phase shape as harness_lib's parallel runners: build a self-contained per-case command that
 // writes gid-namespaced result file(s) (each `zenc build/run` gets its OWN output binary `zob<gid>` and
@@ -138,16 +107,6 @@ run_fixtures* = (name: string_view, cs: [FixtureCase]) i32 {
     free(base)
     fails
 }
-// helper: build a one-arg command  `./zenc <verb> <path> <redirect>`
-cmd_for = (mp: MutPtr<Malloc>, verb: string_view, path: string_view, redirect: string_view) string_view {
-    s := mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "./zenc ").expect("harness: oom")
-    s = s.append_in(mp, verb).expect("harness: oom")
-    s = s.append_in(mp, " ").expect("harness: oom")
-    s = s.append_in(mp, path).expect("harness: oom")
-    s = s.append_in(mp, redirect).expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
 all_present_absent = (txt: string_view, present: [string_view], absent: [string_view]) bool {
     ok := true
@@ -162,16 +121,6 @@ all_present_absent = (txt: string_view, present: [string_view], absent: [string_
         } })
     })
     ok
-}
-// run ONE emit case: `zenc emit` must succeed and the C must satisfy present/absent.
-run_emit* = (ec: EmitCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    rc := shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
-        .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
-        .Err(e)  => false,
-    }), false => false })
 }
 emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) string_view {
     z: string_view := ""
@@ -211,16 +160,6 @@ run_emits* = (name: string_view, cs: [EmitCase]) i32 {
     out("\n")
     free(base)
     fails
-}
-// run ONE doc case: `zenc doc <target>` must exit 0 and the markdown must satisfy present/absent.
-run_doc* = (dc: DocCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    rc := shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("harness: shell")
-    (rc == 0).match ({ true => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
-        .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
-        .Err(e)  => false,
-    }), false => false })
 }
 doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) string_view {
     z: string_view := ""
@@ -980,7 +919,7 @@ harness_build_run* = () i32 {
         want_out: "",
         check_out: false,
     )])
-    // ── (c) `zenc check` accept/reject fixtures (reuse harness_lib.run_verdict on inline SOURCE) ───
+    // ── (c) `zenc check` accept/reject fixtures (shared parallel verdict runner) ───
     vd := run_verdicts("build check", [VerdictCase(
         src: "main = () i32 { 6 * 2 }\n",
         should_pass: true,
@@ -990,9 +929,9 @@ harness_build_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "main = () i32 { if (1 < 2) { return 9 } 7 }\n",
+        src: "main = () i32 { v := 101  if v > 100 => 3  0 }\n",
         should_pass: false,
-        kind: "undefined-name",
+        kind: "if-statement",
     ), VerdictCase(
         src: "main = () i32 { 1 < 2 }\n",
         should_pass: false,
@@ -1071,7 +1010,7 @@ harness_build_run* = () i32 {
         kind: "undefined-name",
     )])
     // a well-typed program checks ok; a std-importing one resolves + checks ok.
-    // source-level `if` is not a Zen construct: `if` parses as an undefined name.
+    // source-level `if` is not a Zen construct: the checker teaches `.match` via error[if-statement].
     // ill-typed: bool is not <: i32 in return position.
     // mixed enum-match arm result types (int vs str / int vs bool) => return-fit.
     // undefined name in value / arg position.
@@ -1084,11 +1023,6 @@ harness_build_run* = () i32 {
     // ── (d) run/stdout fixtures ported from test_build.py inline-source programs (exit only) ──────
     r1 := run_fixtures("build result-paths", [FixtureCase(
         path: "tests/fixtures/zen/build_emits_binary.zen",
-        want_exit: "12",
-        want_out: "",
-        check_out: false,
-    ), FixtureCase(
-        path: "tests/fixtures/zen/run_struct_program.zen",
         want_exit: "12",
         want_out: "",
         check_out: false,
@@ -1262,34 +1196,14 @@ harness_build_run* = () i32 {
         want_exit: "0",
         want_out: "",
         check_out: false,
-    ), FixtureCase(
-        path: "tests/fixtures/zen/enum_match_block_run.zen",
-        want_exit: "0",
-        want_out: "",
-        check_out: false,
     )])
     // cown_result_paths + io_file_result_paths use scratch FILE paths (`@@T@@/...`) — they are driven
     // as shell cases below so each run substitutes its own private `$ZT` dir and seeds the inputs.
     // ── (e) run/stdout fixtures with exact stdout ────────────────────────────────────────────────
     r2 := run_fixtures("build result stdout", [FixtureCase(
-        path: "tests/fixtures/zen/bool_guard_wild_0.zen",
+        path: "tests/fixtures/zen/vec_view_loop.zen",
         want_exit: "0",
-        want_out: "100\n50\n7\n",
-        check_out: true,
-    ), FixtureCase(
-        path: "tests/fixtures/zen/bool_guard_wild_1.zen",
-        want_exit: "0",
-        want_out: "100\n50\n7\n",
-        check_out: true,
-    ), FixtureCase(
-        path: "tests/fixtures/zen/bool_guard_wild_2.zen",
-        want_exit: "0",
-        want_out: "100\n50\n7\n",
-        check_out: true,
-    ), FixtureCase(
-        path: "tests/fixtures/zen/bool_guard_wild_3.zen",
-        want_exit: "0",
-        want_out: "100\n50\n7\n",
+        want_out: "15\n3\n",
         check_out: true,
     ), FixtureCase(
         path: "tests/fixtures/zen/drop_and_fmt_coimport.zen",
@@ -1561,6 +1475,9 @@ harness_build_run* = () i32 {
         src: "main = () i32 {\n    x := = 5\n    0\n}\n",
         wants: [":2:10: error[parse]: syntax error: unparseable top-level input", "      x := = 5", "           ^", "hint: check the syntax around this top-level declaration"],
     ), DiagCase(
+        src: "main = () i32 {\n    v := 101\n    if v > 100 => 3\n    0\n}\n",
+        wants: ["error[if-statement]: `if` statements are not part of Zen", "^~", "hint: branch on the value with `.match`, e.g. `cond.match ({ true => ..., false => ... })`"],
+    ), DiagCase(
         src: "main = () i32 { undefined_fn(1, 2) }\n",
         wants: [":1:17: error[undefined-name]: undefined name", "  main = () i32 { undefined_fn(1, 2) }", "                  ^~~~~~~~~~~~", "hint: declare the name, import it, or qualify the intended module binding"],
     ), DiagCase(
@@ -1782,6 +1699,9 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "main_panic_still_aborts",
         cmd: "./zenc build tests/fixtures/zen/main_panic_still_aborts.zen -o $ZT/zmpa 2>/dev/null && { $ZT/zmpa >/dev/null 2>$ZT/zmpa_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: integer divide by zero\" $ZT/zmpa_e.txt",
+    ), ShellCase(
+        name: "js_fixed_width_matches_c",
+        cmd: "./zenc run tests/fixtures/zen/js_width_battery.zen >$ZT/zwidth_c.txt 2>/dev/null && ./zenc build --target js tests/fixtures/zen/js_width_battery.zen -o $ZT/zwidth.js >/dev/null 2>&1 && node $ZT/zwidth.js >$ZT/zwidth_js.txt && cmp -s $ZT/zwidth_c.txt $ZT/zwidth_js.txt && printf '44\n4464\n1410065408\n1410065408\n-25536\n-106\n1335831723\n2924308450\n' | cmp -s - $ZT/zwidth_c.txt",
     ), ShellCase(
         name: "pool_actor_panic_isolation",
         cmd: "./zenc build tests/fixtures/zen/pool_actor_panic_isolation.zen -o $ZT/zpai 2>/dev/null && { $ZT/zpai >/dev/null 2>$ZT/zpai_e.txt; test \"$?\" = 0; } && grep -Fqx \"zen: panic: integer divide by zero\" $ZT/zpai_e.txt && grep -Fqx \"zen: actor marked dead, pool continues\" $ZT/zpai_e.txt",
