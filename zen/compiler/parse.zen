@@ -558,6 +558,59 @@ note_alias_prefix* = (name: string_view) void {
         alias_prefix_n = alias_prefix_n + 1
     })
 }
+// ── MODULE-SIG registry (per-alias export signatures, Stage B4) ──────────────────────────────────
+// The resolver's ModuleSig knowledge (which names a module provides, with what flags, from which
+// ModuleId), threaded to the checker WITHOUT a std.internal.resolve import (resolve → check_validate
+// → check is a layering cycle — the alias_prefixes_* precedent above). resolve stamps one SigEntry
+// per (ns-alias bind, provided symbol) while resolve_program_data appends module bodies, in APPEND
+// order — the same order the alias-prefixed decls occupy in the flat, so enumeration preserves the
+// checker's deterministic decl-order tie-break. Reset per program next to alias_prefixes_reset.
+// Flags pack the ProvidedSymbol facts (decoded by /bit%2, no bitwise ops — see resolve's ModuleSig).
+SigEntry*: {
+    alias: string_view,
+    name: string_view,
+    flags: i64,
+    origin: i64,
+    sig_pub = (e: SigEntry) bool { e.flags / 1 % 2 == 1 }
+    sig_type = (e: SigEntry) bool { e.flags / 2 % 2 == 1 }
+    sig_imported = (e: SigEntry) bool { e.flags / 4 % 2 == 1 }
+    sig_foreign = (e: SigEntry) bool { e.flags / 8 % 2 == 1 }
+}
+module_sig_flags* = (is_pub: bool, is_type: bool, imported: bool, foreign: bool) i64 {
+    is_pub.match ({ true => 1, false => 0 }) + is_type.match ({ true => 2, false => 0 }) + imported.match ({
+        true  => 4,
+        false => 0,
+    }) + foreign.match ({ true => 8, false => 0 })
+}
+module_sig_buf := no_sigs()
+module_sig_n := 0
+no_sigs = () [SigEntry] { slice(null_ptr(), 0) }
+module_sigs_reset* = (a: MutPtr<Malloc>) void {
+    module_sig_buf = slice(a.acquire(32768 * sizeof(SigEntry)), 32768)
+    module_sig_n = 0
+}
+module_sigs_get* = () [SigEntry] { slice(module_sig_buf.ptr, module_sig_n) }
+// has this (alias, origin ModuleId) pair been stamped already? A module bound twice under the SAME
+// alias appends its body once — stamping twice would invent phantom duplicate candidates. A single
+// alias name bound to two DIFFERENT modules keeps both stamps (both bodies reach the flat).
+module_sig_alias_stamped* = (alias: string_view, origin: i64) bool {
+    f := false
+    module_sigs_get().loop((h, i, e) {
+        f = (eq(e.alias, alias) && e.origin == origin).match ({ true => true, false => f })
+    })
+    f
+}
+note_module_sig* = (alias: string_view, name: string_view, flags: i64, origin: i64) void {
+    (module_sig_n < module_sig_buf.len).then({
+        module_sig_buf[module_sig_n] = SigEntry(
+            alias: alias,
+            name: name,
+            flags: flags,
+            origin: origin,
+        )
+        module_sig_n = module_sig_n + 1
+    })
+}
 // record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
 note_export_if_starred = (a: MutPtr<Malloc>, src: string_view, pos: i32) void {
     nt := src.scan(pos)

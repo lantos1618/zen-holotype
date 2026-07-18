@@ -2,7 +2,7 @@
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 { at, is_alpha, is_alnum } = std.text.bytes
 { Decl, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
-{ decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset } = compiler.parse
+{ decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig, module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
 { check_linked, check_linked_kind } = compiler.check_validate
 // Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
 { Allocator, Malloc, try_acquire } = std.mem.alloc
@@ -2056,6 +2056,19 @@ rewrite_alias_names = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, n
     })
     cur
 }
+// Stage B4/R2: stamp one ns-alias bind's per-module export sig into the compiler.parse registry —
+// one SigEntry per provided symbol (name + pub/type/imported/foreign flags + origin ModuleId), so
+// the checker can enumerate an alias's exports without a std.internal.resolve import. Stamped at the
+// same point the module's body joins the flat (append order = flat decl order). A rebind of the SAME
+// module under the SAME alias appends no new body, so it stamps nothing (see module_sig_alias_stamped).
+note_module_sigs = (a: MutPtr<Malloc>, alias: String, graph: ModuleGraph, origin: i64) void {
+    an := a.gstr_string(16).rappend_string(a, alias).gstr_finish(a)
+    (module_sig_alias_stamped(an, origin) == false).then({
+        graph.symbols.loop((h, i, sym) {
+            note_module_sig(an, sym.name, module_sig_flags(sym.is_pub, sym.is_type, sym.imported, sym.foreign), origin)
+        })
+    })
+}
 alias_module_body = (a: MutPtr<Malloc>, src: string_view, graph: ModuleGraph, alias: String, quals: String, qnames: String, strip_qnames: String, strip_all_quals: String) String {
     names := graph.value_decl_names_in(a)
     hs := a.gstr_string(4096).strip_ns_into(a, src, 0, quals, qnames, strip_qnames, strip_all_quals, true)
@@ -2092,7 +2105,9 @@ load_ns_closure_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: st
     body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     ns_depth = ns_depth - 1
     out2 := ns.c.out.rpush(a, 10).rappend_string(a, body)
-    a.note_fregion(table.index_of_id(id), out2.len - body.len, out2.len, llo)
+    midx := table.index_of_id(id)
+    a.note_module_sigs(alias, graph, midx)    // Stage B4/R2: this bind's export sig → compiler.parse registry
+    a.note_fregion(midx, out2.len - body.len, out2.len, llo)
     Closure(
         seen: ns.c.seen,
         out: out2,
@@ -3419,6 +3434,7 @@ undefined_name_hint* = (a: MutPtr<Malloc>, table: ModuleTable, flat: string_view
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) ResolvedProgram {
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
+    a.module_sigs_reset()    // fresh per program: the checker's per-alias export sigs (B4/R2), stamped per ns bind below
     a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load
     a.lmap_reset()    // fresh per program: flat-region + original-line maps recorded during closure load
     graph := a.module_graph(mainsrc)
