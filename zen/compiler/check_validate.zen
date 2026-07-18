@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, GenericData, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstring_view, tnamed, tptr, tptr_k, tslice, tvoid, k_raw_ptr, k_mut_ptr, ptr_kw, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, env_gstruct, idx_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, write_thru_readonly, lvalue_writes_readonly, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, env_gstruct, idx_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, write_thru_readonly, lvalue_writes_readonly, is_intrinsic, AliasCands, alias_ufcs_candidates, with_exp } = compiler.check
 { Token, scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
@@ -1539,7 +1539,10 @@ let_fit_err = (env: Env, l: LetData) i32 {
     l.ty.is_void_ty().match ({
         true  => 0,
         false => {
-            vt := env.infer_expr(l.value)
+            // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
+            // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
+            // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
+            vt := env.with_exp(l.ty).infer_expr(l.value)
             lv := l.value.lit_slot_verdict(l.ty)
             (lv >= 0).match ({
                 true  => lv,
