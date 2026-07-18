@@ -16,32 +16,48 @@
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(HERE)..)
 
-# Use ccache transparently when it's installed (caches the ~3MB zenc.gen.c recompile); plain `cc`
+# Use ccache transparently when it's installed (caches the ~7 MB zenc.gen.c recompile); plain `cc`
 # otherwise, so the build is byte-identical whether or not ccache is present. An explicit `CC=...`
 # in the environment still wins (this only sets the default).
 CCACHE  := $(shell command -v ccache 2>/dev/null)
-CC      ?= $(if $(CCACHE),ccache cc,cc)
+# GNU make predefines CC=cc with origin "default", so `CC ?= ...` would never actually select ccache.
+# Override only that built-in default; a command-line/environment CC remains authoritative.
+ifeq ($(origin CC),default)
+CC      := $(if $(CCACHE),ccache cc,cc)
+endif
 # Apple Clang treats generated forward calls as errors unless this diagnostic
 # is made non-fatal. (The runtime itself defines macOS's ucontext feature macro.)
 CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -w
 ZENC    := $(ROOT)/zenc
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
+HEADERS := $(HERE)zenrt.h
 
 .PHONY: zenc regen clean harness harness-fast setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
-# Built to a per-builder pid temp then atomically `mv`d into place: two concurrent `make` runs (e.g.
+# supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
+# an unchanged `make zenc` must only check mtimes, not recompile the ~7 MB generated C seed. The
+# Makefile is also a prerequisite because changing its default compiler flags must rebuild the binary.
+zenc: $(ZENC)
+
+# Build to a per-builder pid temp then atomically `mv` it into place: two concurrent `make` runs (e.g.
 # parallel `make harness`) each compile their own temp and never see a half-written `$(ZENC)`, since a
 # direct `cc -o $(ZENC)` truncates-then-writes and a racing `./zenc` exec could hit a partial binary.
-zenc:
+$(ZENC): $(SOURCES) $(HEADERS) $(HERE)Makefile
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
 
-# Regenerate bootstrap/zenc.gen.c with the binary (no Python): `--build-self` reads
-# <srcroot>/bootstrap/sources.txt, strips imports, concatenates in graph/SCC-checked order, and emits
-# the same C the committed file holds. This is the replacement for the old Python regen command.
+# Regenerate through a PID-specific temp and replace the seed only when its bytes changed. A fixpoint
+# regen must preserve zenc.gen.c's mtime; otherwise the following `make zenc` recompiles ~7 MB of
+# identical C for no reason. The temp also keeps a failed/interrupted emission away from the seed.
+# `--build-self` reads <srcroot>/bootstrap/sources.txt, strips imports, concatenates in graph/SCC order,
+# and emits the same C the committed file holds. This is the replacement for the old Python generator.
 regen: zenc
-	$(ZENC) --build-self $(GEN_C) $(ROOT)
+	@tmp=$(GEN_C).$$$$.tmp; \
+	trap 'rm -f "$$tmp"' 0 1 2 15; \
+	$(ZENC) --build-self "$$tmp" $(ROOT) || exit $$?; \
+	if cmp -s "$$tmp" $(GEN_C); then rm -f "$$tmp"; else mv -f "$$tmp" $(GEN_C); fi; \
+	trap - 0 1 2 15
 
 clean:
 	rm -f $(ZENC)
