@@ -265,7 +265,7 @@ Env*: {
     exp: Ty,
     a: MutPtr<Malloc>,
 }    // a = allocator (heap-alloc in infer); didx = name→decl index
-with_exp = (env: Env, t: Ty) Env {
+with_exp* = (env: Env, t: Ty) Env {
     Env(
         vars: env.vars,
         decls: env.decls,
@@ -1549,6 +1549,11 @@ resolve_expr_plain = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Cond(c)        => a.cenode(cond_oa(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e), c.oa)),
         .Call(c)        => a.resolve_call(env, c),
         .Member(mm)     => a.resolve_member(env, mm),
+        // An Arrow (a pass-1 Member→Arrow conversion) must keep resolving its OBJECT on later passes:
+        // a generic call inside it is only rewritten to its mono instance by the FINAL resolve (the
+        // instance decls don't exist earlier), and with no Arrow case that call stayed a bare
+        // template name (`counter.actor().n` emitted an undefined C symbol).
+        .Arrow(ar)      => a.cenode(arrow_at(a.resolve_expr(env.clr_exp(), ar.obj), ar.field, ar.pos)),
         .MakeStruct(sd) => a.resolve_genlit(env, sd),
         .Index(ix)      => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.keep_elem(ix.elem, ix.seq))),
         .Loop(l)        => a.resolve_loop(env, l),
@@ -3976,10 +3981,181 @@ inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: strin
         },
     })
 }
+// A residual no-inline generic call loses its splice context once the enclosing body is inlined
+// (the template's declared return, the let's declared type). PIN the targs inferred HERE into the
+// call as explicit turbofish targs, so the later resolve/discovery mangle the SAME instance — e.g.
+// a tail `ok(x)` spliced out of a `Result<i32, IoError>`-returning template keeps E=IoError instead
+// of re-inferring E=void once the context is gone. Pin only a FULLY-inferred list: a void slot
+// (light inference bails on tparam receivers inside template bodies) must stay open for the
+// instance-context inference, and a pinned void would win over it.
+all_concrete_targs = (ts: [Ty]) bool {
+    con := true
+    ts.loop((h, i, t) {
+        con = t.is_void_ty().match ({ true => false, false => con })
+    })
+    con
+}
+// ── DIAGNOSTICS fallback: splice a template whose instantiation would MISS a trait impl ─────────
+// A template body calling a TRAIT method on a directly tparam-typed param (`println<T>`'s
+// `x.fmt_println()`) instantiated at a targ type with NO impl would surface the miss deep inside
+// the template's own source (against abstract `T`). The OLD splice path put the trait-method call
+// at the CALL SITE with the concrete receiver — exactly what the call-site trait-bound diagnostic
+// (#409) keys on. So: detect the miss (conservatively — direct tparam param receivers, concrete
+// struct targs only) and route that call back through inline_template.
+tmiss_tp_of = (ps: [Param], tparams: [Param], e: Ptr<Expr>) string_view {
+    load(e).match ({
+        .Var(v) => {
+            i := ps.param_index(v.name)
+            (i >= 0).match ({
+                true  => ps[i].ty.match ({
+                    .Named(n) => tparams.tmiss_has_tp(n).match ({ true => n, false => "" }),
+                    _         => "",
+                }),
+                false => "",
+            })
+        },
+        _       => "",
+    })
+}
+tmiss_has_tp = (tparams: [Param], n: string_view) bool {
+    f := false
+    tparams.loop((h, i, tp) {
+        f = eq(tp.name, n).match ({ true => true, false => f })
+    })
+    f
+}
+tmiss_targ_for = (tparams: [Param], targs: [Ty], n: string_view) Ty {
+    t := tvoid()
+    tparams.loop((h, i, tp) {
+        t = (eq(tp.name, n) && i < targs.len).match ({ true => targs[i], false => t })
+    })
+    t
+}
+// is `fn` trait-flavored — provided by some impl, defaulted by a trait, or declared by a trait
+// (a struct whose same-named field is an FnT signature)? One decl scan, run only on candidates.
+tmiss_traitish = (decls: [Decl], fn: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im)         => im.methods.tmiss_has_tp(fn).match ({
+                true  => true,
+                false => found,
+            }),
+            .DTraitDefault(td) => eq(td.fn.name, fn).match ({ true => true, false => found }),
+            .DStruct(sd)       => found.match ({
+                true  => true,
+                false => sd.fields.tmiss_declares(fn),
+            }),
+            _                  => found,
+        })
+    })
+    found
+}
+tmiss_declares = (fields: [Field], m: string_view) bool {
+    found := false
+    fields.loop((h, i, f) {
+        found = (eq(f.name, m) && f.ty.is_fnt()).match ({ true => true, false => found })
+    })
+    found
+}
+tmiss_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], c: CallData) bool {
+    (c.args.len > 0).match ({
+        true  => {
+            tpn := tf.params.tmiss_tp_of(tf.tparams, c.args[0].addr())
+            is_empty(tpn).match ({
+                true  => false,
+                false => {
+                    tyname := tf.tparams.tmiss_targ_for(targs, tpn).dispatch_recv_name()
+                    (is_empty(tyname) || idx.struct_idx.get(tyname, 0 - 1) < 0).match ({
+                        true  => false,
+                        false => eq(a.dispatch_recv(decls, idx, c.fn, tyname), c.fn).match ({
+                            true  => decls.tmiss_traitish(c.fn),
+                            false => false,
+                        }),
+                    })
+                },
+            })
+        },
+        false => false,
+    })
+}
+tmiss_es = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], xs: [Expr]) bool {
+    f := false
+    xs.loop((h, i, x) {
+        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, x.addr()) })
+    })
+    f
+}
+tmiss_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, ar.body) })
+    })
+    f
+}
+tmiss_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, fi.value) })
+    })
+    f
+}
+tmiss_e = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)       => a.tmiss_call(decls, idx, tf, targs, c) || a.tmiss_es(decls, idx, tf, targs, c.args),
+        .Bin(b)        => a.tmiss_e(decls, idx, tf, targs, b.lhs) || a.tmiss_e(decls, idx, tf, targs, b.rhs),
+        .Cond(d)       => a.tmiss_e(decls, idx, tf, targs, d.c) || a.tmiss_e(decls, idx, tf, targs, d.t) || a.tmiss_e(decls, idx, tf, targs, d.e),
+        .Member(m)     => a.tmiss_e(decls, idx, tf, targs, m.obj),
+        .Arrow(ar)     => a.tmiss_e(decls, idx, tf, targs, ar.obj),
+        .MakeEnum(mk)  => a.tmiss_e(decls, idx, tf, targs, mk.payload),
+        .MakeStruct(s) => a.tmiss_inits(decls, idx, tf, targs, s.inits),
+        .Match(m)      => a.tmiss_e(decls, idx, tf, targs, m.subj) || a.tmiss_arms(decls, idx, tf, targs, m.arms),
+        .Index(ix)     => a.tmiss_e(decls, idx, tf, targs, ix.seq) || a.tmiss_e(decls, idx, tf, targs, ix.idx),
+        .SliceLit(sd)  => a.tmiss_es(decls, idx, tf, targs, sd.items),
+        .Loop(l)       => a.tmiss_e(decls, idx, tf, targs, l.seq) || a.tmiss_body(decls, idx, tf, targs, l.body),
+        .Block(bl)     => a.tmiss_body(decls, idx, tf, targs, bl.stmts),
+        .Lambda(la)    => a.tmiss_body(decls, idx, tf, targs, la.body),
+        _              => false,
+    })
+}
+tmiss_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], st: Stmt) bool {
+    st.match ({
+        .Let(l)      => a.tmiss_e(decls, idx, tf, targs, l.value),
+        .Assign(x)   => a.tmiss_e(decls, idx, tf, targs, x.target) || a.tmiss_e(decls, idx, tf, targs, x.value),
+        .Return(r)   => a.tmiss_e(decls, idx, tf, targs, r),
+        .ExprStmt(e) => a.tmiss_e(decls, idx, tf, targs, e),
+        .If(f)       => a.tmiss_e(decls, idx, tf, targs, f.c) || a.tmiss_body(decls, idx, tf, targs, f.then) || a.tmiss_body(decls, idx, tf, targs, f.els),
+        .While(w)    => a.tmiss_e(decls, idx, tf, targs, w.c) || a.tmiss_body(decls, idx, tf, targs, w.body),
+        .IndexSet(x) => a.tmiss_e(decls, idx, tf, targs, x.seq) || a.tmiss_e(decls, idx, tf, targs, x.idx) || a.tmiss_e(decls, idx, tf, targs, x.value),
+    })
+}
+tmiss_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = f.match ({ true => true, false => a.tmiss_stmt(decls, idx, tf, targs, st) })
+    })
+    f
+}
+pin_targs = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty, may_splice: bool) Ptr<Expr> {
+    tf := idx.idx_func(decls, c.fn)
+    (tf.tparams.len > 0 && tf.params.len == cargs.len).match ({
+        true  => {
+            pt := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, c.targs)
+            (may_splice && a.tmiss_body(decls, idx, tf, pt, tf.body)).match ({
+                true  => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs, c.pos),
+                false => pt.all_concrete_targs().match ({
+                    true  => a.cenode(call_full(c.fn, cargs, pt, c.pos, c.raw)),
+                    false => a.recall(c, c.fn, cargs),
+                }),
+            })
+        },
+        false => a.recall(c, c.fn, cargs),
+    })
+}
 maybe_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     idx.idx_template_call(decls, c.fn).match ({
         true  => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).no_inline_gen_f()).match ({
-            true  => a.recall(c, c.fn, cargs),
+            true  => a.pin_targs(decls, idx, c, cargs, env, exp, env.is_inlining(c.fn) == false),
             false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({
                 true  => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs, c.pos),
                 false => a.recall(c, c.fn, cargs),
@@ -4640,17 +4816,16 @@ orx_hidden_body = (body: [Stmt]) bool {
     })
     f
 }
-// the single no-inline predicate every gate shares (maybe_template, rc_col_call, rec_dispatch):
-// recursive generics AND generics with hidden returns both take the mono_rec instance path.
-no_inline_gen_f* = (f: Func) bool {
-    f.rc_is_rec_gen_f().match ({
-        true  => true,
-        false => (f.tparams.len > 0 && f.params.has_fnt_param() == false).match ({
-            true  => f.body.orx_hidden_body(),
-            false => false,
-        }),
-    })
-}
+// the single no-inline predicate every gate shares (maybe_template, rc_col_call, rec_dispatch).
+// KEYSTONE (specialize, don't splice): EVERY type-param generic without an FnT param takes the
+// mono_rec instance path — ONE shared concrete C function per (template, targs), call sites
+// rewritten to it — instead of the body spliced at every call site (code-size blowup, superlinear
+// emit time, caller-return hoists). FnT-param generics (HOF/lambda args) MUST still splice: a
+// lambda has no first-class representation. This subsumes the two cases that always REQUIRED the
+// instance path — direct self-recursion (rc_is_rec_gen_f: the splice never terminates) and hidden
+// early returns (orx_hidden_body: a spliced raw C `return` would exit the CALLER); both detectors
+// remain above as the documentation of those invariants.
+no_inline_gen_f* = (f: Func) bool { f.is_generic_fn() && f.params.has_fnt_param() == false }
 // instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
 rc_gbuf = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
 rc_has = (buf: [GenericData], cnt: i32, m: string_view) bool {
@@ -4708,7 +4883,7 @@ rc_col_inits = (env: Env, buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 
     c
 }
 rc_col_match = (env: Env, buf: [GenericData], cnt: i32, m: MatchData) i32 {
-    c := env.rc_col_e(buf, cnt, m.subj)
+    c := env.clr_exp().rc_col_e(buf, cnt, m.subj)
     t := env.infer_expr(m.subj)
     m.arms.loop((h, i, ar) {
         c = env.a.arm_env(env, t, ar).rc_col_e(buf, c, ar.body)
@@ -4716,7 +4891,7 @@ rc_col_match = (env: Env, buf: [GenericData], cnt: i32, m: MatchData) i32 {
     c
 }
 rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
-    c := env.rc_col_e(buf, cnt, l.seq)
+    c := env.clr_exp().rc_col_e(buf, cnt, l.seq)
     e := Env(
         vars: env.a.vcons(l.elem, l.elemTy, env.a.vcons(l.idx, ti64(), env.vars)),
         decls: env.decls,
@@ -4742,18 +4917,27 @@ rc_lam_env = (env: Env, ps: [Param]) Env {
     e
 }
 rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
-    c2 := env.rc_col_es(buf, cnt, c.args)
     dn := env.dispatch_name(c)
     f := env.env_func(dn)
-    (eq(f.name, dn) && f.params.len == c.args.len && f.no_inline_gen_f()).match ({
+    known := eq(f.name, dn) && f.params.len == c.args.len
+    tmpl := known && f.is_generic_fn()
+    atargs := tmpl.match ({ true => env.call_targs(f, c.args, c.targs), false => no_tys() })
+    c2 := cnt
+    c.args.loop((h, i, ar) {
+        ax := known.match ({
+            true  => env.call_arg_exp(tmpl, f.tparams, atargs, f.params, i),
+            false => tvoid(),
+        })
+        c2 = env.with_exp(ax).rc_col_e(buf, c2, ar.addr())
+    })
+    (known && f.no_inline_gen_f()).match ({
         true  => {
-            targs := env.call_targs(f, c.args, c.targs)
-            m := env.a.mangle_semantic_in(dn, targs)
-            buf.rc_has(c2, m).match ({
+            m := env.a.mangle_semantic_in(dn, atargs)
+            (buf.rc_has(c2, m) || env.didx.func_idx.get(m, 0 - 1) >= 0).match ({
                 true  => c2,
                 false => buf.rc_add(c2, GenericData(
                     name: dn,
-                    args: targs,
+                    args: atargs,
                     mangled: m,
                 )),
             })
@@ -4761,40 +4945,52 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
         false => c2,
     })
 }
+// each position walks under the SAME expected type resolve_expr_plain threads there (cleared for
+// operands/receivers/payloads, kept for cond branches, the element type for slice items), so a
+// generic call's return-position tparam infers — and mangles — exactly as resolve will.
 rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)       => env.rc_col_call(buf, cnt, c),
-        .Bin(b)        => env.rc_col_e(buf, env.rc_col_e(buf, cnt, b.lhs), b.rhs),
-        .Cond(d)       => env.rc_col_e(buf, env.rc_col_e(buf, env.rc_col_e(buf, cnt, d.c), d.t), d.e),
-        .Member(m)     => env.rc_col_e(buf, cnt, m.obj),
-        .Arrow(ar)     => env.rc_col_e(buf, cnt, ar.obj),
-        .MakeEnum(mk)  => env.rc_col_e(buf, cnt, mk.payload),
-        .MakeStruct(s) => env.rc_col_inits(buf, cnt, s.inits),
+        .Bin(b)        => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, b.lhs), b.rhs),
+        .Cond(d)       => env.rc_col_e(buf, env.rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, d.c), d.t), d.e),
+        .Member(m)     => env.clr_exp().rc_col_e(buf, cnt, m.obj),
+        .Arrow(ar)     => env.clr_exp().rc_col_e(buf, cnt, ar.obj),
+        .MakeEnum(mk)  => env.clr_exp().rc_col_e(buf, cnt, mk.payload),
+        .MakeStruct(s) => env.clr_exp().rc_col_inits(buf, cnt, s.inits),
         .Match(m)      => env.rc_col_match(buf, cnt, m),
-        .Index(ix)     => env.rc_col_e(buf, env.rc_col_e(buf, cnt, ix.seq), ix.idx),
-        .SliceLit(sd)  => env.rc_col_es(buf, cnt, sd.items),
+        .Index(ix)     => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, ix.seq), ix.idx),
+        .SliceLit(sd)  => env.with_exp(env.sl_elem_exp(sd.items)).rc_col_es(buf, cnt, sd.items),
         .Loop(l)       => env.rc_col_loop(buf, cnt, l),
         .Block(bl)     => env.rc_col_body(buf, cnt, bl.stmts),
         .Lambda(la)    => env.rc_lam_env(la.params).rc_col_body(buf, cnt, la.body),
         _              => cnt,
     })
 }
-rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt) i32 {
+// mirror resolve_stmt's expected-type discipline: a Let's value under its declared type, a Return's
+// operand under the enclosing fn's return, a non-tail ExprStmt under disc_env, conditions cleared.
+rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32 {
     st.match ({
-        .Let(l)      => env.rc_col_e(buf, cnt, l.value),
-        .Assign(x)   => env.rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
-        .Return(r)   => env.rc_col_e(buf, cnt, r),
-        .ExprStmt(e) => env.rc_col_e(buf, cnt, e),
-        .If(f)       => env.rc_col_body(buf, env.rc_col_body(buf, env.rc_col_e(buf, cnt, f.c), f.then), f.els),
-        .While(w)    => env.rc_col_body(buf, env.rc_col_e(buf, cnt, w.c), w.body),
-        .IndexSet(x) => env.rc_col_e(buf, env.rc_col_e(buf, env.rc_col_e(buf, cnt, x.seq), x.idx), x.value),
+        .Let(l)      => env.let_exp(l.ty).rc_col_e(buf, cnt, l.value),
+        .Assign(x)   => env.clr_exp().rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
+        .Return(r)   => {
+            rt := env.vars.fnret_of()
+            renv := rt.is_void_ty().match ({ true => env, false => env.with_exp(rt) })
+            renv.rc_col_e(buf, cnt, r)
+        },
+        .ExprStmt(e) => (last && env.exp.is_void_ty() == false).match ({
+            true  => env.rc_col_e(buf, cnt, e),
+            false => env.disc_env(e).rc_col_e(buf, cnt, e),
+        }),
+        .If(f)       => env.rc_col_body(buf, env.rc_col_body(buf, env.clr_exp().rc_col_e(buf, cnt, f.c), f.then), f.els),
+        .While(w)    => env.rc_col_body(buf, env.clr_exp().rc_col_e(buf, cnt, w.c), w.body),
+        .IndexSet(x) => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, x.seq), x.idx), x.value),
     })
 }
 rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
     c := cnt
     e := env
     body.loop((h, i, st) {
-        c = e.rc_col_stmt(buf, c, st)
+        c = e.rc_col_stmt(buf, c, st, i == body.len - 1)
         e = e.a.extend_env(e, st)
     })
     c
@@ -4802,22 +4998,27 @@ rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
 // seed from CONCRETE functions only (a template body's self-call has a tparam targ, not a concrete one).
 rc_fn_env = (env: Env, f: Func) Env {
     Env(
-        vars: env.a.params_env(f.params),
+        vars: env.a.bind_fnret(env.a.params_env(f.params), f.ret),
         decls: env.decls,
         didx: env.didx,
         exp: f.ret,
         a: env.a,
     )
 }
-rc_seed = (env: Env, buf: [GenericData], cnt: i32) i32 {
+// `from` skips decls already seeded by an earlier mono_close round: only the tail appended (and
+// HOF-spliced) since the previous round can surface NEW instances — the head's bodies are unchanged.
+rc_seed = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
     c := cnt
     env.decls.loop((h, i, d) {
-        c = d.match ({
-            .DFunc(f) => f.is_generic_fn().match ({
-                true  => c,
-                false => env.rc_fn_env(f).rc_col_body(buf, c, f.body),
+        c = (i >= from).match ({
+            true  => d.match ({
+                .DFunc(f) => f.is_generic_fn().match ({
+                    true  => c,
+                    false => env.rc_fn_env(f).rc_col_body(buf, c, f.body),
+                }),
+                _         => c,
             }),
-            _         => c,
+            false => c,
         })
     })
     c
@@ -4837,11 +5038,12 @@ rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
     tf := env.didx.idx_func(env.decls, g.name)
     iparams := env.a.rc_subst_params(tf.tparams, g.args, tf.params)
     ibody := env.a.subst_body(0, tf.tparams, g.args, tf.body)
+    iret := env.a.subst_ty_in(tf.tparams, g.args, tf.ret)
     ienv := Env(
-        vars: env.a.params_env(iparams),
+        vars: env.a.bind_fnret(env.a.params_env(iparams), iret),
         decls: env.decls,
         didx: env.didx,
-        exp: env.a.subst_ty_in(tf.tparams, g.args, tf.ret),
+        exp: iret,
         a: env.a,
     )
     env.rc_expand(buf, ienv.rc_col_body(buf, count, ibody), i + 1)
@@ -4865,7 +5067,7 @@ rc_gen = (env: Env, g: GenericData) Decl {
 }
 // append one concrete C function per discovered recursive-generic instance. The templates stay in the
 // decl list (emit skips them via is_template); resolve_call — run after this — rewrites the calls.
-mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] {
     base := Env(
         vars: a.vnil(),
         decls: decls,
@@ -4874,7 +5076,7 @@ mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
         a: a,
     )
     buf := a.rc_gbuf(4096)
-    cnt := base.rc_expand(buf, base.rc_seed(buf, 0), 0)
+    cnt := base.rc_expand(buf, base.rc_seed(buf, 0, from), 0)
     (cnt == 0).match ({
         true  => decls,
         false => {
@@ -4890,6 +5092,31 @@ mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
                 })
             })
             slice(out.ptr, k)
+        },
+    })
+}
+// KEYSTONE closure: one mono_rec round appends concrete instances whose (substituted) bodies are
+// still un-spliced template bodies — they may call FnT-param generics (HOFs) that must inline, and
+// those splices can expose FURTHER generic calls. So per round: resolve the appended tail (dispatch
+// on its now-concrete types), inline it (splice HOFs/lambdas), rerun discovery. Terminates: rc
+// discovery dedups against the decl index (an emitted instance is never re-added), so each round
+// either strictly grows the decl list or stops; the rc depth bound caps polymorphic recursion, and
+// `guard` hard-stops pathological growth (a legitimate program nests HOF splices far shallower).
+mono_close = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
+    idx := a.build_decl_index(decls)
+    exp := a.mono_rec(decls, idx, from)
+    (exp.len == decls.len || guard >= 16).match ({
+        true  => exp,
+        false => {
+            eidx := a.build_decl_index(exp)
+            buf := a.dbuf(exp.len)
+            exp.loop((h, i, d) {
+                buf[i] = (i < decls.len).match ({
+                    true  => d,
+                    false => a.inline_decl(exp, eidx, a.resolve_decl(exp, eidx, d)),
+                })
+            })
+            a.mono_close(buf, decls.len, guard + 1)
         },
     })
 }
@@ -5489,10 +5716,10 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     out.loop((h, i, d) {
         inl2[i] = a.inline_decl(out, oidx, d)
     })
-    i2idx := a.build_decl_index(inl2)
-    // emit one concrete fn per recursive-generic instance BEFORE the final resolve, so each instance
-    // body gets resolved (dispatch on its concrete types) and resolve_call rewrites recursive calls to it.
-    exp2 := a.mono_rec(inl2, i2idx)
+    // emit one concrete fn per generic instance BEFORE the final resolve, so each instance body gets
+    // resolved (dispatch on its concrete types) and resolve_call rewrites generic calls to it —
+    // iterated to closure because instance bodies splice HOFs that can expose further instances.
+    exp2 := a.mono_close(inl2, 0, 0)
     // lower ESCAPING capturing closures (a fn returning a lambda over its params) to a by-value closure
     // struct + a top-level call fn, BEFORE the non-capturing lift and the final resolve. The final
     // resolve then sees the rewritten return type (the closure struct) and rewrites indirect calls.
