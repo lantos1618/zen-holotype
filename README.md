@@ -271,11 +271,10 @@ This is rough around the edges. Known limits worth flagging up front:
 ## More docs
 
 **[SPEC.md](SPEC.md)** (language behavior) ·
-**[FEATURES.md](FEATURES.md)** (full inventory) ·
+**[STATUS.md](STATUS.md)** (feature/roadmap ledger) ·
 **[MEMORY_MODEL.md](MEMORY_MODEL.md)** (ownership / allocator rules) ·
-**[ERROR_POLICY.md](ERROR_POLICY.md)** (Result/error contract) ·
-**[ARCHITECTURE.md](ARCHITECTURE.md)** (compiler structure) ·
-**[VISION.md](VISION.md)** (the why) · **[CHANGELOG.md](CHANGELOG.md)** (history).
+**[ARCHITECTURE.md](ARCHITECTURE.md)** (compiler structure).
+Everything else lives in Git history; `make docs-check` keeps this set deliberate.
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight into typed
 objects) and the syntax of [zenlang](https://github.com/lantos1618/zenlang).

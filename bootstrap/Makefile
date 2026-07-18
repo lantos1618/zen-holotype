@@ -1,8 +1,8 @@
 # Python-free build + regen for the self-hosted Zen compiler.
 #
-# The compiler IS the `zenc` binary: cc compiles bootstrap/{zenc.gen.c,zenrt.c,driver.c}
-# (zenc.gen.c is the committed C the Zen frontend emits for the bootstrap compiler sources). NO Python is in
-# this loop — this Makefile is the binary-only replacement for the old Python generator.
+# The compiler IS the `zenc` binary: cc compiles bootstrap/{zenc.gen.c,zenrt.c}.
+# zenc.gen.c is the committed C emitted from the Zen compiler sources plus driver.zen. NO Python is
+# in this loop.
 #
 #   make -f bootstrap/Makefile zenc     # build the standalone compiler binary
 #   make -f bootstrap/Makefile regen    # rebuild zenc, then regenerate zenc.gen.c with it
@@ -33,7 +33,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zenc regen clean harness harness-fast setup-git resolve-seed
+.PHONY: zenc regen clean harness harness-fast docs-check setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -65,18 +65,22 @@ clean:
 # The Zen-native correctness harness (tests/harness.zen) — the self-hosted replacement for the pytest
 # value/verdict harness. Build it with the freshly-built `zenc`, then run it from the repo ROOT (the
 # harness drives `./zenc` + `tests/harness_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
-# The harness's exit code is the failing-case count, so `make harness` fails iff any case fails.
+# The harness exits 0 when all cases pass and 1 when any fail, so counts cannot wrap through POSIX's
+# 8-bit process status.
 #   make -f bootstrap/Makefile harness
 harness: zenc
 	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
 
-# Fast SMOKE subset of the harness (~13s vs ~3min): runs only the quick deterministic correctness
+# Fast smoke subset of the harness: runs only the quick deterministic correctness
 # suites (value + verdict) via ZEN_HARNESS_FAST and SKIPS the slow subprocess-heavy suites (modules /
 # build / boundaries / misc / fuzz / fixpoint). For inner-loop iteration only — the full `make
 # harness` above stays the merge gate. See tests/harness.zen for which suites the flag selects.
 #   make -f bootstrap/Makefile harness-fast
 harness-fast: zenc
 	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+
+docs-check:
+	cd $(ROOT) && ./scripts/check-docs.sh
 
 # Register the local git merge driver that auto-resolves the generated seed (bootstrap/zenc.gen.c).
 # `.gitattributes` maps that path to `merge=zenseed`; this points the driver at scripts/zenseed-merge.sh.

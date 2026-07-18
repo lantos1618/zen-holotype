@@ -1,76 +1,54 @@
 # Zen examples
 
-Runnable, self-contained Zen programs. Each one compiles and runs with the
-self-hosted compiler and exits 0. Build `zenc` first (`make -f bootstrap/Makefile zenc`),
-then run any example with:
+Eleven examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
-```
-./zenc run examples/<name>.zen
-```
+Build once, then run a C example with:
 
-## Start here
-
-| Example | What it shows | Run |
-| --- | --- | --- |
-| `hello.zen` | The smallest real program: import, print, exit code. | `./zenc run examples/hello.zen` |
-| `tour.zen` | One-file tour of Zen's working surface. | `./zenc run examples/tour.zen` |
-
-## Reading input (unix filters)
-
-These read **stdin**, so pipe input in:
-
-| Example | What it shows | Run |
-| --- | --- | --- |
-| `stdin_echo.zen` | Read stdin line by line; number + upper-case each line. | `printf 'hello\nworld\n' \| ./zenc run examples/stdin_echo.zen` |
-| `wordfreq.zen` | stdin → split into words → count in an `HMap<str, i64>` → print. | `printf 'the cat sat on the mat the cat\n' \| ./zenc run examples/wordfreq.zen` |
-
-Expected output:
-
-```
-$ printf 'hello\nworld\n' | ./zenc run examples/stdin_echo.zen
-1: HELLO
-2: WORLD
-
-$ printf 'the cat sat on the mat the cat\n' | ./zenc run examples/wordfreq.zen
-the: 3
-cat: 2
-sat: 1
-on: 1
-mat: 1
-5 distinct words
+```sh
+make
+./zenc run examples/hello.zen
 ```
 
-## Data & collections
+## Language and data
 
-| Example | What it shows | Run |
-| --- | --- | --- |
-| `stats.zen` | List statistics over a `Vec<i32>`. | `./zenc run examples/stats.zen` |
-| `json_demo.zen` | Build and print JSON with `std.json`. | `./zenc run examples/json_demo.zen` |
-| `str_ops_demo.zen` | String ops: join/replace/to_upper/to_lower/repeat/pad/trim. | `./zenc run examples/str_ops_demo.zen` |
+| Example | What it demonstrates |
+|---|---|
+| `hello.zen` | Minimal import, output, and exit code. |
+| `tour.zen` | Compact tour of the working language surface. |
+| `shapes.zen` | Records, a trait, implementations, and receiver dispatch. |
+| `stats.zen` | Numeric work over `Vec<i32>`. |
+| `str_ops_demo.zen` | Allocator-backed string operations. |
+| `json_demo.zen` | Build and print JSON. |
+| `store_demo.zen` | Redux-style state and a pure reducer. |
 
-## Types, traits, and state
+Run any of them as `./zenc run examples/<name>.zen`.
 
-| Example | What it shows | Run |
-| --- | --- | --- |
-| `shapes.zen` | A trait with two impls, dispatched by receiver type (UFCS). | `./zenc run examples/shapes.zen` |
-| `store_demo.zen` | A Redux-style store with a pure reducer. | `./zenc run examples/store_demo.zen` |
+## Unix filters
+
+| Example | Run |
+|---|---|
+| `stdin_echo.zen` | `printf 'hello\nworld\n' \| ./zenc run examples/stdin_echo.zen` |
+| `wordfreq.zen` | `printf 'the cat sat on the mat the cat\n' \| ./zenc run examples/wordfreq.zen` |
+
+`wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
 
 ## Concurrency
 
-| Example | What it shows | Run |
-| --- | --- | --- |
-| `actor_demo.zen` | Cooperative typed actor: `send` + `request` drained inline on the caller thread. | `./zenc run examples/actor_demo.zen` |
-| `pool_actor_demo.zen` | Parallel typed actors on the pool (concrete trampoline + workers). | `./zenc run examples/pool_actor_demo.zen` |
+| Example | Model | Run |
+|---|---|---|
+| `actor_demo.zen` | Cooperative typed actor; send/request drains inline on the caller. | `./zenc run examples/actor_demo.zen` |
+| `pool_actor_demo.zen` | Parallel typed actors over OS workers with a concrete trampoline. | `./zenc run examples/pool_actor_demo.zen` |
 
-Expected output:
+The two actor examples intentionally expose the current split API; see
+[../STATUS.md](../STATUS.md#important-current-limits-and-defects).
 
+## Browser JavaScript
+
+`dom_demo.zen` lowers `std.web.dom` calls to browser DOM APIs. It is not a C/Node console program:
+
+```sh
+./zenc emit-js examples/dom_demo.zen > /tmp/dom-demo.js
 ```
-$ ./zenc run examples/actor_demo.zen
-after alice joined:   online=1 posted=0
-after bob + a message: online=2 posted=1
-ok
 
-$ ./zenc run examples/pool_actor_demo.zen
-total=1000
-ok
-```
+Load the emitted script in a browser page to exercise `document`, element creation, text content,
+append, and event-listener lowering.

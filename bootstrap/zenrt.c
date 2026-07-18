@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <setjmp.h>
 #include <ucontext.h>   /* faulting-thread register context (SP) — used to classify a SIGSEGV */
-/* U1.3: the runtime primitives below are also defined in Zen by resolvable std modules.
+/* The runtime primitives below are also defined in Zen by resolvable std modules.
  * Built programs emit their own strong definitions when they import those modules; these weak
  * fallbacks keep the bootstrap compiler and import-free programs linkable. String allocation is
  * intentionally not provided here; String builders must go through an explicit allocator. */
@@ -27,19 +27,16 @@ ZWEAK void* heap(int64_t n){ return malloc(n); }
 ZWEAK uint8_t* alloc(int64_t n){ return (uint8_t*)malloc(n); }
 ZWEAK zslice view(const char* s){ zslice z; z.ptr = (void*)s; z.len = (int64_t)strlen(s); return z; }
 
-/* OS entry: the real main lives here, stashes argc/argv into globals that std.os reads, then calls
- * the Zen entry (emitted as `zen_main`). WEAK so that during the driver->Zen migration the zenc binary
- * — which still links bootstrap/driver.c and its own strong main — overrides this one (the weak body,
- * with its zen_main reference, is dropped at link). User programs (compiled with just <prog>.c +
- * zenrt.c, no driver.c) get this entry, which calls the program's own zen_main. */
+/* OS entry: the weak main below stashes argc/argv into globals that std.os reads, then calls the
+ * generated Zen entry (`zen_main`). This is the entry path for both zenc and user programs. */
 int32_t __zen_argc = 0;
 char**  __zen_argv = 0;
 /* std.os reads argv through these (never touches the globals directly). Bounds-checked so an out-of-
  * range index is an empty string, not a crash. */
 int32_t zen_argc(void){ return __zen_argc; }
 const char* zen_argv_at(int32_t i){ return (i >= 0 && i < __zen_argc) ? __zen_argv[i] : ""; }
-/* Weak stub so the zenc binary (whose weak main below is overridden by driver.c and never runs) still
- * links — a user program emits its own strong zen_main, which overrides this. */
+/* Weak stub keeps an import-free runtime linkable; a generated program emits its own strong
+ * zen_main, which overrides this. */
 ZWEAK int32_t zen_main(void){ return 0; }
 
 /* ── stack-overflow panic ──────────────────────────────────────────────────────────────────────────
@@ -169,9 +166,9 @@ static void __zen_install_sigsegv_handler(void){
  *
  * KNOWN v1 LIMIT: a longjmp abandons the crashed behavior's C frame, so anything it malloc'd before the
  * panic (e.g. a typed message box) LEAKS — leaking one dead actor's memory beats aborting the whole
- * process. The real fix (DEFERRED) is a per-actor arena rt that is reset when the actor dies, reclaiming
- * everything the behavior allocated in one shot. No lock is held across the catch (the pool runs the
- * behavior OUTSIDE the mailbox lock), so the longjmp cannot strand a lock. */
+ * process. The required fix is deterministic per-actor cleanup. The pool does not hold its
+ * mailbox lock across the catch, but user code can hold another mutex when it panics; longjmp then
+ * skips that unlock and may strand the mutex. See STATUS.md for the required regression gate. */
 /* __zen_panic_jmp (the per-worker catch target; 0 = "no catch installed") is declared above, next to the
  * SIGSEGV handler, because BOTH the ordinary panics (via __zen_panic_unwind) AND a worker's stack-overflow
  * SIGSEGV route into it. It is a `sigjmp_buf` (not `jmp_buf`) so the SIGSEGV handler can siglongjmp out of

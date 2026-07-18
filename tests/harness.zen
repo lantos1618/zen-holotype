@@ -1,9 +1,9 @@
 // tests/harness.zen — the thin MAIN of the Zen-native correctness harness (the self-hosted replacement
 // for the pytest value/verdict harness). It imports the harness library + each category file and sums
-// their fail counts into the process exit code. NO Python anywhere — the compiler tests itself, in
+// their fail counts into one final pass/fail exit status. NO Python anywhere — the compiler tests itself, in
 // itself, by driving the committed `zenc` binary via std.io.
 //
-//   make -f bootstrap/Makefile harness   # build this with zenc, run it; exit = total fail count
+//   make -f bootstrap/Makefile harness   # build this with zenc, run it; exit 0 only when all pass
 //
 // ── ADDING A CATEGORY ────────────────────────────────────────────────────────────────────────────
 // A category agent writes tests/harness_<cat>.zen exporting `harness_<cat>_run*() i32` (see harness_lib.zen
@@ -24,7 +24,7 @@
 { is_empty } = std.text.str
 main* = () i32 {
     // FAST mode (env ZEN_HARNESS_FAST set non-empty, e.g. `make harness-fast`): run ONLY the quick
-    // deterministic correctness suites (value + verdict, ~13s) and skip the slow subprocess-heavy
+    // deterministic correctness suites (value + verdict) and skip the slow subprocess-heavy
     // ones (modules ~90s of multi-file builds, build/boundaries/misc/fuzz, + the full self-host
     // fixpoint). For inner-loop iteration; the full `make harness` stays the merge gate.
     fast := is_empty(getEnv("ZEN_HARNESS_FAST")).match ({ true => false, false => true })
@@ -43,8 +43,15 @@ main* = () i32 {
     // remove this run's private scratch dir (unique per pid, so cleanup is best-effort housekeeping).
     zo_cleanup()
     (fails == 0).match ({
-        true  => out("\nzen harness: ALL PASS\n"),
-        false => out("\nzen harness: FAILURES above (see F marks); exit = total fail count\n"),
+        true  => {
+            out("\nzen harness: ALL PASS\n")
+            0
+        },
+        false => {
+            // POSIX exit status is only 8 bits: returning the raw count makes exactly 256/512/…
+            // failures appear as success. The F marks above carry detail; process status is boolean.
+            out("\nzen harness: FAILURES above (see F marks)\n")
+            1
+        },
     })
-    fails
 }

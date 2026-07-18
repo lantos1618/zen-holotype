@@ -26,7 +26,7 @@ and ownership APIs.
 String bytes carry their own provenance discipline — static `string_literal`,
 borrowed NUL-terminated `string_cstr`, general borrowed `string_view`, and the
 heap-owned `String` (freed through the allocator that owns its buffer). The old
-`text`/`Cstr`/`str` spellings are parser aliases; see [STRING_TYPES.md](STRING_TYPES.md).
+`text`/`Cstr`/`str` spellings are parser aliases; see the string types section of [SPEC.md](SPEC.md).
 
 ## Current Rules
 

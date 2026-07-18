@@ -14,8 +14,7 @@
 // `find`/`has` can hash/compare a query value without taking an allocator — plus `len` live entries and `idx`
 // (the 2*cap i64 hash index).
 //
-//   alloc := default()
-//   a := alloc.addr()
+//   a := caller_allocator.addr()
 //   s := sets.of(a, 10).expect("of")       // Set<i64>; T inferred from the seed (of chains)
 //   s  = s.add(a, 20).expect("add")        // insert — grows through alloc when full
 //   s  = s.add(a, 10).expect("add")        // already present — no-op, len unchanged
@@ -473,17 +472,15 @@ difference*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Result<Set<T>, IoError>
         },
     })
 }
-// ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
+// ── STORED-ALLOCATOR FORM (process-heap default) ─────────────────────────────────────────────────
 // The allocator-free twin of `Set<T>`, in the exact `AVec<T>` mold (see std.collections.vec for the full
-// rationale). `ASet<T>` STORES the narrow allocator captured at construction (the ambient rt narrowed to
-// a `DynAlloc`) and draws every later allocation (grow, free) from THAT allocator — it never re-reads
-// `current()` per op, so an ASet is safe to outlive the scope it was born in (re-reading would
-// cross-allocator-free on grow). Everything
+// rationale). `new()` stores `dyn_heap()`; `new_in(a)` stores the caller's `DynAlloc`, and every later
+// grow/free uses that same value. A custom allocator's raw `state` must outlive the ASet. Everything
 // above (the explicit `Set<T>` + `of(a, …)`/`s.add(a, x)`/`s.free(a)` forms and the set-algebra free fns)
 // is UNCHANGED; this section only adds new names on a new type.
 //
 //   s: ASet<i64> := set.new()          // T from the annotation (nothing to infer it)
-//   s  = s.add(10)                     // no allocator — bytes from the stored rt
+//   s  = s.add(10)                     // no allocator argument — uses the stored DynAlloc
 //   s  = s.add(20)
 //   s.has(10)                          // true
 //   s  = s.remove(10)
@@ -520,8 +517,8 @@ ASet*<T>: {
     }
 }
 // EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `ASet<T>` bound to a
-// caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw (docs/runtime-design.md:
-// explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
+// caller-supplied narrow allocator (`a: DynAlloc`), with no implicit process-heap selection. The default
+// `new()` below is a one-line shim — the single
 // process-heap draw (`dyn_heap()`) on the set construction path.
 new_in*<T> = (a: DynAlloc) ASet<T> {
     da := a
@@ -531,7 +528,7 @@ new_in*<T> = (a: DynAlloc) ASet<T> {
         alloc: a,
     )
 }
-// a zero-element ambient `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
+// a zero-element process-heap `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
 // `s: ASet<i64> := set.new()`. The process heap is drawn ONCE here (as a DynAlloc) and stored for the
 // life of the set. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
 // std.text.string's generic `new_in<A>(MutPtr<A>)` once both flatten together; qualified `set.new_in`
@@ -545,7 +542,7 @@ new*<T> = () ASet<T> {
     )
 }
 // EXPLICIT-allocator seed constructor: an `ASet<T>` bound to `a`, seeded from a slice (dedups via `add`).
-// No ambient draw. T inferred from the elements.
+// No implicit allocator selection. T is inferred from the elements.
 from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
     da := a
     sr: Result<Set<T>, IoError> := empty(da.addr())
@@ -558,7 +555,7 @@ from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
         alloc: a,
     )
 }
-// an ambient `ASet<T>` seeded from a slice. Narrow the process heap once; `from_in`'s body is inlined
+// a process-heap `ASet<T>` seeded from a slice. Capture `dyn_heap()` once; `from_in`'s body is inlined
 // (no bare `from_in` call — same string-`new_in` collision avoidance).
 from*<T> = (xs: [T]) ASet<T> {
     a := dyn_heap()
