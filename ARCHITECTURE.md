@@ -1,152 +1,195 @@
-# Architecture
+# Zen compiler architecture
 
-How the **self-hosted** compiler is shaped. For the current language behavior see
-[SPEC](SPEC.md); for the feature inventory see [FEATURES](FEATURES.md); for the *why* see
-[README](README.md); for the long-term language see [VISION](VISION.md).
+Zen is self-hosted: the CLI, loader, parser, semantic passes, formatter, and backends are Zen source.
+A committed generated C file plus a small hand-written runtime floor bootstraps the next compiler.
 
-The compiler is written entirely in Zen (`zen/compiler/`) and compiles itself, with runtime
-and user-facing library modules in `zen/std/`. There is no Python frontend and no tree-sitter —
-`cc` builds a `zenc` binary from committed C, and `zenc` regenerates that C. C is the intentional
-intermediate/bootstrap target for the self-hosted compiler; a **second backend emits JavaScript**
-(`genjs`) over the same checked AST. The repo has **zero `.py` files**: even the test harness is a
-Zen program (`tests/harness.zen`) that drives the `zenc` binary as a subprocess.
+## Shipping pipeline
 
-## The pipeline
-
-Each stage is an ordinary Zen module. The checked user-program commands (`zenc check`,
-`zenc build`, `zenc run`) resolve `std` imports first, then parse and validate the resulting
-flat module; compiler/internal modules can import from `compiler.*`. `build`/`run` pass the
-emitted C to `cc`.
-
-```
-.zen source
-  → resolve imports (loader: std.X/compiler.X graph → one flat module)   zen/std/internal/resolve.zen
-  → scan       (lexer: source → tokens, slice-free)               zen/compiler/lex.zen
-  → parse      (recursive-descent → compiler.genc Expr/Stmt/Decl)  zen/compiler/parse{,_expr,_stmt,_type}.zen
-  → check      (resolve refs, infer types, fits() each call)      zen/compiler/check.zen + check_validate.zen
-  → mono       (specialize generics for every concrete use)       zen/compiler/mono.zen
-  → emit       ┬─ C  (lower the specialized AST to C text)        zen/compiler/genc.zen + genc_emit.zen  → cc
-               └─ JS (the same AST → JavaScript)                  zen/compiler/genjs.zen                → node
+```text
+source files
+    │
+    ▼
+module discovery / import graph / compatibility flattening
+    │                         zen/std/internal/resolve.zen
+    ▼
+lexer → recursive-descent parser → shared AST
+    │     lex.zen + parse*.zen     genc.zen
+    ▼
+resolution / inference / inlining / monomorphization / closure lowering
+    │                         check.zen + mono.zen
+    ▼
+type, diagnostic, ownership, escape, send, and boundary validation
+    │                         check_validate.zen + diagnostic.zen
+    ├──────────────► faithful source formatter       pretty.zen
+    ├──────────────► C emitter → cc → executable     genc_emit.zen
+    └──────────────► JavaScript emitter              genjs.zen
 ```
 
-`compiler.genc`'s `Expr`/`Stmt`/`Decl` are the **one AST** the parser builds, the checker
-annotates, and a backend walks. There are **two backends today** — C (default) and JavaScript;
-the AST is deliberately backend-neutral, so a further walk (LLVM, …) is a new emitter, not a new
-IR. Both emitters walk the *already-checked* AST and never re-check.
+The backends walk the same resolved/monomorphized AST. C is the complete bootstrap path. JavaScript
+is a second emitter with a smaller runtime floor and a target-limited subset; it does not define a
+separate frontend or type system.
 
-Checked CLI modes reject on any type error before linking. `zenc emit-js <file>` and
-`zenc build --target js <file>` run the identical resolve/parse/check pipeline and only swap
-`genc`'s `genModule` for `genjs`'s `genJsModule` — a type-broken program never produces JS.
-The plain emit form (`zenc file.zen` or stdin) is deliberately lower-level: it expects one
-already-flat module, skips `std.internal.resolve`/`check_validate`, and writes C to stdout.
+## Source and AST ownership
 
-## Multi-module programs: the loader
+`compiler.genc` defines the shared declaration, statement, expression, and type data. Its name is
+historical: parser, checker, C emitter, JS emitter, formatter, and AST-building APIs all use it.
 
-Programs that span files with `{ … } = std.X` imports use **`zen/std/internal/resolve.zen`** — the
-self-hosted loader. It reads a program's import edges, gathers the transitive closure of
-`zen/std/<name>.zen` modules, and also understands `compiler.X` for internal compiler/std
-dependencies. It strips import lines and concatenates each module body exactly once into one
-flat module (per-module dedup breaks cycles; a final per-**name** pass keeps the first definition
-of each top-level name, so a cross-module clash resolves deterministically).
-Namespace binds (`alias = std.X` or `alias = sibling`) are also source-text based, but they
-prefix direct exports before flattening; that lets two bound modules export the same short
-function or type name and be used through `left.name` / `right.name` in one program.
-The resolver also has a structured `ImportEdge { module, alias, namespace, start, next }`
-scanner (`import_edges`) that records destructuring and namespace-bind imports in source
-order with byte spans. The checked loader consumes that edge list when loading
-destructuring dependencies and namespace-bound modules. Declaration resolution still uses
-the flattened source path below, but import-head validation and namespace alias rewrite
-sets now use structured
-`ProvidedSymbol { name, start, next, decl_start, decl_next, imported, foreign }`
-values instead of separate newline-delimited declaration scans. User-module duplicate
-tracking and the final per-name dedup pass also consume the same symbol data, using
-normalized keys for lowered-name collisions while preserving source spelling in diagnostics.
+The parser is split by concern:
 
-That loader is folded into the shipping CLI for `zenc check`, `zenc build`, and `zenc run`,
-so std-importing programs resolve from disk in those modes. Plain emit mode remains flat and
-unvalidated.
-See [README → Modules & imports](README.md#modules--imports).
-
-## The bootstrap: building the compiler, and the fixpoint
-
-`bootstrap/` holds everything needed to build `zenc` with **no Python**:
-
-| file | what it is |
+| Source | Responsibility |
 |---|---|
-| `zenc.gen.c` | the compiler's `.zen` sources (including `driver.zen`, the CLI entry, lowered to a `zen_main`), already compiled to C — committed, the bootstrap seed |
-| `zenrt.c` / `zenrt.h` | the 161-line C runtime floor: the growable `String`, `eq`/`is_empty`, `heap`, and the thin OS shims the emitted C calls |
-| `zenrt.js` | the ~70-line JavaScript runtime floor, prepended to `genjs` output so a program runs under `node` |
-| `sources.txt` | the graph/SCC-checked manifest of Zen sources used to regenerate `zenc.gen.c` |
-| `Makefile` | `zenc:` builds the binary; `regen:` regenerates `zenc.gen.c` with it |
+| `lex.zen` | Tokens, literals, comments, and source positions. |
+| `parse_type.zen` | Types, parameters, delimiters, and parser state. |
+| `parse_expr.zen` | Expressions, operators, calls, lambdas, matches, and guards. |
+| `parse_stmt.zen` | Blocks, bindings, assignment, return, and internal lowered statements. |
+| `parse.zen` | Top-level declarations, records, enums, imports, impls, and module assembly. |
 
-There is **no `driver.c`** — the CLI is `driver.zen`, an ordinary Zen module compiled into the
-seed. The whole `zenc` binary is `cc bootstrap/{zenc.gen.c,zenrt.c}`; the only hand-written C is
-the runtime floor.
+`pretty.zen` renders that parsed structure while retaining source comments. `zenc fmt --check` and
+the in-place formatter compare/render the same canonical result; fixtures enforce idempotence.
 
+## Modules
+
+`std.internal.resolve` scans each file into import edges and provided symbols, constructs a module
+table, validates public/private imports, and has parsed-module/check-link APIs. The shipping CLI still
+uses `ResolvedProgram.flat` at its parser/checker boundary:
+
+1. discover the entry's transitive import closure;
+2. map `std`/`compiler` modules into the checkout and bare local modules beside the entry;
+3. validate missing modules/names, visibility, cycles, and duplicate user definitions;
+4. prefix namespace-bound direct exports and rewrite qualified uses;
+5. deterministically concatenate stripped module bodies;
+6. parse, resolve, and emit the flattened compatibility program.
+
+That hybrid explains both the current functionality and its limits. Namespace binds and privacy
+work, and the resolver already has per-module graph structures, but nested local package paths and a
+signature-linked module world are not the CLI's final architecture yet.
+
+## Semantic architecture today
+
+The semantic layer works, but its shape is the largest maintainability risk.
+
+`check.zen` currently combines:
+
+- declaration indexing and name/receiver dispatch;
+- type inference, unification, `fits`, and trait selection;
+- generic inlining and monomorphization support;
+- match lowering and `or_return` rewriting;
+- function-value/closure lifting;
+- some pointer and call rules;
+- construction of backend-ready lowered nodes.
+
+`check_validate.zen` then re-walks raw and resolved ASTs for:
+
+- core error counts;
+- packed first-error kinds and source positions;
+- batch diagnostics plus message enrichment;
+- ownership/use-after-consume;
+- bound, call, and `or_return` checks that need pre-inline syntax;
+- pointer writes/null dereferences;
+- escape/address/scratch/sendability analyses;
+- must-use, main-signature, infinite-type, and reserved-name checks.
+
+The CLI manually orders these channels and suppresses cascades. This preserves useful diagnostics,
+but duplicates traversal and judgments. `check.zen` is roughly 4.7k lines and
+`check_validate.zen` roughly 6.1k lines; size alone is not the problem, but the same fact being
+reconstructed by several walkers is.
+
+The simplification direction is:
+
+| Keep | Consolidate | Separate clearly | Retire after migration |
+|---|---|---|---|
+| `Ty`, `fits`, declaration index, source spans, typed AST, monomorphization | Count/kind/batch/enrichment into direct `Diagnostic` emission | Module linking, type checking, flow safety, and lowering | Flat-source compatibility, manual diagnostic channel chain, name/shape-only safety guesses |
+
+A practical sequence is listed in [STATUS.md](STATUS.md). The key constraint is behavioral: every
+semantic refactor must preserve accepted/rejected programs, diagnostic kinds/spans, both backends,
+and the bootstrap fixpoint before deleting the old path.
+
+## CLI and projects
+
+`driver.zen` owns command dispatch and orchestration:
+
+- reads a single file or resolves `zen.toml`/`build.zen` projects;
+- runs the checked compiler pipeline;
+- renders mapped diagnostics from flattened offsets back to source files;
+- invokes `cc` for C builds and runs binaries;
+- emits JS with `bootstrap/zenrt.js`;
+- implements `fmt`, `doc`, and the embedded `init` templates;
+- assembles compiler sources for `--build-self`.
+
+`build.zen` is itself compiled and run to emit a five-field target specification. It wins over
+`zen.toml`. This is a useful proof that build configuration can use Zen values, but project-local
+temporary naming and single-target/single-link-library limits remain rough.
+
+## Bootstrap and fixpoint
+
+The default build has two layers:
+
+1. `cc` compiles committed `bootstrap/zenc.gen.c` with `bootstrap/zenrt.c` into `./zenc`.
+2. That compiler reads `bootstrap/sources.txt` plus `driver.zen` and re-emits the committed C.
+
+`bootstrap/sources.txt` is checked against the resolver graph/SCC order. A valid compiler change must
+regenerate C and reach a byte-identical fixpoint:
+
+```sh
+make regen
+cp bootstrap/zenc.gen.c /tmp/zenc.fixpoint.c
+make regen
+cmp /tmp/zenc.fixpoint.c bootstrap/zenc.gen.c
 ```
-make -f bootstrap/Makefile zenc     # cc bootstrap/{zenc.gen.c,zenrt.c} -o zenc
-make -f bootstrap/Makefile regen     # builds zenc, then ./zenc --build-self bootstrap/zenc.gen.c .
-```
 
-**The fixpoint.** `--build-self` reads `bootstrap/sources.txt`, strips each listed source's
-module import lines, concatenates them in the graph-derived SCC order checked by the resolver harness,
-and emits C. Fed its **own** sources,
-`zenc` emits **byte-for-byte** the committed `zenc.gen.c` — the compiler reproduces itself.
-The harness's `fixpoint` suite builds the binary from the committed C and checks the
-reproduction; codegen is deterministic, so the byte-exact match is the parity guarantee
-(no separate "compare two compilers" oracle is needed).
+The hand-written C floor supplies process entry, allocation/IO boundaries, threads, signals, and
+pooled-actor panic isolation. The JavaScript floor supplies its target runtime. Everything above
+those floors is intended to remain ordinary Zen.
 
-## Correctness: the Zen-native harness
+See [bootstrap/README.md](bootstrap/README.md) for the exact local workflow.
 
-The test suite (`tests/`, run with `make harness`) is the **sole correctness reference**, and it
-is Python-*free*: the harness is itself a Zen program (`tests/harness.zen` plus the `harness_*.zen`
-suites) and the repo has zero `.py` files. It is built with the freshly-made `zenc` and drives
-that same shipping binary as a subprocess:
+## Runtime surfaces
 
-- **value cases** — `emit_value(src, want)` runs `zenc emit`, `#include`s the emitted C body into
-  `tests/harness_runner.c`, compiles and runs it, and asserts the printed result (a silent-miscompile
-  guard);
-- **verdict cases** — `verdict(src)` runs the shipping `zenc check`/`build` and asserts accept vs.
-  reject (a reject-parity guard);
-- **command / module / build / fuzz / fixpoint** suites drive the real `zenc check`, `zenc build`,
-  and `zenc run` paths end to end, including std-import resolution and the self-host fixpoint.
+Three runtime ideas coexist in code:
 
-`make harness-fast` runs just the quick value + verdict subset for the inner loop; `make harness`
-(the full suite) is the merge gate. Its exit code is the failing-case count.
-
-## One AST, many emitters
-
-There is a single AST — `compiler.genc`'s `Expr`/`Stmt`/`Decl`. The parser builds it, the
-checker annotates it (filling enum names on `match`/constructors, etc.), and each backend is
-a walk over it:
-
-| backend | module | target |
+| Surface | Current role | Status |
 |---|---|---|
-| `genc` | `zen/compiler/genc.zen` + `genc_emit.zen` | C, the default + bootstrap/intermediate target |
-| `genjs` | `zen/compiler/genjs.zen` | JavaScript, run under `node` (floor: `bootstrap/zenrt.js`) |
+| `std.sys.Sys` | Explicit executable root; attenuates to `Writer`, `Allocator`, `Env`, `Clock`, and `Fs`. | Preferred public direction. |
+| `std.rt` | Thread-local/process-default ambient allocator runtime; pool actors enter/leave it. | Live legacy/experimental substrate. |
+| `std.scope` + `std.concurrent.runtime` | Generic sync/async scope, arena, cancellation/checkpoint experiment. | Live and tested, but not the settled target. |
 
-A new backend is a new walk; it never re-checks, because the checker already proved the
-structure fits. Source branching is `.match` only, but a backend can choose target-native
-branches such as C `if` or `?:` when lowering a checked match. This is the
-[VISION](VISION.md) "kernel + a row of emitters" made real for the subset the self-hosted
-compiler covers today.
+Concurrency also has two actor surfaces:
 
-## Metaprogramming, as values
+- `std.concurrent.actor`: typed cooperative actors drained on the caller thread, including blocking
+  request/reply helpers;
+- `std.concurrent.pool_actor`: typed actors on OS-worker threads, using a concrete trampoline per
+  message/state pair over the pool.
 
-There is **no `@emit` pragma and no comptime evaluator** in the self-hosted compiler. You
-metaprogram by building AST values and emitting them: an ordinary function returns
-`[Decl]`, and `compiler.genc.genModule` lowers it to C — `std.internal.ast` gives fluent heap-allocating
-builders (`var("x").dot("a").eq(…)`), and `zen/std/io/c.zen`'s `libc()` is exactly this shape
-(a function that returns the libc bindings as `[Decl]`). The AST is data; a generator is a
-function over data.
+The pool is a real multicore implementation with atomics, mutex/condition primitives, exactly-once
+stress tests, and per-actor panic/stack-overflow isolation. Its scheduler is still one global
+mutex-protected run queue, not per-worker work stealing. `Sys.Spawner` is a stub and panics if used;
+actor API convergence is roadmap work, not a shipped abstraction.
 
-## What's deferred
+## Tests
 
-- A typed IR boundary distinct from the source AST (lowering still re-runs inference,
-  entangled with monomorphization).
-- Growing the self-hosted frontend to full parity with the language `zenlang` describes
-  (the checker covers a real but partial slice today).
-- A broader package/module system beyond the std-import closure that `check`/`build`/`run`
-  resolve today; plain emit remains a flat-module C emitter.
-- Further backends (e.g. `gen.llvm`) beyond the C and JavaScript emitters that ship today, and
-  the one-structure surface syntax from [VISION](VISION.md).
+`tests/harness.zen` dispatches a Zen-native suite. A 16-line C runner supplies only the executable
+entry used to run the compiled harness. Major suites are split into value, verdict, modules, build,
+boundaries, misc/differential, fuzz, argparse, datetime, and fixpoint groups.
+
+The test system's strengths are independent runtime checks, explicit reject kinds, source-span
+diagnostics, C/JS differential cases, fixpoint validation, architectural source-boundary checks, and
+many adversarial regressions. Its weaknesses are large inline arrays, repeated compilation shells,
+duplicated cases across value/verdict/build/modules, source-text implementation assertions, and a
+full runtime measured in minutes.
+
+`make harness-fast` runs the value/verdict subset; `make harness` runs everything. The quantified
+coverage and reduction plan are in [STATUS.md](STATUS.md).
+
+## Change discipline
+
+For compiler or runtime work:
+
+1. reproduce the behavior with the smallest pass/fail or value pair;
+2. run formatter checks on touched Zen;
+3. run the smallest relevant harness slice, then the full harness for semantic changes;
+4. regenerate `bootstrap/zenc.gen.c` after any compiler/driver/bootstrap-source change;
+5. prove a second regeneration is byte-identical;
+6. remove a compatibility path only after its replacement passes the same evidence.
+
+Do not use an old plan, audit score, or generated C as semantic authority when the Zen source and
+executable tests say otherwise.

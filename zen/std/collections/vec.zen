@@ -228,31 +228,27 @@ of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError> {
         },
     })
 }
-// ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
+// ── STORED-ALLOCATOR FORM (process-heap default) ─────────────────────────────────────────────────
 // An ADDITIVE surface that removes allocator threading: `v := vec.new()` then `v.push(x)` — no `a`
 // argument anywhere. Everything above (the explicit `Vec<T>` + `of(a, …)` / `v.push(a, x)` forms) is
 // UNCHANGED and remains the precise-control API; this section only adds new names on new types.
 //
 //   v: AVec<i32> := vec.new()          // T comes from the annotation (nothing to infer it from)
-//   v  = v.push(1)                     // no allocator — bytes come from the ambient rt
+//   v  = v.push(1)                     // no allocator argument — new() stored dyn_heap()
 //   v  = v.push(2)
 //   n  := v.len()                      // 2
 //   x  := v.get(0)                     // 1
 //   v.each((y){ ... })                 // iterate the live elements
-//   v.free()                           // hand storage back to the SAME rt that made it
+//   v.free()                           // hand storage back to the stored allocator
 //
 //   w := vec.from([10, 20, 30])        // seed from a slice; T inferred from the elements
 //
-// STORE-NOT-REREAD (why AVec carries its allocator). The ambient rt is narrowed to an allocator ONCE,
-// at construction, and the resulting `DynAlloc` is stored in the header — every later op (grow, free)
-// allocates through that SAME allocator. It is NOT re-read from `current()` per op. Re-reading would be
-// a correctness bug: if the container is created under one allocator (e.g. an actor's per-actor heap,
-// or an arena scope) and then an op runs after the ambient rt has changed, `grow` would allocate the
-// new buffer from allocator B while the old buffer came from allocator A — and then free the old buffer
-// through B: a cross-allocator free (corruption). Storing the allocator makes an AVec self-contained and
-// safe to outlive the scope it was born in (Pony per-actor semantics).
+// STORE-NOT-REREAD (why AVec carries its allocator). `new()` stores `dyn_heap()`; `new_in(a)` stores
+// the caller's `DynAlloc`. Every later grow/free uses that same value, avoiding cross-allocator frees.
+// A custom `DynAlloc.state` is a raw pointer, so the allocator state itself MUST outlive the AVec;
+// storing its vtable does not make a stack/arena-backed allocator immortal.
 //
-// The ambient ops are FAIL-FAST on allocation failure (`.expect`, which panics) — the trivial-program
+// These allocator-free-call-site ops are fail-fast on allocation failure (`.expect`, which panics). The
 // ergonomic path. Callers who need allocation failure as a value keep using the explicit `Vec<T>` API,
 // whose ops return `Result<Vec<T>, IoError>`.
 // AVec<T> = an explicit `Vec<T>` plus the NARROW allocator it was born under (`alloc: DynAlloc` — the
@@ -285,14 +281,14 @@ AVec*<T>: {
     }
 }
 // EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `AVec<T>` bound to
-// a caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw. Per the runtime reversal
-// (docs/runtime-design.md), an explicit capability handed in is the model: a caller who holds an
+// a caller-supplied narrow allocator (`a: DynAlloc`), with no implicit process-heap selection.
+// (MEMORY_MODEL.md), an explicit capability handed in is the model: a caller who holds an
 // allocator (`std.mem.alloc.dyn_heap()`, an actor's own heap narrowed via `rt.dyn_of_rt`, an arena)
-// calls this and the thread-local is never touched. The ambient `new()` below is a one-line shim over
+// calls this and the thread-local is never touched. The default `new()` below is a one-line shim over
 // it — the single process-heap draw (`dyn_heap()`) on the vec construction path.
 // `empty`'s T lives only in its return type; pin it via the annotation (nested-return inference can't
 // reach it through the struct-literal field). `empty` is fallible, so unwrap fail-fast here (the
-// ambient form is fail-fast on OOM by design).
+// default form is fail-fast on OOM by design).
 new_in*<T> = (a: DynAlloc) AVec<T> {
     da := a
     ivr: Result<Vec<T>, IoError> := empty(da.addr())
@@ -301,7 +297,7 @@ new_in*<T> = (a: DynAlloc) AVec<T> {
         alloc: a,
     )
 }
-// a zero-element ambient `AVec<T>` (capacity for one, like `empty`). T can't be inferred from an
+// a zero-element process-heap `AVec<T>` (capacity for one, like `empty`). T can't be inferred from an
 // argument, so it comes from the LHS annotation: `v: AVec<i32> := vec.new()`. The process heap is drawn
 // ONCE here (as a DynAlloc) and stored for the life of the vec (all later ops use the stored allocator).
 // The `new_in` body is inlined (rather than `new_in(dyn_heap())`) so the shim makes no bare `new_in`
@@ -316,7 +312,7 @@ new*<T> = () AVec<T> {
     )
 }
 // EXPLICIT-allocator seed constructor: an `AVec<T>` bound to `a`, seeded from a slice (copies `xs`). No
-// ambient draw. T is inferred from the elements.
+// implicit allocator selection. T is inferred from the elements.
 from_in*<T> = (a: DynAlloc, xs: [T]) AVec<T> {
     da := a
     iv: Vec<T> := of(da.addr(), xs).expect("vec.from: out of memory")
@@ -325,7 +321,7 @@ from_in*<T> = (a: DynAlloc, xs: [T]) AVec<T> {
         alloc: a,
     )
 }
-// an ambient `AVec<T>` seeded from a slice. Narrow the process heap once; `from_in`'s body is inlined
+// a process-heap `AVec<T>` seeded from a slice. Capture `dyn_heap()` once; `from_in`'s body is inlined
 // (no bare `from_in` call — same string-`new_in` collision avoidance as `new`). Fail-fast.
 from*<T> = (xs: [T]) AVec<T> {
     a := dyn_heap()

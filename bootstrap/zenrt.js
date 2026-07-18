@@ -84,7 +84,7 @@ const memcpy = (dst, src, n) => { for (let i = 0; i < Number(n); i++) __zr.MEM[d
 // A bump allocator never frees, so the OLD block at `p` is still live: copy `n` bytes forward into the
 // fresh, larger block (the tail past the old length is spare capacity the caller overwrites). Without the
 // copy, growing a container — vec.push past cap → try_resize → realloc — silently dropped every existing
-// element (QUICKSTART's vecdemo printed 4 instead of 10). C's realloc preserves contents; so must this.
+// element (the Vec growth regression produced 4 instead of 10). C realloc preserves contents; so must this.
 const realloc = (p, n) => { const q = __zr.malloc(n); n = Number(n); for (let i = 0; i < n; i++) __zr.MEM[q + i] = __zr.MEM[p + i]; return q; };
 const free = (_p) => {};
 const abort = () => { throw new Error("abort"); };

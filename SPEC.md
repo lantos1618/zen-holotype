@@ -2,7 +2,7 @@
 
 This is the current-state spec for the self-hosted `zenc` compiler in this
 repository. It describes behavior implemented by the code and covered by tests,
-not every long-term idea in [VISION.md](VISION.md).
+not every long-term idea. [STATUS.md](STATUS.md) is the feature and roadmap ledger.
 
 The strongest executable references are the Zen-native harness (no Python):
 
@@ -97,8 +97,8 @@ Name<T, U>
 The three canonical non-owning string types express provenance:
 `string_literal` is static literal storage, `string_cstr` is a borrowed
 NUL-terminated pointer, and `string_view` is the general readable borrow. They
-currently lower to `const char*`; a true `(ptr, len)` view is Phase 2 of
-[STRING_TYPES.md](STRING_TYPES.md). The parser still accepts `text`, `Cstr`, and
+currently lower to `const char*`; a true `(ptr, len)` view is a later phase
+(tracked in [STATUS.md](STATUS.md)). The parser still accepts `text`, `Cstr`, and
 `str` as migration aliases, while formatting and diagnostics use the canonical
 names. The owned growable buffer remains `String`. `[T]` is a fat slice with a
 pointer and length. Function types are parameter types for inline templates and
@@ -395,8 +395,8 @@ roadmap items.
 
 ## Errors And Results
 
-The stdlib fast/fallible API policy is documented in
-[ERROR_POLICY.md](ERROR_POLICY.md).
+The stdlib policy: fallible operations return `Result` (allocation, IO, parsing);
+panic is explicit and greppable, never the default path.
 
 Zen has no exceptions and no unwinding. Fallible library APIs return values:
 
