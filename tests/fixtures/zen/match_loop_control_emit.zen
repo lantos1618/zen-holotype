@@ -1,0 +1,71 @@
+// Regression: match lowering must preserve the selected loop handler across C switches and JS IIFEs.
+// It also covers a nested statement-position match whose arms yield only side effects (no void `_out`).
+{ println } = std.text.fmt
+R*: Ok(i32) | Err
+Cell*: {
+    n: i32,
+}
+parse = (n: i32) R { (n > 0).match ({ true => .Ok(n), false => .Err }) }
+bump = (n: i32) R { .Ok(n) }
+main = () i32 {
+    scan_total := 0
+    [1, 0, 9].loop((scan, i, x) {
+        step := parse(x).match ({
+            .Err   => {
+                scan.break
+                0
+            },
+            .Ok(n) => n,
+        })
+        scan_total = scan_total + step
+    })
+    println(scan_total)
+    nested_total := 0
+    [1, 2].loop((nested, i, x) {
+        parse(x).match ({
+            .Err   => {
+                nested.break
+            },
+            .Ok(n) => bump(n).match ({
+                .Err   => {
+                    nested.break
+                },
+                .Ok(v) => {
+                    nested_total = nested_total + v
+                },
+            }),
+        })
+    })
+    println(nested_total)
+    control_total := 0
+    [1, 2, 3].loop((outer, i, x) {
+        [1, 2, 3].loop((inner, j, y) {
+            (y == 2).then({
+                inner.continue
+            })
+            (x == 2 && y == 3).then({
+                outer.continue
+            })
+            (x == 3).then({
+                outer.break
+            })
+            control_total = control_total + x * 10 + y
+        })
+    })
+    println(control_total)
+    // Discarded boolean matches are statements: their arms need not share a value type. In C this
+    // specifically pairs the loop-jump sentinel (i32) with a struct-valued assignment.
+    cell := Cell(n: 0)
+    [4, 0].loop((typed, i, x) {
+        (x == 0).match ({
+            true  => {
+                typed.break
+            },
+            false => {
+                cell = Cell(n: x)
+            },
+        })
+    })
+    println(cell.n)
+    0
+}

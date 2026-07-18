@@ -19,13 +19,13 @@ Compact roadmap from the current codebase. Each goal names the gap and the check
    - Next: broaden inference coverage beyond actor replies and keep generic inference consistent across full and light checker paths.
 
 3. **Formatter**
-   - Status: `zenc fmt [--check] <file>` exists; the first formatter preserves line comments, block comments, strings, char literals, and braces inside comments/literals, normalizes brace indentation/trailing whitespace, is idempotent, and has fixture tests.
-   - Gap: formatter is still conservative line/brace formatting, not an AST-aware pretty-printer for the full language style.
+   - Status: `zenc fmt [--check] <file>` is the comment-preserving AST pretty-printer in `compiler.pretty`: it round-trips UFCS/source syntax, formats matches and declarations structurally, preserves comments/literals, is idempotent, and has fixture plus real-corpus tests.
+   - Gap: the repository is not yet wholly canonical under the current string-type spelling migration, and the style policy is still defined by implementation/tests rather than a standalone formatting specification.
    - Done when: `zenc fmt <file>` is idempotent, preserves comments, has fixture tests, supports check mode, and covers the full syntax/style policy.
 
 4. **Diagnostics**
    - Status: CLI diagnostics render `error[kind]`, a human message, mapped source line/column, a source marker, and a hint for undefined names, arity errors, arg-type errors, return-fit errors, assign-fit errors, trait conformance errors, and ownership errors. The checker exposes the CLI-compatible `CheckDiagnostic { code, kind, source_offset, span_width, count, message, hint }` and first-class `Diagnostic { code, kind, span: SourceSpan, count, message, hint }` values via `diagnostic_from_source` and module diagnostic helpers, while preserving the older packed-kind harness entrypoints; binary expressions carry source operator offsets so `main = () i32 { 1 < 2 }` reports `return-fit` at the `<` instead of falling back to a positionless diagnostic.
-   - Gap: user-file line/column mapping is still assembled in the C CLI, and richer multi-diagnostic flows are not yet threaded through the validation pipeline.
+   - Gap: the Zen driver now maps spans and batches main-channel diagnostics, but several specialized checks still run as separate first-error channels and some fallback diagnostics remain positionless or generic.
    - Done when: undefined names, type errors, arity errors, and trait errors are represented as stable diagnostic values and render precise spans plus useful text.
 
 5. **AST Import Resolution**
@@ -39,8 +39,8 @@ Compact roadmap from the current codebase. Each goal names the gap and the check
    - Done when: `std.mem`, `std.text`, `std.collections`, and `std.io` document fallible vs fail-fast APIs and test both paths.
 
 7. **Memory Safety Rules**
-   - Status: [MEMORY_MODEL.md](MEMORY_MODEL.md) documents the current model; allocator-threaded tests cover arena backing storage, fallible ownership constructors, and internal AST declaration buffers; `zenc check` rejects same-body local use after `Own<T>.release_in(...)`, `Rc<T>.drop_in(...)`, or `Arc<T>.drop_in(...)` with precise ownership diagnostics.
-   - Gap: no full branch-sensitive ownership, lifetime, pointer-direction, or nullability checker yet.
+   - Status: [MEMORY_MODEL.md](MEMORY_MODEL.md) documents the current model; allocator-threaded tests cover arena backing storage, fallible ownership constructors, and internal AST declaration buffers; `zenc check` rejects same-body local use after `Own<T>.release_in(...)`, `Rc<T>.drop_in(...)`, or `Arc<T>.drop_in(...)`. Pointer kinds are distinct: read-only writes and nullable typed-raw dereferences are rejected, top-level direction is checked, and nested pointer/generic positions are invariant.
+   - Gap: ownership/lifetime analysis is not fully branch-sensitive or interprocedural, and the deliberately permissive `RawPtr<u8>` allocator/FFI floor is outside ordinary null-deref enforcement.
    - Done when: the model grows from the current local consume rule into the full pointer/ownership safety policy and tests cover representative invalid lifetime patterns.
 
 8. **Package Manifest**

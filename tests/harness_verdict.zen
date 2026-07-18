@@ -1,13 +1,12 @@
 // tests/harness_verdict.zen — the FULL VERDICT + KIND corpus for the Zen-native correctness harness
-// (the self-hosted replacement for the pytest verdict harness). Ported verbatim from
-// tests/_oracle_corpus.py: VERDICT_CASES (188, accept/reject) + VERDICT_KIND_CASES (83, a reject
-// pinned by its first-error KIND). `zenc check src` must accept (should_pass=true) or reject
+// (the self-hosted replacement for the historical pytest verdict harness). `zenc check src` must
+// accept (should_pass=true) or reject
 // (false); a non-empty `kind` (e.g. "arity") makes the harness require `error[<kind>]` in the
 // rejection diagnostic (reject-for-the-right-reason). The harness wraps the bare kind label.
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = harness_lib
 harness_verdict_run* = () i32 {
-    a := run_verdicts("verdict (469)", [VerdictCase(
+    a := run_verdicts("verdict", [VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -250,11 +249,7 @@ harness_verdict_run* = () i32 {
     ), VerdictCase(
         src: "f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }",
         should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }",
-        should_pass: false,
-        kind: "",
+        kind: "no-if",
     ), VerdictCase(
         src: "R*: Ok(i32) | Err(i32)\nf* = (r: R) i32 {\n v := r.match({ .Ok(x) => { return x  x + 1 }, .Err(e) => e })\n v + 1\n}\ntest* = () i32 { f(.Ok(5)) }",
         should_pass: false,
@@ -929,20 +924,8 @@ harness_verdict_run* = () i32 {
         kind: "",
     ), VerdictCase(
         src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Val(9)) }",
-        should_pass: true,
-        kind: "",
-    ), VerdictCase(
-        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) if v > 10 => 1, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
         should_pass: false,
-        kind: "exhaustiveness",
-    ), VerdictCase(
-        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) if v => 1, .Val(v) => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
-        should_pass: false,
-        kind: "guard-type",
-    ), VerdictCase(
-        src: "Box: Val(i32) | Empty\nsz = (o: Box) i32 { o.match ({ .Val(v) => 1, .Val(v) if v > 0 => 2, .Empty => 3 }) }\ntest* = () i32 { sz(Box.Empty) }",
-        should_pass: false,
-        kind: "dup-variant",
+        kind: "no-if",
     ), VerdictCase(
         src: "{ println } = std.text.fmt\nT: { x: i32 }\nmain = () i32 { v := T(x: 5)  println(\"hi\")  v.x }\n",
         should_pass: true,
@@ -952,10 +935,7 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "trait-bound",
     )])
-    // MATCH GUARD accept: a guarded `.Val` arm plus an UNGUARDED `.Val` arm covers the variant.
-    // GUARD exhaustiveness: `.Val` covered ONLY by a guarded arm (guard may fail) → not exhaustive.
-    // GUARD type: the `if` guard must be a bool (here `v` is i32).
-    // GUARD does NOT weaken the duplicate-arm rule: a later `.Val` AFTER an UNGUARDED `.Val` is dead.
+    // `if` is forbidden everywhere, including the former match-arm guard position.
     // C2 (task #35): a CONCRETE param of a GENERIC callee is now arg-checked (was off since the
     // right-arity call inlines away before the post-inline check). Accept: a correctly-typed
     // concrete arg + a tparam-typed slot that still DEFERS to monomorphization.
@@ -1025,7 +1005,7 @@ harness_verdict_run* = () i32 {
     // program type-checks (was: error pointing into fmt.zen with no attribution to the user file).
     // TPARAM-SCOPE reject-for-the-right-reason: passing that `T` VALUE where Display IS required is a
     // genuine trait-bound gap, reported at the USER call site (not leaked into stdlib) — soundness kept.
-    b := run_verdicts("verdict-kind (192)", [VerdictCase(
+    b := run_verdicts("verdict-kind", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -1152,11 +1132,7 @@ harness_verdict_run* = () i32 {
     ), VerdictCase(
         src: "f* = (b: bool) i32 {\n if (b) { return 9 }\n 7\n}\ntest* = () i32 { f(true) }",
         should_pass: false,
-        kind: "undefined-name",
-    ), VerdictCase(
-        src: "f* = (b: bool) i32 {\n if (b) { return 9 } else { return 8 }\n 7\n}\ntest* = () i32 { f(false) }",
-        should_pass: false,
-        kind: "undefined-name",
+        kind: "no-if",
     ), VerdictCase(
         src: "test* = () i32 { xs := [1, 2, 3]  xs.loop((h, i, v) { undefined_here  {} })  0 }",
         should_pass: false,
@@ -1505,6 +1481,58 @@ harness_verdict_run* = () i32 {
         src: "Box*: { v: i32 }\ngetv* = (p: MutPtr<Box>) i32 { p.v }\ntest* = () i32 { r: RawPtr<Box> := null_ptr()  q := assert_nonnull(r)  getv(q) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "test* = () i32 { x := 1  p: Ptr<i32> := x.addr()  q := assert_nonnull(p)  store(q, 9)  x }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        src: "Box*: { v: i32 }\nset* = (p: Ptr<Box>) void { q := p.v.addr()  store(q, 9) }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        src: "Box*: { v: i32 }\nset* = (p: MutPtr<Box>) void { q := p.v.addr()  store(q, 9) }\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "test* = () i32 { x := 1  p: MutPtr<i32> := x.addr()  q := assert_nonnull(p)  store(q, 9)  x }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "test* = () i32 { x := 1  p: Ptr<i32> := x.addr()  r: RawPtr<i32> := p  0 }",
+        should_pass: false,
+        kind: "assign-fit",
+    ), VerdictCase(
+        src: "test* = () i64 { x: i64 := 1  p: Ptr<i64> := x.addr()  store_i64(p, 9)  x }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        src: "test* = () i64 { x: i64 := 1  p: Ptr<i64> := x.addr()  atomic_store_i64(p, 9)  x }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        src: "test* = () i64 { x: i64 := 1  p: Ptr<i64> := x.addr()  atomic_add_i64(p, 1) }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        src: "test* = () i32 { x := 1  p: Ptr<i32> := x.addr()  xs: [i32] := slice(p, 1)  xs[0] = 9  x }",
+        should_pass: false,
+        kind: "ptr-write",
+    ), VerdictCase(
+        src: "test* = () i32 { x := 1  p: MutPtr<i32> := x.addr()  xs: [i32] := slice(p, 1)  xs[0] = 9  x }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Box*: { v: i32 }\ngetv* = (p: RawPtr<Box>) i32 { p.v }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "null-deref",
+    ), VerdictCase(
+        src: "Box*: { v: i32 }\nsetv* = (p: RawPtr<Box>) void { p.v = 2 }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "null-deref",
+    ), VerdictCase(
+        src: "E*: A | B\nread* = (p: RawPtr<E>) i32 { p.match ({ .A => 1, .B => 2 }) }\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "null-deref",
     ), VerdictCase(
         src: "use* = (p: RawPtr<u8>) i32 { 0 }\ntest* = () i32 { b: RawPtr<u8> := malloc(8)  use(b) }",
         should_pass: true,
@@ -1977,6 +2005,34 @@ harness_verdict_run* = () i32 {
         src: "f* = (p: MutPtr<i64>) i64 { p.load() }\ntest* = () i32 { to_i32(f(5)) }",
         should_pass: false,
         kind: "arg-type",
+    ), VerdictCase(
+        src: "take = (p: MutPtr<u8>) i32 { 0 }\ntest* = () i32 { x: u8 := 1  ro: Ptr<u8> := x.addr()  take(ro) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "take = (p: MutPtr<i32>) i32 { 0 }\ntest* = () i32 { x: u8 := 1  p: MutPtr<u8> := x.addr()  take(p) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "Box*<T>: { v: T }\nWrap*<T>: { v: T }\ntake = (w: Wrap<Box<MutPtr<i32>>>) i32 { 0 }\ntest* = () i32 { x: i32 := 1  ro: Ptr<i32> := x.addr()  b := Box<Ptr<i32>>(v: ro)  w := Wrap<Box<Ptr<i32>>>(v: b)  take(w) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "Box*<T>: { v: T }\nWrap*<T>: { v: T }\ntake = (w: Wrap<Box<Ptr<i32>>>) i32 { 0 }\ntest* = () i32 { x: i32 := 1  rw: MutPtr<i32> := x.addr()  b := Box<MutPtr<i32>>(v: rw)  w := Wrap<Box<MutPtr<i32>>>(v: b)  take(w) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "take = (p: MutPtr<MutPtr<i32>>) i32 { 0 }\ntest* = (p: MutPtr<Ptr<i32>>) i32 { take(p) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "take = (xs: [MutPtr<i32>]) i32 { 0 }\ntest* = (xs: [Ptr<i32>]) i32 { take(xs) }",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "Box*<T>: { v: T }\ntake = (b: Box<RawPtr<u8>>, p: MutPtr<i32>) i32 { 0 }\ntest* = () i32 { p := null_ptr()  take(Box(v: p), p) }",
+        should_pass: true,
+        kind: "",
     )])
     // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
     // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
@@ -1987,6 +2043,12 @@ harness_verdict_run* = () i32 {
     // generic enum: Result.Bogus must reject (enum_variants covers DGenEnum).
     // census: undefined module member in a UFCS chain (os.env) — positioned reject at check, not cc ICE.
     // MutPtr param mismatch on a non-lvalue literal — gate at check, not cc ICE.
+    // POINTER-FLOOR mode: `Ptr<u8>` is read-only, not a wildcard that can become `MutPtr<u8>`.
+    // POINTER-FLOOR pointee: `MutPtr<u8>` is not the raw floor and cannot become `MutPtr<i32>`.
+    // RECURSIVE MODE INVARIANCE: generic wrappers, nested pointer pointees, and slice elements cannot
+    // launder Ptr→MutPtr or MutPtr→Ptr.
+    // The deliberately permissive floor remains `RawPtr<u8>`: null_ptr() and raw allocator results
+    // are indistinguishable at this boundary and still fit typed pointers.
     // BRICK 1 discriminating PAIR (docs/effects-as-types-design.md §4): identical program modulo the
     // pointer KIND at one nested leaf. A deeply-frozen `Outer→Inner→scalars` payload (mode `frozen`,
     // reaches no MutPtr) is ACCEPTED — the runtime twin is send_frozen_payload_accepted.zen.
@@ -2136,6 +2198,11 @@ harness_verdict_run* = () i32 {
     // R7: a non-void body that falls through with no produced value is a return-fit error.
     // R1: passing a read-only `Ptr<T>` where a `MutPtr<T>` is wanted is an arg-type error.
     // R8: assert_nonnull on a non-pointer arg is an arg-type error.
+    // P1 capability preservation: assert_nonnull proves only non-nullness (Ptr stays read-only),
+    // and an ordinary Ptr cannot launder through writable RawPtr. RawPtr<u8> remains the explicit floor.
+    // Every mutating word/atomic intrinsic observes Ptr direction, not only typed store(). Because [T]
+    // is writable, slice(Ptr<T>, n) is likewise a ptr-write; slice(MutPtr<T>, n) remains valid.
+    // Typed RawPtr aggregate/member and enum-match auto-dereferences require assert_nonnull first.
     // M5 R3: a turbofish type arg that names no declared type → positioned unknown-type (was a cc leak).
     // M5 R4: turbofish on a callee with NO type params → no-type-args (was silently dropped).
     // M5 R4: an explicit type arg that contradicts the value arg (`T=str` vs `5:i64`) → arg-type.

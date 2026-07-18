@@ -1,7 +1,7 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, arm_g, arm_at_g, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, mangle_semantic_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, mangle_semantic_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get } = compiler.parse
 { panic, expect } = std.core.result
@@ -287,7 +287,7 @@ lookup_var = (v: Ptr<VList>, name: string_view) Ty {
 // under an unlexable name (identifiers cannot start with a digit, so no user binding collides; the
 // same trick as the inliner's in-progress-template marker). A `return <expr>` operand is typed against
 // THIS — never the positional expected type, which is void everywhere but a body's tail statement
-// (a guard-match `return err(e)` sits inside a lowered If branch; a value-position arm's `return`
+// (an `.or_return()` error branch sits inside a lowered If; a value-position arm's `return`
 // sits in a block whose own value expectation is the ARM type). Lambda bodies bind their own (possibly
 // void) entry so an enclosing function's return type never leaks into a lambda's `return`.
 bind_fnret* = (a: MutPtr<Malloc>, vars: Ptr<VList>, ret: Ty) Ptr<VList> { a.vcons("0return", ret, vars) }
@@ -1105,6 +1105,25 @@ arg0_ty = (env: Env, c: CallData) Ty { (c.args.len > 0).match ({
     true  => env.infer_expr(c.args[0].addr()),
     false => tvoid(),
 }) }
+addr_ty = (env: Env, c: CallData) Ty {
+    base := env.arg0_ty(c)
+    readonly := (c.args.len > 0).match ({
+        true  => env.lvalue_writes_readonly(c.args[0].addr()),
+        false => false,
+    })
+    tptr_k(env.a.tnode(base), readonly.match ({ true => k_ptr(), false => k_mut_ptr() }))
+}
+// `assert_nonnull` proves nullability, not writability: RawPtr<T> narrows to MutPtr<T>, while an
+// already-non-null Ptr<T>/MutPtr<T> keeps its direction capability unchanged.
+nonnull_ty = (t: Ty) Ty {
+    t.match ({
+        .Ptr(pd) => (pd.kind == k_raw_ptr()).match ({
+            true  => tptr_k(pd.pointee, k_mut_ptr()),
+            false => t,
+        }),
+        _        => tvoid(),
+    })
+}
 infer_call = (env: Env, c: CallData) Ty {
     eq(c.fn, "sizeof").match ({
         true  => ti64(),
@@ -1131,13 +1150,13 @@ infer_call = (env: Env, c: CallData) Ty {
                                                 false => eq(c.fn, "to_f64").match ({
                                                     true  => tf64(),
                                                     false => eq(c.fn, "null_ptr").match ({
-                                                        true  => tptr(env.a.tnode(tu8())),
+                                                        true  => tptr_k(env.a.tnode(tu8()), k_raw_ptr()),
                                                         false => eq(c.fn, "cstr").match ({
                                                             true  => tstring_cstr(),
                                                             false => eq(c.fn, "addr").match ({
-                                                                true  => tptr(env.a.tnode(env.arg0_ty(c))),
+                                                                true  => env.addr_ty(c),
                                                                 false => eq(c.fn, "assert_nonnull").match ({
-                                                                    true  => tptr_k(env.a.tnode(env.arg0_ty(c).pointee_of()), k_mut_ptr()),
+                                                                    true  => env.arg0_ty(c).nonnull_ty(),
                                                                     false => env.gen_call_ret(c),
                                                                 }),
                                                             }),
@@ -1156,8 +1175,6 @@ infer_call = (env: Env, c: CallData) Ty {
         }),
     })
 }
-// Stage 3: `assert_nonnull(p)` PANICs if p is null and yields a non-null `MutPtr<T>`
-// (the null-checked narrowing of a nullable `RawPtr<T>`).
 // Constructor types keep generic args so later match-arm binds recover concrete payload types.
 einst_ty = (ei: EnumInst) Ty { (ei.targs.len > 0).match ({
     true  => tgeneric(ei.base, ei.targs, ei.mty),
@@ -1906,30 +1923,23 @@ resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
         aenv := a.arm_env(env, t, ar)
-        g := is_expr_null(ar.guard).match ({
-            true  => ar.guard,
-            false => a.resolve_expr(aenv, ar.guard),
-        })
-        buf[i] = arm_at_g(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), g, ar.pos)
+        buf[i] = arm_at(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), ar.pos)
     })
     buf
 }
 // Discarded matches lower to `if` so arm returns remain real returns. Value-position matches
 // stay expressions. Non-exhaustive enum matches stay Match nodes for the validator to reject.
-// A GUARDED arm never completes coverage (its guard may fail), so — like the validator's has_wildcard /
-// arm_covers — the lowerability check must not count it: a guarded-only match stays a Match node so the
-// exhaustiveness validator can reject it (rather than being lowered to a switch/if that drops the node).
 match_has_wild = (m: MatchData) bool {
     f := false
     m.arms.loop((h, i, ar) {
-        f = (eq(ar.variant, "_") && is_expr_null(ar.guard)).match ({ true => true, false => f })
+        f = eq(ar.variant, "_").match ({ true => true, false => f })
     })
     f
 }
 arm_covers_v = (m: MatchData, vn: string_view) bool {
     f := false
     m.arms.loop((h, i, ar) {
-        f = (eq(ar.variant, vn) && is_expr_null(ar.guard)).match ({ true => true, false => f })
+        f = eq(ar.variant, vn).match ({ true => true, false => f })
     })
     f
 }
@@ -2053,7 +2063,10 @@ lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [S
                 out = a.branch_stmts(env, ar.body)
             },
             false => {
-                cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), a.cenode(vref(a.tag_const(m.ename, ar.variant)))))
+                // Keep the tag as a semantic Tag node. C folds `.tag` to its enum constant, while JS
+                // emits the variant string; baking a C-only `Enum_Variant` Var breaks the JS backend.
+                tag := a.subj_tag(a.cenode(mktag(m.ename, ar.variant)), false)
+                cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), tag))
                 out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
             },
         })
@@ -2156,7 +2169,7 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) 
         },
         .Return(r)   => {
             // A return's operand is expected to be the ENCLOSING FN's return type, wherever the
-            // return sits (guard-match arm, value-position arm block, loop body). Falls back to the
+            // return sits (lowered conditional branch, value-position arm block, loop body). Falls back to the
             // positional exp when no fnret is bound (globals) or the fn returns void.
             rt := env.vars.fnret_of()
             out = sret(a.resolve_expr(rt.is_void_ty().match ({
@@ -3214,11 +3227,7 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
         })
         br := arm(ar.variant, bind, ar.body)
         aenv := a.xform_arm_env(decls, idx, subj, ename, br, env)
-        g := is_expr_null(ar.guard).match ({
-            true  => ar.guard,
-            false => a.xform_expr_exp(decls, idx, ar.guard, ps, xs, aenv, exp),
-        })
-        buf[i] = arm_g(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, aenv, exp), g)
+        buf[i] = arm(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, aenv, exp))
     })
     buf
 }
@@ -3774,11 +3783,7 @@ subst_exprs = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], xs: [E
 subst_arms = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        g := is_expr_null(ar.guard).match ({
-            true  => ar.guard,
-            false => a.subst_expr(cs, tparams, targs, ar.guard),
-        })
-        buf[i] = arm_g(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body), g)
+        buf[i] = arm(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body))
     })
     buf
 }
@@ -4025,7 +4030,7 @@ xform_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, params
         .Return(r)   => {
             // a return's operand infers against the enclosing fn's return type (threaded via
             // bind_fnret), NOT the positional exp — which is void for every non-tail statement, so
-            // a guard-arm `return err(e)` inlined here otherwise instantiates err<void, E>.
+            // a nested match-arm `return err(e)` inlined here otherwise instantiates err<void, E>.
             rt := env.fnret_of()
             out = sret(a.xform_expr_exp(decls, idx, r, params, fargs, env, rt.is_void_ty().match ({
                 true  => exp,
@@ -4297,8 +4302,7 @@ dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
 }
 dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
     arms.loop((h, i, ar) {
-        g := is_expr_null(ar.guard).match ({ true => ar.guard, false => a.dmc_expr_val(ar.guard) })
-        store(arms[i].addr(), arm_at_g(ar.variant, ar.bind, a.dmc_expr_val(ar.body), g, ar.pos))
+        store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
     })
 }
 // `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
@@ -4984,11 +4988,7 @@ lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u
 lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        g := is_expr_null(ar.guard).match ({
-            true  => ar.guard,
-            false => a.lift_rw_expr(decls, idx, gcp, gen, ar.guard),
-        })
-        buf[i] = arm_g(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body), g)
+        buf[i] = arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body))
     })
     buf
 }
@@ -5193,11 +5193,7 @@ clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit
 clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
     buf := a.abuf(arms.len)
     arms.loop((h, i, ar) {
-        g := is_expr_null(ar.guard).match ({
-            true  => ar.guard,
-            false => a.clos_sub_expr(ps, ar.guard),
-        })
-        buf[i] = arm_at_g(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), g, ar.pos)
+        buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos)
     })
     buf
 }
@@ -5594,13 +5590,16 @@ ty_eq* = (g: Ty, w: Ty) bool {
         }),
     })
 }
-// `RawPtr<u8>` is the raw-pointer floor: it fits any typed pointer slot (this is what `null_ptr()`
-// returns, so a null can initialize/assign any `Ptr<T>` field/param without a cast).
+// `RawPtr<u8>` is the deliberately permissive allocator/FFI floor. It can initialize any pointer
+// spelling; unlike typed RawPtr<T>, the checker cannot distinguish null_ptr() from malloc() here.
 is_raw_ptr_ty* = (t: Ty) bool {
     t.match ({
-        .Ptr(pd) => load(pd.pointee).match ({
-            .U8 => true,
-            _   => false,
+        .Ptr(pd) => (pd.kind == k_raw_ptr()).match ({
+            true  => load(pd.pointee).match ({
+                .U8 => true,
+                _   => false,
+            }),
+            false => false,
         }),
         _        => false,
     })
@@ -5620,11 +5619,29 @@ ptr_kind_of* = (t: Ty) i32 {
 }
 // A write (store) through a read-only `Ptr<T>` (kind == k_ptr) is rejected; `MutPtr`/`RawPtr` permit it.
 is_readonly_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() }
+is_any_ptr = (t: Ty) bool { t.ptr_kind_of() >= 0 }
+// Preserve lvalue provenance across addr(): taking the address of storage reached through Ptr<T>
+// yields Ptr<U>, never MutPtr<U>. The walk stops at the first pointer indirection, matching writes.
+write_thru_readonly* = (env: Env, obj: Ptr<Expr>) bool {
+    ot := env.infer_expr(obj)
+    ot.is_any_ptr().match ({
+        true  => ot.is_readonly_ptr_ty(),
+        false => env.lvalue_writes_readonly(obj),
+    })
+}
+lvalue_writes_readonly* = (env: Env, target: Ptr<Expr>) bool {
+    load(target).match ({
+        .Member(m) => env.write_thru_readonly(m.obj),
+        .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty(),
+        .Index(ix) => env.write_thru_readonly(ix.seq),
+        _          => false,
+    })
+}
 // A NON-NULL pointer: `Ptr<T>` (k_ptr) or `MutPtr<T>` (k_mut_ptr). These can never be null, so a slot
 // of this kind cannot be left default-zeroed and cannot be filled by a nullable `RawPtr<T>`.
 is_nonnull_ptr_ty* = (t: Ty) bool { t.ptr_kind_of() == k_ptr() || t.ptr_kind_of() == k_mut_ptr() }
 // Stage 3 nullability: a `RawPtr<T>` (kind == k_raw_ptr) is NULLABLE and must be proven non-null
-// (via `assert_nonnull`, which yields a `MutPtr<T>`) before a deref. EXCEPTION: the `RawPtr<u8>`
+// (via `assert_nonnull`, which narrows RawPtr<T> to MutPtr<T>) before a deref. EXCEPTION: the `RawPtr<u8>`
 // byte-buffer floor — the trusted allocator/FFI primitive — derefs freely (so it is NOT nullable here).
 // `Ptr<T>` / `MutPtr<T>` are non-null, so they are never nullable.
 is_nullable_ptr_ty* = (t: Ty) bool {
@@ -5645,23 +5662,21 @@ dir_mode_of* = (t: Ty) i32 {
         false => 0 - 1,
     })
 }
-// Mode-lattice cell for `fits` (R1): a readonly (`read`) value must NOT satisfy a writable (`mut`)
-// slot — that would launder the read-only guarantee (silently grant write access). Every other
-// direction fits (a writable `mut` fits a `read` slot; same-mode fits; non-pointers unaffected).
-// Behavior-identical to the previous `ptr_kind_fits` (readonly `Ptr<T>` ⊄ writable `MutPtr<T>`),
-// just re-expressed in the mode vocabulary.
+// Mode-lattice cell for `fits`: a readonly Ptr must not satisfy either writable spelling
+// (MutPtr or RawPtr), while MutPtr may safely lose capability into Ptr/RawPtr.
 mode_fits* = (g: Ty, w: Ty) bool {
-    (w.dir_mode_of() == k_mut_ptr() && g.dir_mode_of() == k_ptr()).match ({
+    (g.ptr_kind_of() == k_ptr() && (w.ptr_kind_of() == k_mut_ptr() || w.ptr_kind_of() == k_raw_ptr())).match ({
         true  => false,
         false => true,
     })
 }
+raw_floor_fits = (g: Ty, w: Ty) bool { g.is_raw_ptr_ty() && w.is_ptr_ty_g() }
 fits* = (g: Ty, w: Ty) bool {
     numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
     numeric.match ({
         true  => g.ty_rank() <= w.ty_rank(),
-        false => g.is_raw_ptr_ty().match ({
-            true  => w.is_ptr_ty_g(),
+        false => g.raw_floor_fits(w).match ({
+            true  => true,
             false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({
                 true  => false,
                 false => g.ty_eq(w) && g.mode_fits(w),

@@ -78,8 +78,7 @@ ArmData*: {
     bind: string_view,
     body: Ptr<Expr>,
     pos: i32,
-    guard: Ptr<Expr>,
-}    // .Variant(bind) [if guard] => body  (bind "" = none, guard expr_null() = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal. A GUARDED arm is taken only when its pattern matches AND its guard evals true; on guard-false control falls through to the next arm (so a guarded arm does NOT complete coverage — exhaustiveness still needs an unguarded catch-all)
+}    // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal.
 MatchData*: {
     subj: Ptr<Expr>,
     ename: string_view,
@@ -193,13 +192,21 @@ GenericData*: {
     args: [Ty],
     mangled: string_view,
 }
-// pointer KIND tag (safety-goal-D). All three spellings still lower to `T*` and mangle to `ptr_`;
-// the kind is CARRIED through the AST (preserved by the formatter) but is NOT yet read by codegen or
-// the type-checker — ty_eq/unify/fits stay kind-blind. 0=RawPtr (nullable FFI floor), 1=Ptr (read-only
-// borrow), 2=MutPtr (writable borrow). Mirrors the `() i32` constant style used for the K* diag codes.
+// pointer KIND tag (safety-goal-D). All three spellings still lower to `T*`; their semantic/mono
+// names remain distinct so a generic wrapper cannot erase a nested capability. Direct pointer
+// direction is checked by `fits`/`mode_fits`. 0=RawPtr (nullable FFI floor), 1=Ptr (read-only borrow),
+// 2=MutPtr (writable borrow). Mirrors the `() i32` constant style used for the K* diag codes.
 k_raw_ptr* = () i32 { 0 }
 k_ptr* = () i32 { 1 }
 k_mut_ptr* = () i32 { 2 }
+// The canonical surface keyword for a pointer kind. Shared by the formatter and diagnostics so a
+// rejected `Ptr<T>` -> `MutPtr<T>` conversion never prints two indistinguishable `Ptr<T>` types.
+ptr_kw* = (kind: i32) string_view {
+    (kind == k_raw_ptr()).match ({
+        true  => "RawPtr",
+        false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" }),
+    })
+}
 PtrData*: {
     pointee: Ptr<Ty>,
     kind: i32,
@@ -649,7 +656,6 @@ arm* = (v: string_view, bind: string_view, body: Ptr<Expr>) ArmData {
         bind: bind,
         body: body,
         pos: 0,
-        guard: expr_null(),
     )
 }
 arm_at* = (v: string_view, bind: string_view, body: Ptr<Expr>, p: i32) ArmData {
@@ -658,28 +664,8 @@ arm_at* = (v: string_view, bind: string_view, body: Ptr<Expr>, p: i32) ArmData {
         bind: bind,
         body: body,
         pos: p,
-        guard: expr_null(),
     )
 }    // source-backed (formatter anchors arm comments)
-// guarded variants of the above — carry an `if <guard>` condition on the arm.
-arm_g* = (v: string_view, bind: string_view, body: Ptr<Expr>, guard: Ptr<Expr>) ArmData {
-    ArmData(
-        variant: v,
-        bind: bind,
-        body: body,
-        pos: 0,
-        guard: guard,
-    )
-}
-arm_at_g* = (v: string_view, bind: string_view, body: Ptr<Expr>, guard: Ptr<Expr>, p: i32) ArmData {
-    ArmData(
-        variant: v,
-        bind: bind,
-        body: body,
-        pos: p,
-        guard: guard,
-    )
-}
 ematch* = (subj: Ptr<Expr>, ename: string_view, arms: [ArmData]) Expr {
     .Match(MatchData(
         subj: subj,
@@ -797,8 +783,29 @@ tgeneric* = (nm: string_view, args: [Ty], mangled: string_view) Ty {
         mangled: mangled,
     ))
 }
-// the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` -> `Vec_ptr_u8`.
+// the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` ->
+// `Vec_ptr_u8`. Pointer KINDS get distinct fragments (`rawptr_`/`ptr_`/`mutptr_`) even though all
+// still lower to `T*`; the name is also the generic-instance identity used by mono/check dedup.
 // A C identifier fragment per arg (prims by name, a nested generic by its own mangled name).
+ptr_mangle_prefix = (s: String, a: MutPtr<Malloc>, kind: i32) String {
+    (kind == k_raw_ptr()).match ({
+        true  => s.gstr_append(a, "rawptr_"),
+        false => (kind == k_mut_ptr()).match ({
+            true  => s.gstr_append(a, "mutptr_"),
+            false => s.gstr_append(a, "ptr_"),
+        }),
+    })
+}
+ptr_mangle_prefix_len = (kind: i32) i64 { (kind == k_ptr()).match ({ true => 4, false => 7 }) }
+ptr_mangle_write = (dst: RawPtr<u8>, at: i64, kind: i32) i64 {
+    (kind == k_raw_ptr()).match ({
+        true  => dst.write_str(at, "rawptr_"),
+        false => (kind == k_mut_ptr()).match ({
+            true  => dst.write_str(at, "mutptr_"),
+            false => dst.write_str(at, "ptr_"),
+        }),
+    })
+}
 mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
         .I32           => s.gstr_append(a, "i32"),
@@ -814,7 +821,7 @@ mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
         .Void          => s.gstr_append(a, "void"),
         .Named(n)      => s.gstr_append(a, n),
         .Generic(g)    => s.gstr_append(a, g.mangled),
-        .Ptr(pd)       => s.gstr_append(a, "ptr_").mangle_ty(a, load(pd.pointee)),
+        .Ptr(pd)       => s.ptr_mangle_prefix(a, pd.kind).mangle_ty(a, load(pd.pointee)),
         .Slice(e)      => s.gstr_append(a, "slice_").mangle_ty(a, load(e)),
         .FnT(ft)       => s.gstr_append(a, "fn"),
     })
@@ -832,7 +839,7 @@ mangle_ty_len = (t: Ty) i64 {
         .Void          => 4,
         .Named(n)      => n.view().len,
         .Generic(g)    => g.mangled.view().len,
-        .Ptr(pd)       => 4 + load(pd.pointee).mangle_ty_len(),
+        .Ptr(pd)       => pd.kind.ptr_mangle_prefix_len() + load(pd.pointee).mangle_ty_len(),
         .Slice(e)      => 6 + load(e).mangle_ty_len(),
         .FnT(ft)       => 2,
     })
@@ -857,7 +864,7 @@ mangle_write_ty = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
         .Void          => dst.write_str(at, "void"),
         .Named(n)      => dst.write_str(at, n),
         .Generic(g)    => dst.write_str(at, g.mangled),
-        .Ptr(pd)       => dst.mangle_write_ty(dst.write_str(at, "ptr_"), load(pd.pointee)),
+        .Ptr(pd)       => dst.mangle_write_ty(dst.ptr_mangle_write(at, pd.kind), load(pd.pointee)),
         .Slice(e)      => dst.mangle_write_ty(dst.write_str(at, "slice_"), load(e)),
         .FnT(ft)       => dst.write_str(at, "fn"),
     })

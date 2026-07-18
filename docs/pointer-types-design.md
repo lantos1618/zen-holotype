@@ -1,7 +1,23 @@
 # Design: distinct `Ptr` / `MutPtr` / `RawPtr` pointer types (safety-goal-D)
 
-Status: DESIGN-ONLY, decision-ready. No code changed. Author hand-off doc.
-Date: 2026-06-26. Target reviewer: the user (review BEFORE any implementation).
+Status: IMPLEMENTED; this is the historical design/staging record.
+Date: designed 2026-06-26; implementation status updated 2026-07-12.
+
+Current implementation notes (these supersede historical "today" claims below):
+
+- `PtrData.kind` survives parsing and formatting; diagnostics print the exact kind.
+- `Ptr<T>` is read-only, `MutPtr<T>` writable, and typed `RawPtr<T>` nullable.
+- `RawPtr<u8>` remains the deliberately permissive allocator/FFI floor; `null_ptr()` infers it.
+  This is an explicit unsafe boundary because null and allocation results share one type.
+- top-level `MutPtr<T>` can widen to `Ptr<T>`, while recursive pointee, slice, and generic
+  positions are invariant and capability-exact.
+- `assert_nonnull` preserves Ptr/Mut direction, Ptr cannot launder through RawPtr, all
+  mutating intrinsics are direction-checked, and `.addr()` preserves readonly lvalue provenance.
+- C declarators still erase every kind to `T*`, but generic/recursive mono names encode
+  `rawptr_`, `ptr_`, or `mutptr_` so distinct semantic instances cannot collide.
+
+The problem statement, line references, and staged seed-identity predictions below describe the
+pre-implementation snapshot. They are retained as decision history, not as current behavior.
 
 ## 0. The one-paragraph problem
 
@@ -186,9 +202,9 @@ Rules for `fits(g, w)` (g = source/given, w = target/wanted), pointer cases:
 | given \ wanted | `MutPtr<T>` | `Ptr<T>` | `RawPtr<T>` |
 |----------------|-------------|----------|-------------|
 | `MutPtr<T>`    | ✓           | ✓ widen  | ✓ (narrow to floor — always safe) |
-| `Ptr<T>`       | ✗ (gain write) | ✓     | ✓ |
+| `Ptr<T>`       | ✗ (gain write) | ✓     | ✗ (RawPtr is writable) |
 | `RawPtr<T>`    | needs check (S3) | needs check (S3) | ✓ |
-| `RawPtr<u8>` (= `null_ptr()`) | ✓* | ✓* | ✓ | * special-cased: see below |
+| `RawPtr<u8>` (= `null_ptr()`) | ✓ unsafe floor | ✓ unsafe floor | ✓ |
 
 - **Pointee must still match** (`load(pa).ty_eq(load(pb))`), unchanged.
 - **`MutPtr→Ptr` is the workhorse coercion.** It legalizes the single most common
@@ -196,18 +212,17 @@ Rules for `fits(g, w)` (g = source/given, w = target/wanted), pointer cases:
   flows into a `Ptr<Expr>`/`Ptr<Ty>` field (`tnode`, `cenode`, `buf[0].addr()`). Because
   `MutPtr` widens to `Ptr`, all ~126 `.addr()`→`Ptr<…>`-field sites stay legal with NO
   source change.
-- **`null_ptr()` keeps fitting everything.** Today's `is_raw_ptr_ty` (`Ptr<u8>` fits any
-  pointer) is preserved as: `kind==kRawPtr && pointee==U8` fits any pointer slot. This is
-  what lets `null_ptr()` initialize a `Ptr<Expr>` field; we keep it through all stages so
-  null-init code never breaks. (Tightening this is a Stage-3+ open question, §9.)
+- **`null_ptr()` keeps the historical unsafe-floor behavior.** `kind==kRawPtr &&
+  pointee==U8` fits any pointer slot because it is also the allocator result type. This is
+  deliberately called out as a trust boundary rather than claimed as sound nullability.
 - **Calling a `Ptr`-param fn with a `MutPtr` arg: YES** (widening). Calling a
   `MutPtr`-param fn with a `Ptr` arg: NO.
 
-### `.addr()` produces which kind? → `MutPtr<T>`
-Decision: `x.addr()` yields `MutPtr<T>`. Rationale: you can only take `.addr()` of an
-lvalue (a local/field/index slot), which is writable; making it `MutPtr` lets it (a) pass
-to allocator-style `MutPtr<Self>` receivers and (b) widen to `Ptr` for read-only sinks.
-Change: `infer_call` `addr` arm (`check.zen:449-450`) → `tptr_k(node, kMutPtr)`.
+### `.addr()` preserves the lvalue's direction
+`x.addr()` yields `MutPtr<T>` for writable local/field/index storage. Storage reached
+through a read-only `Ptr<U>` yields `Ptr<T>` instead, so `p.field.addr()` cannot launder
+read-only access into a writable pointer. The checker walks the lvalue chain to its first
+pointer indirection.
 
 ### Allocator flow: `acquire` returns `RawPtr<u8>`
 `Allocator.acquire : (MutPtr<Self>, i64) RawPtr<u8>` (`alloc.zen:15`). Two sinks:
@@ -227,7 +242,8 @@ guards (the trustworthy-safety preamble already PANICs on div-zero and OOB index
 ```
 p2 := assert_nonnull(p)        // p: RawPtr<T>  →  p2: MutPtr<T>  (PANICs if p == null)
 ```
-- Checker: `infer_call` arm `assert_nonnull` → `tptr_k(pointee, kMutPtr)`; arity 1
+- Checker: `RawPtr<T>` → `MutPtr<T>`; an already non-null `Ptr<T>`/`MutPtr<T>` keeps
+  its existing direction capability. Arity is 1.
   (register in `check_validate.zen`).
 - Codegen: lower to a stmt-expr guard mirroring `zen__idx`, e.g.
   `({ T* _p = (p); if(!_p) zen__panic("zen: panic: null pointer deref\n"); _p; })`.
@@ -244,9 +260,9 @@ inside the arms of a null comparison, the `RawPtr` is re-typed:
     false => { /* p NARROWED to MutPtr<T> — load/store OK, no panic */ }
 })
 ```
-(Symmetrically `p != null_ptr()` narrows in the `true` arm.) This is the same shape as the
-guard-match / partial-match feature already in the language and keeps the match-only
-ergonomics. It is strictly an optimization over 6a; implement 6a first.
+(Symmetrically `p != null_ptr()` narrows in the `true` arm.) This is an ordinary,
+exhaustive boolean `.match`, so it keeps the match-only ergonomics without relying on
+match-arm guard syntax. It is strictly an optimization over 6a; implement 6a first.
 
 Recommendation: **Stage 3 ships 6a (assert_nonnull) as the required idiom; 6b is a
 follow-up** so we don't block on flow-analysis plumbing.
@@ -318,8 +334,8 @@ allocator is mutated through `acquire`). Driven by Stage 2/3 diagnostics, not a 
   spelling: Stages 0–1 keep `fits`/`ty_eq` kind-blind, so **nothing is rejected** and all
   2200 sites keep compiling untouched. Checking is then turned on one capability at a time
   (mutability in S2, nullability in S3), each gated by an audit.
-- **`null_ptr()` / `RawPtr<u8>` floor stays a wildcard** through every stage, so the
-  pervasive null-init and raw-buffer patterns never become a flag day.
+- **`null_ptr()` / `RawPtr<u8>` stays the permissive wildcard** to avoid a compiler-wide
+  migration of optional AST pointers and raw allocator results; it remains a known unsafe boundary.
 - **`.addr()` → `MutPtr` + `MutPtr→Ptr` widening** is what keeps the ~126 `.addr()` sites
   and the AST-node-pointer code legal with zero edits.
 - The compiler's `MutPtr<Malloc>` allocator threading (967 sites) is **correct as-is and

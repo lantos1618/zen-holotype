@@ -1,5 +1,5 @@
 // compiler.parse_expr — expression parsing: atoms, postfixes, matches, literals, calls, and precedence.
-{ Expr, Stmt, Ty, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, mkenumg, mktagg, arm, arm_at, arm_at_g, expr_null, is_expr_null, ematch, strlit, strlit_at, eindex, slit, eloop, lam_r, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, tstring_literal, tnamed } = compiler.genc
+{ Expr, Stmt, Ty, ArmData, FieldInit, Field, Param, lit, byte_lit, flit, vref, vref_at, bin, bin_at, call, call_at, raw_call_at, call_targs_at, emcall, cond, cond_oa, member, member_at, mkstruct, mkstruct_at, finit, mkenum, mktag, mkenumg, mktagg, arm, arm_at, ematch, strlit, strlit_at, eindex, slit, eloop, lam_r, block, sret, slet, sexpr, mkstructg, mkstructg_at, mangle_str_in, mangle_anon_in, dotted_name_in, payload_fname, chain_tmp_name, field, param, tvoid, ti32, ti64, tu8, tf64, tbool, tstring_literal, tnamed } = compiler.genc
 { Token, Scan, scan, is_hex_prefix, is_bin_prefix, is_oct_prefix } = compiler.lex
 { at, is_digit } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -943,32 +943,6 @@ arm_rhs = (a: MutPtr<Malloc>, src: string_view, pos: i32, bare_ok: bool) PExpr {
         },
     })
 }
-// Arm guard: an optional `if <cond>` sitting between an arm PATTERN and its `=>`. `if` here is the
-// guard keyword ONLY (Zen has no if-statement) — in arm position the token after a pattern is normally
-// `=>`, so an `if` there is unambiguous. The guard is a full boolean expression (parsed nested so it
-// stops at `=>`). A guarded arm fires only when the pattern matches AND the guard is true; on false,
-// control falls through to the next arm.
-is_if_kw = (src: string_view, t: Token) bool { src.tok_eq(t, "if") }
-GuardEnd*: {
-    guard: Ptr<Expr>,
-    next: i32,
-}
-parse_arm_guard = (a: MutPtr<Malloc>, src: string_view, pos: i32) GuardEnd {
-    sc := src.scan(pos)
-    src.is_if_kw(sc.tok).match ({
-        true  => {
-            g := a.parse_or_nested(src, sc.next)
-            GuardEnd(
-                guard: g.expr,
-                next: g.next,
-            )
-        },
-        false => GuardEnd(
-            guard: expr_null(),
-            next: pos,
-        ),
-    })
-}
 // Bool match requires two arms or a wildcard; assembly is order-independent.
 BoolArmEnd*: {
     lab: Token,
@@ -1042,16 +1016,12 @@ bool_close = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, a0: BoolArmEnd, 
         false => a.reject_match(close.next),
     })
 }
-// Literal match lowers to nested equality conditionals. A BIND-ALL guarded arm (`x if <cond> => body`)
-// binds the subject to `x` for the guard and body: `test` is the guard, `bind` the binder name, and
-// `bindall` true — cons_lit_arm wraps it as `({ x := subj  (guard ? body : rest) })` so `x` is in scope.
+// Literal match lowers to nested equality conditionals.
 LitArmEnd*: {
     test: Ptr<Expr>,
     body: Ptr<Expr>,
     wild: bool,
     next: i32,
-    bind: string_view,
-    bindall: bool,
 }
 parse_lit_match = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, open: Scan) PExpr {
     first := src.scan(open.next)
@@ -1113,25 +1083,10 @@ lit_arm_more = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArmEnd
 }
 cons_lit_arm = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArmEnd, after: Scan) PExpr {
     rest := a.parse_lit_arms(src, subj, after.next)
-    arm.bindall.match ({
-        true  => PExpr(
-            expr: a.enode(a.bindall_block(subj, arm, rest.expr)),
-            next: rest.next,
-        ),
-        false => PExpr(
-            expr: a.enode(cond(arm.test, arm.body, rest.expr)),
-            next: rest.next,
-        ),
-    })
-}
-// A bind-all guarded value arm `x if g => body`, with the following arms lowered to `rest`, becomes
-// `({ x := subj  (g ? body : rest) })`: the let binds the subject so the guard `g` and `body` can name
-// it, and the trailing cond is the block's value. On guard-false the cond yields `rest` (fall-through).
-bindall_block = (a: MutPtr<Malloc>, subj: PExpr, arm: LitArmEnd, rest: Ptr<Expr>) Expr {
-    stm: [Stmt] := slice(a.acquire(2 * sizeof(Stmt)), 2)
-    stm[0] = slet(arm.bind, subj.expr)
-    stm[1] = sexpr(a.enode(cond(arm.test, arm.body, rest)))
-    block(stm)
+    PExpr(
+        expr: a.enode(cond(arm.test, arm.body, rest.expr)),
+        next: rest.next,
+    )
 }
 parse_lit_arm = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) LitArmEnd {
     sc := src.scan(pos)
@@ -1148,34 +1103,10 @@ parse_lit_arm_wild = (a: MutPtr<Malloc>, src: string_view, us: Scan) LitArmEnd {
         body: rhs.expr,
         wild: true,
         next: rhs.next,
-        bind: "",
-        bindall: false,
     )
 }
-// A non-wildcard value arm: either a BIND-ALL guarded arm `<ident> if <cond> => body` (the identifier
-// binds the whole subject) or a literal-label arm `<literal> => body`. The `if` after a bare identifier
-// is unambiguous (a plain literal arm's label is followed by `=>`), so it selects the bind-all form.
-parse_lit_arm_val = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) LitArmEnd {
-    sc := src.scan(pos)
-    nx := src.scan(sc.next)
-    (is_ident_tok(sc.tok) && src.is_if_kw(nx.tok)).match ({
-        true  => a.parse_lit_arm_bindall(src, sc),
-        false => a.parse_lit_arm_lit(src, subj, pos),
-    })
-}
-parse_lit_arm_bindall = (a: MutPtr<Malloc>, src: string_view, id: Scan) LitArmEnd {
-    name := a.lexeme(src, id.tok)
-    gd := a.parse_arm_guard(src, id.next)    // parses `if <cond>`; gd.next is at `=>`
-    rhs := a.arm_rhs(src, gd.next, false)
-    LitArmEnd(
-        test: gd.guard,
-        body: rhs.expr,
-        wild: false,
-        next: rhs.next,
-        bind: name,
-        bindall: true,
-    )
-}    // the guard (bool), evaluated with `name` bound to the subject
+// A non-wildcard value arm is a literal label followed by `=> body`.
+parse_lit_arm_val = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) LitArmEnd { a.parse_lit_arm_lit(src, subj, pos) }
 parse_lit_arm_lit = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) LitArmEnd {
     le := a.parse_atom(src, pos)    // the literal label (0, 'a', -5, …)
     rhs := a.arm_rhs(src, le.next, false)
@@ -1184,8 +1115,6 @@ parse_lit_arm_lit = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32)
         body: rhs.expr,
         wild: false,
         next: rhs.next,
-        bind: "",
-        bindall: false,
     )
 }    // the mandatory `=> body`
 subj_name = (e: Ptr<Expr>) string_view {
@@ -1298,9 +1227,8 @@ fill_varm = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [ArmData], i: i
     src.is_lparen(pk.tok).match ({
         true  => a.fill_varm_bound(src, vn, pk.next, buf, i, dot.tok.start),
         false => {
-            gd := a.parse_arm_guard(src, vt.next)
-            rhs := a.arm_rhs(src, gd.next, false)
-            buf[i] = arm_at_g(vn, "", rhs.expr, gd.guard, dot.tok.start)
+            rhs := a.arm_rhs(src, vt.next, false)
+            buf[i] = arm_at(vn, "", rhs.expr, dot.tok.start)
             a.arm_tail(src, rhs.next, buf, i)
         },
     })
@@ -1308,11 +1236,10 @@ fill_varm = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [ArmData], i: i
 // `.Variant(binders…) => body`: a single binder keeps the existing form; multiple binders desugar.
 fill_varm_bound = (a: MutPtr<Malloc>, src: string_view, vn: string_view, pos: i32, buf: [ArmData], i: i32, dpos: i32) PEnd {
     bl := a.arm_binds(src, pos)
-    gd := a.parse_arm_guard(src, bl.next)
-    rhs := a.arm_rhs(src, gd.next, false)
+    rhs := a.arm_rhs(src, bl.next, false)
     buf[i] = (bl.count == 1).match ({
-        true  => arm_at_g(vn, bl.names[0], rhs.expr, gd.guard, dpos),
-        false => arm_at_g(vn, "__zen_payload", a.destr_body(bl, rhs.expr), gd.guard, dpos),
+        true  => arm_at(vn, bl.names[0], rhs.expr, dpos),
+        false => arm_at(vn, "__zen_payload", a.destr_body(bl, rhs.expr), dpos),
     })
     a.arm_tail(src, rhs.next, buf, i)
 }
@@ -1330,9 +1257,8 @@ fill_wild = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [ArmData], i: i
     (src.is_wild_label(us.tok) == false).then({
         perr_set_at(us.tok.start)
     })
-    gd := a.parse_arm_guard(src, us.next)
-    rhs := a.arm_rhs(src, gd.next, true)
-    buf[i] = arm_at_g("_", "", rhs.expr, gd.guard, us.tok.start)
+    rhs := a.arm_rhs(src, us.next, true)
+    buf[i] = arm_at("_", "", rhs.expr, us.tok.start)
     a.arm_tail(src, rhs.next, buf, i)
 }
 // Comma continues arm list; rbrace closes it; anything else is a parse error.

@@ -13,7 +13,7 @@
 { perr_get } = compiler.parse_type
 { lerr_get, collect_comments } = compiler.lex
 { resolve_module } = compiler.check
-{ CheckDiagnostic, check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, check_module_batch, denrich_check, desc_or } = compiler.check_validate
+{ CheckDiagnostic, check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_no_if_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, check_module_batch, denrich_check, desc_or } = compiler.check_validate
 { genModuleIn } = compiler.genc_emit
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
@@ -40,7 +40,7 @@ cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic { (a.code == 0)
 // types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
 // INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
 // batch (the flat sentinels would otherwise spray bogus type errors).
-check_diag_no_main = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: string_view) CheckDiagnostic { mp.check_module_parse_diagnostic_from_source(decls, flat).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)) }
+check_diag_no_main = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: string_view) CheckDiagnostic { check_module_no_if_diagnostic_from_source(flat).cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat)).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)) }
 RenderTarget*: {
     path: string_view,
     src: string_view,
@@ -81,6 +81,35 @@ emit_one = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram,
     sp := diag_user_span(rp.flat, rt.src, cd.source_offset, cd.span_width)
     msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
     derr(mp.render_diagnostic(rt.path, rt.src, sp.line, sp.col, sp.end_col, cd.kind, msg, cd.hint, cd.count))
+}
+// Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
+// but the no-if language rule still applies. Render the same structured diagnostic directly against
+// their input so every user-facing command teaches the canonical `.match` replacement.
+report_no_if_plain = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
+    cd := check_module_no_if_diagnostic_from_source(src)
+    (cd.code == 0).match ({
+        true  => 0,
+        false => {
+            sp := diag_user_span(src, src, cd.source_offset, cd.span_width)
+            derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            1
+        },
+    })
+}
+// Checked commands preflight the resolved flat source before parsing or semantic lowering. This keeps
+// the obsolete guard parser/lowerer out of the execution path and still maps an `if` in an imported
+// module back to that module's real file.
+report_no_if_resolved = (mp: MutPtr<Malloc>, rp: ResolvedProgram, path: string_view, user: string_view) i32 {
+    cd := check_module_no_if_diagnostic_from_source(rp.flat)
+    (cd.code == 0).match ({
+        true  => 0,
+        false => {
+            rt := pick_render(rp, cd.source_offset, cd.span_width, path, user)
+            sp := diag_user_span(rp.flat, rt.src, cd.source_offset, cd.span_width)
+            derr(mp.render_diagnostic(rt.path, rt.src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            1
+        },
+    })
 }
 // how many main-channel diagnostics we print before collapsing the rest into a single trailer line.
 DIAG_CAP = () i32 { 20 }
@@ -193,20 +222,25 @@ cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: str
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc failure.
 compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view) i32 {
     rp := mp.resolve_prog(root, path, src)
-    raw := mp.parse_module(rp.flat)
-    decls := mp.resolve_module(raw)
-    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+    (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
-            gen := mp.genModuleIn(decls)
-            tmpc := mp.TMPC()
-            write_runnable_c(tmpc, gen).match ({
-                true  => (mp.cc_command(root, tmpc, out, ccflags, links).system() == 0).match ({
-                    true  => 0,
-                    false => {
-                        derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
-                        1
-                    },
-                }),
+            raw := mp.parse_module(rp.flat)
+            decls := mp.resolve_module(raw)
+            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                true  => {
+                    gen := mp.genModuleIn(decls)
+                    tmpc := mp.TMPC()
+                    write_runnable_c(tmpc, gen).match ({
+                        true  => (mp.cc_command(root, tmpc, out, ccflags, links).system() == 0).match ({
+                            true  => 0,
+                            false => {
+                                derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
+                                1
+                            },
+                        }),
+                        false => 1,
+                    })
+                },
                 false => 1,
             })
         },
@@ -230,12 +264,17 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
             rp := mp.resolve_prog(root, path, src)
-            raw := mp.parse_module(rp.flat)
-            decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+            (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
-                    out_bytes(mp.genModuleIn(decls).bytes())
-                    0
+                    raw := mp.parse_module(rp.flat)
+                    decls := mp.resolve_module(raw)
+                    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                        true  => {
+                            out_bytes(mp.genModuleIn(decls).bytes())
+                            0
+                        },
+                        false => 1,
+                    })
                 },
                 false => 1,
             })
@@ -263,14 +302,19 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
             rp := mp.resolve_prog(root, path, src)
-            raw := mp.parse_module(rp.flat)
-            decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+            (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
-                    out(mp.js_floor(root))
-                    out("\n")
-                    out_bytes(mp.genJsModuleIn(decls).bytes())
-                    0
+                    raw := mp.parse_module(rp.flat)
+                    decls := mp.resolve_module(raw)
+                    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                        true  => {
+                            out(mp.js_floor(root))
+                            out("\n")
+                            out_bytes(mp.genJsModuleIn(decls).bytes())
+                            0
+                        },
+                        false => 1,
+                    })
                 },
                 false => 1,
             })
@@ -286,21 +330,26 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
     contents_in(mp, path).match ({
         .Ok(src) => {
             rp := mp.resolve_prog(root, path, src)
-            raw := mp.parse_module(rp.flat)
-            decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+            (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
-                    js := mp.gstr_string(8192).gstr_append(mp, mp.js_floor(root)).gstr_append(mp, "\n")
-                    mod := mp.genJsModuleIn(decls)
-                    full := js.gstr_append(mp, mod.finish_cstr(mp))
-                    save(out_path, full.finish_cstr(mp), full.len).match ({
-                        .Ok(n)  => {
-                            derr("zenc: wrote ")
-                            derr(out_path)
-                            derr("\n")
-                            0
+                    raw := mp.parse_module(rp.flat)
+                    decls := mp.resolve_module(raw)
+                    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                        true  => {
+                            js := mp.gstr_string(8192).gstr_append(mp, mp.js_floor(root)).gstr_append(mp, "\n")
+                            mod := mp.genJsModuleIn(decls)
+                            full := js.gstr_append(mp, mod.finish_cstr(mp))
+                            save(out_path, full.finish_cstr(mp), full.len).match ({
+                                .Ok(n)  => {
+                                    derr("zenc: wrote ")
+                                    derr(out_path)
+                                    derr("\n")
+                                    0
+                                },
+                                .Err(e) => 1,
+                            })
                         },
-                        .Err(e) => 1,
+                        false => 1,
                     })
                 },
                 false => 1,
@@ -340,14 +389,19 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
             rp := mp.resolve_prog(root, spec.source, src)
-            raw := mp.parse_module(rp.flat)
-            decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
+            (mp.report_no_if_resolved(rp, spec.source, src) == 0).match ({
                 true  => {
-                    derr("zenc: ")
-                    derr(spec.source)
-                    derr(": ok\n")
-                    0
+                    raw := mp.parse_module(rp.flat)
+                    decls := mp.resolve_module(raw)
+                    (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
+                        true  => {
+                            derr("zenc: ")
+                            derr(spec.source)
+                            derr(": ok\n")
+                            0
+                        },
+                        false => 1,
+                    })
                 },
                 false => 1,
             })
@@ -513,7 +567,7 @@ default_emit = (mp: MutPtr<Malloc>, path: string_view) i32 { eq(path, "").match 
 stdin_emit = (mp: MutPtr<Malloc>, src: string_view) i32 {
     sib := mp.first_user_import_in(src)
     eq(sib, "").match ({
-        true  => mp.raw_emit_src(src),
+        true  => mp.raw_emit_src("<stdin>", src),
         false => {
             derr(mp.gstr_string(256).gstr_append(mp, "zenc: <stdin>: error: sibling import '").gstr_append(mp, sib).gstr_append(mp, "' needs a source file on disk (stdin has no directory); use `zenc build <file.zen>`\n").gstr_finish(mp))
             1
@@ -522,16 +576,21 @@ stdin_emit = (mp: MutPtr<Malloc>, src: string_view) i32 {
 }
 raw_emit_file = (mp: MutPtr<Malloc>, path: string_view) i32 {
     contents_in(mp, path).match ({
-        .Ok(src) => mp.raw_emit_src(src),
+        .Ok(src) => mp.raw_emit_src(path, src),
         .Err(e)  => {
             derr("zenc: cannot open input\n")
             1
         },
     })
 }
-raw_emit_src = (mp: MutPtr<Malloc>, src: string_view) i32 {
-    out_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(src))).bytes())
-    0
+raw_emit_src = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
+    (mp.report_no_if_plain(path, src) == 0).match ({
+        true  => {
+            out_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(src))).bytes())
+            0
+        },
+        false => 1,
+    })
 }
 // read all of fd 0 (stdin/pipe — no seekable size) into one buffer.
 STDIN_CAP := 8388608
@@ -715,17 +774,22 @@ bs_write = (out_path: string_view, gen: String) bool {
 // those std modules so the names ARE declared, dedups, and runs the full checker over the real program.
 bs_emit_checked = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, flat: string_view, entry: string_view, esrc: string_view) i32 {
     rp := mp.resolve_prog(root, entry, esrc)
-    raw := mp.parse_module(rp.flat)
-    decls := mp.resolve_module(raw)
-    (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
+    (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
         true  => {
-            gen := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))
-            gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
-                true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
-                false => {
-                    derr("zenc: --build-self: emitted C did not start with the expected head\n")
-                    1
+            raw := mp.parse_module(rp.flat)
+            decls := mp.resolve_module(raw)
+            (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
+                true  => {
+                    gen := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))    // type error in compiler source — fail, don't regenerate a miscompiled seed
+                    gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
+                        true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
+                        false => {
+                            derr("zenc: --build-self: emitted C did not start with the expected head\n")
+                            1
+                        },
+                    })
                 },
+                false => 1,
             })
         },
         false => 1,
@@ -912,24 +976,29 @@ fmt_dirty = (src: string_view, r: FmtResult) bool {
 fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            r := mp.fmt_render(src)
-            r.ok.match ({
-                true  => fmt_dirty(src, r).match ({
-                    true  => check.match ({
-                        true  => {
-                            derr("zenc: ")
-                            derr(path)
-                            derr(": needs formatting\n")
-                            1
-                        },
-                        false => save(path, r.text, r.len).match ({
-                            .Ok(n)  => 0,
-                            .Err(e) => 1,
+            (mp.report_no_if_plain(path, src) == 0).match ({
+                true  => {
+                    r := mp.fmt_render(src)
+                    r.ok.match ({
+                        true  => fmt_dirty(src, r).match ({
+                            true  => check.match ({
+                                true  => {
+                                    derr("zenc: ")
+                                    derr(path)
+                                    derr(": needs formatting\n")
+                                    1
+                                },
+                                false => save(path, r.text, r.len).match ({
+                                    .Ok(n)  => 0,
+                                    .Err(e) => 1,
+                                }),
+                            }),
+                            false => 0,
                         }),
-                    }),
-                    false => 0,
-                }),
-                false => mp.fmt_parse_err(),
+                        false => mp.fmt_parse_err(),
+                    })
+                },
+                false => 1,
             })
         },
         .Err(e)  => {
@@ -942,13 +1011,18 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
 fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            r := mp.fmt_render(src)
-            r.ok.match ({
+            (mp.report_no_if_plain(path, src) == 0).match ({
                 true  => {
-                    out(r.text)
-                    0
+                    r := mp.fmt_render(src)
+                    r.ok.match ({
+                        true  => {
+                            out(r.text)
+                            0
+                        },
+                        false => mp.fmt_parse_err(),
+                    })
                 },
-                false => mp.fmt_parse_err(),
+                false => 1,
             })
         },
         .Err(e)  => {

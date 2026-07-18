@@ -60,13 +60,13 @@ fits* = (g: Ty, w: Ty) bool {
           false => g.ty_eq(w) && g.ptr_kind_fits(w) }) }) }) }
 ```
 
-`fits` already decides **three** things: numeric rank widening (`ty_rank`), the `RawPtr<u8>`
-floor coercion, and — the point — **two capability facets**:
+`fits` already decides **three** things: numeric rank widening (`ty_rank`), the deliberately
+permissive `RawPtr<u8>` floor, and — the point — **two capability facets**:
 
 - **Nullability subtyping**: a nullable `RawPtr<T>` does **not** fit a non-null `Ptr`/`MutPtr`
   slot (`check.zen:4526-4528`, `4542`).
 - **Direction subtyping**: a read-only `k_ptr` value does **not** fit a writable `k_mut_ptr`
-  slot; every other direction is permissive (`ptr_kind_fits`, `check.zen:4539`).
+  or writable `k_raw_ptr` slot. `MutPtr→Ptr` and `MutPtr→RawPtr` remain safe.
 
 `fits` is called ~19× across `check_validate.zen` for assignment-fit, return-fit, arg-fit,
 struct-field-fit (`check_validate.zen:865,1170,1178,1212,1219,3029,…`). **Crucially it is

@@ -185,6 +185,9 @@ harness_value_run* = () i32 {
         src: "Box<M>: { buf: [M]  n: i32  sum = (b: Box<M>) M { ms: [M] := b.buf  ms[0] + ms[1] } }\ntest* = () i32 { data := [10, 20, 30]  b := Box<i32>(buf: data, n: 3)  b.sum() }",
         want: "30",
     ), VCase(
+        src: "Box*<T>: { v: T }\nuse = (ro: Box<Ptr<i32>>, rw: Box<MutPtr<i32>>) i32 { ro.v.load() + rw.v.load() }\ntest* = () i32 { x: i32 := 20  y: i32 := 22  p: Ptr<i32> := x.addr()  q: MutPtr<i32> := y.addr()  use(Box<Ptr<i32>>(v: p), Box<MutPtr<i32>>(v: q)) }",
+        want: "42",
+    ), VCase(
         src: "Result<T, E>: Ok(T) | Err(E)\nIoError: NotFound\nok2<T, E> = (x: T) Result<T, E> { .Ok(x) }\ngetit = () Result<i32, IoError> { ok2(42) }\ntest* = () i32 { getit().match({ .Ok(v) => v, .Err(e) => 0 - 1 }) }",
         want: "42",
     ), VCase(
@@ -527,7 +530,7 @@ harness_value_run* = () i32 {
         src: "sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match({ true => lo, false => (v > hi).match({ true => hi, false => v }) }) }\nsub<T> = (xs: [T], lo: i64, hi: i64) [T] { l := sl_clamp(lo, 0, xs.len)  h := sl_clamp(hi, l, xs.len)  slice(xs.ptr.offset(l * sizeof(T)), h - l) }\ntake<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }\ndrop<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  v: [i32] := s.sub(1, 3)\n  t: [i32] := s.take(2)\n  d: [i32] := s.drop(3)\n  o: [i32] := s.sub(2, 99)\n  v.len.to_i32() * 1000 + v[0] * 10 + v[1] + t[0] + d[0] + o.len.to_i32()\n}",
         want: "2282",
     ), VCase(
-        src: "Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) Ptr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: [T]) [T] { out := a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h := Heap(z: 0)\n  r: [i32] := h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}",
+        src: "Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: [T]) [T] { out := a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h := Heap(z: 0)\n  r: [i32] := h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}",
         want: "4321",
     ), VCase(
         src: "index_of<T> = (xs: [T], x: T) i64 { r := 0 - 1  xs.loop((h, i, e) { (e == x).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ncontains<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }\nis30 = (x: i32) bool { x == 30 }\nfind_by<T> = (xs: [T], pred: (T) bool) i64 { r := 0 - 1  xs.loop((h, i, e) { pred(e).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ntest* = () i32 {\n  s := [10, 20, 30, 40]\n  ix := s.index_of(30)\n  miss := s.index_of(99)\n  has := s.contains(40).match({ true => 1, false => 0 })\n  fb := s.find_by(is30)\n  ix.to_i32() * 1000 + (miss + 1).to_i32() * 100 + has * 10 + fb.to_i32()\n}",
@@ -980,26 +983,11 @@ harness_value_run* = () i32 {
         src: "R<T, E>: Ok(T) | Err(E)\nmk<T> = (x: T) R<T, i32> { .Ok(x) }\ninc<T> = (x: T) R<T, i32> {\n  .Ok(mk(x).or_return())\n}\ntest* = () i32 { inc(9).match ({ .Ok(n) => n, .Err(e) => 0 - 1 }) }",
         want: "9",
     ), VCase(
-        src: "test* = () i32 { n := 5\n n.match ({ x if x > 0 => 1, x if x < 0 => 2, _ => 3 }) }",
-        want: "1",
+        src: "classify = (n: i32) i32 { (n > 0).match ({ true => 1, false => (n < 0).match ({ true => 2, false => 3 }) }) }\ntest* = () i32 { classify(5) * 100 + classify(0 - 4) * 10 + classify(0) }",
+        want: "123",
     ), VCase(
-        src: "test* = () i32 { n := 0 - 4\n n.match ({ x if x > 0 => 1, x if x < 0 => 2, _ => 3 }) }",
-        want: "2",
-    ), VCase(
-        src: "test* = () i32 { n := 0\n n.match ({ x if x > 0 => 1, x if x < 0 => 2, _ => 3 }) }",
-        want: "3",
-    ), VCase(
-        src: "Box: Val(i32) | Empty\ntest* = () i32 { Box.Val(42).match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }",
-        want: "1",
-    ), VCase(
-        src: "Box: Val(i32) | Empty\ntest* = () i32 { Box.Val(3).match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }",
-        want: "2",
-    ), VCase(
-        src: "Box: Val(i32) | Empty\ntest* = () i32 { Box.Empty.match ({ .Val(v) if v > 10 => 1, .Val(v) => 2, .Empty => 3 }) }",
-        want: "3",
-    ), VCase(
-        src: "Box: Val(i32) | Empty\nclassify = (b: Box) i32 { b.match ({ .Val(v) if v > 100 => 3, .Val(v) if v > 10 => 2, .Val(v) => 1, .Empty => 0 }) }\ntest* = () i32 { classify(Box.Val(50)) * 100 + classify(Box.Val(5)) * 10 + classify(Box.Empty) }",
-        want: "210",
+        src: "Box: Val(i32) | Empty\nclassify = (b: Box) i32 { b.match ({ .Val(v) => (v > 100).match ({ true => 3, false => (v > 10).match ({ true => 2, false => 1 }) }), .Empty => 0 }) }\ntest* = () i32 { classify(Box.Val(500)) * 1000 + classify(Box.Val(50)) * 100 + classify(Box.Val(5)) * 10 + classify(Box.Empty) }",
+        want: "3210",
     ), VCase(
         src: "twice = (f: (i32) i32) (i32) i32 { (x: i32) i32 { f(f(x)) } }\ntest* = () i32 { inc := (x: i32) i32 { x + 1 }\n twice(inc)(5) }",
         want: "7",
@@ -1039,13 +1027,8 @@ harness_value_run* = () i32 {
 // the returned closure BOUND to a local and applied twice: h(3)+h(10) = 8 + 22 = 30.
 // a TOP-LEVEL named fn (a bare fn value) captured + called through the closure env. twice(inc)(5)=7.
 // pipe: fn-typed params called directly in a non-returning fn (no closure lowering). g(f(3))=8.
-// MATCH GUARD, bind-all value arm: `x if <cond> => …`, guard true → first matching arm.
-// bind-all guard fall-through: first guard false, second guard true.
-// bind-all guard all-false → the unguarded catch-all `_`.
-// MATCH GUARD, variant arm: `.Val(v) if v > 10` taken (guard true) over the later unguarded `.Val`.
-// variant guard FALL-THROUGH to the later unguarded same-variant arm when the guard is false.
-// variant guard: a different variant is unaffected by the guard.
-// the guard sees the arm's payload binding; second .Val arm is ALSO guarded, third is the catch-all.
+// MATCH-ONLY conditionals: positive / negative / zero through nested boolean matches.
+// Enum payload classification nests a boolean `.match` in `.Val`; source-level `if` is forbidden.
 // GENERIC or_return (#54): the Err-guard's synthesized tag const must be monomorphized with the
 // caller's concrete T. Statement position: `v := mk(x).or_return()` in a `R<T, i32>`-returning
 // generic fn once emitted `R_T_i32_Err` (unsubstituted T → C wouldn't compile).

@@ -13,7 +13,7 @@
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, is_expr_null, tvoid, k_raw_ptr, k_mut_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, is_expr_null, tvoid, ptr_kw, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Comment } = compiler.lex
 { at } = std.text.bytes
 // ── comment sidecar state ──────────────────────────────────────────────────────
@@ -279,13 +279,6 @@ ff_indent = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({
     false => s.ff_append(a, "    ").ff_indent(a, n - 1),
 }) }
 // ── types ────────────────────────────────────────────────────────────────────
-// the source keyword for a pointer kind (preserves the spelling on round-trip)
-ptr_kw = (kind: i32) string_view {
-    (kind == k_raw_ptr()).match ({
-        true  => "RawPtr",
-        false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" }),
-    })
-}
 ff_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
         .I32           => s.ff_append(a, "i32"),
@@ -584,16 +577,6 @@ ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
     ret.ff_block(a, lm.body, ind, true)
 }
 // ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
-// An arm's `if <guard>` (rendered ` if <guard>`, 4 + the guard's text length) is part of the aligned
-// PATTERN region, so `=>` still lines up across guarded and unguarded arms. The guard is rendered into a
-// throwaway String only to MEASURE its width; ff_arm_pat re-renders it for output — the two agree, so a
-// guarded arm round-trips through the formatter idempotently.
-ff_guard_len = (a: MutPtr<Malloc>, ar: ArmData) i32 {
-    ar.guard.is_expr_null().match ({
-        true  => 0,
-        false => 4 + to_i32(view(a.gstr_string(64).ff_expr(a, ar.guard, 0).gstr_finish(a)).len),
-    })
-}
 arm_pat_len = (a: MutPtr<Malloc>, ar: ArmData) i32 {
     eq(ar.variant, "_").match ({
         true  => 1,
@@ -601,7 +584,7 @@ arm_pat_len = (a: MutPtr<Malloc>, ar: ArmData) i32 {
             true  => 1 + to_i32(view(ar.variant).len),
             false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len),
         }),
-    }) + a.ff_guard_len(ar)
+    })
 }
 arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
     m := 0
@@ -612,16 +595,12 @@ arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
     m
 }
 ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
-    pat := eq(ar.variant, "_").match ({
+    eq(ar.variant, "_").match ({
         true  => s.ff_append(a, "_"),
         false => is_empty(ar.bind).match ({
             true  => s.ff_append(a, ".").ff_append(a, ar.variant),
             false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")"),
         }),
-    })
-    ar.guard.is_expr_null().match ({
-        true  => pat,
-        false => pat.ff_append(a, " if ").ff_expr(a, ar.guard, 0),
     })
 }
 ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({
@@ -818,7 +797,9 @@ ff_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) String {
         .Assign(asn) => s.ff_expr(a, asn.target, ind).ff_append(a, " = ").ff_expr(a, asn.value, ind),
         .Return(e)   => s.ff_append(a, "return ").ff_expr(a, e, ind),
         .ExprStmt(e) => s.ff_expr(a, e, ind),
-        .If(f)       => s.ff_append(a, "if (").ff_expr(a, f.c, ind).ff_append(a, ") ").ff_block(a, f.then, ind, false).ff_append(a, " else ").ff_block(a, f.els, ind, false),
+        // Internal branch IR is never parsed from Zen source. If a resolved tree is printed through
+        // this API, preserve the language invariant by spelling it as a boolean `.match`.
+        .If(f)       => s.ff_append(a, "(").ff_expr(a, f.c, ind).ff_append(a, ").match ({ true => ").ff_block(a, f.then, ind, false).ff_append(a, ", false => ").ff_block(a, f.els, ind, false).ff_append(a, " })"),
         .While(w)    => s.ff_append(a, "@while (").ff_expr(a, w.c, ind).ff_append(a, ") ").ff_block(a, w.body, ind, false),
         .IndexSet(x) => s.ff_recv(a, x.seq, ind).ff_append(a, "[").ff_expr(a, x.idx, ind).ff_append(a, "] = ").ff_expr(a, x.value, ind),
     })

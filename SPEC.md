@@ -52,8 +52,9 @@ Box<T>*: { value: T }                      // generic struct
 Opt<T>*: Some(T) | None                    // generic enum
 ```
 
-`*` is a glued visibility marker on the declaration name. It is used by docs and
-module export intent. Full privacy enforcement is still pending.
+`*` is a glued visibility marker on the declaration name. The checked module loader rejects
+destructured imports and qualified value/type uses of unstarred declarations as
+`error[private-name]`. The lower-level flat-module emitter has no module boundary to enforce.
 
 Function bodies return their trailing expression. `return expr` is supported as
 an early return statement, but early returns inside value-position block/match
@@ -103,10 +104,15 @@ names. The owned growable buffer remains `String`. `[T]` is a fat slice with a
 pointer and length. Function types are parameter types for inline templates and
 closure arguments.
 
-Current pointer status: the parser accepts `Ptr<T>`, `MutPtr<T>`, and
-`RawPtr<T>`, but the checker/backend currently collapse them to one pointer
-shape and enforce invariant pointee equality. Direction and nullability are a
-language goal, not a fully enforced current guarantee.
+Pointer kinds are enforced by the checker even though all three lower to `T*`
+in C. `Ptr<T>` is non-null/read-only, `MutPtr<T>` is non-null/writable, and
+`RawPtr<T>` is nullable. A writable pointer may flow to a read-only slot, but
+not the reverse; nested pointer, slice, and generic arguments are invariant.
+`null_ptr()` has type `RawPtr<u8>`, the deliberately permissive allocator/FFI
+floor. Typed `RawPtr<T>` values require `assert_nonnull` before non-null use, and
+that assertion preserves an existing direction (`Ptr` stays `Ptr`, `MutPtr`
+stays `MutPtr`) while narrowing typed `RawPtr` to `MutPtr`. The byte floor is an
+explicit unsafe boundary because allocation results and null share its type.
 
 Integer literals are context-sensitive. They fit numeric slots when in range and
 default to `i32` unless the value requires `i64`. `u8 <= i32 <= i64` widening is
@@ -149,6 +155,11 @@ return expr      // early return
 Source-level branching is `.match`. `if`, `for`, and ordinary `while` are not
 source syntax. The C backend may lower checked matches to C `switch`, `if`, or
 ternary expressions as target details.
+
+An exact source token `if` is rejected as `error[no-if]`. The diagnostic shows
+the equivalent boolean form: `cond.match ({ true => yes, false => no })`.
+Conditional logic inside an enum arm is another nested boolean `.match`; Zen has
+no match-guard exception to the no-`if` rule.
 
 `loop` is the public slice iteration form:
 
@@ -377,8 +388,10 @@ directly; there is no separate `try_*` doubling.
 Current safety status: these APIs exist and are tested, and the checker rejects
 same-body local use after `Own<T>.release_in(...)`, `Rc<T>.drop_in(...)`, or
 `Arc<T>.drop_in(...)`. The full model is documented in
-[MEMORY_MODEL.md](MEMORY_MODEL.md). Branch-sensitive ownership flow, pointer
-direction/nullability, and lifetime checking remain roadmap items.
+[MEMORY_MODEL.md](MEMORY_MODEL.md). Pointer direction and typed-raw nullability are
+checked; `RawPtr<u8>` remains the deliberately permissive allocator/FFI floor.
+Branch-sensitive/interprocedural ownership flow and full lifetime checking remain
+roadmap items.
 
 ## Errors And Results
 
@@ -516,10 +529,10 @@ kernel does not re-check.
 
 ## Tooling
 
-`zenc fmt [--check] <file.zen>` exists and is conservative: it preserves line
-comments, block comments, strings, and char literals while normalizing brace
-indentation/trailing whitespace, and is tested for idempotence. It is not yet a
-full AST pretty-printer.
+`zenc fmt [--check] <file.zen>` uses the comment-preserving AST pretty-printer in
+`compiler.pretty`. It preserves faithful source forms such as UFCS calls, formats
+matches/declarations structurally, round-trips comments and literals, and is tested
+for idempotence on fixtures and a real-source corpus.
 
 `zenc doc <std.mod|file.zen>` lists public declaration heads and adjacent `//`
 docs. It is a first-pass docs command, not a rich documentation generator.
