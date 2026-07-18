@@ -575,12 +575,36 @@ ModuleTable*: {
         })
         found
     }
+    index_of_id = (t: ModuleTable, id: String) i64 {
+        found := 0 - 1
+        t.modules.loop((h, i, m) {
+            (found < 0 && id.string_eq_str(m.id)).then({
+                found = i
+            })
+        })
+        found
+    }
+}
+// One appended module body in the flat: `midx` indexes ResolvedProgram.table.modules (0 = the entry
+// module), [lo, hi) is the body's byte span in the FINAL flat (kept exact through the shadow-rename
+// splices and the dedup drops), and [line_lo, line_lo+line_n) indexes ResolvedProgram.line_srcs —
+// for each kept flat line of the region, its 1-based line number in the module's ORIGINAL source.
+// A module bound under several namespace aliases is appended once per bind, so it may own several
+// regions; regions are recorded in append order (ascending lo), which is what fregion_find assumes.
+FlatRegion*: {
+    midx: i64,
+    lo: i64,
+    hi: i64,
+    line_lo: i64,
+    line_n: i64,
 }
 ResolvedProgram*: {
     table: ModuleTable,
     flat: string_view,
     body_start: i64,
     body_end: i64,
+    regions: [FlatRegion],
+    line_srcs: [i32],
 }
 ParsedModule*: {
     id: string_view,
@@ -1128,10 +1152,12 @@ load_closure_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view
             c3 := a.load_import_graph_table(table, inpath, entry.source, graph, id.id_is_user(), c2)
             ns := a.collect_ns_graph_table(table, inpath, entry.source, graph, a.ns_scan(c3))
             blo := ns.c.out.len
+            llo := lmap_lines()
             body := ns.c.out.strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, false)
             id.id_is_user().then({
                 note_uregion(entry.id, blo, body.len)
             })
+            a.note_fregion(table.index_of_id(id), body.freg_lo(blo), body.len, llo)
             Closure(
                 seen: ns.c.seen,
                 out: body,
@@ -1799,6 +1825,9 @@ dedup_symbols = (a: MutPtr<Malloc>, out: String, flat: string_view, symbols: [Pr
                 keep.then({
                     cur = cur.rappend_span(a, flat, sym.decl_start, sym.decl_next)
                 })
+                (keep == false).then({
+                    a.note_ldrop(to_i64(sym.decl_start), to_i64(sym.decl_next))
+                })
                 seen = shadow.match ({
                     true  => seen,
                     false => seen.seen_name(nm).match ({
@@ -1867,6 +1896,9 @@ dedup_impls_into = (a: MutPtr<Malloc>, out: String, flat: string_view, p: i32, s
                     })
                     (drop == false).then({
                         cur = cur.rappend_span(a, flat, sp.start, sp.next)
+                    })
+                    drop.then({
+                        a.note_ldrop(to_i64(sp.start), to_i64(sp.next))
                     })
                     pos = sp.next
                 },
@@ -2022,11 +2054,14 @@ load_ns_closure_graph_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: st
     ns_depth = ns_depth + 1
     c2 := a.load_import_graph_table(table, inpath, src, graph, id.id_is_user(), c)
     ns := a.collect_ns_graph_table(table, inpath, src, graph, a.ns_scan(c2))
+    llo := lmap_lines()
     body := a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     ns_depth = ns_depth - 1
+    out2 := ns.c.out.rpush(a, 10).rappend_string(a, body)
+    a.note_fregion(table.index_of_id(id), out2.len - body.len, out2.len, llo)
     Closure(
         seen: ns.c.seen,
-        out: ns.c.out.rpush(a, 10).rappend_string(a, body),
+        out: out2,
         useen: ns.c.useen,
     )
 }
@@ -2116,6 +2151,8 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, f
     cur := out
     pos := p
     is_first := first
+    lline := 1    // 1-based source line of `lpos`, advanced lazily as kept lines are recorded
+    lpos := 0
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
@@ -2129,6 +2166,11 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, f
                         pos = s.next_line(pos)
                     },
                     false => {
+                        lmap_on.then({
+                            lline = lline + to_i32(s.count_nl(lpos, pos))
+                            lpos = pos
+                            a.lmap_note_line(lline)
+                        })
                         e := s.line_end(pos)
                         cur = is_first.match ({
                             true  => cur.rappend_span(a, s, pos, e),
@@ -2652,6 +2694,282 @@ note_uregion = (id: string_view, lo: i64, hi: i64) void {
     })
 }
 uregions_get = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
+// ── FLAT-REGION / LINE map (identity-based diagnostics) ─────────────────────────────────────────
+// Every module-body append into the flat records a FlatRegion, and the strip walk records — for each
+// KEPT line — its 1-based line in the module's ORIGINAL source (import/ns lines are stripped whole,
+// so kept-line numbers jump over them; ns-prefix rewrites are intra-line and never change line
+// counts). A diagnostic's flat offset then resolves to its module IDENTITY and original line
+// directly, with no text matching. Recording is on only while resolve_program_data builds a flat
+// (lmap_on), so parse_resolved_program's per-module strip never pollutes the maps. Reset per
+// program (see uregions_reset for the pattern); buffers grow geometrically via the mp allocator.
+lmap_on := false
+no_fregions = () [FlatRegion] { slice(null_ptr(), 0) }
+freg_buf := no_fregions()
+freg_n := 0
+no_lsrc = () [i32] { slice(null_ptr(), 0) }
+lsrc_buf := no_lsrc()
+lsrc_n := 0
+no_ldrops = () [i64] { slice(null_ptr(), 0) }
+ldrop_buf := no_ldrops()    // flattened (start, end) pairs, ascending, from ONE dedup pass
+ldrop_n := 0
+freg_alloc = (a: MutPtr<Malloc>, n: i64) [FlatRegion] { slice(a.acquire(n * sizeof(FlatRegion)), n) }
+lsrc_alloc = (a: MutPtr<Malloc>, n: i64) [i32] { slice(a.acquire(n * sizeof(i32)), n) }
+ldrop_alloc = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire(n * sizeof(i64)), n) }
+lmap_reset = (a: MutPtr<Malloc>) void {
+    freg_buf = a.freg_alloc(64)
+    freg_n = 0
+    lsrc_buf = a.lsrc_alloc(1024)
+    lsrc_n = 0
+    ldrop_buf = a.ldrop_alloc(64)
+    ldrop_n = 0
+    lmap_on = true
+}
+lmap_off = () void { lmap_on = false }
+lmap_lines = () i64 { lsrc_n }
+fregions_get = () [FlatRegion] { slice(freg_buf.ptr, freg_n) }
+lsrc_get = () [i32] { slice(lsrc_buf.ptr, lsrc_n) }
+freg_grow = (a: MutPtr<Malloc>) void {
+    (freg_n >= freg_buf.len).then({
+        grown := a.freg_alloc(freg_buf.len * 2)
+        freg_buf.loop((h, i, r) {
+            grown[i] = r
+        })
+        freg_buf = grown
+    })
+}
+lsrc_grow = (a: MutPtr<Malloc>) void {
+    (lsrc_n >= lsrc_buf.len).then({
+        grown := a.lsrc_alloc(lsrc_buf.len * 2)
+        lsrc_buf.loop((h, i, v) {
+            grown[i] = v
+        })
+        lsrc_buf = grown
+    })
+}
+ldrop_grow = (a: MutPtr<Malloc>) void {
+    (ldrop_n + 1 >= ldrop_buf.len).then({
+        grown := a.ldrop_alloc(ldrop_buf.len * 2)
+        ldrop_buf.loop((h, i, v) {
+            grown[i] = v
+        })
+        ldrop_buf = grown
+    })
+}
+// newline count in s[lo, hi) — sub-slice iteration (O(hi-lo), no rescan from 0, constant stack).
+count_nl = (s: string_view, lo: i32, hi: i32) i64 {
+    n: i64 := 0
+    (hi > lo).then({
+        span: [u8] := slice(s.offset(lo), to_i64(hi - lo))
+        span.loop((h, i, b) {
+            (b == '\n').then({
+                n = n + 1
+            })
+        })
+    })
+    n
+}
+lmap_note_line = (a: MutPtr<Malloc>, srcline: i32) void {
+    lmap_on.then({
+        a.lsrc_grow()
+        lsrc_buf[lsrc_n] = srcline
+        lsrc_n = lsrc_n + 1
+    })
+}
+// a body append starts with the '\n' separator pushed before it (unless it opens the flat); the
+// region's first LINE starts just past that separator.
+freg_lo = (out: String, blo: i64) i64 { (out.len > blo && out.res_sbyte(blo) == 10).match ({
+    true  => blo + 1,
+    false => blo,
+}) }
+note_fregion = (a: MutPtr<Malloc>, midx: i64, lo: i64, hi: i64, line_lo: i64) void {
+    (lmap_on && hi > lo && midx >= 0).then({
+        a.freg_grow()
+        freg_buf[freg_n] = FlatRegion(
+            midx: midx,
+            lo: lo,
+            hi: hi,
+            line_lo: line_lo,
+            line_n: lsrc_n - line_lo,
+        )
+        freg_n = freg_n + 1
+    })
+}
+// A shadow-rename splice replaced flat[slo, shi) with `newlen` bytes: renames are strictly inside
+// decls (never a newline), so only BYTE coords move — the containing region's hi stretches and every
+// later region shifts; line maps are untouched.
+fregions_splice = (slo: i64, shi: i64, newlen: i64) void {
+    delta := newlen - (shi - slo)
+    (lmap_on && delta != 0).then({
+        regs := fregions_get()
+        regs.loop((h, i, r) {
+            (r.lo >= shi).then({
+                freg_buf[i] = FlatRegion(
+                    midx: r.midx,
+                    lo: r.lo + delta,
+                    hi: r.hi + delta,
+                    line_lo: r.line_lo,
+                    line_n: r.line_n,
+                )
+            })
+            (r.lo < shi && r.hi > slo).then({
+                freg_buf[i] = FlatRegion(
+                    midx: r.midx,
+                    lo: r.lo,
+                    hi: r.hi + delta,
+                    line_lo: r.line_lo,
+                    line_n: r.line_n,
+                )
+            })
+        })
+    })
+}
+note_ldrop = (a: MutPtr<Malloc>, ds: i64, de: i64) void {
+    (lmap_on && de > ds).then({
+        a.ldrop_grow()
+        ldrop_buf[ldrop_n] = ds
+        ldrop_buf[ldrop_n + 1] = de
+        ldrop_n = ldrop_n + 2
+    })
+}
+ldrops_get = () [i64] { slice(ldrop_buf.ptr, ldrop_n) }
+// Apply one dedup pass's DROP list to the maps. `flat` is the PRE-drop flat that pass walked — drops
+// and regions are both in its coordinates. Dropped decl spans start at a line start, so a drop kills
+// exactly the line entries [k0, k0+dead) of the region(s) it overlaps (a drop running PAST a region's
+// end takes the region's whole tail with it). Four passes, each a plain slice walk: (A) turn every
+// drop∩region overlap into a dead-line interval in GLOBAL line-array coordinates (regions and drops
+// both ascend, so intervals come out ascending and disjoint, and never cross a region's window);
+// (B) shrink region byte spans by the dropped bytes before them; (C) rebase each region's line
+// window by the dead entries before/inside it; (D) compact the line array with a cursor over the
+// dead intervals (each is non-empty, so the cursor advances at most once per index and never lags).
+lmap_apply_drops = (a: MutPtr<Malloc>, flat: string_view) void {
+    (lmap_on && ldrop_n > 0).then({
+        regs := fregions_get()
+        drops := ldrops_get()
+        dbuf := a.ldrop_alloc(ldrop_n * 2 + 2)
+        dn := 0
+        regs.loop((h, ri, r) {
+            drops.loop((h2, j, dv) {
+                // A) dead line intervals
+                (j % 2 == 0).then({
+                    ds := dv
+                    de := drops[j + 1]
+                    x := (ds > r.lo).match ({ true => ds, false => r.lo })
+                    y := (de < r.hi).match ({ true => de, false => r.hi })
+                    (x < y).then({
+                        k0 := flat.count_nl(to_i32(r.lo), to_i32(x))
+                        dead := (de > r.hi).match ({
+                            true  => r.line_n - k0,
+                            false => flat.count_nl(to_i32(x), to_i32(y)),
+                        })
+                        capped := (k0 + dead > r.line_n).match ({
+                            true  => r.line_n - k0,
+                            false => dead,
+                        })
+                        (capped > 0).then({
+                            dbuf[dn] = r.line_lo + k0
+                            dbuf[dn + 1] = r.line_lo + k0 + capped
+                            dn = dn + 2
+                        })
+                    })
+                })
+            })
+        })
+        regs.loop((h, ri, r) {
+            // B) byte shifts: subtract every dropped byte before lo / before hi
+            dlo: i64 := 0
+            dhi: i64 := 0
+            drops.loop((h2, j, dv) {
+                (j % 2 == 0).then({
+                    ds := dv
+                    de := drops[j + 1]
+                    cl := (de < r.lo).match ({ true => de, false => r.lo })
+                    (cl > ds).then({
+                        dlo = dlo + (cl - ds)
+                    })
+                    ch := (de < r.hi).match ({ true => de, false => r.hi })
+                    (ch > ds).then({
+                        dhi = dhi + (ch - ds)
+                    })
+                })
+            })
+            freg_buf[ri] = FlatRegion(
+                midx: r.midx,
+                lo: r.lo - dlo,
+                hi: r.hi - dhi,
+                line_lo: r.line_lo,
+                line_n: r.line_n,
+            )
+        })
+        regs.loop((h, ri, r) {
+            // C) rebase line windows (byte fields already updated; line fields still pre-drop)
+            cumb: i64 := 0
+            inw: i64 := 0
+            dbuf.loop((h2, j, v) {
+                (j % 2 == 0 && j < dn).then({
+                    (v < r.line_lo).then({
+                        cumb = cumb + (dbuf[j + 1] - v)
+                    })
+                    (v >= r.line_lo && v < r.line_lo + r.line_n).then({
+                        inw = inw + (dbuf[j + 1] - v)
+                    })
+                })
+            })
+            freg_buf[ri] = FlatRegion(
+                midx: r.midx,
+                lo: r.lo,
+                hi: r.hi,
+                line_lo: r.line_lo - cumb,
+                line_n: r.line_n - inw,
+            )
+        })
+        // D) compact the line array
+        w := 0
+        di := 0
+        lsrc_get().loop((h, k, v) {
+            (di < dn && k >= dbuf[di + 1]).then({
+                di = di + 2
+            })
+            inside := di < dn && k >= dbuf[di] && k < dbuf[di + 1]
+            (inside == false).then({
+                lsrc_buf[w] = v
+                w = w + 1
+            })
+        })
+        lsrc_n = w
+        ldrop_n = 0
+    })
+}
+// binary search: the index of the region whose [lo, hi) contains `off`, else -1 (regions are in
+// append order = ascending lo; separator newlines between regions belong to no region).
+fregion_find* = (regions: [FlatRegion], off: i64) i64 { regions.fregion_bs(off, 0, regions.len) }
+fregion_bs = (regions: [FlatRegion], off: i64, lo: i64, hi: i64) i64 {
+    (lo >= hi).match ({
+        true  => 0 - 1,
+        false => {
+            mid := (lo + hi) / 2
+            r := regions[mid]
+            (off < r.lo).match ({
+                true  => regions.fregion_bs(off, lo, mid),
+                false => (off < r.hi).match ({
+                    true  => mid,
+                    false => regions.fregion_bs(off, mid + 1, hi),
+                }),
+            })
+        },
+    })
+}
+// the 1-based ORIGINAL source line for flat offset `off` inside region `ri`, else 0.
+fregion_src_line* = (regions: [FlatRegion], line_srcs: [i32], flat: string_view, ri: i64, off: i64) i32 {
+    r := regions[ri]
+    k := flat.count_nl(to_i32(r.lo), to_i32(off))
+    (k < r.line_n && r.line_lo + k < line_srcs.len).match ({
+        true  => {
+            v := line_srcs[r.line_lo + k]
+            (v > 0).match ({ true => v, false => 0 })
+        },
+        false => 0,
+    })
+}
 // name-decl offset of `nm` in a module's ORIGINAL source graph (for error line/col attribution).
 symbol_start_of = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) i32 {
     posn := 0
@@ -2793,6 +3111,7 @@ shadow_flat_users = (a: MutPtr<Malloc>, pre: string_view, table: ModuleTable, pr
                     seg := a.gstr_string(hi - lo + 1).rappend_span(a, cur, to_i32(lo), to_i32(hi)).gstr_finish(a)
                     rew := a.gstr_string(4096).rewrite_alias_names(a, seg, 0, ss.ren, alias)
                     cur = a.gstr_string(4096).rappend_span(a, cur, 0, to_i32(lo)).rappend_string(a, rew).append_to_nul(a, cur, to_i32(hi)).gstr_finish(a)
+                    fregions_splice(lo, hi, rew.len)
                     (hi <= nsl).then({
                         shift = shift + (rew.len - (hi - lo))
                     })
@@ -3066,6 +3385,7 @@ check_alias_collisions = (a: MutPtr<Malloc>, table: ModuleTable, graph: ModuleGr
 resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) ResolvedProgram {
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
     a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load
+    a.lmap_reset()    // fresh per program: flat-region + original-line maps recorded during closure load
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
@@ -3078,7 +3398,9 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
     })
     ns := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
     nsl := ns.c.out.len
+    mllo := lmap_lines()
     body := ns.c.out.strip_ns_into(a, mainsrc, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, ns.c.out.len == 0)
+    a.note_fregion(0, body.freg_lo(nsl), body.len, mllo)    // entry module = table index 0
     cN := a.load_import_graph_table(table, inpath, mainsrc, graph, true, Closure(
         seen: ns.c.seen,
         out: body,
@@ -3093,6 +3415,7 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
         true  => false,
         false => true,
     }))
+    fregions_splice(nsl, body.len, sf.bodyend - nsl)    // main-body rename shifts every later region
     su := a.shadow_flat_users(sf.flat, table, body.len, sf.bodyend - body.len, nsl, internal.match ({
         true  => false,
         false => true,
@@ -3101,12 +3424,18 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
         true  => a.module_graph(su.flat).symbols,
         false => fsyms,
     })
-    flat := a.dedup_impls(a.dedup_decls_syms(su.flat, dsyms, nsl + su.shift, sf.bodyend + su.shift, internal))
+    d1 := a.dedup_decls_syms(su.flat, dsyms, nsl + su.shift, sf.bodyend + su.shift, internal)
+    a.lmap_apply_drops(su.flat)
+    flat := a.dedup_impls(d1)
+    a.lmap_apply_drops(d1)
+    lmap_off()
     ResolvedProgram(
         table: table,
         flat: flat,
         body_start: nsl + su.shift,
         body_end: sf.bodyend + su.shift,
+        regions: fregions_get(),
+        line_srcs: lsrc_get(),
     )
 }
 resolve_program* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) string_view { a.resolve_program_data(root, progdir, inpath, mainsrc).flat }

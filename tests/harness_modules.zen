@@ -2144,6 +2144,82 @@ harness_modules_run* = () i32 {
         entry: "p.zen",
         want: 42,
     )])
+    // ── identity-based diagnostic map (flat offset → module + original line, no text matching) ────
+    // Each case pins the full `path:line:col` needle (the temp project dir always contains
+    // `zo_mods/`), so a wrong file, line, OR column fails the case.
+    im := run_mod_verdicts("modules verdict (identity diagnostics map)", [ModVerdictCase(
+        files: [ModFile(
+            name: "m1.zen",
+            src: "one* = () i32 { 1 }\n",
+        ), ModFile(
+            name: "m2.zen",
+            src: "{ one } = m1\ntwo* = () i32 {\n    bad()\n}\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ two } = m2\nmain = () i32 { two() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "/m2.zen:3:5: error[undefined-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "helpers.zen",
+            src: "foo* = (n: i32) i32 { n }\nbar* = (n: i32) i32 { n }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ foo, bar } = helpers\nmain = () i32 {\n    x := foo(bar(\"s\"))\n    x\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "/p.zen:3:18: error[arg-type]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "app/utils.zen",
+            src: "seven* = () i32 {\n    nope()\n}\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ seven } = app.utils\nmain = () i32 { seven() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "/app/utils.zen:2:5: error[undefined-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "helper.zen",
+            src: "value* = () i32 { 3 }\n",
+        ), ModFile(
+            name: "lib.zen",
+            src: "h = helper\ntwo__fer* = () i32 { 2 }\nnine* = () i32 {\n    h.value() + two__fer() + boom()\n}\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ nine } = lib\nmain = () i32 { nine() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "/lib.zen:4:1: error[undefined-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "a.zen",
+            src: "inc* = (x: i32) i32 {\n    x + 1\n}\n",
+        ), ModFile(
+            name: "b.zen",
+            src: "flip* = (x: bool) i32 {\n    x + 1\n}\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ inc } = a\n{ flip } = b\nmain = () i32 { inc(1) + flip(true) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "/b.zen:2:7: error[operand-type]",
+    )])
+    // (a) the error lives in the SECOND module of a 3-module chain → exact file:line:col there
+    // (b) dense line: bare brace-imported calls mid-expression — position recovered exactly
+    // (c) the error lives inside a DOTTED (B1) module → dotted file path in the message
+    // (d) ns-bound module body: the erroring line mixes an `h.value`→`h__value` alias rewrite
+    // with a GENUINE `__` name, so every whole-line textual inverse fails — the region map still
+    // pins the module and line (column falls back to 1 rather than losing the location).
+    // (e) two modules contain an IDENTICAL source line ("    x + 1"); the error is in b.zen —
+    // the map's module IDENTITY must win (text matching used to attribute this to a.zen).
     dd := run_mod_verdicts("modules verdict (dotted user module ids)", [ModVerdictCase(
         files: [ModFile(
             name: "app/utils.zen",
@@ -2164,7 +2240,7 @@ harness_modules_run* = () i32 {
         should_pass: false,
         needle: "unknown module 'app.nothere' (no app/nothere.zen next to",
     )])
-    v + d + e + dc + sd + dl + dv + dd
+    v + d + e + dc + sd + dl + dv + im + dd
 }
 // ── deep-loader driver builders (paths injected at runtime) ──────────────────────────────────────
 // Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and
