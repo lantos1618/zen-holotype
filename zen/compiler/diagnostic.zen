@@ -186,6 +186,58 @@ diag_user_span* = (flat: string_view, user: string_view, offset: i32, span_width
     })
     dspan_none()
 }
+// ── identity-based variant: the module and its ORIGINAL 1-based line are already KNOWN (from the
+// resolver's flat-region/line map), so only the COLUMN is recovered — by running the single-line
+// textual inverses (exact / alias-`__`-removal / `__`==`.`) against that ONE known line instead of
+// scanning every candidate source. When every inverse fails (e.g. several rewritten names on one
+// line), the line is still pinned and the column falls back to 1 — the location is never lost.
+diag_line_span* = (flat: string_view, user: string_view, offset: i32, span_width: i32, srcline: i32) DiagSpan {
+    (offset < 0 || srcline <= 0).then({
+        return dspan_none()
+    })
+    ls := flat.dline_start(offset)
+    llen := flat.dline_len(ls, 0)
+    rel := offset - ls
+    erel0 := rel + span_width - 1
+    erel := (erel0 >= llen && llen > 0).match ({ true => llen - 1, false => erel0 })
+    up := user.dline_off(srcline, 0)
+    ulen := user.dline_len(up, 0)
+    // 1) exact line-text match
+    (ulen == llen && user.dseg_eq(up, flat, ls, llen, 0)).then({
+        return DiagSpan(
+            line: srcline,
+            col: rel + 1,
+            end_col: rel + span_width,
+        )
+    })
+    // 2) alias `__`-removal inverse on the known line
+    lead := flat.dlead_ws(ls, llen, 0)
+    j := flat.dfind_dunder(ls, llen, lead + 1)
+    (j >= 0).then({
+        rn := j + 2 - lead
+        user.dmatch_removed(up, ulen, flat, ls, llen, lead, rn).then({
+            return DiagSpan(
+                line: srcline,
+                col: rel.dremoved_col(lead, rn),
+                end_col: erel.dremoved_col(lead, rn),
+            )
+        })
+    })
+    // 3) on-the-fly `__`==`.` normalized match on the known line
+    user.dseg_eq_ns(up, 0, flat, ls, 0, llen).then({
+        return DiagSpan(
+            line: srcline,
+            col: flat.dnorm_col(ls, llen, rel, 0, 1),
+            end_col: flat.dnorm_col(ls, llen, erel, 0, 1),
+        )
+    })
+    DiagSpan(
+        line: srcline,
+        col: 1,
+        end_col: 1,
+    )
+}
+// 4) the line is known even when no textual inverse fits: pin it, column 1
 // alias variant of duser_line: match each user line against flat[ls..ls+llen] with [lead,lead+rn) removed
 duser_line_alias_at = (user: string_view, up: i32, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32, no: i32) i32 {
     ulen := user.dline_len(up, 0)
