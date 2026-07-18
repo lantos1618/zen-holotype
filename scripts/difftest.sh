@@ -68,6 +68,22 @@ CASES="$WORK/cases"
     done
 } | sort > "$CASES"
 
+# ── run-stage skips ──────────────────────────────────────────────────────────────────────────────
+# These programs assert OBSERVED parallelism (workers_busy: "did >1 worker actually run?"), so their
+# exit code depends on machine load — under the differ's own parallel execution they flake between
+# "agreed, parallel" and "agreed, but only 1 core observed" with NO compiler diff involved. Their
+# check + emit stages are still compared; only the load-sensitive run stage is skipped.
+RUN_SKIP="tests/fixtures/zen/pool_colorless_driver.zen
+tests/fixtures/zen/pool_typed_actors_parallel.zen
+tests/fixtures/zen/pool_parallel_actors.zen
+tests/fixtures/zen/pool_stress_exactly_once.zen
+examples/pool_actor_demo.zen"
+run_skipped() {
+    echo "$RUN_SKIP" | grep -qx "$1"
+}
+export RUN_SKIP
+export -f run_skipped
+
 # ── one case: capture both binaries, record differing stages ─────────────────────────────────────
 run_case() {
     case_id="$1"
@@ -81,7 +97,9 @@ run_case() {
     "$NEW" check "$entry" > "$d/new.check" 2>&1; echo "$?" > "$d/new.check.rc"
     "$OLD" emit  "$entry" > "$d/old.emit" 2> /dev/null; echo "$?" > "$d/old.emit.rc"
     "$NEW" emit  "$entry" > "$d/new.emit" 2> /dev/null; echo "$?" > "$d/new.emit.rc"
-    if [ "$(cat "$d/old.check.rc")" = "0" ]; then
+    if run_skipped "$case_id"; then
+        stages="check emit"
+    elif [ "$(cat "$d/old.check.rc")" = "0" ]; then
         timeout "$RUN_TIMEOUT" "$OLD" run "$entry" < /dev/null > "$d/old.run" 2> /dev/null; echo "$?" > "$d/old.run.rc"
         timeout "$RUN_TIMEOUT" "$NEW" run "$entry" < /dev/null > "$d/new.run" 2> /dev/null; echo "$?" > "$d/new.run.rc"
         stages="check emit run"

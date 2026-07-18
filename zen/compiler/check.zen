@@ -3,7 +3,7 @@
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, is_fnt, has_fnt_param, is_generic_fn, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, mangle_semantic_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Allocator, Malloc } = std.mem.alloc
-{ exports_get, alias_prefixes_get } = compiler.parse
+{ exports_get, alias_prefixes_get, module_sigs_get, SigEntry } = compiler.parse
 { panic, expect } = std.core.result
 { view, eq, is_empty, ends_with } = std.text.str
 { String } = std.text.string
@@ -1116,26 +1116,34 @@ alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
         false => false,
     })
 }
+// Sig-driven enumeration (B4/R3): candidates come from the per-alias export sigs the resolver
+// stamped into the compiler.parse registry, not from shape-scanning every flat decl. Only entries
+// mirroring the names the resolver actually PREFIXED can produce a candidate — value decls of the
+// aliased module (not imported pass-throughs, not foreign, not types: exactly the
+// value_decl_names_in filter), reconstructed as `alias__name` and resolved to the real decl through
+// func_idx (DFunc and DForeign alike). Every semantic gate (real-prefix, tail, `*`-export via the
+// flat's star markers, param0 head/tparam/fits) stays in alias_cand_matches, applied to the SAME
+// Func the old scan matched, so a candidate's verdict is unchanged — only the enumeration is new.
+// Registry order is flat append order and a module's symbols are in decl order, so the deterministic
+// decl-order tie-break (first/second in the ambiguity message) is preserved. The cheap prefilter is
+// safe: the dispatcher's tail (after the LAST `__` of `alias__name`) is always a suffix of the
+// module-side name, so a non-suffix entry can never match and is skipped without allocating.
+// Intentional divergence from the shape scan: a USER-written `alias__method` decl that the aliased
+// module does not export (main-body or brace-imported, merely SHAPED like an alias decl) is no
+// longer a candidate — the alias's method namespace is closed to the module's real exports.
 alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands {
     cnt := 0
     first := ""
     second := ""
-    env.decls.loop((h, i, d) {
-        hit := d.match ({
-            .DFunc(f)    => f.alias_cand_matches(fn, rty, exact).match ({
-                true  => f.name,
-                false => "",
-            }),
-            .DForeign(f) => f.alias_cand_matches(fn, rty, exact).match ({
-                true  => f.name,
-                false => "",
-            }),
-            _            => "",
-        })
-        (is_empty(hit) == false).then({
-            second = (cnt == 1).match ({ true => hit, false => second })
-            first = (cnt == 0).match ({ true => hit, false => first })
-            cnt = cnt + 1
+    module_sigs_get().loop((h, i, e) {
+        (e.sig_imported() == false && e.sig_foreign() == false && e.sig_type() == false && e.name.ends_with(fn)).then({
+            fname := env.a.gstr_string(32).gstr_append(env.a, e.alias).gstr_append(env.a, "__").gstr_append(env.a, e.name).gstr_finish(env.a)
+            f := env.env_func(fname)
+            (is_empty(f.name) == false && f.alias_cand_matches(fn, rty, exact)).then({
+                second = (cnt == 1).match ({ true => f.name, false => second })
+                first = (cnt == 0).match ({ true => f.name, false => first })
+                cnt = cnt + 1
+            })
         })
     })
     AliasCands(
