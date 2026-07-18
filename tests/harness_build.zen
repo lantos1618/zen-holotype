@@ -1981,6 +1981,15 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "parse_error_unclosed_brace_positioned",
         cmd: "printf 'main = () i32 {\\n    x := 5\\n' > $ZT/zpe_brace.zen && ./zenc check $ZT/zpe_brace.zen > $ZT/zpe_brace.txt 2>&1; grep -Fq ':2:11: error[parse]: syntax error: unparseable top-level input' $ZT/zpe_brace.txt && grep -Fq '      x := 5' $ZT/zpe_brace.txt && grep -Fq '            ^' $ZT/zpe_brace.txt",
+    ), ShellCase(
+        name: "cache_bin_hit_reuses_cached_binary",
+        cmd: "rm -rf $ZT/zcc1 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc1.zen && ZENC_CACHE_DIR=$ZT/zcc1 ./zenc build $ZT/zcc1.zen -o $ZT/zcc1a 2>/dev/null && { $ZT/zcc1a; test \"$?\" = 41; } && test -n \"$(ls $ZT/zcc1 2>/dev/null)\" && ZENC_CACHE_DIR=$ZT/zcc1 ./zenc check $ZT/zcc1.zen 2>$ZT/zcc1_c1.txt && ZENC_CACHE_DIR=$ZT/zcc1 ./zenc check $ZT/zcc1.zen 2>$ZT/zcc1_c2.txt && cmp -s $ZT/zcc1_c1.txt $ZT/zcc1_c2.txt && ls $ZT/zcc1 | grep -q '^check_' && printf 'main = () i32 { 42 }\\n' > $ZT/zcc1_other.zen && ZENC_NO_CACHE=1 ./zenc build $ZT/zcc1_other.zen -o $ZT/zcc1_other_bin 2>/dev/null && cp $ZT/zcc1_other_bin $ZT/zcc1/bin_* && ZENC_CACHE_DIR=$ZT/zcc1 ./zenc build $ZT/zcc1.zen -o $ZT/zcc1b 2>/dev/null && { $ZT/zcc1b; test \"$?\" = 42; }",
+    ), ShellCase(
+        name: "cache_no_cache_env_bypasses_read_and_write",
+        cmd: "rm -rf $ZT/zcc2 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc2.zen && ZENC_CACHE_DIR=$ZT/zcc2 ./zenc build $ZT/zcc2.zen -o $ZT/zcc2a 2>/dev/null && printf 'main = () i32 { 42 }\\n' > $ZT/zcc2_other.zen && ZENC_NO_CACHE=1 ./zenc build $ZT/zcc2_other.zen -o $ZT/zcc2_other_bin 2>/dev/null && cp $ZT/zcc2_other_bin $ZT/zcc2/bin_* && ZENC_NO_CACHE=1 ZENC_CACHE_DIR=$ZT/zcc2 ./zenc build $ZT/zcc2.zen -o $ZT/zcc2b 2>/dev/null && { $ZT/zcc2b; test \"$?\" = 41; } && ZENC_CACHE_DIR=$ZT/zcc2 ./zenc build $ZT/zcc2.zen -o $ZT/zcc2c 2>/dev/null && { $ZT/zcc2c; test \"$?\" = 42; } && rm -rf $ZT/zcc2n && printf 'main = () i32 { 43 }\\n' > $ZT/zcc2n.zen && ZENC_NO_CACHE=1 ZENC_CACHE_DIR=$ZT/zcc2n ./zenc build $ZT/zcc2n.zen -o $ZT/zcc2d 2>/dev/null && { $ZT/zcc2d; test \"$?\" = 43; } && ! test -e $ZT/zcc2n",
+    ), ShellCase(
+        name: "cache_source_edit_invalidates",
+        cmd: "rm -rf $ZT/zcc3 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc3.zen && ZENC_CACHE_DIR=$ZT/zcc3 ./zenc build $ZT/zcc3.zen -o $ZT/zcc3a 2>/dev/null && printf 'main = () i32 { 42 }\\n' > $ZT/zcc3_other.zen && ZENC_NO_CACHE=1 ./zenc build $ZT/zcc3_other.zen -o $ZT/zcc3_other_bin 2>/dev/null && for f in $ZT/zcc3/bin_*; do cp $ZT/zcc3_other_bin $f; done && printf '// comment changes content hash\\n' >> $ZT/zcc3.zen && ZENC_CACHE_DIR=$ZT/zcc3 ./zenc build $ZT/zcc3.zen -o $ZT/zcc3b 2>/dev/null && { $ZT/zcc3b; test \"$?\" = 41; } && test \"$(ls $ZT/zcc3 | grep -c '^bin_')\" = 2",
     )])
     // args() owns the whole argv (len = 2 with --verbose, unwrapped from Result), has_flag/flag_str read it, set_env→getEnv→unset_env round-trips.
     // os_args_oom_result: args() under an always-fail allocator returns `.Err` as a value (prints `oom-err`, exit 0) — the OOM path never writes the argv strings through a null backbone.

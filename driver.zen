@@ -6,7 +6,7 @@
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
 { contents_in, out, out_bytes, save, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
-{ or } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
+{ or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
 { then } = std.core.bool
 { open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid } = std.c.libc
 { parse_module, exports_get } = compiler.parse
@@ -19,7 +19,7 @@
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name } = std.internal.resolve
 say = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -220,8 +220,168 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
 // bootstrap/Makefile CFLAGS, untouched, so the byte-exact fixpoint is unaffected. Non-tail recursion
 // whose result feeds a branch still overflows — caught by zenrt.c's stack-overflow panic.
 cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: string_view, ccflags: string_view, links: string_view) string_view { mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ").gstr_append(mp, tmpc).gstr_append(mp, " ").gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ").gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links).gstr_append(mp, " -lm").gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp) }    // libm: always link (sin/cos/log/exp/pow); free if unused
-// type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc failure.
+// ── content-hash compile cache ────────────────────────────────────────────────────────────────────
+// check/run/build re-frontend the WHOLE flattened import closure on every invocation (~27s for a
+// program importing the compiler). The cache keys a fully-SUCCESSFUL result by CONTENT: FNV-1a 64-bit
+// over the running zenc binary's own bytes (a rebuilt compiler invalidates everything it ever cached),
+// the version string, the command kind, ccflags/links (a token naming a readable file — a project's
+// extra native .c — folds in its bytes, so editing it misses), and the SOURCE of every module in the
+// import closure (the probe loads the transitive module table only — the flattened text it would
+// produce is a deterministic function of those sources plus the stamped compiler, so hashing the
+// inputs covers it while skipping the expensive namespace-strip/dedup flatten on a hit). No mtimes,
+// no filesystem paths: an identical program is an identical key. A `check` hit replays the ok line
+// from a marker file; a `run`/`build` hit copies the cached binary into place. Failures are NEVER
+// cached (the entry is written only after the full pipeline succeeded). ZENC_NO_CACHE=1 (any
+// non-empty value) bypasses both reads and writes; ZENC_CACHE_DIR overrides /tmp/zenc-cache (the
+// harness's cache cases point it at scratch). i64 wraps like the spec's u64: every build has -fwrapv.
+FNV_PRIME = () i64 { 1099511628211 }
+FNV_BASIS = () i64 { 0 - 3750763034362895579 }    // 0xcbf29ce484222325, the FNV-1a-64 offset basis, as an i64
+fnv_str = (h: i64, s: string_view) i64 {
+    v: [u8] := s.view()
+    hh := h
+    v.loop((lh, i, b) {
+        hh = (hh ^ to_i64(b)) * FNV_PRIME()
+    })
+    (hh ^ v.len) * FNV_PRIME()
+}    // seal with the length so piece boundaries cannot slide
+flag_token_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ').match ({
+    true  => i,
+    false => v.flag_token_end(i + 1),
+}) }
+// fold a flag string: its text (order + non-file tokens like -lm), plus the CONTENT of every
+// whitespace token that names a readable file (a project's extra .c sources compiled into the binary).
+fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: [u8], i: i64) i64 {
+    (i >= v.len).match ({
+        true  => h,
+        false => (v[i] == ' ').match ({
+            true  => mp.fnv_flag_files(h, v, i + 1),
+            false => {
+                e := flag_token_end(v, i)
+                tok := push_prefix(mp.gstr_string(e - i + 1), mp, v, i, e).gstr_finish(mp)
+                h2 := contents_in(mp, tok).match ({
+                    .Ok(c)  => h.fnv_str(c),
+                    .Err(x) => h,
+                })
+                mp.fnv_flag_files(h2, v, e)
+            },
+        }),
+    })
+}
+fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: string_view) i64 {
+    v: [u8] := s.view()
+    mp.fnv_flag_files(h.fnv_str(s), v, 0)
+}
+// the compiler's own identity: the hash of the running zenc binary (argv[0]). A rebuilt zenc — new
+// checker, new codegen, new zenrt.c, all compiled in — yields a new stamp, so an old binary's entries
+// can never be replayed by a new one. An unreadable argv[0] (bare PATH lookup) degrades to 0 and the
+// key falls back to the version string alone.
+cache_self = (mp: MutPtr<Malloc>) i64 {
+    contents_in(mp, arg(0)).match ({
+        .Ok(b)  => FNV_BASIS().fnv_str(b),
+        .Err(e) => 0,
+    })
+}
+cache_hex_digit = (d: i64) u8 { load(offset("0123456789abcdef", d)) }
+push_hex = (s: String, mp: MutPtr<Malloc>, h: i64, i: i64) String {
+    (i < 0).match ({
+        true  => s,
+        false => {
+            hs := s.gstr_push(mp, cache_hex_digit(h >> i * 4 & 15))
+            hs.push_hex(mp, h, i - 1)
+        },
+    })
+}    // nibble i*4..0, most significant first (hoist: gstr_reserve re-evals the receiver)
+cache_dir = () string_view {
+    e := getEnv("ZENC_CACHE_DIR")
+    eq(e, "").match ({ true => "/tmp/zenc-cache", false => e })
+}
+cache_on = () bool { eq(getEnv("ZENC_NO_CACHE"), "") }
+// ── the probe's light closure walk ── the resolver's own module walk (module_table) builds a full
+// per-module symbol graph twice over; the probe only needs BYTES, so it walks the same import edges
+// (the resolver's exported edge scanner — the one source of truth for what an import line is) and
+// folds each module's logical id + entire source into the key. Any edit to any imported file, however
+// deep, changes the key. An unreadable/unknown module folds its id only — the miss path then reports
+// it with the resolver's real diagnostic (and a failed pipeline never populates the cache).
+CacheWalk: {
+    seen: String,
+    h: i64,
+}
+edges_of = (mp: MutPtr<Malloc>, src: string_view) [ImportEdge] { mp.import_edges(src).expect("zenc: cache probe: allocation failed") }
+// id "u/<name>" -> <progdir>/<name>.zen (sibling); anything else -> <root>/zen/<id>.zen — the same
+// mapping as the resolver's module_path.
+cache_module_path = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view) string_view {
+    v: [u8] := id.view()
+    (v.len >= 2 && v[0] == 'u' && v[1] == '/').match ({
+        true  => push_prefix(mp.gstr_string(64).gstr_append(mp, progdir).gstr_push(mp, '/'), mp, v, 2, v.len).gstr_append(mp, ".zen").gstr_finish(mp),
+        false => mp.gstr_string(64).gstr_append(mp, root).gstr_append(mp, "/zen/").gstr_append(mp, id).gstr_append(mp, ".zen").gstr_finish(mp),
+    })
+}
+cache_walk_one = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view, st: CacheWalk) CacheWalk {
+    idn := mp.gstr_string(24).gstr_append(mp, id)
+    st.seen.seen_name(idn).match ({
+        true  => st,
+        false => {
+            next := CacheWalk(
+                seen: st.seen.add_name(mp, idn),
+                h: st.h.fnv_str(id),
+            )
+            contents_in(mp, mp.cache_module_path(root, progdir, id)).match ({
+                .Ok(msrc) => mp.cache_walk_edges(root, progdir, mp.edges_of(msrc), CacheWalk(
+                    seen: next.seen,
+                    h: next.h.fnv_str(msrc),
+                )),
+                .Err(e)   => next,
+            })
+        },
+    })
+}
+cache_walk_edges = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, edges: [ImportEdge], st: CacheWalk) CacheWalk {
+    cur := st
+    edges.loop((lh, i, e) {
+        cur = mp.cache_walk_one(root, progdir, e.module, cur)
+    })
+    cur
+}
+// the on-disk entry for one (kind, program) pair: <dir>/<kind>_<16 hex digits>.
+cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: string_view, src: string_view, ccflags: string_view, links: string_view) string_view {
+    h0 := mp.cache_self().fnv_str(VERSION()).fnv_str(kind).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
+    st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
+        seen: mp.gstr_string(256),
+        h: h0,
+    ))
+    mp.gstr_string(96).gstr_append(mp, cache_dir()).gstr_push(mp, '/').gstr_append(mp, kind).gstr_push(mp, '_').push_hex(mp, st.h, 15).gstr_finish(mp)
+}
+// mark a fully-successful `check`: the marker's EXISTENCE is the cached verdict (content is cosmetic).
+cache_put_ok = (path: string_view) i64 {
+    mkdir(cache_dir(), MODE_755)
+    save(path, "ok\n", 3).or(0)
+}
+// copy the cached binary into place; chmod so the exec bit survives any pre-existing destination.
+cache_bin_cmd = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) string_view { mp.gstr_string(160).gstr_append(mp, "cp ").quote_arg(mp, cb).gstr_push(mp, ' ').quote_arg(mp, out).gstr_append(mp, " && chmod 755 ").quote_arg(mp, out).gstr_finish(mp) }
+// publish a built binary: copy to a pid-suffixed temp inside the cache dir, then atomic `mv -f` — a
+// concurrent zenc never observes a half-written entry (and an exec'ing reader never sees ETXTBSY).
+cache_store_bin = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) i32 {
+    mkdir(cache_dir(), MODE_755)
+    tmp := mp.gstr_string(96).gstr_append(mp, cb).gstr_push(mp, '.').push_int(mp, getpid()).gstr_finish(mp)
+    mp.gstr_string(256).gstr_append(mp, "cp ").quote_arg(mp, out).gstr_push(mp, ' ').quote_arg(mp, tmp).gstr_append(mp, " && mv -f ").quote_arg(mp, tmp).gstr_push(mp, ' ').quote_arg(mp, cb).gstr_finish(mp).system()
+}
+// type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc
+// failure. The cache wraps this whole pipeline: a hit copies the previously-built binary and skips
+// resolve-onward re-verification (the key proves the identical closure already compiled cleanly).
 compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view) i32 {
+    cb := mp.cache_probe("bin", root, path, src, ccflags, links)
+    (cache_on() && file_exists(cb) && mp.cache_bin_cmd(cb, out).system() == 0).match ({
+        true  => 0,
+        false => {
+            rc := mp.compile_flat(root, path, src, out, ccflags, links)
+            (rc == 0 && cache_on()).then({
+                mp.cache_store_bin(cb, out)
+            })
+            rc
+        },
+    })
+}
+compile_flat = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view) i32 {
     rp := mp.resolve_prog(root, path, src)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
@@ -389,30 +549,43 @@ check_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 { spec.ok.m
 check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, spec.source, src)
-            (mp.report_no_if_resolved(rp, spec.source, src) == 0).match ({
-                true  => {
-                    raw := mp.parse_module(rp.flat)
-                    decls := mp.resolve_module(raw)
-                    (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
+            // a probe hit means this exact closure content already checked clean: replay the ok line.
+            ck := mp.cache_probe("check", root, spec.source, src, spec.ccflags, spec.links)
+            (cache_on() && file_exists(ck)).match ({
+                true  => check_ok_line(spec.source),
+                false => {
+                    rp := mp.resolve_prog(root, spec.source, src)
+                    (mp.report_no_if_resolved(rp, spec.source, src) == 0).match ({
                         true  => {
-                            derr("zenc: ")
-                            derr(spec.source)
-                            derr(": ok\n")
-                            0
+                            raw := mp.parse_module(rp.flat)
+                            decls := mp.resolve_module(raw)
+                            (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
+                                true  => {
+                                    cache_on().then({
+                                        cache_put_ok(ck)
+                                    })
+                                    check_ok_line(spec.source)
+                                },
+                                false => 1,
+                            })
                         },
                         false => 1,
                     })
                 },
-                false => 1,
             })
-        },    // <path>: ok -> stderr
+        },
         .Err(e)  => {
             derr("zenc: cannot open input\n")
             1
         },
     })
 }
+check_ok_line = (path: string_view) i32 {
+    derr("zenc: ")
+    derr(path)
+    derr(": ok\n")
+    0
+}    // <path>: ok -> stderr
 build_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, flag: string_view, outarg: string_view) i32 {
     spec.ok.match ({
         true  => {
@@ -510,6 +683,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     eq(e, "").match ({ true => mp.dirname(arg(0)), false => e })
 }
 HELP = () string_view { "usage: zenc <run|build|check|emit|doc|fmt|init|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  cat file.zen | zenc   (source -> C filter)\n" }
+VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -522,7 +696,7 @@ main = () i32 {
         },
         false => eq(cmd, "--version").match ({
             true  => {
-                say("zenc 0.2.0-dev (self-hosted; zen driver)")
+                say(VERSION())
                 0
             },
             false => eq(cmd, "--build-self").match ({
