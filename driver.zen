@@ -19,7 +19,7 @@
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, diag_line_span, DiagSpan, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
 say = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -110,7 +110,16 @@ locate_diag = (rp: ResolvedProgram, off: i32, w: i32, rpath: string_view, rsrc: 
 emit_one = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram, path: string_view, user: string_view, cd: CheckDiagnostic) i64 {
     dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
     msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
-    derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, msg, cd.hint, cd.count))
+    // World teaching hint: an undefined name that some closure module EXPORTS names that module
+    // (with the import to write) instead of the generic advice — see undefined_name_hint.
+    hint := cd.hint
+    eq(cd.kind, "undefined-name").then({
+        wh := mp.undefined_name_hint(rp.table, rp.flat, cd.source_offset)
+        (is_empty(wh) == false).then({
+            hint = wh
+        })
+    })
+    derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, msg, hint, cd.count))
 }
 // Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
 // but the no-if language rule still applies. Render the same structured diagnostic directly against
