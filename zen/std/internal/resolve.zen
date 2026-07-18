@@ -3373,6 +3373,48 @@ check_alias_collisions = (a: MutPtr<Malloc>, table: ModuleTable, graph: ModuleGr
     })
     0
 }
+// ── World teaching hint for undefined names (Stage B3) ──────────────────────────────────────────
+// The identifier at flat offset `off`, looked up across every module signature in the program's
+// World: when a module in the closure EXPORTS that name as a value the generic undefined-name hint
+// becomes a teaching hint — name the module and show both consumption forms. Only modules already
+// in the table are searched (the import closure — exactly the modules whose exports bleed through
+// the flat under an alias prefix, the collision-adjacent confusion this hint retires). Returns ""
+// when no module exports the name (the caller keeps the generic hint).
+mappend_mid_display = (a: MutPtr<Malloc>, out: String, id: string_view) String {
+    id.mid_is_user().match ({
+        true  => a.mappend_id_str_dotted(out, cstr(offset(id, 2))),
+        false => a.mappend_id_str_dotted(out, id),
+    })
+}
+undefined_name_hint* = (a: MutPtr<Malloc>, table: ModuleTable, flat: string_view, off: i32) string_view {
+    ie := flat.res_ident_end(off)
+    (off < 0 || ie <= off).match ({
+        true  => "",
+        false => {
+            nm := a.mimport_name_span(flat, off, ie).gstr_finish(a)
+            hit: i64 := 0 - 1
+            table.modules.loop((h, i, m) {
+                (hit < 0 && i > 0).then({
+                    m.graph.sig.exports_value(nm).then({
+                        hit = i
+                    })
+                })
+            })
+            (hit < 0).match ({
+                true  => "",
+                false => {
+                    m := table.modules[hit]
+                    h0 := a.gstr_string(192).gstr_append(a, "`").gstr_append(a, nm).gstr_append(a, "` is exported by ")
+                    h1 := a.mappend_mid_display(h0, m.id)
+                    h2 := h1.gstr_append(a, " — import it (`{ ").gstr_append(a, nm).gstr_append(a, " } = ")
+                    h3 := a.mappend_mid_display(h2, m.id)
+                    h4 := h3.gstr_append(a, "`) or qualify it through a module alias")
+                    h4.gstr_finish(a)
+                },
+            })
+        },
+    })
+}
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) ResolvedProgram {

@@ -1343,6 +1343,28 @@ harness_modules_run* = () i32 {
         needle: "left.nope()",
     ), ModVerdictCase(
         files: [ModFile(
+            name: "zmod.zen",
+            src: "zero* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "z = zmod\nmain = () i32 { zero() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "`zero` is exported by zmod",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "zmod.zen",
+            src: "zero* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "z = zmod\nmain = () i32 { zero() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "import it (`{ zero } = zmod`)",
+    ), ModVerdictCase(
+        files: [ModFile(
             name: "left.zen",
             src: "thing* = (a: i32, b: i32) i32 { a + b }\n",
         ), ModFile(
@@ -1531,6 +1553,31 @@ harness_modules_run* = () i32 {
         entry: "p.zen",
         should_pass: false,
         needle: "p.zen:2:1: error[dup-fn]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "left.zen",
+            src: "thing* = () i32 { 1 }\n",
+        ), ModFile(
+            name: "right.zen",
+            src: "thing* = () i32 { 2 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ thing } = left\n{ thing } = right\nmain = () i32 { thing() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "already provided by 'left'",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "kw.zen",
+            src: "double = (x: i32) i32 { x * 2 }\nshown* = (x: i32) i32 { x }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ double } = kw\nmain = () i32 { double(2) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "`double` is private in module 'kw'",
     ), ModVerdictCase(
         files: [ModFile(
             name: "p.zen",
@@ -1875,6 +1922,13 @@ harness_modules_run* = () i32 {
         should_pass: true,
         needle: "",
     )])
+    // World teaching hint (Stage B3): a bare call of a name that exists ONLY behind a module
+    // alias names the exporting module in the undefined-name hint …
+    // … and spells out the exact import line to add.
+    // Stage B3/R2: cross-module duplicate attribution comes from the sig import-map — the
+    // diagnostic names BOTH the redefining module and the FIRST provider.
+    // Stage B3/R1: sig-based privacy through the C-keyword escape — the import head queries the
+    // `_zk`-escaped key, the sig stores raw + escaped forms for the same private decl.
     // entry defines a name a DEP defines PRIVATELY (never imported by the entry): the entry's decl is
     // shadow-renamed at flatten so both survive — compiles clean (was error[dup-fn]; the #1 newcomer bounce).
     // same hygiene for a PUBLIC dep export the entry redefines without importing it by name: the entry's
