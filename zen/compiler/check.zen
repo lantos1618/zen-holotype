@@ -23,6 +23,8 @@ DeclIndex*: {
     impl_idx: Map<i64>,
     tdef_idx: Map<i64>,
     alias_idx: Map<i64>,
+    tmethod_idx: Map<i64>,
+    import_idx: Map<i64>,
 }    // DFunc.name | DForeign.name → index
 tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a) }    // DStruct.name → index
 // ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
@@ -73,104 +75,73 @@ alias_note = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view, i: i64) Map<i64
         false => m,
     })
 }
+// fold a name-only [Param] list (DImpl.methods / DImport.names) into a presence map.
+names_note = (m: Map<i64>, a: MutPtr<Malloc>, names: [Param], i: i64) Map<i64> {
+    mm := m
+    names.loop((h, j, p) {
+        mm = mm.put(a, p.name, i).expect("check: decl-index alloc")
+    })
+    mm
+}
 build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
     seed: i64 := 0 - 1    // DEnum.name → index
     // DGlobal.name → index
     // DImpl.ty → presence marker (a type with at least one impl)
     // (trait "\t" method) → presence: the trait provides a default for the method
     // the combined key for a trait-default lookup; trait/method are identifiers, so a TAB can't collide.
-    idx := DeclIndex(
-        func_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        struct_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        enum_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        global_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        impl_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        tdef_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        alias_idx: of(a, "", seed).expect("check: decl-index alloc"),
-    )
+    fm := of(a, "", seed).expect("check: decl-index alloc")
+    sm := of(a, "", seed).expect("check: decl-index alloc")
+    em := of(a, "", seed).expect("check: decl-index alloc")
+    gm := of(a, "", seed).expect("check: decl-index alloc")
+    im2 := of(a, "", seed).expect("check: decl-index alloc")
+    tm := of(a, "", seed).expect("check: decl-index alloc")
+    am := of(a, "", seed).expect("check: decl-index alloc")
+    mm := of(a, "", seed).expect("check: decl-index alloc")
+    pm := of(a, "", seed).expect("check: decl-index alloc")
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f)          => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx.put(a, f.name, i).expect("check: decl-index alloc"),
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx.alias_note(a, f.name, i),
-                )
+                fm = fm.put(a, f.name, i).expect("check: decl-index alloc")
+                am = am.alias_note(a, f.name, i)
             },
             .DForeign(f)       => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx.put(a, f.name, i).expect("check: decl-index alloc"),
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx.alias_note(a, f.name, i),
-                )
+                fm = fm.put(a, f.name, i).expect("check: decl-index alloc")
+                am = am.alias_note(a, f.name, i)
             },
             .DStruct(s)        => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx.put(a, s.name, i).expect("check: decl-index alloc"),
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+                sm = sm.put(a, s.name, i).expect("check: decl-index alloc")
             },
             .DEnum(e)          => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx.put(a, e.name, i).expect("check: decl-index alloc"),
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+                em = em.put(a, e.name, i).expect("check: decl-index alloc")
             },
             .DGlobal(g)        => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx.put(a, g.name, i).expect("check: decl-index alloc"),
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+                gm = gm.put(a, g.name, i).expect("check: decl-index alloc")
             },
-            .DImpl(im)         => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx.put(a, im.ty, i).expect("check: decl-index alloc"),
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+            .DImpl(imd)        => {
+                im2 = im2.put(a, imd.ty, i).expect("check: decl-index alloc")
+                mm = mm.names_note(a, imd.methods, i)
             },
             .DTraitDefault(td) => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i).expect("check: decl-index alloc"),
-                    alias_idx: idx.alias_idx,
-                )
+                tm = tm.put(a, a.tdkey(td.trname, td.fn.name), i).expect("check: decl-index alloc")
+                mm = mm.put(a, td.fn.name, i).expect("check: decl-index alloc")
+            },
+            .DImport(imp)      => {
+                pm = pm.names_note(a, imp.names, i)
             },
             _                  => { },
         })
     })
-    idx
+    DeclIndex(
+        func_idx: fm,
+        struct_idx: sm,
+        enum_idx: em,
+        global_idx: gm,
+        impl_idx: im2,
+        tdef_idx: tm,
+        alias_idx: am,
+        tmethod_idx: mm,
+        import_idx: pm,
+    )
 }
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)

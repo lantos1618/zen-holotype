@@ -14,6 +14,10 @@
 is_known_fn = (decls: [Decl], fn: string_view) bool { eq(decls.the_func(fn).name, fn) }
 env_known_fn = (env: Env, fn: string_view) bool { eq(env.env_func(fn).name, fn) }
 env_params = (env: Env, fn: string_view) [Param] { env.env_func(fn).params }
+// O(1) indexed forms of the linear is_trait_method / is_imported scans below (same presence result:
+// tmethod_idx folds every DImpl.methods name + every DTraitDefault fn name; import_idx every DImport name).
+env_trait_method = (env: Env, fn: string_view) bool { env.didx.tmethod_idx.get(fn, 0 - 1) >= 0 }
+env_imported = (env: Env, fn: string_view) bool { env.didx.import_idx.get(fn, 0 - 1) >= 0 }
 // O(1) indexed struct presence/field lookups (Env carries the decl index).
 env_is_struct = (env: Env, name: string_view) bool { env.didx.struct_idx.get(name, 0 - 1) >= 0 }
 // A CONCRETE enum (`DEnum`) by name — enums carry variants, not fields, so `e.field` on one is always
@@ -455,7 +459,7 @@ intrinsic_arity = (fn: string_view) i32 {
 // it is a `trait_recv_missing` error, not a deferral that leaks a bare method symbol to the linker.
 is_unresolved_trait_call = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
-        true  => env.decls.is_trait_method(c.fn).match ({
+        true  => env.env_trait_method(c.fn).match ({
             true  => eq(env.dispatch_name(c), c.fn).match ({
                 true  => env.unknown_ty(env.infer_expr(c.args[0].addr())),
                 false => false,
@@ -469,7 +473,7 @@ is_unresolved_trait_call = (env: Env, c: CallData) bool {
 // redirect) and that is neither a free function nor an imported name — would emit a bare `area`
 // call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
 trait_recv_missing = (env: Env, c: CallData) bool {
-    (c.args.len > 0 && env.decls.is_trait_method(c.fn) && env.decls.is_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({
+    (c.args.len > 0 && env.env_trait_method(c.fn) && env.env_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({
         true  => eq(env.dispatch_name(c), c.fn) && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false,
         false => false,
     })
@@ -481,7 +485,7 @@ is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }
 // An FnT-typed shadow still gets the indirect-call arity/arg checks (fnval path); a KNOWN non-FnT
 // shadow is not-callable (see shadow_not_callable); only a not-yet-typable shadow (pre-inline
 // generic bodies) is skipped, never over-rejected.
-shadows_toplevel = (env: Env, fn: string_view) bool { env.is_local(fn) && (env.env_known_fn(fn) || fn.is_intrinsic() || env.decls.is_imported(fn) || env.decls.is_trait_method(fn)) }
+shadows_toplevel = (env: Env, fn: string_view) bool { env.is_local(fn) && (env.env_known_fn(fn) || fn.is_intrinsic() || env.env_imported(fn) || env.env_trait_method(fn)) }
 // A call THROUGH a non-FnT shadow: the local is a scalar/struct, so the call can never succeed — and
 // worse, genc's call dispatch is by NAME, so a "skipped" call to an intrinsic-named local (e.g. a
 // param `store_i64: i64`) is still emitted as the INTRINSIC expansion, silently writing wrong values.
@@ -1300,7 +1304,7 @@ index_err = (env: Env, ix: IndexData) i32 { (env.non_slice(ix.seq) || env.non_nu
 }) }
 // Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
 var_err = (env: Env, name: string_view) i32 {
-    (eq(name, "true") || eq(name, "false") || env.is_bound(name) || env.env_known_fn(name) || env.decls.is_imported(name) || env.decls.is_trait_method(name) || name.is_intrinsic() || env.decls.is_tag_const(env.a, name)).match ({
+    (eq(name, "true") || eq(name, "false") || env.is_bound(name) || env.env_known_fn(name) || env.env_imported(name) || env.env_trait_method(name) || name.is_intrinsic() || env.decls.is_tag_const(env.a, name)).match ({
         true  => 0,
         false => 1,
     })
@@ -3495,7 +3499,7 @@ undef_is_method = (env: Env, c: CallData) bool {
 // one. When a receiver-typed impl/alias DOES fit, resolve_call already rewrote c.fn to it and we never get
 // here (is_trait_method on the mangled impl name is false), so real dispatch is untouched.
 recv_typed_miss = (env: Env, c: CallData) bool {
-    (c.args.len > 0 && env.decls.is_trait_method(c.fn)).match ({
+    (c.args.len > 0 && env.env_trait_method(c.fn)).match ({
         true  => {
             f := env.env_func(c.fn)
             (f.params.len > 0 && f.tparams.ty_mentions_tparam(f.params[0].ty) == false).match ({
@@ -3535,7 +3539,7 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
                             true  => 0,
                             false => KARITY(),
                         }),
-                        false => (env.decls.is_imported(c.fn) || env.decls.is_trait_method(c.fn)).match ({
+                        false => (env.env_imported(c.fn) || env.env_trait_method(c.fn)).match ({
                             true  => env.trait_recv_missing(c).match ({
                                 true  => kv_at(KTRAITBOUND(), c.pos),
                                 false => 0,
@@ -4331,8 +4335,8 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
 // type that does not impl Trait. It reports ONLY this one kind, so an unresolved generic body never
 // false-positives the other validation kinds. Imported/foreign generics defer (bound_errs is 0).
 kvb_call_kind = (env: Env, c: CallData) i32 {
-    env.decls.is_known_fn(c.fn).match ({
-        true  => env.bound_errs(env.decls.the_func(c.fn), c).kv_one(KTRAITBOUND()).kv_at(c.pos),
+    env.env_known_fn(c.fn).match ({
+        true  => env.bound_errs(env.env_func(c.fn), c).kv_one(KTRAITBOUND()).kv_at(c.pos),
         false => 0,
     })
 }
@@ -4393,20 +4397,22 @@ kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     })
     acc
 }
-kvb_func_kind = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
+kvb_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env := Env(
         vars: a.params_env(f.params),
         decls: decls,
+        didx: idx,
         exp: f.ret,
         a: a,
     )
     a.kvb_body_kind(env, f.body)
 }
 check_module_bound_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    idx := a.build_decl_index(decls)
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.kvb_func_kind(decls, f),
+            .DFunc(f) => a.kvb_func_kind(decls, idx, f),
             _         => 0,
         }))
     })
@@ -4601,14 +4607,14 @@ ka_args_check = (env: Env, tparams: [Param], authoritative: bool, f: Func, args:
 // wrong yardstick here; e.g. a closure param `f` while a top-level `f` exists). Shadowed calls are
 // skipped, not re-judged: pre-inline generic bodies can't always type the local (lenient by design).
 ka_call_core = (env: Env, tparams: [Param], fn: string_view, args: [Expr], etargs: [Ty], pos: i32) i32 {
-    (env.decls.is_known_fn(fn) && env.is_local(fn) == false).match ({
+    (env.env_known_fn(fn) && env.is_local(fn) == false).match ({
         true  => {
-            f := env.decls.the_func(fn)
+            f := env.env_func(fn)
             // `the_func(fn)`'s signature is the authoritative callee only when `fn` is not ALSO a trait/impl
             // method — otherwise UFCS may dispatch to the impl by receiver type, and the free-fn signature
             // is the wrong yardstick for the concrete-arg check (which then defers). (Zen has no free-fn
             // overloading, so a name with no impl method resolves uniquely to this decl.)
-            authoritative := env.decls.is_trait_method(fn) == false
+            authoritative := env.env_trait_method(fn) == false
             tf := (etargs.len == 0).match ({
                 true  => 0,
                 false => (f.tparams.len == 0).match ({
