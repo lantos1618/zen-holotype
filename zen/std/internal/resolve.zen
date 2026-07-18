@@ -1075,12 +1075,14 @@ module_count_one = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, 
             path := a.module_path(root, progdir, id)
             a.guard_module(progdir, inpath, id, path)
             src := a.read_module(inpath, path)
-            graph := a.module_graph(src)
+            // counting only follows IMPORT edges — skip the (expensive) provided-symbol scan the full
+            // module_graph would also run; the fill pass builds the real graph for each module once.
+            edges := a.import_edges(src).expect("std.internal.resolve: allocation failed")
             next := ModuleCount(
                 seen: st.seen.add_name(a, id),
                 count: st.count + 1,
             )
-            a.module_count_edges(root, progdir, inpath, graph.imports, next)
+            a.module_count_edges(root, progdir, inpath, edges, next)
         },
     })
 }
@@ -1795,8 +1797,10 @@ main_symbol_names = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], 
     cur
 }
 dedup_decls* = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64) string_view { a.dedup_decls_mode(flat, bodystart, bodyend, false) }
-dedup_decls_mode = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64, allow_main_shadow: bool) string_view {
-    symbols := a.module_graph(flat).symbols
+dedup_decls_mode = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64, allow_main_shadow: bool) string_view { a.dedup_decls_syms(flat, a.module_graph(flat).symbols, bodystart, bodyend, allow_main_shadow) }
+// symbols-taking core: resolve_program_data reuses the pre-shadow graph when no rename fired, so the
+// expensive whole-flat module_graph scan runs once, not twice.
+dedup_decls_syms = (a: MutPtr<Malloc>, flat: string_view, symbols: [ProvidedSymbol], bodystart: i64, bodyend: i64, allow_main_shadow: bool) string_view {
     main_names := allow_main_shadow.match ({
         true  => a.main_symbol_names(a.gstr_string(256), symbols, 0, bodystart, bodyend),
         false => a.gstr_string(64),
@@ -2546,8 +2550,7 @@ shadow_mangled = (a: MutPtr<Malloc>, name: String) String { a.gstr_string(name.l
 // user-vs-user dup → keep the error), whose name ALSO exists as a non-imported value decl OUTSIDE the
 // body (the transitive/std export), that the user did NOT import by name, and whose mangled form is not
 // already taken (else fall back to the dup-fn error rather than silently rebind).
-shadow_rename_set = (a: MutPtr<Malloc>, flat: string_view, mainsrc: string_view, lo: i64, hi: i64) String {
-    syms := a.module_graph(flat).symbols
+shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64) String {
     imported := a.imported_value_name_set(a.rset_new(), a.module_graph(mainsrc).symbols)
     allnames := a.value_symbol_name_set(a.rset_new(), syms)
     mainseen := a.rset_new()
@@ -2599,17 +2602,19 @@ shadow_rename_set = (a: MutPtr<Malloc>, flat: string_view, mainsrc: string_view,
 ShadowFlat*: {
     flat: string_view,
     bodyend: i64,
+    renamed: bool,
 }
 // Given the pre-dedup flat, rename the user's colliding decls in the body region [lo,hi) and return the
 // rewritten flat plus the shifted body end. `enable` is false for internal sources (byte-identical no-op).
-shadow_flat = (a: MutPtr<Malloc>, pre: string_view, mainsrc: string_view, lo: i64, hi: i64, enable: bool) ShadowFlat {
+shadow_flat = (a: MutPtr<Malloc>, pre: string_view, presyms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64, enable: bool) ShadowFlat {
     enable.match ({
         true  => {
-            names := a.shadow_rename_set(pre, mainsrc, lo, hi)
+            names := a.shadow_rename_set(presyms, mainsrc, lo, hi)
             (names.len == 0).match ({
                 true  => ShadowFlat(
                     flat: pre,
                     bodyend: hi,
+                    renamed: false,
                 ),
                 false => {
                     main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
@@ -2618,6 +2623,7 @@ shadow_flat = (a: MutPtr<Malloc>, pre: string_view, mainsrc: string_view, lo: i6
                     ShadowFlat(
                         flat: nf,
                         bodyend: lo + rewS.len,
+                        renamed: true,
                     )
                 },
             })
@@ -2625,6 +2631,7 @@ shadow_flat = (a: MutPtr<Malloc>, pre: string_view, mainsrc: string_view, lo: i6
         false => ShadowFlat(
             flat: pre,
             bodyend: hi,
+            renamed: false,
         ),
     })
 }
@@ -2861,11 +2868,16 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
         useen: ns.c.useen,
     ))
     internal := inpath.internal_source_path()
-    sf := a.shadow_flat(cN.out.gstr_finish(a), mainsrc, nsl, body.len, internal.match ({
+    // one whole-flat symbol scan, shared by the shadow-rename pass and (when no rename fired,
+    // the common case) the dedup pass — the graph is recomputed only over a REWRITTEN flat.
+    pre := cN.out.gstr_finish(a)
+    fsyms := a.module_graph(pre).symbols
+    sf := a.shadow_flat(pre, fsyms, mainsrc, nsl, body.len, internal.match ({
         true  => false,
         false => true,
     }))
-    flat := a.dedup_impls(a.dedup_decls_mode(sf.flat, nsl, sf.bodyend, internal))
+    dsyms := sf.renamed.match ({ true => a.module_graph(sf.flat).symbols, false => fsyms })
+    flat := a.dedup_impls(a.dedup_decls_syms(sf.flat, dsyms, nsl, sf.bodyend, internal))
     ResolvedProgram(
         table: table,
         flat: flat,

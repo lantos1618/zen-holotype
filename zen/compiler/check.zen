@@ -23,6 +23,11 @@ DeclIndex*: {
     impl_idx: Map<i64>,
     tdef_idx: Map<i64>,
     alias_idx: Map<i64>,
+    tmethod_idx: Map<i64>,
+    import_idx: Map<i64>,
+    genstruct_idx: Map<i64>,
+    genenum_idx: Map<i64>,
+    dispatch_idx: Map<i64>,
 }    // DFunc.name | DForeign.name → index
 tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a) }    // DStruct.name → index
 // ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
@@ -73,104 +78,177 @@ alias_note = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view, i: i64) Map<i64
         false => m,
     })
 }
+// fold a name-only [Param] list (DImpl.methods / DImport.names) into a presence map.
+names_note = (m: Map<i64>, a: MutPtr<Malloc>, names: [Param], i: i64) Map<i64> {
+    mm := m
+    names.loop((h, j, p) {
+        mm = mm.put(a, p.name, i).expect("check: decl-index alloc")
+    })
+    mm
+}
 build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
     seed: i64 := 0 - 1    // DEnum.name → index
     // DGlobal.name → index
     // DImpl.ty → presence marker (a type with at least one impl)
     // (trait "\t" method) → presence: the trait provides a default for the method
     // the combined key for a trait-default lookup; trait/method are identifiers, so a TAB can't collide.
-    idx := DeclIndex(
-        func_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        struct_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        enum_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        global_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        impl_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        tdef_idx: of(a, "", seed).expect("check: decl-index alloc"),
-        alias_idx: of(a, "", seed).expect("check: decl-index alloc"),
-    )
+    fm := of(a, "", seed).expect("check: decl-index alloc")
+    sm := of(a, "", seed).expect("check: decl-index alloc")
+    em := of(a, "", seed).expect("check: decl-index alloc")
+    gm := of(a, "", seed).expect("check: decl-index alloc")
+    im2 := of(a, "", seed).expect("check: decl-index alloc")
+    tm := of(a, "", seed).expect("check: decl-index alloc")
+    am := of(a, "", seed).expect("check: decl-index alloc")
+    mm := of(a, "", seed).expect("check: decl-index alloc")
+    pm := of(a, "", seed).expect("check: decl-index alloc")
+    gsm := of(a, "", seed).expect("check: decl-index alloc")
+    gem := of(a, "", seed).expect("check: decl-index alloc")
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f)          => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx.put(a, f.name, i).expect("check: decl-index alloc"),
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx.alias_note(a, f.name, i),
-                )
+                fm = fm.put(a, f.name, i).expect("check: decl-index alloc")
+                am = am.alias_note(a, f.name, i)
             },
             .DForeign(f)       => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx.put(a, f.name, i).expect("check: decl-index alloc"),
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx.alias_note(a, f.name, i),
-                )
+                fm = fm.put(a, f.name, i).expect("check: decl-index alloc")
+                am = am.alias_note(a, f.name, i)
             },
             .DStruct(s)        => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx.put(a, s.name, i).expect("check: decl-index alloc"),
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+                sm = sm.put(a, s.name, i).expect("check: decl-index alloc")
             },
             .DEnum(e)          => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx.put(a, e.name, i).expect("check: decl-index alloc"),
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+                em = em.put(a, e.name, i).expect("check: decl-index alloc")
             },
             .DGlobal(g)        => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx.put(a, g.name, i).expect("check: decl-index alloc"),
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+                gm = gm.put(a, g.name, i).expect("check: decl-index alloc")
             },
-            .DImpl(im)         => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx.put(a, im.ty, i).expect("check: decl-index alloc"),
-                    tdef_idx: idx.tdef_idx,
-                    alias_idx: idx.alias_idx,
-                )
+            .DImpl(imd)        => {
+                im2 = im2.put(a, imd.ty, i).expect("check: decl-index alloc")
+                mm = mm.names_note(a, imd.methods, i)
             },
             .DTraitDefault(td) => {
-                idx = DeclIndex(
-                    func_idx: idx.func_idx,
-                    struct_idx: idx.struct_idx,
-                    enum_idx: idx.enum_idx,
-                    global_idx: idx.global_idx,
-                    impl_idx: idx.impl_idx,
-                    tdef_idx: idx.tdef_idx.put(a, a.tdkey(td.trname, td.fn.name), i).expect("check: decl-index alloc"),
-                    alias_idx: idx.alias_idx,
-                )
+                tm = tm.put(a, a.tdkey(td.trname, td.fn.name), i).expect("check: decl-index alloc")
+                mm = mm.put(a, td.fn.name, i).expect("check: decl-index alloc")
+            },
+            .DImport(imp)      => {
+                pm = pm.names_note(a, imp.names, i)
+            },
+            .DGenStruct(gs)    => {
+                gsm = gsm.put(a, gs.name, i).expect("check: decl-index alloc")
+            },
+            .DGenEnum(ge)      => {
+                gem = gem.put(a, ge.name, i).expect("check: decl-index alloc")
             },
             _                  => { },
         })
     })
-    idx
+    // ── dispatch index: (recv-ty "\t" method) → decl index of the LAST impl of that ty providing the
+    // method, directly or via its trait's default — exactly the last-match verdict the old linear
+    // dispatch_recv scan produced. Built as a second sweep (a trait default may be declared anywhere
+    // relative to its impls); per impl the direct + defaulted method names are stamped together, so
+    // decl order between impls decides, as before.
+    tdn: i64 := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => {
+                tdn = tdn + 1
+            },
+            _                  => { },
+        })
+    })
+    tds := a.ibuf(tdn)
+    tdk: i64 := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => {
+                tds[tdk] = i
+                tdk = tdk + 1
+            },
+            _                  => { },
+        })
+    })
+    dm := of(a, "", seed).expect("check: decl-index alloc")
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(imd) => {
+                imd.methods.loop((h2, j, p) {
+                    dm = dm.put(a, a.tdkey(imd.ty, p.name), i).expect("check: decl-index alloc")
+                })
+                tds.loop((h2, j, ti) {
+                    decls[ti].match ({
+                        .DTraitDefault(td) => {
+                            eq(td.trname, imd.trname).then({
+                                dm = dm.put(a, a.tdkey(imd.ty, td.fn.name), i).expect("check: decl-index alloc")
+                            })
+                        },
+                        _                  => { },
+                    })
+                })
+            },
+            _           => { },
+        })
+    })
+    DeclIndex(
+        func_idx: fm,
+        struct_idx: sm,
+        enum_idx: em,
+        global_idx: gm,
+        impl_idx: im2,
+        tdef_idx: tm,
+        alias_idx: am,
+        tmethod_idx: mm,
+        import_idx: pm,
+        genstruct_idx: gsm,
+        genenum_idx: gem,
+        dispatch_idx: dm,
+    )
+}
+ibuf = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire((n + 1) * sizeof(i64)), n) }
+// O(1) indexed generic-decl lookups (same last-match sentinels as the linear gstruct_of/find_genenum).
+idx_genstruct* = (idx: DeclIndex, decls: [Decl], name: string_view) GenStructDecl {
+    i := idx.genstruct_idx.get(name, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({
+            .DGenStruct(g) => g,
+            _              => GenStructDecl(
+                name: "",
+                tparams: slice(null_ptr(), 0),
+                fields: slice(null_ptr(), 0),
+            ),
+        }),
+        false => GenStructDecl(
+            name: "",
+            tparams: slice(null_ptr(), 0),
+            fields: slice(null_ptr(), 0),
+        ),
+    })
+}
+idx_genenum* = (idx: DeclIndex, decls: [Decl], name: string_view) GenEnumDecl {
+    i := idx.genenum_idx.get(name, 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({
+            .DGenEnum(g) => g,
+            _            => GenEnumDecl(
+                name: "",
+                tparams: slice(null_ptr(), 0),
+                variants: slice(null_ptr(), 0),
+            ),
+        }),
+        false => GenEnumDecl(
+            name: "",
+            tparams: slice(null_ptr(), 0),
+            variants: slice(null_ptr(), 0),
+        ),
+    })
+}
+env_genenum* = (env: Env, name: string_view) GenEnumDecl { env.didx.idx_genenum(env.decls, name) }
+env_gstruct* = (env: Env, name: string_view) GenStructDecl { env.didx.idx_genstruct(env.decls, name) }
+idx_genstruct_field* = (idx: DeclIndex, a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
+    g := idx.idx_genstruct(decls, gname)
+    is_empty(g.name).match ({
+        true  => tvoid(),
+        false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
+    })
 }
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
@@ -482,7 +560,7 @@ ctor_enum_plain = (env: Env, vn: string_view) string_view {
     base := env.exp.exp_enum_base()
     env.decls.named_has(base, vn).match ({
         true  => base,
-        false => env.decls.find_genenum(base).gen_enum_has(vn).match ({
+        false => env.env_genenum(base).gen_enum_has(vn).match ({
             true  => base,
             false => env.decls.enum_of_variant(vn),
         }),
@@ -618,7 +696,7 @@ enum_inst_gen = (env: Env, g: GenEnumDecl, base: string_view, variant: string_vi
     })
 }
 enum_inst_of = (env: Env, base: string_view, variant: string_view, pty: Ty) EnumInst {
-    g := env.decls.find_genenum(base)
+    g := env.env_genenum(base)
     eq(g.name, "").match ({
         true  => EnumInst(
             base: base,
@@ -842,21 +920,16 @@ method_in = (methods: [Param], fn: string_view) bool {
     f
 }
 dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_view, tyname: string_view) string_view {
-    found := ""
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im) => eq(im.ty, tyname).match ({
-                true  => (im.methods.method_in(fn) || didx.tdef_idx.get(a.tdkey(im.trname, fn), 0 - 1) >= 0).match ({
-                    true  => a.impl_cname_in(im.trname, im.ty, fn),
-                    false => found,
-                }),
-                false => found,
-            }),
-            // trait-default check is now an O(1) index lookup instead of a full decl scan per impl.
-            _          => found,
-        })
+    // O(1): dispatch_idx holds the LAST impl of `tyname` providing `fn` (directly or via a trait
+    // default) — the same verdict the old whole-decls scan accumulated.
+    i := didx.dispatch_idx.get(a.tdkey(tyname, fn), 0 - 1)
+    (i >= 0 && i < decls.len).match ({
+        true  => decls[i].match ({
+            .DImpl(im) => a.impl_cname_in(im.trname, im.ty, fn),
+            _          => fn,
+        }),
+        false => fn,
     })
-    is_empty(found).match ({ true => fn, false => found })
 }
 dispatch_name = (env: Env, c: CallData) string_view {
     (c.args.len > 0).match ({
@@ -1236,7 +1309,7 @@ slice_member = (a: MutPtr<Malloc>, field: string_view) Ty {
 // (e.g. dispatch on a generic-struct field receiver in an inlined template body) must re-infer it.
 infer_field = (env: Env, oty: Ty, field: string_view) Ty {
     oty.ty_under_ptr().match ({
-        .Generic(g) => env.a.gen_struct_field(env.decls, g.name, field, g.args),
+        .Generic(g) => env.didx.idx_genstruct_field(env.a, env.decls, g.name, field, g.args),
         .Slice(e)   => env.a.slice_member(field),
         _           => env.didx.idx_struct_field(env.decls, oty.enum_name(), field),
     })
@@ -1412,7 +1485,7 @@ infer_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, written: 
     buf
 }
 genlit_g = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
-    nt := a.infer_struct_targs(env, env.decls.gstruct_of(sd.ty), sd.targs, inits)
+    nt := a.infer_struct_targs(env, env.env_gstruct(sd.ty), sd.targs, inits)
     a.cenode(mkstructg_at(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits, sd.pos))
 }
 // the expected type's args, when it names generic struct `base` — the authoritative source for a bare
@@ -1442,7 +1515,7 @@ bare_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, inits: [Fi
 // is mangled (mty) and discovered/emitted by compiler.mono, exactly like the explicit `Store<…>(…)` form.
 // A bare literal of a plain (non-generic) struct is unchanged.
 resolve_genlit_bare = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
-    gsd := env.decls.gstruct_of(sd.ty)
+    gsd := env.env_gstruct(sd.ty)
     is_empty(gsd.name).match ({
         true  => a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, inits, sd.pos)),
         false => {
@@ -1566,16 +1639,16 @@ idx_variant_default* = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: s
 // Concrete payload type for a match arm bind, including generic enum substitution.
 subj_variant_payload* = (env: Env, t: Ty, variant: string_view) Ty {
     t.match ({
-        .Generic(g) => env.decls.find_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
+        .Generic(g) => env.env_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
         _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant),
     })
 }
 gsubst = (pty: Ty, env: Env, g: GenericData) Ty {
-    ged := env.decls.find_genenum(g.name)
+    ged := env.env_genenum(g.name)
     sub := env.a.subst_ty_in(ged.tparams, g.args, pty)
     sub.match ({
         .Named(n) => {
-            gsd := env.decls.gstruct_of(n)
+            gsd := env.env_gstruct(n)
             is_empty(gsd.name).match ({
                 true  => sub,
                 false => {
@@ -1591,7 +1664,7 @@ gsubst = (pty: Ty, env: Env, g: GenericData) Ty {
     })
 }
 enum_payload_mono_ty = (env: Env, ename: string_view, etargs: [Ty], variant: string_view) Ty {
-    env.decls.find_genenum(ename).gen_variant_payload(variant).gsubst(env, GenericData(
+    env.env_genenum(ename).gen_variant_payload(variant).gsubst(env, GenericData(
         name: ename,
         args: etargs,
         mangled: env.a.mangle_str_in(ename, etargs),
@@ -1641,7 +1714,7 @@ str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
 is_enum_ty = (env: Env, t: Ty) bool {
     t.match ({
         .Named(n)   => env.didx.enum_idx.get(n, 0 - 1) >= 0,
-        .Generic(g) => is_empty(env.decls.find_genenum(g.name).name) == false,
+        .Generic(g) => is_empty(env.env_genenum(g.name).name) == false,
         _           => false,
     })
 }
@@ -3203,7 +3276,7 @@ xform_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, args: [Expr], pa
 }
 xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: string_view, ar: ArmData) Ty {
     subj.match ({
-        .Generic(g) => a.subst_ty_in(decls.find_genenum(g.name).tparams, g.args, decls.find_genenum(g.name).gen_variant_payload(ar.variant)),
+        .Generic(g) => a.subst_ty_in(idx.idx_genenum(decls, g.name).tparams, g.args, idx.idx_genenum(decls, g.name).gen_variant_payload(ar.variant)),
         _           => idx.idx_variant_payload(decls, ename, ar.variant),
     })
 }
@@ -3354,7 +3427,7 @@ light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl
 }
 light_member_ty = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, obj: Ty, field: string_view) Ty {
     obj.ty_under_ptr().match ({
-        .Generic(g) => a.gen_struct_field(decls, g.name, field, g.args),
+        .Generic(g) => idx.idx_genstruct_field(a, decls, g.name, field, g.args),
         .Slice(e)   => a.slice_member(field),
         _           => idx.idx_struct_field(decls, obj.enum_name(), field),
     })
@@ -3671,7 +3744,7 @@ impl_trait_targ_of = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tyname: 
     })
 }
 impl_trait_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, tp: string_view) Ty {
-    g := decls.gstruct_of(im.trname)
+    g := idx.idx_genstruct(decls, im.trname)
     (is_empty(g.name) || g.tparams.has_tparam(tp) == false).match ({
         true  => tvoid(),
         false => {
@@ -4931,10 +5004,10 @@ lift_name = (a: MutPtr<Malloc>, k: i64) string_view {
     a.lift_digits(s, k).gstr_finish(a)
 }
 // the (function) type of struct `sty`'s field `fname` — substituted for a generic instance's targs.
-field_fnt = (a: MutPtr<Malloc>, decls: [Decl], sty: string_view, targs: [Ty], fname: string_view) Ty {
+field_fnt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, sty: string_view, targs: [Ty], fname: string_view) Ty {
     (targs.len > 0).match ({
-        true  => a.gen_struct_field(decls, sty, fname, targs),
-        false => decls.struct_field(sty, fname),
+        true  => idx.idx_genstruct_field(a, decls, sty, fname, targs),
+        false => idx.idx_struct_field(decls, sty, fname),
     })
 }
 // generate the top-level fn for a lifted lambda: params typed from the expected FnT, body = lambda body.
@@ -4981,7 +5054,7 @@ lift_rw_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
 lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], sty: string_view, targs: [Ty], inits: [FieldInit]) [FieldInit] {
     buf := a.fbuf(inits.len)
     inits.loop((h, i, fi) {
-        buf[i] = finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, sty, targs, fi.name), fi.value))
+        buf[i] = finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value))
     })
     buf
 }
